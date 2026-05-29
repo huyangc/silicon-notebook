@@ -83,6 +83,32 @@ def _ev(element_id: str, quoted_span: str) -> Evidence:
     )
 
 
+def check_csv_xlsx_parsing() -> None:
+    """T4: CSV (stdlib) and XLSX (openpyxl) parse into table_row elements."""
+    from app.services.parsers import parse_csv, parse_xlsx
+
+    with tempfile.TemporaryDirectory(prefix="sn-csv-") as tmp:
+        csv_path = Path(tmp) / "rules.csv"
+        csv_path.write_text("Pin,Net,Note\n1,GND,quiet return\n2,VIN,sensitive input\n", encoding="utf-8")
+        csv_elements = parse_csv("src-csv", csv_path)
+        assert len(csv_elements) == 3 and all(e.element_type == "table_row" for e in csv_elements)
+        assert "GND" in csv_elements[1].text
+
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            return
+        xlsx_path = Path(tmp) / "rules.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Pin", "Net", "Note"])
+        ws.append([1, "GND", "quiet return"])
+        wb.save(str(xlsx_path))
+        xlsx_elements = parse_xlsx("src-xlsx", xlsx_path)
+        assert xlsx_elements and xlsx_elements[0].element_type == "table_row"
+        assert "GND" in " ".join(e.text for e in xlsx_elements)
+
+
 def check_mineru_mapping() -> None:
     """MinerU content_list -> SourceElements: formulas keep LaTeX, tables flatten."""
     content_list = [
@@ -378,6 +404,7 @@ def check_pipeline_event_logging() -> None:
 
 
 def main() -> None:
+    check_csv_xlsx_parsing()
     check_mineru_mapping()
     check_score_knowledge()
     check_heuristic_extraction()

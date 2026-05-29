@@ -349,7 +349,7 @@ function formatFileSize(size: number): string {
 
 function compactSourceTitle(source: SourceSummary): string {
   const rawTitle = (source.title || source.file_name || "Untitled source").trim();
-  const withoutExtension = rawTitle.replace(/\.(pdf|md|markdown|docx|pptx)$/i, "");
+  const withoutExtension = rawTitle.replace(/\.(pdf|md|markdown|docx|pptx|csv|xlsx|xlsm)$/i, "");
   return withoutExtension || rawTitle;
 }
 
@@ -779,7 +779,7 @@ export default function Home() {
   async function uploadSources(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
     if (!currentNotebookId || files.length === 0) return;
-    const supported = files.filter((file) => /\.(pdf|md|markdown|docx|pptx)$/i.test(file.name));
+    const supported = files.filter((file) => /\.(pdf|md|markdown|docx|pptx|csv|xlsx|xlsm)$/i.test(file.name));
     if (supported.length === 0) {
       setStatusText("Select PDF, Markdown, DOCX, or PPTX files");
       return;
@@ -1249,7 +1249,7 @@ export default function Home() {
               <div className="workspace-panel-body sources-body">
                 <label className="add-source-button">
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
-                  <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx" onChange={(event) => uploadSources(event).catch(reportError)} />
+                  <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={(event) => uploadSources(event).catch(reportError)} />
                 </label>
                 <button className="add-source-button review-queue-button" onClick={() => setReviewOpen(true)}>
                   ⚖ 审核队列{candidates.length > 0 ? ` · ${candidates.length}` : ""}
@@ -1495,7 +1495,7 @@ export default function Home() {
               <button className="icon-button" onClick={() => setSourceModalOpen(false)} title="Close">×</button>
             </div>
             <label className="drop-zone">
-              <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx" onChange={(event) => uploadSources(event).catch(reportError)} />
+              <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={(event) => uploadSources(event).catch(reportError)} />
               <span className="drop-plus">＋</span>
               <strong>选择来源文件</strong>
               <small>当前版本会立即解析文本元素；图片和 OCR 暂不处理。</small>
