@@ -591,6 +591,13 @@ def main() -> None:
         assert feedback.answer_id == answer.answer_id
         assert feedback.comment == "grounded and actionable"
 
+        # §16: analytics aggregates feedback / candidates / knowledge / sources.
+        analytics = repository.notebook_analytics(notebook.id)
+        assert analytics.feedback_useful >= 1
+        assert analytics.usefulness_rate == 1.0  # only the one useful vote so far
+        assert analytics.knowledge_counts.get("rule", 0) >= 1
+        assert sum(analytics.source_status_counts.values()) >= 1
+
         # Article research must derive from the article's own text, not a hardcoded brief.
         article = repository.create_article(
             notebook.id,

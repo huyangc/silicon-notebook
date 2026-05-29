@@ -359,3 +359,14 @@ class FeedbackResponse(BaseModel):
     answer_id: str
     rating: str
     comment: str = ""
+
+
+class NotebookAnalytics(BaseModel):
+    answers_total: int = 0
+    feedback_useful: int = 0
+    feedback_not_useful: int = 0
+    usefulness_rate: float = 0.0
+    low_rated_questions: List[str] = Field(default_factory=list)
+    candidate_counts: Dict[str, int] = Field(default_factory=dict)
+    knowledge_counts: Dict[str, int] = Field(default_factory=dict)
+    source_status_counts: Dict[str, int] = Field(default_factory=dict)

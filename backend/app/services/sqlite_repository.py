@@ -38,6 +38,7 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
+    NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
@@ -2098,6 +2099,73 @@ class SQLiteRepository:
             answer_id=answer_id,
             rating=payload.rating,
             comment=payload.comment,
+        )
+
+    def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
+        """Answer-quality + curation + coverage metrics for a notebook (§16)."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            answers_total = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM answers WHERE notebook_id = ?", (notebook_id,)
+                ).fetchone()["c"]
+            )
+            useful = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'useful'",
+                    (notebook_id,),
+                ).fetchone()["c"]
+            )
+            not_useful = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'not_useful'",
+                    (notebook_id,),
+                ).fetchone()["c"]
+            )
+            low_rated = [
+                row["question"]
+                for row in db.execute(
+                    "SELECT DISTINCT a.question FROM feedback f "
+                    "JOIN answers a ON a.id = f.answer_id "
+                    "WHERE f.notebook_id = ? AND f.rating = 'not_useful' "
+                    "ORDER BY f.created_at DESC LIMIT 10",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+            candidate_counts = {
+                row["status"]: int(row["c"])
+                for row in db.execute(
+                    "SELECT status, COUNT(*) AS c FROM extraction_candidates "
+                    "WHERE notebook_id = ? GROUP BY status",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            knowledge_counts = {
+                row["object_type"]: int(row["c"])
+                for row in db.execute(
+                    "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
+                    "WHERE notebook_id = ? AND status != 'deprecated' GROUP BY object_type",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            source_status_counts = {
+                row["parse_status"]: int(row["c"])
+                for row in db.execute(
+                    "SELECT parse_status, COUNT(*) AS c FROM sources "
+                    "WHERE notebook_id = ? GROUP BY parse_status",
+                    (notebook_id,),
+                ).fetchall()
+            }
+        rated = useful + not_useful
+        return NotebookAnalytics(
+            answers_total=answers_total,
+            feedback_useful=useful,
+            feedback_not_useful=not_useful,
+            usefulness_rate=round(useful / rated, 3) if rated else 0.0,
+            low_rated_questions=low_rated,
+            candidate_counts=candidate_counts,
+            knowledge_counts=knowledge_counts,
+            source_status_counts=source_status_counts,
         )
 
     def scenario_query(self, notebook_id: str, payload: ScenarioQueryRequest) -> AskResponse:

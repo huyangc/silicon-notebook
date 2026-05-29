@@ -273,6 +273,17 @@ type DerivedRuleCandidate = {
   created_label: string;
 };
 
+type NotebookAnalytics = {
+  answers_total: number;
+  feedback_useful: number;
+  feedback_not_useful: number;
+  usefulness_rate: number;
+  low_rated_questions: string[];
+  candidate_counts: Record<string, number>;
+  knowledge_counts: Record<string, number>;
+  source_status_counts: Record<string, number>;
+};
+
 type RuleExplanation = {
   rule: { id: string; title: string; statement: string; status: string; owner?: string };
   origin: Citation[];
@@ -420,6 +431,7 @@ export default function Home() {
   const [ruleExplanation, setRuleExplanation] = useState<RuleExplanation | null>(null);
   const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
   const [derivedOpen, setDerivedOpen] = useState(false);
+  const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
@@ -971,6 +983,12 @@ export default function Home() {
     setRuleExplanation(response);
   }
 
+  async function openAnalytics() {
+    if (!currentNotebookId) return;
+    const response = await api<NotebookAnalytics>(`/notebooks/${currentNotebookId}/analytics`);
+    setAnalytics(response);
+  }
+
   async function openDerivedRules() {
     if (!currentNotebookId) return;
     const response = await api<DerivedRuleCandidate[]>(`/notebooks/${currentNotebookId}/derived-rules`);
@@ -1227,6 +1245,7 @@ export default function Home() {
                   { label: "运行对话分析", action: () => runAsk().catch(reportError) }
                 ]
               })}>分析</button>
+              <button className="sort-button" onClick={() => openAnalytics().catch(reportError)}>看板</button>
               <button className="sort-button" onClick={() => setInfoModal({
                 title: "分享",
                 message: "当前是本机单用户 beta，分享会生成本地 notebook 链接；多人权限后续再接入。",
@@ -1694,6 +1713,49 @@ export default function Home() {
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {analytics && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setAnalytics(null); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>知识分析看板</h2>
+                <p>回答质量、审核进度、知识覆盖与来源状态的本机统计。</p>
+              </div>
+              <button className="icon-button" onClick={() => setAnalytics(null)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <p className="section-title">回答质量</p>
+              <div className="tag-row">
+                <span className="tag">提问 {analytics.answers_total}</span>
+                <span className="tag">👍 {analytics.feedback_useful}</span>
+                <span className="tag">👎 {analytics.feedback_not_useful}</span>
+                <span className="tag">有用率 {Math.round(analytics.usefulness_rate * 100)}%</span>
+              </div>
+              {analytics.low_rated_questions.length > 0 && (
+                <>
+                  <p className="section-title">低分提问（知识缺口）</p>
+                  <div className="stack">{analytics.low_rated_questions.map((q) => <div className="checklist-row" key={q}>{q}</div>)}</div>
+                </>
+              )}
+              <p className="section-title">知识覆盖（已批准）</p>
+              <div className="tag-row">
+                {Object.entries(analytics.knowledge_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
+                {Object.keys(analytics.knowledge_counts).length === 0 && <span className="tool-hint">暂无已批准知识</span>}
+              </div>
+              <p className="section-title">审核队列</p>
+              <div className="tag-row">
+                {Object.entries(analytics.candidate_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
+                {Object.keys(analytics.candidate_counts).length === 0 && <span className="tool-hint">暂无候选</span>}
+              </div>
+              <p className="section-title">来源状态</p>
+              <div className="tag-row">
+                {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
+              </div>
             </div>
           </div>
         </section>

@@ -26,6 +26,7 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
+    NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
@@ -45,7 +46,7 @@ from app.services.sqlite_repository import SQLiteRepository
 
 router = APIRouter()
 
-SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx"}
+SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
@@ -104,6 +105,14 @@ def create_notebook(payload: NotebookCreate) -> NotebookSummary:
 def get_notebook(notebook_id: str) -> NotebookSummary:
     try:
         return repository().get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics)
+def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
+    try:
+        return repository().notebook_analytics(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

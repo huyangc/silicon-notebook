@@ -24,6 +24,7 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
+    NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
@@ -58,6 +59,8 @@ class NotebookRepository(Protocol):
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary: ...
+
+    def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics: ...
 
     def update_notebook(self, notebook_id: str, payload: NotebookUpdate) -> NotebookSummary: ...
 
