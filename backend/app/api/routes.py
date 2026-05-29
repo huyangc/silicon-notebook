@@ -85,6 +85,11 @@ def me() -> UserProfile:
     return repository().current_user()
 
 
+@router.get("/notebook-templates", response_model=List[NotebookTemplate])
+def list_notebook_templates() -> List[NotebookTemplate]:
+    return repository().list_notebook_templates()
+
+
 @router.get("/notebooks", response_model=List[NotebookSummary])
 def list_notebooks() -> List[NotebookSummary]:
     return repository().list_notebooks()

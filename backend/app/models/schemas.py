@@ -65,6 +65,12 @@ class NotebookCreate(BaseModel):
     name: str = "Untitled notebook"
     purpose: str = ""
     primary_domain: str = "Semiconductor"
+    target_users: str = ""
+    expected_questions: List[str] = Field(default_factory=list)
+    source_types: List[str] = Field(default_factory=list)
+    taxonomy: List[str] = Field(default_factory=list)
+    access_scope: str = ""
+    template: str = ""  # optional template id to apply preset defaults (§6.2)
 
 
 class NotebookUpdate(BaseModel):
@@ -72,6 +78,11 @@ class NotebookUpdate(BaseModel):
     purpose: Optional[str] = None
     primary_domain: Optional[str] = None
     status: Optional[str] = None
+    target_users: Optional[str] = None
+    expected_questions: Optional[List[str]] = None
+    source_types: Optional[List[str]] = None
+    taxonomy: Optional[List[str]] = None
+    access_scope: Optional[str] = None
 
 
 class NotebookSummary(BaseModel):
@@ -82,6 +93,22 @@ class NotebookSummary(BaseModel):
     status: str
     counts: Dict[str, int]
     created_label: str = ""
+    target_users: str = ""
+    expected_questions: List[str] = Field(default_factory=list)
+    source_types: List[str] = Field(default_factory=list)
+    taxonomy: List[str] = Field(default_factory=list)
+    access_scope: str = ""
+
+
+class NotebookTemplate(BaseModel):
+    id: str
+    label: str
+    purpose: str = ""
+    primary_domain: str = "Semiconductor"
+    target_users: str = ""
+    expected_questions: List[str] = Field(default_factory=list)
+    source_types: List[str] = Field(default_factory=list)
+    taxonomy: List[str] = Field(default_factory=list)
 
 
 class RuleCard(BaseModel):

@@ -21,6 +21,7 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/services/demo_repository.py" \
   "$ROOT_DIR/backend/app/services/extraction.py" \
   "$ROOT_DIR/backend/app/services/mineru_client.py" \
+  "$ROOT_DIR/backend/app/services/notebook_templates.py" \
   "$ROOT_DIR/backend/app/services/parsers.py" \
   "$ROOT_DIR/backend/app/services/prompts.py" \
   "$ROOT_DIR/backend/app/services/repository.py" \

@@ -16,6 +16,7 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     NotebookCreate,
+    NotebookUpdate,
     SourceElement,
 )
 from app.services.demo_repository import DEMO_NOTEBOOK_ID
@@ -338,6 +339,10 @@ def check_pipeline_event_logging() -> None:
                 storage_dir=str(root / "storage"),
                 event_log_dir=str(log_dir),
                 mineru_mode="off",
+                openai_compat_base_url="",
+                openai_compat_api_key="",
+                openai_compat_model="",
+                openai_compat_embedding_model="",
             )
         )
         notebook = repo.create_notebook(NotebookCreate(name="Pipe", purpose="p", primary_domain="d"))
@@ -412,6 +417,16 @@ def main() -> None:
                 primary_domain="Semiconductor",
             )
         )
+
+        # §6.1/§6.2: templates + rich creation fields.
+        templates = repository.list_notebook_templates()
+        assert len(templates) >= 6 and any(t.id == "rule" for t in templates)
+        templated = repository.create_notebook(NotebookCreate(name="From template", template="rule"))
+        assert templated.taxonomy and templated.target_users, "template should seed rich fields"
+        updated_nb = repository.update_notebook(
+            templated.id, NotebookUpdate(expected_questions=["q1", "q2"], access_scope="team")
+        )
+        assert updated_nb.expected_questions == ["q1", "q2"] and updated_nb.access_scope == "team"
 
         uploaded = repository.upload_sources(
             notebook.id,

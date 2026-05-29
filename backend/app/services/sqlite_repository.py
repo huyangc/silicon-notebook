@@ -41,6 +41,7 @@ from app.models.schemas import (
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
+    NotebookTemplate,
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
@@ -64,6 +65,7 @@ from app.services.demo_repository import (
 )
 from app.services.extraction import bind_evidence, run_extraction
 from app.services.mineru_client import MinerUClient
+from app.services.notebook_templates import NOTEBOOK_TEMPLATES, get_template
 from app.services.parsers import parse_source_file
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -288,6 +290,10 @@ class SQLiteRepository:
                 db.execute(
                     "ALTER TABLE knowledge_objects ADD COLUMN last_reviewed TEXT NOT NULL DEFAULT ''"
                 )
+            nb_cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)").fetchall()}
+            for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope"):
+                if col not in nb_cols:
+                    db.execute(f"ALTER TABLE notebooks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
     def _seed(self) -> None:
         now = _now()
@@ -572,25 +578,55 @@ class SQLiteRepository:
             ).fetchall()
             return [self._notebook_from_row(db, row) for row in rows]
 
+    def list_notebook_templates(self) -> List[NotebookTemplate]:
+        return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
+
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         notebook_id = f"nb-{uuid4().hex[:10]}"
         now = _now()
+        template = get_template(payload.template) if payload.template else None
+
+        def fill(value, key, default):
+            if value:
+                return value
+            if template and template.get(key):
+                return template[key]
+            return default
+
+        purpose = fill(payload.purpose, "purpose", "")
+        primary_domain = fill(
+            payload.primary_domain if payload.primary_domain != "Semiconductor" else "",
+            "primary_domain",
+            "Semiconductor",
+        )
+        target_users = fill(payload.target_users, "target_users", "")
+        access_scope = payload.access_scope
+        expected_questions = fill(payload.expected_questions, "expected_questions", [])
+        source_types = fill(payload.source_types, "source_types", [])
+        taxonomy = fill(payload.taxonomy, "taxonomy", [])
+
         with self._connect() as db:
             db.execute(
                 """
                 INSERT INTO notebooks
-                (id, name, purpose, primary_domain, status, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, purpose, primary_domain, status, created_by, created_at, updated_at,
+                 target_users, expected_questions, source_types, taxonomy, access_scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     notebook_id,
                     payload.name,
-                    payload.purpose,
-                    payload.primary_domain,
+                    purpose,
+                    primary_domain,
                     "draft",
                     "user-local",
                     now,
                     now,
+                    target_users,
+                    json.dumps(expected_questions, ensure_ascii=False),
+                    json.dumps(source_types, ensure_ascii=False),
+                    json.dumps(taxonomy, ensure_ascii=False),
+                    access_scope,
                 ),
             )
             row = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
@@ -619,6 +655,17 @@ class SQLiteRepository:
         if payload.status is not None:
             updates.append("status = ?")
             values.append(payload.status.strip() or "draft")
+        if payload.target_users is not None:
+            updates.append("target_users = ?")
+            values.append(payload.target_users.strip())
+        if payload.access_scope is not None:
+            updates.append("access_scope = ?")
+            values.append(payload.access_scope.strip())
+        for field in ("expected_questions", "source_types", "taxonomy"):
+            value = getattr(payload, field)
+            if value is not None:
+                updates.append(f"{field} = ?")
+                values.append(json.dumps(value, ensure_ascii=False))
         if updates:
             updates.append("updated_at = ?")
             values.append(_now())
@@ -2569,6 +2616,17 @@ class SQLiteRepository:
             "glossary": self._count_knowledge(db, row["id"], "glossary"),
             "article_claims": self._count(db, "article_claims", "notebook_id", row["id"]),
         }
+        keys = row.keys()
+
+        def _list(field: str) -> List[str]:
+            if field not in keys or not row[field]:
+                return []
+            try:
+                value = json.loads(row[field])
+                return [str(v) for v in value] if isinstance(value, list) else []
+            except (json.JSONDecodeError, TypeError):
+                return []
+
         return NotebookSummary(
             id=row["id"],
             name=row["name"],
@@ -2577,6 +2635,11 @@ class SQLiteRepository:
             status=row["status"],
             counts=counts,
             created_label=_created_label(row["created_at"]),
+            target_users=row["target_users"] if "target_users" in keys else "",
+            expected_questions=_list("expected_questions"),
+            source_types=_list("source_types"),
+            taxonomy=_list("taxonomy"),
+            access_scope=row["access_scope"] if "access_scope" in keys else "",
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:

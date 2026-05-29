@@ -27,6 +27,7 @@ from app.models.schemas import (
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
+    NotebookTemplate,
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
@@ -51,6 +52,8 @@ class NotebookRepository(Protocol):
     def current_user(self) -> UserProfile: ...
 
     def list_notebooks(self) -> List[NotebookSummary]: ...
+
+    def list_notebook_templates(self) -> List[NotebookTemplate]: ...
 
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
 

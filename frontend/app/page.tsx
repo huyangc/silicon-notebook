@@ -15,6 +15,11 @@ type NotebookSummary = {
   status: string;
   counts: Record<string, number>;
   created_label: string;
+  target_users?: string;
+  expected_questions?: string[];
+  source_types?: string[];
+  taxonomy?: string[];
+  access_scope?: string;
 };
 
 type SourceSummary = {
@@ -369,6 +374,7 @@ function cardIcon(index: number, notebook: NotebookSummary): string {
 export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
+  const [templates, setTemplates] = useState<Array<{ id: string; label: string }>>([]);
   const [searchHits, setSearchHits] = useState<Record<string, SearchHit[]>>({});
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
@@ -585,12 +591,17 @@ export default function Home() {
     setHealth(healthResponse);
     setStatusText(`API ${healthResponse.status}; LLM configured: ${healthResponse.llm_configured}`);
     setNotebooks(notebookResponse);
+    if (templates.length === 0) {
+      api<Array<{ id: string; label: string }>>("/notebook-templates")
+        .then(setTemplates)
+        .catch(() => undefined);
+    }
   }
 
-  async function createNotebook() {
+  async function createNotebook(template = "") {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({})
+      body: JSON.stringify(template ? { template } : {})
     });
     await loadNotebookCollection();
     await openNotebook(notebook.id);
@@ -730,12 +741,19 @@ export default function Home() {
     event.preventDefault();
     if (!editingNotebook) return;
     const formData = new FormData(event.currentTarget);
+    const splitLines = (value: string) =>
+      value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
     const updated = await api<NotebookSummary>(`/notebooks/${editingNotebook.id}`, {
       method: "PATCH",
       body: JSON.stringify({
         name: formData.get("name"),
         purpose: formData.get("purpose"),
-        primary_domain: formData.get("primary_domain")
+        primary_domain: formData.get("primary_domain"),
+        target_users: String(formData.get("target_users") || ""),
+        access_scope: String(formData.get("access_scope") || ""),
+        expected_questions: splitLines(String(formData.get("expected_questions") || "")),
+        source_types: splitLines(String(formData.get("source_types") || "")),
+        taxonomy: splitLines(String(formData.get("taxonomy") || ""))
       })
     });
     setEditingNotebook(null);
@@ -1106,6 +1124,21 @@ export default function Home() {
                   ))}
                 </div>
               </div>
+              {templates.length > 0 && (
+                <select
+                  className="sort-button"
+                  value=""
+                  onChange={(event) => {
+                    const tid = event.target.value;
+                    if (tid) createNotebook(tid).catch(reportError);
+                    event.currentTarget.value = "";
+                  }}
+                  title="从模板新建"
+                >
+                  <option value="">从模板…</option>
+                  {templates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.label}</option>)}
+                </select>
+              )}
               <button className="new-pill" onClick={() => createNotebook().catch(reportError)}>＋ 新建</button>
             </div>
           </section>
@@ -1483,8 +1516,13 @@ export default function Home() {
             </div>
             <form className="edit-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
               <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
-              <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={4} maxLength={260} /></label>
+              <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
               <label>领域<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
+              <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
+              <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
+              <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
+              <label>分类 taxonomy（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
+              <label>访问范围<input name="access_scope" defaultValue={editingNotebook.access_scope ?? ""} maxLength={80} /></label>
               <div className="modal-actions">
                 <button type="button" className="sort-button" onClick={() => setEditingNotebook(null)}>取消</button>
                 <button type="submit" className="new-pill">保存</button>
