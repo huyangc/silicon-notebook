@@ -575,6 +575,18 @@ def main() -> None:
             ).fetchone()
         assert claim_row is not None
         assert "thermal" in " ".join(brief.derived_rule_candidates).lower() or int(derived_count["count"]) >= 1
+
+        # Derived Rule Candidate queue (§7.5): list + approve into the rule library.
+        derived = repository.list_derived_rules(notebook.id)
+        assert isinstance(derived, list)
+        draft = next((d for d in derived if d.status == "draft"), None)
+        if draft is not None:
+            rules_before = len(repository.list_rules(notebook.id))
+            approved_rule = repository.approve_derived_rule(draft.id)
+            assert approved_rule.status == "approved"
+            assert len(repository.list_rules(notebook.id)) == rules_before + 1
+            assert any(d.status == "approved" for d in repository.list_derived_rules(notebook.id))
+
         repository.delete_article(article.id)
         assert all(item.id != article.id for item in repository.list_articles(notebook.id))
         with repository._connect() as db:

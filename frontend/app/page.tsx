@@ -256,6 +256,18 @@ type KnowledgeRef = { id: string; object_type: string; headline: string; status:
 type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
 type ConflictPair = { object_type: string; reason: string; a: KnowledgeRef; b: KnowledgeRef };
 
+type DerivedRuleCandidate = {
+  id: string;
+  notebook_id: string;
+  article_id: string;
+  title: string;
+  proposed_rule: string;
+  rationale: string;
+  status: string;
+  evidence: Evidence[];
+  created_label: string;
+};
+
 type RuleExplanation = {
   rule: { id: string; title: string; statement: string; status: string; owner?: string };
   origin: Citation[];
@@ -400,6 +412,8 @@ export default function Home() {
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   const [conflicts, setConflicts] = useState<ConflictPair[] | null>(null);
   const [ruleExplanation, setRuleExplanation] = useState<RuleExplanation | null>(null);
+  const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
+  const [derivedOpen, setDerivedOpen] = useState(false);
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
@@ -939,6 +953,25 @@ export default function Home() {
     setRuleExplanation(response);
   }
 
+  async function openDerivedRules() {
+    if (!currentNotebookId) return;
+    const response = await api<DerivedRuleCandidate[]>(`/notebooks/${currentNotebookId}/derived-rules`);
+    setDerivedRules(response);
+    setDerivedOpen(true);
+  }
+
+  async function decideDerivedRule(candidateId: string, decision: "approve" | "reject") {
+    await api(`/derived-rules/${candidateId}/${decision}`, { method: "POST" });
+    await openDerivedRules();
+    if (decision === "approve") {
+      if (knowledge.rule !== null) await loadKnowledge("rule");
+      await loadNotebookCollection();
+      setToast("派生规则已批准并加入规则库");
+    } else {
+      setToast("派生规则候选已拒绝");
+    }
+  }
+
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
     if (mode === "rules" && knowledge[knowledgeKind] === null) {
@@ -1361,6 +1394,7 @@ export default function Home() {
                   <button className="studio-tile mindmap" onClick={() => runStudio("mindmap").catch(reportError)}><span>◇</span><strong>思维导图</strong></button>
                   <button className="studio-tile slides" onClick={() => setArticleModalOpen(true)}><span>＋</span><strong>新建文章</strong></button>
                   <button className="studio-tile infographic" onClick={() => runStudio("infographic").catch(reportError)}><span>▤</span><strong>信息图</strong></button>
+                  <button className="studio-tile mindmap" onClick={() => openDerivedRules().catch(reportError)}><span>⚖</span><strong>派生规则候选</strong></button>
                 </div>
                 {articles.length > 0 && (
                   <div className="article-stack">
@@ -1618,6 +1652,43 @@ export default function Home() {
                         <button className="sort-button" onClick={() => rejectCandidate(candidate.id).catch(reportError)}>拒绝</button>
                         <button className="new-pill" onClick={() => approveCandidate(candidate.id).catch(reportError)}>批准</button>
                       </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {derivedOpen && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setDerivedOpen(false); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>派生规则候选</h2>
+                <p>来自文章研究的候选规则。批准后会加入正式规则库，可在知识库中浏览和检索。</p>
+              </div>
+              <button className="icon-button" onClick={() => setDerivedOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {(derivedRules ?? []).length === 0 ? (
+                <p className="tool-hint">暂无派生规则候选。先在 Studio 对文章运行研究简报。</p>
+              ) : (
+                <div className="stack">
+                  {(derivedRules ?? []).map((candidate) => (
+                    <article className="item" key={candidate.id}>
+                      <div className="tag-row"><span className="tag">{candidate.status}</span></div>
+                      <h3>{candidate.title || candidate.proposed_rule.slice(0, 80)}</h3>
+                      <p>{candidate.proposed_rule}</p>
+                      {candidate.rationale && <p><strong>依据：</strong>{candidate.rationale}</p>}
+                      <EvidenceLine evidence={candidate.evidence} />
+                      {candidate.status === "draft" && (
+                        <div className="modal-actions">
+                          <button className="sort-button" onClick={() => decideDerivedRule(candidate.id, "reject").catch(reportError)}>拒绝</button>
+                          <button className="new-pill" onClick={() => decideDerivedRule(candidate.id, "approve").catch(reportError)}>批准为规则</button>
+                        </div>
+                      )}
                     </article>
                   ))}
                 </div>

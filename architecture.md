@@ -4,6 +4,8 @@
 
 本文件梳理当前实现的**核心算法逻辑**与**功能清单**（API / 数据表 / 知识对象 / 前端 / 配置）。代码以 `backend/app` 与 `frontend/app/page.tsx` 为准。
 
+> 逐行核对源码的**算法 + 全量函数/接口/表清单**另见 [算法与功能清单.md](算法与功能清单.md)（含阈值速查表）。
+
 ---
 
 ## 1. 系统总览
@@ -81,7 +83,7 @@ LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic �
 - 候选 approve → 写入 `knowledge_objects`（`object_type` + `payload` + `evidence` + `status`）；reject → 标记并清理。
 - **状态机**：`KNOWLEDGE_STATUSES = approved/reviewed/deprecated/conflict/project_specific`；**仅 `USABLE_STATUSES`(approved/reviewed/project_specific/conflict) 进入检索/回答**，`deprecated` 排除。`PATCH /knowledge/{id}` 改 status/owner/payload 并盖 `last_reviewed`。
 - **重复检测/合并**：同类型两两相似度（payload `keyword_score` + 证据向量 cosine，阈值 0.6 成组）→ `GET /duplicates`；`POST /knowledge/{id}/merge` 并合 evidence、源置 `deprecated`。
-- **冲突检测**：规则对 applies_to/title 高重合但 recommendation 取向相反 → `GET /conflicts`；`ask()` 命中 `conflict` 状态规则时在 `missing_information` 追加冲突提示（§12）。
+- **冲突检测**：规则对 `scope_sim ≥ 0.5`（title+applies_to）且 `rec_sim < 0.2`（recommendation/statement）→ 判「范围重合但取向相反」`GET /conflicts`；`ask()` 命中 `conflict` 状态规则时在 `missing_information` 追加冲突提示（§12）。
 
 ### 2.6 问答（ask / scenario_query / case_search / checklist）
 1. 解析问题 + scenario 标签 → query；取 `USABLE` 知识 + 相关 elements。
@@ -90,6 +92,7 @@ LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic �
 4. **Citation 校验**：引用的 element_id 必须能回查到有效元素，否则丢弃并在 missing_information 标注。
 5. 保存 `answers` 并返回 `answer_id`（供反馈关联）。
 - `scenario_query` 把 9 字段拼成场景后走 ask；`case_search`/`checklist` 走对应类型检索（checklist 无命中时从 rules 兜底生成）。
+- `explain_rule`（§6.10）：把规则回溯到 origin 证据，并按相关度带出关联 cases(3)/risks(3)/checklist(5) → `RuleExplanation`。
 
 ### 2.7 Article Studio（research_article）
 - 文章作为 source/标题+摘要文本；LLM 或句子级回退抽取 claims（带 evidence）。
@@ -105,12 +108,12 @@ LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic �
 
 ## 3. 功能清单
 
-### 3.1 API（37 条，`/api` 前缀）
+### 3.1 API（39 条，`/api` 前缀）
 - **系统**：`GET /health`、`GET /me`
 - **Notebook**：`GET/POST /notebooks`、`GET/PATCH/DELETE /notebooks/{id}`
 - **Source**：`GET /notebooks/{id}/sources`、`POST /notebooks/{id}/sources`(上传)、`POST .../sources/import`、`GET/DELETE /sources/{id}`、`POST /sources/{id}/parse`、`GET /sources/{id}/elements`、`POST /sources/{id}/extract`
 - **候选审核**：`GET /notebooks/{id}/candidates[/{type}]`、`PATCH /candidates/{id}`、`POST /candidates/{id}/approve|reject`
-- **知识浏览/治理**：`GET /notebooks/{id}/rules|methods|risks|glossary`、`PATCH /knowledge/{id}`、`GET /notebooks/{id}/duplicates`、`POST /knowledge/{id}/merge`、`GET /notebooks/{id}/conflicts`
+- **知识浏览/治理**：`GET /notebooks/{id}/rules|methods|risks|glossary`、`GET /notebooks/{id}/rules/{rule_id}/explain`、`PATCH /knowledge/{id}`、`GET /notebooks/{id}/duplicates`、`POST /knowledge/{id}/merge`、`GET /notebooks/{id}/conflicts`
 - **检索/问答**：`GET /notebooks/{id}/search`、`POST /notebooks/{id}/ask|scenario-query|case-search|checklist`
 - **Article**：`GET/POST /notebooks/{id}/articles`、`DELETE /articles/{id}`、`POST /articles/{id}/research`
 - **反馈**：`POST /answers/{answer_id}/feedback`
@@ -121,7 +124,8 @@ LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic �
 ### 3.3 知识对象与状态
 - 类型：rule / method / risk / case / checklist / glossary（统一存 `knowledge_objects`，payload 内联）。
 - 状态：reviewed / approved / deprecated / conflict / project_specific（候选另有 candidate / needs_review / approved / rejected）。
-- 卡片 schema：`RuleCard`(title/statement/applies_to/recommendation/risk_if_ignored/severity/status/owner/last_reviewed/evidence) · `CaseCard` · `MethodCard` · `RiskItemCard` · `GlossaryTermCard` · `ChecklistItem` · `ArticleClaimCard`。
+- 卡片 schema：`RuleCard`(title/statement/applies_to/recommendation/risk_if_ignored/severity/status/owner/last_reviewed/evidence) · `CaseCard` · `MethodCard` · `RiskItemCard` · `GlossaryTermCard` · `ChecklistItem` · `ArticleClaimCard` · `RuleExplanation`(rule/origin/applicable_scenario/exception/related_cases/related_risks/related_checklist)。
+- 治理/检索 schema：`KnowledgeRef` · `DuplicateGroup` · `ConflictPair` · `MergeRequest` · `SearchHit` · `NotebookSearchResponse`。
 
 ### 3.4 source parse_status 状态机
 `queued → parsing → parsed → extracting → extracted`（失败 `failed`）。前端对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`。

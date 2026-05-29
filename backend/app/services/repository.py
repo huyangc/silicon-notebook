@@ -16,6 +16,7 @@ from app.models.schemas import (
     ChecklistItem,
     ChecklistRequest,
     ConflictPair,
+    DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
@@ -129,5 +130,13 @@ class NotebookRepository(Protocol):
     def delete_article(self, article_id: str) -> None: ...
 
     def research_article(self, article_id: str) -> ArticleResearchBrief: ...
+
+    def list_derived_rules(
+        self, notebook_id: str, status: str | None = None
+    ) -> List[DerivedRuleCandidate]: ...
+
+    def approve_derived_rule(self, candidate_id: str) -> RuleCard: ...
+
+    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate: ...
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...

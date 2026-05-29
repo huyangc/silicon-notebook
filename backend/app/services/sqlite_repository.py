@@ -28,6 +28,7 @@ from app.models.schemas import (
     ChecklistRequest,
     Citation,
     ConflictPair,
+    DerivedRuleCandidate,
     DuplicateGroup,
     Evidence,
     FeedbackRequest,
@@ -1303,6 +1304,99 @@ class SQLiteRepository:
             related_risks=related_risks,
             related_checklist=related_checklist,
         )
+
+    def _derived_from_row(self, row: sqlite3.Row) -> DerivedRuleCandidate:
+        return DerivedRuleCandidate(
+            id=row["id"],
+            notebook_id=row["notebook_id"],
+            article_id=row["article_id"] or "",
+            title=row["title"],
+            proposed_rule=row["proposed_rule"],
+            rationale=row["rationale"],
+            status=row["status"],
+            evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+            created_label=_created_label(row["created_at"]),
+        )
+
+    def list_derived_rules(
+        self, notebook_id: str, status: str | None = None
+    ) -> List[DerivedRuleCandidate]:
+        self.get_notebook(notebook_id)
+        query = "SELECT * FROM derived_rule_candidates WHERE notebook_id = ?"
+        params: List[object] = [notebook_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC, id ASC"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [self._derived_from_row(row) for row in rows]
+
+    def approve_derived_rule(self, candidate_id: str) -> RuleCard:
+        """Promote a derived rule candidate into the formal rule library (§7.5)."""
+        now = _now()
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(candidate_id)
+            payload = {
+                "title": row["title"] or _first_sentence(row["proposed_rule"], 90),
+                "statement": row["proposed_rule"],
+                "applies_to": [],
+                "recommendation": "",
+                "risk_if_ignored": row["rationale"] or "",
+                "severity": "medium",
+            }
+            ko_id = f"ko-{uuid4().hex[:10]}"
+            db.execute(
+                """
+                INSERT INTO knowledge_objects
+                (id, notebook_id, object_type, status, owner, payload, evidence,
+                 source_candidate_id, created_at, updated_at)
+                VALUES (?, ?, 'rule', 'approved', '', ?, ?, ?, ?, ?)
+                """,
+                (
+                    ko_id,
+                    row["notebook_id"],
+                    json.dumps(payload, ensure_ascii=False),
+                    row["evidence"] or "[]",
+                    candidate_id,
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                "UPDATE derived_rule_candidates SET status = 'approved' WHERE id = ?",
+                (candidate_id,),
+            )
+            ko_row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (ko_id,)).fetchone()
+        obj = {
+            "id": ko_row["id"],
+            "payload": json.loads(ko_row["payload"] or "{}"),
+            "evidence": [Evidence(**e) for e in json.loads(ko_row["evidence"] or "[]")],
+            "status": ko_row["status"],
+            "owner": ko_row["owner"],
+            "last_reviewed": ko_row["last_reviewed"] if "last_reviewed" in ko_row.keys() else "",
+        }
+        return self._rule_card(self._as_retrieved(obj, "rule"))
+
+    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(candidate_id)
+            db.execute(
+                "UPDATE derived_rule_candidates SET status = 'rejected' WHERE id = ?",
+                (candidate_id,),
+            )
+            row = db.execute(
+                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return self._derived_from_row(row)
 
     def update_knowledge(
         self, knowledge_id: str, payload: KnowledgeUpdate

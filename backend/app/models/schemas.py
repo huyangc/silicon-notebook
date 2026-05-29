@@ -300,6 +300,18 @@ class ArticleClaimCard(BaseModel):
     evidence: List[Evidence] = Field(default_factory=list)
 
 
+class DerivedRuleCandidate(BaseModel):
+    id: str
+    notebook_id: str
+    article_id: str = ""
+    title: str
+    proposed_rule: str
+    rationale: str = ""
+    status: str
+    evidence: List[Evidence] = Field(default_factory=list)
+    created_label: str = ""
+
+
 class RuleExplanation(BaseModel):
     rule: RuleCard
     origin: List[Citation] = Field(default_factory=list)

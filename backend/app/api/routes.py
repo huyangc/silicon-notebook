@@ -18,6 +18,7 @@ from app.models.schemas import (
     ChecklistItem,
     ChecklistRequest,
     ConflictPair,
+    DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
@@ -424,6 +425,30 @@ def research_article(article_id: str) -> ArticleResearchBrief:
         return repository().research_article(article_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Article not found")
+
+
+@router.get("/notebooks/{notebook_id}/derived-rules", response_model=List[DerivedRuleCandidate])
+def list_derived_rules(notebook_id: str) -> List[DerivedRuleCandidate]:
+    try:
+        return repository().list_derived_rules(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/derived-rules/{candidate_id}/approve", response_model=RuleCard)
+def approve_derived_rule(candidate_id: str) -> RuleCard:
+    try:
+        return repository().approve_derived_rule(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+
+
+@router.post("/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate)
+def reject_derived_rule(candidate_id: str) -> DerivedRuleCandidate:
+    try:
+        return repository().reject_derived_rule(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Derived rule candidate not found")
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
