@@ -197,14 +197,21 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - **配置**：`config.py` + `.env.example` 新增 `EVENT_LOG_ENABLED` / `EVENT_LOG_DIR` / `SLOW_REQUEST_MS`（沿用既有 `LLM_LOG_*`）。
 - **验证**：`scripts/smoke_backend.py` 新增 `check_event_logging`（JSONL 可解析、禁用不写、写失败不抛）与 `check_pipeline_event_logging`（管线阶段事件产出 + `error_message` bug 回归）；`scripts/check.sh` 纳入 `event_logging.py` 编译。
 
-## 19. 当前边界（后续阶段，未计入已完成）
+## 19. 本轮新增（dev 分支，方案 §6/§7/§16）
 
-- **Tier 3 — Article Studio 收尾（方案 v0.3）**：文章作为可解析 source 上传全文（claims 绑全文 element 证据）；Derived Rule Candidate 持久队列 + 审核端点 + 批准进正式规则库；Implication Map 可视化；Explain Rule（§6.10）；Inference 分层（§7.3）。
-- **Tier 4 — 创建/数据/分析**：Notebook 模板（§6.2）+ 创建富字段（§6.1）；CSV/Excel 解析（MinerU 亦支持 xlsx/docx/pptx）；反馈分析 / 答案质量 / 知识缺口看板（§16）。
+- **Explain Rule（§6.10）**：`GET /notebooks/{id}/rules/{rule_id}/explain` 把规则反向追溯到来源 evidence，并召回相关 case/risk/checklist；前端规则卡片「解释」按钮 + 弹窗。
+- **Derived Rule Candidate 审核队列（§7.5）**：`GET /notebooks/{id}/derived-rules` + `POST /derived-rules/{id}/approve|reject`；approve 携 evidence 落入正式 `knowledge_objects`(rule)；前端 Studio「派生规则候选」弹窗审核。
+- **创建富字段 + 模板（§6.1/§6.2）**：`NotebookCreate/Update/Summary` 增 `target_users/expected_questions/source_types/taxonomy/access_scope`（notebooks 表迁移）；6 套模板 `GET /notebook-templates`，创建按模板预填；前端集合页「从模板…」选择器 + 编辑弹窗富字段。
+- **CSV / Excel 解析（§6.3）**：`parse_csv`(stdlib) + `parse_xlsx`(openpyxl) → `table_row` 元素；上传校验/accept 扩 `.csv/.xlsx/.xlsm`。
+- **质量/分析看板（§16）**：`GET /notebooks/{id}/analytics`（有用率、低分提问=知识缺口、候选状态分布、知识覆盖、来源状态）；前端「看板」弹窗。
+- **测试硬化**：`smoke_backend.py` 三处 `Settings` 清空 `OPENAI_COMPAT_*` + `mineru_mode=off`，`scripts/check.sh` 不再调用真实 LLM/embedding（即便 `.env` 有 key），全程离线 1–2s。
+
+## 20. 当前边界（后续阶段，未计入已完成）
+
+- **Article 深度可视化**：typed 关系下游动作（suggests_checklist/creates_risk）、Implication Map（§7.4）、Inference 分层（§7.3）+ Hypothesis（§5.9）、研究简报字段补齐（§7.1）。
 - **v0.4 Review Mode**：review session、场景 checklist sign-off、reviewer 评论、action items、导出 review 报告。
-- **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff / 分析看板。
-- 检索：BM25 / FTS5 / pgvector 放量；Knowledge graph。
+- **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
+- 检索：BM25 / FTS5 / pgvector 放量、结构化硬过滤、Knowledge graph（已评估为低 ROI / 基础设施级，暂缓）。
 - 扫描件 OCR、DOCX/PPTX 公式（OMML）解析；MinerU 已覆盖 PDF 的公式/表格/版面（本机 MLX 或 GPU 主机）。
-- 规则版本 diff 与 sign-off 工作流（属 Review Mode / 企业）。
 
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
