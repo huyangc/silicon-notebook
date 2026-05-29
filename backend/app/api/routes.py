@@ -31,6 +31,7 @@ from app.models.schemas import (
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
+    RuleExplanation,
     ScenarioQueryRequest,
     SourceDetail,
     SourceElement,
@@ -267,6 +268,14 @@ def list_rules(notebook_id: str) -> List[RuleCard]:
         return repository().list_rules(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/rules/{rule_id}/explain", response_model=RuleExplanation)
+def explain_rule(notebook_id: str, rule_id: str) -> RuleExplanation:
+    try:
+        return repository().explain_rule(notebook_id, rule_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Rule not found")
 
 
 @router.get("/notebooks/{notebook_id}/methods", response_model=List[MethodCard])

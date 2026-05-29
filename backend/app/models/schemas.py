@@ -300,6 +300,16 @@ class ArticleClaimCard(BaseModel):
     evidence: List[Evidence] = Field(default_factory=list)
 
 
+class RuleExplanation(BaseModel):
+    rule: RuleCard
+    origin: List[Citation] = Field(default_factory=list)
+    applicable_scenario: List[str] = Field(default_factory=list)
+    exception: str = ""
+    related_cases: List[CaseCard] = Field(default_factory=list)
+    related_risks: List[RiskItemCard] = Field(default_factory=list)
+    related_checklist: List[str] = Field(default_factory=list)
+
+
 class FeedbackRequest(BaseModel):
     rating: str
     comment: str = ""

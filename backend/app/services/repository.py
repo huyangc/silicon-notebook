@@ -29,6 +29,7 @@ from app.models.schemas import (
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
+    RuleExplanation,
     ScenarioQueryRequest,
     SourceDetail,
     SourceElement,
@@ -90,6 +91,8 @@ class NotebookRepository(Protocol):
     def reject_candidate(self, candidate_id: str) -> Candidate: ...
 
     def list_rules(self, notebook_id: str) -> List[RuleCard]: ...
+
+    def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation: ...
 
     def list_methods(self, notebook_id: str) -> List[MethodCard]: ...
 

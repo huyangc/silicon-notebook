@@ -491,6 +491,10 @@ def main() -> None:
         assert rules_now, "approved rule should appear in list_rules"
         rule_id = rules_now[0].id
         assert rules_now[0].status == "approved"
+        # Explain Rule (§6.10): traces the rule back to its origin evidence.
+        explanation = repository.explain_rule(notebook.id, rule_id)
+        assert explanation.rule.id == rule_id
+        assert isinstance(explanation.origin, list) and isinstance(explanation.related_cases, list)
         # Deprecate -> must drop out of answers.
         repository.update_knowledge(rule_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
         dep = next(r for r in repository.list_rules(notebook.id) if r.id == rule_id)

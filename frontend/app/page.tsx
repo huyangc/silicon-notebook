@@ -256,6 +256,16 @@ type KnowledgeRef = { id: string; object_type: string; headline: string; status:
 type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
 type ConflictPair = { object_type: string; reason: string; a: KnowledgeRef; b: KnowledgeRef };
 
+type RuleExplanation = {
+  rule: { id: string; title: string; statement: string; status: string; owner?: string };
+  origin: Citation[];
+  applicable_scenario: string[];
+  exception: string;
+  related_cases: Array<{ id: string; symptom: string; root_cause: string }>;
+  related_risks: Array<{ id: string; title: string; description: string }>;
+  related_checklist: string[];
+};
+
 type StudioOutput = {
   title: string;
   sections: Array<[string, string[]]>;
@@ -389,6 +399,7 @@ export default function Home() {
   const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   const [conflicts, setConflicts] = useState<ConflictPair[] | null>(null);
+  const [ruleExplanation, setRuleExplanation] = useState<RuleExplanation | null>(null);
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
@@ -920,6 +931,14 @@ export default function Home() {
     setToast("已合并，源条目置为 deprecated");
   }
 
+  async function explainRule(ruleId: string) {
+    if (!currentNotebookId) return;
+    const response = await api<RuleExplanation>(
+      `/notebooks/${currentNotebookId}/rules/${ruleId}/explain`
+    );
+    setRuleExplanation(response);
+  }
+
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
     if (mode === "rules" && knowledge[knowledgeKind] === null) {
@@ -1318,6 +1337,7 @@ export default function Home() {
                     onFindDuplicates={() => findDuplicates(knowledgeKind).catch(reportError)}
                     onFindConflicts={() => findConflicts().catch(reportError)}
                     onMerge={(sourceId, intoId) => mergeKnowledge(sourceId, intoId).catch(reportError)}
+                    onExplain={(ruleId) => explainRule(ruleId).catch(reportError)}
                     reload={() => loadKnowledge(knowledgeKind).catch(reportError)}
                   />
                 )}
@@ -1607,6 +1627,62 @@ export default function Home() {
         </section>
       )}
 
+      {ruleExplanation && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setRuleExplanation(null); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>为什么有这条规则</h2>
+                <p>{ruleExplanation.rule.title || ruleExplanation.rule.id}</p>
+              </div>
+              <button className="icon-button" onClick={() => setRuleExplanation(null)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <p>{ruleExplanation.rule.statement}</p>
+              {ruleExplanation.applicable_scenario.length > 0 && (
+                <div className="tag-row">
+                  {ruleExplanation.applicable_scenario.map((scope) => <span className="tag" key={scope}>{scope}</span>)}
+                </div>
+              )}
+              {ruleExplanation.exception && <p><strong>例外：</strong>{ruleExplanation.exception}</p>}
+              <p className="section-title">来源 / 形成依据</p>
+              {ruleExplanation.origin.length > 0 ? ruleExplanation.origin.map((citation, index) => (
+                <div className="citation" key={`${citation.label}-${index}`}>
+                  <strong>{citation.label}</strong>
+                  <div>{citation.location_label}</div>
+                  <div>{citation.quoted_span}</div>
+                </div>
+              )) : <p className="tool-hint">该规则暂无可追溯的来源证据。</p>}
+              {ruleExplanation.related_cases.length > 0 && (
+                <>
+                  <p className="section-title">相关案例</p>
+                  <div className="stack">
+                    {ruleExplanation.related_cases.map((caseCard) => (
+                      <article className="item" key={caseCard.id}>
+                        <h3>{caseCard.symptom || caseCard.id}</h3>
+                        {caseCard.root_cause && <p><strong>根因：</strong>{caseCard.root_cause}</p>}
+                      </article>
+                    ))}
+                  </div>
+                </>
+              )}
+              {ruleExplanation.related_risks.length > 0 && (
+                <>
+                  <p className="section-title">相关风险</p>
+                  <div className="tag-row">{ruleExplanation.related_risks.map((risk) => <span className="tag" key={risk.id}>{risk.title}</span>)}</div>
+                </>
+              )}
+              {ruleExplanation.related_checklist.length > 0 && (
+                <>
+                  <p className="section-title">相关检查项</p>
+                  <div className="stack">{ruleExplanation.related_checklist.map((q) => <div className="checklist-row" key={q}>{q}</div>)}</div>
+                </>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -1828,6 +1904,7 @@ function KnowledgeBrowser({
   onFindDuplicates,
   onFindConflicts,
   onMerge,
+  onExplain,
   reload
 }: {
   kind: KnowledgeKind;
@@ -1842,6 +1919,7 @@ function KnowledgeBrowser({
   onFindDuplicates: () => void;
   onFindConflicts: () => void;
   onMerge: (sourceId: string, intoId: string) => void;
+  onExplain: (ruleId: string) => void;
   reload: () => void;
 }) {
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
@@ -1932,6 +2010,9 @@ function KnowledgeBrowser({
                   />
                 </label>
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
+                {kind === "rule" && (
+                  <button className="sort-button" onClick={() => onExplain(item.id)}>解释</button>
+                )}
               </div>
               <EvidenceLine evidence={item.evidence} />
             </article>

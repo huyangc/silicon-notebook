@@ -43,6 +43,7 @@ from app.models.schemas import (
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
+    RuleExplanation,
     ScenarioQueryRequest,
     SearchHit,
     SourceDetail,
@@ -1250,6 +1251,58 @@ class SQLiteRepository:
         with self._connect() as db:
             objects = self._knowledge_objects(db, notebook_id, "glossary", statuses=None)
         return [self._glossary_card(self._as_retrieved(obj, "glossary")) for obj in objects]
+
+    def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation:
+        """Trace a rule back to its origin evidence and surface related
+        cases / risks / checklist items (the "why is this rule here?" view, §6.10)."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM knowledge_objects "
+                "WHERE id = ? AND notebook_id = ? AND object_type = 'rule'",
+                (rule_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(rule_id)
+            rule_obj = {
+                "id": row["id"],
+                "payload": json.loads(row["payload"] or "{}"),
+                "evidence": [Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+                "status": row["status"],
+                "owner": row["owner"],
+                "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
+            }
+            cases = self._knowledge_objects(db, notebook_id, "case")
+            risks = self._knowledge_objects(db, notebook_id, "risk")
+            checklist = self._knowledge_objects(db, notebook_id, "checklist")
+            valid_ids = {element["element_id"] for element in self._gather_elements(db, notebook_id)}
+
+        rule_card = self._rule_card(self._as_retrieved(rule_obj, "rule"))
+        payload = rule_obj["payload"]
+        query = " ".join(
+            [rule_card.title, rule_card.statement, " ".join(rule_card.applies_to)]
+        ).strip()
+        related_cases = [self._case_card(item) for item in score_knowledge(query, cases, "case")[:3]]
+        related_risks = [self._risk_card(item) for item in score_knowledge(query, risks, "risk")[:3]]
+        related_checklist = [
+            str(item.payload.get("question", "")).strip()
+            for item in score_knowledge(query, checklist, "checklist")[:5]
+            if str(item.payload.get("question", "")).strip()
+        ]
+        origin = [
+            _citation("Rule origin", evidence)
+            for evidence in rule_obj["evidence"]
+            if not evidence.element_id or evidence.element_id in valid_ids
+        ]
+        return RuleExplanation(
+            rule=rule_card,
+            origin=origin,
+            applicable_scenario=rule_card.applies_to,
+            exception=str(payload.get("exception", "")),
+            related_cases=related_cases,
+            related_risks=related_risks,
+            related_checklist=related_checklist,
+        )
 
     def update_knowledge(
         self, knowledge_id: str, payload: KnowledgeUpdate
