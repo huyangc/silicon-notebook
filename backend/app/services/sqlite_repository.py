@@ -69,18 +69,29 @@ from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
     OBJECT_TYPE_LABELS,
+    PROFILES,
     ObjectSchema,
+    get_profile,
     resolve_profile,
 )
+
+
+def _normalize_doc_type(doc_type: str) -> str:
+    """Keep only known profile ids; everything else (incl. 'auto') means
+    auto-detect, stored as ''."""
+    value = (doc_type or "").strip().lower()
+    return value if value in PROFILES else ""
 from app.services.mineru_client import MinerUClient
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES, get_template
 from app.services.parsers import parse_source_file
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
+    DESCRIPTION_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
+    notebook_description_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
@@ -325,6 +336,14 @@ class SQLiteRepository:
             for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope", "template"):
                 if col not in nb_cols:
                     db.execute(f"ALTER TABLE notebooks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+            # purpose_auto=1 means the description is auto-derived from sources and
+            # may be regenerated; set to 0 once the user edits it manually.
+            if "purpose_auto" not in nb_cols:
+                db.execute("ALTER TABLE notebooks ADD COLUMN purpose_auto INTEGER NOT NULL DEFAULT 0")
+            # Per-source document type drives schema/profile selection at extraction.
+            src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
+            if "doc_type" not in src_cols:
+                db.execute("ALTER TABLE sources ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -505,52 +524,32 @@ class SQLiteRepository:
         return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
 
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
+        """Minimal creation: only name + description (purpose). When the user
+        leaves the description blank it is flagged auto (purpose_auto=1) and
+        later derived from the first batch of uploaded sources."""
         notebook_id = f"nb-{uuid4().hex[:10]}"
         now = _now()
-        template = get_template(payload.template) if payload.template else None
-
-        def fill(value, key, default):
-            if value:
-                return value
-            if template and template.get(key):
-                return template[key]
-            return default
-
-        purpose = fill(payload.purpose, "purpose", "")
-        primary_domain = fill(
-            payload.primary_domain if payload.primary_domain != "Semiconductor" else "",
-            "primary_domain",
-            "Semiconductor",
-        )
-        target_users = fill(payload.target_users, "target_users", "")
-        access_scope = payload.access_scope
-        expected_questions = fill(payload.expected_questions, "expected_questions", [])
-        source_types = fill(payload.source_types, "source_types", [])
-        taxonomy = fill(payload.taxonomy, "taxonomy", [])
+        purpose = (payload.purpose or "").strip()
+        purpose_auto = 0 if purpose else 1
 
         with self._connect() as db:
             db.execute(
                 """
                 INSERT INTO notebooks
                 (id, name, purpose, primary_domain, status, created_by, created_at, updated_at,
-                 target_users, expected_questions, source_types, taxonomy, access_scope, template)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 purpose_auto)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     notebook_id,
                     payload.name,
                     purpose,
-                    primary_domain,
+                    "Semiconductor",
                     "draft",
                     "user-local",
                     now,
                     now,
-                    target_users,
-                    json.dumps(expected_questions, ensure_ascii=False),
-                    json.dumps(source_types, ensure_ascii=False),
-                    json.dumps(taxonomy, ensure_ascii=False),
-                    access_scope,
-                    payload.template or "",
+                    purpose_auto,
                 ),
             )
             row = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
@@ -573,6 +572,9 @@ class SQLiteRepository:
         if payload.purpose is not None:
             updates.append("purpose = ?")
             values.append(payload.purpose.strip())
+            # A user-edited description is manual; stop auto-regenerating it.
+            updates.append("purpose_auto = ?")
+            values.append(0)
         if payload.primary_domain is not None:
             updates.append("primary_domain = ?")
             values.append(payload.primary_domain.strip() or "Semiconductor")
@@ -644,8 +646,8 @@ class SQLiteRepository:
                     """
                     INSERT INTO sources
                     (id, notebook_id, title, source_type, status, parse_status, file_name,
-                     file_size, summary, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     file_size, summary, doc_type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         source_id,
@@ -657,6 +659,7 @@ class SQLiteRepository:
                         file.file_name,
                         file.file_size,
                         "File metadata imported. Upload the file to parse source elements.",
+                        _normalize_doc_type(file.doc_type),
                         now,
                         now,
                     ),
@@ -693,8 +696,8 @@ class SQLiteRepository:
                     """
                     INSERT INTO sources
                     (id, notebook_id, title, source_type, status, parse_status, file_name,
-                     file_path, file_size, file_hash, summary, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     file_path, file_size, file_hash, summary, doc_type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         source_id,
@@ -708,6 +711,7 @@ class SQLiteRepository:
                         len(file.content),
                         digest,
                         "Uploaded; parsing is queued.",
+                        _normalize_doc_type(file.doc_type),
                         now,
                         now,
                     ),
@@ -864,6 +868,14 @@ class SQLiteRepository:
                 "extracted",
                 error_message=empty_hint or fallback_hint,
             )
+            # Derive the notebook description from its sources while it is still
+            # auto (the user hasn't written one). Best-effort; never fails the pipeline.
+            try:
+                self._augment_notebook_description(source.notebook_id)
+            except Exception:
+                self.event_log.logger.exception(
+                    "description augment failed for %s", source.notebook_id
+                )
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
@@ -879,6 +891,62 @@ class SQLiteRepository:
     def parse_source(self, source_id: str) -> SourceSummary:
         # Manual (re)parse is always synchronous so the response reflects the result.
         return self.process_source(source_id)
+
+    def _augment_notebook_description(self, notebook_id: str) -> None:
+        """Derive the notebook description from its sources, while it is still
+        auto (purpose_auto=1). Regenerates as the first batch's sources finish so
+        the final description reflects all of them. No-op once user-edited."""
+        with self._connect() as db:
+            nb = db.execute(
+                "SELECT purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
+            ).fetchone()
+            if nb is None or ("purpose_auto" in nb.keys() and nb["purpose_auto"] != 1):
+                return
+            rows = db.execute(
+                "SELECT title, doc_type, summary FROM sources "
+                "WHERE notebook_id = ? AND status = 'extracted' ORDER BY created_at ASC",
+                (notebook_id,),
+            ).fetchall()
+        if not rows:
+            return
+        titles = [r["title"] for r in rows]
+        labels = []
+        for r in rows:
+            profile = PROFILES.get(_normalize_doc_type(r["doc_type"]))
+            label = profile.label if profile else "自动检测"
+            if label not in labels:
+                labels.append(label)
+
+        description = ""
+        if self.llm_client.configured:
+            block = "\n".join(
+                f"- {r['title']} "
+                f"[{(PROFILES.get(_normalize_doc_type(r['doc_type'])) or get_profile('general')).label}] "
+                f"{(r['summary'] or '')[:200]}"
+                for r in rows[:20]
+            )
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user", "content": notebook_description_prompt(block)}],
+                    DESCRIPTION_SCHEMA_HINT,
+                )
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    description = str(parsed.get("description", "")).strip()
+            except Exception:
+                description = ""
+        if not description:
+            shown = "、".join(titles[:5]) + ("等" if len(titles) > 5 else "")
+            description = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
+            if labels:
+                description += f"文档类型涵盖 {'、'.join(labels)}。"
+
+        with self._connect() as db:
+            db.execute(
+                "UPDATE notebooks SET purpose = ?, updated_at = ? "
+                "WHERE id = ? AND purpose_auto = 1",
+                (description[:1000], _now(), notebook_id),
+            )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
         self.get_source(source_id)
@@ -936,18 +1004,13 @@ class SQLiteRepository:
         elements = self.source_elements(source_id)
         now = _now()
         run_id = f"run-{uuid4().hex[:10]}"
-        # Pick the document-type extraction profile: notebook template default,
-        # overridden by per-source content detection when confident.
-        with self._connect() as db:
-            nb_row = db.execute(
-                "SELECT * FROM notebooks WHERE id = ?", (source.notebook_id,)
-            ).fetchone()
-        template_id = (
-            nb_row["template"]
-            if nb_row is not None and "template" in nb_row.keys()
-            else ""
-        )
-        profile = resolve_profile(template_id, source.title, elements)
+        # Pick the document-type extraction profile from the per-source doc_type
+        # chosen at upload; empty/'auto' falls back to content detection.
+        doc_type = _normalize_doc_type(getattr(source, "doc_type", "") or "")
+        if doc_type:
+            profile = get_profile(doc_type)
+        else:
+            profile = resolve_profile(None, source.title, elements)
         registry = self.effective_schemas()
         with self._connect() as db:
             self._clear_source_extraction_state(
@@ -3150,6 +3213,7 @@ class SQLiteRepository:
             file_hash=row["file_hash"],
             parse_status=row["parse_status"],
             created_label=_created_label(row["created_at"]),
+            doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
         )
 
     def _source_type_from_name(self, file_name: str) -> str:

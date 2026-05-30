@@ -70,6 +70,19 @@ def extraction_prompt(
     )
 
 
+DESCRIPTION_SCHEMA_HINT = '{"description":""}'
+
+
+def notebook_description_prompt(sources_block: str) -> str:
+    return (
+        "Write a concise 1-2 sentence description (Chinese ok) of what this "
+        "knowhow notebook covers, based on the sources its curator has added. "
+        "Describe the subject matter and document types; do not invent scope "
+        "beyond the sources. Return valid JSON only with a 'description' field.\n\n"
+        f"Sources:\n{sources_block}"
+    )
+
+
 REFINE_SCHEMA_HINT = (
     '{"items":[{"index":0,"keep":true,"quoted_span":"","reason":""}]}'
 )

@@ -463,7 +463,6 @@ function cardIcon(index: number, notebook: NotebookSummary): string {
 export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
-  const [templates, setTemplates] = useState<Array<{ id: string; label: string }>>([]);
   const [searchHits, setSearchHits] = useState<Record<string, SearchHit[]>>({});
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
@@ -481,6 +480,12 @@ export default function Home() {
   const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
   const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [createDesc, setCreateDesc] = useState("");
+  const [docTypeOptions, setDocTypeOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  const [stagedDocTypes, setStagedDocTypes] = useState<string[]>([]);
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
@@ -692,20 +697,29 @@ export default function Home() {
     setHealth(healthResponse);
     setStatusText(`API ${healthResponse.status}; LLM configured: ${healthResponse.llm_configured}`);
     setNotebooks(notebookResponse);
-    if (templates.length === 0) {
-      api<Array<{ id: string; label: string }>>("/notebook-templates")
-        .then(setTemplates)
+    if (docTypeOptions.length === 0) {
+      api<Array<{ id: string; label: string }>>("/doc-types")
+        .then(setDocTypeOptions)
         .catch(() => undefined);
     }
   }
 
-  async function createNotebook(template = "") {
+  function openCreate() {
+    setCreateName("");
+    setCreateDesc("");
+    setCreateOpen(true);
+  }
+
+  async function submitCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify(template ? { template } : {})
+      body: JSON.stringify({ name: createName.trim() || "未命名笔记本", purpose: createDesc.trim() })
     });
+    setCreateOpen(false);
     await loadNotebookCollection();
     await openNotebook(notebook.id);
+    setStagedFiles([]);
+    setStagedDocTypes([]);
     setSourceModalOpen(true);
   }
 
@@ -878,16 +892,35 @@ export default function Home() {
     setToast("Notebook 已删除");
   }
 
-  async function uploadSources(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files || []);
-    if (!currentNotebookId || files.length === 0) return;
-    const supported = files.filter((file) => /\.(pdf|md|markdown|docx|pptx|csv|xlsx|xlsm)$/i.test(file.name));
-    if (supported.length === 0) {
-      setStatusText("Select PDF, Markdown, DOCX, or PPTX files");
+  // Stage selected files so the user can pick a document type per file before
+  // uploading (auto-detect by default).
+  function stageFiles(event: ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(event.target.files || []).filter((file) =>
+      /\.(pdf|md|markdown|docx|pptx|csv|xlsx|xlsm)$/i.test(file.name)
+    );
+    event.target.value = "";
+    if (picked.length === 0) {
+      setStatusText("Select PDF, Markdown, DOCX, PPTX, CSV or Excel files");
       return;
     }
+    setStagedFiles(picked);
+    setStagedDocTypes(picked.map(() => ""));
+    setSourceModalOpen(true);
+  }
+
+  function setStagedDocType(index: number, value: string) {
+    setStagedDocTypes((prev) => prev.map((dt, i) => (i === index ? value : dt)));
+  }
+
+  function setAllStagedDocTypes(value: string) {
+    setStagedDocTypes((prev) => prev.map(() => value));
+  }
+
+  async function confirmUpload() {
+    if (!currentNotebookId || stagedFiles.length === 0) return;
     const formData = new FormData();
-    supported.forEach((file) => formData.append("files", file));
+    stagedFiles.forEach((file) => formData.append("files", file));
+    stagedDocTypes.forEach((dt) => formData.append("doc_types", dt));
     const uploaded = await api<SourceSummary[]>(`/notebooks/${currentNotebookId}/sources`, {
       method: "POST",
       body: formData
@@ -895,9 +928,10 @@ export default function Home() {
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
     await loadNotebookCollection();
     await loadCandidates(currentNotebookId);
-    event.target.value = "";
+    setStagedFiles([]);
+    setStagedDocTypes([]);
     setSourceModalOpen(false);
-    setToast(`Imported ${uploaded.length} source file(s)`);
+    setToast(`已上传 ${uploaded.length} 个来源`);
   }
 
   async function openSourceDetail(source: SourceSummary) {
@@ -1331,22 +1365,7 @@ export default function Home() {
                   ))}
                 </div>
               </div>
-              {templates.length > 0 && (
-                <select
-                  className="sort-button"
-                  value=""
-                  onChange={(event) => {
-                    const tid = event.target.value;
-                    if (tid) createNotebook(tid).catch(reportError);
-                    event.currentTarget.value = "";
-                  }}
-                  title="从模板新建"
-                >
-                  <option value="">从模板…</option>
-                  {templates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.label}</option>)}
-                </select>
-              )}
-              <button className="new-pill" onClick={() => createNotebook().catch(reportError)}>＋ 新建</button>
+              <button className="new-pill" onClick={openCreate}>＋ 新建</button>
             </div>
           </section>
 
@@ -1365,7 +1384,7 @@ export default function Home() {
             ) : (
               <>
                 {!searchQuery && filter !== "featured" && (
-                  <button className="notebook-card create-card" onClick={() => createNotebook().catch(reportError)}>
+                  <button className="notebook-card create-card" onClick={openCreate}>
                     <div className="create-circle">＋</div>
                     <h2>新建笔记本</h2>
                   </button>
@@ -1424,7 +1443,7 @@ export default function Home() {
               </div>
             </div>
             <div className="workspace-actions">
-              <button className="new-pill" onClick={() => createNotebook().catch(reportError)}>＋ 创建笔记本</button>
+              <button className="new-pill" onClick={openCreate}>＋ 创建笔记本</button>
               <button className="sort-button" onClick={() => setInfoModal({
                 title: "分析",
                 message: "第一版提供本机 beta 的分析入口：可以从当前来源生成 Studio 输出，或直接跑一次 evidence-grounded 回答。",
@@ -1459,7 +1478,7 @@ export default function Home() {
               <div className="workspace-panel-body sources-body">
                 <label className="add-source-button">
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
-                  <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={(event) => uploadSources(event).catch(reportError)} />
+                  <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={stageFiles} />
                 </label>
                 <button className="add-source-button review-queue-button" onClick={() => setReviewOpen(true)}>
                   ⚖ 审核队列{candidates.length > 0 ? ` · ${candidates.length}` : ""}
@@ -1695,22 +1714,79 @@ export default function Home() {
         </div>
       )}
 
+      {createOpen && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setCreateOpen(false); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>新建笔记本</h2>
+                <p>只需名称与描述。描述留空时会在你添加首批来源后自动生成。文档类型在上传每个文件时选择。</p>
+              </div>
+              <button className="icon-button" onClick={() => setCreateOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <label>名称
+                <input value={createName} autoFocus placeholder="例如 模拟封装 Knowhow" onChange={(event) => setCreateName(event.target.value)} />
+              </label>
+              <label>描述（可选）
+                <textarea rows={3} value={createDesc} placeholder="留空则根据首批来源自动生成" onChange={(event) => setCreateDesc(event.target.value)} />
+              </label>
+              <div className="tag-row">
+                <button className="new-pill" onClick={() => submitCreate().catch(reportError)}>创建并添加来源</button>
+                <button className="sort-button" onClick={() => setCreateOpen(false)}>取消</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       {sourceModalOpen && (
         <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSourceModalOpen(false); }}>
           <div className="source-modal-card">
             <div className="source-modal-header">
               <div>
                 <h2>添加来源</h2>
-                <p>选择现有 PDF、Markdown、DOCX 或 PPTX。系统会保存文件、解析文本元素，并生成 source summary。</p>
+                <p>选择文件后，可为每个文件指定文档类型（默认自动检测）；类型决定该文件的抽取 schema。</p>
               </div>
-              <button className="icon-button" onClick={() => setSourceModalOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             <label className="drop-zone">
-              <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={(event) => uploadSources(event).catch(reportError)} />
+              <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={stageFiles} />
               <span className="drop-plus">＋</span>
-              <strong>选择来源文件</strong>
-              <small>当前版本会立即解析文本元素；图片和 OCR 暂不处理。</small>
+              <strong>{stagedFiles.length > 0 ? "继续添加文件" : "选择来源文件"}</strong>
+              <small>支持 PDF / Markdown / DOCX / PPTX / CSV / Excel；图片与 OCR 暂不处理。</small>
             </label>
+            {stagedFiles.length > 0 && (
+              <div className="source-detail-body">
+                <div className="tool-input-row">
+                  <span className="section-title">{stagedFiles.length} 个待上传文件</span>
+                  <label>全部设为
+                    <select value="" onChange={(event) => { if (event.target.value !== "__none__") setAllStagedDocTypes(event.target.value); }}>
+                      <option value="__none__">— 批量 —</option>
+                      {docTypeOptions.map((opt) => <option key={opt.id || "auto"} value={opt.id}>{opt.label}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div className="stack">
+                  {stagedFiles.map((file, index) => (
+                    <div className="checklist-row" key={`${file.name}-${index}`}>
+                      <span style={{ flex: 1 }}>{file.name}</span>
+                      <select
+                        value={stagedDocTypes[index] ?? ""}
+                        onChange={(event) => setStagedDocType(index, event.target.value)}
+                      >
+                        {docTypeOptions.length === 0 && <option value="">自动检测</option>}
+                        {docTypeOptions.map((opt) => <option key={opt.id || "auto"} value={opt.id}>{opt.label}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <div className="tag-row">
+                  <button className="new-pill" onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
+                  <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); }}>清空</button>
+                </div>
+              </div>
+            )}
           </div>
         </section>
       )}

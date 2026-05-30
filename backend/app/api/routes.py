@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 
 from app.core.config import get_settings
 from app.models.schemas import (
@@ -93,6 +93,16 @@ def me() -> UserProfile:
     return repository().current_user()
 
 
+@router.get("/doc-types")
+def list_doc_types():
+    """Document-type options for the upload picker ('' = auto-detect)."""
+    from app.services.extraction_profiles import PROFILES
+
+    return [{"id": "", "label": "自动检测"}] + [
+        {"id": profile.id, "label": profile.label} for profile in PROFILES.values()
+    ]
+
+
 @router.get("/notebook-templates", response_model=List[NotebookTemplate])
 def list_notebook_templates() -> List[NotebookTemplate]:
     return repository().list_notebook_templates()
@@ -166,20 +176,24 @@ async def upload_sources(
     notebook_id: str,
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
+    doc_types: List[str] = Form(default=[]),
 ) -> List[SourceSummary]:
     try:
         repo = repository()
         uploaded_files = []
-        for file in files:
+        for index, file in enumerate(files):
             file_name = file.filename or "source.bin"
             _validate_source_file(file_name)
             content = await file.read()
             _validate_source_file(file_name, len(content))
+            # doc_types is aligned with files by position; missing/extra are tolerated.
+            doc_type = doc_types[index] if index < len(doc_types) else ""
             uploaded_files.append(
                 UploadedSourceFile(
                     file_name=file_name,
                     content_type=file.content_type or "",
                     content=content,
+                    doc_type=doc_type,
                 )
             )
         return repo.upload_sources(

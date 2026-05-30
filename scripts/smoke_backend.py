@@ -722,15 +722,32 @@ def main() -> None:
             )
         )
 
-        # §6.1/§6.2: templates + rich creation fields.
-        templates = repository.list_notebook_templates()
-        assert len(templates) >= 6 and any(t.id == "rule" for t in templates)
-        templated = repository.create_notebook(NotebookCreate(name="From template", template="rule"))
-        assert templated.taxonomy and templated.target_users, "template should seed rich fields"
-        updated_nb = repository.update_notebook(
-            templated.id, NotebookUpdate(expected_questions=["q1", "q2"], access_scope="team")
+        # Minimal creation: a blank description is auto (regenerated from sources);
+        # a provided description stays manual. Type lives per-source, not per-notebook.
+        auto_nb = repository.create_notebook(NotebookCreate(name="Auto desc"))
+        assert auto_nb.purpose == "", "blank description starts empty (auto)"
+        manual_nb = repository.create_notebook(NotebookCreate(name="Manual", purpose="hand-written"))
+        assert manual_nb.purpose == "hand-written"
+        # Per-source doc_type is stored and drives extraction profile selection.
+        typed = repository.upload_sources(
+            auto_nb.id,
+            [UploadedSourceFile(
+                file_name="paper.md", content_type="text/markdown",
+                content=b"# Abstract\nWe propose X and report experimental results. References: [1].\n",
+                doc_type="academic_paper",
+            )],
         )
-        assert updated_nb.expected_questions == ["q1", "q2"] and updated_nb.access_scope == "team"
+        assert typed[0].doc_type == "academic_paper"
+        # Blank description got auto-derived from the uploaded source.
+        assert repository.get_notebook(auto_nb.id).purpose, "auto description filled from sources"
+        # A user edit makes the description manual (no longer auto-regenerated).
+        edited = repository.update_notebook(auto_nb.id, NotebookUpdate(purpose="pinned"))
+        assert edited.purpose == "pinned"
+        repository.upload_sources(
+            auto_nb.id,
+            [UploadedSourceFile(file_name="more.md", content_type="text/markdown", content=b"# More\nExtra content here.\n")],
+        )
+        assert repository.get_notebook(auto_nb.id).purpose == "pinned", "manual description must not be overwritten"
 
         uploaded = repository.upload_sources(
             notebook.id,

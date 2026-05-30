@@ -239,6 +239,15 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - **顺带修复**：`routes.py` 缺失的 `NotebookTemplate` import（API 模块导入即 NameError）。
 - **验证**：`smoke_backend.py` 增 `check_object_schemas / check_self_refinement / check_knowledge_graph` + ask `related_knowledge` 断言；TestClient 实跑全部新端点 200；`check.sh` 全绿、`npm run build` 通过。
 
+## 24. 类型决策从「建库」移到「上传/单文件」+ 描述自动生成 + API 层冒烟
+
+- **动机**：库类型不应在建库时选；应按**文档内容类型**选 schema，且粒度到**单个文件**（一个库可混论文/方案/复盘）。
+- **建库极简化**：去掉模板/库类型与富字段预填，建库只留**名称 + 描述**。描述留空 → `purpose_auto=1`，在用户添加**首批来源**后由来源内容自动生成（LLM 配置时 1–2 句摘要，否则「N 个来源 + 类型涵盖…」启发式）；用户手改描述后置 `purpose_auto=0`，不再覆盖。
+- **per-file 文档类型**：`sources.doc_type`（迁移）；上传接口增 `doc_types` 表单数组（与 files 按序对齐）；`_run_extraction` profile 解析改为 **source.doc_type 优先 → 空/auto 内容判别 → general**，砍掉 notebook template 线。`GET /doc-types` 暴露选项（自动检测 + 7 profile）。
+- **前端**：建库改「名称+描述」弹窗；上传改**暂存式**——选文件→列清单→每文件文档类型下拉(默认自动检测)+「全部设为…」→确认上传；移除「从模板…」入口。
+- **API 层冒烟（夯实）**：`check_api_layer` 用 TestClient 真起 app 跑遍各路由组 + 错误码契约(404/400/422)，补上「测试从不 import routes」这个盲区（此前 `NotebookTemplate` 漏 import 即因此潜伏）。
+- 备注：`/notebook-templates` 端点与 `notebook_templates.py` 现已无人使用，留作后续清理。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
 
 - **Article 深度可视化**：typed 关系下游动作（suggests_checklist/creates_risk）、Implication Map（§7.4）、Inference 分层（§7.3）+ Hypothesis（§5.9）、研究简报字段补齐（§7.1）。

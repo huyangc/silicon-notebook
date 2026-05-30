@@ -44,12 +44,14 @@ class SourceSummary(BaseModel):
     file_hash: str = ""
     parse_status: str = ""
     created_label: str = ""
+    doc_type: str = ""  # "" = auto-detect; else an extraction profile id
 
 
 class SourceImportFile(BaseModel):
     file_name: str
     file_size: int = 0
     mime_type: str = ""
+    doc_type: str = ""
 
 
 class SourceImportRequest(BaseModel):

@@ -53,6 +53,7 @@ class UploadedSourceFile:
     file_name: str
     content_type: str
     content: bytes
+    doc_type: str = ""  # "" = auto-detect; else an extraction profile id
 
 
 class NotebookRepository(Protocol):
