@@ -24,7 +24,58 @@ def parse_source_file(
         return parse_pptx(source_id, Path(file_path))
     if suffix == ".pdf":
         return parse_pdf(source_id, Path(file_path), file_name, mineru_client)
+    if suffix == ".csv":
+        return parse_csv(source_id, Path(file_path))
+    if suffix in {".xlsx", ".xlsm"}:
+        return parse_xlsx(source_id, Path(file_path))
     return parse_plain_text(source_id, Path(file_path), "text")
+
+
+def parse_csv(source_id: str, path: Path) -> List[SourceElement]:
+    import csv
+
+    elements: List[SourceElement] = []
+    with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+        for index, row in enumerate(csv.reader(handle), start=1):
+            cells = [cell.strip() for cell in row if cell and cell.strip()]
+            if not cells:
+                continue
+            elements.append(
+                _element(
+                    source_id,
+                    "table_row",
+                    f"CSV row {index}",
+                    " | ".join(cells),
+                    {"parser": "csv", "row_index": index},
+                )
+            )
+    return elements
+
+
+def parse_xlsx(source_id: str, path: Path) -> List[SourceElement]:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise RuntimeError("XLSX parser dependency openpyxl is not installed") from exc
+
+    workbook = load_workbook(str(path), read_only=True, data_only=True)
+    elements: List[SourceElement] = []
+    for sheet in workbook.worksheets:
+        for index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+            if not cells:
+                continue
+            elements.append(
+                _element(
+                    source_id,
+                    "table_row",
+                    f"XLSX {sheet.title} row {index}",
+                    " | ".join(cells),
+                    {"parser": "xlsx", "sheet": sheet.title, "row_index": index},
+                )
+            )
+    workbook.close()
+    return elements
 
 
 def parse_markdown(source_id: str, path: Path) -> List[SourceElement]:
@@ -246,7 +297,13 @@ def parse_pdf(
             elements = mineru_content_list_to_elements(source_id, content_list)
             if elements:
                 return elements
-        except Exception:
+            if hasattr(mineru_client, "last_error"):
+                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
+        except Exception as exc:
+            if hasattr(mineru_client, "last_error") and not getattr(
+                mineru_client, "last_error", ""
+            ):
+                mineru_client.last_error = str(exc)
             # Fall through to pypdf so a MinerU outage never blocks ingestion.
             pass
     return parse_pdf_pypdf(source_id, path)

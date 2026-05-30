@@ -16,6 +16,7 @@ from app.models.schemas import (
     ChecklistItem,
     ChecklistRequest,
     ConflictPair,
+    DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
@@ -23,12 +24,15 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
+    NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
+    NotebookTemplate,
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
+    RuleExplanation,
     ScenarioQueryRequest,
     SourceDetail,
     SourceElement,
@@ -50,9 +54,13 @@ class NotebookRepository(Protocol):
 
     def list_notebooks(self) -> List[NotebookSummary]: ...
 
+    def list_notebook_templates(self) -> List[NotebookTemplate]: ...
+
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary: ...
+
+    def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics: ...
 
     def update_notebook(self, notebook_id: str, payload: NotebookUpdate) -> NotebookSummary: ...
 
@@ -91,6 +99,8 @@ class NotebookRepository(Protocol):
 
     def list_rules(self, notebook_id: str) -> List[RuleCard]: ...
 
+    def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation: ...
+
     def list_methods(self, notebook_id: str) -> List[MethodCard]: ...
 
     def list_risks(self, notebook_id: str) -> List[RiskItemCard]: ...
@@ -126,5 +136,13 @@ class NotebookRepository(Protocol):
     def delete_article(self, article_id: str) -> None: ...
 
     def research_article(self, article_id: str) -> ArticleResearchBrief: ...
+
+    def list_derived_rules(
+        self, notebook_id: str, status: str | None = None
+    ) -> List[DerivedRuleCandidate]: ...
+
+    def approve_derived_rule(self, candidate_id: str) -> RuleCard: ...
+
+    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate: ...
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...

@@ -7,44 +7,25 @@
 
 ## 状态速览
 
-- ✅ 已完成主体：v0.1 闭环、v0.2 Rule 治理（状态机/owner/合并/冲突/Method·Risk·Glossary 浏览）、PDF 解析（MinerU+MLX / pypdf 回退 + KaTeX/表格渲染）、知识抽取（LLM 分窗 + CJK 模糊证据绑定 + 启发式回退 + 去重/置信度）、混合检索（关键词+向量+场景 boost）、citation 校验、Article 研究简报 + 反馈。
-- 🔧 进行方向：v0.3 Article 深度 → 创建体验/数据类型/分析 → v0.4 Review Mode → v1.0 企业。
+- ✅ 已完成主体：v0.1 闭环、v0.2 Rule 治理、PDF(MinerU+MLX/pypdf+KaTeX)、知识抽取(LLM 分窗+CJK 模糊绑定+启发式+去重/置信度)、混合检索、citation 校验、Article 研究简报+反馈。
+- ✅ 本轮(dev 分支)新完成：**Explain Rule(§6.10)**、**Derived Rule Candidate 审核队列(§7.5)**、**创建富字段+6 模板(§6.1/§6.2)**、**CSV/Excel 解析(§6.3)**、**质量/分析看板(§16)**。详见 `fangan_done.md`。
+- 🔧 剩余方向：Article 深度可视化 → v0.4 Review Mode → v1.0 企业。
 
 ---
 
-## P1 — 高价值、低/中成本（建议优先）
-
-### T1. Article Studio 收尾（方案 §7 / v0.3）
-- [ ] **Derived Rule Candidate 审核队列（§7.5）**：现在派生规则候选只作为字符串塞在 `ArticleResearchBrief.derived_rule_candidates` 里。需要：持久化为一等队列（`derived_rule_candidates` 表已存在但无端点）+ `GET 列表` + `POST /derived-rule-candidates/{id}/approve|reject`，approve 落入正式 `knowledge_objects`(rule)。
-- [ ] **typed 关系结构化落库（§7.2）**：claims 已有启发式 `relation_type`/`related_rule_id`/`implication`，但缺 `suggests_checklist`/`creates_risk` 等关系的下游动作；关系仅展示，未驱动"建议更新 checklist"。
+## P1 — Article Studio 深度（方案 §7 / v0.3 余项）
+- [ ] **typed 关系下游动作（§7.2）**：claims 已有启发式 `relation_type`/`related_rule_id`/`implication` 且 derived 候选已可审核入库；仍缺 `suggests_checklist`/`creates_risk` 等关系驱动的"建议更新 checklist/新增风险"动作（目前仅展示）。
 - [ ] **Implication Map（§7.4）**：Article Claim →（supports/extends/challenges）Rule/Method/Checklist 的可视化树。无端点、无前端。
-- [ ] **Inference 分层（§7.3）**：Level 0–4（直接/内部/场景/假设/验证）。当前 claims 是扁平列表，无层级与 Hypothesis 对象（§5.9）。
+- [ ] **Inference 分层（§7.3）**：Level 0–4（直接/内部/场景/假设/验证）+ Hypothesis 对象（§5.9）。当前 claims 扁平。
 - [ ] **研究简报字段补齐（§7.1）**：每条 claim 的 `measurement_condition`、逐条 limitation 等。
 
-### T2. Explain Rule（方案 §6.10）
-- [ ] "为什么有这条规则"：规则 → evidence → source/claim 反向追溯。新增 `GET /notebooks/{id}/rules/{rule_id}/explain` + 前端展示（来源、形成原因、相关案例、适用场景、例外、相关风险/检查）。
-
-### T3. 创建体验与知识组织（方案 §6.1 / §6.2）
-- [ ] **创建富字段（§6.1）**：`NotebookCreate` 仅 name/purpose/primary_domain；缺 `target_users` / `expected_questions` / `source_types` / `taxonomy` / `access_scope`。
-- [ ] **Notebook 模板（§6.2）**：6 种模板（Rule / Method / Case / Review / Article / General）预设字段与引导。当前无模板系统。
-- [ ] **自定义 taxonomy 编辑**（v0.2 余项）。
-
-### T4. 数据类型扩展（方案 §6.3）
-- [ ] **CSV / Excel 解析**：半导体规则常以表格维护。MinerU CLI 已支持 xlsx/docx/pptx，可顺势接入；CSV 需自写轻解析（按行/列 → table/row 元素）。
-
 ---
 
-## P2 — 检索与分析深化
-
-### T5. 检索增强（方案 §11）
-- [ ] **BM25 / FTS5 全文**：当前是关键词命中率 + 向量余弦，无 BM25/词频权重。
-- [ ] **结构化 rule matching 硬过滤（§11.4）**：现有 `structured_boost` 只是软加权；缺基于 applies_to/condition 的场景本体硬匹配/过滤。
-- [ ] **Knowledge graph 遍历**：规则/案例/方法之间的关系图召回（如"提到 bondwire 的规则"链路）。
-
-### T6. 质量与分析看板（方案 §16）
-- [ ] 回答质量分析（基于已存的 `feedback`/`answers` 表做 usefulness 率、低分回答聚类）。
-- [ ] 知识缺口看板（哪些场景/提问检索不到知识）。
-- [ ] 抽取质量指标（候选 approve/reject 率、needs_review 占比）、检索质量评估。
+## P2 — 检索深化（方案 §11，**已评估为低 ROI / 基础设施级，暂缓**）
+> 现状已是 CJK 分词 + 向量余弦(真实 embedding)+ 场景 soft boost + 相关度地板 + 类型权重，覆盖 §11 主体。下列为增量基础设施，当前优先级低：
+- [ ] **BM25 / FTS5 全文索引**：需 SQLite FTS5 虚拟表 + 同步维护；纯按文档的 tf 加权（无语料 df）收益有限，已验证不值得为此扰动现有阈值。
+- [ ] **结构化 rule matching 硬过滤（§11.4）**：`structured_boost` 软加权已部分满足；硬过滤有清空结果风险，需谨慎。
+- [ ] **Knowledge graph 遍历**：规则/案例/方法关系图召回，独立大特性。
 
 ---
 

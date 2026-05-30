@@ -16,6 +16,7 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     NotebookCreate,
+    NotebookUpdate,
     SourceElement,
 )
 from app.services.demo_repository import DEMO_NOTEBOOK_ID
@@ -80,6 +81,32 @@ def _ev(element_id: str, quoted_span: str) -> Evidence:
         quoted_span=quoted_span,
         confidence=0.7,
     )
+
+
+def check_csv_xlsx_parsing() -> None:
+    """T4: CSV (stdlib) and XLSX (openpyxl) parse into table_row elements."""
+    from app.services.parsers import parse_csv, parse_xlsx
+
+    with tempfile.TemporaryDirectory(prefix="sn-csv-") as tmp:
+        csv_path = Path(tmp) / "rules.csv"
+        csv_path.write_text("Pin,Net,Note\n1,GND,quiet return\n2,VIN,sensitive input\n", encoding="utf-8")
+        csv_elements = parse_csv("src-csv", csv_path)
+        assert len(csv_elements) == 3 and all(e.element_type == "table_row" for e in csv_elements)
+        assert "GND" in csv_elements[1].text
+
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            return
+        xlsx_path = Path(tmp) / "rules.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Pin", "Net", "Note"])
+        ws.append([1, "GND", "quiet return"])
+        wb.save(str(xlsx_path))
+        xlsx_elements = parse_xlsx("src-xlsx", xlsx_path)
+        assert xlsx_elements and xlsx_elements[0].element_type == "table_row"
+        assert "GND" in " ".join(e.text for e in xlsx_elements)
 
 
 def check_mineru_mapping() -> None:
@@ -338,6 +365,10 @@ def check_pipeline_event_logging() -> None:
                 storage_dir=str(root / "storage"),
                 event_log_dir=str(log_dir),
                 mineru_mode="off",
+                openai_compat_base_url="",
+                openai_compat_api_key="",
+                openai_compat_model="",
+                openai_compat_embedding_model="",
             )
         )
         notebook = repo.create_notebook(NotebookCreate(name="Pipe", purpose="p", primary_domain="d"))
@@ -373,6 +404,7 @@ def check_pipeline_event_logging() -> None:
 
 
 def main() -> None:
+    check_csv_xlsx_parsing()
     check_mineru_mapping()
     check_score_knowledge()
     check_heuristic_extraction()
@@ -412,6 +444,16 @@ def main() -> None:
                 primary_domain="Semiconductor",
             )
         )
+
+        # §6.1/§6.2: templates + rich creation fields.
+        templates = repository.list_notebook_templates()
+        assert len(templates) >= 6 and any(t.id == "rule" for t in templates)
+        templated = repository.create_notebook(NotebookCreate(name="From template", template="rule"))
+        assert templated.taxonomy and templated.target_users, "template should seed rich fields"
+        updated_nb = repository.update_notebook(
+            templated.id, NotebookUpdate(expected_questions=["q1", "q2"], access_scope="team")
+        )
+        assert updated_nb.expected_questions == ["q1", "q2"] and updated_nb.access_scope == "team"
 
         uploaded = repository.upload_sources(
             notebook.id,
@@ -491,6 +533,10 @@ def main() -> None:
         assert rules_now, "approved rule should appear in list_rules"
         rule_id = rules_now[0].id
         assert rules_now[0].status == "approved"
+        # Explain Rule (§6.10): traces the rule back to its origin evidence.
+        explanation = repository.explain_rule(notebook.id, rule_id)
+        assert explanation.rule.id == rule_id
+        assert isinstance(explanation.origin, list) and isinstance(explanation.related_cases, list)
         # Deprecate -> must drop out of answers.
         repository.update_knowledge(rule_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
         dep = next(r for r in repository.list_rules(notebook.id) if r.id == rule_id)
@@ -545,6 +591,13 @@ def main() -> None:
         assert feedback.answer_id == answer.answer_id
         assert feedback.comment == "grounded and actionable"
 
+        # §16: analytics aggregates feedback / candidates / knowledge / sources.
+        analytics = repository.notebook_analytics(notebook.id)
+        assert analytics.feedback_useful >= 1
+        assert analytics.usefulness_rate == 1.0  # only the one useful vote so far
+        assert analytics.knowledge_counts.get("rule", 0) >= 1
+        assert sum(analytics.source_status_counts.values()) >= 1
+
         # Article research must derive from the article's own text, not a hardcoded brief.
         article = repository.create_article(
             notebook.id,
@@ -571,6 +624,18 @@ def main() -> None:
             ).fetchone()
         assert claim_row is not None
         assert "thermal" in " ".join(brief.derived_rule_candidates).lower() or int(derived_count["count"]) >= 1
+
+        # Derived Rule Candidate queue (§7.5): list + approve into the rule library.
+        derived = repository.list_derived_rules(notebook.id)
+        assert isinstance(derived, list)
+        draft = next((d for d in derived if d.status == "draft"), None)
+        if draft is not None:
+            rules_before = len(repository.list_rules(notebook.id))
+            approved_rule = repository.approve_derived_rule(draft.id)
+            assert approved_rule.status == "approved"
+            assert len(repository.list_rules(notebook.id)) == rules_before + 1
+            assert any(d.status == "approved" for d in repository.list_derived_rules(notebook.id))
+
         repository.delete_article(article.id)
         assert all(item.id != article.id for item in repository.list_articles(notebook.id))
         with repository._connect() as db:

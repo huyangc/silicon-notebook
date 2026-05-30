@@ -65,6 +65,12 @@ class NotebookCreate(BaseModel):
     name: str = "Untitled notebook"
     purpose: str = ""
     primary_domain: str = "Semiconductor"
+    target_users: str = ""
+    expected_questions: List[str] = Field(default_factory=list)
+    source_types: List[str] = Field(default_factory=list)
+    taxonomy: List[str] = Field(default_factory=list)
+    access_scope: str = ""
+    template: str = ""  # optional template id to apply preset defaults (§6.2)
 
 
 class NotebookUpdate(BaseModel):
@@ -72,6 +78,11 @@ class NotebookUpdate(BaseModel):
     purpose: Optional[str] = None
     primary_domain: Optional[str] = None
     status: Optional[str] = None
+    target_users: Optional[str] = None
+    expected_questions: Optional[List[str]] = None
+    source_types: Optional[List[str]] = None
+    taxonomy: Optional[List[str]] = None
+    access_scope: Optional[str] = None
 
 
 class NotebookSummary(BaseModel):
@@ -82,6 +93,22 @@ class NotebookSummary(BaseModel):
     status: str
     counts: Dict[str, int]
     created_label: str = ""
+    target_users: str = ""
+    expected_questions: List[str] = Field(default_factory=list)
+    source_types: List[str] = Field(default_factory=list)
+    taxonomy: List[str] = Field(default_factory=list)
+    access_scope: str = ""
+
+
+class NotebookTemplate(BaseModel):
+    id: str
+    label: str
+    purpose: str = ""
+    primary_domain: str = "Semiconductor"
+    target_users: str = ""
+    expected_questions: List[str] = Field(default_factory=list)
+    source_types: List[str] = Field(default_factory=list)
+    taxonomy: List[str] = Field(default_factory=list)
 
 
 class RuleCard(BaseModel):
@@ -300,6 +327,28 @@ class ArticleClaimCard(BaseModel):
     evidence: List[Evidence] = Field(default_factory=list)
 
 
+class DerivedRuleCandidate(BaseModel):
+    id: str
+    notebook_id: str
+    article_id: str = ""
+    title: str
+    proposed_rule: str
+    rationale: str = ""
+    status: str
+    evidence: List[Evidence] = Field(default_factory=list)
+    created_label: str = ""
+
+
+class RuleExplanation(BaseModel):
+    rule: RuleCard
+    origin: List[Citation] = Field(default_factory=list)
+    applicable_scenario: List[str] = Field(default_factory=list)
+    exception: str = ""
+    related_cases: List[CaseCard] = Field(default_factory=list)
+    related_risks: List[RiskItemCard] = Field(default_factory=list)
+    related_checklist: List[str] = Field(default_factory=list)
+
+
 class FeedbackRequest(BaseModel):
     rating: str
     comment: str = ""
@@ -310,3 +359,14 @@ class FeedbackResponse(BaseModel):
     answer_id: str
     rating: str
     comment: str = ""
+
+
+class NotebookAnalytics(BaseModel):
+    answers_total: int = 0
+    feedback_useful: int = 0
+    feedback_not_useful: int = 0
+    usefulness_rate: float = 0.0
+    low_rated_questions: List[str] = Field(default_factory=list)
+    candidate_counts: Dict[str, int] = Field(default_factory=dict)
+    knowledge_counts: Dict[str, int] = Field(default_factory=dict)
+    source_status_counts: Dict[str, int] = Field(default_factory=dict)

@@ -18,6 +18,7 @@ from app.models.schemas import (
     ChecklistItem,
     ChecklistRequest,
     ConflictPair,
+    DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
@@ -25,12 +26,14 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
+    NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
+    RuleExplanation,
     ScenarioQueryRequest,
     SourceDetail,
     SourceElement,
@@ -43,7 +46,7 @@ from app.services.sqlite_repository import SQLiteRepository
 
 router = APIRouter()
 
-SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx"}
+SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
@@ -83,6 +86,11 @@ def me() -> UserProfile:
     return repository().current_user()
 
 
+@router.get("/notebook-templates", response_model=List[NotebookTemplate])
+def list_notebook_templates() -> List[NotebookTemplate]:
+    return repository().list_notebook_templates()
+
+
 @router.get("/notebooks", response_model=List[NotebookSummary])
 def list_notebooks() -> List[NotebookSummary]:
     return repository().list_notebooks()
@@ -97,6 +105,14 @@ def create_notebook(payload: NotebookCreate) -> NotebookSummary:
 def get_notebook(notebook_id: str) -> NotebookSummary:
     try:
         return repository().get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics)
+def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
+    try:
+        return repository().notebook_analytics(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -269,6 +285,14 @@ def list_rules(notebook_id: str) -> List[RuleCard]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
+@router.get("/notebooks/{notebook_id}/rules/{rule_id}/explain", response_model=RuleExplanation)
+def explain_rule(notebook_id: str, rule_id: str) -> RuleExplanation:
+    try:
+        return repository().explain_rule(notebook_id, rule_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+
 @router.get("/notebooks/{notebook_id}/methods", response_model=List[MethodCard])
 def list_methods(notebook_id: str) -> List[MethodCard]:
     try:
@@ -415,6 +439,30 @@ def research_article(article_id: str) -> ArticleResearchBrief:
         return repository().research_article(article_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Article not found")
+
+
+@router.get("/notebooks/{notebook_id}/derived-rules", response_model=List[DerivedRuleCandidate])
+def list_derived_rules(notebook_id: str) -> List[DerivedRuleCandidate]:
+    try:
+        return repository().list_derived_rules(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/derived-rules/{candidate_id}/approve", response_model=RuleCard)
+def approve_derived_rule(candidate_id: str) -> RuleCard:
+    try:
+        return repository().approve_derived_rule(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+
+
+@router.post("/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate)
+def reject_derived_rule(candidate_id: str) -> DerivedRuleCandidate:
+    try:
+        return repository().reject_derived_rule(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Derived rule candidate not found")
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)

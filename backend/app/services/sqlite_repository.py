@@ -28,6 +28,7 @@ from app.models.schemas import (
     ChecklistRequest,
     Citation,
     ConflictPair,
+    DerivedRuleCandidate,
     DuplicateGroup,
     Evidence,
     FeedbackRequest,
@@ -37,12 +38,15 @@ from app.models.schemas import (
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
+    NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
+    NotebookTemplate,
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
+    RuleExplanation,
     ScenarioQueryRequest,
     SearchHit,
     SourceDetail,
@@ -62,6 +66,7 @@ from app.services.demo_repository import (
 )
 from app.services.extraction import bind_evidence, run_extraction
 from app.services.mineru_client import MinerUClient
+from app.services.notebook_templates import NOTEBOOK_TEMPLATES, get_template
 from app.services.parsers import parse_source_file
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -286,6 +291,10 @@ class SQLiteRepository:
                 db.execute(
                     "ALTER TABLE knowledge_objects ADD COLUMN last_reviewed TEXT NOT NULL DEFAULT ''"
                 )
+            nb_cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)").fetchall()}
+            for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope"):
+                if col not in nb_cols:
+                    db.execute(f"ALTER TABLE notebooks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
     def _seed(self) -> None:
         now = _now()
@@ -570,25 +579,55 @@ class SQLiteRepository:
             ).fetchall()
             return [self._notebook_from_row(db, row) for row in rows]
 
+    def list_notebook_templates(self) -> List[NotebookTemplate]:
+        return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
+
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         notebook_id = f"nb-{uuid4().hex[:10]}"
         now = _now()
+        template = get_template(payload.template) if payload.template else None
+
+        def fill(value, key, default):
+            if value:
+                return value
+            if template and template.get(key):
+                return template[key]
+            return default
+
+        purpose = fill(payload.purpose, "purpose", "")
+        primary_domain = fill(
+            payload.primary_domain if payload.primary_domain != "Semiconductor" else "",
+            "primary_domain",
+            "Semiconductor",
+        )
+        target_users = fill(payload.target_users, "target_users", "")
+        access_scope = payload.access_scope
+        expected_questions = fill(payload.expected_questions, "expected_questions", [])
+        source_types = fill(payload.source_types, "source_types", [])
+        taxonomy = fill(payload.taxonomy, "taxonomy", [])
+
         with self._connect() as db:
             db.execute(
                 """
                 INSERT INTO notebooks
-                (id, name, purpose, primary_domain, status, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, purpose, primary_domain, status, created_by, created_at, updated_at,
+                 target_users, expected_questions, source_types, taxonomy, access_scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     notebook_id,
                     payload.name,
-                    payload.purpose,
-                    payload.primary_domain,
+                    purpose,
+                    primary_domain,
                     "draft",
                     "user-local",
                     now,
                     now,
+                    target_users,
+                    json.dumps(expected_questions, ensure_ascii=False),
+                    json.dumps(source_types, ensure_ascii=False),
+                    json.dumps(taxonomy, ensure_ascii=False),
+                    access_scope,
                 ),
             )
             row = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
@@ -617,6 +656,17 @@ class SQLiteRepository:
         if payload.status is not None:
             updates.append("status = ?")
             values.append(payload.status.strip() or "draft")
+        if payload.target_users is not None:
+            updates.append("target_users = ?")
+            values.append(payload.target_users.strip())
+        if payload.access_scope is not None:
+            updates.append("access_scope = ?")
+            values.append(payload.access_scope.strip())
+        for field in ("expected_questions", "source_types", "taxonomy"):
+            value = getattr(payload, field)
+            if value is not None:
+                updates.append(f"{field} = ?")
+                values.append(json.dumps(value, ensure_ascii=False))
         if updates:
             updates.append("updated_at = ?")
             values.append(_now())
@@ -809,7 +859,23 @@ class SQLiteRepository:
             elements = parse_source_file(
                 source_id, source.file_path, source.file_name, self.mineru_client
             )
-            stage("parse", "done", t, elements=len(elements), parser_mode=str(getattr(self.mineru_client, "mode", "")))
+            mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
+            element_parsers = sorted(
+                {
+                    str(element.metadata.get("parser", ""))
+                    for element in elements
+                    if element.metadata.get("parser")
+                }
+            )
+            stage(
+                "parse",
+                "done",
+                t,
+                elements=len(elements),
+                parser_mode=str(getattr(self.mineru_client, "mode", "")),
+                actual_parsers=element_parsers,
+                mineru_error=mineru_error[:500],
+            )
             summary = self._summarize_source(source.title, elements)
             with self._connect() as db:
                 self._clear_source_extraction_state(
@@ -857,7 +923,24 @@ class SQLiteRepository:
                     "No extractable text — likely a scanned/image PDF. "
                     "Enable MinerU (MINERU_MODE) or add OCR to parse it."
                 )
-            self._set_source_status(source_id, "extracted", error_message=empty_hint)
+            fallback_hint = ""
+            if (
+                source.file_name.lower().endswith(".pdf")
+                and self.mineru_client.configured
+                and elements
+                and "mineru" not in element_parsers
+            ):
+                fallback_hint = (
+                    "MinerU did not produce usable elements; fell back to pypdf text extraction. "
+                    "Check MinerU settings/logs if layout, formula, or table fidelity is expected."
+                )
+                if mineru_error:
+                    fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
+            self._set_source_status(
+                source_id,
+                "extracted",
+                error_message=empty_hint or fallback_hint,
+            )
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
@@ -1250,6 +1333,151 @@ class SQLiteRepository:
         with self._connect() as db:
             objects = self._knowledge_objects(db, notebook_id, "glossary", statuses=None)
         return [self._glossary_card(self._as_retrieved(obj, "glossary")) for obj in objects]
+
+    def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation:
+        """Trace a rule back to its origin evidence and surface related
+        cases / risks / checklist items (the "why is this rule here?" view, §6.10)."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM knowledge_objects "
+                "WHERE id = ? AND notebook_id = ? AND object_type = 'rule'",
+                (rule_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(rule_id)
+            rule_obj = {
+                "id": row["id"],
+                "payload": json.loads(row["payload"] or "{}"),
+                "evidence": [Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+                "status": row["status"],
+                "owner": row["owner"],
+                "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
+            }
+            cases = self._knowledge_objects(db, notebook_id, "case")
+            risks = self._knowledge_objects(db, notebook_id, "risk")
+            checklist = self._knowledge_objects(db, notebook_id, "checklist")
+            valid_ids = {element["element_id"] for element in self._gather_elements(db, notebook_id)}
+
+        rule_card = self._rule_card(self._as_retrieved(rule_obj, "rule"))
+        payload = rule_obj["payload"]
+        query = " ".join(
+            [rule_card.title, rule_card.statement, " ".join(rule_card.applies_to)]
+        ).strip()
+        related_cases = [self._case_card(item) for item in score_knowledge(query, cases, "case")[:3]]
+        related_risks = [self._risk_card(item) for item in score_knowledge(query, risks, "risk")[:3]]
+        related_checklist = [
+            str(item.payload.get("question", "")).strip()
+            for item in score_knowledge(query, checklist, "checklist")[:5]
+            if str(item.payload.get("question", "")).strip()
+        ]
+        origin = [
+            _citation("Rule origin", evidence)
+            for evidence in rule_obj["evidence"]
+            if not evidence.element_id or evidence.element_id in valid_ids
+        ]
+        return RuleExplanation(
+            rule=rule_card,
+            origin=origin,
+            applicable_scenario=rule_card.applies_to,
+            exception=str(payload.get("exception", "")),
+            related_cases=related_cases,
+            related_risks=related_risks,
+            related_checklist=related_checklist,
+        )
+
+    def _derived_from_row(self, row: sqlite3.Row) -> DerivedRuleCandidate:
+        return DerivedRuleCandidate(
+            id=row["id"],
+            notebook_id=row["notebook_id"],
+            article_id=row["article_id"] or "",
+            title=row["title"],
+            proposed_rule=row["proposed_rule"],
+            rationale=row["rationale"],
+            status=row["status"],
+            evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+            created_label=_created_label(row["created_at"]),
+        )
+
+    def list_derived_rules(
+        self, notebook_id: str, status: str | None = None
+    ) -> List[DerivedRuleCandidate]:
+        self.get_notebook(notebook_id)
+        query = "SELECT * FROM derived_rule_candidates WHERE notebook_id = ?"
+        params: List[object] = [notebook_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC, id ASC"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [self._derived_from_row(row) for row in rows]
+
+    def approve_derived_rule(self, candidate_id: str) -> RuleCard:
+        """Promote a derived rule candidate into the formal rule library (§7.5)."""
+        now = _now()
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(candidate_id)
+            payload = {
+                "title": row["title"] or _first_sentence(row["proposed_rule"], 90),
+                "statement": row["proposed_rule"],
+                "applies_to": [],
+                "recommendation": "",
+                "risk_if_ignored": row["rationale"] or "",
+                "severity": "medium",
+            }
+            ko_id = f"ko-{uuid4().hex[:10]}"
+            db.execute(
+                """
+                INSERT INTO knowledge_objects
+                (id, notebook_id, object_type, status, owner, payload, evidence,
+                 source_candidate_id, created_at, updated_at)
+                VALUES (?, ?, 'rule', 'approved', '', ?, ?, ?, ?, ?)
+                """,
+                (
+                    ko_id,
+                    row["notebook_id"],
+                    json.dumps(payload, ensure_ascii=False),
+                    row["evidence"] or "[]",
+                    candidate_id,
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                "UPDATE derived_rule_candidates SET status = 'approved' WHERE id = ?",
+                (candidate_id,),
+            )
+            ko_row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (ko_id,)).fetchone()
+        obj = {
+            "id": ko_row["id"],
+            "payload": json.loads(ko_row["payload"] or "{}"),
+            "evidence": [Evidence(**e) for e in json.loads(ko_row["evidence"] or "[]")],
+            "status": ko_row["status"],
+            "owner": ko_row["owner"],
+            "last_reviewed": ko_row["last_reviewed"] if "last_reviewed" in ko_row.keys() else "",
+        }
+        return self._rule_card(self._as_retrieved(obj, "rule"))
+
+    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(candidate_id)
+            db.execute(
+                "UPDATE derived_rule_candidates SET status = 'rejected' WHERE id = ?",
+                (candidate_id,),
+            )
+            row = db.execute(
+                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return self._derived_from_row(row)
 
     def update_knowledge(
         self, knowledge_id: str, payload: KnowledgeUpdate
@@ -1906,6 +2134,73 @@ class SQLiteRepository:
             comment=payload.comment,
         )
 
+    def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
+        """Answer-quality + curation + coverage metrics for a notebook (§16)."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            answers_total = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM answers WHERE notebook_id = ?", (notebook_id,)
+                ).fetchone()["c"]
+            )
+            useful = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'useful'",
+                    (notebook_id,),
+                ).fetchone()["c"]
+            )
+            not_useful = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'not_useful'",
+                    (notebook_id,),
+                ).fetchone()["c"]
+            )
+            low_rated = [
+                row["question"]
+                for row in db.execute(
+                    "SELECT DISTINCT a.question FROM feedback f "
+                    "JOIN answers a ON a.id = f.answer_id "
+                    "WHERE f.notebook_id = ? AND f.rating = 'not_useful' "
+                    "ORDER BY f.created_at DESC LIMIT 10",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+            candidate_counts = {
+                row["status"]: int(row["c"])
+                for row in db.execute(
+                    "SELECT status, COUNT(*) AS c FROM extraction_candidates "
+                    "WHERE notebook_id = ? GROUP BY status",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            knowledge_counts = {
+                row["object_type"]: int(row["c"])
+                for row in db.execute(
+                    "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
+                    "WHERE notebook_id = ? AND status != 'deprecated' GROUP BY object_type",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            source_status_counts = {
+                row["parse_status"]: int(row["c"])
+                for row in db.execute(
+                    "SELECT parse_status, COUNT(*) AS c FROM sources "
+                    "WHERE notebook_id = ? GROUP BY parse_status",
+                    (notebook_id,),
+                ).fetchall()
+            }
+        rated = useful + not_useful
+        return NotebookAnalytics(
+            answers_total=answers_total,
+            feedback_useful=useful,
+            feedback_not_useful=not_useful,
+            usefulness_rate=round(useful / rated, 3) if rated else 0.0,
+            low_rated_questions=low_rated,
+            candidate_counts=candidate_counts,
+            knowledge_counts=knowledge_counts,
+            source_status_counts=source_status_counts,
+        )
+
     def scenario_query(self, notebook_id: str, payload: ScenarioQueryRequest) -> AskResponse:
         scenario = {key: value for key, value in payload.model_dump().items() if value}
         concern = payload.concern or "design review"
@@ -2422,6 +2717,17 @@ class SQLiteRepository:
             "glossary": self._count_knowledge(db, row["id"], "glossary"),
             "article_claims": self._count(db, "article_claims", "notebook_id", row["id"]),
         }
+        keys = row.keys()
+
+        def _list(field: str) -> List[str]:
+            if field not in keys or not row[field]:
+                return []
+            try:
+                value = json.loads(row[field])
+                return [str(v) for v in value] if isinstance(value, list) else []
+            except (json.JSONDecodeError, TypeError):
+                return []
+
         return NotebookSummary(
             id=row["id"],
             name=row["name"],
@@ -2430,6 +2736,11 @@ class SQLiteRepository:
             status=row["status"],
             counts=counts,
             created_label=_created_label(row["created_at"]),
+            target_users=row["target_users"] if "target_users" in keys else "",
+            expected_questions=_list("expected_questions"),
+            source_types=_list("source_types"),
+            taxonomy=_list("taxonomy"),
+            access_scope=row["access_scope"] if "access_scope" in keys else "",
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
