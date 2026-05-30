@@ -23,6 +23,9 @@ from app.models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
     GlossaryTermCard,
+    KnowledgeGraph,
+    KnowledgeRecord,
+    KnowledgeTypeCount,
     KnowledgeUpdate,
     MergeRequest,
     MethodCard,
@@ -32,6 +35,9 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    ObjectSchemaCreate,
+    ObjectSchemaModel,
+    ObjectSchemaUpdate,
     RiskItemCard,
     RuleCard,
     RuleExplanation,
@@ -318,6 +324,76 @@ def list_glossary(notebook_id: str) -> List[GlossaryTermCard]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
+@router.get(
+    "/notebooks/{notebook_id}/knowledge-types",
+    response_model=List[KnowledgeTypeCount],
+)
+def knowledge_types(notebook_id: str) -> List[KnowledgeTypeCount]:
+    try:
+        return repository().knowledge_types(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/knowledge", response_model=List[KnowledgeRecord])
+def list_knowledge(
+    notebook_id: str, type: str = Query(...)
+) -> List[KnowledgeRecord]:
+    object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
+    try:
+        return repository().list_knowledge(notebook_id, object_type)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+# --- Editable extraction-schema registry ---------------------------------
+@router.get("/object-schemas", response_model=List[ObjectSchemaModel])
+def list_object_schemas() -> List[ObjectSchemaModel]:
+    return repository().list_object_schemas()
+
+
+@router.post("/object-schemas", response_model=ObjectSchemaModel)
+def create_object_schema(payload: ObjectSchemaCreate) -> ObjectSchemaModel:
+    try:
+        return repository().create_object_schema(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.patch("/object-schemas/{object_type}", response_model=ObjectSchemaModel)
+def update_object_schema(
+    object_type: str, payload: ObjectSchemaUpdate
+) -> ObjectSchemaModel:
+    try:
+        return repository().update_object_schema(object_type, payload)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/object-schemas/{object_type}")
+def delete_object_schema(object_type: str):
+    try:
+        repository().delete_object_schema(object_type)
+        return {"status": "deleted", "object_type": object_type}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/notebooks/{notebook_id}/schema-proposals",
+    response_model=List[ObjectSchemaModel],
+)
+def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
+    try:
+        return repository().propose_schemas(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
 @router.patch("/knowledge/{knowledge_id}")
 def update_knowledge(knowledge_id: str, payload: KnowledgeUpdate):
     try:
@@ -351,6 +427,14 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
 def find_conflicts(notebook_id: str) -> List[ConflictPair]:
     try:
         return repository().find_conflicts(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/graph", response_model=KnowledgeGraph)
+def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
+    try:
+        return repository().knowledge_graph(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

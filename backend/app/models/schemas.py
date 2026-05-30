@@ -160,6 +160,8 @@ class AskResponse(BaseModel):
     missing_information: List[str]
     citations: List[Citation]
     llm_mode: str
+    # Generic block for non-core object types (claim/finding/concept/... + glossary).
+    related_knowledge: List["KnowledgeRecord"] = Field(default_factory=list)
 
 
 class ScenarioQueryRequest(BaseModel):
@@ -272,6 +274,87 @@ class KnowledgeRef(BaseModel):
     status: str
 
 
+class KnowledgeFieldValue(BaseModel):
+    key: str
+    value: str
+
+
+class KnowledgeRecord(BaseModel):
+    """Generic, type-agnostic view of one approved knowledge object, so any
+    object type (including academic/textbook types without a bespoke card) can
+    be browsed and curated uniformly."""
+
+    id: str
+    object_type: str
+    headline: str
+    fields: List[KnowledgeFieldValue]
+    status: str
+    owner: str = ""
+    last_reviewed: str = ""
+    evidence: List[Evidence]
+
+
+class KnowledgeTypeCount(BaseModel):
+    object_type: str
+    label: str
+    count: int
+
+
+class ObjectSchemaModel(BaseModel):
+    """An editable extraction-schema definition (a typed knowledge object)."""
+
+    object_type: str
+    plural: str
+    fields: List[str] = Field(default_factory=list)
+    primary: str = ""
+    description: str = ""
+    label: str = ""
+    list_fields: List[str] = Field(default_factory=list)
+    source: str = "builtin"  # builtin | custom | induced
+    status: str = "active"  # active | proposed | disabled
+    rationale: str = ""
+    notebook_id: str = ""
+
+
+class ObjectSchemaCreate(BaseModel):
+    object_type: str
+    plural: str = ""
+    fields: List[str] = Field(default_factory=list)
+    primary: str = ""
+    description: str = ""
+    label: str = ""
+    list_fields: List[str] = Field(default_factory=list)
+
+
+class ObjectSchemaUpdate(BaseModel):
+    plural: Optional[str] = None
+    fields: Optional[List[str]] = None
+    primary: Optional[str] = None
+    description: Optional[str] = None
+    label: Optional[str] = None
+    list_fields: Optional[List[str]] = None
+    status: Optional[str] = None
+
+
+class KnowledgeNode(BaseModel):
+    id: str
+    object_type: str
+    headline: str
+    status: str
+
+
+class KnowledgeEdge(BaseModel):
+    from_id: str
+    to_id: str
+    relation: str
+    label: str
+
+
+class KnowledgeGraph(BaseModel):
+    nodes: List[KnowledgeNode]
+    edges: List[KnowledgeEdge]
+
+
 class DuplicateGroup(BaseModel):
     object_type: str
     similarity: float
@@ -347,6 +430,8 @@ class RuleExplanation(BaseModel):
     related_cases: List[CaseCard] = Field(default_factory=list)
     related_risks: List[RiskItemCard] = Field(default_factory=list)
     related_checklist: List[str] = Field(default_factory=list)
+    # Neighbors derived from the rule's explicit relation fields (edges layer).
+    related_knowledge: List[KnowledgeRef] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):

@@ -206,6 +206,39 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - **质量/分析看板（§16）**：`GET /notebooks/{id}/analytics`（有用率、低分提问=知识缺口、候选状态分布、知识覆盖、来源状态）；前端「看板」弹窗。
 - **测试硬化**：`smoke_backend.py` 三处 `Settings` 清空 `OPENAI_COMPAT_*` + `mineru_mode=off`，`scripts/check.sh` 不再调用真实 LLM/embedding（即便 `.env` 有 key），全程离线 1–2s。
 
+## 21. 文档类型抽取 profile 注册表（方案 §5 对象模型 + §6.2 模板）
+
+- **问题**：原抽取对所有文档硬套固定 6 类（rule/method/risk/case/checklist/glossary），只适合方案/总结；论文/课本硬套会产噪声、漏抽。
+- **profile 注册表**（`backend/app/services/extraction_profiles.py`）：
+  - `OBJECT_SCHEMAS`——共享 typed 知识模型，按 §5 补齐缺失字段，尤其**关系字段**：rule 增 `condition/exception/rule_type/related_cases/related_methods`；method 增 `tradeoff/required_condition/related_rules/related_cases`；case 增 `related_rules/related_methods`；checklist 增 `applies_to/related_rules/related_cases`；risk 增 `mitigation/related_rules`；glossary 增 `aliases`。新增论文/课本类型：`claim`(claim_type/measurement_condition…)、`finding`、`concept`、`principle`、`example`。
+  - `PROFILES`——文档类型 → 启用对象集 + prompt 框定：`design_spec / method / postmortem / review / academic_paper / textbook / general`。
+  - `TEMPLATE_PROFILE`——notebook 模板(§6.2) → 默认 profile。
+  - `detect_doc_type` / `resolve_profile`——离线 bilingual 线索打分做 per-source 文档类型判别（明显胜出才覆盖模板默认，阈值：≥2 命中且领先 ≥2）。
+- **接入**：`run_extraction(..., profile)` 按 profile 动态生成 schema hint(`build_extraction_schema_hint`) + prompt(`extraction_prompt`)；启发式路径按 profile 过滤只产出激活类型；`notebooks` 表迁移加 `template` 列并在创建时落库；`_run_extraction` 解析 profile（模板默认 + 内容判别），并把 `profile=<id>` 记入 extraction_runs。
+- **验证**：`scripts/smoke_backend.py::check_extraction_profiles`——论文 doc 在 rule notebook 中仍判为 academic_paper 且不产 rule 候选；模板默认在判别不确定时生效；schema hint/prompt 反映各 profile 对象集与新字段；general 仍覆盖六类。`scripts/check.sh` 全绿、离线。
+
+## 22. 新类型通用浏览闭环 + 全栈对等规则
+
+- **背景**：§21 让论文/课本类型（claim/finding/concept/principle/example）以及一直没有浏览入口的 case/checklist 能被抽取并 approve 入库，但**前端只有 rule/method/risk/glossary 四个 tab** → 「可审批但不可见」。本轮补齐前后端闭环。
+- **后端**：
+  - `GET /notebooks/{id}/knowledge-types` → 该 notebook 现有对象类型 + 非 deprecated 计数 + 中文 label（`KnowledgeTypeCount`）。
+  - `GET /notebooks/{id}/knowledge?type=<type>` → 任意对象类型的通用记录（`KnowledgeRecord`：headline + 按 `OBJECT_SCHEMAS` 排序的 `fields[]` + status/owner/last_reviewed/evidence），与既有 PATCH `/knowledge/{id}` 治理通用。
+  - `search_notebook` 纳入 knowledge_objects（全类型）→ 新类型可被 notebook 检索命中。
+- **前端**（`frontend/app/page.tsx`）：知识库 tab 改为**动态**——四个定型 tab 始终在，其余类型从 `/knowledge-types` 动态出现（带计数徽标）；非定型类型用通用渲染（headline + 字段表，字段名走中文 label 映射），复用状态/owner 编辑与查重。
+- **同时修复**：`routes.py` 缺失的 `NotebookTemplate` import（此前 API 模块导入即 NameError，但 check.sh 只导 services 未触发）。
+- **新规矩（AGENTS.md「Full-Stack Parity」）**：本系统中**任何面向用户的后端能力必须同变更内附带对应前端界面，不允许只实现一半**；"done" 的判定含后端端点、前端入口、`check.sh` 绿、`npm run build` 通过。
+- **验证**：`smoke_backend.py` 增 knowledge_types/list_knowledge 断言；TestClient 实跑确认 demo notebook 现可浏览 rule/case/checklist/glossary；`check.sh` 全绿、`npm run build` 通过。
+
+## 23. Schema 管理 + 归纳 + 关系图 + ask 织入 + 抽取自我修正
+
+- **可编辑 schema 注册表**：新增 `object_schemas` 表（迁移时从代码默认 seed，`INSERT OR IGNORE` 保留人工编辑）。抽取改为读 **DB 生效 schema**（`effective_schemas()` 叠加在代码默认上），prompt/schema-hint/字段排序全部按生效注册表。端点 `GET/POST/PATCH/DELETE /object-schemas`（内置可停用不可删、自定义可删）。前端「Schema」弹窗：列出/编辑字段·标签·说明、启用/停用、新增自定义类型。
+- **Schema 归纳（建议态，§开放发现）**：`POST /notebooks/{id}/schema-proposals` 用 LLM 从笔记本内容提议新类型（offline 为 no-op），存为 `status='proposed' source='induced'`，绝不自动启用；前端在 Schema 弹窗审核（批准→active / 拒绝→删除）。
+- **关系边消费（§7.4 基础）**：`GET /notebooks/{id}/graph` 把各对象 `related_rules/cases/methods/concepts` 自由文本按 headline 模糊匹配解析成边（nodes+edges）；Explain Rule 增 `related_knowledge`（规则连出的对象）；前端「关系图」弹窗 + Explain 弹窗内关系块。
+- **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回非核心类型（claim/finding/concept/principle/example/glossary/自定义）的 top 命中；前端 AnswerView 渲染。
+- **抽取自我修正 + 证据绑定升级**：LLM 路径加一轮自检（drop 幻觉/含糊、回填更忠实 verbatim span，`REFINE_SCHEMA_HINT`/`refine_prompt`，offline no-op）；`bind_evidence` 命中元素后取最佳**逐句 verbatim** 作为引文。
+- **顺带修复**：`routes.py` 缺失的 `NotebookTemplate` import（API 模块导入即 NameError）。
+- **验证**：`smoke_backend.py` 增 `check_object_schemas / check_self_refinement / check_knowledge_graph` + ask `related_knowledge` 断言；TestClient 实跑全部新端点 200；`check.sh` 全绿、`npm run build` 通过。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
 
 - **Article 深度可视化**：typed 关系下游动作（suggests_checklist/creates_risk）、Implication Map（§7.4）、Inference 分层（§7.3）+ Hypothesis（§5.9）、研究简报字段补齐（§7.1）。

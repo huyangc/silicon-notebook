@@ -70,6 +70,192 @@ def check_heuristic_extraction() -> None:
     ), "headings/tables must not spawn heuristic candidates"
 
 
+def check_extraction_profiles() -> None:
+    """Document-type profiles: detection, template default, and that the
+    heuristic extractor only emits the active profile's object types."""
+    from app.services.extraction_profiles import (
+        detect_doc_type,
+        get_profile,
+        resolve_profile,
+    )
+    from app.services.prompts import build_extraction_schema_hint, extraction_prompt
+
+    def el(index: int, text: str, element_type: str = "paragraph") -> SourceElement:
+        return SourceElement(
+            id=f"e{index}",
+            source_id="s",
+            element_type=element_type,
+            location_label=f"L{index}",
+            text=text,
+            metadata={},
+        )
+
+    # 1) Per-source detection: a paper-shaped doc resolves to academic_paper even
+    #    inside a "rule" notebook, and the directive sentence's "must not" does
+    #    NOT produce a rule candidate (rule is not in the academic_paper profile).
+    paper = [
+        el(1, "Abstract: this paper studies bondwire coupling in analog AFEs."),
+        el(2, "We propose a shielding scheme and report experimental results."),
+        el(3, "The ESD path must not share the sensitive input return."),
+        el(4, "References: [1] Smith et al., 2021."),
+    ]
+    assert detect_doc_type("Bondwire coupling study", paper) == "academic_paper"
+    profile = resolve_profile("rule", "Bondwire coupling study", paper)
+    assert profile.id == "academic_paper", profile.id
+    assert "rule" not in profile.object_types
+    records = run_extraction(_NoLLM(), paper, "t", profile)
+    assert all(r.candidate_type != "rule" for r in records), (
+        "academic_paper profile must not emit rule candidates"
+    )
+
+    # 2) Template default applies when detection is inconclusive.
+    neutral = [el(1, "Some neutral notes about analog layout spacing margins.")]
+    assert detect_doc_type("Notes", neutral) is None
+    assert resolve_profile("review", "Notes", neutral).id == "review"
+    assert resolve_profile(None, "Notes", neutral).id == "general"
+
+    # 3) Schema hint / prompt reflect the profile's object set + new §5 fields.
+    spec_hint = build_extraction_schema_hint(get_profile("design_spec"))
+    assert '"rule_type"' in spec_hint and '"condition"' in spec_hint
+    assert '"related_cases"' in spec_hint
+    paper_prompt = extraction_prompt("t", "[L1] x", get_profile("academic_paper"))
+    assert "- claims:" in paper_prompt and "- rules:" not in paper_prompt
+
+    # 4) General profile (default) still covers all six core types.
+    general_hint = build_extraction_schema_hint(get_profile(None))
+    for plural in ("rules", "methods", "risks", "cases", "checklist", "glossary"):
+        assert f'"{plural}"' in general_hint, plural
+
+
+def check_object_schemas() -> None:
+    """Editable schema registry: seeded builtins, custom create/edit/delete,
+    builtin protected from deletion, disabled types drop out of extraction,
+    and induction is an offline no-op."""
+    import tempfile
+    from app.models.schemas import (
+        NotebookCreate,
+        ObjectSchemaCreate,
+        ObjectSchemaUpdate,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="sn-schema-") as tmp:
+        repo = SQLiteRepository(
+            settings=Settings(
+                database_url=f"sqlite:///{tmp}/s.db",
+                storage_dir=f"{tmp}/storage",
+                openai_compat_base_url="",
+                openai_compat_api_key="",
+                openai_compat_model="",
+                openai_compat_embedding_model="",
+                mineru_mode="off",
+            )
+        )
+        # Builtins seeded as ObjectSchema rows.
+        seeded = {s.object_type for s in repo.list_object_schemas()}
+        assert {"rule", "claim", "concept"} <= seeded, seeded
+        # effective_schemas is an ObjectSchema registry used by extraction.
+        eff = repo.effective_schemas()
+        assert "rule" in eff and "rule_type" in eff["rule"].fields
+
+        # Create a custom type, edit fields, then disable -> leaves the registry.
+        repo.create_object_schema(
+            ObjectSchemaCreate(object_type="Process Window", fields=["title", "limit"], label="工艺窗口")
+        )
+        custom = next(s for s in repo.list_object_schemas() if s.object_type == "process_window")
+        assert custom.source == "custom" and custom.label == "工艺窗口"
+        repo.update_object_schema("process_window", ObjectSchemaUpdate(fields=["title", "limit", "margin"]))
+        assert "margin" in repo.effective_schemas()["process_window"].fields
+        repo.update_object_schema("process_window", ObjectSchemaUpdate(status="disabled"))
+        assert "process_window" not in repo.effective_schemas()
+        repo.delete_object_schema("process_window")
+        assert all(s.object_type != "process_window" for s in repo.list_object_schemas())
+
+        # Builtins can be disabled but never deleted.
+        try:
+            repo.delete_object_schema("rule")
+            raise AssertionError("builtin schema should not be deletable")
+        except ValueError:
+            pass
+
+        # Induction is an offline no-op (no LLM) and must not raise.
+        nb = repo.create_notebook(NotebookCreate(name="S", purpose="p", primary_domain="d"))
+        assert repo.propose_schemas(nb.id) == []
+
+
+def check_self_refinement() -> None:
+    """LLM self-refinement: drops items marked keep=false and rebinds corrected
+    verbatim spans; deterministic offline path is untouched (no-op without LLM)."""
+    import json as _json
+    from app.services.extraction import CandidateRecord, _refine_with_llm
+
+    class FakeLLM:
+        configured = True
+
+        def chat_json(self, messages, schema_hint):
+            return _json.dumps({
+                "items": [
+                    {"index": 0, "keep": True, "quoted_span": "安静的回流路径"},
+                    {"index": 1, "keep": False, "reason": "not supported by source"},
+                ]
+            })
+
+    elements = [
+        SourceElement(
+            id="el-1", source_id="s", element_type="paragraph", location_label="p1",
+            text="低噪声模拟前端封装应保证安静的回流路径，避免噪声耦合。", metadata={},
+        )
+    ]
+    records = [
+        CandidateRecord("rule", {"title": "保证安静回流路径", "statement": "x"}, extraction_mode="llm"),
+        CandidateRecord("rule", {"title": "无中生有的规则", "statement": "y"}, extraction_mode="llm"),
+    ]
+    refined = _refine_with_llm(FakeLLM(), records, elements, "t")
+    assert len(refined) == 1, "keep=false item should be dropped"
+    assert refined[0].payload["title"] == "保证安静回流路径"
+    assert refined[0].evidence and refined[0].evidence[0].element_id == "el-1", (
+        "corrected verbatim span should rebind to the source element"
+    )
+
+
+def check_knowledge_graph() -> None:
+    """Relation edges: free-text related_* fields resolve to edges by fuzzy
+    headline match; unrelated objects stay disconnected; empty notebook is safe."""
+    import tempfile
+    from app.models.schemas import NotebookCreate
+
+    with tempfile.TemporaryDirectory(prefix="sn-graph-") as tmp:
+        repo = SQLiteRepository(
+            settings=Settings(
+                database_url=f"sqlite:///{tmp}/g.db",
+                storage_dir=f"{tmp}/storage",
+                openai_compat_base_url="",
+                openai_compat_api_key="",
+                openai_compat_model="",
+                openai_compat_embedding_model="",
+                mineru_mode="off",
+            )
+        )
+        objs = [
+            {"id": "a", "object_type": "rule", "status": "approved",
+             "payload": {"title": "Keep bond loop short", "related_methods": ["loop length check"]}},
+            {"id": "b", "object_type": "method", "status": "approved",
+             "payload": {"name": "Loop length check"}},
+            {"id": "c", "object_type": "case", "status": "approved",
+             "payload": {"symptom": "totally unrelated symptom about clocks"}},
+        ]
+        edges = repo._relation_edges(objs)
+        assert any(
+            e.from_id == "a" and e.to_id == "b" and e.relation == "related_methods"
+            for e in edges
+        ), "related_methods phrase should bind to the matching method headline"
+        assert all(e.to_id != "c" for e in edges), "unrelated object must not be linked"
+
+        # End-to-end graph on an empty notebook must not raise.
+        nb = repo.create_notebook(NotebookCreate(name="G", purpose="p", primary_domain="d"))
+        graph = repo.knowledge_graph(nb.id)
+        assert graph.nodes == [] and graph.edges == []
+
+
 def _ev(element_id: str, quoted_span: str) -> Evidence:
     return Evidence(
         source_id="s",
@@ -407,6 +593,10 @@ def main() -> None:
     check_mineru_mapping()
     check_score_knowledge()
     check_heuristic_extraction()
+    check_extraction_profiles()
+    check_object_schemas()
+    check_self_refinement()
+    check_knowledge_graph()
     check_json_fences()
     check_llm_interaction_logging()
     check_event_logging()
@@ -527,6 +717,9 @@ def main() -> None:
         answer = repository.ask(notebook.id, AskRequest(question=statement or "quiet ground return path"))
         assert answer.answer_id
         assert answer.llm_mode in ("deterministic", "configured")
+        # Non-core types (glossary/claim/...) ride in the generic block.
+        assert isinstance(answer.related_knowledge, list)
+        assert all(r.object_type not in {"rule", "case", "checklist", "method", "risk"} for r in answer.related_knowledge)
 
         # --- Tier 2: knowledge status lifecycle + multi-type browsing ---
         rules_now = repository.list_rules(notebook.id)
@@ -559,6 +752,19 @@ def main() -> None:
         assert isinstance(repository.list_methods(notebook.id), list)
         assert isinstance(repository.list_risks(notebook.id), list)
         assert isinstance(repository.list_glossary(notebook.id), list)
+
+        # Generic knowledge browse (any object_type, incl. academic/textbook).
+        ktypes = repository.knowledge_types(notebook.id)
+        type_counts = {t.object_type: t.count for t in ktypes}
+        assert type_counts.get("rule", 0) >= 1, "rule should be present with a count"
+        assert all(t.label for t in ktypes), "each type carries a display label"
+        generic_rules = repository.list_knowledge(notebook.id, "rule")
+        assert generic_rules and generic_rules[0].headline, "generic record has a headline"
+        assert any(f.key == "statement" for f in generic_rules[0].fields), (
+            "generic record exposes ordered payload fields"
+        )
+        # An absent type returns an empty list, not an error.
+        assert repository.list_knowledge(notebook.id, "claim") == []
 
         # --- Tier 2b: duplicates / conflicts / merge ---
         for candidate in repository.list_candidates(notebook.id):

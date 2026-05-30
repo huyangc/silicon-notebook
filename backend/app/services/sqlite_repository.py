@@ -34,8 +34,17 @@ from app.models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
     GlossaryTermCard,
+    KnowledgeEdge,
+    KnowledgeFieldValue,
+    KnowledgeGraph,
+    KnowledgeNode,
+    KnowledgeRecord,
     KnowledgeRef,
+    KnowledgeTypeCount,
     KnowledgeUpdate,
+    ObjectSchemaCreate,
+    ObjectSchemaModel,
+    ObjectSchemaUpdate,
     MergeRequest,
     MethodCard,
     NotebookAnalytics,
@@ -56,14 +65,23 @@ from app.models.schemas import (
     UserProfile,
 )
 from app.services.extraction import bind_evidence, run_extraction
+from app.services.extraction_profiles import (
+    LIST_FIELDS,
+    OBJECT_SCHEMAS,
+    OBJECT_TYPE_LABELS,
+    ObjectSchema,
+    resolve_profile,
+)
 from app.services.mineru_client import MinerUClient
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES, get_template
 from app.services.parsers import parse_source_file
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
+    SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
+    schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
@@ -74,12 +92,17 @@ from app.services.retrieval import (
     keyword_score,
     score_elements,
     score_knowledge,
+    token_overlap,
 )
 
 
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
+
+# Object types woven into the structured ask answer via bespoke fields; every
+# other (active) type is surfaced generically in AskResponse.related_knowledge.
+_CORE_ASK_TYPES = frozenset({"rule", "case", "checklist", "method", "risk"})
 KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
 
 
@@ -274,6 +297,22 @@ class SQLiteRepository:
                   evidence TEXT NOT NULL DEFAULT '[]',
                   created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS object_schemas (
+                  object_type TEXT PRIMARY KEY,
+                  plural TEXT NOT NULL DEFAULT '',
+                  fields TEXT NOT NULL DEFAULT '[]',
+                  primary_field TEXT NOT NULL DEFAULT '',
+                  description TEXT NOT NULL DEFAULT '',
+                  label TEXT NOT NULL DEFAULT '',
+                  list_fields TEXT NOT NULL DEFAULT '[]',
+                  source TEXT NOT NULL DEFAULT 'builtin',
+                  status TEXT NOT NULL DEFAULT 'active',
+                  rationale TEXT NOT NULL DEFAULT '',
+                  notebook_id TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 """
             )
             # Lightweight column migrations for pre-existing databases.
@@ -283,9 +322,33 @@ class SQLiteRepository:
                     "ALTER TABLE knowledge_objects ADD COLUMN last_reviewed TEXT NOT NULL DEFAULT ''"
                 )
             nb_cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)").fetchall()}
-            for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope"):
+            for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope", "template"):
                 if col not in nb_cols:
                     db.execute(f"ALTER TABLE notebooks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+            # Seed the editable object-schema registry from the code defaults
+            # (INSERT OR IGNORE keeps any curator edits / induced types intact).
+            now = _now()
+            for object_type, schema in OBJECT_SCHEMAS.items():
+                list_fields = [f for f in schema.fields if f in LIST_FIELDS]
+                db.execute(
+                    """
+                    INSERT OR IGNORE INTO object_schemas
+                    (object_type, plural, fields, primary_field, description, label,
+                     list_fields, source, status, rationale, notebook_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'builtin', 'active', '', '', ?, ?)
+                    """,
+                    (
+                        object_type,
+                        schema.plural,
+                        json.dumps(schema.fields, ensure_ascii=False),
+                        schema.primary,
+                        schema.description,
+                        OBJECT_TYPE_LABELS.get(object_type, object_type),
+                        json.dumps(list_fields, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
 
     def _seed(self) -> None:
         now = _now()
@@ -470,8 +533,8 @@ class SQLiteRepository:
                 """
                 INSERT INTO notebooks
                 (id, name, purpose, primary_domain, status, created_by, created_at, updated_at,
-                 target_users, expected_questions, source_types, taxonomy, access_scope)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 target_users, expected_questions, source_types, taxonomy, access_scope, template)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     notebook_id,
@@ -487,6 +550,7 @@ class SQLiteRepository:
                     json.dumps(source_types, ensure_ascii=False),
                     json.dumps(taxonomy, ensure_ascii=False),
                     access_scope,
+                    payload.template or "",
                 ),
             )
             row = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
@@ -872,6 +936,19 @@ class SQLiteRepository:
         elements = self.source_elements(source_id)
         now = _now()
         run_id = f"run-{uuid4().hex[:10]}"
+        # Pick the document-type extraction profile: notebook template default,
+        # overridden by per-source content detection when confident.
+        with self._connect() as db:
+            nb_row = db.execute(
+                "SELECT * FROM notebooks WHERE id = ?", (source.notebook_id,)
+            ).fetchone()
+        template_id = (
+            nb_row["template"]
+            if nb_row is not None and "template" in nb_row.keys()
+            else ""
+        )
+        profile = resolve_profile(template_id, source.title, elements)
+        registry = self.effective_schemas()
         with self._connect() as db:
             self._clear_source_extraction_state(
                 db,
@@ -888,7 +965,9 @@ class SQLiteRepository:
                 (run_id, source.notebook_id, source_id, "candidate", "running", "", now, now),
             )
         try:
-            records = run_extraction(self.llm_client, elements, source.title)
+            records = run_extraction(
+                self.llm_client, elements, source.title, profile, registry
+            )
             extraction_mode = (
                 "llm"
                 if any(record.extraction_mode == "llm" for record in records)
@@ -923,7 +1002,12 @@ class SQLiteRepository:
                     )
                 db.execute(
                     "UPDATE extraction_runs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
-                    ("completed", f"extraction_mode={extraction_mode}", _now(), run_id),
+                    (
+                        "completed",
+                        f"extraction_mode={extraction_mode} profile={profile.id}",
+                        _now(),
+                        run_id,
+                    ),
                 )
         except Exception as exc:
             with self._connect() as db:
@@ -1193,6 +1277,378 @@ class SQLiteRepository:
             objects = self._knowledge_objects(db, notebook_id, "glossary", statuses=None)
         return [self._glossary_card(self._as_retrieved(obj, "glossary")) for obj in objects]
 
+    def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
+        """All object types present in this notebook with non-deprecated counts,
+        so the UI can render a tab per type — including academic/textbook types
+        that have no bespoke card."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
+                "WHERE notebook_id = ? AND status != 'deprecated' "
+                "GROUP BY object_type",
+                (notebook_id,),
+            ).fetchall()
+            label_rows = db.execute(
+                "SELECT object_type, label FROM object_schemas"
+            ).fetchall()
+        labels = {r["object_type"]: (r["label"] or r["object_type"]) for r in label_rows}
+        counts = {row["object_type"]: int(row["c"]) for row in rows}
+        ordered = [t for t in OBJECT_SCHEMAS if t in counts]
+        ordered += [t for t in counts if t not in OBJECT_SCHEMAS]
+        return [
+            KnowledgeTypeCount(
+                object_type=t,
+                label=labels.get(t, OBJECT_TYPE_LABELS.get(t, t)),
+                count=counts[t],
+            )
+            for t in ordered
+        ]
+
+    def _knowledge_record(
+        self, object_type: str, obj: dict, schema: Optional[ObjectSchema]
+    ) -> KnowledgeRecord:
+        payload = obj.get("payload") or {}
+        keys = (
+            schema.fields
+            if schema
+            else [k for k in payload if not str(k).startswith("_")]
+        )
+        fields: List[KnowledgeFieldValue] = []
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, (list, tuple)):
+                text = ", ".join(str(v) for v in value if str(v).strip())
+            elif value is None:
+                text = ""
+            else:
+                text = str(value)
+            if text.strip():
+                fields.append(KnowledgeFieldValue(key=key, value=text.strip()))
+        return KnowledgeRecord(
+            id=obj["id"],
+            object_type=object_type,
+            headline=self._knowledge_headline(object_type, payload),
+            fields=fields,
+            status=obj.get("status", "approved"),
+            owner=obj.get("owner", ""),
+            last_reviewed=obj.get("last_reviewed", ""),
+            evidence=obj.get("evidence", []),
+        )
+
+    def list_knowledge(
+        self, notebook_id: str, object_type: str
+    ) -> List[KnowledgeRecord]:
+        """Generic, type-agnostic listing for any object type (used to browse
+        the academic/textbook types that have no dedicated card endpoint)."""
+        self.get_notebook(notebook_id)
+        schema = self.effective_schemas().get(object_type)
+        with self._connect() as db:
+            objects = self._knowledge_objects(db, notebook_id, object_type, statuses=None)
+        return [self._knowledge_record(object_type, obj, schema) for obj in objects]
+
+    # --- Editable extraction-schema registry ----------------------------
+    @staticmethod
+    def _object_schema_from_row(row) -> ObjectSchemaModel:
+        return ObjectSchemaModel(
+            object_type=row["object_type"],
+            plural=row["plural"] or f"{row['object_type']}s",
+            fields=json.loads(row["fields"] or "[]"),
+            primary=row["primary_field"] or "",
+            description=row["description"] or "",
+            label=row["label"] or row["object_type"],
+            list_fields=json.loads(row["list_fields"] or "[]"),
+            source=row["source"] or "builtin",
+            status=row["status"] or "active",
+            rationale=row["rationale"] or "",
+            notebook_id=row["notebook_id"] if "notebook_id" in row.keys() else "",
+        )
+
+    def effective_schemas(self) -> Dict[str, ObjectSchema]:
+        """Active object schemas as an ObjectSchema registry for extraction —
+        DB rows overlaid on the code defaults."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM object_schemas WHERE status = 'active'"
+            ).fetchall()
+        registry: Dict[str, ObjectSchema] = {}
+        for row in rows:
+            registry[row["object_type"]] = ObjectSchema(
+                type=row["object_type"],
+                plural=row["plural"] or f"{row['object_type']}s",
+                fields=json.loads(row["fields"] or "[]"),
+                primary=row["primary_field"] or "",
+                description=row["description"] or "",
+                list_fields=json.loads(row["list_fields"] or "[]"),
+            )
+        for object_type, schema in OBJECT_SCHEMAS.items():
+            registry.setdefault(object_type, schema)
+        return registry
+
+    def list_object_schemas(self) -> List[ObjectSchemaModel]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM object_schemas").fetchall()
+        models = [self._object_schema_from_row(row) for row in rows]
+        order = {"active": 0, "disabled": 1, "proposed": 2}
+        models.sort(key=lambda m: (order.get(m.status, 3), m.object_type))
+        return models
+
+    def create_object_schema(self, payload: ObjectSchemaCreate) -> ObjectSchemaModel:
+        object_type = payload.object_type.strip().lower().replace(" ", "_")
+        if not object_type:
+            raise ValueError("object_type is required")
+        now = _now()
+        with self._connect() as db:
+            exists = db.execute(
+                "SELECT 1 FROM object_schemas WHERE object_type = ?", (object_type,)
+            ).fetchone()
+            if exists is not None:
+                raise ValueError(f"object type '{object_type}' already exists")
+            db.execute(
+                """
+                INSERT INTO object_schemas
+                (object_type, plural, fields, primary_field, description, label,
+                 list_fields, source, status, rationale, notebook_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'custom', 'active', '', '', ?, ?)
+                """,
+                (
+                    object_type,
+                    payload.plural.strip() or f"{object_type}s",
+                    json.dumps(payload.fields, ensure_ascii=False),
+                    payload.primary.strip() or (payload.fields[0] if payload.fields else ""),
+                    payload.description.strip(),
+                    payload.label.strip() or object_type,
+                    json.dumps(payload.list_fields, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
+            ).fetchone()
+        return self._object_schema_from_row(row)
+
+    def update_object_schema(
+        self, object_type: str, payload: ObjectSchemaUpdate
+    ) -> ObjectSchemaModel:
+        updates: List[str] = []
+        values: List[object] = []
+        if payload.plural is not None:
+            updates.append("plural = ?")
+            values.append(payload.plural.strip())
+        if payload.fields is not None:
+            updates.append("fields = ?")
+            values.append(json.dumps(payload.fields, ensure_ascii=False))
+        if payload.primary is not None:
+            updates.append("primary_field = ?")
+            values.append(payload.primary.strip())
+        if payload.description is not None:
+            updates.append("description = ?")
+            values.append(payload.description.strip())
+        if payload.label is not None:
+            updates.append("label = ?")
+            values.append(payload.label.strip())
+        if payload.list_fields is not None:
+            updates.append("list_fields = ?")
+            values.append(json.dumps(payload.list_fields, ensure_ascii=False))
+        if payload.status is not None:
+            status = payload.status.strip()
+            if status not in {"active", "disabled", "proposed"}:
+                raise ValueError(f"invalid schema status: {status}")
+            updates.append("status = ?")
+            values.append(status)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(object_type)
+            if updates:
+                updates.append("updated_at = ?")
+                values.append(_now())
+                values.append(object_type)
+                db.execute(
+                    f"UPDATE object_schemas SET {', '.join(updates)} WHERE object_type = ?",
+                    values,
+                )
+            row = db.execute(
+                "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
+            ).fetchone()
+        return self._object_schema_from_row(row)
+
+    def delete_object_schema(self, object_type: str) -> None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT source FROM object_schemas WHERE object_type = ?",
+                (object_type,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(object_type)
+            if row["source"] == "builtin":
+                raise ValueError("builtin schemas can be disabled but not deleted")
+            db.execute(
+                "DELETE FROM object_schemas WHERE object_type = ?", (object_type,)
+            )
+
+    def propose_schemas(self, notebook_id: str) -> List[ObjectSchemaModel]:
+        """Schema induction (suggestion mode): inspect the notebook's content and
+        propose NEW object types the current schema does not cover. Proposals are
+        stored with status='proposed' for curator approval; never auto-activated.
+        Requires the LLM; offline this is a no-op that returns existing proposals."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            existing = {
+                r["object_type"]
+                for r in db.execute(
+                    "SELECT object_type FROM object_schemas"
+                ).fetchall()
+            }
+            elements = self._gather_elements(db, notebook_id)
+        if self.llm_client.configured and elements:
+            sample = "\n".join(
+                f"[{e['location_label']}] {e['text']}" for e in elements
+            )[:8000]
+            data: dict = {}
+            try:
+                raw = self.llm_client.chat_json(
+                    [
+                        {
+                            "role": "user",
+                            "content": schema_induction_prompt(
+                                sorted(existing), sample
+                            ),
+                        }
+                    ],
+                    SCHEMA_INDUCTION_HINT,
+                )
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    data = parsed
+            except Exception:
+                data = {}
+            now = _now()
+            with self._connect() as db:
+                for item in data.get("new_types") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    object_type = (
+                        str(item.get("object_type", "")).strip().lower().replace(" ", "_")
+                    )
+                    fields = [
+                        str(f).strip()
+                        for f in (item.get("fields") or [])
+                        if str(f).strip()
+                    ]
+                    if not object_type or object_type in existing or not fields:
+                        continue
+                    primary = str(item.get("primary", "")).strip() or fields[0]
+                    db.execute(
+                        """
+                        INSERT INTO object_schemas
+                        (object_type, plural, fields, primary_field, description, label,
+                         list_fields, source, status, rationale, notebook_id, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, '[]', 'induced', 'proposed', ?, ?, ?, ?)
+                        """,
+                        (
+                            object_type,
+                            str(item.get("plural", "")).strip() or f"{object_type}s",
+                            json.dumps(fields, ensure_ascii=False),
+                            primary,
+                            str(item.get("description", "")).strip(),
+                            str(item.get("label", "")).strip() or object_type,
+                            str(item.get("rationale", "")).strip(),
+                            notebook_id,
+                            now,
+                            now,
+                        ),
+                    )
+                    existing.add(object_type)
+        return [m for m in self.list_object_schemas() if m.status == "proposed"]
+
+    # --- Relation edges (knowledge graph over relation payload fields) ----
+    _RELATION_FIELDS = {
+        "related_rules": "rule",
+        "related_cases": "case",
+        "related_methods": "method",
+        "related_concepts": "concept",
+    }
+    _RELATION_BIND_THRESHOLD = 0.34
+
+    def _relation_edges(self, objs: List[dict]) -> List[KnowledgeEdge]:
+        """Resolve free-text relation fields to concrete edges by fuzzy-matching
+        each referenced phrase against other objects' headlines."""
+        headlines = [
+            (o["id"], self._knowledge_headline(o["object_type"], o["payload"]))
+            for o in objs
+        ]
+        edges: List[KnowledgeEdge] = []
+        seen: set = set()
+        for obj in objs:
+            payload = obj["payload"] or {}
+            for field_name, target_type in self._RELATION_FIELDS.items():
+                value = payload.get(field_name)
+                if not value:
+                    continue
+                phrases = value if isinstance(value, (list, tuple)) else [value]
+                for phrase in phrases:
+                    phrase = str(phrase).strip()
+                    if len(phrase) < 3:
+                        continue
+                    best_id = ""
+                    best_ratio = self._RELATION_BIND_THRESHOLD
+                    for target_id, headline in headlines:
+                        if target_id == obj["id"] or not headline:
+                            continue
+                        ratio = token_overlap(phrase, headline)
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_id = target_id
+                    if not best_id:
+                        continue
+                    key = (obj["id"], best_id, field_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    edges.append(
+                        KnowledgeEdge(
+                            from_id=obj["id"],
+                            to_id=best_id,
+                            relation=field_name,
+                            label=phrase[:80],
+                        )
+                    )
+        return edges
+
+    def knowledge_graph(self, notebook_id: str) -> KnowledgeGraph:
+        """Build a curated knowledge graph: nodes = non-deprecated knowledge
+        objects, edges = resolved relation fields (§7.4 Implication Map basis)."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, object_type, status, payload FROM knowledge_objects "
+                "WHERE notebook_id = ? AND status != 'deprecated'",
+                (notebook_id,),
+            ).fetchall()
+        objs = [
+            {
+                "id": row["id"],
+                "object_type": row["object_type"],
+                "status": row["status"],
+                "payload": json.loads(row["payload"] or "{}"),
+            }
+            for row in rows
+        ]
+        nodes = [
+            KnowledgeNode(
+                id=o["id"],
+                object_type=o["object_type"],
+                headline=self._knowledge_headline(o["object_type"], o["payload"]),
+                status=o["status"],
+            )
+            for o in objs
+        ]
+        return KnowledgeGraph(nodes=nodes, edges=self._relation_edges(objs))
+
     def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation:
         """Trace a rule back to its origin evidence and surface related
         cases / risks / checklist items (the "why is this rule here?" view, §6.10)."""
@@ -1235,6 +1691,31 @@ class SQLiteRepository:
             for evidence in rule_obj["evidence"]
             if not evidence.element_id or evidence.element_id in valid_ids
         ]
+        # Edge-derived neighbors: consume the rule's explicit relation fields.
+        graph = self.knowledge_graph(notebook_id)
+        node_by_id = {node.id: node for node in graph.nodes}
+        related_knowledge: List[KnowledgeRef] = []
+        seen_ids: set = set()
+        for edge in graph.edges:
+            other_id = (
+                edge.to_id if edge.from_id == rule_id
+                else edge.from_id if edge.to_id == rule_id
+                else ""
+            )
+            if not other_id or other_id in seen_ids:
+                continue
+            node = node_by_id.get(other_id)
+            if node is None:
+                continue
+            seen_ids.add(other_id)
+            related_knowledge.append(
+                KnowledgeRef(
+                    id=node.id,
+                    object_type=node.object_type,
+                    headline=node.headline,
+                    status=node.status,
+                )
+            )
         return RuleExplanation(
             rule=rule_card,
             origin=origin,
@@ -1243,6 +1724,7 @@ class SQLiteRepository:
             related_cases=related_cases,
             related_risks=related_risks,
             related_checklist=related_checklist,
+            related_knowledge=related_knowledge,
         )
 
     def _derived_from_row(self, row: sqlite3.Row) -> DerivedRuleCandidate:
@@ -1403,7 +1885,12 @@ class SQLiteRepository:
             "glossary": ("term", "definition"),
             "case": ("symptom", "context"),
             "checklist": ("question",),
-        }.get(object_type, ("title",))
+            "claim": ("statement",),
+            "finding": ("statement", "metric"),
+            "concept": ("term", "definition"),
+            "principle": ("statement", "rationale"),
+            "example": ("title", "problem"),
+        }.get(object_type, ("title", "statement", "name", "term", "question"))
         for key in keys:
             value = str(payload.get(key, "")).strip()
             if value:
@@ -1576,6 +2063,11 @@ class SQLiteRepository:
                 "SELECT * FROM articles WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchall()
+            knowledge_rows = db.execute(
+                "SELECT id, object_type, payload FROM knowledge_objects "
+                "WHERE notebook_id = ? AND status != 'deprecated'",
+                (notebook_id,),
+            ).fetchall()
 
         candidates = [
             ("Notebook", notebook_id, notebook["name"], notebook["purpose"], "", ""),
@@ -1602,6 +2094,13 @@ class SQLiteRepository:
         for article in article_rows:
             candidates.append(
                 ("Article", notebook_id, article["title"], article["summary"], "", "")
+            )
+        for ko in knowledge_rows:
+            payload = json.loads(ko["payload"] or "{}")
+            label = OBJECT_TYPE_LABELS.get(ko["object_type"], ko["object_type"])
+            headline = self._knowledge_headline(ko["object_type"], payload)
+            candidates.append(
+                (label, notebook_id, headline, self._payload_join(payload), "", "")
             )
 
         for scope, nb_id, label, text, source_id, element_id in candidates:
@@ -1774,10 +2273,18 @@ class SQLiteRepository:
             checklist = self._knowledge_objects(db, notebook_id, "checklist")
             methods = self._knowledge_objects(db, notebook_id, "method")
             risks = self._knowledge_objects(db, notebook_id, "risk")
+            # Non-core object types (claim/finding/concept/principle/example +
+            # glossary + any custom/induced) are retrieved generically.
+            registry = self.effective_schemas()
+            extra_types = [t for t in registry if t not in _CORE_ASK_TYPES]
+            extra_objs = {
+                t: self._knowledge_objects(db, notebook_id, t) for t in extra_types
+            }
             elements = self._gather_elements(db, notebook_id)
             query_vector = self._embed_query(query)
+            all_extra = [o for objs in extra_objs.values() for o in objs]
             knowledge_vectors = self._knowledge_vectors(
-                db, notebook_id, rules + cases + checklist + methods + risks
+                db, notebook_id, rules + cases + checklist + methods + risks + all_extra
             )
 
         element_vectors = self._element_vectors(elements)
@@ -1788,6 +2295,30 @@ class SQLiteRepository:
         scored_methods = score_knowledge(query, methods, "method", query_vector, element_vectors, knowledge_vectors, scenario)[:4]
         scored_risks = score_knowledge(query, risks, "risk", query_vector, element_vectors, knowledge_vectors, scenario)[:4]
         scored_elements = score_elements(query, elements, query_vector)
+
+        # Generic related-knowledge block: top matches per non-core type.
+        related_knowledge: List[KnowledgeRecord] = []
+        for object_type, objs in extra_objs.items():
+            if not objs:
+                continue
+            schema = registry.get(object_type)
+            top = score_knowledge(
+                query, objs, object_type, query_vector, element_vectors,
+                knowledge_vectors, scenario,
+            )[:2]
+            for item in top:
+                obj = {
+                    "id": item.object_id,
+                    "payload": item.payload,
+                    "status": item.status,
+                    "owner": getattr(item, "owner", ""),
+                    "last_reviewed": getattr(item, "last_reviewed", ""),
+                    "evidence": item.evidence,
+                }
+                related_knowledge.append(
+                    self._knowledge_record(object_type, obj, schema)
+                )
+        related_knowledge = related_knowledge[:8]
 
         valid_element_ids = {element["element_id"] for element in elements}
         related_rules = [self._rule_card(item) for item in scored_rules]
@@ -1818,7 +2349,8 @@ class SQLiteRepository:
         citations.extend(self._citations_from(scored_risks, valid_element_ids, "Risk evidence"))
 
         has_knowledge = bool(
-            scored_rules or scored_cases or scored_checklist or scored_methods or scored_risks
+            scored_rules or scored_cases or scored_checklist or scored_methods
+            or scored_risks or related_knowledge
         )
 
         llm_mode = "deterministic"
@@ -1885,6 +2417,7 @@ class SQLiteRepository:
             missing_information=missing_information,
             citations=citations,
             llm_mode=llm_mode,
+            related_knowledge=related_knowledge,
         )
         response.answer_id = self._save_answer(notebook_id, question, response)
         return response
