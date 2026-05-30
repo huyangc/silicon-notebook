@@ -19,7 +19,6 @@ from app.models.schemas import (
     NotebookUpdate,
     SourceElement,
 )
-from app.services.demo_repository import DEMO_NOTEBOOK_ID
 from app.services.extraction import run_extraction
 from app.services.parsers import mineru_content_list_to_elements
 from app.services.repository import UploadedSourceFile
@@ -433,9 +432,10 @@ def main() -> None:
                 openai_compat_embedding_model="",
             )
         )
-        demo = repository.get_notebook(DEMO_NOTEBOOK_ID)
-        assert demo.counts["rules"] > 0, "seed demo should approve extracted rules"
-        assert repository.list_rules(DEMO_NOTEBOOK_ID), "seed demo should populate knowledge_objects"
+        # A fresh database must be clean for a real team: only the local user is
+        # seeded, never a synthetic demo notebook.
+        assert repository.list_notebooks() == [], "fresh DB should not seed any demo notebook"
+        assert repository.current_user().display_name, "fresh DB should still seed the local user"
 
         notebook = repository.create_notebook(
             NotebookCreate(

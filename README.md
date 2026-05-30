@@ -13,7 +13,7 @@ This repository now targets a local real-team beta loop:
 - Next.js / React / TypeScript frontend under `frontend/`
 - OpenAI-compatible LLM configuration for summaries, extraction, answers, and article research; embeddings can be configured independently with the same compatible API endpoint
 - Deterministic summary and answer fallbacks when no LLM key is configured
-- Synthetic mixed Chinese/English semiconductor demo data
+- Clean start for real teams: a fresh database seeds only the local user — no demo notebook or synthetic sources. New-notebook example prompts adapt to the chosen template / notebook domain instead of hardcoded samples
 - Real multipart source upload (async parsing via FastAPI `BackgroundTasks`) for PDF, Markdown, DOCX, and PPTX
 - PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured on a GPU host; pypdf text fallback locally / when MinerU is off
 - Parsed `SourceElement` records with `element_type`, `location_label`, `text`, and `metadata`

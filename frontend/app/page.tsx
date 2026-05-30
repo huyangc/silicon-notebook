@@ -191,15 +191,15 @@ const EMPTY_SCENARIO: ScenarioForm = {
 };
 
 const SCENARIO_FIELDS: Array<[keyof ScenarioForm, string, string]> = [
-  ["domain", "领域", "Analog IC"],
-  ["block_type", "电路模块", "Low-noise AFE"],
-  ["design_stage", "设计阶段", "Package review"],
-  ["package_type", "封装类型", "Wirebond / QFN"],
-  ["signal_type", "信号类型", "Low-noise analog"],
-  ["concern", "关注点", "Noise / ESD / parasitic"],
-  ["constraint", "约束", "Cost / area / schedule"],
-  ["process_or_node", "工艺/节点", "180nm BCD"],
-  ["application", "应用", "Sensor frontend"]
+  ["domain", "领域", "如：模拟前端 / RF / 数字后端"],
+  ["block_type", "电路模块", "如：LNA / ADC / PLL"],
+  ["design_stage", "设计阶段", "如：方案评审 / tapeout"],
+  ["package_type", "封装类型", "如：Wirebond / QFN / Flip-chip"],
+  ["signal_type", "信号类型", "如：小信号 / 高速 / 电源"],
+  ["concern", "关注点", "如：噪声 / ESD / 寄生"],
+  ["constraint", "约束", "如：成本 / 面积 / 进度"],
+  ["process_or_node", "工艺/节点", "如：180nm BCD / 28nm"],
+  ["application", "应用", "如：传感器前端 / 电源管理"]
 ];
 
 const CHAT_MODES: Array<[ChatMode, string]> = [
@@ -315,12 +315,48 @@ type NotebookMenuPosition = {
   left: number;
 };
 
-const prompts = [
-  ["生成 package review checklist", "请基于当前来源生成 package review checklist，并给出引用。"],
-  ["查询相似 debug case", "请查询和当前场景相似的 debug case，并说明 root cause 与 resolution。"],
-  ["解释某条设计规则", "请解释低噪声模拟前端 wirebond pin assignment 相关的关键设计规则。"],
-  ["分析文章对规则库的影响", "请分析这篇文章或来源对现有规则库的影响，并列出候选规则。"]
+// Domain-agnostic fallback prompts. Used when a notebook has no expected
+// questions of its own; phrased around the notebook tools (来源/规则/案例/
+// checklist) rather than any specific demo scenario.
+const GENERIC_PROMPTS: Array<[string, string]> = [
+  ["基于来源回答问题", "请基于当前来源回答我的问题，并给出可追溯的引用。"],
+  ["生成检查清单", "请基于当前来源生成一份场景化 checklist，并标注每项所需证据。"],
+  ["检索相似案例", "请检索与我描述场景相似的历史案例，并说明根因与解决办法。"],
+  ["提炼/解释规则", "请基于当前来源解释相关的关键规则，并说明违反的风险。"]
 ];
+
+function chipLabel(question: string): string {
+  const text = question.trim();
+  return text.length > 16 ? `${text.slice(0, 16)}…` : text;
+}
+
+// Quick-prompt chips for a notebook: prefer its own expected questions
+// (set at creation from the template/user input), else neutral fallbacks.
+function promptChipsFor(notebook: NotebookSummary | null): Array<[string, string]> {
+  const expected = (notebook?.expected_questions ?? []).map((q) => q.trim()).filter(Boolean);
+  if (expected.length > 0) {
+    return expected.slice(0, 4).map((q) => [chipLabel(q), q] as [string, string]);
+  }
+  return GENERIC_PROMPTS;
+}
+
+// Placeholder for the Ask box: a real expected question if the notebook has
+// one, else a domain-aware hint, else a neutral prompt.
+function askPlaceholder(notebook: NotebookSummary | null): string {
+  const expected = (notebook?.expected_questions ?? []).map((q) => q.trim()).find(Boolean);
+  if (expected) return expected;
+  const domain = notebook?.primary_domain?.trim();
+  return domain ? `基于来源提问，例如：${domain} 场景下需要注意什么？` : "基于已导入的来源提问…";
+}
+
+// Scenario form fields with the 领域 placeholder pinned to the notebook domain.
+function scenarioFieldsFor(notebook: NotebookSummary | null): Array<[keyof ScenarioForm, string, string]> {
+  const domain = notebook?.primary_domain?.trim();
+  if (!domain || domain === "Semiconductor") return SCENARIO_FIELDS;
+  return SCENARIO_FIELDS.map((field) =>
+    field[0] === "domain" ? ([field[0], field[1], `如：${domain}`] as [keyof ScenarioForm, string, string]) : field
+  );
+}
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || "GET").toUpperCase();
@@ -390,7 +426,7 @@ export default function Home() {
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
   const [sources, setSources] = useState<SourceSummary[]>([]);
-  const [question, setQuestion] = useState("低噪声模拟前端使用 wirebond 封装时，pin assignment 需要注意什么？");
+  const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<AskResponse | null>(null);
   const [studioOutput, setStudioOutput] = useState<StudioOutput | null>(null);
   const [filter, setFilter] = useState("mine");
@@ -581,7 +617,6 @@ export default function Home() {
       .filter(({ notebook, hits }) => {
         if (filter === "featured") {
           const featured =
-            notebook.status === "beta-demo" ||
             (notebook.counts.rules ?? 0) > 0 ||
             (notebook.counts.cases ?? 0) > 0 ||
             (notebook.counts.article_claims ?? 0) > 0;
@@ -596,6 +631,12 @@ export default function Home() {
     });
     return enriched;
   }, [filter, notebooks, searchHits, searchQuery, sortMode]);
+
+  // Example prompts / placeholders adapt to the open notebook's template-seeded
+  // expected questions and domain, so a new notebook never shows demo examples.
+  const promptChips = useMemo(() => promptChipsFor(currentNotebook), [currentNotebook]);
+  const scenarioFields = useMemo(() => scenarioFieldsFor(currentNotebook), [currentNotebook]);
+  const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
 
   async function loadNotebookCollection() {
     const healthResponse = await api<Health>("/health");
@@ -882,6 +923,7 @@ export default function Home() {
 
   async function runAsk(nextQuestion = question) {
     if (!currentNotebookId) return;
+    if (!nextQuestion.trim()) return;
     setChatMode("ask");
     const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
       method: "POST",
@@ -1333,7 +1375,7 @@ export default function Home() {
                     <h2>Build a source-grounded engineering notebook</h2>
                     <p>导入来源后，你可以围绕规则、案例、风险、文章 claim 和 checklist 提问。系统会优先展示可追溯的 evidence。</p>
                     <div className="prompt-chips">
-                      {prompts.map(([label, prompt]) => (
+                      {promptChips.map(([label, prompt]) => (
                         <button key={label} onClick={() => runAsk(prompt).catch(reportError)}>{label}</button>
                       ))}
                     </div>
@@ -1351,7 +1393,7 @@ export default function Home() {
                 {chatMode === "scenario" && (
                   <div className="tool-view">
                     <div className="scenario-grid">
-                      {SCENARIO_FIELDS.map(([key, label, placeholder]) => (
+                      {scenarioFields.map(([key, label, placeholder]) => (
                         <label key={key}>{label}
                           <input
                             value={scenarioForm[key]}
@@ -1383,7 +1425,7 @@ export default function Home() {
                     <div className="tool-input-row">
                       <input
                         value={caseQuery}
-                        placeholder="描述症状或现象，如：实验室噪声比仿真高，怀疑和封装有关"
+                        placeholder="描述症状或现象，例如：某测试项结果异常，怀疑和某模块相关"
                         onChange={(event) => setCaseQuery(event.target.value)}
                         onKeyDown={(event) => { if (event.key === "Enter") runCaseSearch().catch(reportError); }}
                       />
@@ -1398,7 +1440,7 @@ export default function Home() {
                     <div className="tool-input-row">
                       <input
                         value={checklistScenario}
-                        placeholder="描述要 review 的场景，如：低噪声模拟前端的 QFN 封装方案"
+                        placeholder="描述要 review 的场景，例如：某模块的设计方案评审"
                         onChange={(event) => setChecklistScenario(event.target.value)}
                         onKeyDown={(event) => { if (event.key === "Enter") runChecklist().catch(reportError); }}
                       />
@@ -1429,7 +1471,7 @@ export default function Home() {
               </div>
               {chatMode === "ask" && (
                 <div className="chat-input-bar">
-                  <textarea className="chat-input" rows={1} value={question} onChange={(event) => setQuestion(event.target.value)} />
+                  <textarea className="chat-input" rows={1} placeholder={askHint} value={question} onChange={(event) => setQuestion(event.target.value)} />
                   <span>{sources.length} 个来源</span>
                   <button className="send-button" onClick={() => runAsk().catch(reportError)}>→</button>
                 </div>

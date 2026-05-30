@@ -13,7 +13,7 @@
 - `frontend/` 下的 Next.js / React / TypeScript 前端作为主线
 - OpenAI-compatible LLM 配置，用于摘要、抽取、回答和文章研究；embedding 可通过同一兼容 API 端点独立配置
 - 未配置 LLM key 时使用 deterministic fallback，保证本机 beta 可用
-- 中英混合 synthetic 半导体 demo 数据
+- 面向真实团队的干净起点：全新数据库只初始化本机用户，不再预置 demo 笔记本或合成来源；新建笔记本的示例提问会根据所选模板/笔记本领域动态生成，而非写死的样例
 - 真实 multipart 文件上传（解析经 FastAPI `BackgroundTasks` 异步执行），支持 PDF、Markdown、DOCX、PPTX
 - PDF 解析在配置 MinerU（GPU 主机）时走 MinerU（公式转 LaTeX、表格、版面）；本机/未启用时回退到 pypdf 纯文本
 - 解析生成 `SourceElement`，包含 `element_type`、`location_label`、`text`、`metadata`

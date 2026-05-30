@@ -55,15 +55,6 @@ from app.models.schemas import (
     SourceSummary,
     UserProfile,
 )
-from app.services.demo_repository import (
-    CASE_NOISE,
-    DEMO_ARTICLE_ID,
-    DEMO_NOTEBOOK_ID,
-    DEMO_SOURCE_ID,
-    RULE_ESD_PATH,
-    RULE_WIREBOND_RETURN,
-    _citation,
-)
 from app.services.extraction import bind_evidence, run_extraction
 from app.services.mineru_client import MinerUClient
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES, get_template
@@ -330,138 +321,6 @@ class SQLiteRepository:
                     now,
                 ),
             )
-            db.execute(
-                """
-                INSERT OR IGNORE INTO notebooks
-                (id, name, purpose, primary_domain, status, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    DEMO_NOTEBOOK_ID,
-                    "Analog Packaging Knowhow",
-                    (
-                        "Scenario-aware package rules, cases, and checklists for "
-                        "low-noise analog IC teams."
-                    ),
-                    "Analog IC Packaging",
-                    "beta-demo",
-                    "user-local",
-                    "2026-05-28T00:00:00",
-                    now,
-                ),
-            )
-            db.execute(
-                """
-                INSERT OR IGNORE INTO sources
-                (id, notebook_id, title, source_type, status, parse_status, file_name,
-                 file_path, file_size, file_hash, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    DEMO_SOURCE_ID,
-                    DEMO_NOTEBOOK_ID,
-                    "Synthetic Analog Packaging Knowhow Guideline",
-                    "guideline",
-                    "parsed",
-                    "parsed",
-                    "analog_packaging_knowhow.md",
-                    str(self.root_dir / "data/demo/analog_packaging_knowhow.md"),
-                    4096,
-                    "synthetic",
-                    (
-                        "Synthetic mixed Chinese/English source covering wirebond "
-                        "pin assignment, quiet ground return, ESD path review, and "
-                        "package parasitic risks for low-noise analog front-ends."
-                    ),
-                    "2026-05-28T00:00:00",
-                    now,
-                ),
-            )
-            if self._count(db, "source_elements", "source_id", DEMO_SOURCE_ID) == 0:
-                demo_elements = [
-                    (
-                        "el-pdf-001",
-                        "paragraph",
-                        "PDF p.3 paragraph 2",
-                        RULE_WIREBOND_RETURN.evidence[0].quoted_span,
-                        {"parser": "synthetic", "language": "en"},
-                    ),
-                    (
-                        "el-md-002",
-                        "paragraph",
-                        "Markdown section 'ESD and quiet pins'",
-                        RULE_ESD_PATH.evidence[0].quoted_span,
-                        {"parser": "synthetic", "language": "en"},
-                    ),
-                    (
-                        "el-docx-004",
-                        "paragraph",
-                        "DOCX paragraph 14",
-                        CASE_NOISE.evidence[0].quoted_span,
-                        {"parser": "synthetic", "language": "en"},
-                    ),
-                    (
-                        "el-pptx-006",
-                        "slide_text_box",
-                        "PPTX slide 6 text box 2",
-                        "Package review checklist: quiet pins, return path, parasitic extraction, ESD path.",
-                        {"parser": "synthetic", "language": "mixed"},
-                    ),
-                ]
-                for element_id, element_type, location_label, text, metadata in demo_elements:
-                    db.execute(
-                        """
-                        INSERT INTO source_elements
-                        (id, source_id, element_type, location_label, text, metadata, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            element_id,
-                            DEMO_SOURCE_ID,
-                            element_type,
-                            location_label,
-                            text,
-                            json.dumps(metadata),
-                            now,
-                        ),
-                    )
-            db.execute(
-                """
-                INSERT OR IGNORE INTO articles
-                (id, notebook_id, source_id, title, status, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    DEMO_ARTICLE_ID,
-                    DEMO_NOTEBOOK_ID,
-                    DEMO_SOURCE_ID,
-                    "Synthetic Paper: Bondwire Coupling in Low-Noise AFE Packages",
-                    "brief-ready",
-                    (
-                        "A synthetic article used to demonstrate claim extraction "
-                        "and implication mapping for package-level coupling."
-                    ),
-                    "2026-05-28T00:00:00",
-                    now,
-                ),
-            )
-        self._seed_demo_knowledge()
-
-    def _seed_demo_knowledge(self) -> None:
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT COUNT(*) AS count FROM knowledge_objects WHERE notebook_id = ?",
-                (DEMO_NOTEBOOK_ID,),
-            ).fetchone()
-            if int(row["count"]):
-                return
-            candidate_count = self._count(db, "extraction_candidates", "source_id", DEMO_SOURCE_ID)
-        if candidate_count == 0:
-            self._run_extraction(DEMO_SOURCE_ID)
-        for candidate in self.list_candidates(DEMO_NOTEBOOK_ID):
-            if candidate.source_id == DEMO_SOURCE_ID:
-                self.approve_candidate(candidate.id)
-
     def _count(self, db: sqlite3.Connection, table: str, column: str, value: str) -> int:
         row = db.execute(
             f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?",
@@ -2800,7 +2659,7 @@ class SQLiteRepository:
         return f"{len(elements)} parsed text element(s). {first}"
 
     def _delete_file(self, file_path: str) -> None:
-        if not file_path or "data/demo" in file_path:
+        if not file_path:
             return
         path = Path(file_path)
         if path.exists() and path.is_file():
@@ -2812,6 +2671,16 @@ class SQLiteRepository:
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _citation(label: str, evidence: Evidence) -> Citation:
+    return Citation(
+        label=label,
+        source_id=evidence.source_id,
+        element_id=evidence.element_id,
+        location_label=evidence.location_label,
+        quoted_span=evidence.quoted_span,
+    )
 
 
 def _as_str_list(value: object) -> List[str]:

@@ -30,6 +30,7 @@ from app.models.schemas import (
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
+    NotebookTemplate,
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
