@@ -205,10 +205,8 @@ const SCENARIO_FIELDS: Array<[keyof ScenarioForm, string, string]> = [
 
 const CHAT_MODES: Array<[ChatMode, string]> = [
   ["ask", "问答"],
-  ["scenario", "场景查询"],
-  ["case", "案例检索"],
-  ["checklist", "Checklist"],
   ["rules", "知识库"]
+  // 场景查询 / 案例检索 / Checklist 暂时下线（保留实现，仅从入口移除）。
 ];
 
 // Any object_type string (the 4 below have bespoke cards; everything else —

@@ -256,6 +256,92 @@ def check_knowledge_graph() -> None:
         assert graph.nodes == [] and graph.edges == []
 
 
+def check_api_layer() -> None:
+    """Boot the FastAPI app and exercise every route group via TestClient.
+
+    py_compile + the unit smokes never import app.api.routes, so route-level
+    breakage (a response_model referencing an un-imported model, a bad path)
+    slips through. This hits each endpoint so that whole class of bug fails
+    here. Kept hermetic: env is forced offline + a throwaway DB/storage dir.
+    """
+    import os
+    import tempfile
+    from fastapi.testclient import TestClient
+
+    with tempfile.TemporaryDirectory(prefix="sn-api-") as tmp:
+        os.environ.update({
+            "OPENAI_COMPAT_BASE_URL": "",
+            "OPENAI_COMPAT_API_KEY": "",
+            "OPENAI_COMPAT_MODEL": "",
+            "OPENAI_COMPAT_EMBEDDING_MODEL": "",
+            "MINERU_MODE": "off",
+            "DATABASE_URL": f"sqlite:///{tmp}/api.db",
+            "SILICON_NOTEBOOK_STORAGE_DIR": f"{tmp}/storage",
+            "LLM_LOG_ENABLED": "false",
+            "EVENT_LOG_ENABLED": "false",
+        })
+        from app.core.config import get_settings
+        get_settings.cache_clear()
+        from app.main import create_app
+
+        client = TestClient(create_app())
+
+        def ok(method: str, path: str, **kw):
+            response = client.request(method, path, **kw)
+            assert response.status_code == 200, (
+                f"{method} {path} -> {response.status_code}: {response.text[:200]}"
+            )
+            return response.json()
+
+        ok("GET", "/api/health")
+        ok("GET", "/api/me")
+        # response_model=List[NotebookTemplate] — the route that previously broke import.
+        templates = ok("GET", "/api/notebook-templates")
+        assert isinstance(templates, list) and templates
+
+        nb = ok("POST", "/api/notebooks", json={
+            "name": "API smoke", "purpose": "p", "primary_domain": "d", "template": "rule",
+        })
+        nid = nb["id"]
+        assert ok("GET", "/api/notebooks")
+        ok("GET", f"/api/notebooks/{nid}")
+        assert ok("GET", f"/api/notebooks/{nid}/sources") == []
+
+        # Knowledge browse + governance route group.
+        for path in ("rules", "methods", "risks", "glossary", "candidates"):
+            ok("GET", f"/api/notebooks/{nid}/{path}")
+        ok("GET", f"/api/notebooks/{nid}/knowledge-types")
+        ok("GET", f"/api/notebooks/{nid}/knowledge", params={"type": "rule"})
+        ok("GET", f"/api/notebooks/{nid}/duplicates", params={"type": "rules"})
+        ok("GET", f"/api/notebooks/{nid}/conflicts")
+        ok("GET", f"/api/notebooks/{nid}/graph")
+        ok("GET", f"/api/notebooks/{nid}/analytics")
+        ok("GET", f"/api/notebooks/{nid}/derived-rules")
+
+        # Editable schema registry + induction.
+        schemas = ok("GET", "/api/object-schemas")
+        assert any(s["object_type"] == "rule" for s in schemas)
+        ok("POST", "/api/object-schemas", json={"object_type": "api_test_type", "fields": ["a", "b"], "label": "x"})
+        ok("PATCH", "/api/object-schemas/api_test_type", json={"status": "disabled"})
+        assert client.delete("/api/object-schemas/api_test_type").status_code == 200
+        ok("POST", f"/api/notebooks/{nid}/schema-proposals")
+
+        # Ask returns the structured shape incl. the generic related_knowledge block.
+        answer = ok("POST", f"/api/notebooks/{nid}/ask", json={"question": "any rules?", "scenario": {}})
+        assert "related_knowledge" in answer and answer["llm_mode"] == "deterministic"
+
+        # Error-path contracts (lock the status codes so they can't regress).
+        assert client.get("/api/notebooks/nb-does-not-exist").status_code == 404
+        assert client.get("/api/notebooks/nb-does-not-exist/rules").status_code == 404
+        assert client.patch("/api/object-schemas/no_such_type", json={"label": "x"}).status_code == 404
+        assert client.delete("/api/object-schemas/rule").status_code == 400  # builtin not deletable
+        dup = client.post("/api/object-schemas", json={"object_type": "rule", "fields": ["a"]})
+        assert dup.status_code == 400  # duplicate type
+        assert client.get(f"/api/notebooks/{nid}/knowledge").status_code == 422  # missing ?type=
+
+        get_settings.cache_clear()
+
+
 def _ev(element_id: str, quoted_span: str) -> Evidence:
     return Evidence(
         source_id="s",
@@ -607,6 +693,7 @@ def main() -> None:
     check_extraction_windowing()
     check_payload_embedding_retrieval()
     check_structured_scenario_boost()
+    check_api_layer()
     with tempfile.TemporaryDirectory(prefix="silicon-notebook-smoke-") as temp_dir:
         root = Path(temp_dir)
         repository = SQLiteRepository(
