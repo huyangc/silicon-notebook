@@ -15,7 +15,13 @@ from typing import Dict, List, Optional
 
 from app.core.llm import OpenAICompatibleClient
 from app.models.schemas import Evidence, SourceElement
-from app.services.prompts import EXTRACTION_SCHEMA_HINT, extraction_prompt
+from app.services.extraction_profiles import ExtractionProfile, get_profile
+from app.services.prompts import (
+    REFINE_SCHEMA_HINT,
+    build_extraction_schema_hint,
+    extraction_prompt,
+    refine_prompt,
+)
 from app.services.retrieval import token_overlap
 
 # Windowed extraction so large documents are covered in full, not just the
@@ -131,10 +137,26 @@ def bind_evidence(
             best_ratio = ratio
             best_element = element
     if best_element is not None and best_ratio >= BIND_OVERLAP_THRESHOLD:
+        # Prefer a verbatim sentence from the matched element over the (possibly
+        # paraphrased) model span, so the citation quotes the real source text.
+        verbatim = _best_sentence_span(quoted_span, best_element.text) or quoted_span
         return _make_evidence(
-            best_element, source_title, quoted_span, max(0.0, confidence - 0.1)
+            best_element, source_title, verbatim, max(0.0, confidence - 0.1)
         )
     return None
+
+
+def _best_sentence_span(span: str, element_text: str) -> Optional[str]:
+    """Return the element sentence that best overlaps the span (verbatim), if it
+    clears a modest overlap bar."""
+    best: Optional[str] = None
+    best_ratio = 0.45
+    for sentence in _sentences(element_text):
+        ratio = token_overlap(span, sentence)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best = sentence
+    return best
 
 
 def _records_from_llm_section(
@@ -164,16 +186,6 @@ def _records_from_llm_section(
             )
         )
     return records
-
-
-_LLM_SECTIONS = [
-    ("rule", "rules", ["title", "statement", "applies_to", "recommendation", "risk_if_ignored", "severity"]),
-    ("method", "methods", ["name", "use_when", "benefit", "limitation"]),
-    ("risk", "risks", ["title", "description", "severity"]),
-    ("case", "cases", ["symptom", "context", "root_cause", "resolution", "lesson_learned"]),
-    ("checklist", "checklist", ["question", "severity", "required_evidence"]),
-    ("glossary", "glossary", ["term", "definition"]),
-]
 
 
 def _element_windows(elements: List[SourceElement]) -> List[List[SourceElement]]:
@@ -211,16 +223,18 @@ def _parse_llm_records(
     data: object,
     elements: List[SourceElement],
     source_title: str,
+    profile: ExtractionProfile,
+    registry=None,
 ) -> List[CandidateRecord]:
     if not isinstance(data, dict):
         raise ValueError("extraction did not return a JSON object")
     records: List[CandidateRecord] = []
-    for candidate_type, key, payload_keys in _LLM_SECTIONS:
-        items = data.get(key) or []
+    for schema in profile.schemas(registry):
+        items = data.get(schema.plural) or []
         if isinstance(items, list):
             records.extend(
                 _records_from_llm_section(
-                    candidate_type, items, payload_keys, elements, source_title
+                    schema.type, items, schema.fields, elements, source_title
                 )
             )
     return records
@@ -254,20 +268,97 @@ def _extract_with_llm(
     client: OpenAICompatibleClient,
     elements: List[SourceElement],
     source_title: str,
+    profile: ExtractionProfile,
+    registry=None,
 ) -> List[CandidateRecord]:
+    schema_hint = build_extraction_schema_hint(profile, registry)
     records: List[CandidateRecord] = []
     for window in _element_windows(elements):
         elements_block = "\n".join(
             f"[{element.location_label}] {element.text}" for element in window
         )[:WINDOW_MAX_CHARS]
         raw = client.chat_json(
-            [{"role": "user", "content": extraction_prompt(source_title, elements_block)}],
-            EXTRACTION_SCHEMA_HINT,
+            [
+                {
+                    "role": "user",
+                    "content": extraction_prompt(
+                        source_title, elements_block, profile, registry
+                    ),
+                }
+            ],
+            schema_hint,
         )
         # Bind evidence against the full element list (not just the window) for
         # the best chance of a successful binding.
-        records.extend(_parse_llm_records(json.loads(raw), elements, source_title))
+        records.extend(
+            _parse_llm_records(
+                json.loads(raw), elements, source_title, profile, registry
+            )
+        )
     return _dedupe_records(records)
+
+
+def _record_primary(record: CandidateRecord) -> str:
+    payload = record.payload
+    for key in ("title", "name", "term", "question", "symptom", "statement"):
+        value = str(payload.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _refine_with_llm(
+    client: OpenAICompatibleClient,
+    records: List[CandidateRecord],
+    elements: List[SourceElement],
+    source_title: str,
+) -> List[CandidateRecord]:
+    """One self-refinement pass: ask the LLM to drop unsupported/vague items and
+    supply more faithful verbatim spans. Conservative — only drops on an explicit
+    keep=false; any failure leaves records unchanged."""
+    if not records:
+        return records
+    records_block = "\n".join(
+        f"{index}. [{record.candidate_type}] {_record_primary(record)[:200]}"
+        for index, record in enumerate(records)
+    )
+    elements_block = "\n".join(
+        f"[{element.location_label}] {element.text}" for element in elements
+    )[:WINDOW_MAX_CHARS]
+    try:
+        raw = client.chat_json(
+            [
+                {
+                    "role": "user",
+                    "content": refine_prompt(source_title, records_block, elements_block),
+                }
+            ],
+            REFINE_SCHEMA_HINT,
+        )
+        data = json.loads(raw)
+    except Exception:
+        return records
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return records
+    verdicts: Dict[int, dict] = {}
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("index"), int):
+            verdicts[item["index"]] = item
+    refined: List[CandidateRecord] = []
+    for index, record in enumerate(records):
+        verdict = verdicts.get(index)
+        if verdict is not None and verdict.get("keep") is False:
+            continue
+        if verdict is not None:
+            new_span = str(verdict.get("quoted_span", "")).strip()
+            if new_span:
+                evidence = bind_evidence(new_span, elements, source_title, 0.75)
+                if evidence is not None:
+                    record.evidence = [evidence]
+                    record.status = "candidate"
+        refined.append(record)
+    return refined
 
 
 def _first_sentence(text: str, limit: int = 200) -> str:
@@ -365,14 +456,18 @@ def _heuristic_payload(candidate_type: str, sentence: str) -> tuple[Dict[str, ob
 def _extract_with_heuristics(
     elements: List[SourceElement],
     source_title: str,
+    active_types: Optional[set] = None,
 ) -> List[CandidateRecord]:
     """Sentence-level offline extraction.
 
     One element can yield several candidates (one per qualifying sentence).
     Glossary terms come only from real definition phrasing, and noise-prone
     element types (tables/formulas/captions/notes) are skipped for directive and
-    case heuristics.
+    case heuristics. Only candidate types in ``active_types`` (the resolved
+    profile) are emitted; offline heuristics cover the design-doc core types,
+    so paper/textbook-only types simply yield nothing here.
     """
+    allowed = active_types if active_types is not None else None
     records: List[CandidateRecord] = []
     for element in elements:
         text = element.text.strip()
@@ -380,7 +475,7 @@ def _extract_with_heuristics(
             continue
 
         glossary = _glossary_from_text(text)
-        if glossary is not None:
+        if glossary is not None and (allowed is None or "glossary" in allowed):
             records.append(
                 CandidateRecord(
                     "glossary",
@@ -398,6 +493,8 @@ def _extract_with_heuristics(
         for sentence in _sentences(text):
             candidate_type = _classify_sentence(sentence, element.element_type)
             if candidate_type is None:
+                continue
+            if allowed is not None and candidate_type not in allowed:
                 continue
             payload, confidence = _heuristic_payload(candidate_type, sentence)
             records.append(
@@ -417,18 +514,28 @@ def run_extraction(
     client: OpenAICompatibleClient,
     elements: List[SourceElement],
     source_title: str,
+    profile: Optional[ExtractionProfile] = None,
+    registry=None,
 ) -> List[CandidateRecord]:
+    profile = profile or get_profile("general")
     elements = [element for element in elements if element.text.strip()]
     if not elements:
         return []
     records: List[CandidateRecord] = []
     if client.configured:
         try:
-            records = _extract_with_llm(client, elements, source_title)
+            records = _extract_with_llm(
+                client, elements, source_title, profile, registry
+            )
+            # Self-refinement: verify against the source, drop hallucinations,
+            # tighten evidence spans (LLM-only; no-op offline).
+            records = _refine_with_llm(client, records, elements, source_title)
         except Exception:
             records = []
     if not records:
-        records = _extract_with_heuristics(elements, source_title)
+        records = _extract_with_heuristics(
+            elements, source_title, active_types=set(profile.object_types)
+        )
     records = _dedupe_records(records)
     records.sort(key=lambda record: record.confidence, reverse=True)
     return records

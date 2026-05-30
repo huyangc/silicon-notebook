@@ -113,6 +113,7 @@ type AskResponse = {
     location_label: string;
     quoted_span: string;
   }>;
+  related_knowledge?: KnowledgeRecord[];
 };
 
 type ArticleResearchBrief = {
@@ -210,15 +211,47 @@ const CHAT_MODES: Array<[ChatMode, string]> = [
   ["rules", "知识库"]
 ];
 
-type KnowledgeKind = "rule" | "method" | "risk" | "glossary";
+// Any object_type string (the 4 below have bespoke cards; everything else —
+// case/claim/finding/concept/principle/example — is browsed generically).
+type KnowledgeKind = string;
 
-// kind -> [label, REST path]
+// kind -> [label, REST path] for the four types with dedicated card endpoints.
 const KNOWLEDGE_KINDS: Array<[KnowledgeKind, string, string]> = [
   ["rule", "规则", "rules"],
   ["method", "方法", "methods"],
   ["risk", "风险", "risks"],
   ["glossary", "术语", "glossary"]
 ];
+
+const BESPOKE_KINDS = new Set(KNOWLEDGE_KINDS.map(([k]) => k));
+
+type KnowledgeFieldValue = { key: string; value: string };
+type KnowledgeTypeCount = { object_type: string; label: string; count: number };
+
+type ObjectSchema = {
+  object_type: string;
+  plural: string;
+  fields: string[];
+  primary: string;
+  description: string;
+  label: string;
+  list_fields: string[];
+  source: string; // builtin | custom | induced
+  status: string; // active | proposed | disabled
+  rationale: string;
+  notebook_id: string;
+};
+// Generic record returned by GET /notebooks/{id}/knowledge?type=
+type KnowledgeRecord = {
+  id: string;
+  object_type: string;
+  headline: string;
+  fields: KnowledgeFieldValue[];
+  status: string;
+  owner?: string;
+  last_reviewed?: string;
+  evidence: Evidence[];
+};
 
 const KNOWLEDGE_STATUS_OPTIONS = [
   "reviewed",
@@ -248,14 +281,13 @@ type KnowledgeItem = {
   description?: string;
   term?: string;
   definition?: string;
+  // Generic-type fields (case/claim/finding/concept/principle/example).
+  headline?: string;
+  object_type?: string;
+  fields?: KnowledgeFieldValue[];
 };
 
-const EMPTY_KNOWLEDGE: Record<KnowledgeKind, KnowledgeItem[] | null> = {
-  rule: null,
-  method: null,
-  risk: null,
-  glossary: null
-};
+const EMPTY_KNOWLEDGE: Record<string, KnowledgeItem[] | null> = {};
 
 type KnowledgeRef = { id: string; object_type: string; headline: string; status: string };
 type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
@@ -292,6 +324,18 @@ type RuleExplanation = {
   related_cases: Array<{ id: string; symptom: string; root_cause: string }>;
   related_risks: Array<{ id: string; title: string; description: string }>;
   related_checklist: string[];
+  related_knowledge: KnowledgeRef[];
+};
+
+type KnowledgeNode = { id: string; object_type: string; headline: string; status: string };
+type KnowledgeEdge = { from_id: string; to_id: string; relation: string; label: string };
+type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
+
+const RELATION_LABELS: Record<string, string> = {
+  related_rules: "关联规则",
+  related_cases: "关联案例",
+  related_methods: "关联方法",
+  related_concepts: "关联概念"
 };
 
 type StudioOutput = {
@@ -424,7 +468,8 @@ export default function Home() {
   const [checklistScenario, setChecklistScenario] = useState("");
   const [checklistResults, setChecklistResults] = useState<ChecklistItem[] | null>(null);
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("rule");
-  const [knowledge, setKnowledge] = useState<Record<KnowledgeKind, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
+  const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
+  const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
   const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   const [conflicts, setConflicts] = useState<ConflictPair[] | null>(null);
@@ -432,6 +477,11 @@ export default function Home() {
   const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
   const [derivedOpen, setDerivedOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
+  const [schemaModalOpen, setSchemaModalOpen] = useState(false);
+  const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
+  const [schemaBusy, setSchemaBusy] = useState(false);
+  const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
+  const [graphOpen, setGraphOpen] = useState(false);
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
@@ -674,7 +724,8 @@ export default function Home() {
     await loadNotebookCollection();
     const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
     setCurrentNotebook(refreshed);
-    if (knowledge[knowledgeKind] !== null) await loadKnowledge(knowledgeKind);
+    if (knowledge[knowledgeKind] != null) await loadKnowledge(knowledgeKind);
+    await loadKnowledgeTypes();
     setToast("候选已批准并加入知识库");
   }
 
@@ -924,15 +975,41 @@ export default function Home() {
 
   async function loadKnowledge(kind: KnowledgeKind) {
     if (!currentNotebookId) return;
-    const path = KNOWLEDGE_KINDS.find(([k]) => k === kind)?.[2] ?? "rules";
-    const response = await api<KnowledgeItem[]>(`/notebooks/${currentNotebookId}/${path}`);
+    const bespoke = KNOWLEDGE_KINDS.find(([k]) => k === kind);
+    let response: KnowledgeItem[];
+    if (bespoke) {
+      response = await api<KnowledgeItem[]>(`/notebooks/${currentNotebookId}/${bespoke[2]}`);
+    } else {
+      const records = await api<KnowledgeRecord[]>(
+        `/notebooks/${currentNotebookId}/knowledge?type=${encodeURIComponent(kind)}`
+      );
+      response = records.map((record) => ({
+        id: record.id,
+        status: record.status,
+        owner: record.owner,
+        last_reviewed: record.last_reviewed,
+        evidence: record.evidence,
+        headline: record.headline,
+        object_type: record.object_type,
+        fields: record.fields
+      }));
+    }
     setKnowledge((prev) => ({ ...prev, [kind]: response }));
+  }
+
+  async function loadKnowledgeTypes() {
+    if (!currentNotebookId) return;
+    const types = await api<KnowledgeTypeCount[]>(
+      `/notebooks/${currentNotebookId}/knowledge-types`
+    );
+    setKnowledgeTypes(types);
   }
 
   async function updateKnowledge(id: string, patch: { status?: string; owner?: string }) {
     if (!currentNotebookId) return;
     await api(`/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
     await loadKnowledge(knowledgeKind);
+    await loadKnowledgeTypes();
     await loadNotebookCollection();
     const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
     setCurrentNotebook(refreshed);
@@ -944,15 +1021,15 @@ export default function Home() {
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
     setConflicts(null);
-    if (knowledge[kind] === null) loadKnowledge(kind).catch(reportError);
+    if (knowledge[kind] == null) loadKnowledge(kind).catch(reportError);
   }
 
   async function findDuplicates(kind: KnowledgeKind) {
     if (!currentNotebookId) return;
     setConflicts(null);
-    const path = KNOWLEDGE_KINDS.find(([k]) => k === kind)?.[2] ?? "rules";
+    const path = KNOWLEDGE_KINDS.find(([k]) => k === kind)?.[2] ?? kind;
     const response = await api<DuplicateGroup[]>(
-      `/notebooks/${currentNotebookId}/duplicates?type=${path}`
+      `/notebooks/${currentNotebookId}/duplicates?type=${encodeURIComponent(path)}`
     );
     setDuplicates(response);
   }
@@ -971,6 +1048,7 @@ export default function Home() {
       body: JSON.stringify({ into_id: intoId })
     });
     await loadKnowledge(knowledgeKind);
+    await loadKnowledgeTypes();
     await findDuplicates(knowledgeKind);
     setToast("已合并，源条目置为 deprecated");
   }
@@ -987,6 +1065,74 @@ export default function Home() {
     if (!currentNotebookId) return;
     const response = await api<NotebookAnalytics>(`/notebooks/${currentNotebookId}/analytics`);
     setAnalytics(response);
+  }
+
+  async function loadSchemas() {
+    const response = await api<ObjectSchema[]>(`/object-schemas`);
+    setSchemas(response);
+  }
+
+  function openSchemas() {
+    setSchemaModalOpen(true);
+    loadSchemas().catch(reportError);
+  }
+
+  async function patchSchema(objectType: string, patch: Partial<ObjectSchema> & { status?: string }) {
+    setSchemaBusy(true);
+    try {
+      await api(`/object-schemas/${encodeURIComponent(objectType)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch)
+      });
+      await loadSchemas();
+      setToast("Schema 已更新");
+    } finally {
+      setSchemaBusy(false);
+    }
+  }
+
+  async function createSchema(payload: { object_type: string; label: string; fields: string[]; description: string }) {
+    setSchemaBusy(true);
+    try {
+      await api(`/object-schemas`, { method: "POST", body: JSON.stringify(payload) });
+      await loadSchemas();
+      setToast("已新增类型");
+    } finally {
+      setSchemaBusy(false);
+    }
+  }
+
+  async function deleteSchema(objectType: string) {
+    setSchemaBusy(true);
+    try {
+      await api(`/object-schemas/${encodeURIComponent(objectType)}`, { method: "DELETE" });
+      await loadSchemas();
+      setToast("类型已删除");
+    } finally {
+      setSchemaBusy(false);
+    }
+  }
+
+  async function openGraph() {
+    if (!currentNotebookId) return;
+    setGraphOpen(true);
+    const response = await api<KnowledgeGraph>(`/notebooks/${currentNotebookId}/graph`);
+    setGraph(response);
+  }
+
+  async function induceSchemas() {
+    if (!currentNotebookId) return;
+    setSchemaBusy(true);
+    try {
+      const proposals = await api<ObjectSchema[]>(
+        `/notebooks/${currentNotebookId}/schema-proposals`,
+        { method: "POST" }
+      );
+      await loadSchemas();
+      setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或未配置 LLM）");
+    } finally {
+      setSchemaBusy(false);
+    }
   }
 
   async function openDerivedRules() {
@@ -1010,8 +1156,11 @@ export default function Home() {
 
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
-    if (mode === "rules" && knowledge[knowledgeKind] === null) {
-      loadKnowledge(knowledgeKind).catch(reportError);
+    if (mode === "rules") {
+      loadKnowledgeTypes().catch(reportError);
+      if (knowledge[knowledgeKind] == null) {
+        loadKnowledge(knowledgeKind).catch(reportError);
+      }
     }
   }
 
@@ -1246,6 +1395,8 @@ export default function Home() {
                 ]
               })}>分析</button>
               <button className="sort-button" onClick={() => openAnalytics().catch(reportError)}>看板</button>
+              <button className="sort-button" onClick={openSchemas}>Schema</button>
+              <button className="sort-button" onClick={() => openGraph().catch(reportError)}>关系图</button>
               <button className="sort-button" onClick={() => setInfoModal({
                 title: "分享",
                 message: "当前是本机单用户 beta，分享会生成本地 notebook 链接；多人权限后续再接入。",
@@ -1411,7 +1562,8 @@ export default function Home() {
                 {chatMode === "rules" && (
                   <KnowledgeBrowser
                     kind={knowledgeKind}
-                    items={knowledge[knowledgeKind]}
+                    items={knowledge[knowledgeKind] ?? null}
+                    types={knowledgeTypes}
                     statusFilter={knowledgeStatusFilter}
                     duplicates={duplicates}
                     conflicts={conflicts}
@@ -1761,6 +1913,67 @@ export default function Home() {
         </section>
       )}
 
+      {schemaModalOpen && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSchemaModalOpen(false); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>Schema 管理</h2>
+                <p>管理抽取的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
+              </div>
+              <button className="icon-button" onClick={() => setSchemaModalOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <SchemaManager
+                schemas={schemas}
+                busy={schemaBusy}
+                canInduce={Boolean(currentNotebookId)}
+                onPatch={(t, p) => patchSchema(t, p).catch(reportError)}
+                onCreate={(p) => createSchema(p).catch(reportError)}
+                onDelete={(t) => deleteSchema(t).catch(reportError)}
+                onInduce={() => induceSchemas().catch(reportError)}
+              />
+            </div>
+          </div>
+        </section>
+      )}
+
+      {graphOpen && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setGraphOpen(false); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>知识关系图</h2>
+                <p>由各知识对象的关系字段（related_rules / cases / methods / concepts）解析出的边。用于 Implication / 冲突 / Explain 的下游消费。</p>
+              </div>
+              <button className="icon-button" onClick={() => setGraphOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {graph === null ? (
+                <p className="tool-hint">加载中…</p>
+              ) : graph.edges.length === 0 ? (
+                <p className="tool-hint">暂无关系边。当抽取/审核的对象在 related_* 字段引用了同库其它对象时，这里会出现连线。</p>
+              ) : (
+                <div className="stack">
+                  <div className="tag-row"><span className="tag">节点 {graph.nodes.length}</span><span className="tag">边 {graph.edges.length}</span></div>
+                  {graph.edges.map((edge, index) => {
+                    const from = graph.nodes.find((n) => n.id === edge.from_id);
+                    const to = graph.nodes.find((n) => n.id === edge.to_id);
+                    return (
+                      <div className="checklist-row" key={`edge-${index}`}>
+                        <strong>{from?.headline ?? edge.from_id}</strong>
+                        <span className="tag">{RELATION_LABELS[edge.relation] ?? edge.relation}</span>
+                        → <strong>{to?.headline ?? edge.to_id}</strong>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {derivedOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setDerivedOpen(false); }}>
           <div className="utility-modal-card">
@@ -1847,6 +2060,18 @@ export default function Home() {
                 <>
                   <p className="section-title">相关检查项</p>
                   <div className="stack">{ruleExplanation.related_checklist.map((q) => <div className="checklist-row" key={q}>{q}</div>)}</div>
+                </>
+              )}
+              {ruleExplanation.related_knowledge.length > 0 && (
+                <>
+                  <p className="section-title">关系字段连出的对象（边）</p>
+                  <div className="stack">
+                    {ruleExplanation.related_knowledge.map((ref) => (
+                      <div className="checklist-row" key={ref.id}>
+                        <span className="tag">{ref.object_type}</span> {ref.headline}
+                      </div>
+                    ))}
+                  </div>
                 </>
               )}
             </div>
@@ -2034,12 +2259,41 @@ function ChecklistList({ results }: { results: ChecklistItem[] | null }) {
 }
 
 function knowledgeHeadline(kind: KnowledgeKind, item: KnowledgeItem): string {
+  if (item.headline) return item.headline; // generic types
   if (kind === "method") return item.name || item.id;
   if (kind === "glossary") return item.term || item.id;
   return item.title || item.id; // rule / risk
 }
 
+// Field-key labels for the generic (case/claim/finding/concept/...) renderer.
+const FIELD_LABELS: Record<string, string> = {
+  statement: "陈述", claim_type: "类型", measurement_condition: "测量条件",
+  limitation: "局限", metric: "指标", condition: "条件", dataset: "数据集",
+  term: "术语", definition: "定义", why_it_matters: "意义", related_concepts: "相关概念",
+  rationale: "依据", applies_to: "适用范围", problem: "问题", approach: "做法",
+  result: "结果", symptom: "症状", context: "背景", root_cause: "根因",
+  resolution: "解决", lesson_learned: "经验", required_evidence: "所需证据",
+  question: "检查项", related_rules: "相关规则", related_cases: "相关案例",
+  related_methods: "相关方法"
+};
+
+function genericBody(item: KnowledgeItem) {
+  const fields = (item.fields ?? []).filter((f) => f.value && f.value !== item.headline);
+  if (fields.length === 0) return null;
+  return (
+    <>
+      {fields.map((field) => (
+        <p key={field.key}>
+          <strong>{FIELD_LABELS[field.key] ?? field.key}：</strong>
+          {field.value}
+        </p>
+      ))}
+    </>
+  );
+}
+
 function knowledgeBody(kind: KnowledgeKind, item: KnowledgeItem) {
+  if (!BESPOKE_KINDS.has(kind)) return genericBody(item);
   if (kind === "rule") {
     return (
       <>
@@ -2062,9 +2316,157 @@ function knowledgeBody(kind: KnowledgeKind, item: KnowledgeItem) {
   return item.definition ? <p>{item.definition}</p> : null; // glossary
 }
 
+function SchemaRow({
+  schema,
+  busy,
+  onPatch,
+  onDelete
+}: {
+  schema: ObjectSchema;
+  busy: boolean;
+  onPatch: (t: string, p: Partial<ObjectSchema> & { status?: string }) => void;
+  onDelete: (t: string) => void;
+}) {
+  const [fieldsText, setFieldsText] = useState(schema.fields.join(", "));
+  const [label, setLabel] = useState(schema.label);
+  const [description, setDescription] = useState(schema.description);
+  const dirty =
+    fieldsText !== schema.fields.join(", ") ||
+    label !== schema.label ||
+    description !== schema.description;
+  const save = () =>
+    onPatch(schema.object_type, {
+      fields: fieldsText.split(",").map((f) => f.trim()).filter(Boolean),
+      label,
+      description
+    });
+  return (
+    <article className={`item ${schema.status === "disabled" ? "knowledge-deprecated" : ""}`}>
+      <div className="tag-row">
+        <strong>{schema.object_type}</strong>
+        <span className="tag">{schema.source}</span>
+        <span className={`tag ${schema.status === "active" ? "severity-low" : ""}`}>{schema.status}</span>
+      </div>
+      <label>显示名
+        <input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} />
+      </label>
+      <label>字段（逗号分隔，按顺序）
+        <textarea rows={2} value={fieldsText} disabled={busy} onChange={(e) => setFieldsText(e.target.value)} />
+      </label>
+      <label>说明（用于抽取提示）
+        <input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+      <div className="tag-row">
+        <button className="sort-button" disabled={busy || !dirty} onClick={save}>保存</button>
+        {schema.status === "active" ? (
+          <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "disabled" })}>停用</button>
+        ) : (
+          <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "active" })}>启用</button>
+        )}
+        {schema.source !== "builtin" && (
+          <button className="sort-button" disabled={busy} onClick={() => onDelete(schema.object_type)}>删除</button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function NewSchemaForm({
+  busy,
+  onCreate
+}: {
+  busy: boolean;
+  onCreate: (p: { object_type: string; label: string; fields: string[]; description: string }) => void;
+}) {
+  const [objectType, setObjectType] = useState("");
+  const [label, setLabel] = useState("");
+  const [fieldsText, setFieldsText] = useState("");
+  const [description, setDescription] = useState("");
+  const submit = () => {
+    const fields = fieldsText.split(",").map((f) => f.trim()).filter(Boolean);
+    if (!objectType.trim() || fields.length === 0) return;
+    onCreate({ object_type: objectType.trim(), label: label.trim(), fields, description: description.trim() });
+    setObjectType(""); setLabel(""); setFieldsText(""); setDescription("");
+  };
+  return (
+    <article className="item">
+      <p className="section-title">新增自定义类型</p>
+      <label>类型 id（snake_case）
+        <input value={objectType} disabled={busy} placeholder="例如 process_window" onChange={(e) => setObjectType(e.target.value)} />
+      </label>
+      <label>显示名<input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} /></label>
+      <label>字段（逗号分隔）
+        <textarea rows={2} value={fieldsText} disabled={busy} placeholder="title, condition, limit" onChange={(e) => setFieldsText(e.target.value)} />
+      </label>
+      <label>说明<input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} /></label>
+      <button className="sort-button" disabled={busy} onClick={submit}>新增类型</button>
+    </article>
+  );
+}
+
+function SchemaManager({
+  schemas,
+  busy,
+  canInduce,
+  onPatch,
+  onCreate,
+  onDelete,
+  onInduce
+}: {
+  schemas: ObjectSchema[] | null;
+  busy: boolean;
+  canInduce: boolean;
+  onPatch: (t: string, p: Partial<ObjectSchema> & { status?: string }) => void;
+  onCreate: (p: { object_type: string; label: string; fields: string[]; description: string }) => void;
+  onDelete: (t: string) => void;
+  onInduce: () => void;
+}) {
+  if (schemas === null) return <p className="tool-hint">加载中…</p>;
+  const proposed = schemas.filter((s) => s.status === "proposed");
+  const managed = schemas.filter((s) => s.status !== "proposed");
+  return (
+    <div className="stack">
+      <div className="tag-row">
+        <button className="sort-button" disabled={busy || !canInduce} onClick={onInduce} title={canInduce ? "" : "先选择一个笔记本"}>
+          从当前笔记本归纳候选类型
+        </button>
+        {busy && <span className="tag">处理中…</span>}
+      </div>
+
+      {proposed.length > 0 && (
+        <>
+          <p className="section-title">归纳候选（建议态，待批准）</p>
+          {proposed.map((schema) => (
+            <article className="item" key={schema.object_type}>
+              <div className="tag-row">
+                <strong>{schema.object_type}</strong>
+                <span className="tag">induced</span>
+              </div>
+              {schema.rationale && <p><strong>理由：</strong>{schema.rationale}</p>}
+              <p><strong>字段：</strong>{schema.fields.join(", ")}</p>
+              <div className="tag-row">
+                <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "active" })}>批准并启用</button>
+                <button className="sort-button" disabled={busy} onClick={() => onDelete(schema.object_type)}>拒绝</button>
+              </div>
+            </article>
+          ))}
+        </>
+      )}
+
+      <p className="section-title">已有类型（{managed.length}）</p>
+      {managed.map((schema) => (
+        <SchemaRow key={schema.object_type} schema={schema} busy={busy} onPatch={onPatch} onDelete={onDelete} />
+      ))}
+
+      <NewSchemaForm busy={busy} onCreate={onCreate} />
+    </div>
+  );
+}
+
 function KnowledgeBrowser({
   kind,
   items,
+  types,
   statusFilter,
   duplicates,
   conflicts,
@@ -2080,6 +2482,7 @@ function KnowledgeBrowser({
 }: {
   kind: KnowledgeKind;
   items: KnowledgeItem[] | null;
+  types: KnowledgeTypeCount[];
   statusFilter: string;
   duplicates: DuplicateGroup[] | null;
   conflicts: ConflictPair[] | null;
@@ -2095,15 +2498,24 @@ function KnowledgeBrowser({
 }) {
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
   const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
+  const countOf = (k: string) => types.find((t) => t.object_type === k)?.count;
+  // Bespoke four tabs always shown; extra types (case/claim/finding/...) appear
+  // only once they actually exist in this notebook.
+  const tabs: Array<{ key: string; label: string; count?: number }> = [
+    ...KNOWLEDGE_KINDS.map(([k, label]) => ({ key: k, label, count: countOf(k) })),
+    ...types
+      .filter((t) => !BESPOKE_KINDS.has(t.object_type))
+      .map((t) => ({ key: t.object_type, label: t.label, count: t.count }))
+  ];
   return (
     <div className="tool-view">
       <div className="knowledge-kind-tabs">
-        {KNOWLEDGE_KINDS.map(([k, label]) => (
+        {tabs.map((tab) => (
           <button
-            key={k}
-            className={`chat-tab ${kind === k ? "active" : ""}`}
-            onClick={() => onKind(k)}
-          >{label}</button>
+            key={tab.key}
+            className={`chat-tab ${kind === tab.key ? "active" : ""}`}
+            onClick={() => onKind(tab.key)}
+          >{tab.label}{tab.count ? ` (${tab.count})` : ""}</button>
         ))}
       </div>
       <div className="tool-input-row">
@@ -2257,6 +2669,22 @@ function AnswerView({
           </div>
           <p className="section-title">Checklist</p>
           <div className="stack">{answer.checklist.map((item) => <div className="checklist-row" key={item}>{item}</div>)}</div>
+          {(answer.related_knowledge ?? []).length > 0 && (
+            <>
+              <p className="section-title">相关知识（其它类型）</p>
+              <div className="stack">
+                {(answer.related_knowledge ?? []).map((record) => (
+                  <article className="item" key={record.id}>
+                    <div className="tag-row"><span className="tag">{record.object_type}</span><span className="tag">{record.status}</span></div>
+                    <h3>{record.headline}</h3>
+                    {record.fields.slice(0, 3).map((field) => (
+                      <p key={field.key}><strong>{field.key}：</strong>{field.value}</p>
+                    ))}
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
         </div>
         <div>
           <p className="section-title">Missing Information</p>

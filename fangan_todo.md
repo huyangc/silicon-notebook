@@ -13,6 +13,13 @@
 
 ---
 
+## P0 — schema-guided 抽取（profile 注册表 + 新类型闭环 + schema 管理/归纳 + 关系图 + ask 织入 + 自我修正，全部已落地，见 fangan_done §21/§22/§23）
+> 余下的增量优化（非阻塞）：
+- [ ] **关系图升级**：当前 edges 用 headline 模糊匹配自由文本；可在抽取时直接产出 id 级关系，或加可视化布局（现为列表）。
+- [ ] **Implication Map / Inference 分层（§7.3/§7.4）**：edges 层已具备，可在其上做 supports/extends/challenges 的分型与可视化树。
+- [ ] **schema 归纳字段增补**：当前归纳只提议新「类型」；可扩展为对已有类型提议新「字段」。
+- [ ] **自我修正成本**：refine 为每来源一次额外 LLM 调用；大库可加开关/抽样。
+
 ## P1 — Article Studio 深度（方案 §7 / v0.3 余项）
 - [ ] **typed 关系下游动作（§7.2）**：claims 已有启发式 `relation_type`/`related_rule_id`/`implication` 且 derived 候选已可审核入库；仍缺 `suggests_checklist`/`creates_risk` 等关系驱动的"建议更新 checklist/新增风险"动作（目前仅展示）。
 - [ ] **Implication Map（§7.4）**：Article Claim →（supports/extends/challenges）Rule/Method/Checklist 的可视化树。无端点、无前端。

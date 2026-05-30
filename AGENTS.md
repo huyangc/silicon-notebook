@@ -24,6 +24,15 @@ Do not update only one language README when the same information should be avail
 
 Treat `fangan_done.md` as a required deliverable of finishing spec work, not an afterthought.
 
+## Full-Stack Parity (Backend ⇄ Frontend)
+
+**No half-features.** In this product, every user-facing backend capability MUST ship with a corresponding frontend UI in the same change. It is not allowed to implement only one side.
+
+- If you add a backend endpoint or data type that produces something a user should see or act on (a new knowledge type, list, action, status, field, analytics view, etc.), you MUST also add the frontend surface to view/use it — and vice versa (no frontend control that calls a missing endpoint).
+- A feature is "done" only when: backend endpoint exists, `frontend/app/page.tsx` (or its components) exposes it, `scripts/check.sh` is green, and `cd frontend && npm run build` passes.
+- Concretely, do NOT leave any object type "approvable but not browsable", any endpoint with no UI entry point, or any UI button wired to a non-existent route.
+- Purely internal/infrastructure endpoints (health checks, migrations, observability logs) are exempt — they are not user-facing. When in doubt, treat it as user-facing and build the UI.
+
 ## Product Name
 
 Use `silicon-notebook` as both the product name and project name.

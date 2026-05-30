@@ -21,7 +21,13 @@ from app.models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
     GlossaryTermCard,
+    KnowledgeGraph,
+    KnowledgeRecord,
+    KnowledgeTypeCount,
     KnowledgeUpdate,
+    ObjectSchemaCreate,
+    ObjectSchemaModel,
+    ObjectSchemaUpdate,
     MergeRequest,
     MethodCard,
     NotebookAnalytics,
@@ -106,6 +112,28 @@ class NotebookRepository(Protocol):
     def list_risks(self, notebook_id: str) -> List[RiskItemCard]: ...
 
     def list_glossary(self, notebook_id: str) -> List[GlossaryTermCard]: ...
+
+    def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]: ...
+
+    def list_knowledge(
+        self, notebook_id: str, object_type: str
+    ) -> List[KnowledgeRecord]: ...
+
+    def list_object_schemas(self) -> List[ObjectSchemaModel]: ...
+
+    def create_object_schema(
+        self, payload: ObjectSchemaCreate
+    ) -> ObjectSchemaModel: ...
+
+    def update_object_schema(
+        self, object_type: str, payload: ObjectSchemaUpdate
+    ) -> ObjectSchemaModel: ...
+
+    def delete_object_schema(self, object_type: str) -> None: ...
+
+    def propose_schemas(self, notebook_id: str) -> List[ObjectSchemaModel]: ...
+
+    def knowledge_graph(self, notebook_id: str) -> KnowledgeGraph: ...
 
     def update_knowledge(
         self, knowledge_id: str, payload: KnowledgeUpdate
