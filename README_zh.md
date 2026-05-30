@@ -204,6 +204,15 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
 - **同机 CLI**：如果 `mineru` 与后端装在同一台机器，可改用 `MINERU_MODE=cli`（无需 `MINERU_API_URL`）。
 
+- **远端 VLM 推理服务器**：若只想把 VLM 模型卸载到一台独立的 vllm/sglang 服务器（而非整套 `mineru-api`），用 client 后端并指向该服务器：
+
+  ```text
+  MINERU_BACKEND=vlm-http-client        # 或 vlm-sglang-client
+  MINERU_VLM_SERVER_URL=http://<vlm-host>:30000
+  ```
+
+  `http` 与 `cli` 两种模式都生效；非 client 后端会忽略该 URL。
+
 - **Apple Silicon 本地（MLX，离线）**：Apple Silicon 的 Mac 没有 NVIDIA GPU，但可用 MLX 加速 MinerU，因此本地也能跑同质的高保真解析：
 
   ```bash

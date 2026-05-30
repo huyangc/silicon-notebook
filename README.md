@@ -211,6 +211,15 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 
 - **Same-host CLI**: if `mineru` is installed alongside the backend, set `MINERU_MODE=cli` instead (no `MINERU_API_URL` needed).
 
+- **Remote VLM inference server**: to offload only the VLM model to a standalone vllm/sglang server (instead of the full `mineru-api`), use a client backend and point it at that server:
+
+  ```text
+  MINERU_BACKEND=vlm-http-client        # or vlm-sglang-client
+  MINERU_VLM_SERVER_URL=http://<vlm-host>:30000
+  ```
+
+  This works in both `http` and `cli` modes; the URL is ignored by non-client backends.
+
 - **Apple Silicon local (MLX, offline)**: a Mac with Apple Silicon has no NVIDIA GPU but accelerates MinerU via MLX, so you can run the same high-fidelity parsing locally:
 
   ```bash

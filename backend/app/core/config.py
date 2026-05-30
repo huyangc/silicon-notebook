@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     mineru_mode: str = Field("off", env="MINERU_MODE")
     mineru_api_url: str = Field("", env="MINERU_API_URL")
     mineru_backend: str = Field("pipeline", env="MINERU_BACKEND")
+    # Only used by the VLM *client* backends (vlm-http-client / vlm-sglang-client):
+    # the URL of a standalone VLM inference server (vllm/sglang serving MinerU's VLM).
+    mineru_vlm_server_url: str = Field("", env="MINERU_VLM_SERVER_URL")
     mineru_lang: str = Field("", env="MINERU_LANG")
     mineru_cli_bin: str = Field("mineru", env="MINERU_CLI_BIN")
     mineru_model_source: str = Field("huggingface", env="MINERU_MODEL_SOURCE")

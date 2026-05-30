@@ -66,6 +66,9 @@ class MinerUClient:
         }
         if self.settings.mineru_lang:
             fields["lang_list"] = self.settings.mineru_lang
+        # The VLM client backends need the standalone VLM server's URL.
+        if self.settings.mineru_vlm_server_url:
+            fields["server_url"] = self.settings.mineru_vlm_server_url
 
         content = Path(file_path).read_bytes()
         body, content_type = _encode_multipart(fields, "files", file_name, content)
@@ -94,6 +97,9 @@ class MinerUClient:
             ]
             if self.settings.mineru_lang:
                 command += ["--lang", self.settings.mineru_lang]
+            # The VLM client backends need the standalone VLM server's URL.
+            if self.settings.mineru_vlm_server_url:
+                command += ["-u", self.settings.mineru_vlm_server_url]
             # MinerU CLI reads model source from the process env, not our Settings.
             env = {**os.environ}
             if self.settings.mineru_model_source:
