@@ -202,7 +202,7 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
   MINERU_TIMEOUT_SECONDS=600
   ```
 
-- **同机 CLI**：如果 `mineru` 与后端装在同一台机器，可改用 `MINERU_MODE=cli`（无需 `MINERU_API_URL`）。
+- **同机 Python API**：如果 `mineru` Python 包与后端装在同一台机器，可改用 `MINERU_MODE=cli`（无需 `MINERU_API_URL`）。这个模式会在隔离子进程里调用 `mineru.cli.common.do_parse/read_fn`，不会调用 `mineru` shell 命令；因为部分 MinerU 版本的 CLI 会自行拉起本地 API server，长文档场景下更容易卡住。
 
 - **Apple Silicon 本地（MLX，离线）**：Apple Silicon 的 Mac 没有 NVIDIA GPU，但可用 MLX 加速 MinerU，因此本地也能跑同质的高保真解析：
 
@@ -216,12 +216,15 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
   ```text
   MINERU_MODE=cli
   MINERU_BACKEND=vlm-auto-engine     # Apple Silicon 上走 MLX
+  MINERU_PARSE_METHOD=auto           # 如需对齐手工 MinerU 结果，可改 txt/ocr
+  MINERU_LANG=en                     # 可选；已知 PDF 语言时建议设置
   MINERU_MODEL_SOURCE=huggingface
+  MINERU_TIMEOUT_SECONDS=1800        # 本地 VLM 跑完整论文可能超过 10 分钟
   ```
 
   `.env.example` 默认仍保持 `MINERU_MODE=off`，让其他环境默认离线安全。
 
-MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会静默降级到 pypdf，保证上传不被阻塞；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。
+MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。
 
 ## 当前限制
 

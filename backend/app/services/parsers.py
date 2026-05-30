@@ -297,7 +297,13 @@ def parse_pdf(
             elements = mineru_content_list_to_elements(source_id, content_list)
             if elements:
                 return elements
-        except Exception:
+            if hasattr(mineru_client, "last_error"):
+                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
+        except Exception as exc:
+            if hasattr(mineru_client, "last_error") and not getattr(
+                mineru_client, "last_error", ""
+            ):
+                mineru_client.last_error = str(exc)
             # Fall through to pypdf so a MinerU outage never blocks ingestion.
             pass
     return parse_pdf_pypdf(source_id, path)

@@ -859,7 +859,23 @@ class SQLiteRepository:
             elements = parse_source_file(
                 source_id, source.file_path, source.file_name, self.mineru_client
             )
-            stage("parse", "done", t, elements=len(elements), parser_mode=str(getattr(self.mineru_client, "mode", "")))
+            mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
+            element_parsers = sorted(
+                {
+                    str(element.metadata.get("parser", ""))
+                    for element in elements
+                    if element.metadata.get("parser")
+                }
+            )
+            stage(
+                "parse",
+                "done",
+                t,
+                elements=len(elements),
+                parser_mode=str(getattr(self.mineru_client, "mode", "")),
+                actual_parsers=element_parsers,
+                mineru_error=mineru_error[:500],
+            )
             summary = self._summarize_source(source.title, elements)
             with self._connect() as db:
                 self._clear_source_extraction_state(
@@ -907,7 +923,24 @@ class SQLiteRepository:
                     "No extractable text — likely a scanned/image PDF. "
                     "Enable MinerU (MINERU_MODE) or add OCR to parse it."
                 )
-            self._set_source_status(source_id, "extracted", error_message=empty_hint)
+            fallback_hint = ""
+            if (
+                source.file_name.lower().endswith(".pdf")
+                and self.mineru_client.configured
+                and elements
+                and "mineru" not in element_parsers
+            ):
+                fallback_hint = (
+                    "MinerU did not produce usable elements; fell back to pypdf text extraction. "
+                    "Check MinerU settings/logs if layout, formula, or table fidelity is expected."
+                )
+                if mineru_error:
+                    fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
+            self._set_source_status(
+                source_id,
+                "extracted",
+                error_message=empty_hint or fallback_hint,
+            )
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")

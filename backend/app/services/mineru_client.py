@@ -5,8 +5,8 @@ backend. Nothing here imports torch or MinerU at module load time:
 
   - "http" mode  -> POST the PDF to a remote `mineru-api` service (the GPU box)
                     and read back its `content_list`.
-  - "cli"  mode  -> run the local `mineru` CLI as a subprocess and read the
-                    `*_content_list.json` it writes.
+  - "cli"  mode  -> run MinerU's Python API (`do_parse` / `read_fn`) in an
+                    isolated subprocess and read the `*_content_list.json` it writes.
   - "off"  mode  -> `configured` is False; callers fall back to pypdf.
 
 The return value is always MinerU's `content_list` (a list of block dicts);
@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import signal
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import uuid
@@ -32,6 +34,7 @@ from app.core.config import Settings
 class MinerUClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.last_error = ""
 
     @property
     def configured(self) -> bool:
@@ -43,11 +46,16 @@ class MinerUClient:
 
     def parse(self, file_path: str, file_name: str) -> List[dict]:
         """Return MinerU's content_list for a PDF. Raises on failure."""
-        if self.mode == "http":
-            return self._parse_http(file_path, file_name)
-        if self.mode == "cli":
-            return self._parse_cli(file_path, file_name)
-        raise RuntimeError("MinerU is not configured")
+        self.last_error = ""
+        try:
+            if self.mode == "http":
+                return self._parse_http(file_path, file_name)
+            if self.mode == "cli":
+                return self._parse_cli(file_path, file_name)
+            raise RuntimeError("MinerU is not configured")
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
 
     # -- HTTP mode (remote mineru-api service) ---------------------------------
 
@@ -55,6 +63,7 @@ class MinerUClient:
         url = self.settings.mineru_api_url.rstrip("/") + "/file_parse"
         fields = {
             "backend": self.settings.mineru_backend,
+            "parse_method": self.settings.mineru_parse_method,
             "return_content_list": "true",
             "return_md": "false",
             "return_middle_json": "false",
@@ -75,48 +84,107 @@ class MinerUClient:
             payload = json.loads(response.read().decode("utf-8"))
         return _extract_content_list(payload)
 
-    # -- CLI mode (local mineru subprocess) ------------------------------------
+    # -- CLI mode (local MinerU Python API subprocess) -------------------------
 
     def _parse_cli(self, file_path: str, file_name: str) -> List[dict]:
         with tempfile.TemporaryDirectory(prefix="mineru-") as out_dir:
-            command = [
-                self.settings.mineru_cli_bin,
-                "-p",
-                file_path,
-                "-o",
-                out_dir,
-                "--backend",
-                self.settings.mineru_backend,
-                "--formula",
-                _bool_flag(self.settings.mineru_formula_enable),
-                "--table",
-                _bool_flag(self.settings.mineru_table_enable),
-            ]
-            if self.settings.mineru_lang:
-                command += ["--lang", self.settings.mineru_lang]
-            # MinerU CLI reads model source from the process env, not our Settings.
+            config = {
+                "file_path": file_path,
+                "file_name": file_name,
+                "out_dir": out_dir,
+                "backend": self.settings.mineru_backend,
+                "parse_method": self.settings.mineru_parse_method or "auto",
+                "lang": self.settings.mineru_lang or "ch",
+                "formula_enable": self.settings.mineru_formula_enable,
+                "table_enable": self.settings.mineru_table_enable,
+                "model_source": self.settings.mineru_model_source,
+            }
+            script_path = Path(out_dir) / "run_mineru_parse.py"
+            config_path = Path(out_dir) / "mineru_config.json"
+            script_path.write_text(_DO_PARSE_SCRIPT, encoding="utf-8")
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            command = [sys.executable, str(script_path), str(config_path)]
+            # MinerU reads model source from the process env, not our Settings.
             env = {**os.environ}
             if self.settings.mineru_model_source:
                 env["MINERU_MODEL_SOURCE"] = self.settings.mineru_model_source
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                start_new_session=(os.name != "nt"),
+            )
             try:
-                subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    timeout=self.settings.mineru_timeout_seconds,
-                    env=env,
+                stdout, stderr = process.communicate(
+                    timeout=self.settings.mineru_timeout_seconds
                 )
-            except subprocess.CalledProcessError as exc:
-                stderr = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
-                raise RuntimeError(f"MinerU CLI failed: {stderr}") from exc
+            except subprocess.TimeoutExpired as exc:
+                stdout, stderr = _terminate_process(process)
+                detail = _tail_process_output(stdout, stderr)
+                suffix = f": {detail}" if detail else ""
+                raise RuntimeError(
+                    f"MinerU Python API timed out after "
+                    f"{self.settings.mineru_timeout_seconds}s{suffix}"
+                ) from exc
+            if process.returncode != 0:
+                detail = _tail_process_output(stdout, stderr)
+                raise RuntimeError(f"MinerU Python API failed: {detail}")
             matches = sorted(Path(out_dir).rglob("*_content_list.json"))
             if not matches:
-                raise RuntimeError("MinerU CLI produced no content_list.json")
+                raise RuntimeError("MinerU Python API produced no content_list.json")
             return json.loads(matches[0].read_text(encoding="utf-8"))
 
 
-def _bool_flag(value: bool) -> str:
-    return "true" if value else "false"
+_DO_PARSE_SCRIPT = r"""
+import json
+import os
+import sys
+from pathlib import Path
+
+
+
+def main() -> None:
+    from mineru.cli.common import do_parse, read_fn
+    from mineru.utils.enum_class import MakeMode
+
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    model_source = cfg.get("model_source")
+    if model_source:
+        os.environ["MINERU_MODEL_SOURCE"] = model_source
+
+    pdf_path = Path(cfg["file_path"])
+    pdf_name = cfg.get("file_name") or pdf_path.name
+    pdf_stem = Path(pdf_name).stem or pdf_path.stem
+    pdf_bytes = read_fn(pdf_path)
+
+    do_parse(
+        output_dir=cfg["out_dir"],
+        pdf_file_names=[pdf_stem],
+        pdf_bytes_list=[pdf_bytes],
+        p_lang_list=[cfg.get("lang") or "ch"],
+        backend=cfg.get("backend") or "pipeline",
+        parse_method=cfg.get("parse_method") or "auto",
+        formula_enable=bool(cfg.get("formula_enable", True)),
+        table_enable=bool(cfg.get("table_enable", True)),
+        f_draw_layout_bbox=False,
+        f_draw_span_bbox=False,
+        f_dump_md=True,
+        f_dump_middle_json=True,
+        f_dump_model_output=False,
+        f_dump_orig_pdf=False,
+        f_dump_content_list=True,
+        f_make_md_mode=MakeMode.MM_MD,
+        start_page_id=0,
+        end_page_id=None,
+        image_analysis=True,
+        client_side_output_generation=False,
+    )
+
+
+if __name__ == "__main__":
+    main()
+"""
 
 
 def _extract_content_list(payload: object) -> List[dict]:
@@ -131,6 +199,37 @@ def _extract_content_list(payload: object) -> List[dict]:
             if isinstance(value, dict) and isinstance(value.get("content_list"), list):
                 return value["content_list"]
     raise RuntimeError("MinerU response did not contain a content_list")
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    else:
+        process.terminate()
+    try:
+        return process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        return process.communicate()
+
+
+def _tail_process_output(
+    stdout: bytes | None,
+    stderr: bytes | None,
+    limit: int = 1000,
+) -> str:
+    stdout_text = (stdout or b"").decode("utf-8", "replace")[-limit:].strip()
+    stderr_text = (stderr or b"").decode("utf-8", "replace")[-limit:].strip()
+    return "\n".join(part for part in (stderr_text, stdout_text) if part)
 
 
 def _encode_multipart(

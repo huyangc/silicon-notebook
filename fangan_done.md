@@ -90,9 +90,9 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - `SourceElement`（id / source_id / element_type / location_label / text / metadata）+ `source_elements` 表。
 - parser：Markdown（heading/paragraph/list_item）、DOCX（paragraph/table_row）、PPTX、PDF、plain text fallback。
 - **PPTX 升级为元素级**：按 shape / text box 逐个产出 `slide_text` 元素，并解析 `ppt/notesSlides/*.xml` speaker notes 为 `speaker_notes` 元素。
-- **PDF 解析经 MinerU 适配器（`mineru_client.py`）与 GPU 解耦**：`MINERU_MODE=http` 调远端 `mineru-api`，`cli` 跑本机 `mineru`，`off`（默认）用 pypdf 回退。后端不引入 torch；MinerU 不可达/出错时静默降级 pypdf。MinerU 输出映射为结构化元素：公式→`formula`（保留 LaTeX）、表格→`table`（HTML 存 metadata）、标题保留层级。
+- **PDF 解析经 MinerU 适配器（`mineru_client.py`）与 GPU 解耦**：`MINERU_MODE=http` 调远端 `mineru-api`，`cli` 在隔离 Python 子进程中调用 MinerU `do_parse/read_fn`，`off`（默认）用 pypdf 回退。FastAPI 后端进程不引入 torch/MinerU；MinerU 不可达/出错时降级 pypdf，并在 pipeline log / source `error_message` 留下回退诊断。MinerU 输出映射为结构化元素：公式→`formula`（保留 LaTeX）、表格→`table`（HTML 存 metadata）、标题保留层级。
 - **off 回退质量已提升**：`parse_pdf_pypdf` 改用 pypdf **layout 抽取模式**（更好的阅读顺序、行/列间距），并按空行切分为 `heading` / `page_text` 元素（不再单块压平）；零新依赖、许可证友好。无公式/表格保真（那需 MinerU）。
-- **本机已启用 MinerU(MLX)**：本机为 Apple Silicon，已装 `mineru[core]` + `mlx-vlm`（VLM 模型 MinerU2.5-Pro 已下载），`.env` 设 `MINERU_MODE=cli`、`MINERU_BACKEND=vlm-auto-engine`，`vlm-auto-engine` 自动走 MLX 引擎（实测单页约 20s，模型载入 ~2.8s）。公式/表格/版面离线可得。
+- **本机已启用 MinerU(MLX)**：本机为 Apple Silicon，已装 `mineru[core]` + `mlx-vlm`（VLM 模型 MinerU2.5-Pro 已下载），`.env` 设 `MINERU_MODE=cli`、`MINERU_BACKEND=vlm-auto-engine`、`MINERU_PARSE_METHOD=auto`、`MINERU_LANG=en`、`MINERU_TIMEOUT_SECONDS=1800`，`vlm-auto-engine` 自动走 MLX 引擎（Engram 第一页实测 24.57s，完整论文可能超过 600s）。公式/表格/版面离线可得。
 - **空 PDF 止血**：PDF 解析出 0 元素时写明确提示（疑似扫描/图片型 PDF，需 MinerU/OCR），避免"假成功空结果"。
 - 每个元素带 `location_label`，作为 evidence citation 锚点。
 - `.env.example` 默认仍保持 `MINERU_MODE=off`，其它环境默认离线 pypdf。

@@ -48,9 +48,9 @@ LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic �
 ### 2.1 文档解析（parsers.py + mineru_client.py）
 - 按扩展名分发：Markdown（heading/paragraph/list_item）、DOCX（paragraph/table_row）、PPTX（按 shape 的 `slide_text` + `speaker_notes`）、PDF、plain text 回退。
 - **PDF 与 GPU 解耦的 MinerU 适配器**（`MINERU_MODE`）：
-  - `http` → POST 远端 `mineru-api` `/file_parse`；`cli` → subprocess 本机 `mineru`（Apple Silicon 自动走 MLX）；`off`（默认）→ pypdf 纯文本。
+  - `http` → POST 远端 `mineru-api` `/file_parse`；`cli` → 隔离子进程调用 MinerU Python API（`do_parse/read_fn`，Apple Silicon 可走 MLX）；`off`（默认）→ pypdf 纯文本。
   - MinerU 的 `content_list` 经 `mineru_content_list_to_elements` 映射为结构化 `SourceElement`：公式→`formula`（保留 LaTeX，去 `$$`）、表格→`table`（HTML 存 `metadata.table_html`，正文展平）、标题保留 `text_level`、`page_idx` 转 1-based。
-  - MinerU 不可达/报错或产出空 → **静默回退 pypdf**，上传永不阻塞。PDF 解析出 0 元素时给"疑似扫描件"提示。
+  - MinerU 不可达/报错或产出空 → 回退 pypdf，上传永不阻塞；pipeline log / source `error_message` 会保留回退诊断。PDF 解析出 0 元素时给"疑似扫描件"提示。
 - 每个元素带 `location_label`，作为 evidence/citation 锚点。
 
 ### 2.2 嵌入（sqlite_repository `_embed_source` / `_embed_query`）
@@ -139,7 +139,7 @@ LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic �
 
 ### 3.6 配置开关（`.env` / config.py）
 - LLM：`OPENAI_COMPAT_BASE_URL/API_KEY/MODEL/EMBEDDING_MODEL/TIMEOUT_SECONDS`（`llm_configured` / `embedding_configured`）。
-- MinerU：`MINERU_MODE(off|http|cli)`、`MINERU_API_URL`、`MINERU_BACKEND`、`MINERU_MODEL_SOURCE`、`MINERU_TIMEOUT_SECONDS`、`MINERU_FORMULA_ENABLE`、`MINERU_TABLE_ENABLE`。
+- MinerU：`MINERU_MODE(off|http|cli)`、`MINERU_API_URL`、`MINERU_BACKEND`、`MINERU_PARSE_METHOD`、`MINERU_LANG`、`MINERU_MODEL_SOURCE`、`MINERU_TIMEOUT_SECONDS`、`MINERU_FORMULA_ENABLE`、`MINERU_TABLE_ENABLE`。
 - 存储/CORS：`DATABASE_URL`、`SILICON_NOTEBOOK_STORAGE_DIR`、`SILICON_NOTEBOOK_CORS_ORIGINS`。
 
 ### 3.7 验证

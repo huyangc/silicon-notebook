@@ -209,7 +209,7 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
   MINERU_TIMEOUT_SECONDS=600
   ```
 
-- **Same-host CLI**: if `mineru` is installed alongside the backend, set `MINERU_MODE=cli` instead (no `MINERU_API_URL` needed).
+- **Same-host Python API**: if the `mineru` Python package is installed alongside the backend, set `MINERU_MODE=cli` instead (no `MINERU_API_URL` needed). This mode runs `mineru.cli.common.do_parse/read_fn` in an isolated subprocess; it does not invoke the `mineru` shell command, because that command can start its own local API server on some MinerU versions.
 
 - **Apple Silicon local (MLX, offline)**: a Mac with Apple Silicon has no NVIDIA GPU but accelerates MinerU via MLX, so you can run the same high-fidelity parsing locally:
 
@@ -223,12 +223,15 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
   ```text
   MINERU_MODE=cli
   MINERU_BACKEND=vlm-auto-engine     # uses MLX on Apple Silicon
+  MINERU_PARSE_METHOD=auto           # set txt/ocr when you need to match a manual MinerU run
+  MINERU_LANG=en                     # optional; set when the PDF language is known
   MINERU_MODEL_SOURCE=huggingface
+  MINERU_TIMEOUT_SECONDS=1800        # local VLM can need >10 min for full papers
   ```
 
   Keep `MINERU_MODE=off` in `.env.example` so other environments stay offline-safe by default.
 
-MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion silently degrades to pypdf so uploads never block; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
+MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion degrades to pypdf so uploads never block, while pipeline logs and the source `error_message` keep the fallback diagnostic; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
 
 ## Current Limitations
 

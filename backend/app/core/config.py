@@ -51,12 +51,12 @@ class Settings(BaseSettings):
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use the built-in pypdf text fallback (default; no GPU, offline)
     #   "http" -> call a remote MinerU service (mineru-api) at mineru_api_url
-    #   "cli"  -> run the local `mineru` CLI as a subprocess (MinerU installed on host)
+    #   "cli"  -> run MinerU's Python API in an isolated subprocess
     mineru_mode: str = Field("off", env="MINERU_MODE")
     mineru_api_url: str = Field("", env="MINERU_API_URL")
     mineru_backend: str = Field("pipeline", env="MINERU_BACKEND")
+    mineru_parse_method: str = Field("auto", env="MINERU_PARSE_METHOD")
     mineru_lang: str = Field("", env="MINERU_LANG")
-    mineru_cli_bin: str = Field("mineru", env="MINERU_CLI_BIN")
     mineru_model_source: str = Field("huggingface", env="MINERU_MODEL_SOURCE")
     mineru_timeout_seconds: int = Field(600, env="MINERU_TIMEOUT_SECONDS")
     mineru_formula_enable: bool = Field(True, env="MINERU_FORMULA_ENABLE")
@@ -106,7 +106,7 @@ class Settings(BaseSettings):
         if mode == "http":
             return bool(self.mineru_api_url)
         if mode == "cli":
-            return bool(self.mineru_cli_bin)
+            return True
         return False
 
     @property
