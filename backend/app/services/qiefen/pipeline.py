@@ -11,7 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional
 
 from app.services.qiefen import (
-    atomizer, chunker, do_not_extract, mentions, objects, packager, relations,
+    atom_selector, atomizer, chunker, do_not_extract, mentions, objects,
+    packager, relations,
 )
 from app.services.qiefen.models import EvidenceAtom, QiefenDocument, SourceMeta
 from app.services.qiefen.profiles import extraction_targets
@@ -26,6 +27,8 @@ MAX_RELATION_OBJECTS = 80
 # per-package calls are independent, so a thread pool turns ~N sequential calls
 # into ~N/workers waves. Override with QIEFEN_LLM_WORKERS.
 LLM_MAX_WORKERS = int(os.environ.get("QIEFEN_LLM_WORKERS", "8"))
+# Experiment: LLM atom selection BEFORE chunking (textbook only). Off by default.
+_ATOM_SELECT = os.environ.get("QIEFEN_ATOM_SELECT", "0") != "0"
 
 _HIGH_VALUE_ATOM_TYPES = {
     "formula_atom", "table_header_atom", "table_row_atom", "table_caption_atom",
@@ -66,6 +69,19 @@ def run(source_text: str, source_file: str, profile: str,
         sec_elements = [e for e in elements if section_of[e.id] == sid
                         and e.type != "heading"]
         atoms.extend(atomizer.atomize(source_text, sec_elements, sid, profile))
+
+    # Optional LLM atom selection (textbook) BEFORE chunking, so every downstream
+    # stage (chunks/packages/objects) is built on the curated atom set — no
+    # alignment perturbation (unlike post-hoc curation).
+    if (_ATOM_SELECT and profile == "textbook" and atoms
+            and client is not None and getattr(client, "configured", False)):
+        try:
+            client.client()  # pre-warm before the selector's thread pool
+        except Exception:
+            pass
+        keep = atom_selector.select_core_atoms(client, atoms, profile, LLM_MAX_WORKERS)
+        if keep:
+            atoms = [a for a in atoms if a.id in keep]
 
     chunks = chunker.build_chunks(atoms, profile, section_paths)
     atoms_by_id = {a.id: a for a in atoms}
