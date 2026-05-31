@@ -40,6 +40,9 @@ def main():
                          "engram/ch00_abstract,cmos/ch01_introduction")
     ap.add_argument("--no-llm", action="store_true",
                     help="skip the LLM stages (deterministic S1-S5 only)")
+    ap.add_argument("--chapter-workers", type=int, default=14,
+                    help="how many chapters to process concurrently (each chapter "
+                         "also runs its packages concurrently via QIEFEN_LLM_WORKERS)")
     args = ap.parse_args()
     # Resolve to absolute: the harness runs with cwd=GOLD, so a relative
     # pred-root would otherwise be looked up relative to the wrong directory.
@@ -49,12 +52,13 @@ def main():
     client = None if args.no_llm else default_client()
     if client is not None and getattr(client, "configured", False):
         print(f"LLM: {client.settings.openai_compat_model} @ {client.settings.openai_compat_base_url}")
+        client.client()  # single-threaded pre-warm before fan-out (avoid init race)
     else:
         print("LLM: not configured -> deterministic only")
 
+    jobs = []
     for gp in sorted(GOLD.glob("*/ch*/gold.yaml")):
-        chapter_dir = gp.parent
-        rel = chapter_dir.relative_to(GOLD)
+        rel = gp.parent.relative_to(GOLD)
         if only and str(rel) not in only:
             continue
         meta = yaml.safe_load(gp.read_text(encoding="utf-8"))["source_meta"]
@@ -62,7 +66,10 @@ def main():
         if not src_path or not src_path.exists():
             print(f"skip {rel}: source missing")
             continue
-        src = src_path.read_text(encoding="utf-8")
+        jobs.append((rel, meta, src_path.read_text(encoding="utf-8")))
+
+    def _process(job):
+        rel, meta, src = job
         doc = run(src, source_file=meta["source_file"], profile=meta["profile"],
                   line_range=meta.get("source_line_range"),
                   source_id=meta.get("source_id", ""), title=meta.get("title", ""),
@@ -70,8 +77,17 @@ def main():
         dst = out_root / rel
         dst.mkdir(parents=True, exist_ok=True)
         (dst / "pred.yaml").write_text(to_yaml(doc), encoding="utf-8")
-        print(f"wrote {rel}/pred.yaml ({len(doc.evidence_atoms)} atoms, "
-              f"{len(doc.objects)} objects, {len(doc.relations)} relations)")
+        return (f"wrote {rel}/pred.yaml ({len(doc.evidence_atoms)} atoms, "
+                f"{len(doc.objects)} objects, {len(doc.relations)} relations)")
+
+    # Chapters are independent -> process them concurrently. Combined with the
+    # per-chapter package pool, this fans out to chapter_workers x QIEFEN_LLM_WORKERS
+    # concurrent calls (the flash endpoint allows thousands).
+    workers = max(1, min(args.chapter_workers, len(jobs))) if (client and jobs) else 1
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for line in pool.map(_process, jobs):
+            print(line)
 
     # Run the harness.
     cmd = [sys.executable, "-m", "harness.run_all", "--gold-root", ".",
