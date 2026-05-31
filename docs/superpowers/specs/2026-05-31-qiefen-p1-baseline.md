@@ -97,6 +97,24 @@ lift is smaller because payload is 0.13 weight and textbook atoms/chunks drag).
 The article pipeline is strong end-to-end; the remaining ceiling is **textbook
 atom over-extraction** (atoms 0.20 + chunks 0.15 = 0.35 weight, near-zero on cmos).
 
+## Textbook atom ceiling — investigated, not cheaply fixable
+
+The textbook composite (cmos 18.8) is dragged by atom over-extraction (atoms
+0.20 + chunks 0.15 = 0.35 weight near-zero). Three curation approaches were
+tried and ALL are net-negative:
+1. deterministic selectivity (P0.5c) — cue heuristics over/under-match.
+2. curate atoms to object **evidence** — LLM cites a different subset than gold.
+3. explicit LLM **core_atom_ids** selection — atoms ticked up (ch01 0.16->0.19,
+   count 136->48 vs gold 38) but **objects dropped** (0.59->0.44) and total fell.
+
+Root cause (robust): the harness object alignment keys on `atom_p2g` (local-
+evidence atom overlap). **Dropping any atoms perturbs that alignment**, so the
+small atom-precision gain is outweighed by object-alignment loss — regardless of
+how atoms are picked. The ceiling is the over-extraction at atomization time
+(matching a human's "which 38 of 530 sentences matter"), an irreducible semantic-
+curation gap without a much heavier (and uncertain) dedicated atomizer. All three
+experiments were reverted; the pipeline stays at mean 28.68 (article 34.2).
+
 ## Real extraction quality (this is what actually improved)
 
 - **objects 0.474** type-strict — per chapter: engram/ch00 **0.89**, ch01 0.64,
