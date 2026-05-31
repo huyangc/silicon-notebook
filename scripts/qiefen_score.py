@@ -36,7 +36,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(REPO / "harness_out" / "qiefen_pred"))
     args = ap.parse_args()
-    out_root = pathlib.Path(args.out)
+    # Resolve to absolute: the harness runs with cwd=GOLD, so a relative
+    # pred-root would otherwise be looked up relative to the wrong directory.
+    out_root = pathlib.Path(args.out).resolve()
 
     for gp in sorted(GOLD.glob("*/ch*/gold.yaml")):
         chapter_dir = gp.parent
