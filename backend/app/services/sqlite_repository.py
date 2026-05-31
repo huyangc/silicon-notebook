@@ -1028,11 +1028,11 @@ class SQLiteRepository:
                 (run_id, source.notebook_id, source_id, "candidate", "running", "", now, now),
             )
         try:
-            records = run_extraction(
-                self.llm_client, elements, source.title, profile, registry
-            )
+            records = self._extract_records(source, elements, profile, registry)
             extraction_mode = (
-                "llm"
+                "qiefen"
+                if any(record.extraction_mode == "qiefen" for record in records)
+                else "llm"
                 if any(record.extraction_mode == "llm" for record in records)
                 else "heuristic"
             )
@@ -1079,6 +1079,38 @@ class SQLiteRepository:
                     ("failed", str(exc), _now(), run_id),
                 )
             raise
+
+    def _extract_records(self, source, elements, profile, registry):
+        """Paper/textbook sources go through the qiefen pipeline; everything else
+        keeps the legacy extractor. Qiefen needs raw text + char offsets, so we
+        use the raw file for markdown/text and reconstruct it from elements
+        otherwise."""
+        from app.services.qiefen_ingest import (
+            QIEFEN_PROFILE_BY_DOCTYPE, qiefen_doc_to_candidates, reconstruct_markdown,
+        )
+
+        qprofile = QIEFEN_PROFILE_BY_DOCTYPE.get(profile.id)
+        if qprofile and getattr(self.llm_client, "configured", False):
+            from app.services.qiefen.pipeline import run as qiefen_run
+
+            source_text = self._source_text_for_qiefen(source, elements, reconstruct_markdown)
+            doc = qiefen_run(
+                source_text, source_file=(source.file_name or "source.md"),
+                profile=qprofile, source_id=source.id, title=source.title,
+                client=self.llm_client,
+            )
+            return qiefen_doc_to_candidates(doc, source.id, source.title)
+        return run_extraction(self.llm_client, elements, source.title, profile, registry)
+
+    def _source_text_for_qiefen(self, source, elements, reconstruct_markdown):
+        path = getattr(source, "file_path", "") or ""
+        name = (source.file_name or "").lower()
+        if path and name.endswith((".md", ".markdown", ".txt")):
+            try:
+                return self._resolve_path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        return reconstruct_markdown(elements)
 
     def _embed_source(self, source_id: str) -> None:
         if not self.settings.embedding_configured:
