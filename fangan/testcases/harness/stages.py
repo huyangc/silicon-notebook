@@ -131,6 +131,15 @@ def _payload_field_prf(gold_objs, pred_objs, matches, judge=None):
         fp += len(pool)
         if missed_vals:
             gaps.append({"gold_id": gid, "pred_id": pid, "missing_values": missed_vals})
+    # Recall-aware: every gold object the candidate did NOT match contributes its
+    # payload fields as misses (fn). Without this, a candidate that extracts no
+    # objects has zero matched pairs and metrics.prf(0,0,0)==1.0 — a vacuous
+    # perfect score that rewards extracting nothing. (Gold-vs-gold is unaffected:
+    # every gold object matches itself, so there are no unmatched gold objects.)
+    matched_gold = {gid for gid, _pid, _ in matches}
+    for gobj in gold_objs:
+        if gobj.get("id") not in matched_gold:
+            fn += len(textnorm.payload_values(gobj.get("payload")))
     pr = metrics.prf(tp, fp, fn)
     pr["gaps"] = gaps
     return pr
@@ -160,7 +169,11 @@ def score_objects(gold_objs, pred_objs, atom_p2g, judge=None):
     wrong = n - type_ok
     pr = metrics.prf(type_ok, len(al["unmatched_pred"]) + wrong, len(al["unmatched_gold"]) + wrong)
     payload = _payload_field_prf(gold_objs, pred_objs, al["matches"], judge=judge)
-    mean_jac = (sum(ev_jaccards) / len(ev_jaccards)) if ev_jaccards else 1.0
+    # Recall-aware evidence: average local-evidence Jaccard over ALL gold objects
+    # (unmatched gold objects contribute 0), so zero predictions -> 0.0 rather
+    # than a vacuous 1.0. Gold-vs-gold still scores 1.0 (every gold object
+    # matches itself). Empty gold (no objects to evaluate) stays 1.0.
+    mean_jac = (sum(ev_jaccards) / len(gold_objs)) if gold_objs else 1.0
     return {
         "score": pr["f1"],
         "prf": pr,

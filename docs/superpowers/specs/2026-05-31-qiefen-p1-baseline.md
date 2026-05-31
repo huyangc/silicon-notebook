@@ -42,6 +42,36 @@ extracting nothing on these two buckets.
 
 This is an edge-case flaw in the harness, not a regression in extraction.
 
+## Resolution: harness fixed (recall-aware), re-scored
+
+`harness/stages.py` was fixed so `object_payload`/`object_evidence` average over
+ALL gold objects (unmatched gold contributes 0/fn) instead of only matched
+pairs — zero predictions now score 0, not a vacuous 1.0. Gold-vs-gold still
+scores 100 (54 self-tests pass; every gold object matches itself).
+
+Re-scored with the fixed harness (same predictions):
+
+| | mean weighted |
+| --- | --: |
+| deterministic only (no objects) | **12.7** |
+| **+ LLM (P1)** | **27.1** (+14.4, +113%) |
+
+| stage | weight | det | +LLM | Δ |
+| --- | --: | --: | --: | --: |
+| evidence_atoms | 0.20 | 0.198 | 0.198 | 0.000 |
+| semantic_chunks | 0.15 | 0.081 | 0.081 | 0.000 |
+| objects | 0.12 | 0.000 | 0.474 | +0.474 |
+| object_payload | 0.13 | 0.000 | 0.107 | +0.107 |
+| object_evidence | 0.10 | 0.000 | 0.276 | +0.276 |
+| relations | 0.15 | 0.000 | 0.115 | +0.115 |
+| context_packages | 0.05 | 0.107 | 0.685 | +0.577 |
+| do_not_extract | 0.05 | 1.000 | 0.972 | -0.028 |
+| structure | 0.05 | 0.389 | 0.417 | +0.029 |
+
+Under fair scoring P1 is a clear, large net gain. Article (engram) 32.0,
+textbook (cmos) 18.3. Remaining levers: object_payload (0.107), relations
+(0.115), and the textbook atom-curation ceiling (atoms 0.198 / chunks 0.081).
+
 ## Real extraction quality (this is what actually improved)
 
 - **objects 0.474** type-strict — per chapter: engram/ch00 **0.89**, ch01 0.64,
