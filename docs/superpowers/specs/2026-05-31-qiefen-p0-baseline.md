@@ -65,6 +65,31 @@ The exhaustive-vs-curated mismatch means a pure "atomize every sentence" P0 cann
 
 Recommendation: **(B) for a quick precision lift on textbook chapters, then (A)'s cheap structural wins**, re-baseline, and set the firm number from the second run. Decision pending user input.
 
+## P0.5 deterministic tuning round (same day)
+
+After the 32.98 baseline, three deterministic improvements were applied:
+
+| change | stage moved | before -> after |
+| --- | --- | --- |
+| numeric-chain section paths (`2 > 2.1`, `Chapter 1` -> `1`) | structure | 0.036 -> **0.389** |
+| table `<tr>` -> header/row atoms; `Table N` caption detection | atoms (recall) | — |
+| textbook atom selectivity + de-noised cues (drop narrative; image-embed & `<details>` noise; numbered-only problem cue) | atoms (precision) | 0.137 -> **0.198** |
+
+**Mean weighted: 32.98 -> 35.41 / 100.**
+
+Where the gains landed and the honest ceiling:
+- **Structure** was the cheap 10x win (section-path F1 ~0.78; the rest of the 0.05 bucket is mentions, which are P1).
+- **Article atoms improved broadly** (ch04 0->0.37, ch05 0->0.19, ch06 0.11->0.23; abstract stays 0.76) because gold curates article sentences lightly and our keep-all + cue typing tracks it.
+- **Textbook large-chapter atoms stay precision-bound.** cmos/ch01 recall is decent (21/38 gold atoms match at IoU>=0.5) but we still emit ~3.5x gold's count; cmos/ch02–09 stay ~0. The residual is **semantic curation** — *which* of many definitions/principles gold keeps — which cue heuristics cannot capture without overfitting one chapter. This is precisely the job of the P1 LLM object stage (it selects `local_evidence_atom_ids`), so further deterministic atom tuning was stopped here to avoid overfitting.
+
+## Recommended firm P0 acceptance line
+
+- evidence_atoms (det. ceiling): **>= 0.20 mean** (reached: 0.198) — higher requires P1 selectivity.
+- semantic_chunks: downstream of atoms; revisit after P1.
+- structure: **>= 0.38** (reached: 0.389).
+- do_not_extract: **= 1.0** (reached).
+- The path to a materially higher total is **P1 (LLM objects/relations/mentions)** — 0.50 of the weight is currently 0 — not more deterministic atom tuning.
+
 ## Artifacts
 
 `harness_out/` is git-ignored (generated; some pred.yaml are large). Regenerate with the command at the top.
