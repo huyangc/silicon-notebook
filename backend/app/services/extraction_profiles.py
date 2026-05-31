@@ -184,6 +184,54 @@ OBJECT_TYPE_LABELS: Dict[str, str] = {
 }
 
 
+# --- qiefen object types (§ P2 cutover) -----------------------------------
+# Generated from the qiefen pipeline's profile vocabularies so the schema
+# registry / knowledge-browse tabs surface qiefen objects (ArticleClaim,
+# Concept, Formula, ...) with their payload fields, kept in sync in one place.
+_QIEFEN_LIST_FIELDS = {
+    "mechanism", "steps", "variables", "applies_to", "properties",
+    "controls", "contrasts_with",
+}
+_QIEFEN_TYPE_LABELS = {
+    "ArticleClaim": "论文主张 ArticleClaim", "ArticleMethod": "方法 ArticleMethod",
+    "ArchitectureComponent": "架构组件 ArchitectureComponent",
+    "ScalingLaw": "标度律 ScalingLaw", "ExperimentSetup": "实验设置 ExperimentSetup",
+    "ExperimentResult": "实验结果 ExperimentResult",
+    "AblationFinding": "消融发现 AblationFinding",
+    "MechanisticExplanation": "机制解释 MechanisticExplanation",
+    "SystemDesignClaim": "系统设计主张 SystemDesignClaim",
+    "Limitation": "局限 Limitation", "Implication": "推论 Implication",
+    "Concept": "概念 Concept", "Definition": "定义 Definition",
+    "Formula": "公式 Formula", "Variable": "变量 Variable",
+    "Derivation": "推导 Derivation", "ExampleProblem": "例题 ExampleProblem",
+    "ExampleSolution": "解法 ExampleSolution",
+    "TechnologyProcess": "工艺步骤 TechnologyProcess",
+    "ProcessFlow": "工艺流程 ProcessFlow", "ComponentModel": "器件模型 ComponentModel",
+    "PhysicalEffect": "物理效应 PhysicalEffect",
+    "DesignPrinciple": "设计原则 DesignPrinciple", "DesignRule": "设计规则 DesignRule",
+    "ProblemStatement": "习题 ProblemStatement",
+}
+
+
+def _register_qiefen_types() -> None:
+    from app.services.qiefen.profiles import ARTICLE_OBJECTS, TEXTBOOK_OBJECTS
+    for type_name, fields in {**ARTICLE_OBJECTS, **TEXTBOOK_OBJECTS}.items():
+        if type_name in OBJECT_SCHEMAS:
+            continue
+        OBJECT_SCHEMAS[type_name] = ObjectSchema(
+            type=type_name,
+            plural=type_name.lower() + "s",
+            fields=list(fields),
+            primary=fields[0] if fields else "",
+            description=f"a {type_name} extracted by the qiefen pipeline",
+            list_fields=[f for f in fields if f in _QIEFEN_LIST_FIELDS],
+        )
+        OBJECT_TYPE_LABELS.setdefault(type_name, _QIEFEN_TYPE_LABELS.get(type_name, type_name))
+
+
+_register_qiefen_types()
+
+
 @dataclass(frozen=True)
 class ExtractionProfile:
     """A document-type lens: which object types to extract + framing."""
