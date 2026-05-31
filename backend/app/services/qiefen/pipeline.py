@@ -6,6 +6,8 @@ and the output is the deterministic P0 document.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional
 
 from app.services.qiefen import (
@@ -20,6 +22,10 @@ from app.services.qiefen.source_elements import parse_elements
 MAX_PACKAGES_PER_CHAPTER = 60
 # Cap objects fed to the single per-chapter relation call.
 MAX_RELATION_OBJECTS = 80
+# Concurrent per-package object LLM calls (DeepSeek allows concurrency). The
+# per-package calls are independent, so a thread pool turns ~N sequential calls
+# into ~N/workers waves. Override with QIEFEN_LLM_WORKERS.
+LLM_MAX_WORKERS = int(os.environ.get("QIEFEN_LLM_WORKERS", "8"))
 
 _HIGH_VALUE_ATOM_TYPES = {
     "formula_atom", "table_header_atom", "table_row_atom", "table_caption_atom",
@@ -101,12 +107,27 @@ def _run_llm_stages(client, packages, atoms_by_id, profile):
     selected = sorted(packages, key=_package_value, reverse=True)[:MAX_PACKAGES_PER_CHAPTER]
     selected_ids = {p.id for p in selected}
 
-    all_objects = []
+    # Pre-warm the lazily-built OpenAI client so concurrent threads don't race
+    # to initialize it.
+    try:
+        client.client()
+    except Exception:
+        pass
+
+    # Object extraction per package is independent -> run concurrently.
+    def _extract(pkg):
+        return pkg.id, objects.extract_objects(client, pkg, profile, atom_text)
+
     objs_by_pkg = {}
+    if selected:
+        workers = max(1, min(LLM_MAX_WORKERS, len(selected)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for pid, pkg_objs in pool.map(_extract, selected):
+                objs_by_pkg[pid] = pkg_objs
+    # Rebuild in deterministic (selected) order regardless of completion order.
+    all_objects = []
     for pkg in selected:
-        pkg_objs = objects.extract_objects(client, pkg, profile, atom_text)
-        objs_by_pkg[pkg.id] = pkg_objs
-        all_objects.extend(pkg_objs)
+        all_objects.extend(objs_by_pkg.get(pkg.id, []))
 
     # Backfill each package's expected_objects (only the packages we extracted).
     for pkg in packages:
