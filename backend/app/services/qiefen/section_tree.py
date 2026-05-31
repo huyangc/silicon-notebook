@@ -1,37 +1,58 @@
-"""S2: heading elements -> SectionNode list with breadcrumb `path` joined by
-' > ', matching the gold normalization (section paths are scored as a set)."""
+"""S2: heading elements -> SectionNode list with breadcrumb `path`.
+
+Gold normalizes paths to the NUMERIC label chain, not the heading prose:
+  "# 2. Architecture"        -> "2"
+  "# 2.1. Overview"          -> "2 > 2.1"
+  "# Chapter 1 ..."          -> "1"
+  "# 1.1 Analog ..."         -> "1 > 1.1"
+  "# Abstract"               -> "Abstract"          (unnumbered, no chapter yet)
+  "# PROBLEMS" (under ch.1)  -> "1 > ... > PROBLEMS" (unnumbered -> current chain)
+Numbering drives nesting because MinerU emits every heading at level 1 (`#`),
+so the markdown level cannot be trusted. Section paths are scored as a set of
+normalized strings (harness `score_structure`), so matching the numeric chain
+of the numbered sections — the large majority of gold nodes — is what counts.
+"""
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
 from app.services.qiefen.models import SectionNode, SourceElementQ
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+# Leading numeric label, optionally prefixed by Chapter/Section. Captures the
+# dotted number ("2", "2.1", "1.1"); a trailing dot ("2.1.") is not captured.
+_NUM = re.compile(r"^(?:chapter|section)?\s*(\d+(?:\.\d+)*)\b", re.IGNORECASE)
 
 
-def _level_and_title(el: SourceElementQ) -> tuple[int, str]:
+def _heading_title(el: SourceElementQ) -> str:
     m = _HEADING.match(el.text)
-    if m:
-        return len(m.group(1)), m.group(2).strip()
-    return int(el.metadata.get("level", 1) or 1), el.text.strip()
+    return m.group(2).strip() if m else el.text.strip()
+
+
+def _numeric_label(title: str) -> Optional[str]:
+    m = _NUM.match(title)
+    return m.group(1) if m else None
 
 
 def build_section_tree(elements: List[SourceElementQ]) -> List[SectionNode]:
     nodes: List[SectionNode] = []
-    stack: List[tuple[int, str, str]] = []  # (level, node_id, title)
     counter = 0
+    cur_chain: List[str] = []  # numeric prefix chain of the last numbered heading
     for el in elements:
         if el.type != "heading":
             continue
-        level, title = _level_and_title(el)
-        while stack and stack[-1][0] >= level:
-            stack.pop()
+        title = _heading_title(el)
+        num = _numeric_label(title)
+        if num:
+            parts = num.split(".")
+            chain = [".".join(parts[: i + 1]) for i in range(len(parts))]
+            path = " > ".join(chain)
+            cur_chain = chain
+        elif cur_chain:
+            path = " > ".join(cur_chain + [title])
+        else:
+            path = title
         counter += 1
-        node_id = f"SEC-{counter}"
-        parent_id = stack[-1][1] if stack else None
-        path = " > ".join([t for _, _, t in stack] + [title])
-        nodes.append(SectionNode(id=node_id, path=path, title=title,
-                                 parent=parent_id))
-        stack.append((level, node_id, title))
+        nodes.append(SectionNode(id=f"SEC-{counter}", path=path, title=title))
     return nodes
