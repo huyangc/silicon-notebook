@@ -60,6 +60,47 @@ def _score_parallel(pred_root, judge, workers):
     return agg
 
 
+def _prewarm_judge(pred_root, judge, workers):
+    """Fire every needed (gold,pred) payload comparison concurrently to fill the
+    judge cache, so the (sequential) scoring afterwards is all cache hits.
+
+    Enumerates, per chapter, the payload value pairs of aligned object pairs that
+    FAIL deterministic matching — exactly the pairs the judge would be asked
+    about. A superset is fine (unused cache entries are harmless)."""
+    import glob
+    from concurrent.futures import ThreadPoolExecutor
+    from harness import stages, align, textnorm
+    from harness.config import THRESHOLDS
+
+    pairs = set()
+    for gp in sorted(glob.glob(str(GOLD / "*" / "ch*" / "gold.yaml"))):
+        doc = os.path.basename(os.path.dirname(os.path.dirname(gp)))
+        chapter = os.path.basename(os.path.dirname(gp))
+        cand = os.path.join(str(pred_root), doc, chapter, "pred.yaml")
+        if not os.path.exists(cand):
+            continue
+        gold = yaml.safe_load(open(gp, encoding="utf-8"))
+        pred = yaml.safe_load(open(cand, encoding="utf-8"))
+        atom_p2g = stages.score_atoms(gold.get("evidence_atoms"),
+                                      pred.get("evidence_atoms"))["alignment"]["p2g"]
+        gobjs = {o["id"]: o for o in (gold.get("objects") or [])}
+        pobjs = {o["id"]: o for o in (pred.get("objects") or [])}
+        al = align.match_objects(gold.get("objects") or [], pred.get("objects") or [],
+                                 atom_p2g, THRESHOLDS["object_match"])
+        for gid, pid, _ in al["matches"]:
+            gvals = textnorm.payload_values(gobjs[gid].get("payload"))
+            pvals = textnorm.payload_values(pobjs[pid].get("payload"))
+            for gv in gvals:
+                for pv in pvals:
+                    if not textnorm.text_equiv(gv, pv):  # deterministic miss -> judge
+                        pairs.add((gv, pv))
+    pairs = list(pairs)
+    print(f"pre-warming judge cache: {len(pairs)} comparisons @ {workers} concurrent")
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(lambda gp: judge(gp[0], gp[1]), pairs))
+    return judge
+
+
 def _make_judge_backend(client):
     """A semantic-equivalence backend (gold_text, pred_text)->bool using the LLM.
     Only consulted when deterministic substring matching already failed."""
@@ -156,7 +197,9 @@ def main():
     if args.llm_judge and client is not None and getattr(client, "configured", False):
         from harness.judge import make_judge
         judge = make_judge(enabled=True, backend=_make_judge_backend(client))
-        print("scoring with LLM judge (semantic payload equivalence, parallel)...")
+        judge_workers = int(os.environ.get("QIEFEN_JUDGE_WORKERS", "200"))
+        _prewarm_judge(out_root, judge, judge_workers)  # fill cache concurrently
+        print("scoring with LLM judge (semantic payload equivalence, cached)...")
         agg = _score_parallel(out_root, judge, workers)
         print(f"mean {agg['mean_weighted_score']} / 100 over "
               f"{agg['chapters_scored']} chapters (LLM-judged)")
