@@ -20,3 +20,12 @@ def test_atoms_grouped_by_section_each_in_one_chunk():
     # every atom appears in exactly one chunk
     seen = [a for c in chunks for a in c.atom_ids]
     assert sorted(seen) == ["A1", "A2", "A3"]
+
+
+def test_chunk_typed_from_dominant_atom():
+    atoms = [_atom("A1", "SEC1", "concept_definition_atom"),
+             _atom("A2", "SEC1", "formula_atom")]
+    chunks = build_chunks(atoms, "textbook", {"SEC1": "2 > 2.2"})
+    assert len(chunks) == 1
+    # formula present -> formula_definition_block (mapped before the prose default)
+    assert chunks[0].chunk_type == "concept_definition_block"
