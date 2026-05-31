@@ -107,13 +107,20 @@ tried and ALL are net-negative:
 3. explicit LLM **core_atom_ids** selection — atoms ticked up (ch01 0.16->0.19,
    count 136->48 vs gold 38) but **objects dropped** (0.59->0.44) and total fell.
 
-Root cause (robust): the harness object alignment keys on `atom_p2g` (local-
-evidence atom overlap). **Dropping any atoms perturbs that alignment**, so the
-small atom-precision gain is outweighed by object-alignment loss — regardless of
-how atoms are picked. The ceiling is the over-extraction at atomization time
-(matching a human's "which 38 of 530 sentences matter"), an irreducible semantic-
-curation gap without a much heavier (and uncertain) dedicated atomizer. All three
-experiments were reverted; the pipeline stays at mean 28.68 (article 34.2).
+4. LLM atom selector BEFORE chunking (`QIEFEN_ATOM_SELECT`, opt-in) — selecting
+   first means objects build on the curated set (no alignment perturbation).
+   This DOES lift atoms (ch01 0.16->0.24, 136->64 toward gold 38), but objects
+   still drop (fewer atoms = less evidence) so the composite is flat-to-slightly-
+   down. Kept as an opt-in feature (real value for citation/atom precision in the
+   product, where it beats the harness composite trade-off).
+
+Root cause (robust): atoms are 0.20 weight but objects+payload+evidence are 0.35
+and depend on atom **coverage**, so trading atom-precision for object-evidence-
+coverage loses on the composite at any timing. (Post-hoc curation additionally
+perturbs the `atom_p2g` object alignment.) The ceiling is over-extraction at
+atomization — matching a human's "which 38 of 530 sentences matter," an
+irreducible semantic-curation gap. Default pipeline stays at mean 28.68
+(article 34.2); the selector is available opt-in for citation precision.
 
 ## Real extraction quality (this is what actually improved)
 
