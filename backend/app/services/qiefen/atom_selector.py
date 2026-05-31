@@ -23,15 +23,26 @@ def _prompt(batch: List[EvidenceAtom], profile: str) -> str:
         t = a.raw_text[:200] + ("..." if len(a.raw_text) > 200 else "")
         lines.append(f"[{a.id}|{a.atom_type}] {t}")
     body = "\n".join(lines)
-    return f"""From the atoms below (id | type | text), select the HIGH-VALUE knowledge
-atoms worth keeping as standalone evidence in a {profile}: definitions, formulas,
-key quantitative results/values, design principles/rules, physical effects, table
-header/rows, and example/problem statements.
+    if profile == "article_research":
+        keep = ("core claims/contributions, method/architecture descriptions, "
+                "mechanism explanations, quantitative experimental results and "
+                "metric values, formulas, scaling laws, ablation findings, and "
+                "stated limitations")
+    else:
+        keep = ("concept/term definitions, formulas and equations, quantitative "
+                "results/values, design principles and rules, physical effects, "
+                "named process/fabrication steps, table header/rows, and "
+                "example/problem statements")
+    return f"""You curate the HIGH-VALUE knowledge atoms from one section of a
+technical document (a {profile.replace('_', ' ')}). A reader citing this work
+would keep: {keep}.
 
-EXCLUDE narrative, motivation, history, transitions, figure/citation references,
-and filler. Be selective — in a long passage MOST sentences are NOT high-value.
+EXCLUDE sentences that are narrative, motivation, history, transitions,
+restatements, figure/citation cross-references, or filler. In ordinary expository
+prose MOST sentences are NOT high-value — be selective; a definition or result
+stated once is enough.
 
-Atoms:
+Atoms (id | type | text):
 {body}
 
 Return JSON ONLY: {{"core_atom_ids": ["<id>", ...]}}

@@ -70,10 +70,11 @@ def run(source_text: str, source_file: str, profile: str,
                         and e.type != "heading"]
         atoms.extend(atomizer.atomize(source_text, sec_elements, sid, profile))
 
-    # Optional LLM atom selection (textbook) BEFORE chunking, so every downstream
+    # Optional general LLM atom selection BEFORE chunking, so every downstream
     # stage (chunks/packages/objects) is built on the curated atom set — no
-    # alignment perturbation (unlike post-hoc curation).
-    if (_ATOM_SELECT and profile == "textbook" and atoms
+    # alignment perturbation (unlike post-hoc curation). Profile-aware, applied
+    # to both paper and textbook.
+    if (_ATOM_SELECT and atoms
             and client is not None and getattr(client, "configured", False)):
         try:
             client.client()  # pre-warm before the selector's thread pool
