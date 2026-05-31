@@ -72,6 +72,31 @@ Under fair scoring P1 is a clear, large net gain. Article (engram) 32.0,
 textbook (cmos) 18.3. Remaining levers: object_payload (0.107), relations
 (0.115), and the textbook atom-curation ceiling (atoms 0.198 / chunks 0.081).
 
+## Prompt tuning + LLM judge (semantic scoring) + concurrency
+
+- **Concurrency**: per-package object calls + chapter-level fan-out (14×) +
+  200-way judge-cache pre-warm. Full judged scan ~212s (was 1050s serial).
+- **Prompt tuning**: concise/atomic payload values, structured numeric fields for
+  ExperimentResult, relation type-signatures. Mean 27.1 -> 27.5.
+- **LLM judge** (`--llm-judge`, DeepSeek yes/no semantic equivalence, cached +
+  pre-warmed): credits correct paraphrases the substring matcher misses.
+
+Final fair + judged (14 ch): **mean 28.68**; article (engram) **34.2**, textbook
+(cmos) 18.8; **abstract chapter 64.1**.
+
+| object bucket | substr-scored | judge-scored |
+| --- | --: | --: |
+| objects | 0.464 | 0.473 |
+| object_payload | 0.126 | **0.242** |
+| object_evidence | 0.288 | 0.260 |
+| relations | 0.117 | 0.112 |
+| context_packages | 0.691 | 0.683 |
+
+On fixed predictions the judge lifts object_payload 0.19 -> 0.43 (the composite
+lift is smaller because payload is 0.13 weight and textbook atoms/chunks drag).
+The article pipeline is strong end-to-end; the remaining ceiling is **textbook
+atom over-extraction** (atoms 0.20 + chunks 0.15 = 0.35 weight, near-zero on cmos).
+
 ## Real extraction quality (this is what actually improved)
 
 - **objects 0.474** type-strict — per chapter: engram/ch00 **0.89**, ch01 0.64,
