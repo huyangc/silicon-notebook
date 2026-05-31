@@ -1,18 +1,45 @@
-"""Deterministic P0 orchestrator: source_text -> QiefenDocument (S1..S5 + DNE)."""
+"""qiefen orchestrator: source_text -> QiefenDocument.
+
+S1-S5 + do_not_extract are deterministic. When an LLM `client` is supplied and
+configured, S6-S8 (objects/relations/mentions) run; otherwise those stay empty
+and the output is the deterministic P0 document.
+"""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from app.services.qiefen import atomizer, chunker, do_not_extract, packager
+from app.services.qiefen import (
+    atomizer, chunker, do_not_extract, mentions, objects, packager, relations,
+)
 from app.services.qiefen.models import EvidenceAtom, QiefenDocument, SourceMeta
 from app.services.qiefen.profiles import extraction_targets
 from app.services.qiefen.section_tree import build_section_tree
 from app.services.qiefen.source_elements import parse_elements
 
+# Safety cap so an unexpectedly section-rich chapter cannot explode LLM calls.
+MAX_PACKAGES_PER_CHAPTER = 60
+# Cap objects fed to the single per-chapter relation call.
+MAX_RELATION_OBJECTS = 80
+
+_HIGH_VALUE_ATOM_TYPES = {
+    "formula_atom", "table_header_atom", "table_row_atom", "table_caption_atom",
+    "scaling_law_result_atom", "result_sentence", "method_sentence",
+    "mechanism_sentence", "definition_atom", "concept_definition_atom",
+    "design_principle_atom", "example_problem_atom", "problem_statement_atom",
+}
+
+
+def default_client() -> Any:
+    """Build an OpenAICompatibleClient from settings (.env). Returns it even if
+    unconfigured; the pipeline checks `.configured` before using it."""
+    from app.core.config import Settings
+    from app.core.llm import OpenAICompatibleClient
+    return OpenAICompatibleClient(Settings())
+
 
 def run(source_text: str, source_file: str, profile: str,
         line_range: Optional[List[int]] = None, source_id: str = "",
-        title: str = "", scope: str = "") -> QiefenDocument:
+        title: str = "", scope: str = "", client: Any = None) -> QiefenDocument:
     elements = parse_elements(source_text, source_file, line_range)
     sections = build_section_tree(elements)
 
@@ -43,6 +70,14 @@ def run(source_text: str, source_file: str, profile: str,
         pkg.extraction_targets = extraction_targets(profile)
     dne = do_not_extract.detect_negatives(atoms)
 
+    objs: List = []
+    rels: List = []
+    mens: List = []
+    canon: List = []
+    if client is not None and getattr(client, "configured", False):
+        objs, rels, mens, canon = _run_llm_stages(
+            client, packages, atoms_by_id, profile)
+
     return QiefenDocument(
         source_meta=SourceMeta(source_id=source_id, profile=profile, title=title,
                                source_file=source_file,
@@ -50,8 +85,39 @@ def run(source_text: str, source_file: str, profile: str,
                                scope=scope,
                                extraction_targets=extraction_targets(profile)),
         section_tree=sections, evidence_atoms=atoms, semantic_chunks=chunks,
-        context_packages=packages, do_not_extract=dne,
+        context_packages=packages, objects=objs, relations=rels,
+        mentions=mens, canonicalization=canon, do_not_extract=dne,
     )
+
+
+def _package_value(pkg) -> int:
+    return sum(1 for a in (pkg.atoms or [])
+              if a.get("atom_type") in _HIGH_VALUE_ATOM_TYPES)
+
+
+def _run_llm_stages(client, packages, atoms_by_id, profile):
+    atom_text = {aid: a.raw_text for aid, a in atoms_by_id.items()}
+    # Prioritize the most content-bearing packages, then cap.
+    selected = sorted(packages, key=_package_value, reverse=True)[:MAX_PACKAGES_PER_CHAPTER]
+    selected_ids = {p.id for p in selected}
+
+    all_objects = []
+    objs_by_pkg = {}
+    for pkg in selected:
+        pkg_objs = objects.extract_objects(client, pkg, profile, atom_text)
+        objs_by_pkg[pkg.id] = pkg_objs
+        all_objects.extend(pkg_objs)
+
+    # Backfill each package's expected_objects (only the packages we extracted).
+    for pkg in packages:
+        if pkg.id in selected_ids:
+            pkg.expected_objects = [o.id for o in objs_by_pkg.get(pkg.id, [])]
+
+    rels = relations.extract_relations(
+        client, all_objects[:MAX_RELATION_OBJECTS], profile, atom_text)
+    mens = mentions.derive_mentions(all_objects)
+    canon = mentions.build_canonicalization(mens)
+    return all_objects, rels, mens, canon
 
 
 def _pair_headings(elements, sections):

@@ -17,7 +17,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 GOLD = REPO / "fangan" / "testcases"
 sys.path.insert(0, str(REPO / "backend"))
 
-from app.services.qiefen.pipeline import run  # noqa: E402
+from app.services.qiefen.pipeline import run, default_client  # noqa: E402
 from app.services.qiefen.emit import to_yaml  # noqa: E402
 
 SOURCE_ROOT = pathlib.Path(
@@ -35,14 +35,28 @@ SOURCE_PATHS = {
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(REPO / "harness_out" / "qiefen_pred"))
+    ap.add_argument("--chapters", default="",
+                    help="comma-separated doc/chapter filter, e.g. "
+                         "engram/ch00_abstract,cmos/ch01_introduction")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="skip the LLM stages (deterministic S1-S5 only)")
     args = ap.parse_args()
     # Resolve to absolute: the harness runs with cwd=GOLD, so a relative
     # pred-root would otherwise be looked up relative to the wrong directory.
     out_root = pathlib.Path(args.out).resolve()
+    only = {c.strip() for c in args.chapters.split(",") if c.strip()}
+
+    client = None if args.no_llm else default_client()
+    if client is not None and getattr(client, "configured", False):
+        print(f"LLM: {client.settings.openai_compat_model} @ {client.settings.openai_compat_base_url}")
+    else:
+        print("LLM: not configured -> deterministic only")
 
     for gp in sorted(GOLD.glob("*/ch*/gold.yaml")):
         chapter_dir = gp.parent
         rel = chapter_dir.relative_to(GOLD)
+        if only and str(rel) not in only:
+            continue
         meta = yaml.safe_load(gp.read_text(encoding="utf-8"))["source_meta"]
         src_path = SOURCE_PATHS.get(meta["source_file"])
         if not src_path or not src_path.exists():
@@ -52,11 +66,12 @@ def main():
         doc = run(src, source_file=meta["source_file"], profile=meta["profile"],
                   line_range=meta.get("source_line_range"),
                   source_id=meta.get("source_id", ""), title=meta.get("title", ""),
-                  scope=meta.get("scope", ""))
+                  scope=meta.get("scope", ""), client=client)
         dst = out_root / rel
         dst.mkdir(parents=True, exist_ok=True)
         (dst / "pred.yaml").write_text(to_yaml(doc), encoding="utf-8")
-        print(f"wrote {rel}/pred.yaml ({len(doc.evidence_atoms)} atoms)")
+        print(f"wrote {rel}/pred.yaml ({len(doc.evidence_atoms)} atoms, "
+              f"{len(doc.objects)} objects, {len(doc.relations)} relations)")
 
     # Run the harness.
     cmd = [sys.executable, "-m", "harness.run_all", "--gold-root", ".",
