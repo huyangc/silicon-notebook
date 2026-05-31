@@ -94,6 +94,12 @@ Evidence atoms (id | atom_type | text). Choose local_evidence_atom_ids ONLY from
 Rules:
 - Emit an object only when the atoms clearly support it. Do NOT invent facts.
 - Every payload field value must be supported by the cited atoms.
+- Keep values CONCISE and ATOMIC, not copied sentences:
+  * names/terms: the bare name only (e.g. "Engram", not the whole sentence).
+  * numbers/metrics: put each value in its own field as a bare token
+    (e.g. before: "84.2", after: "97.0", knowledge: "MMLU +3.4; CMMLU +4.0").
+  * a "statement"/"finding"/"definition" should be one short clause stating the
+    fact, NOT the verbatim source sentence.
 - local_evidence_atom_ids: the atom ids (from the list above) that support this object.
 - Skip citations, figure/table cross-references, and bare URLs (not objects).
 

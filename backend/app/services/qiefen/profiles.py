@@ -14,7 +14,10 @@ ARTICLE_OBJECTS: Dict[str, List[str]] = {
     "ArchitectureComponent": ["name", "role", "mechanism"],
     "ScalingLaw": ["name", "statement", "governs"],
     "ExperimentSetup": ["setup", "controls", "metric"],
-    "ExperimentResult": ["setup", "finding", "metric", "before", "after"],
+    # before/after/knowledge/reasoning/code_math hold ATOMIC numeric values that
+    # match gold by substring; finding stays a short synthesized sentence.
+    "ExperimentResult": ["setup", "finding", "metric", "before", "after",
+                         "knowledge", "reasoning", "code_math", "note"],
     "AblationFinding": ["component", "finding", "evidence"],
     "MechanisticExplanation": ["mechanism", "explains"],
     "SystemDesignClaim": ["claim", "mechanism", "benefit"],
@@ -51,6 +54,39 @@ TEXTBOOK_RELATIONS: List[str] = [
     "circuit_block_composed_of_block", "component_has_property",
     "design_principle_applies_to_scenario",
 ]
+
+
+# Typical endpoint types per relation (source -> target), to steer the LLM to
+# pick type-correct endpoints. Advisory, not enforced.
+ARTICLE_REL_SIGNATURES = {
+    "method_has_component": "ArticleMethod -> ArchitectureComponent",
+    "component_mitigates_risk": "ArchitectureComponent -> Limitation",
+    "method_addresses_problem": "ArticleMethod -> ArticleClaim",
+    "result_supports_claim": "ExperimentResult|ScalingLaw -> ArticleClaim",
+    "experiment_tests_claim": "ExperimentResult -> ArticleMethod",
+    "ablation_supports_component_importance": "AblationFinding -> ArchitectureComponent",
+    "mechanism_explains_result": "MechanisticExplanation -> ExperimentResult",
+    "system_design_enables_efficiency": "ArticleMethod -> SystemDesignClaim",
+    "claim_guided_by_scaling_law": "ArticleMethod -> ScalingLaw",
+}
+TEXTBOOK_REL_SIGNATURES = {
+    "concept_defines_term": "Concept -> Definition",
+    "concept_contrasts_with_concept": "Concept -> Concept",
+    "formula_defines_variable": "Formula -> Variable",
+    "formula_depends_on_variable": "Formula -> Variable",
+    "formula_derived_from_formula": "Formula -> Formula",
+    "formula_used_in_example": "Formula -> ExampleProblem",
+    "example_uses_formula": "ExampleProblem -> Formula",
+    "process_flow_has_step": "ProcessFlow -> TechnologyProcess",
+    "process_step_precedes_step": "TechnologyProcess -> TechnologyProcess",
+    "circuit_block_composed_of_block": "ComponentModel -> ComponentModel",
+    "component_has_property": "ComponentModel -> PhysicalEffect",
+    "design_principle_applies_to_scenario": "DesignPrinciple -> Concept",
+}
+
+
+def relation_signatures(profile: str) -> Dict[str, str]:
+    return ARTICLE_REL_SIGNATURES if profile == "article_research" else TEXTBOOK_REL_SIGNATURES
 
 
 def object_types(profile: str) -> Dict[str, List[str]]:

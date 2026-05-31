@@ -10,7 +10,7 @@ from typing import Any, List
 
 from app.services.qiefen.llm_extract import safe_json
 from app.services.qiefen.models import KnowledgeObjectQ, RelationQ
-from app.services.qiefen.profiles import relation_types
+from app.services.qiefen.profiles import relation_signatures, relation_types
 
 _IDENTITY_FIELDS = ("name", "statement", "term", "title", "claim", "expression")
 
@@ -30,16 +30,21 @@ def _identity(obj: KnowledgeObjectQ) -> str:
 
 def build_relation_prompt(objects: List[KnowledgeObjectQ], profile: str) -> str:
     obj_lines = "\n".join(f"- {o.id} [{o.type}] {_identity(o)}" for o in objects)
-    rel_lines = ", ".join(relation_types(profile))
+    rel_lines = "\n".join(
+        f"- {rtype}  ({sig})"
+        for rtype, sig in relation_signatures(profile).items()
+    )
     return f"""You connect already-extracted knowledge objects with typed relations.
 
 Objects (id [type] identity):
 {obj_lines}
 
-Allowed relation types (use ONLY these): {rel_lines}
+Allowed relation types (type, and the typical source->target object types):
+{rel_lines}
 
 Rules:
 - source_object_id and target_object_id MUST be ids from the list above.
+- Match the endpoint object TYPES to the relation's typical source->target types.
 - Use only the allowed relation types. Emit a relation only when clearly supported.
 - evidence_atom_ids: ids of atoms supporting the relation (may be empty).
 
