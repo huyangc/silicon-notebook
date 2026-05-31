@@ -1,0 +1,4276 @@
+# Gold fixture v0.3.3-textbook - CMOS Analog Circuit Design Chapter 4 Analog CMOS Subcircuits (profile: textbook)
+# Upgraded from v0.1: dual coordinates (source_span authoritative into the mineru .md + viewer_span into source.md),
+# verbatim raw_text + within-span normalized_text, source_elements, object evidence split into local/supporting +
+# home_package, one context_package per chunk with expected_objects (+ expected_local_fields for cross-package
+# CircuitBlocks reachable from the hierarchy package), gold_label/difficulty/evidence_strength (no decimal confidence),
+# and do_not_extract negatives (bracket [n] citations + policy, Fig./Eq. cross-refs, mermaid/figure-internal node
+# labels, image markup, out-of-chapter refs). This is the CIRCUIT-HIERARCHY chapter: 16 circuit_block_composed_of_block
+# edges. Spans are computed by build.py against the mineru .md; do NOT hand-edit.
+
+schema_version: 0.3.3-textbook
+source_meta:
+  source_id: cmos
+  scope: Chapter 4 (Analog CMOS Subcircuits) only
+  title: CMOS Analog Circuit Design - Allen & Holberg - Chapter 4 Analog CMOS Subcircuits
+  source_file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  source_line_range:
+  - 4873
+  - 7479
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 4873-7479; NOT the authoritative source)
+  profile: textbook
+  profile_detected_as: textbook
+  profile_cues:
+  - Chapter 4
+  - Example 4.1-1
+  - Example 4.3-1
+  - Example 4.4-1
+  - Example 4.6-1
+  - Problems
+  - Eq. (7)
+  - Fig. 4.0-1
+  - Figure 4.6-3
+  extraction_targets:
+  - CircuitBlock
+  - ComponentModel
+  - Formula
+  - Variable
+  - ExampleSolution
+  - PhysicalEffect
+  - DesignPrinciple
+  - ProblemStatement
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span (may rephrase, transliterate math like beta/lambda/eta/gamma/alpha/Delta and ASCII digit spacing, and resolve in-span pronouns) but MUST NOT introduce facts/names/section-refs not inside the span. MinerU spaces digits inside math (''1 9. 7'', ''0. 0 5'') and uses LaTeX in $...$ / $$...$$; normalized gives the readable ascii form. EXCEPTION: a formula_atom may carry symbolic interpretation / neighbouring-equation context via metadata.supported_by_context_atoms.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside its home_package's chunk) + supporting_context_atom_ids (atoms from other chunks). Package object-recall (expected_objects) is scored on local evidence only.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = payload fields derivable from that package alone. The leaf CircuitBlocks reachable from PKG-HIER (MOS switch, current sink, current mirror, MOS diode, current/voltage reference, bandgap) home in their own sub-section package; PKG-HIER declares expected_local_fields for the three hierarchy-local objects only.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of a decimal confidence.
+    tables_and_figures: Tables/characteristic curves render as markdown | tables | or <details> blocks; circuit schematics and the Fig 4.0-1 op-amp hierarchy render as <details><summary>flowchart|text_image</summary> ... </details> OCR/mermaid blocks. Figure-internal node labels, the raw mermaid graph TD node text, image markup, and in-text Fig./Eq./Table cross-references are listed in do_not_extract.
+    context_only: an atom with context_only:true is background/framing (chapter intro A-INTRO-SUB and summary A-SUMMARY) that should NOT yield a typed object on its own; A-INTRO-SUB additionally supports the Analog-Subcircuits composition edges as supporting evidence.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects are the objects whose home_package is that package.
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - Fig 4.0-1 is the op-amp composition hierarchy, rendered by MinerU as a <details><summary>flowchart</summary> ```mermaid graph TD ... ``` </details> block (source lines 4881-4900) plus the caption 'Figure 4.0-1 ...' (line 4902). The hierarchy ATOM A-HIER-OPAMP anchors on the PROSE paragraph (line 4877) that states the composition; the raw mermaid node labels (Operational Amplifier / Biasing Circuits / Source Coupled Pair / ...) are figure-internal and listed in do_not_extract as figure_label / mermaid_flowchart_node_label. The composition is emitted as circuit_block_composed_of_block edges (R-01..R-05).
+  - Formula tags reset per sub-section (4.1 tag1..8, 4.2 tag1..6, 4.3 restarts at 1 and runs to 17, 4.4 restarts, 4.5 restarts, 4.6 restarts). Each formula atom is located by its verbatim $$ line WITHIN its sub-section line window (build.py windows W41/W42/W43/W44/W45/W46), so identical-looking tags in different sections never collide.
+  - 'MinerU spaces digits inside math: ''1 9. 7 \mathrm{mV}'', ''7. 2 7'', ''0. 0 5'', ''2 5 \times 1 0 ^ {9}''. raw_text keeps the spacing verbatim; normalized_text gives the readable ascii number (19.7 mV, 7.27, 0.05).'
+  - 'Charge-feedthrough fast-regime: MinerU labelled the fast-regime condition line beta V_HT^2/(2 C_L) << U as \tag {7} (Eq.6 is the slow-regime V_error). A-SW-VERR-FAST-8 anchors that tag-7 condition line; the Eq.(8) fast V_error and the slow/fast selector are carried as normalized gloss / supported_by_context_atoms.'
+  - Example 4.1-1 has two result lines (Case 1 fast = 19.7 mV, Case 2 slow = 10.95 mV), each its own $$ V_error = ... mV $$ block; both are atomized (A-EX411-RESULT / A-EX411-RESULT2).
+  - 'Many circuits are building blocks of higher-level circuits: the current reference is built from current mirrors, the cascode sink from stacked transistors, the current mirror from a diode-connected M1, and the bandgap from a BJT + PTAT branch + op-amp + resistor ratio; these are the circuit_block_composed_of_block edges R-12..R-16.'
+source_elements:
+- id: SE-4-INTRO
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4875
+  line_end: 4875
+- id: SE-4-HIER
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4877
+  line_end: 4877
+- id: SE-4.1-MODEL
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4910
+  line_end: 4910
+- id: SE-4.1-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4941
+  line_end: 4941
+- id: SE-4.1-EQ2
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4959
+  line_end: 4959
+- id: SE-4.1-RONWL
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4981
+  line_end: 4981
+- id: SE-4.1-OFF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4999
+  line_end: 4999
+- id: SE-4.1-CAPS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5001
+  line_end: 5001
+- id: SE-4.1-CLOCK
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5083
+  line_end: 5083
+- id: SE-4.1-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5156
+  line_end: 5156
+- id: SE-4.1-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5174
+  line_end: 5174
+- id: SE-4.1-EQ7
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5180
+  line_end: 5180
+- id: SE-4.1-FIX
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5269
+  line_end: 5269
+- id: SE-4.1-CMOS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5288
+  line_end: 5288
+- id: SE-EX411-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5193
+  line_end: 5193
+- id: SE-EX411-G
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5193
+  line_end: 5193
+- id: SE-EX411-U
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5226
+  line_end: 5226
+- id: SE-EX411-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5242
+  line_end: 5242
+- id: SE-EX411-R2
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5264
+  line_end: 5264
+- id: SE-4.2-DEF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5324
+  line_end: 5324
+- id: SE-4.2-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5329
+  line_end: 5329
+- id: SE-4.2-EQ2
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5335
+  line_end: 5335
+- id: SE-4.2-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5394
+  line_end: 5394
+- id: SE-EX421-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5440
+  line_end: 5440
+- id: SE-EX421-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5444
+  line_end: 5444
+- id: SE-4.3-DEF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5448
+  line_end: 5448
+- id: SE-4.3-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5451
+  line_end: 5451
+- id: SE-4.3-EQ2
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5476
+  line_end: 5476
+- id: SE-4.3-CASC
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5511
+  line_end: 5511
+- id: SE-4.3-EQ7
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5569
+  line_end: 5569
+- id: SE-4.3-VON
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5624
+  line_end: 5624
+- id: SE-4.3-HS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5727
+  line_end: 5727
+- id: SE-EX431-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5615
+  line_end: 5615
+- id: SE-EX431-G
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5617
+  line_end: 5617
+- id: SE-EX431-U
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5617
+  line_end: 5617
+- id: SE-EX431-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5617
+  line_end: 5617
+- id: SE-EX432-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5779
+  line_end: 5779
+- id: SE-EX432-G
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5779
+  line_end: 5779
+- id: SE-EX432-U
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5782
+  line_end: 5782
+- id: SE-EX432-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5785
+  line_end: 5785
+- id: SE-4.4-DEF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5898
+  line_end: 5898
+- id: SE-4.4-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5901
+  line_end: 5901
+- id: SE-4.4-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5913
+  line_end: 5913
+- id: SE-4.4-NONID
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 5940
+  line_end: 5940
+- id: SE-4.4-EQ14
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6038
+  line_end: 6038
+- id: SE-4.4-MATCH
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6094
+  line_end: 6094
+- id: SE-4.4-EQ15
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6126
+  line_end: 6126
+- id: SE-4.4-EQ16
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6151
+  line_end: 6151
+- id: SE-4.4-WILSON
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6204
+  line_end: 6204
+- id: SE-EX441-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6049
+  line_end: 6049
+- id: SE-EX441-G
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6058
+  line_end: 6058
+- id: SE-EX441-U
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6064
+  line_end: 6064
+- id: SE-EX441-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6067
+  line_end: 6067
+- id: SE-4.5-DEF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6346
+  line_end: 6346
+- id: SE-4.5-EQ2
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6397
+  line_end: 6397
+- id: SE-4.5-EQ8
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6466
+  line_end: 6466
+- id: SE-4.5-BOOT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6581
+  line_end: 6581
+- id: SE-4.5-TCF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6677
+  line_end: 6677
+- id: SE-EX451-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6699
+  line_end: 6699
+- id: SE-EX451-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6746
+  line_end: 6746
+- id: SE-4.6-PRIN
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6781
+  line_end: 6781
+- id: SE-4.6-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6784
+  line_end: 6784
+- id: SE-4.6-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6891
+  line_end: 6891
+- id: SE-4.6-EQ16
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6915
+  line_end: 6915
+- id: SE-4.6-EQ22
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 6974
+  line_end: 6974
+- id: SE-4.6-2ND
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7024
+  line_end: 7024
+- id: SE-EX461-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7020
+  line_end: 7020
+- id: SE-EX461-G
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7020
+  line_end: 7020
+- id: SE-EX461-U
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7022
+  line_end: 7022
+- id: SE-EX461-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7022
+  line_end: 7022
+- id: SE-4.7-SUM
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7060
+  line_end: 7060
+- id: SE-PROB-2
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7069
+  line_end: 7069
+- id: SE-PROB-12
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7202
+  line_end: 7202
+- id: SE-PROB-20
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7340
+  line_end: 7340
+- id: SE-PROB-22
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7403
+  line_end: 7403
+section_tree:
+- id: SEC-4
+  path: '4'
+  title: Analog CMOS Subcircuits
+- id: SEC-4.1
+  path: 4 > 4.1
+  title: MOS Switch
+  parent: SEC-4
+- id: SEC-EX411
+  path: 4 > 4.1 > Example 4.1-1
+  title: Example 4.1-1 Calculation of Charge Feedthrough Error
+  parent: SEC-4.1
+  kind: example
+- id: SEC-4.2
+  path: 4 > 4.2
+  title: MOS Diode/Active Resistor
+  parent: SEC-4
+- id: SEC-EX421
+  path: 4 > 4.2 > Example 4.2-1
+  title: Example 4.2-1 Calculation of the Resistance of an Active Resistor
+  parent: SEC-4.2
+  kind: example
+- id: SEC-4.3
+  path: 4 > 4.3
+  title: Current Sinks and Sources
+  parent: SEC-4
+- id: SEC-EX431
+  path: 4 > 4.3 > Example 4.3-1
+  title: Example 4.3-1 Calculation of Output Resistance for a Current Sink
+  parent: SEC-4.3
+  kind: example
+- id: SEC-EX432
+  path: 4 > 4.3 > Example 4.3-2
+  title: Example 4.3-2 Designing the Cascode Current Sink for a Given V_MIN
+  parent: SEC-4.3
+  kind: example
+- id: SEC-4.4
+  path: 4 > 4.4
+  title: Current Mirrors
+  parent: SEC-4
+- id: SEC-EX441
+  path: 4 > 4.4 > Example 4.4-1
+  title: Example 4.4-1 Aspect Ratio Errors in Current Amplifiers
+  parent: SEC-4.4
+  kind: example
+- id: SEC-4.5
+  path: 4 > 4.5
+  title: Current and Voltage References
+  parent: SEC-4
+- id: SEC-EX451
+  path: 4 > 4.5 > Example 4.5-1
+  title: Example 4.5-1 Calculation of Threshold Voltage Reference Circuit
+  parent: SEC-4.5
+  kind: example
+- id: SEC-4.6
+  path: 4 > 4.6
+  title: Bandgap Reference
+  parent: SEC-4
+- id: SEC-EX461
+  path: 4 > 4.6 > Example 4.6-1
+  title: Example 4.6-1 The Design of a Bandgap-Voltage Reference
+  parent: SEC-4.6
+  kind: example
+- id: SEC-4.7
+  path: 4 > 4.7
+  title: Summary
+  parent: SEC-4
+- id: SEC-PROB
+  path: 4 > Problems
+  title: Problems
+  parent: SEC-4
+evidence_atoms:
+- id: A-INTRO-SUB
+  section_id: SEC-4
+  atom_type: concept_definition_atom
+  source_element_id: SE-4-INTRO
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4875
+    line_end: 4875
+    char_start: 310404
+    char_end: 310725
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 6
+    char_start: 657
+    char_end: 978
+    viewer_only: true
+  raw_text: These simple circuits consist of one or more transistors; they are simple; and they generally perform only one function. A subcircuit is typically combined with other simple circuits to generate a more complex circuit function. Consequently, the circuits of this and the next chapter can be considered as building blocks.
+  normalized_text: Subcircuits are simple circuits of one or more transistors that perform one function; they are combined with other simple circuits to generate more complex circuit functions, so they are the building blocks of this and the next chapter.
+  evidence_strength: direct
+  metadata:
+    context_only: true
+- id: A-HIER-OPAMP
+  section_id: SEC-4
+  atom_type: concept_definition_atom
+  source_element_id: SE-4-HIER
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4877
+    line_end: 4877
+    char_start: 311021
+    char_end: 311744
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1274
+    char_end: 1997
+    viewer_only: true
+  raw_text: Working our way backward, we note that one of the stages of an op amp is the differential amplifier. The differential amplifier consists of simple circuits that might include a current sink, a current-mirror load, and a sourcecoupled pair. Another stage of the op amp is a second gain stage, which might consist of an inverter and a current-sink load. If the op amp is to be able to drive a low-impedance load, an output stage is necessary. The output stage might consist of a source follower and a current-sink load. It is also necessary to provide a stabilized bias for each of the previous stages. The biasing stage could consist of a current sink and current mirrors to distribute the bias currents to the other stages.
+  normalized_text: 'Op-amp hierarchy (Fig 4.0-1): an operational amplifier is composed of biasing circuits, an input differential amplifier, a second gain stage, and an output stage. The differential amplifier consists of a current sink, a current-mirror load, and a source-coupled pair; the second gain stage of an inverter and a current-sink load; the output stage of a source follower and a current-sink load; the biasing stage of a current sink and current mirrors.'
+  evidence_strength: direct
+  metadata:
+    figure: Fig 4.0-1 op-amp hierarchy (rendered as a <details> mermaid flowchart; this atom anchors on the prose statement of the composition, not the mermaid node labels)
+- id: A-SW-MODEL
+  section_id: SEC-4.1
+  atom_type: component_model_atom
+  source_element_id: SE-4.1-MODEL
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4910
+    line_end: 4910
+    char_start: 314082
+    char_end: 314321
+  viewer_span:
+    file: source.md
+    line_start: 41
+    line_end: 41
+    char_start: 4335
+    char_end: 4574
+    viewer_only: true
+  raw_text: The most important characteristics of a switch are its ON resistance, $r _ { \mathrm { O N } }$ , and its OFF resistance , $r _ { \mathrm { O F F } }$ . Ideally $r _ { \mathrm { O N } }$ is zero and $r _ { \mathrm { O F F } }$ is infinite.
+  normalized_text: The most important switch characteristics are its ON resistance r_ON and OFF resistance r_OFF; ideally r_ON is zero and r_OFF is infinite (a voltage-controlled switch, Fig 4.1-1, with offset V_OS, OFF leakage I_OFF, terminal leakage I_A/I_B, and parasitic capacitors C_A,C_B,C_AB,C_AC,C_BC).
+  evidence_strength: direct
+- id: A-SW-ID-1
+  section_id: SEC-4.1
+  atom_type: formula_atom
+  source_element_id: SE-4.1-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4941
+    line_end: 4941
+    char_start: 317135
+    char_end: 317266
+  viewer_span:
+    file: source.md
+    line_start: 72
+    line_end: 72
+    char_start: 7388
+    char_end: 7519
+    viewer_only: true
+  raw_text: I _ {D} = \frac {K ^ {\prime} W}{L} \left[ \left(V _ {G S} - V _ {T}\right) V _ {D S} - \frac {V _ {D S} ^ {2}}{2} \right] \tag {1}
+  normalized_text: I_D = (K' W/L)[(V_GS - V_T) V_DS - V_DS^2/2]
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: nonsaturation_drain_current
+- id: A-SW-RON-2
+  section_id: SEC-4.1
+  atom_type: formula_atom
+  source_element_id: SE-4.1-EQ2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4959
+    line_end: 4959
+    char_start: 317668
+    char_end: 317807
+  viewer_span:
+    file: source.md
+    line_start: 90
+    line_end: 90
+    char_start: 7921
+    char_end: 8060
+    viewer_only: true
+  raw_text: r _ {\mathrm{ON}} = \frac {1}{\partial I _ {D} / \partial V _ {D S}} = \frac {L}{K ^ {\prime} W (V _ {G S} - V _ {T} - V _ {D S})} \tag {2}
+  normalized_text: r_ON = 1/(dI_D/dV_DS) = L/[K' W (V_GS - V_T - V_DS)]
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: on_resistance
+- id: A-SW-RON-WL
+  section_id: SEC-4.1
+  atom_type: physical_effect_atom
+  source_element_id: SE-4.1-RONWL
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4981
+    line_end: 4981
+    char_start: 321783
+    char_end: 321909
+  viewer_span:
+    file: source.md
+    line_start: 112
+    line_end: 112
+    char_start: 12036
+    char_end: 12162
+    viewer_only: true
+  raw_text: It is seen that a lower value of $r _ { \mathrm { O N } }$ is achieved for larger values of W/L. When $V _ { G S }$ approaches
+  normalized_text: r_ON decreases for larger W/L; as V_GS approaches V_T the switch turns off and r_ON approaches infinity (Fig 4.1-4).
+  evidence_strength: direct
+- id: A-SW-OFF
+  section_id: SEC-4.1
+  atom_type: physical_effect_atom
+  source_element_id: SE-4.1-OFF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4999
+    line_end: 4999
+    char_start: 323248
+    char_end: 323528
+  viewer_span:
+    file: source.md
+    line_start: 130
+    line_end: 130
+    char_start: 13501
+    char_end: 13781
+    viewer_only: true
+  raw_text: When, $V _ { G S }$ is less than or equal to $V _ { T }$ the switch is OFF and $r _ { \mathrm { O F F } }$ is ideally infinite. Of course, it is never infinite, but because it is so large, the performance in the OFF state is dominated by the drain-bulk and source-bulk leakage cur
+  normalized_text: When V_GS <= V_T the switch is OFF; r_OFF is ideally infinite but never is, so OFF performance is dominated by drain-bulk and source-bulk junction leakage (plus subthreshold leakage), modeled as I_A,I_B (about 1 fA/um^2 at room temperature, doubling every 8 degC).
+  evidence_strength: direct
+- id: A-SW-CAPS
+  section_id: SEC-4.1
+  atom_type: component_model_atom
+  source_element_id: SE-4.1-CAPS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5001
+    line_end: 5001
+    char_start: 323936
+    char_end: 324235
+  viewer_span:
+    file: source.md
+    line_start: 132
+    line_end: 132
+    char_start: 14189
+    char_end: 14488
+    viewer_only: true
+  raw_text: The offset voltage modeled in Fig. 4.1-1 does not exist in MOS switches and thus is not a consideration in MOS switch performance. The capacitors $C _ { A } , C _ { B } , C _ { A C } ,$ , and $C _ { B C }$ of Fig. 4.1-1 correspond directly to the capacitors $C _ { B S } , \bar { C } _ { B D } , C _
+  normalized_text: The offset voltage V_OS does not exist in MOS switches. The switch parasitics C_A,C_B,C_AC,C_BC correspond to the MOS capacitors C_BS,C_BD,C_GS,C_GD (C_AB is small and usually negligible).
+  evidence_strength: direct
+- id: A-SW-CLOCKFEED
+  section_id: SEC-4.1
+  atom_type: physical_effect_atom
+  source_element_id: SE-4.1-CLOCK
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5083
+    line_end: 5083
+    char_start: 328613
+    char_end: 328912
+  viewer_span:
+    file: source.md
+    line_start: 214
+    line_end: 214
+    char_start: 18866
+    char_end: 19165
+    viewer_only: true
+  raw_text: One of the most serious limitations of monolithic switches is the clock feedthrough effect. Clock feedthrough (also called charge injection, and charge feedthrough) is due to the coupling capacitance from the gate to both source and drain. This coupling allows charge to be transferred from the gate
+  normalized_text: 'Clock feedthrough (also called charge injection / charge feedthrough) is one of the most serious limitations of monolithic switches: the gate-to-source/drain coupling capacitance transfers charge from the gate (clock) to the source/drain nodes.'
+  evidence_strength: direct
+- id: A-SW-GVT-3
+  section_id: SEC-4.1
+  atom_type: formula_atom
+  source_element_id: SE-4.1-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5156
+    line_end: 5156
+    char_start: 333315
+    char_end: 333347
+  viewer_span:
+    file: source.md
+    line_start: 287
+    line_end: 287
+    char_start: 23568
+    char_end: 23600
+    viewer_only: true
+  raw_text: v _ {G} = V _ {H} - U t \tag {3}
+  normalized_text: v_G = V_H - U t  (linear gate-voltage ramp; slope U)
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: gate_voltage_ramp
+    supported_by_context_atoms:
+    - A-SW-VERR-SLOW-6
+    - A-SW-VERR-FAST-8
+- id: A-SW-VERR-SLOW-6
+  section_id: SEC-4.1
+  atom_type: formula_atom
+  source_element_id: SE-4.1-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5174
+    line_end: 5174
+    char_start: 333729
+    char_end: 333952
+  viewer_span:
+    file: source.md
+    line_start: 305
+    line_end: 305
+    char_start: 23982
+    char_end: 24205
+    viewer_only: true
+  raw_text: V _ {e r r o r} = \left(\frac {W \cdot \mathrm{CGD0} + \frac {C _ {\text {channel}}}{2}}{C _ {L}}\right) \sqrt {\frac {\pi U C _ {L}}{2 \beta}} + \frac {W \cdot \mathrm{CGD0}}{C _ {L}} (V _ {S} + V _ {T} - V _ {L}) \tag {6}
+  normalized_text: V_error(slow) = [(W*CGD0 + C_channel/2)/C_L] sqrt(pi U C_L/(2 beta)) + (W*CGD0/C_L)(V_S + V_T - V_L)
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: charge_feedthrough_error_slow
+- id: A-SW-VERR-FAST-8
+  section_id: SEC-4.1
+  atom_type: formula_atom
+  source_element_id: SE-4.1-EQ7
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5180
+    line_end: 5180
+    char_start: 334018
+    char_end: 334077
+  viewer_span:
+    file: source.md
+    line_start: 311
+    line_end: 311
+    char_start: 24271
+    char_end: 24330
+    viewer_only: true
+  raw_text: \frac {\beta V _ {H T} ^ {2}}{2 C _ {L}} <   <   U \tag {7}
+  normalized_text: beta V_HT^2/(2 C_L) << U  (fast-regime condition; the fast-regime V_error uses (V_HT - beta V_HT^3/(6 U C_L)), Eq.8)
+  evidence_strength: direct
+  metadata:
+    tag: '7'
+    role: charge_feedthrough_fast_regime
+- id: A-SW-FEEDFIX
+  section_id: SEC-4.1
+  atom_type: design_principle_atom
+  source_element_id: SE-4.1-FIX
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5269
+    line_end: 5269
+    char_start: 337447
+    char_end: 337707
+  viewer_span:
+    file: source.md
+    line_start: 400
+    line_end: 400
+    char_start: 27700
+    char_end: 27960
+    viewer_only: true
+  raw_text: It is possible to partially cancel some of the feedthrough effects using the technique illustrated in Fig. 4.1-11. Here a dummy MOS transistor MD (with source and drain both attached to the signal line and the gate attached to the inverse clock) is used to app
+  normalized_text: Clock feedthrough can be partially cancelled with a dummy MOS transistor whose gate is driven by the inverse clock (Fig 4.1-11), and reduced by using the largest capacitors possible, minimum-geometry switches, and the smallest clock swing - each of which creates compromises elsewhere.
+  evidence_strength: direct
+- id: A-SW-CMOS
+  section_id: SEC-4.1
+  atom_type: component_model_atom
+  source_element_id: SE-4.1-CMOS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5288
+    line_end: 5288
+    char_start: 338650
+    char_end: 338778
+  viewer_span:
+    file: source.md
+    line_start: 419
+    line_end: 419
+    char_start: 28903
+    char_end: 29031
+    viewer_only: true
+  raw_text: Using CMOS technology, a switch is usually constructed by connecting p-channel and n-channel enhancement transistors in parallel
+  normalized_text: A CMOS switch connects p-channel and n-channel enhancement transistors in parallel; its primary advantage over the single-channel MOS switch is greatly increased ON-state dynamic analog-signal range (Fig 4.1-12/4.1-13).
+  evidence_strength: direct
+- id: A-EX411-PROBLEM
+  section_id: SEC-EX411
+  atom_type: example_problem_atom
+  source_element_id: SE-EX411-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5193
+    line_end: 5193
+    char_start: 334536
+    char_end: 334619
+  viewer_span:
+    file: source.md
+    line_start: 324
+    line_end: 324
+    char_start: 24789
+    char_end: 24872
+    viewer_only: true
+  raw_text: Calculate the effect of charge feedthrough on the circuit shown in Fig. 4.1-9 where
+  normalized_text: 'Example 4.1-1: calculate the charge-feedthrough error on the circuit of Fig 4.1-9 for two gate-fall cases, using Eqs (3)-(8).'
+  evidence_strength: direct
+- id: A-EX411-GIVEN
+  section_id: SEC-EX411
+  atom_type: given_atom
+  source_element_id: SE-EX411-G
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5193
+    line_end: 5193
+    char_start: 334620
+    char_end: 334744
+  viewer_span:
+    file: source.md
+    line_start: 324
+    line_end: 324
+    char_start: 24873
+    char_end: 24997
+    viewer_only: true
+  raw_text: $V _ { S } = 1 . 0$ volts, $C _ { L } = 2 0 0$ fF, $\ W / \mathrm { L } = 0 . 8 \mu \mathrm { m } / 0 . 8 \mu \mathrm { m }$
+  normalized_text: 'Given: V_S = 1.0 V, C_L = 200 fF, W/L = 0.8 um/0.8 um (Case 1 falls 5 V -> 0 V in 0.2 ns, U=25e9 V/s; Case 2 in 10 ns, U=5e8 V/s).'
+  evidence_strength: direct
+- id: A-EX411-USE
+  section_id: SEC-EX411
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX411-U
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5226
+    line_end: 5226
+    char_start: 335685
+    char_end: 335754
+  viewer_span:
+    file: source.md
+    line_start: 357
+    line_end: 357
+    char_start: 25938
+    char_end: 26007
+    viewer_only: true
+  raw_text: V _ {H T} = V _ {H} - V _ {S} - V _ {T} = 5 - 1 - 0. 8 8 7 = 3. 1 1 3
+  normalized_text: V_HT = V_H - V_S - V_T = 5 - 1 - 0.887 = 3.113; test beta V_HT^2/(2 C_L) = 2.66e9 vs U to pick the regime (Case 1 fast -> Eq.8; Case 2 slow -> Eq.6).
+  evidence_strength: direct
+- id: A-EX411-RESULT
+  section_id: SEC-EX411
+  atom_type: result_atom
+  source_element_id: SE-EX411-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5242
+    line_end: 5242
+    char_start: 336343
+    char_end: 336379
+  viewer_span:
+    file: source.md
+    line_start: 373
+    line_end: 373
+    char_start: 26596
+    char_end: 26632
+    viewer_only: true
+  raw_text: V _ {e r r o r} = 1 9. 7 \mathrm{mV}
+  normalized_text: 'Case 1 (fast): V_error = 19.7 mV. (Case 2 (slow): V_error = 10.95 mV.)'
+  evidence_strength: direct
+  metadata:
+    note: Case 1 result line; the Case 2 result V_error = 10.95 mV is on a separate $$ line (A-EX411-RESULT2).
+- id: A-EX411-RESULT2
+  section_id: SEC-EX411
+  atom_type: result_atom
+  source_element_id: SE-EX411-R2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5264
+    line_end: 5264
+    char_start: 336989
+    char_end: 337027
+  viewer_span:
+    file: source.md
+    line_start: 395
+    line_end: 395
+    char_start: 27242
+    char_end: 27280
+    viewer_only: true
+  raw_text: V _ {e r r o r} = 1 0. 9 5 \mathrm{mV}
+  normalized_text: 'Case 2 (slow): V_error = 10.95 mV.'
+  evidence_strength: direct
+  metadata:
+    note: Case 2 result line.
+- id: A-DIODE-DEF
+  section_id: SEC-4.2
+  atom_type: component_model_atom
+  source_element_id: SE-4.2-DEF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5324
+    line_end: 5324
+    char_start: 341187
+    char_end: 341487
+  viewer_span:
+    file: source.md
+    line_start: 455
+    line_end: 455
+    char_start: 31440
+    char_end: 31740
+    viewer_only: true
+  raw_text: When the gate and drain of an MOS transistor are tied together as illustrated in Fig. 4.2-1(a) and (b), the I-V characteristics are qualitatively similar to a pn-junction diode, thus the name MOS diode. The MOS diode is used as a component of a current mirror (Sec. 4.4) and for level translation (vo
+  normalized_text: An MOS diode ties gate to drain, forcing saturation; its I-V is qualitatively like a pn-junction diode. It is used as a component of a current mirror (Sec 4.4) and for level translation (voltage drop).
+  evidence_strength: direct
+- id: A-DIODE-I-1
+  section_id: SEC-4.2
+  atom_type: formula_atom
+  source_element_id: SE-4.2-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5329
+    line_end: 5329
+    char_start: 341755
+    char_end: 341930
+  viewer_span:
+    file: source.md
+    line_start: 460
+    line_end: 460
+    char_start: 32008
+    char_end: 32183
+    viewer_only: true
+  raw_text: I = I _ {D} = \left(\frac {K ^ {\prime} W}{2 L}\right) \left[ \left(V _ {G S} - V _ {T}\right) ^ {2} \right] = \frac {\beta}{2} \left(V _ {G S} - V _ {T}\right) ^ {2} \tag {1}
+  normalized_text: I = I_D = (K' W/(2 L))(V_GS - V_T)^2 = (beta/2)(V_GS - V_T)^2
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: mos_diode_current
+- id: A-DIODE-V-2
+  section_id: SEC-4.2
+  atom_type: formula_atom
+  source_element_id: SE-4.2-EQ2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5335
+    line_end: 5335
+    char_start: 341942
+    char_end: 342014
+  viewer_span:
+    file: source.md
+    line_start: 466
+    line_end: 466
+    char_start: 32195
+    char_end: 32267
+    viewer_only: true
+  raw_text: V = V _ {G S} = V _ {D S} = V _ {T} + \sqrt {2 I _ {D} / \beta} \tag {2}
+  normalized_text: V = V_GS = V_DS = V_T + sqrt(2 I_D/beta)
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: mos_diode_voltage
+- id: A-DIODE-ROUT-3
+  section_id: SEC-4.2
+  atom_type: formula_atom
+  source_element_id: SE-4.2-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5394
+    line_end: 5394
+    char_start: 343277
+    char_end: 343377
+  viewer_span:
+    file: source.md
+    line_start: 525
+    line_end: 525
+    char_start: 33530
+    char_end: 33630
+    viewer_only: true
+  raw_text: r _ {\text { out }} = \frac {1}{g _ {m} + g _ {m b s} + g _ {d s}} \cong \frac {1}{g _ {m}} \tag {3}
+  normalized_text: r_out = 1/(g_m + g_mbs + g_ds) ~= 1/g_m  (g_m >> g_mbs, g_ds)
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: active_resistor_resistance
+- id: A-EX421-PROBLEM
+  section_id: SEC-EX421
+  atom_type: example_problem_atom
+  source_element_id: SE-EX421-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5440
+    line_end: 5440
+    char_start: 345420
+    char_end: 345505
+  viewer_span:
+    file: source.md
+    line_start: 571
+    line_end: 571
+    char_start: 35673
+    char_end: 35758
+    viewer_only: true
+  raw_text: The floating active resistor of Fig. 4.2-3 is to be used to design a 1 kΩ resistance.
+  normalized_text: 'Example 4.2-1: design the Fig 4.2-3 floating active resistor (n-channel, gate at 5 V, V_DS=0, V_A,B=2 V, bulk 0 V) for 1 kOhm; find W/L (Table 3.1-2).'
+  evidence_strength: direct
+- id: A-EX421-RESULT
+  section_id: SEC-EX421
+  atom_type: result_atom
+  source_element_id: SE-EX421-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5444
+    line_end: 5444
+    char_start: 346014
+    char_end: 346112
+  viewer_span:
+    file: source.md
+    line_start: 575
+    line_end: 575
+    char_start: 36267
+    char_end: 36365
+    viewer_only: true
+  raw_text: the new $V _ { T }$ is found to be 1.022 volts. Equating Eq. (5) to 1000 Ω gives a W/L of $4 . 5 9
+  normalized_text: The new V_T due to |V_BS|=2 V is 1.022 V; equating r_ds to 1000 Ohm gives W/L = 4.597 ~= 4.6.
+  evidence_strength: direct
+- id: A-CS-DEF
+  section_id: SEC-4.3
+  atom_type: component_model_atom
+  source_element_id: SE-4.3-DEF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5448
+    line_end: 5448
+    char_start: 346164
+    char_end: 346316
+  viewer_span:
+    file: source.md
+    line_start: 579
+    line_end: 579
+    char_start: 36417
+    char_end: 36569
+    viewer_only: true
+  raw_text: A current sink and current source are two terminal components whose current at any instant of time is independent of the voltage across their terminals.
+  normalized_text: A current sink/source is a two-terminal component whose current is independent of the terminal voltage; a sink has its negative node at V_SS, a source its positive node at V_DD. An MOS device implements it with a fixed gate bias and must stay in saturation (v_OUT must exceed V_MIN).
+  evidence_strength: direct
+- id: A-CS-VMIN-1
+  section_id: SEC-4.3
+  atom_type: formula_atom
+  source_element_id: SE-4.3-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5451
+    line_end: 5451
+    char_start: 347064
+    char_end: 347131
+  viewer_span:
+    file: source.md
+    line_start: 582
+    line_end: 582
+    char_start: 37317
+    char_end: 37384
+    viewer_only: true
+  raw_text: v _ {\text { OUT }} \geq V _ {G G} - V _ {T 0} - V _ {S S} \tag {1}
+  normalized_text: v_OUT >= V_GG - V_T0 - V_SS  (minimum output voltage for the simple current sink, Fig 4.3-1a)
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: current_sink_vmin
+- id: A-CS-ROUT-2
+  section_id: SEC-4.3
+  atom_type: formula_atom
+  source_element_id: SE-4.3-EQ2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5476
+    line_end: 5476
+    char_start: 347734
+    char_end: 347844
+  viewer_span:
+    file: source.md
+    line_start: 607
+    line_end: 607
+    char_start: 37987
+    char_end: 38097
+    viewer_only: true
+  raw_text: r _ {\text { out }} = \frac {1 + \lambda V _ {D S}}{\lambda I _ {D}} \cong \frac {1}{\lambda I _ {D}} \tag {2}
+  normalized_text: r_out = (1 + lambda V_DS)/(lambda I_D) ~= 1/(lambda I_D)
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: current_source_output_resistance
+- id: A-CS-CASCODE-PRIN
+  section_id: SEC-4.3
+  atom_type: design_principle_atom
+  source_element_id: SE-4.3-CASC
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5511
+    line_end: 5511
+    char_start: 349340
+    char_end: 349511
+  viewer_span:
+    file: source.md
+    line_start: 642
+    line_end: 642
+    char_start: 39593
+    char_end: 39764
+    viewer_only: true
+  raw_text: However, there are two areas in which their performance may need to be improved for certain applications. One improvement is to increase the small-signal output resistance
+  normalized_text: 'The simple sink/source has two performance limits: low output resistance and high V_MIN. The output resistance is increased with the common-gate (cascode) configuration, which multiplies the source resistance r by the common-gate voltage gain g_m2 r_ds2.'
+  evidence_strength: direct
+- id: A-CS-CASCODE-ROUT-7
+  section_id: SEC-4.3
+  atom_type: formula_atom
+  source_element_id: SE-4.3-EQ7
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5569
+    line_end: 5569
+    char_start: 352052
+    char_end: 352122
+  viewer_span:
+    file: source.md
+    line_start: 700
+    line_end: 700
+    char_start: 42305
+    char_end: 42375
+    viewer_only: true
+  raw_text: r _ {\text { out }} \cong (g _ {m 2} r _ {d s 2}) r _ {d s 1} \tag {7}
+  normalized_text: r_out ~= (g_m2 r_ds2) r_ds1  (cascode current-sink output resistance, increased by the factor g_m2 r_ds2; full form r_ds1 + r_ds2 + g_m2 r_ds1 r_ds2 (1+eta_2), Eq.6)
+  evidence_strength: direct
+  metadata:
+    tag: '7'
+    role: cascode_output_resistance
+- id: A-CS-VON-PRIN
+  section_id: SEC-4.3
+  atom_type: design_principle_atom
+  source_element_id: SE-4.3-VON
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5624
+    line_end: 5624
+    char_start: 354886
+    char_end: 354926
+  viewer_span:
+    file: source.md
+    line_start: 755
+    line_end: 755
+    char_start: 45139
+    char_end: 45179
+    viewer_only: true
+  raw_text: V _ {G S} = V _ {O N} + V _ {T} \tag {8}
+  normalized_text: 'Biasing principle: V_GS = V_ON + V_T (Eq.8) where V_ON is the excess over V_T; v_DS(sat)=V_ON (Eq.9); i_D=(K''W/2L)V_ON^2 (Eq.10). For series devices with equal current (W1/L1)/(W2/L2)=(V_ON2)^2/(V_ON1)^2 (Eq.13); for equal V_GS, i_D1(W2/L2)=i_D2(W1/L1) (Eq.14).'
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+    role: von_biasing_principle
+    note: anchored on the Eq.8 line; the principle spans Eqs 8-14.
+- id: A-CS-HIGHSWING
+  section_id: SEC-4.3
+  atom_type: design_principle_atom
+  source_element_id: SE-4.3-HS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5727
+    line_end: 5727
+    char_start: 359651
+    char_end: 359836
+  viewer_span:
+    file: source.md
+    line_start: 858
+    line_end: 858
+    char_start: 49904
+    char_end: 50089
+    viewer_only: true
+  raw_text: It can be seen that a voltage of $2 { \cal V } _ { O N }$ is across both M1 and M2 giving the lowest value of $V _ { \mathrm { M I N } }$ and still keeping both M1 and M2 in saturation.
+  normalized_text: The standard cascode (Fig 4.3-5) has V_MIN = V_T + 2 V_ON (Eq.16). Making M4 W/L one quarter of M1-M3 raises the M2 gate so V_MIN = 2 V_ON (Eq.17) - the lowest V_MIN keeping M1,M2 saturated. A series M5 (Fig 4.3-7) equalizes the M1/M3 drain voltages to remove channel-length-modulation and drain-induced-threshold-shift errors.
+  evidence_strength: direct
+- id: A-EX431-PROBLEM
+  section_id: SEC-EX431
+  atom_type: example_problem_atom
+  source_element_id: SE-EX431-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5615
+    line_end: 5615
+    char_start: 352841
+    char_end: 352981
+  viewer_span:
+    file: source.md
+    line_start: 746
+    line_end: 746
+    char_start: 43094
+    char_end: 43234
+    viewer_only: true
+  raw_text: 'Use the model parameters of Table 3.1-2 to calculate: (a) the small-signal output resistance for the simple current sink of Fig. 4.3-1(a) if'
+  normalized_text: 'Example 4.3-1: (a) the small-signal output resistance of the simple current sink (Fig 4.3-1a) at I_OUT=100 uA, and (b) the output resistance when placed in the cascode configuration of Fig 4.3-4a.'
+  evidence_strength: direct
+- id: A-EX431-GIVEN
+  section_id: SEC-EX431
+  atom_type: given_atom
+  source_element_id: SE-EX431-G
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5617
+    line_end: 5617
+    char_start: 353258
+    char_end: 353380
+  viewer_span:
+    file: source.md
+    line_start: 748
+    line_end: 748
+    char_start: 43511
+    char_end: 43633
+    viewer_only: true
+  raw_text: (a) Using $\lambda = 0 . 0 4$ and $I _ { \mathrm { O U T } } = 1 0 0 $ A gives a small-signal output resistance of 250 kΩ.
+  normalized_text: 'Given: Table 3.1-2 params, W1/L1=W2/L2=1, lambda=0.04, I_OUT=100 uA (g_mbs2 neglected).'
+  evidence_strength: direct
+- id: A-EX431-USE
+  section_id: SEC-EX431
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX431-U
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5617
+    line_end: 5617
+    char_start: 353473
+    char_end: 353558
+  viewer_span:
+    file: source.md
+    line_start: 748
+    line_end: 748
+    char_start: 43726
+    char_end: 43811
+    viewer_only: true
+  raw_text: Equation (6) of Sec. 3.3 gives $g _ { m 1 } = g _ { m 2 } = 1 4 8 \mu \mathrm { A } /
+  normalized_text: (a) r_out = 1/(lambda I_D) with lambda=0.04, I_OUT=100 uA. (b) g_m1=g_m2=148 uA/V into Eq.(7) r_out ~= (g_m2 r_ds2) r_ds1.
+  evidence_strength: direct
+- id: A-EX431-RESULT
+  section_id: SEC-EX431
+  atom_type: result_atom
+  source_element_id: SE-EX431-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5617
+    line_end: 5617
+    char_start: 353331
+    char_end: 353380
+  viewer_span:
+    file: source.md
+    line_start: 748
+    line_end: 748
+    char_start: 43584
+    char_end: 43633
+    viewer_only: true
+  raw_text: gives a small-signal output resistance of 250 kΩ.
+  normalized_text: (a) simple current sink r_out = 250 kOhm; (b) cascode current sink r_out = 9.25 MOhm.
+  evidence_strength: direct
+- id: A-EX432-PROBLEM
+  section_id: SEC-EX432
+  atom_type: example_problem_atom
+  source_element_id: SE-EX432-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5779
+    line_end: 5779
+    char_start: 360582
+    char_end: 360735
+  viewer_span:
+    file: source.md
+    line_start: 910
+    line_end: 910
+    char_start: 50835
+    char_end: 50988
+    viewer_only: true
+  raw_text: Use the cascode current-sink configuration of Fig. 4.3-6(a) to design a current sink of 100 $\mu \mathrm { A }$ and a $V _ { \mathrm { M I N } }$ of 1 V.
+  normalized_text: 'Example 4.3-2: design the high-swing cascode current sink (Fig 4.3-6a) for I_OUT=100 uA and V_MIN=1 V.'
+  evidence_strength: direct
+- id: A-EX432-GIVEN
+  section_id: SEC-EX432
+  atom_type: given_atom
+  source_element_id: SE-EX432-G
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5779
+    line_end: 5779
+    char_start: 360781
+    char_end: 360870
+  viewer_span:
+    file: source.md
+    line_start: 910
+    line_end: 910
+    char_start: 51034
+    char_end: 51123
+    viewer_only: true
+  raw_text: 'With $V _ { \mathrm { M I N } }$ of 1 V, choose $V _ { O N } = 0 . 5 \ : \mathrm { V }$ .'
+  normalized_text: 'Given: Table 3.1-2 params (K''=110 uA/V^2); V_MIN=1 V so choose V_ON=0.5 V.'
+  evidence_strength: direct
+- id: A-EX432-USE
+  section_id: SEC-EX432
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX432-U
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5782
+    line_end: 5782
+    char_start: 360952
+    char_end: 361119
+  viewer_span:
+    file: source.md
+    line_start: 913
+    line_end: 913
+    char_start: 51205
+    char_end: 51372
+    viewer_only: true
+  raw_text: \frac {W}{L} = \frac {2 i _ {\mathrm{OUT}}}{K ^ {\prime} V _ {O N} ^ {2}} = \frac {2 \times 1 0 0 \times 1 0 ^ {- 6}}{1 1 0 \times 1 0 ^ {- 6} \times 0 . 2 5} = 7. 2 7
+  normalized_text: W/L = 2 i_OUT/(K' V_ON^2) = 2*100e-6/(110e-6*0.25) = 7.27.
+  evidence_strength: direct
+- id: A-EX432-RESULT
+  section_id: SEC-EX432
+  atom_type: result_atom
+  source_element_id: SE-EX432-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5785
+    line_end: 5785
+    char_start: 361124
+    char_end: 361176
+  viewer_span:
+    file: source.md
+    line_start: 916
+    line_end: 916
+    char_start: 51377
+    char_end: 51429
+    viewer_only: true
+  raw_text: The W /L ratio of M4 will be 1/4 this value or 1.82.
+  normalized_text: W/L of M1-M3 = 7.27; W/L of M4 = 1/4 of that = 1.82.
+  evidence_strength: direct
+- id: A-CM-DEF
+  section_id: SEC-4.4
+  atom_type: component_model_atom
+  source_element_id: SE-4.4-DEF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5898
+    line_end: 5898
+    char_start: 364606
+    char_end: 364697
+  viewer_span:
+    file: source.md
+    line_start: 1029
+    line_end: 1029
+    char_start: 54859
+    char_end: 54950
+    viewer_only: true
+  raw_text: Current mirrors are simply an extension of the current sink/source of the previous section.
+  normalized_text: 'A current mirror is an extension of the current sink/source: if the gate-source potentials of two identical MOS transistors are equal, their channel currents are equal. M1 (diode-connected) is in saturation and the output current i_O mirrors the input i_I (Fig 4.4-1).'
+  evidence_strength: direct
+- id: A-CM-RATIO-1
+  section_id: SEC-4.4
+  atom_type: formula_atom
+  source_element_id: SE-4.4-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5901
+    line_end: 5901
+    char_start: 365515
+    char_end: 365786
+  viewer_span:
+    file: source.md
+    line_start: 1032
+    line_end: 1032
+    char_start: 55768
+    char_end: 56039
+    viewer_only: true
+  raw_text: \frac {i _ {O}}{i _ {I}} = \left(\frac {L _ {1} W _ {2}}{W _ {1} L _ {2}}\right) \left(\frac {V _ {G S} - V _ {T 2}}{V _ {G S} - V _ {T 1}}\right) ^ {2} \left[ \frac {1 + \lambda v _ {D S 2}}{1 + \lambda v _ {D S 1}} \left(\frac {K _ {2}}{K _ {1}}\right) \right] \tag {1}
+  normalized_text: i_O/i_I = (L1 W2/(W1 L2)) ((V_GS-V_T2)/(V_GS-V_T1))^2 [((1+lambda v_DS2)/(1+lambda v_DS1))(K2/K1)]
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: current_mirror_ratio_general
+- id: A-CM-RATIO-3
+  section_id: SEC-4.4
+  atom_type: formula_atom
+  source_element_id: SE-4.4-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5913
+    line_end: 5913
+    char_start: 366313
+    char_end: 366402
+  viewer_span:
+    file: source.md
+    line_start: 1044
+    line_end: 1044
+    char_start: 56566
+    char_end: 56655
+    viewer_only: true
+  raw_text: \frac {i _ {O}}{i _ {I}} = \left(\frac {L _ {1} W _ {2}}{W _ {1} L _ {2}}\right) \tag {3}
+  normalized_text: 'i_O/i_I = (L1 W2)/(W1 L2)  (ideal: matched devices, equal v_DS; ratio set by designer-controlled aspect ratios)'
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: current_mirror_ratio_ideal
+- id: A-CM-NONIDEAL
+  section_id: SEC-4.4
+  atom_type: physical_effect_atom
+  source_element_id: SE-4.4-NONID
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 5940
+    line_end: 5940
+    char_start: 366738
+    char_end: 366984
+  viewer_span:
+    file: source.md
+    line_start: 1071
+    line_end: 1071
+    char_start: 56991
+    char_end: 57237
+    viewer_only: true
+  raw_text: 'There are three effects that cause the current mirror to be different than the ideal situation of Eq. (3). These effects are: (1) channel-length modulation, (2) threshold offset between the two transistors, and (3) imperfect geometrical matching.'
+  normalized_text: 'Three effects make a real mirror deviate from the ideal: (1) channel-length modulation (unequal v_DS), (2) threshold offset Delta V_T between the two transistors (typically <10 mV), and (3) imperfect geometrical (aspect-ratio) matching.'
+  evidence_strength: direct
+- id: A-CM-KVT-14
+  section_id: SEC-4.4
+  atom_type: formula_atom
+  source_element_id: SE-4.4-EQ14
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6038
+    line_end: 6038
+    char_start: 375959
+    char_end: 376106
+  viewer_span:
+    file: source.md
+    line_start: 1169
+    line_end: 1169
+    char_start: 66212
+    char_end: 66359
+    viewer_only: true
+  raw_text: \frac {i _ {O}}{i _ {I}} \cong 1 + \frac {\Delta K ^ {\prime}}{K ^ {\prime}} - \frac {2 \Delta V _ {T}}{\left(v _ {G S} - V _ {T}\right)} \tag {14}
+  normalized_text: i_O/i_I ~= 1 + (Delta K'/K') - 2 Delta V_T/(v_GS - V_T)  (first-order mirror gain error; e.g. +/-5% K and +/-10% relative V_T gives a 15% gain error)
+  evidence_strength: direct
+  metadata:
+    tag: '14'
+    role: mirror_gain_error
+- id: A-CM-MATCH
+  section_id: SEC-4.4
+  atom_type: design_principle_atom
+  source_element_id: SE-4.4-MATCH
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6094
+    line_end: 6094
+    char_start: 378791
+    char_end: 378990
+  viewer_span:
+    file: source.md
+    line_start: 1225
+    line_end: 1225
+    char_start: 69044
+    char_end: 69243
+    viewer_only: true
+  raw_text: A solution to this problem can be achieved by using proper layout techniques. The correct one-to-five ratio should be implemented using five duplicates of the transistor M1. In this way, the toleranc
+  normalized_text: 'Aspect-ratio matching: a 1-to-N current amplifier should be built from N duplicates of the unit transistor M1 (with W,L > 10 um and common-centroid layout) so the W tolerance is not multiplied by the gain.'
+  evidence_strength: direct
+- id: A-CM-ROUT-15
+  section_id: SEC-4.4
+  atom_type: formula_atom
+  source_element_id: SE-4.4-EQ15
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6126
+    line_end: 6126
+    char_start: 380563
+    char_end: 380648
+  viewer_span:
+    file: source.md
+    line_start: 1257
+    line_end: 1257
+    char_start: 70816
+    char_end: 70901
+    viewer_only: true
+  raw_text: r _ {\text { out }} = \frac {1}{g _ {d s}} \cong \frac {1}{\lambda I _ {D}} \tag {15}
+  normalized_text: r_out = 1/g_ds ~= 1/(lambda I_D)
+  evidence_strength: direct
+  metadata:
+    tag: '15'
+    role: simple_mirror_output_resistance
+- id: A-CM-CASCODE-16
+  section_id: SEC-4.4
+  atom_type: formula_atom
+  source_element_id: SE-4.4-EQ16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6151
+    line_end: 6151
+    char_start: 381727
+    char_end: 381847
+  viewer_span:
+    file: source.md
+    line_start: 1282
+    line_end: 1282
+    char_start: 71980
+    char_end: 72100
+    viewer_only: true
+  raw_text: r _ {\text { out }} = r _ {d s 2} + r _ {d s 4} + g _ {m 4} r _ {d s 2} r _ {d s 4} \left(1 + \eta_ {4}\right) \tag {16}
+  normalized_text: r_out = r_ds2 + r_ds4 + g_m4 r_ds2 r_ds4 (1 + eta_4)  (cascode current mirror, Fig 4.4-6; same form as Example 4.3-1)
+  evidence_strength: direct
+  metadata:
+    tag: '16'
+    role: cascode_mirror_output_resistance
+- id: A-CM-WILSON
+  section_id: SEC-4.4
+  atom_type: component_model_atom
+  source_element_id: SE-4.4-WILSON
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6204
+    line_end: 6204
+    char_start: 382421
+    char_end: 382620
+  viewer_span:
+    file: source.md
+    line_start: 1335
+    line_end: 1335
+    char_start: 72674
+    char_end: 72873
+    viewer_only: true
+  raw_text: This circuit is an n-channel implementation of the well-known Wilson current mirror [5]. The output resistance of the Wilson current mirror is increased through the use of negative, current feedback.
+  normalized_text: The Wilson current mirror (Fig 4.4-8) raises r_out via negative current feedback; the regulated cascode (Fig 4.4-10) achieves an output resistance on the order of g_m^2 r^3.
+  evidence_strength: direct
+- id: A-EX441-PROBLEM
+  section_id: SEC-EX441
+  atom_type: example_problem_atom
+  source_element_id: SE-EX441-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6049
+    line_end: 6049
+    char_start: 377667
+    char_end: 377823
+  viewer_span:
+    file: source.md
+    line_start: 1180
+    line_end: 1180
+    char_start: 67920
+    char_end: 68076
+    viewer_only: true
+  raw_text: Figure 4.4-4 shows the layout of a one-to-four current amplifier. Assume that the lengths are identical $( L _ { 1 } = L _ { 2 } )$ and find the ratio error
+  normalized_text: 'Example 4.4-1: find the ratio error of a one-to-four current amplifier (Fig 4.4-4) with identical lengths.'
+  evidence_strength: direct
+- id: A-EX441-GIVEN
+  section_id: SEC-EX441
+  atom_type: given_atom
+  source_element_id: SE-EX441-G
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6058
+    line_end: 6058
+    char_start: 377957
+    char_end: 377996
+  viewer_span:
+    file: source.md
+    line_start: 1189
+    line_end: 1189
+    char_start: 68210
+    char_end: 68249
+    viewer_only: true
+  raw_text: W _ {2} = 2 0 \pm 0. 0 5 \mu \mathrm{m}
+  normalized_text: 'Given: W1 = 5 +/- 0.05 um, W2 = 20 +/- 0.05 um, L1 = L2 (variations assumed same sign).'
+  evidence_strength: direct
+- id: A-EX441-USE
+  section_id: SEC-EX441
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX441-U
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6064
+    line_end: 6064
+    char_start: 378177
+    char_end: 378284
+  viewer_span:
+    file: source.md
+    line_start: 1195
+    line_end: 1195
+    char_start: 68430
+    char_end: 68537
+    viewer_only: true
+  raw_text: \frac {i _ {O}}{i _ {I}} = \frac {W _ {2}}{W _ {1}} = \frac {2 0 \pm 0 . 0 5}{5 \pm 0 . 0 5} = 4 \pm 0. 0 5
+  normalized_text: i_O/i_I = W2/W1 = (20 +/- 0.05)/(5 +/- 0.05) = 4 +/- 0.05; the tolerance is NOT multiplied by the nominal gain of 4.
+  evidence_strength: direct
+- id: A-EX441-RESULT
+  section_id: SEC-EX441
+  atom_type: result_atom
+  source_element_id: SE-EX441-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6067
+    line_end: 6067
+    char_start: 378362
+    char_end: 378441
+  viewer_span:
+    file: source.md
+    line_start: 1198
+    line_end: 1198
+    char_start: 68615
+    char_end: 68694
+    viewer_only: true
+  raw_text: It is seen that this ratio error is 1.25% of the desired current ratio or gain.
+  normalized_text: 'i_O/i_I = 4 +/- 0.05; ratio error = 1.25% of the desired gain. (Example 4.4-2: building W2 from four copies of W1 gives exactly 4, removing the error.)'
+  evidence_strength: direct
+- id: A-REF-DEF
+  section_id: SEC-4.5
+  atom_type: concept_definition_atom
+  source_element_id: SE-4.5-DEF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6346
+    line_end: 6346
+    char_start: 389085
+    char_end: 389170
+  viewer_span:
+    file: source.md
+    line_start: 1477
+    line_end: 1477
+    char_start: 79338
+    char_end: 79423
+    viewer_only: true
+  raw_text: An ideal voltage or current reference is independent of power supply and temperature.
+  normalized_text: An ideal voltage or current reference is independent of power supply and temperature; 'reference' implies more precision and stability than a source, and a high-performance voltage reference can implement a high-performance current reference and vice versa.
+  evidence_strength: direct
+- id: A-REF-PN-4
+  section_id: SEC-4.5
+  atom_type: formula_atom
+  source_element_id: SE-4.5-EQ2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6397
+    line_end: 6397
+    char_start: 392182
+    char_end: 392274
+  viewer_span:
+    file: source.md
+    line_start: 1528
+    line_end: 1528
+    char_start: 82435
+    char_end: 82527
+    viewer_only: true
+  raw_text: V _ {\mathrm{REF}} = V _ {E B} = \frac {k T}{q} \ln \left(\frac {I}{I _ {s}}\right) \tag {2}
+  normalized_text: V_REF = V_EB = (kT/q) ln(I/I_s)  (pn-junction / substrate-BJT reference; with I ~= V_DD/R, V_REF ~= (kT/q) ln(V_DD/(R I_s)), Eq.4; sensitivity S = 1/ln(I/I_s) < 1, Eq.5)
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: pn_voltage_reference
+- id: A-REF-MOS-8
+  section_id: SEC-4.5
+  atom_type: formula_atom
+  source_element_id: SE-4.5-EQ8
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6466
+    line_end: 6466
+    char_start: 394757
+    char_end: 394909
+  viewer_span:
+    file: source.md
+    line_start: 1597
+    line_end: 1597
+    char_start: 85010
+    char_end: 85162
+    viewer_only: true
+  raw_text: V _ {\mathrm{REF}} = V _ {T} - \frac {1}{\beta R} + \sqrt {\frac {2 \left(V _ {D D} - V _ {T}\right)}{\beta R} + \frac {1}{\beta^ {2} R ^ {2}}} \tag {8}
+  normalized_text: V_REF = V_T - 1/(beta R) + sqrt(2(V_DD - V_T)/(beta R) + 1/(beta^2 R^2))  (MOS V_T-based reference; V_DD=5 V, W/L=2, R=100 kOhm gives V_REF=1.281 V, sensitivity 0.281)
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+    role: mos_vt_voltage_reference
+- id: A-REF-BOOTSTRAP
+  section_id: SEC-4.5
+  atom_type: design_principle_atom
+  source_element_id: SE-4.5-BOOT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6581
+    line_end: 6581
+    char_start: 401106
+    char_end: 401276
+  viewer_span:
+    file: source.md
+    line_start: 1712
+    line_end: 1712
+    char_start: 91359
+    char_end: 91529
+    viewer_only: true
+  raw_text: If the voltage across the active device is used to create a current and this current is somehow used to provide the original current through the device, then a current or
+  normalized_text: 'V_T-referenced (bootstrap) source: the reference''s own voltage creates a current that is fed back to provide the original current, giving an equilibrium I_Q = V_T1/R + ... (Eq.13) essentially independent of V_DD. Two equilibrium points exist (one at the origin), so a start-up circuit is required; a V_BE-referenced variant uses I_2 R = V_BE1 = V_t ln(I_1/I_s) (Eq.14).'
+  evidence_strength: direct
+- id: A-REF-TCF
+  section_id: SEC-4.5
+  atom_type: physical_effect_atom
+  source_element_id: SE-4.5-TCF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6677
+    line_end: 6677
+    char_start: 405185
+    char_end: 405375
+  viewer_span:
+    file: source.md
+    line_start: 1808
+    line_end: 1808
+    char_start: 95438
+    char_end: 95628
+    viewer_only: true
+  raw_text: Unfortunately, supply-independent references are not necessarily temperature independent because the pn junction and gate-source voltage drops are temperature dependent as noted in Sec. 2.5.
+  normalized_text: 'Supply-independent references are not temperature-independent: pn-junction and gate-source drops are temperature dependent. TC_F = (1/V_REF) dV_REF/dT; the simple pn reference (V_REF=0.6 V) has TC_F ~= -2500 ppm/degC.'
+  evidence_strength: direct
+- id: A-EX451-PROBLEM
+  section_id: SEC-EX451
+  atom_type: example_problem_atom
+  source_element_id: SE-EX451-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6699
+    line_end: 6699
+    char_start: 407204
+    char_end: 407286
+  viewer_span:
+    file: source.md
+    line_start: 1830
+    line_end: 1830
+    char_start: 97457
+    char_end: 97539
+    viewer_only: true
+  raw_text: Calculate the temperature coefficient of the circuit in Fig. 4.5-4(a) where W/L=2,
+  normalized_text: 'Example 4.5-1: calculate the temperature coefficient of the MOS V_T reference of Fig 4.5-4(a), W/L=2, V_DD=5, R=100 kOhm (polysilicon, +1500 ppm/degC).'
+  evidence_strength: direct
+- id: A-EX451-RESULT
+  section_id: SEC-EX451
+  atom_type: result_atom
+  source_element_id: SE-EX451-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6746
+    line_end: 6746
+    char_start: 408731
+    char_end: 408852
+  viewer_span:
+    file: source.md
+    line_start: 1877
+    line_end: 1877
+    char_start: 98984
+    char_end: 99105
+    viewer_only: true
+  raw_text: T C _ {F} = - 1. 1 8 9 \times 1 0 ^ {- 3} \left(\frac {1}{1 . 2 8 1}\right) = - 9 2 8 \mathrm{ppm} / ^ {\circ} \mathrm{C}
+  normalized_text: TC_F = -1.189e-3 * (1/1.281) = -928 ppm/degC (V_REF=1.281 V; unrealistically good because alpha and the resistor TC_F lack the implied accuracy).
+  evidence_strength: direct
+- id: A-BG-PRINCIPLE
+  section_id: SEC-4.6
+  atom_type: design_principle_atom
+  source_element_id: SE-4.6-PRIN
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6781
+    line_end: 6781
+    char_start: 412399
+    char_end: 412915
+  viewer_span:
+    file: source.md
+    line_start: 1912
+    line_end: 1912
+    char_start: 102652
+    char_end: 103168
+    viewer_only: true
+  raw_text: A voltage $V _ { B E }$ is generated from a pn-junction diode having a temperature coefficient of approximately −2.2 mV/°C at room temperature. Also generated is a thermal voltage $V _ { t } \ ( V _ { t } \ = k \ T / q )$ which is proportional to absolute temperature (PTAT) and has a temperature coefficient of $+ 0 . 0 8 5 ~ \mathrm { m V / ^ { \circ } C }$ at room temperature. If the $V _ { t }$ voltage is multiplied by a constant K and summed with the $V _ { B E }$ voltage, then the output voltage is given as
+  normalized_text: 'Bandgap principle (Fig 4.6-1): sum a V_BE from a pn-junction diode (CTAT, ~ -2.2 mV/degC at room temperature) with a thermal voltage V_t = kT/q (PTAT, ~ +0.085 mV/degC) multiplied by a constant K. Choosing K so the two temperature slopes cancel gives a near-zero temperature coefficient (~10 ppm/degC over 0-70 degC).'
+  evidence_strength: direct
+- id: A-BG-VREF-1
+  section_id: SEC-4.6
+  atom_type: formula_atom
+  source_element_id: SE-4.6-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6784
+    line_end: 6784
+    char_start: 412920
+    char_end: 412971
+  viewer_span:
+    file: source.md
+    line_start: 1915
+    line_end: 1915
+    char_start: 103173
+    char_end: 103224
+    viewer_only: true
+  raw_text: V _ {\mathrm{REF}} = V _ {B E} + K V _ {t} \tag {1}
+  normalized_text: V_REF = V_BE + K V_t  (V_BE is CTAT, K V_t is PTAT; K chosen for zero tempco)
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: bandgap_reference
+- id: A-BG-DVBE-12
+  section_id: SEC-4.6
+  atom_type: formula_atom
+  source_element_id: SE-4.6-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6891
+    line_end: 6891
+    char_start: 417254
+    char_end: 417343
+  viewer_span:
+    file: source.md
+    line_start: 2022
+    line_end: 2022
+    char_start: 107507
+    char_end: 107596
+    viewer_only: true
+  raw_text: \Delta V _ {B E} = \frac {k T}{q} \ln \left(\frac {J _ {C 1}}{J _ {C 2}}\right) \tag {12}
+  normalized_text: Delta V_BE = (kT/q) ln(J_C1/J_C2)
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: delta_vbe_ptat
+- id: A-BG-K-16
+  section_id: SEC-4.6
+  atom_type: formula_atom
+  source_element_id: SE-4.6-EQ16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6915
+    line_end: 6915
+    char_start: 418193
+    char_end: 418279
+  viewer_span:
+    file: source.md
+    line_start: 2046
+    line_end: 2046
+    char_start: 108446
+    char_end: 108532
+    viewer_only: true
+  raw_text: K = \frac {V _ {G 0} - V _ {B E 0} + (\gamma - \alpha) V _ {t 0}}{V _ {t 0}} \tag {16}
+  normalized_text: K = (V_G0 - V_BE0 + (gamma - alpha) V_t0)/V_t0
+  evidence_strength: direct
+  metadata:
+    tag: '16'
+    role: bandgap_zero_tempco
+- id: A-BG-CONV-22
+  section_id: SEC-4.6
+  atom_type: formula_atom
+  source_element_id: SE-4.6-EQ22
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 6974
+    line_end: 6974
+    char_start: 421286
+    char_end: 421438
+  viewer_span:
+    file: source.md
+    line_start: 2105
+    line_end: 2105
+    char_start: 111539
+    char_end: 111691
+    viewer_only: true
+  raw_text: V _ {\mathrm{REF}} = V _ {E B 2} + \left(\frac {R _ {2}}{R _ {1}}\right) V _ {t} \ln \left(\frac {R _ {2} A _ {E 1}}{R _ {3} A _ {E 2}}\right) \tag {22}
+  normalized_text: V_REF = V_EB2 + (R2/R1) V_t ln(R2 A_E1/(R3 A_E2))  (conventional CMOS n-well bandgap, Fig 4.6-3; K = (R2/R1) ln(R2 A_E1/(R3 A_E2)), Eq.23, set by resistor and emitter-base-area ratios; op-amp offset V_OS degrades V_REF, Eq.24)
+  evidence_strength: direct
+  metadata:
+    tag: '22'
+    role: conventional_bandgap
+- id: A-BG-2NDORDER
+  section_id: SEC-4.6
+  atom_type: physical_effect_atom
+  source_element_id: SE-4.6-2ND
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7024
+    line_end: 7024
+    char_start: 425061
+    char_end: 425318
+  viewer_span:
+    file: source.md
+    line_start: 2155
+    line_end: 2155
+    char_start: 115314
+    char_end: 115571
+    viewer_only: true
+  raw_text: Other effects include the mismatch in the betas of Q1 and Q2 and the mismatch in the finite base resistors of Q1 and Q2. Yet another source of complication is that the silicon bandgap voltage varies as a function of temperature over wide temperature ranges.
+  normalized_text: 'Second-order errors limit the conventional bandgap to ~100 ppm/degC: op-amp input-offset V_OS (and its drift), resistor temperature coefficients, beta and base-resistance mismatch of Q1/Q2, and curvature of the silicon bandgap V_G0. With curvature/offset compensation, TC down to 13 ppm/degC over 0-70 degC has been achieved.'
+  evidence_strength: direct
+- id: A-EX461-PROBLEM
+  section_id: SEC-EX461
+  atom_type: example_problem_atom
+  source_element_id: SE-EX461-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7020
+    line_end: 7020
+    char_start: 423360
+    char_end: 423503
+  viewer_span:
+    file: source.md
+    line_start: 2151
+    line_end: 2151
+    char_start: 113613
+    char_end: 113756
+    viewer_only: true
+  raw_text: Find $R _ { 2 } / R _ { 1 }$ to give a zero temperature coefficient at room temperature. If $V _ { O S } = 1 0 \mathrm { m V }$ , find the chan
+  normalized_text: 'Example 4.6-1: find R2/R1 for zero tempco at room temperature, and the change in V_REF if V_OS=10 mV.'
+  evidence_strength: direct
+- id: A-EX461-GIVEN
+  section_id: SEC-EX461
+  atom_type: given_atom
+  source_element_id: SE-EX461-G
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7020
+    line_end: 7020
+    char_start: 423203
+    char_end: 423359
+  viewer_span:
+    file: source.md
+    line_start: 2151
+    line_end: 2151
+    char_start: 113456
+    char_end: 113612
+    viewer_only: true
+  raw_text: Assume that $A _ { E 1 } = 1 0 \ A _ { E 2 }$ , VEB2 = 0.7 V, $R _ { 2 } = R _ { 3 }$ , and $V _ { t } = ~ 0 . 0 2 6 \mathrm { ~ V ~ }$ at room temperature.
+  normalized_text: 'Given: A_E1 = 10 A_E2, V_EB2 = 0.7 V, R2 = R3, V_t = 0.026 V (assume V_REF = 1.262 V).'
+  evidence_strength: direct
+- id: A-EX461-USE
+  section_id: SEC-EX461
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX461-U
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7022
+    line_end: 7022
+    char_start: 423644
+    char_end: 423872
+  viewer_span:
+    file: source.md
+    line_start: 2153
+    line_end: 2153
+    char_start: 113897
+    char_end: 114125
+    viewer_only: true
+  raw_text: 'Using the values of $V _ { E B 2 }$ and $V _ { t }$ in Eq. (1) and assuming that $V _ { \mathrm { R E F } } { = } 1 . 2 6 2 \ : \mathrm { V }$ gives a value of K equal to 21.62. Eq. (23) gives $R _ { 2 } / R _ { 1 } = 9 . 3 9$ .'
+  normalized_text: Eq.(1) with V_EB2, V_t gives K = 21.62; Eq.(23) gives R2/R1 = 9.39; Eq.(24) gives the V_OS-degraded V_REF (iterate).
+  evidence_strength: direct
+- id: A-EX461-RESULT
+  section_id: SEC-EX461
+  atom_type: result_atom
+  source_element_id: SE-EX461-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7022
+    line_end: 7022
+    char_start: 423787
+    char_end: 423872
+  viewer_span:
+    file: source.md
+    line_start: 2153
+    line_end: 2153
+    char_start: 114040
+    char_end: 114125
+    viewer_only: true
+  raw_text: gives a value of K equal to 21.62. Eq. (23) gives $R _ { 2 } / R _ { 1 } = 9 . 3 9$ .
+  normalized_text: K = 21.62; R2/R1 = 9.39; with V_OS=10 mV, V_REF drops from 1.262 V to 1.153 V.
+  evidence_strength: direct
+- id: A-SUMMARY
+  section_id: SEC-4.7
+  atom_type: summary_atom
+  source_element_id: SE-4.7-SUM
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7060
+    line_end: 7060
+    char_start: 427791
+    char_end: 428073
+  viewer_span:
+    file: source.md
+    line_start: 2191
+    line_end: 2191
+    char_start: 118044
+    char_end: 118326
+    viewer_only: true
+  raw_text: This chapter has introduced CMOS subcircuits, including the switch, active resistors, current sinks/sources, current mirrors or amplifiers, and voltage and current references. The general principles of each circuit were covered as was their large-signal and smallsignal performance.
+  normalized_text: Chapter 4 introduced CMOS subcircuits - the switch, active resistors, current sinks/sources, current mirrors/amplifiers, and voltage and current references - each analyzed for large-signal and small-signal performance; these circuits are rarely used alone but are joined to implement complete analog functions.
+  evidence_strength: direct
+  metadata:
+    context_only: true
+  context_only: true
+- id: A-PROB-2
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7069
+    line_end: 7069
+    char_start: 429190
+    char_end: 429458
+  viewer_span:
+    file: source.md
+    line_start: 2200
+    line_end: 2200
+    char_start: 119443
+    char_end: 119711
+    viewer_only: true
+  raw_text: 2. The circuit shown in Fig. P4.1 illustrates a single-channel MOS resistor with a W/L of $2 \mu \mathrm { m } / 1 \mu \mathrm { m }$ . Using Table 3.1-2 model parameters, calculate the small-signal on resistance of the MOS transistor at various values for $V _ { S }$
+  normalized_text: 'Problem 2: for a single-channel MOS resistor (W/L=2um/1um, Fig P4.1), calculate the small-signal ON resistance at various V_S (Table 3.1-2).'
+  evidence_strength: direct
+- id: A-PROB-12
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7202
+    line_end: 7202
+    char_start: 434404
+    char_end: 434563
+  viewer_span:
+    file: source.md
+    line_start: 2333
+    line_end: 2333
+    char_start: 124657
+    char_end: 124816
+    viewer_only: true
+  raw_text: 12. Figure P4.12 illustrates a source-degenerated current source. Using Table 3.1-2 model parameters calculate the output resistance at the given current bias.
+  normalized_text: 'Problem 12: for the source-degenerated current source of Fig P4.12, calculate the output resistance at the given current bias (Table 3.1-2).'
+  evidence_strength: direct
+- id: A-PROB-20
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-20
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7340
+    line_end: 7340
+    char_start: 437354
+    char_end: 437496
+  viewer_span:
+    file: source.md
+    line_start: 2471
+    line_end: 2471
+    char_start: 127607
+    char_end: 127749
+    viewer_only: true
+  raw_text: '20. Consider the simple current mirror illustrated in Fig. P4.20. Over process, the absolute variations of physical parameters are as follows:'
+  normalized_text: 'Problem 20: for the simple current mirror of Fig P4.20, with +/-5% W, +/-5% L, +/-5% K'', +/-5 mV V_T and identical drain voltages, find the min and max output current over process.'
+  evidence_strength: direct
+- id: A-PROB-22
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-22
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7403
+    line_end: 7403
+    char_start: 438916
+    char_end: 439197
+  viewer_span:
+    file: source.md
+    line_start: 2534
+    line_end: 2534
+    char_start: 129169
+    char_end: 129450
+    viewer_only: true
+  raw_text: 22 An improved bandgap reference generator is illustrated in Fig. P4-22. Assume that the devices M1 through M5 are identical in W/L. Further assume that the area ratio for the bipolar transistors is 10:1. Design the components to achieve an output reference voltage of 1.262 volts.
+  normalized_text: 'Problem 22: design the improved bandgap reference of Fig P4-22 (bipolar area ratio 10:1, M1-M5 identical W/L) for an output reference voltage of 1.262 V.'
+  evidence_strength: direct
+semantic_chunks:
+- id: C-HIER
+  profile: textbook
+  chunk_type: circuit_hierarchy_block
+  section_path: '4'
+  atom_ids:
+  - A-INTRO-SUB
+  - A-HIER-OPAMP
+  - A-SUMMARY
+  central_atom_ids:
+  - A-HIER-OPAMP
+  boundary_reason: chapter scope + the Fig 4.0-1 op-amp composition hierarchy (the source of the circuit_block_composed_of_block edges) kept with the intro/summary framing text
+  extraction_targets:
+  - CircuitBlock
+  - Concept
+  gold_must_cover_atoms:
+  - A-HIER-OPAMP
+  - A-INTRO-SUB
+- id: C-SW-MODEL
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 4 > 4.1
+  atom_ids:
+  - A-SW-MODEL
+  - A-SW-ID-1
+  - A-SW-RON-2
+  - A-SW-RON-WL
+  - A-SW-OFF
+  - A-SW-CAPS
+  central_atom_ids:
+  - A-SW-MODEL
+  - A-SW-RON-2
+  boundary_reason: 'switch model: r_ON formula with its nonsaturation source, OFF leakage, parasitic caps kept together (formula-explanation continuity)'
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-SW-MODEL
+  - A-SW-RON-2
+  - A-SW-OFF
+- id: C-SW-CLOCK
+  profile: textbook
+  chunk_type: physical_effect_block
+  section_path: 4 > 4.1
+  atom_ids:
+  - A-SW-CLOCKFEED
+  - A-SW-GVT-3
+  - A-SW-VERR-SLOW-6
+  - A-SW-VERR-FAST-8
+  - A-SW-FEEDFIX
+  - A-SW-CMOS
+  central_atom_ids:
+  - A-SW-CLOCKFEED
+  boundary_reason: clock feedthrough / charge injection effect + slow/fast error model + mitigation + CMOS switch, one effect cluster
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  - DesignPrinciple
+  - ComponentModel
+  gold_must_cover_atoms:
+  - A-SW-CLOCKFEED
+  - A-SW-VERR-SLOW-6
+  - A-SW-VERR-FAST-8
+  - A-SW-FEEDFIX
+- id: C-EX-411
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.1 > Example 4.1-1
+  atom_ids:
+  - A-EX411-PROBLEM
+  - A-EX411-GIVEN
+  - A-EX411-USE
+  - A-EX411-RESULT
+  - A-EX411-RESULT2
+  central_atom_ids:
+  - A-EX411-PROBLEM
+  boundary_reason: problem/given/formula-usage/result(s) continuous (example_solution_continuity); Case 1 (19.7 mV) and Case 2 (10.95 mV) results both kept
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX411-PROBLEM
+  - A-EX411-GIVEN
+  - A-EX411-USE
+  - A-EX411-RESULT
+- id: C-DIODE
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 4 > 4.2
+  atom_ids:
+  - A-DIODE-DEF
+  - A-DIODE-I-1
+  - A-DIODE-V-2
+  - A-DIODE-ROUT-3
+  central_atom_ids:
+  - A-DIODE-DEF
+  boundary_reason: MOS diode/active resistor model + its I, V, r_out formulas
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  gold_must_cover_atoms:
+  - A-DIODE-DEF
+  - A-DIODE-ROUT-3
+- id: C-EX-421
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.2 > Example 4.2-1
+  atom_ids:
+  - A-EX421-PROBLEM
+  - A-EX421-RESULT
+  central_atom_ids:
+  - A-EX421-PROBLEM
+  boundary_reason: active-resistor sizing worked example
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX421-PROBLEM
+  - A-EX421-RESULT
+- id: C-CS
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 4 > 4.3
+  atom_ids:
+  - A-CS-DEF
+  - A-CS-VMIN-1
+  - A-CS-ROUT-2
+  - A-CS-CASCODE-PRIN
+  - A-CS-CASCODE-ROUT-7
+  - A-CS-VON-PRIN
+  - A-CS-HIGHSWING
+  central_atom_ids:
+  - A-CS-DEF
+  - A-CS-CASCODE-ROUT-7
+  boundary_reason: current sink/source model, r_out, cascode boosting principle, V_ON biasing principle and high-swing V_MIN reduction kept together (composition + formula continuity)
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-CS-DEF
+  - A-CS-ROUT-2
+  - A-CS-CASCODE-ROUT-7
+  - A-CS-HIGHSWING
+- id: C-EX-431
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.3 > Example 4.3-1
+  atom_ids:
+  - A-EX431-PROBLEM
+  - A-EX431-GIVEN
+  - A-EX431-USE
+  - A-EX431-RESULT
+  central_atom_ids:
+  - A-EX431-PROBLEM
+  boundary_reason: output-resistance worked example (simple vs cascode) continuous
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX431-PROBLEM
+  - A-EX431-USE
+  - A-EX431-RESULT
+- id: C-EX-432
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.3 > Example 4.3-2
+  atom_ids:
+  - A-EX432-PROBLEM
+  - A-EX432-GIVEN
+  - A-EX432-USE
+  - A-EX432-RESULT
+  central_atom_ids:
+  - A-EX432-PROBLEM
+  boundary_reason: cascode-sink design-for-V_MIN worked example continuous
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX432-PROBLEM
+  - A-EX432-GIVEN
+  - A-EX432-RESULT
+- id: C-CM
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 4 > 4.4
+  atom_ids:
+  - A-CM-DEF
+  - A-CM-RATIO-1
+  - A-CM-RATIO-3
+  - A-CM-NONIDEAL
+  - A-CM-KVT-14
+  - A-CM-MATCH
+  - A-CM-ROUT-15
+  - A-CM-CASCODE-16
+  - A-CM-WILSON
+  central_atom_ids:
+  - A-CM-DEF
+  - A-CM-NONIDEAL
+  boundary_reason: current-mirror model, ideal/general ratio, three nonidealities, matching principle, simple/cascode/Wilson output resistance kept together
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  - PhysicalEffect
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-CM-DEF
+  - A-CM-RATIO-3
+  - A-CM-NONIDEAL
+  - A-CM-MATCH
+- id: C-EX-441
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.4 > Example 4.4-1
+  atom_ids:
+  - A-EX441-PROBLEM
+  - A-EX441-GIVEN
+  - A-EX441-USE
+  - A-EX441-RESULT
+  central_atom_ids:
+  - A-EX441-PROBLEM
+  boundary_reason: aspect-ratio-error worked example continuous
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX441-PROBLEM
+  - A-EX441-GIVEN
+  - A-EX441-RESULT
+- id: C-REF
+  profile: textbook
+  chunk_type: design_principle_block
+  section_path: 4 > 4.5
+  atom_ids:
+  - A-REF-DEF
+  - A-REF-PN-4
+  - A-REF-MOS-8
+  - A-REF-BOOTSTRAP
+  - A-REF-TCF
+  central_atom_ids:
+  - A-REF-BOOTSTRAP
+  boundary_reason: 'voltage/current references: pn (V_T/V_BE-based) and MOS V_T-based references built from current mirrors, bootstrap principle, and their temperature limitation'
+  extraction_targets:
+  - Concept
+  - Formula
+  - DesignPrinciple
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-REF-DEF
+  - A-REF-PN-4
+  - A-REF-MOS-8
+  - A-REF-BOOTSTRAP
+- id: C-EX-451
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.5 > Example 4.5-1
+  atom_ids:
+  - A-EX451-PROBLEM
+  - A-EX451-RESULT
+  central_atom_ids:
+  - A-EX451-PROBLEM
+  boundary_reason: V_T-reference temperature-coefficient worked example
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX451-PROBLEM
+  - A-EX451-RESULT
+- id: C-BG
+  profile: textbook
+  chunk_type: design_principle_block
+  section_path: 4 > 4.6
+  atom_ids:
+  - A-BG-PRINCIPLE
+  - A-BG-VREF-1
+  - A-BG-DVBE-12
+  - A-BG-K-16
+  - A-BG-CONV-22
+  - A-BG-2NDORDER
+  central_atom_ids:
+  - A-BG-PRINCIPLE
+  boundary_reason: bandgap principle (CTAT V_BE + PTAT K*V_t -> zero tempco) with its V_REF/Delta V_BE/K formulas, conventional realization, and second-order errors
+  extraction_targets:
+  - DesignPrinciple
+  - Formula
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-BG-PRINCIPLE
+  - A-BG-VREF-1
+  - A-BG-K-16
+- id: C-EX-461
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 4 > 4.6 > Example 4.6-1
+  atom_ids:
+  - A-EX461-PROBLEM
+  - A-EX461-GIVEN
+  - A-EX461-USE
+  - A-EX461-RESULT
+  central_atom_ids:
+  - A-EX461-PROBLEM
+  boundary_reason: bandgap design worked example continuous
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX461-PROBLEM
+  - A-EX461-GIVEN
+  - A-EX461-RESULT
+- id: C-PROB
+  profile: textbook
+  chunk_type: problem_set_block
+  section_path: 4 > Problems
+  atom_ids:
+  - A-PROB-2
+  - A-PROB-12
+  - A-PROB-20
+  - A-PROB-22
+  central_atom_ids:
+  - A-PROB-2
+  boundary_reason: end-of-chapter problems
+  extraction_targets:
+  - ProblemStatement
+  gold_must_cover_atoms:
+  - A-PROB-2
+  - A-PROB-12
+  - A-PROB-20
+  - A-PROB-22
+context_packages:
+- id: PKG-HIER
+  profile: textbook
+  chunk_id: C-HIER
+  section_path: Chapter 4 > 4.0 Analog CMOS Subcircuits > Hierarchy
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-INTRO-SUB
+    atom_type: concept_definition_atom
+  - atom_id: A-HIER-OPAMP
+    atom_type: concept_definition_atom
+  - atom_id: A-SUMMARY
+    atom_type: summary_atom
+  linked_context:
+    figure: 'Fig 4.0-1 op-amp composition hierarchy (rendered as a <details> mermaid flowchart: op amp -> biasing/diff-amp/2nd-stage/output; diff-amp -> current sink + current-mirror load + source-coupled pair)'
+    previous_heading: Chapter 4 Analog CMOS Subcircuits
+    next_heading: 4.1 MOS Switch
+  extraction_targets:
+  - CircuitBlock
+  - Concept
+  expected_objects:
+  - CIRCUIT-ANALOG-SUBCIRCUITS
+  - CIRCUIT-OPAMP
+  - CIRCUIT-DIFF-AMP
+  - CIRCUIT-CURRENT-SINK
+  - CIRCUIT-CURRENT-MIRROR
+  - CIRCUIT-MOS-SWITCH
+  - CIRCUIT-MOS-DIODE
+  - CIRCUIT-CURRENT-REFERENCE
+  - CIRCUIT-BANDGAP
+  expected_local_fields:
+    CIRCUIT-ANALOG-SUBCIRCUITS:
+    - name
+    - role
+    - members
+    CIRCUIT-OPAMP:
+    - name
+    - note
+    CIRCUIT-DIFF-AMP:
+    - name
+    - note
+    CIRCUIT-CURRENT-SINK:
+    - name
+    CIRCUIT-CURRENT-MIRROR:
+    - name
+    CIRCUIT-MOS-SWITCH:
+    - name
+    CIRCUIT-MOS-DIODE:
+    - name
+    CIRCUIT-CURRENT-REFERENCE:
+    - name
+    CIRCUIT-BANDGAP:
+    - name
+  note: A-INTRO-SUB and A-SUMMARY are context_only framing text. The hierarchy package supplies the composition edges; CIRCUIT-ANALOG-SUBCIRCUITS / CIRCUIT-OPAMP / CIRCUIT-DIFF-AMP home here, while the leaf CircuitBlock objects (MOS switch, current sink, current mirror, MOS diode, current/voltage reference, bandgap) home in their own sub-section packages and are reachable here only by their A-INTRO-SUB / A-HIER-OPAMP composition statement, so this package declares expected_local_fields = ['name'] for those cross-package objects (the only field derivable from the hierarchy atoms).
+- id: PKG-SW-MODEL
+  profile: textbook
+  chunk_id: C-SW-MODEL
+  section_path: Chapter 4 > 4.1 MOS Switch > Switch model
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-SW-MODEL
+    atom_type: component_model_atom
+  - atom_id: A-SW-ID-1
+    atom_type: formula_atom
+  - atom_id: A-SW-RON-2
+    atom_type: formula_atom
+  - atom_id: A-SW-RON-WL
+    atom_type: physical_effect_atom
+  - atom_id: A-SW-OFF
+    atom_type: physical_effect_atom
+  - atom_id: A-SW-CAPS
+    atom_type: component_model_atom
+  linked_context:
+    formula_context: r_ON = L/[K' W (V_GS - V_T - V_DS)] (Eq.2) derived from the nonsaturation I_D (Eq.1)
+    previous_heading: 4.1 MOS Switch
+    next_heading: Clock feedthrough
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  - PhysicalEffect
+  expected_objects:
+  - CIRCUIT-MOS-SWITCH
+  - COMP-SWITCH-MODEL
+  - FORMULA-RON
+  - PHYS-RON-OFF
+  expected_local_fields:
+    CIRCUIT-MOS-SWITCH:
+    - name
+    - properties
+    - nonidealities
+- id: PKG-SW-CLOCK
+  profile: textbook
+  chunk_id: C-SW-CLOCK
+  section_path: Chapter 4 > 4.1 MOS Switch > Clock feedthrough
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-SW-CLOCKFEED
+    atom_type: physical_effect_atom
+  - atom_id: A-SW-GVT-3
+    atom_type: formula_atom
+  - atom_id: A-SW-VERR-SLOW-6
+    atom_type: formula_atom
+  - atom_id: A-SW-VERR-FAST-8
+    atom_type: formula_atom
+  - atom_id: A-SW-FEEDFIX
+    atom_type: design_principle_atom
+  - atom_id: A-SW-CMOS
+    atom_type: component_model_atom
+  linked_context:
+    formula_context: slow/fast charge-feedthrough V_error (Eqs 6/8) selected by beta V_HT^2/(2 C_L) vs U
+    previous_heading: Switch model
+    next_heading: Example 4.1-1
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  - DesignPrinciple
+  - ComponentModel
+  expected_objects:
+  - PHYS-CLOCK-FEEDTHROUGH
+  - FORMULA-CHARGE-FEEDTHROUGH
+  - PRINCIPLE-FEEDTHROUGH-MIT
+  - CIRCUIT-CMOS-SWITCH
+- id: PKG-EX-411
+  profile: textbook
+  chunk_id: C-EX-411
+  section_path: Chapter 4 > 4.1 > Example 4.1-1
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX411-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX411-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX411-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX411-RESULT
+    atom_type: result_atom
+  - atom_id: A-EX411-RESULT2
+    atom_type: result_atom
+  linked_context:
+    previous_heading: Clock feedthrough
+    next_heading: 4.2 MOS Diode/Active Resistor
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.1-1
+- id: PKG-DIODE
+  profile: textbook
+  chunk_id: C-DIODE
+  section_path: Chapter 4 > 4.2 MOS Diode/Active Resistor
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-DIODE-DEF
+    atom_type: component_model_atom
+  - atom_id: A-DIODE-I-1
+    atom_type: formula_atom
+  - atom_id: A-DIODE-V-2
+    atom_type: formula_atom
+  - atom_id: A-DIODE-ROUT-3
+    atom_type: formula_atom
+  linked_context:
+    formula_context: r_out = 1/(g_m + g_mbs + g_ds) ~= 1/g_m (Eq.3)
+    previous_heading: 4.2 MOS Diode/Active Resistor
+    next_heading: Example 4.2-1
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  expected_objects:
+  - CIRCUIT-MOS-DIODE
+  - FORMULA-DIODE-ROUT
+  expected_local_fields:
+    CIRCUIT-MOS-DIODE:
+    - name
+    - note
+- id: PKG-EX-421
+  profile: textbook
+  chunk_id: C-EX-421
+  section_path: Chapter 4 > 4.2 > Example 4.2-1
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX421-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX421-RESULT
+    atom_type: result_atom
+  linked_context:
+    previous_heading: 4.2 MOS Diode/Active Resistor
+    next_heading: 4.3 Current Sinks and Sources
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.2-1
+- id: PKG-CS
+  profile: textbook
+  chunk_id: C-CS
+  section_path: Chapter 4 > 4.3 Current Sinks and Sources
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-CS-DEF
+    atom_type: component_model_atom
+  - atom_id: A-CS-VMIN-1
+    atom_type: formula_atom
+  - atom_id: A-CS-ROUT-2
+    atom_type: formula_atom
+  - atom_id: A-CS-CASCODE-PRIN
+    atom_type: design_principle_atom
+  - atom_id: A-CS-CASCODE-ROUT-7
+    atom_type: formula_atom
+  - atom_id: A-CS-VON-PRIN
+    atom_type: design_principle_atom
+  - atom_id: A-CS-HIGHSWING
+    atom_type: design_principle_atom
+  linked_context:
+    formula_context: cascode r_out ~= (g_m2 r_ds2) r_ds1 (Eq.7) boosts the simple-sink r_out ~= 1/(lambda I_D) (Eq.2); high-swing V_MIN = 2 V_ON (Eq.17)
+    previous_heading: 4.3 Current Sinks and Sources
+    next_heading: Example 4.3-1
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  - DesignPrinciple
+  expected_objects:
+  - CIRCUIT-CURRENT-SINK
+  - CIRCUIT-CASCODE-SINK
+  - FORMULA-CS-ROUT
+  - FORMULA-CASCODE-ROUT
+  - PRINCIPLE-CASCODE
+  - PRINCIPLE-VON-BIAS
+  expected_local_fields:
+    CIRCUIT-CURRENT-SINK:
+    - name
+    - note
+    CIRCUIT-CASCODE-SINK:
+    - name
+    - note
+    - composed_of
+- id: PKG-EX-431
+  profile: textbook
+  chunk_id: C-EX-431
+  section_path: Chapter 4 > 4.3 > Example 4.3-1
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX431-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX431-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX431-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX431-RESULT
+    atom_type: result_atom
+  linked_context:
+    previous_heading: 4.3 Current Sinks and Sources
+    next_heading: Example 4.3-2
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.3-1
+- id: PKG-EX-432
+  profile: textbook
+  chunk_id: C-EX-432
+  section_path: Chapter 4 > 4.3 > Example 4.3-2
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX432-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX432-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX432-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX432-RESULT
+    atom_type: result_atom
+  linked_context:
+    previous_heading: Example 4.3-1
+    next_heading: 4.4 Current Mirrors
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.3-2
+- id: PKG-CM
+  profile: textbook
+  chunk_id: C-CM
+  section_path: Chapter 4 > 4.4 Current Mirrors
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-CM-DEF
+    atom_type: component_model_atom
+  - atom_id: A-CM-RATIO-1
+    atom_type: formula_atom
+  - atom_id: A-CM-RATIO-3
+    atom_type: formula_atom
+  - atom_id: A-CM-NONIDEAL
+    atom_type: physical_effect_atom
+  - atom_id: A-CM-KVT-14
+    atom_type: formula_atom
+  - atom_id: A-CM-MATCH
+    atom_type: design_principle_atom
+  - atom_id: A-CM-ROUT-15
+    atom_type: formula_atom
+  - atom_id: A-CM-CASCODE-16
+    atom_type: formula_atom
+  - atom_id: A-CM-WILSON
+    atom_type: component_model_atom
+  linked_context:
+    formula_context: ideal ratio i_O/i_I = (L1 W2)/(W1 L2) (Eq.3); first-order gain error (Eq.14); simple r_out (Eq.15); cascode r_out (Eq.16)
+    previous_heading: 4.4 Current Mirrors
+    next_heading: Example 4.4-1
+  extraction_targets:
+  - ComponentModel
+  - Formula
+  - PhysicalEffect
+  - DesignPrinciple
+  expected_objects:
+  - CIRCUIT-CURRENT-MIRROR
+  - COMP-WILSON
+  - FORMULA-MIRROR-RATIO
+  - FORMULA-MIRROR-ERROR
+  - PHYS-ASPECT-RATIO-ERROR
+  - PRINCIPLE-MIRROR-MATCH
+  expected_local_fields:
+    CIRCUIT-CURRENT-MIRROR:
+    - name
+    - note
+    - composed_of
+- id: PKG-EX-441
+  profile: textbook
+  chunk_id: C-EX-441
+  section_path: Chapter 4 > 4.4 > Example 4.4-1
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX441-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX441-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX441-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX441-RESULT
+    atom_type: result_atom
+  linked_context:
+    previous_heading: 4.4 Current Mirrors
+    next_heading: 4.5 Current and Voltage References
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.4-1
+- id: PKG-REF
+  profile: textbook
+  chunk_id: C-REF
+  section_path: Chapter 4 > 4.5 Current and Voltage References
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-REF-DEF
+    atom_type: concept_definition_atom
+  - atom_id: A-REF-PN-4
+    atom_type: formula_atom
+  - atom_id: A-REF-MOS-8
+    atom_type: formula_atom
+  - atom_id: A-REF-BOOTSTRAP
+    atom_type: design_principle_atom
+  - atom_id: A-REF-TCF
+    atom_type: physical_effect_atom
+  linked_context:
+    formula_context: pn reference V_REF = V_EB = (kT/q) ln(I/I_s) (Eq.2); MOS V_T reference (Eq.8); bootstrap I_Q (Eq.13)
+    previous_heading: 4.5 Current and Voltage References
+    next_heading: Example 4.5-1
+  extraction_targets:
+  - Concept
+  - Formula
+  - DesignPrinciple
+  - PhysicalEffect
+  expected_objects:
+  - CIRCUIT-CURRENT-REFERENCE
+  - FORMULA-PN-REF
+  - FORMULA-MOS-VT-REF
+  - PRINCIPLE-BOOTSTRAP
+  - PHYS-REF-TEMPDEP
+  expected_local_fields:
+    CIRCUIT-CURRENT-REFERENCE:
+    - name
+    - note
+    - composed_of
+- id: PKG-EX-451
+  profile: textbook
+  chunk_id: C-EX-451
+  section_path: Chapter 4 > 4.5 > Example 4.5-1
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX451-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX451-RESULT
+    atom_type: result_atom
+  linked_context:
+    previous_heading: 4.5 Current and Voltage References
+    next_heading: 4.6 Bandgap Reference
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.5-1
+- id: PKG-BG
+  profile: textbook
+  chunk_id: C-BG
+  section_path: Chapter 4 > 4.6 Bandgap Reference
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-BG-PRINCIPLE
+    atom_type: design_principle_atom
+  - atom_id: A-BG-VREF-1
+    atom_type: formula_atom
+  - atom_id: A-BG-DVBE-12
+    atom_type: formula_atom
+  - atom_id: A-BG-K-16
+    atom_type: formula_atom
+  - atom_id: A-BG-CONV-22
+    atom_type: formula_atom
+  - atom_id: A-BG-2NDORDER
+    atom_type: physical_effect_atom
+  linked_context:
+    formula_context: V_REF = V_BE + K V_t (Eq.1); Delta V_BE PTAT (Eq.12); zero-tempco K (Eq.16); conventional bandgap (Eq.22/23)
+    previous_heading: 4.6 Bandgap Reference
+    next_heading: Example 4.6-1
+  extraction_targets:
+  - DesignPrinciple
+  - Formula
+  - PhysicalEffect
+  expected_objects:
+  - CIRCUIT-BANDGAP
+  - FORMULA-BANDGAP
+  - FORMULA-BANDGAP-CONV
+  - PHYS-PTAT
+  - PHYS-BANDGAP-2NDORDER
+  - PRINCIPLE-BANDGAP-CANCEL
+  expected_local_fields:
+    CIRCUIT-BANDGAP:
+    - name
+    - note
+    - composed_of
+- id: PKG-EX-461
+  profile: textbook
+  chunk_id: C-EX-461
+  section_path: Chapter 4 > 4.6 > Example 4.6-1
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-EX461-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX461-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX461-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX461-RESULT
+    atom_type: result_atom
+  linked_context:
+    previous_heading: 4.6 Bandgap Reference
+    next_heading: 4.7 Summary
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-4.6-1
+- id: PKG-PROB
+  profile: textbook
+  chunk_id: C-PROB
+  section_path: Chapter 4 > Problems
+  document_title: CMOS Analog Circuit Design - Allen & Holberg
+  atoms:
+  - atom_id: A-PROB-2
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-12
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-20
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-22
+    atom_type: problem_statement_atom
+  linked_context:
+    previous_heading: 4.7 Summary
+    next_heading: References
+  extraction_targets:
+  - ProblemStatement
+  expected_objects:
+  - PROB-2
+  - PROB-12
+  - PROB-20
+  - PROB-22
+mentions:
+- id: M-01
+  text: MOS switch
+  type: CircuitBlock
+  atom_id: A-SW-MODEL
+  canonical_key: mos_switch
+- id: M-02
+  text: ON resistance
+  type: Variable
+  atom_id: A-SW-RON-2
+  canonical_key: on_resistance_ron
+- id: M-03
+  text: clock feedthrough
+  type: PhysicalEffect
+  atom_id: A-SW-CLOCKFEED
+  canonical_key: clock_feedthrough
+- id: M-04
+  text: charge injection
+  type: PhysicalEffect
+  atom_id: A-SW-CLOCKFEED
+  canonical_key: clock_feedthrough
+- id: M-05
+  text: MOS diode
+  type: CircuitBlock
+  atom_id: A-DIODE-DEF
+  canonical_key: mos_diode_active_resistor
+- id: M-06
+  text: current sink
+  type: CircuitBlock
+  atom_id: A-CS-DEF
+  canonical_key: current_sink_source
+- id: M-07
+  text: cascode current sink
+  type: CircuitBlock
+  atom_id: A-CS-CASCODE-ROUT-7
+  canonical_key: cascode_current_sink
+- id: M-08
+  text: current mirror
+  type: CircuitBlock
+  atom_id: A-CM-DEF
+  canonical_key: current_mirror
+- id: M-09
+  text: aspect-ratio error
+  type: PhysicalEffect
+  atom_id: A-CM-NONIDEAL
+  canonical_key: aspect_ratio_error
+- id: M-10
+  text: Wilson current mirror
+  type: CircuitBlock
+  atom_id: A-CM-WILSON
+  canonical_key: wilson_current_mirror
+- id: M-11
+  text: voltage reference
+  type: CircuitBlock
+  atom_id: A-REF-DEF
+  canonical_key: voltage_reference
+- id: M-12
+  text: bootstrap reference
+  type: CircuitBlock
+  atom_id: A-REF-BOOTSTRAP
+  canonical_key: current_reference
+- id: M-13
+  text: bandgap reference
+  type: CircuitBlock
+  atom_id: A-BG-PRINCIPLE
+  canonical_key: bandgap_reference
+- id: M-14
+  text: PTAT
+  type: PhysicalEffect
+  atom_id: A-BG-DVBE-12
+  canonical_key: ptat_voltage
+- id: M-15
+  text: operational amplifier
+  type: CircuitBlock
+  atom_id: A-HIER-OPAMP
+  canonical_key: operational_amplifier
+- id: M-16
+  text: differential amplifier
+  type: CircuitBlock
+  atom_id: A-HIER-OPAMP
+  canonical_key: differential_amplifier
+canonicalization:
+- canonical: clock_feedthrough
+  aliases:
+  - clock feedthrough
+  - charge injection
+  - charge feedthrough
+  note: 4.1 states 'Clock feedthrough (also called charge injection, and charge feedthrough)' - the three names co-refer.
+- canonical: current_sink_source
+  aliases:
+  - current sink
+  - current source
+  - current sink/source
+  note: sink and source are the same two-terminal device named by node polarity.
+- canonical: cascode_current_sink
+  aliases:
+  - cascode current sink
+  - cascode current source
+  - high-swing cascode
+  - standard cascode current sink
+objects:
+- id: CIRCUIT-ANALOG-SUBCIRCUITS
+  type: CircuitBlock
+  section_path: '4'
+  home_package: PKG-HIER
+  payload:
+    name: Analog CMOS Subcircuits
+    role: Chapter-4 building blocks composing more complex analog functions
+    members:
+    - MOS switch
+    - MOS diode/active resistor
+    - current sink/source
+    - current mirror
+    - current/voltage reference
+    - bandgap reference
+  local_evidence_atom_ids:
+  - A-INTRO-SUB
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: CIRCUIT-OPAMP
+  type: CircuitBlock
+  section_path: '4'
+  home_package: PKG-HIER
+  payload:
+    name: operational amplifier
+    note: complex circuit (Fig 4.0-1) composed of biasing circuits, input differential amplifier, second gain stage, and output stage.
+  local_evidence_atom_ids:
+  - A-HIER-OPAMP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-DIFF-AMP
+  type: CircuitBlock
+  section_path: '4'
+  home_package: PKG-HIER
+  payload:
+    name: input differential amplifier
+    note: stage composed of a current sink, a current-mirror load, and a source-coupled pair.
+  local_evidence_atom_ids:
+  - A-HIER-OPAMP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-MOS-SWITCH
+  type: CircuitBlock
+  section_path: 4 > 4.1
+  home_package: PKG-SW-MODEL
+  payload:
+    name: MOS switch
+    properties:
+    - r_ON
+    - r_OFF
+    - parasitic capacitors C_GS/C_GD/C_BS/C_BD
+    nonidealities:
+    - clock feedthrough
+    - OFF leakage I_OFF
+  local_evidence_atom_ids:
+  - A-SW-MODEL
+  - A-SW-CAPS
+  supporting_context_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-CMOS-SWITCH
+  type: CircuitBlock
+  section_path: 4 > 4.1
+  home_package: PKG-SW-CLOCK
+  payload:
+    name: CMOS switch
+    note: p-channel and n-channel enhancement transistors in parallel; larger ON-state dynamic range.
+  local_evidence_atom_ids:
+  - A-SW-CMOS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-MOS-DIODE
+  type: CircuitBlock
+  section_path: 4 > 4.2
+  home_package: PKG-DIODE
+  payload:
+    name: MOS diode / active resistor
+    note: gate-drain tied, in saturation; r_out ~= 1/g_m; used in current mirrors and for level translation.
+  local_evidence_atom_ids:
+  - A-DIODE-DEF
+  - A-DIODE-I-1
+  - A-DIODE-V-2
+  - A-DIODE-ROUT-3
+  supporting_context_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-CURRENT-SINK
+  type: CircuitBlock
+  section_path: 4 > 4.3
+  home_package: PKG-CS
+  payload:
+    name: current sink/source
+    note: two-terminal constant-current device; r_out ~= 1/(lambda I_D); requires v_OUT > V_MIN.
+  local_evidence_atom_ids:
+  - A-CS-DEF
+  - A-CS-VMIN-1
+  - A-CS-ROUT-2
+  supporting_context_atom_ids:
+  - A-INTRO-SUB
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-CASCODE-SINK
+  type: CircuitBlock
+  section_path: 4 > 4.3
+  home_package: PKG-CS
+  payload:
+    name: cascode current sink
+    note: common-gate stack (M2 over M1) boosting r_out by g_m2 r_ds2; high-swing variant gives V_MIN = 2 V_ON.
+    composed_of:
+    - common-gate device M2
+    - current-sink device M1
+  local_evidence_atom_ids:
+  - A-CS-CASCODE-PRIN
+  - A-CS-CASCODE-ROUT-7
+  - A-CS-HIGHSWING
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-CURRENT-MIRROR
+  type: CircuitBlock
+  section_path: 4 > 4.4
+  home_package: PKG-CM
+  payload:
+    name: current mirror
+    note: two matched MOS transistors with common V_GS; i_O/i_I set by aspect ratios.
+    composed_of:
+    - MOS diode (M1)
+    - output transistor (M2)
+  local_evidence_atom_ids:
+  - A-CM-DEF
+  - A-CM-RATIO-3
+  - A-CM-ROUT-15
+  supporting_context_atom_ids:
+  - A-INTRO-SUB
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-CURRENT-REFERENCE
+  type: CircuitBlock
+  section_path: 4 > 4.5
+  home_package: PKG-REF
+  payload:
+    name: current/voltage reference
+    note: bootstrap (V_T- or V_BE-referenced) source; built from current mirrors (M3/M4) forcing I_1=I_2 plus a start-up circuit; supply-independent.
+    composed_of:
+    - current mirror
+    - reference device (V_T or V_BE)
+    - resistor R
+    - start-up circuit
+  local_evidence_atom_ids:
+  - A-REF-DEF
+  - A-REF-BOOTSTRAP
+  supporting_context_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CIRCUIT-BANDGAP
+  type: CircuitBlock
+  section_path: 4 > 4.6
+  home_package: PKG-BG
+  payload:
+    name: bandgap reference
+    note: V_REF = V_BE + K V_t; CTAT V_BE from a BJT summed with PTAT K*V_t; ~10 ppm/degC.
+    composed_of:
+    - BJT (V_BE, CTAT)
+    - PTAT delta-V_BE current branch
+    - op amp
+    - resistor ratio R2/R1
+  local_evidence_atom_ids:
+  - A-BG-PRINCIPLE
+  - A-BG-CONV-22
+  supporting_context_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-SWITCH-MODEL
+  type: ComponentModel
+  section_path: 4 > 4.1
+  home_package: PKG-SW-MODEL
+  payload:
+    name: nonideal switch model
+    elements:
+    - r_ON
+    - r_OFF
+    - V_OS (zero for MOS)
+    - I_OFF
+    - I_A/I_B leakage
+    - C_A,C_B,C_AB,C_AC,C_BC
+  local_evidence_atom_ids:
+  - A-SW-MODEL
+  - A-SW-CAPS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-WILSON
+  type: ComponentModel
+  section_path: 4 > 4.4
+  home_package: PKG-CM
+  payload:
+    name: Wilson / regulated cascode mirror
+    note: Wilson uses negative current feedback; the cascode mirror (Fig 4.4-6) boosts r_out (Eq.16); the regulated cascode reaches r_out ~ g_m^2 r^3.
+  local_evidence_atom_ids:
+  - A-CM-CASCODE-16
+  - A-CM-WILSON
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-RON
+  type: Formula
+  section_path: 4 > 4.1
+  home_package: PKG-SW-MODEL
+  payload:
+    name: switch ON resistance
+    expression: r_ON = L/[K' W (V_GS - V_T - V_DS)]
+    variables:
+      K_prime: transconductance parameter
+      W/L: aspect ratio
+      V_GS: gate-source voltage
+      V_T: threshold
+  local_evidence_atom_ids:
+  - A-SW-RON-2
+  - A-SW-ID-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-CHARGE-FEEDTHROUGH
+  type: Formula
+  section_path: 4 > 4.1
+  home_package: PKG-SW-CLOCK
+  payload:
+    name: charge-feedthrough error
+    expression: 'V_error depends on regime: slow uses sqrt(pi U C_L/(2 beta)); fast uses (V_HT - beta V_HT^3/(6 U C_L))'
+    condition: slow if beta V_HT^2/(2 C_L) >> U; fast if << U
+  local_evidence_atom_ids:
+  - A-SW-GVT-3
+  - A-SW-VERR-SLOW-6
+  - A-SW-VERR-FAST-8
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+- id: FORMULA-DIODE-ROUT
+  type: Formula
+  section_path: 4 > 4.2
+  home_package: PKG-DIODE
+  payload:
+    name: MOS-diode small-signal resistance
+    expression: r_out = 1/(g_m + g_mbs + g_ds) ~= 1/g_m
+  local_evidence_atom_ids:
+  - A-DIODE-ROUT-3
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-CS-ROUT
+  type: Formula
+  section_path: 4 > 4.3
+  home_package: PKG-CS
+  payload:
+    name: current-source output resistance
+    expression: r_out = (1 + lambda V_DS)/(lambda I_D) ~= 1/(lambda I_D)
+  local_evidence_atom_ids:
+  - A-CS-ROUT-2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-CASCODE-ROUT
+  type: Formula
+  section_path: 4 > 4.3
+  home_package: PKG-CS
+  payload:
+    name: cascode output resistance
+    expression: r_out ~= (g_m2 r_ds2) r_ds1  (~ g_m r_ds^2)
+    note: common-gate gain g_m2 r_ds2 multiplies the lower device r_ds1
+  local_evidence_atom_ids:
+  - A-CS-CASCODE-ROUT-7
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-MIRROR-RATIO
+  type: Formula
+  section_path: 4 > 4.4
+  home_package: PKG-CM
+  payload:
+    name: ideal current-mirror ratio
+    expression: i_O/i_I = (L1 W2)/(W1 L2)
+  local_evidence_atom_ids:
+  - A-CM-RATIO-3
+  - A-CM-RATIO-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-MIRROR-ERROR
+  type: Formula
+  section_path: 4 > 4.4
+  home_package: PKG-CM
+  payload:
+    name: first-order mirror gain error
+    expression: i_O/i_I ~= 1 + (Delta K'/K') - 2 Delta V_T/(v_GS - V_T)
+  local_evidence_atom_ids:
+  - A-CM-KVT-14
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-PN-REF
+  type: Formula
+  section_path: 4 > 4.5
+  home_package: PKG-REF
+  payload:
+    name: pn-junction voltage reference
+    expression: V_REF = V_EB = (kT/q) ln(I/I_s); S = 1/ln(I/I_s) < 1
+  local_evidence_atom_ids:
+  - A-REF-PN-4
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-MOS-VT-REF
+  type: Formula
+  section_path: 4 > 4.5
+  home_package: PKG-REF
+  payload:
+    name: MOS V_T-based reference
+    expression: V_REF = V_T - 1/(beta R) + sqrt(2(V_DD - V_T)/(beta R) + 1/(beta^2 R^2))
+  local_evidence_atom_ids:
+  - A-REF-MOS-8
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BANDGAP
+  type: Formula
+  section_path: 4 > 4.6
+  home_package: PKG-BG
+  payload:
+    name: bandgap reference voltage
+    expression: V_REF = V_BE + K V_t; V_REF|T0 = V_G0 + V_t0(gamma - alpha)
+    variables:
+      V_BE: CTAT, -2.2 mV/degC
+      V_t: PTAT, kT/q
+      K: scaling constant for zero tempco
+      V_G0: bandgap voltage 1.205 V
+  local_evidence_atom_ids:
+  - A-BG-VREF-1
+  - A-BG-K-16
+  - A-BG-DVBE-12
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BANDGAP-CONV
+  type: Formula
+  section_path: 4 > 4.6
+  home_package: PKG-BG
+  payload:
+    name: conventional CMOS bandgap V_REF
+    expression: V_REF = V_EB2 + (R2/R1) V_t ln(R2 A_E1/(R3 A_E2)); K = (R2/R1) ln(R2 A_E1/(R3 A_E2))
+  local_evidence_atom_ids:
+  - A-BG-CONV-22
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.1-1
+  type: ExampleSolution
+  section_path: 4 > 4.1 > Example 4.1-1
+  home_package: PKG-EX-411
+  payload:
+    title: Example 4.1-1 Charge Feedthrough Error
+    problem: Charge-feedthrough error for two gate-fall cases (Fig 4.1-9).
+    given: V_S=1.0 V, C_L=200 fF, W/L=0.8/0.8; Case1 fall 0.2 ns, Case2 fall 10 ns.
+    result: Case1 (fast) V_error=19.7 mV; Case2 (slow) V_error=10.95 mV.
+  local_evidence_atom_ids:
+  - A-EX411-PROBLEM
+  - A-EX411-GIVEN
+  - A-EX411-USE
+  - A-EX411-RESULT
+  - A-EX411-RESULT2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.2-1
+  type: ExampleSolution
+  section_path: 4 > 4.2 > Example 4.2-1
+  home_package: PKG-EX-421
+  payload:
+    title: Example 4.2-1 Active Resistor
+    problem: Size an n-channel floating active resistor for 1 kOhm.
+    result: V_T(due to |V_BS|=2 V)=1.022 V; W/L = 4.6.
+  local_evidence_atom_ids:
+  - A-EX421-PROBLEM
+  - A-EX421-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.3-1
+  type: ExampleSolution
+  section_path: 4 > 4.3 > Example 4.3-1
+  home_package: PKG-EX-431
+  payload:
+    title: Example 4.3-1 Output Resistance for a Current Sink
+    problem: 'Output resistance: simple vs cascode current sink.'
+    given: I_OUT=100 uA, W1/L1=W2/L2=1, lambda=0.04, g_m1=g_m2=148 uA/V.
+    result: (a) simple sink 250 kOhm; (b) cascode sink 9.25 MOhm.
+  local_evidence_atom_ids:
+  - A-EX431-PROBLEM
+  - A-EX431-GIVEN
+  - A-EX431-USE
+  - A-EX431-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.3-2
+  type: ExampleSolution
+  section_path: 4 > 4.3 > Example 4.3-2
+  home_package: PKG-EX-432
+  payload:
+    title: Example 4.3-2 Cascode Sink for a Given V_MIN
+    problem: Design high-swing cascode sink, I_OUT=100 uA, V_MIN=1 V.
+    given: V_ON=0.5 V, K'=110 uA/V^2.
+    result: W/L (M1-M3) = 7.27; W/L (M4) = 1.82.
+  local_evidence_atom_ids:
+  - A-EX432-PROBLEM
+  - A-EX432-GIVEN
+  - A-EX432-USE
+  - A-EX432-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.4-1
+  type: ExampleSolution
+  section_path: 4 > 4.4 > Example 4.4-1
+  home_package: PKG-EX-441
+  payload:
+    title: Example 4.4-1 Aspect Ratio Errors in Current Amplifiers
+    problem: Ratio error of a 1-to-4 current amplifier.
+    given: W1=5+/-0.05 um, W2=20+/-0.05 um, L1=L2.
+    result: i_O/i_I = 4 +/- 0.05; ratio error 1.25%.
+  local_evidence_atom_ids:
+  - A-EX441-PROBLEM
+  - A-EX441-GIVEN
+  - A-EX441-USE
+  - A-EX441-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.5-1
+  type: ExampleSolution
+  section_path: 4 > 4.5 > Example 4.5-1
+  home_package: PKG-EX-451
+  payload:
+    title: Example 4.5-1 Threshold Voltage Reference Circuit
+    problem: TC_F of the MOS V_T reference (Fig 4.5-4a).
+    result: V_REF=1.281 V; dV_REF/dT=-1.189e-3 V/degC; TC_F=-928 ppm/degC.
+  local_evidence_atom_ids:
+  - A-EX451-PROBLEM
+  - A-EX451-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-4.6-1
+  type: ExampleSolution
+  section_path: 4 > 4.6 > Example 4.6-1
+  home_package: PKG-EX-461
+  payload:
+    title: Example 4.6-1 Design of a Bandgap-Voltage Reference
+    problem: Find R2/R1 for zero tempco; change in V_REF with V_OS=10 mV.
+    given: A_E1=10 A_E2, V_EB2=0.7 V, R2=R3, V_t=0.026 V.
+    result: K=21.62; R2/R1=9.39; V_REF drops 1.262 -> 1.153 V with V_OS=10 mV.
+  local_evidence_atom_ids:
+  - A-EX461-PROBLEM
+  - A-EX461-GIVEN
+  - A-EX461-USE
+  - A-EX461-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-CLOCK-FEEDTHROUGH
+  type: PhysicalEffect
+  section_path: 4 > 4.1
+  home_package: PKG-SW-CLOCK
+  payload:
+    name: clock feedthrough / charge injection
+    description: Gate-to-source/drain coupling capacitance transfers clock charge to the signal nodes; depends on layout, dimensions, impedance, and gate waveform; the most serious switch limitation.
+  local_evidence_atom_ids:
+  - A-SW-CLOCKFEED
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-RON-OFF
+  type: PhysicalEffect
+  section_path: 4 > 4.1
+  home_package: PKG-SW-MODEL
+  payload:
+    name: r_ON / OFF leakage
+    description: r_ON falls with W/L and rises to infinity as V_GS -> V_T; OFF state dominated by junction and subthreshold leakage (1 fA/um^2, doubles every 8 degC).
+  local_evidence_atom_ids:
+  - A-SW-RON-WL
+  - A-SW-OFF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-ASPECT-RATIO-ERROR
+  type: PhysicalEffect
+  section_path: 4 > 4.4
+  home_package: PKG-CM
+  payload:
+    name: aspect-ratio / matching error
+    description: Channel-length modulation, V_T offset (<10 mV), and W/L mismatch cause mirror-ratio error; 15% gain error for +/-5% K' and +/-10% relative V_T.
+  local_evidence_atom_ids:
+  - A-CM-NONIDEAL
+  - A-CM-KVT-14
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-REF-TEMPDEP
+  type: PhysicalEffect
+  section_path: 4 > 4.5
+  home_package: PKG-REF
+  payload:
+    name: reference temperature dependence
+    description: 'Supply-independent references still drift with temperature: simple pn reference TC_F ~= -2500 ppm/degC.'
+  local_evidence_atom_ids:
+  - A-REF-TCF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-PTAT
+  type: PhysicalEffect
+  section_path: 4 > 4.6
+  home_package: PKG-BG
+  payload:
+    name: PTAT thermal voltage
+    description: Delta V_BE = (kT/q) ln(J_C1/J_C2) is proportional to absolute temperature (+0.085 mV/degC), opposing the CTAT V_BE (-2.2 mV/degC).
+  local_evidence_atom_ids:
+  - A-BG-DVBE-12
+  - A-BG-PRINCIPLE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-BANDGAP-2NDORDER
+  type: PhysicalEffect
+  section_path: 4 > 4.6
+  home_package: PKG-BG
+  payload:
+    name: bandgap second-order errors
+    description: Op-amp V_OS (and its drift), resistor TC, beta and base-resistance mismatch, and V_G0 curvature limit a conventional bandgap to ~100 ppm/degC (13 ppm/degC with compensation).
+  local_evidence_atom_ids:
+  - A-BG-2NDORDER
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-FEEDTHROUGH-MIT
+  type: DesignPrinciple
+  section_path: 4 > 4.1
+  home_package: PKG-SW-CLOCK
+  payload:
+    statement: Reduce clock feedthrough with a dummy transistor on the inverse clock, the largest capacitors possible, minimum-geometry switches, and the smallest clock swing.
+    applies_to:
+    - sampled-data / switched-capacitor circuits
+    tradeoff: dummy transistor needs an inverted clock and may worsen feedthrough; larger caps and smaller swing create problems elsewhere.
+  local_evidence_atom_ids:
+  - A-SW-FEEDFIX
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-CASCODE
+  type: DesignPrinciple
+  section_path: 4 > 4.3
+  home_package: PKG-CS
+  payload:
+    statement: Use a common-gate (cascode) device to multiply output resistance by g_m r_ds; the high-swing cascode (M4 W/L = 1/4) lowers V_MIN from V_T+2V_ON to 2V_ON.
+    applies_to:
+    - current sinks/sources
+    - current mirrors
+    tradeoff: more stacked devices reduce voltage headroom; reducing V_MIN at the output can raise V_I(min) at the input.
+  local_evidence_atom_ids:
+  - A-CS-CASCODE-PRIN
+  - A-CS-HIGHSWING
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-VON-BIAS
+  type: DesignPrinciple
+  section_path: 4 > 4.3
+  home_package: PKG-CS
+  payload:
+    statement: 'Biasing relationships from V_GS=V_ON+V_T and i_D=(K''W/2L)V_ON^2: for equal series currents the W/L ratio is inversely proportional to V_ON^2; for equal V_GS the currents scale with W/L.'
+    applies_to:
+    - MOS biasing
+    - current scaling
+  local_evidence_atom_ids:
+  - A-CS-VON-PRIN
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-MIRROR-MATCH
+  type: DesignPrinciple
+  section_path: 4 > 4.4
+  home_package: PKG-CM
+  payload:
+    statement: 'Current-mirror accuracy comes from device ratios: keep equal drain-source voltages and high output resistance; build a 1-to-N amplifier from N unit copies of M1 (with W,L >10 um and common-centroid layout) so tolerances scale with the gain.'
+    applies_to:
+    - current mirrors
+    - current amplifiers
+    tradeoff: larger devices and common-centroid layout cost area.
+  local_evidence_atom_ids:
+  - A-CM-MATCH
+  - A-CM-NONIDEAL
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-BOOTSTRAP
+  type: DesignPrinciple
+  section_path: 4 > 4.5
+  home_package: PKG-REF
+  payload:
+    statement: A bootstrap (V_T- or V_BE-referenced) source feeds the reference's own current back through a current mirror so I_Q is essentially V_DD-independent; a start-up circuit is required to avoid the zero-current equilibrium.
+    applies_to:
+    - supply-independent biasing
+    tradeoff: needs a start-up circuit; not temperature independent.
+  local_evidence_atom_ids:
+  - A-REF-BOOTSTRAP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-BANDGAP-CANCEL
+  type: DesignPrinciple
+  section_path: 4 > 4.6
+  home_package: PKG-BG
+  payload:
+    statement: 'Bandgap tempco cancellation: sum a CTAT V_BE (~ -2.2 mV/degC) with a PTAT K*V_t (~ +0.085 mV/degC scaled by K) so the slopes cancel at T0, giving V_REF ~= V_G0 (1.262 V) with near-zero temperature coefficient.'
+    applies_to:
+    - precision voltage/current references
+    tradeoff: needs matched BJTs, accurate resistor ratios, and a low-offset op amp; curvature limits the achievable TC.
+  local_evidence_atom_ids:
+  - A-BG-PRINCIPLE
+  - A-BG-K-16
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-2
+  type: ProblemStatement
+  section_path: 4 > Problems
+  home_package: PKG-PROB
+  payload:
+    question: Calculate the small-signal ON resistance of a single-channel MOS resistor (W/L=2/1) at various V_S.
+  local_evidence_atom_ids:
+  - A-PROB-2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-12
+  type: ProblemStatement
+  section_path: 4 > Problems
+  home_package: PKG-PROB
+  payload:
+    question: Calculate the output resistance of a source-degenerated current source (Fig P4.12).
+  local_evidence_atom_ids:
+  - A-PROB-12
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-20
+  type: ProblemStatement
+  section_path: 4 > Problems
+  home_package: PKG-PROB
+  payload:
+    question: Find min/max output current of a simple current mirror over +/-5% W,L,K' and +/-5 mV V_T.
+  local_evidence_atom_ids:
+  - A-PROB-20
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-22
+  type: ProblemStatement
+  section_path: 4 > Problems
+  home_package: PKG-PROB
+  payload:
+    question: Design the improved bandgap reference of Fig P4-22 (area ratio 10:1) for V_REF=1.262 V.
+  local_evidence_atom_ids:
+  - A-PROB-22
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-OPAMP
+  target_object_id: CIRCUIT-DIFF-AMP
+  evidence_atom_ids:
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-OPAMP
+  target_object_id: CIRCUIT-CURRENT-SINK
+  evidence_atom_ids:
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-OPAMP
+  target_object_id: CIRCUIT-CURRENT-MIRROR
+  evidence_atom_ids:
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-04
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-DIFF-AMP
+  target_object_id: CIRCUIT-CURRENT-SINK
+  evidence_atom_ids:
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-05
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-DIFF-AMP
+  target_object_id: CIRCUIT-CURRENT-MIRROR
+  evidence_atom_ids:
+  - A-HIER-OPAMP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-ANALOG-SUBCIRCUITS
+  target_object_id: CIRCUIT-MOS-SWITCH
+  evidence_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-07
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-ANALOG-SUBCIRCUITS
+  target_object_id: CIRCUIT-MOS-DIODE
+  evidence_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-08
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-ANALOG-SUBCIRCUITS
+  target_object_id: CIRCUIT-CURRENT-SINK
+  evidence_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-09
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-ANALOG-SUBCIRCUITS
+  target_object_id: CIRCUIT-CURRENT-MIRROR
+  evidence_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-10
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-ANALOG-SUBCIRCUITS
+  target_object_id: CIRCUIT-CURRENT-REFERENCE
+  evidence_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-11
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-ANALOG-SUBCIRCUITS
+  target_object_id: CIRCUIT-BANDGAP
+  evidence_atom_ids:
+  - A-INTRO-SUB
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-12
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-CASCODE-SINK
+  target_object_id: CIRCUIT-CURRENT-SINK
+  evidence_atom_ids:
+  - A-CS-CASCODE-PRIN
+  - A-CS-CASCODE-ROUT-7
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-13
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-CURRENT-MIRROR
+  target_object_id: CIRCUIT-MOS-DIODE
+  evidence_atom_ids:
+  - A-CM-DEF
+  - A-DIODE-DEF
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-14
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-CURRENT-REFERENCE
+  target_object_id: CIRCUIT-CURRENT-MIRROR
+  evidence_atom_ids:
+  - A-REF-BOOTSTRAP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-15
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-BANDGAP
+  target_object_id: CIRCUIT-CURRENT-MIRROR
+  evidence_atom_ids:
+  - A-BG-CONV-22
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-16
+  relation_type: circuit_block_composed_of_block
+  source_object_id: CIRCUIT-CURRENT-MIRROR
+  target_object_id: COMP-WILSON
+  evidence_atom_ids:
+  - A-CM-WILSON
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-17
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-MOS-SWITCH
+  target_object_id: FORMULA-RON
+  evidence_atom_ids:
+  - A-SW-RON-2
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-18
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-MOS-SWITCH
+  target_object_id: PHYS-RON-OFF
+  evidence_atom_ids:
+  - A-SW-RON-WL
+  - A-SW-OFF
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-19
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-MOS-DIODE
+  target_object_id: FORMULA-DIODE-ROUT
+  evidence_atom_ids:
+  - A-DIODE-ROUT-3
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-20
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-CURRENT-SINK
+  target_object_id: FORMULA-CS-ROUT
+  evidence_atom_ids:
+  - A-CS-ROUT-2
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-21
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-CASCODE-SINK
+  target_object_id: FORMULA-CASCODE-ROUT
+  evidence_atom_ids:
+  - A-CS-CASCODE-ROUT-7
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-22
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-CURRENT-MIRROR
+  target_object_id: FORMULA-MIRROR-RATIO
+  evidence_atom_ids:
+  - A-CM-RATIO-3
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-23
+  relation_type: component_has_property
+  source_object_id: CIRCUIT-BANDGAP
+  target_object_id: FORMULA-BANDGAP
+  evidence_atom_ids:
+  - A-BG-VREF-1
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-24
+  relation_type: component_has_nonideality
+  source_object_id: CIRCUIT-MOS-SWITCH
+  target_object_id: PHYS-CLOCK-FEEDTHROUGH
+  evidence_atom_ids:
+  - A-SW-CLOCKFEED
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-25
+  relation_type: component_has_nonideality
+  source_object_id: CIRCUIT-CURRENT-MIRROR
+  target_object_id: PHYS-ASPECT-RATIO-ERROR
+  evidence_atom_ids:
+  - A-CM-NONIDEAL
+  - A-CM-KVT-14
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-26
+  relation_type: component_has_nonideality
+  source_object_id: CIRCUIT-CURRENT-REFERENCE
+  target_object_id: PHYS-REF-TEMPDEP
+  evidence_atom_ids:
+  - A-REF-TCF
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-27
+  relation_type: component_has_nonideality
+  source_object_id: CIRCUIT-BANDGAP
+  target_object_id: PHYS-BANDGAP-2NDORDER
+  evidence_atom_ids:
+  - A-BG-2NDORDER
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-28
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-CHARGE-FEEDTHROUGH
+  target_object_id: EXAMPLE-4.1-1
+  evidence_atom_ids:
+  - A-EX411-USE
+  - A-EX411-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-29
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-CASCODE-ROUT
+  target_object_id: EXAMPLE-4.3-1
+  evidence_atom_ids:
+  - A-EX431-USE
+  - A-EX431-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-30
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-CS-ROUT
+  target_object_id: EXAMPLE-4.3-1
+  evidence_atom_ids:
+  - A-EX431-USE
+  - A-EX431-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-31
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-MIRROR-RATIO
+  target_object_id: EXAMPLE-4.4-1
+  evidence_atom_ids:
+  - A-EX441-USE
+  - A-EX441-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-32
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-MOS-VT-REF
+  target_object_id: EXAMPLE-4.5-1
+  evidence_atom_ids:
+  - A-EX451-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-33
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-BANDGAP-CONV
+  target_object_id: EXAMPLE-4.6-1
+  evidence_atom_ids:
+  - A-EX461-USE
+  - A-EX461-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-34
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-DIODE-ROUT
+  target_object_id: EXAMPLE-4.2-1
+  evidence_atom_ids:
+  - A-EX421-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-35
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-BANDGAP
+  target_object_id: EXAMPLE-4.6-1
+  evidence_atom_ids:
+  - A-EX461-USE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-36
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-CASCODE
+  target_object_id: CIRCUIT-CASCODE-SINK
+  evidence_atom_ids:
+  - A-CS-CASCODE-PRIN
+  - A-CS-HIGHSWING
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-37
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-MIRROR-MATCH
+  target_object_id: CIRCUIT-CURRENT-MIRROR
+  evidence_atom_ids:
+  - A-CM-MATCH
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-38
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-FEEDTHROUGH-MIT
+  target_object_id: CIRCUIT-MOS-SWITCH
+  evidence_atom_ids:
+  - A-SW-FEEDFIX
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-39
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-BOOTSTRAP
+  target_object_id: CIRCUIT-CURRENT-REFERENCE
+  evidence_atom_ids:
+  - A-REF-BOOTSTRAP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-40
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-BANDGAP-CANCEL
+  target_object_id: CIRCUIT-BANDGAP
+  evidence_atom_ids:
+  - A-BG-PRINCIPLE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-41
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-VON-BIAS
+  target_object_id: CIRCUIT-CASCODE-SINK
+  evidence_atom_ids:
+  - A-CS-VON-PRIN
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-42
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-CASCODE
+  target_object_id: CIRCUIT-CASCODE-SINK
+  evidence_atom_ids:
+  - A-CS-HIGHSWING
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-43
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-FEEDTHROUGH-MIT
+  target_object_id: PHYS-CLOCK-FEEDTHROUGH
+  evidence_atom_ids:
+  - A-SW-FEEDFIX
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-44
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-MIRROR-MATCH
+  target_object_id: PHYS-ASPECT-RATIO-ERROR
+  evidence_atom_ids:
+  - A-CM-MATCH
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-45
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-BANDGAP-CANCEL
+  target_object_id: PHYS-BANDGAP-2NDORDER
+  evidence_atom_ids:
+  - A-BG-2NDORDER
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-46
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-BOOTSTRAP
+  target_object_id: PHYS-REF-TEMPDEP
+  evidence_atom_ids:
+  - A-REF-TCF
+  - A-REF-BOOTSTRAP
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-47
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-BANDGAP-CANCEL
+  target_object_id: PHYS-PTAT
+  evidence_atom_ids:
+  - A-BG-DVBE-12
+  - A-BG-PRINCIPLE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-48
+  relation_type: problem_extends_example
+  source_object_id: PROB-20
+  target_object_id: EXAMPLE-4.4-1
+  evidence_atom_ids:
+  - A-PROB-20
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-49
+  relation_type: problem_extends_example
+  source_object_id: PROB-22
+  target_object_id: EXAMPLE-4.6-1
+  evidence_atom_ids:
+  - A-PROB-22
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-50
+  relation_type: problem_extends_example
+  source_object_id: PROB-12
+  target_object_id: EXAMPLE-4.3-1
+  evidence_atom_ids:
+  - A-PROB-12
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+do_not_extract:
+- text: '[1]'
+  atom_id: A-INTRO-SUB
+  reason: bracket reference-list citation marker, not a knowledge object
+  kind: citation
+- pattern: bracket_citation
+  examples:
+  - '[1]'
+  - '[2]'
+  - '[3]'
+  - '[4]'
+  - '[5]'
+  - '[7,8,9,10,11]'
+  reason: Allen & Holberg cite the reference list with bracketed numbers; these are not knowledge objects.
+  kind: citation_policy
+- text: Operational Amplifier
+  source_lines:
+  - 4886
+  - 4886
+  reason: raw mermaid node label inside the Fig 4.0-1 <details> flowchart block; figure-internal node text, not an extractable mention (the op-amp hierarchy is captured by the prose atom A-HIER-OPAMP).
+  kind: figure_label
+- text: Biasing Circuits
+  source_lines:
+  - 4886
+  - 4886
+  reason: raw mermaid node label inside the Fig 4.0-1 flowchart <details> block.
+  kind: figure_label
+- text: Source Coupled Pair
+  source_lines:
+  - 4893
+  - 4893
+  reason: raw mermaid node label inside the Fig 4.0-1 flowchart <details> block.
+  kind: figure_label
+- pattern: mermaid_flowchart_node_label
+  examples:
+  - A["Operational Amplifier"]
+  - B["Biasing Circuits"]
+  - C["Input Differential Amplifier"]
+  - F["Current Source"]
+  - I["Source Coupled Pair"]
+  - K["Inverter"]
+  - M["Source Follower"]
+  reason: the Fig 4.0-1 op-amp hierarchy is a <details><summary>flowchart</summary> mermaid graph TD block; its raw node labels (and the graph TD / --> syntax) are figure-internal and must not be atomized - the composition is carried by the prose atom A-HIER-OPAMP and emitted as circuit_block_composed_of_block edges.
+  kind: figure_label
+- pattern: details_text_image_node_label
+  examples:
+  - I_OFF
+  - r_OFF
+  - C_AB
+  - M1
+  - MD
+  - iOUT
+  - VGG
+  - VBIAS
+  - Startup
+  reason: circuit schematics render as <details><summary>text_image</summary> ... </details> blocks of OCR node labels (M1/M2/iOUT/VGG/...); these are figure-internal pin/device labels, not knowledge objects.
+  kind: figure_label
+- pattern: image_markup
+  examples:
+  - '![](images/0748fad0f0ed002a067b97516a8899ffa8209a6353db9790ae0678d0333383c2.jpg)'
+  reason: MinerU image markdown for the figure raster; not text content.
+  kind: figure_label
+- pattern: figure_equation_cross_reference
+  examples:
+  - Fig. 4.1-1
+  - Fig. 4.0-1
+  - Fig. 4.3-6(a)
+  - Eq. (8)
+  - Eq. (23)
+  - Table 3.1-2
+  reason: in-text Fig./Eq./Table cross-references are navigation pointers, not extractable knowledge objects.
+  kind: out_of_slice_reference
+- text: to be covered in Chapters 6 and 7
+  atom_id: A-HIER-OPAMP
+  reason: forward reference to Chapters 6-7 (op-amp), outside the Chapter-4 slice.
+  kind: out_of_slice_reference
+- text: Chapter 5 will examine more complex circuits like CMOS amplifiers
+  atom_id: A-INTRO-SUB
+  reason: forward reference to Chapter 5, outside the Chapter-4 slice.
+  kind: out_of_slice_reference

@@ -1,0 +1,962 @@
+# Gold fixture v0.3.3 - Engram paper Chapter 5 Long Context Training (profile: article_research)
+# Upgraded from v0.1: dual coordinates (source_span authoritative + viewer_span),
+# raw/normalized discipline with verbatim spans, Table 2 nested header + per-row anchored
+# table_row_atoms, object evidence split into local/supporting + home_package, per-chunk
+# context_packages with expected_objects (+expected_local_fields), gold_label/difficulty/
+# evidence_strength (no decimal confidence), and do_not_extract negatives.
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Chapter 5 (Long Context Training) only
+  title: Engram - Long Context Training (Chapter 5)
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 190
+  - 221
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 190-221; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - Experimental Setup
+  - Experimental Results
+  - Table 2
+  - RULER
+  - LongPPL
+  - we demonstrate
+  - our results indicate
+  - iso-pretraining-loss
+  extraction_targets:
+  - ArticleClaim
+  - ExperimentSetup
+  - ExperimentResult
+  - MechanisticExplanation
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math (alpha/beta, arrow ->, em-dash --), and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs/numbers not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. CLAIM-FREE-ATTENTION is defined in PKG-INTRO but its supporting Iso-Loss evidence sits in PKG-RESULT, which therefore declares its locally derivable field (scope).
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: figure atoms separate physical_section_id from semantic_section_ids; forward references are isolated as do_not_extract cross_section_forward_reference. Chapter 5's slice contains no figure of its own; Figure 4 (line 222) belongs to Section 6.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref. Chapter 5 has none.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    context_only: an atom not consumed by any object or relation may be flagged metadata.context_only:true; Chapter 5 has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+    numeric_over_span: 'for every table_row_atom: each number appearing in normalized_text must occur verbatim in raw_text (no over-span numeric leakage across rows).'
+  parsing_notes:
+  - 'Table 2 renders as a single-line HTML <table> on source line 192 with a NESTED 3-row header: row1 Model(rowspan=3) + LongPPL (32k)(colspan=4) + RULER (32k)(colspan=8); row2 Perplexity(colspan=4)/NIAH Accuracy(colspan=4)/Other Tasks(colspan=4); row3 detail columns Book/Paper/Code/L-CoT, S/MK/MV/MQ, VT/CWE/FWE/QA. A-T2-HEADER''s raw_text is the anchored substring covering exactly these three header <tr> rows.'
+  - Each table_row_atom raw_text is the anchored <tr>...</tr> for one model row; the 12 numbers in its normalized_text are exactly the 12 <td> cells of that row.
+  - Table 2 is physically rendered before the Section 5 prose (caption line 190, table line 192, immediately after Chapter 4), but its caption, the (steps, loss) annotations and all interpretation belong to Chapter 5, so it is kept in this chapter.
+  - 'checkpoint annotations (steps, loss): MoE-27B(50k,1.63), Engram-27B(41k,1.66)/(46k,1.63)/(50k,1.62); the parenthetical loss is the pre-training loss before long-context extension.'
+  - YaRN hyper-parameters render as inline math '$s = 10, \alpha = 1, \beta = 32$' plus 'f = 0.707'; normalized to ASCII 's = 10, alpha = 1, beta = 32, f = 0.707'.
+  - Section 5.1 paragraphs start with run-in bold sub-headings 'Training Details.', 'Model Configurations.', 'Evaluation Benchmarks.'; these are separate MinerU paragraph elements (lines 204/206/208) but one semantic setup chunk.
+  - Section 5.2 finding 1 (line 214) and the three result bullets (lines 218-220) carry a Unicode arrow (41k -> 50k) and em-dashes; normalized to ASCII.
+source_elements:
+- id: SE-H-5
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 198
+  line_end: 198
+- id: SE-H-5.1
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 202
+  line_end: 202
+- id: SE-H-5.2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 210
+  line_end: 210
+- id: SE-5.2-T2CAP
+  type: table_caption
+  file: engram_paper_mineru.md
+  line_start: 190
+  line_end: 190
+- id: SE-5.2-T2
+  type: table
+  file: engram_paper_mineru.md
+  line_start: 192
+  line_end: 192
+- id: SE-5-INTRO
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 200
+  line_end: 200
+- id: SE-5.1-TD
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 204
+  line_end: 204
+- id: SE-5.1-MC
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 206
+  line_end: 206
+- id: SE-5.1-EB
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 208
+  line_end: 208
+- id: SE-5.2-COUP
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 214
+  line_end: 214
+- id: SE-5.2-ISOLOSS
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 218
+  line_end: 218
+- id: SE-5.2-ISOFLOPS
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 219
+  line_end: 219
+- id: SE-5.2-EXTREME
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 220
+  line_end: 220
+section_tree:
+- id: SEC-5
+  path: '5'
+  title: Long Context Training
+- id: SEC-5.1
+  path: 5 > 5.1
+  title: Experimental Setup
+  parent: SEC-5
+- id: SEC-5.2
+  path: 5 > 5.2
+  title: Experimental Results
+  parent: SEC-5
+evidence_atoms:
+- id: A-INTRO-MECH
+  section_id: SEC-5
+  atom_type: mechanism_sentence
+  source_element_id: SE-5-INTRO
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 200
+    line_end: 200
+    char_start: 35922
+    char_end: 36071
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 3291
+    char_end: 3440
+    viewer_only: true
+  raw_text: By offloading local dependency modeling to static lookups, the Engram architecture preserves valuable attention capacity for managing global context.
+  normalized_text: By offloading local dependency modeling to static lookups, the Engram architecture preserves valuable attention capacity for managing global context.
+  evidence_strength: direct
+- id: A-INTRO-CLAIM
+  section_id: SEC-5
+  atom_type: claim_sentence
+  source_element_id: SE-5-INTRO
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 200
+    line_end: 200
+    char_start: 36333
+    char_end: 36429
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 3702
+    char_end: 3798
+    viewer_only: true
+  raw_text: we demonstrate that Engram yields significant gains in long-range retrieval and reasoning tasks.
+  normalized_text: we demonstrate that Engram yields significant gains in long-range retrieval and reasoning tasks.
+  evidence_strength: direct
+- id: A-SETUP-YARN
+  section_id: SEC-5.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-5.1-TD
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 204
+    line_end: 204
+    char_start: 36600
+    char_end: 36899
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 3969
+    char_end: 4268
+    viewer_only: true
+  raw_text: Following the pre-training stage, we apply YaRN (Peng et al., 2024) for context window extension in a 32768-token context training stage for 5,000 steps (30B tokens of high-quality, long-context data). The hyper-parameters are scale $s = 10, \alpha = 1, \beta = 32$ and the scaling factor f = 0.707.
+  normalized_text: Following the pre-training stage, we apply YaRN (Peng et al., 2024) for context window extension in a 32768-token context training stage for 5,000 steps (30B tokens of high-quality, long-context data). The hyper-parameters are scale s = 10, alpha = 1, beta = 32 and the scaling factor f = 0.707.
+  evidence_strength: direct
+  metadata:
+    role: training_details
+    method: YaRN context extension (DeepSeek-V3 strategy)
+- id: A-SETUP-CONFIGS
+  section_id: SEC-5.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-5.1-MC
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 206
+    line_end: 206
+    char_start: 36923
+    char_end: 37340
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 4292
+    char_end: 4709
+    viewer_only: true
+  raw_text: We compare context extensions across four distinct model configurations. We utilize the final pre-training checkpoints (50k steps) for both MoE-27B and Engram-27B. Additionally, to rigorously benchmark architectural efficiency, we select two intermediate checkpoints for Engram-27B at 41k and 46k steps. Despite differing initialization stages, all variants undergo the exact same context extension training protocol.
+  normalized_text: We compare context extensions across four distinct model configurations. We utilize the final pre-training checkpoints (50k steps) for both MoE-27B and Engram-27B. Additionally, to rigorously benchmark architectural efficiency, we select two intermediate checkpoints for Engram-27B at 41k and 46k steps. Despite differing initialization stages, all variants undergo the exact same context extension training protocol.
+  evidence_strength: direct
+  metadata:
+    role: model_configurations
+- id: A-SETUP-ISOLOSS
+  section_id: SEC-5.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-5.1-MC
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 206
+    line_end: 206
+    char_start: 37341
+    char_end: 37658
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 4710
+    char_end: 5027
+    viewer_only: true
+  raw_text: Crucially, Engram-27B (46k) is selected because it exhibits the same pre-training loss as the fully trained MoE-27B (50k). This creates a controlled "Iso-Loss" setting, ensuring that any performance divergence during context extension is attributable to the architecture rather than the starting quality of the model.
+  normalized_text: Engram-27B (46k) is selected because it exhibits the same pre-training loss as the fully trained MoE-27B (50k). This creates a controlled "Iso-Loss" setting, ensuring that any performance divergence during context extension is attributable to the architecture rather than the starting quality of the model.
+  evidence_strength: direct
+  metadata:
+    role: iso_loss_control
+- id: A-SETUP-LONGPPL
+  section_id: SEC-5.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-5.1-EB
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 208
+    line_end: 208
+    char_start: 37772
+    char_end: 37933
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 5141
+    char_end: 5302
+    viewer_only: true
+  raw_text: 'For LongPPL, we construct evaluation sets spanning four categories: long books, research papers, code repositories, and long chain-of-thought (CoT) trajectories.'
+  normalized_text: 'For LongPPL, we construct evaluation sets spanning four categories: long books, research papers, code repositories, and long chain-of-thought (CoT) trajectories.'
+  evidence_strength: direct
+  metadata:
+    role: benchmark
+    benchmark: LongPPL
+- id: A-SETUP-RULER
+  section_id: SEC-5.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-5.1-EB
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 208
+    line_end: 208
+    char_start: 37934
+    char_end: 38219
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 5303
+    char_end: 5588
+    viewer_only: true
+  raw_text: 'For RULER, we evaluate on 14 subsets aggregated into 8 categories: Single (S), Multi-keys (MK), Multi-values (MV) and Multi-queries (MQ) Needle-in-a-Haystack; Multi-hop Variable Tracking (VT), Common Words Extraction (CWE), Frequent Words Extraction (FWE), and Question Answering (QA).'
+  normalized_text: 'For RULER, we evaluate on 14 subsets aggregated into 8 categories: Single (S), Multi-keys (MK), Multi-values (MV) and Multi-queries (MQ) Needle-in-a-Haystack; Multi-hop Variable Tracking (VT), Common Words Extraction (CWE), Frequent Words Extraction (FWE), and Question Answering (QA).'
+  evidence_strength: direct
+  metadata:
+    role: benchmark
+    benchmark: RULER
+- id: A-T2-CAPTION
+  section_id: SEC-5.2
+  atom_type: table_caption_atom
+  source_element_id: SE-5.2-T2CAP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 190
+    line_end: 190
+    char_start: 32781
+    char_end: 32961
+  viewer_span:
+    file: source.md
+    line_start: 2
+    line_end: 2
+    char_start: 150
+    char_end: 330
+    viewer_only: true
+  raw_text: Table 2 | Long-context performance comparison. Parenthetical values (e.g. (50k, 1.62)) denote the pre-training steps and the corresponding loss prior to the long-context extension.
+  normalized_text: Table 2 | Long-context performance comparison. Parenthetical values (e.g. (50k, 1.62)) denote the pre-training steps and the corresponding loss prior to the long-context extension.
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2
+- id: A-T2-HEADER
+  section_id: SEC-5.2
+  atom_type: table_header_atom
+  source_element_id: SE-5.2-T2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 192
+    line_end: 192
+    char_start: 33383
+    char_end: 33761
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 752
+    char_end: 1130
+    viewer_only: true
+  raw_text: <table><tr><td rowspan="3">Model</td><td colspan="4">LongPPL (32k)</td><td colspan="8">RULER (32k)</td></tr><tr><td colspan="4">Perplexity (↓)</td><td colspan="4">NIAH Accuracy (↑)</td><td colspan="4">Other Tasks (↑)</td></tr><tr><td>Book</td><td>Paper</td><td>Code</td><td>L-CoT</td><td>S</td><td>MK</td><td>MV</td><td>MQ</td><td>VT</td><td>CWE</td><td>FWE</td><td>QA</td></tr>
+  normalized_text: 'Nested 3-row header. Row1: Model (rowspan 3) | LongPPL (32k) (colspan 4) | RULER (32k) (colspan 8). Row2: Perplexity (lower better) (colspan 4) | NIAH Accuracy (higher better) (colspan 4) | Other Tasks (higher better) (colspan 4). Row3 detail columns: Book, Paper, Code, L-CoT | S, MK, MV, MQ | VT, CWE, FWE, QA.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2
+    header_rows: 3
+- id: A-T2-ROW-MOE50K
+  section_id: SEC-5.2
+  atom_type: table_row_atom
+  source_element_id: SE-5.2-T2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 192
+    line_end: 192
+    char_start: 33761
+    char_end: 33955
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1130
+    char_end: 1324
+    viewer_only: true
+  raw_text: <tr><td>MoE-27B (50k, 1.63)</td><td>4.38</td><td>2.91</td><td>2.49</td><td>14.16</td><td>100.0</td><td>88.0</td><td>92.7</td><td>84.2</td><td>77.0</td><td>4.5</td><td>73.0</td><td>34.5</td></tr>
+  normalized_text: 'MoE-27B (50k, 1.63): LongPPL Book 4.38 / Paper 2.91 / Code 2.49 / L-CoT 14.16; RULER NIAH S 100.0 / MK 88.0 / MV 92.7 / MQ 84.2; VT 77.0 / CWE 4.5 / FWE 73.0 / QA 34.5.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2
+    row: MoE-27B (50k)
+    note: baseline
+- id: A-T2-ROW-ENG41K
+  section_id: SEC-5.2
+  atom_type: table_row_atom
+  source_element_id: SE-5.2-T2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 192
+    line_end: 192
+    char_start: 33955
+    char_end: 34151
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1324
+    char_end: 1520
+    viewer_only: true
+  raw_text: <tr><td>Engram-27B (41k, 1.66)</td><td>4.37</td><td>2.92</td><td>2.50</td><td>14.26</td><td>99.6</td><td>88.3</td><td>93.0</td><td>89.5</td><td>83.2</td><td>3.8</td><td>99.6</td><td>44.0</td></tr>
+  normalized_text: 'Engram-27B (41k, 1.66): LongPPL Book 4.37 / Paper 2.92 / Code 2.50 / L-CoT 14.26; RULER NIAH S 99.6 / MK 88.3 / MV 93.0 / MQ 89.5; VT 83.2 / CWE 3.8 / FWE 99.6 / QA 44.0.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2
+    row: Engram-27B (41k)
+    note: early-stopped, ~82% FLOPs
+- id: A-T2-ROW-ENG46K
+  section_id: SEC-5.2
+  atom_type: table_row_atom
+  source_element_id: SE-5.2-T2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 192
+    line_end: 192
+    char_start: 34151
+    char_end: 34347
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1520
+    char_end: 1716
+    viewer_only: true
+  raw_text: <tr><td>Engram-27B (46k, 1.63)</td><td>4.19</td><td>2.84</td><td>2.45</td><td>13.59</td><td>97.6</td><td>89.0</td><td>95.5</td><td>97.0</td><td>87.2</td><td>4.3</td><td>98.6</td><td>37.5</td></tr>
+  normalized_text: 'Engram-27B (46k, 1.63): LongPPL Book 4.19 / Paper 2.84 / Code 2.45 / L-CoT 13.59; RULER NIAH S 97.6 / MK 89.0 / MV 95.5 / MQ 97.0; VT 87.2 / CWE 4.3 / FWE 98.6 / QA 37.5.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2
+    row: Engram-27B (46k)
+    note: Iso-Loss vs MoE-27B(50k)
+- id: A-T2-ROW-ENG50K
+  section_id: SEC-5.2
+  atom_type: table_row_atom
+  source_element_id: SE-5.2-T2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 192
+    line_end: 192
+    char_start: 34347
+    char_end: 34543
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1716
+    char_end: 1912
+    viewer_only: true
+  raw_text: <tr><td>Engram-27B (50k, 1.62)</td><td>4.14</td><td>2.82</td><td>2.44</td><td>13.41</td><td>99.3</td><td>89.3</td><td>96.5</td><td>97.0</td><td>89.0</td><td>5.9</td><td>99.3</td><td>40.5</td></tr>
+  normalized_text: 'Engram-27B (50k, 1.62): LongPPL Book 4.14 / Paper 2.82 / Code 2.44 / L-CoT 13.41; RULER NIAH S 99.3 / MK 89.3 / MV 96.5 / MQ 97.0; VT 89.0 / CWE 5.9 / FWE 99.3 / QA 40.5.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2
+    row: Engram-27B (50k)
+    note: Iso-FLOPs vs MoE-27B(50k); best across the board
+- id: A-RES-COUPLING
+  section_id: SEC-5.2
+  atom_type: result_sentence
+  source_element_id: SE-5.2-COUP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 214
+    line_end: 214
+    char_start: 38866
+    char_end: 39417
+  viewer_span:
+    file: source.md
+    line_start: 26
+    line_end: 26
+    char_start: 6235
+    char_end: 6786
+    viewer_only: true
+  raw_text: Observing the trajectory of Engram (41k → 50k), we find that long-context performance improves monotonically with pre-training progression, even when controlling for identical model architecture and a fixed computational budget during the context extension stage. This suggests that long-context performance is intrinsically coupled with the general modeling ability of the base model. Consequently, a rigorous architectural comparison must control for this confounding variable by aligning base model loss, rather than merely aligning training steps.
+  normalized_text: Observing the trajectory of Engram (41k -> 50k), we find that long-context performance improves monotonically with pre-training progression, even when controlling for identical model architecture and a fixed computational budget during the context extension stage. This suggests that long-context performance is intrinsically coupled with the general modeling ability of the base model. Consequently, a rigorous architectural comparison must control for this confounding variable by aligning base model loss, rather than merely aligning training steps.
+  evidence_strength: direct
+- id: A-RES-ISOLOSS
+  section_id: SEC-5.2
+  atom_type: result_sentence
+  source_element_id: SE-5.2-ISOLOSS
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 218
+    line_end: 218
+    char_start: 39745
+    char_end: 40020
+  viewer_span:
+    file: source.md
+    line_start: 30
+    line_end: 30
+    char_start: 7114
+    char_end: 7389
+    viewer_only: true
+  raw_text: 'When comparing Engram-27B (46k) against the fully trained MoE-27B (50k)—models aligned on pre-training loss—Engram demonstrates significant gains. Specifically, it outperforms the baseline on complex retrieval tasks (e.g., Multi-Query NIAH: 97.0 vs. 84.2; VT: 87.2 vs. 77.0).'
+  normalized_text: 'When comparing Engram-27B (46k) against the fully trained MoE-27B (50k)--models aligned on pre-training loss--Engram demonstrates significant gains. Specifically, it outperforms the baseline on complex retrieval tasks (e.g., Multi-Query NIAH: 97.0 vs. 84.2; VT: 87.2 vs. 77.0).'
+  evidence_strength: direct
+  metadata:
+    setting: Iso-Loss
+- id: A-RES-ISOFLOPS
+  section_id: SEC-5.2
+  atom_type: result_sentence
+  source_element_id: SE-5.2-ISOFLOPS
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 219
+    line_end: 219
+    char_start: 40061
+    char_end: 40196
+  viewer_span:
+    file: source.md
+    line_start: 31
+    line_end: 31
+    char_start: 7430
+    char_end: 7565
+    viewer_only: true
+  raw_text: Under the standard iso-compute budget, Engram-27B (50k) further widens this gap, establishing the highest performance across the board.
+  normalized_text: Under the standard iso-compute budget, Engram-27B (50k) further widens this gap, establishing the highest performance across the board.
+  evidence_strength: direct
+  metadata:
+    setting: Iso-FLOPs
+- id: A-RES-EXTREME
+  section_id: SEC-5.2
+  atom_type: result_sentence
+  source_element_id: SE-5.2-EXTREME
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 220
+    line_end: 220
+    char_start: 40241
+    char_end: 40477
+  viewer_span:
+    file: source.md
+    line_start: 32
+    line_end: 32
+    char_start: 7610
+    char_end: 7846
+    viewer_only: true
+  raw_text: Even the early-stopped Engram-27B (41k) remains highly competitive against the fully trained MoE-27B (50k). It matches the baseline on LongPPL and surpasses it on RULER, underscoring the intrinsic superiority of the Engram architecture.
+  normalized_text: Even the early-stopped Engram-27B (41k) remains highly competitive against the fully trained MoE-27B (50k). It matches the baseline on LongPPL and surpasses it on RULER, underscoring the intrinsic superiority of the Engram architecture.
+  evidence_strength: direct
+  metadata:
+    setting: Extreme (~82% compute)
+semantic_chunks:
+- id: C-INTRO
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: '5'
+  atom_ids:
+  - A-INTRO-MECH
+  - A-INTRO-CLAIM
+  central_atom_ids:
+  - A-INTRO-CLAIM
+  boundary_reason: Section-opening claim (significant gains in long-range retrieval and reasoning) plus its mechanistic rationale (offloading local dependencies to static lookups frees attention capacity for global context); kept together as one core-claim block (qiefen Section 5.3).
+  extraction_targets:
+  - ArticleClaim
+  - MechanisticExplanation
+  gold_must_cover_atoms:
+  - A-INTRO-CLAIM
+  - A-INTRO-MECH
+- id: C-SETUP
+  profile: article_research
+  chunk_type: experiment_setup_block
+  section_path: 5 > 5.1
+  atom_ids:
+  - A-SETUP-YARN
+  - A-SETUP-CONFIGS
+  - A-SETUP-ISOLOSS
+  - A-SETUP-LONGPPL
+  - A-SETUP-RULER
+  central_atom_ids:
+  - A-SETUP-CONFIGS
+  - A-SETUP-ISOLOSS
+  boundary_reason: Training details + four checkpoints + Iso-Loss control + both benchmarks form one self-contained setup unit (experiment_setup_result_dependency keeps it adjacent to the result block); not split at the run-in bold sub-headings Training Details./Model Configurations./Evaluation Benchmarks.
+  extraction_targets:
+  - ExperimentSetup
+  gold_must_cover_atoms:
+  - A-SETUP-YARN
+  - A-SETUP-CONFIGS
+  - A-SETUP-ISOLOSS
+  - A-SETUP-LONGPPL
+  - A-SETUP-RULER
+- id: C-RESULT
+  profile: article_research
+  chunk_type: experiment_result_block
+  section_path: 5 > 5.2
+  atom_ids:
+  - A-T2-CAPTION
+  - A-T2-HEADER
+  - A-T2-ROW-MOE50K
+  - A-T2-ROW-ENG41K
+  - A-T2-ROW-ENG46K
+  - A-T2-ROW-ENG50K
+  - A-RES-COUPLING
+  - A-RES-ISOLOSS
+  - A-RES-ISOFLOPS
+  - A-RES-EXTREME
+  central_atom_ids:
+  - A-T2-CAPTION
+  - A-RES-ISOLOSS
+  boundary_reason: Table 2 (caption + nested header + all four model rows) kept with its prose interpretation (table_header_row_dependency; the result sentences cite exact table numbers, e.g. MQ NIAH 97.0 vs 84.2).
+  extraction_targets:
+  - ExperimentResult
+  - ArticleClaim
+  gold_must_cover_atoms:
+  - A-T2-CAPTION
+  - A-T2-HEADER
+  - A-T2-ROW-MOE50K
+  - A-T2-ROW-ENG46K
+  - A-T2-ROW-ENG50K
+  - A-RES-COUPLING
+  - A-RES-ISOLOSS
+  - A-RES-EXTREME
+context_packages:
+- id: PKG-INTRO
+  profile: article_research
+  chunk_id: C-INTRO
+  section_path: Chapter 5 > 5 Long Context Training
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models'
+  atoms:
+  - atom_id: A-INTRO-MECH
+    atom_type: mechanism_sentence
+  - atom_id: A-INTRO-CLAIM
+    atom_type: claim_sentence
+  linked_context:
+    previous_heading: 4.2 Experimental Results
+    next_heading: 5.1 Experimental Setup
+  extraction_targets:
+  - ArticleClaim
+  - MechanisticExplanation
+  expected_objects:
+  - CLAIM-FREE-ATTENTION
+  - MECH-LOOKUP-DELEGATION
+- id: PKG-SETUP
+  profile: article_research
+  chunk_id: C-SETUP
+  section_path: Chapter 5 > 5.1 Experimental Setup
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models'
+  atoms:
+  - atom_id: A-SETUP-YARN
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-CONFIGS
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-ISOLOSS
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-LONGPPL
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-RULER
+    atom_type: experiment_setup_atom
+  linked_context:
+    previous_heading: 5. Long Context Training
+    next_heading: 5.2 Experimental Results
+  extraction_targets:
+  - ExperimentSetup
+  expected_objects:
+  - SETUP-LONGCTX
+- id: PKG-RESULT
+  profile: article_research
+  chunk_id: C-RESULT
+  section_path: Chapter 5 > 5.2 Experimental Results
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models'
+  atoms:
+  - atom_id: A-T2-CAPTION
+    atom_type: table_caption_atom
+  - atom_id: A-T2-HEADER
+    atom_type: table_header_atom
+  - atom_id: A-T2-ROW-MOE50K
+    atom_type: table_row_atom
+  - atom_id: A-T2-ROW-ENG41K
+    atom_type: table_row_atom
+  - atom_id: A-T2-ROW-ENG46K
+    atom_type: table_row_atom
+  - atom_id: A-T2-ROW-ENG50K
+    atom_type: table_row_atom
+  - atom_id: A-RES-COUPLING
+    atom_type: result_sentence
+  - atom_id: A-RES-ISOLOSS
+    atom_type: result_sentence
+  - atom_id: A-RES-ISOFLOPS
+    atom_type: result_sentence
+  - atom_id: A-RES-EXTREME
+    atom_type: result_sentence
+  linked_context:
+    table_caption: Table 2 | Long-context performance comparison
+    table_headers: Model | LongPPL(32k){Book,Paper,Code,L-CoT} | RULER(32k){NIAH:S,MK,MV,MQ ; Other:VT,CWE,FWE,QA}
+    previous_heading: 5.1 Experimental Setup
+    next_heading: 6. Analysis
+  extraction_targets:
+  - ExperimentResult
+  - ArticleClaim
+  expected_objects:
+  - CLAIM-ALIGN-LOSS
+  - RESULT-TABLE2
+  expected_local_fields:
+    CLAIM-FREE-ATTENTION:
+    - scope
+mentions:
+- id: M-01
+  text: YaRN
+  type: ExperimentSetup
+  atom_id: A-SETUP-YARN
+  canonical_key: yarn_context_extension
+- id: M-02
+  text: Iso-Loss
+  type: ExperimentSetup
+  atom_id: A-SETUP-ISOLOSS
+  canonical_key: iso_loss_setting
+- id: M-03
+  text: LongPPL
+  type: ExperimentSetup
+  atom_id: A-SETUP-LONGPPL
+  canonical_key: longppl_benchmark
+- id: M-04
+  text: RULER
+  type: ExperimentSetup
+  atom_id: A-SETUP-RULER
+  canonical_key: ruler_benchmark
+- id: M-05
+  text: Multi-Query NIAH
+  type: ExperimentResult
+  atom_id: A-RES-ISOLOSS
+  canonical_key: mq_niah
+- id: M-06
+  text: VT
+  type: ExperimentResult
+  atom_id: A-RES-ISOLOSS
+  canonical_key: ruler_vt
+- id: M-07
+  text: Engram-27B (46k, 1.63)
+  type: ExperimentResult
+  atom_id: A-T2-ROW-ENG46K
+  canonical_key: engram_27b_46k
+- id: M-08
+  text: Engram-27B (50k, 1.62)
+  type: ExperimentResult
+  atom_id: A-T2-ROW-ENG50K
+  canonical_key: engram_27b_50k
+- id: M-09
+  text: MoE-27B (50k, 1.63)
+  type: ExperimentResult
+  atom_id: A-T2-ROW-MOE50K
+  canonical_key: moe_27b_50k
+- id: M-10
+  text: attention capacity
+  type: MechanisticExplanation
+  atom_id: A-INTRO-MECH
+  canonical_key: freed_attention_capacity
+canonicalization:
+- canonical: iso_loss_setting
+  aliases:
+  - Iso-Loss
+  - iso-pretraining-loss
+  - loss-aligned
+  - Engram-27B (46k)
+  note: 46k checkpoint chosen so pre-training loss equals MoE-27B(50k).
+- canonical: iso_flops_setting
+  aliases:
+  - iso-pretraining-FLOPs
+  - iso-compute
+  - iso-compute budget
+  - Engram-27B (50k)
+- canonical: mq_niah
+  aliases:
+  - Multi-Query NIAH
+  - MQ
+  - Multi-queries Needle-in-a-Haystack
+- canonical: ruler_vt
+  aliases:
+  - VT
+  - Multi-hop Variable Tracking
+- canonical: longppl_benchmark
+  aliases:
+  - LongPPL
+  - LongPPL (32k)
+objects:
+- id: CLAIM-FREE-ATTENTION
+  type: ArticleClaim
+  section_path: '5'
+  home_package: PKG-INTRO
+  payload:
+    statement: By offloading local dependency modeling to static lookups, Engram frees attention capacity for global context, yielding significant gains in long-range retrieval and reasoning.
+    scope: long-context extension training
+  local_evidence_atom_ids:
+  - A-INTRO-CLAIM
+  - A-INTRO-MECH
+  supporting_context_atom_ids:
+  - A-T2-ROW-ENG46K
+  - A-T2-ROW-MOE50K
+  - A-RES-ISOLOSS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-ALIGN-LOSS
+  type: ArticleClaim
+  section_path: 5 > 5.2
+  home_package: PKG-RESULT
+  payload:
+    statement: Long-context performance is intrinsically coupled with base-model quality; a rigorous architectural comparison must align base-model loss rather than training steps.
+    evidence_basis: Engram trajectory 41k -> 50k improves monotonically under fixed extension compute
+  local_evidence_atom_ids:
+  - A-RES-COUPLING
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: MECH-LOOKUP-DELEGATION
+  type: MechanisticExplanation
+  section_path: '5'
+  home_package: PKG-INTRO
+  payload:
+    mechanism: Delegating local dependency modeling to static lookups relieves attention of local modeling, preserving attention capacity for managing global / long-range context.
+  local_evidence_atom_ids:
+  - A-INTRO-MECH
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SETUP-LONGCTX
+  type: ExperimentSetup
+  section_path: 5 > 5.1
+  home_package: PKG-SETUP
+  payload:
+    name: Long-context extension protocol
+    method: YaRN context window extension to 32768 tokens
+    budget: 5,000 steps / 30B tokens long-context data
+    hyperparameters: s = 10, alpha = 1, beta = 32, f = 0.707
+    configurations:
+    - MoE-27B (50k)
+    - Engram-27B (50k)
+    - Engram-27B (46k)
+    - Engram-27B (41k)
+    controls:
+    - 'Iso-Loss: Engram-27B(46k) pre-train loss == MoE-27B(50k) loss'
+    - all variants share the exact same context extension protocol
+    benchmarks:
+    - LongPPL (books / papers / code / long CoT)
+    - 'RULER (14 subsets -> 8 categories: S/MK/MV/MQ NIAH, VT, CWE, FWE, QA)'
+  local_evidence_atom_ids:
+  - A-SETUP-YARN
+  - A-SETUP-CONFIGS
+  - A-SETUP-ISOLOSS
+  - A-SETUP-LONGPPL
+  - A-SETUP-RULER
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-TABLE2
+  type: ExperimentResult
+  section_path: 5 > 5.2
+  home_package: PKG-RESULT
+  payload:
+    name: Table 2 - Long-context performance comparison
+    metric_groups:
+      LongPPL_perplexity_lower_better:
+      - Book
+      - Paper
+      - Code
+      - L-CoT
+      RULER_NIAH_higher_better:
+      - S
+      - MK
+      - MV
+      - MQ
+      RULER_other_higher_better:
+      - VT
+      - CWE
+      - FWE
+      - QA
+    key_rows:
+      MoE-27B (50k):
+        MQ_NIAH: 84.2
+        VT: 77.0
+        FWE: 73.0
+      Engram-27B (46k):
+        MQ_NIAH: 97.0
+        VT: 87.2
+      Engram-27B (50k):
+        MQ_NIAH: 97.0
+        VT: 89.0
+    findings:
+    - Engram-27B(50k) best across the board (Iso-FLOPs)
+    - Engram-27B(46k) beats MoE-27B(50k) on retrieval under Iso-Loss
+    - Engram-27B(41k) matches LongPPL and surpasses on RULER at ~82% compute
+  local_evidence_atom_ids:
+  - A-T2-CAPTION
+  - A-T2-HEADER
+  - A-T2-ROW-MOE50K
+  - A-T2-ROW-ENG41K
+  - A-T2-ROW-ENG46K
+  - A-T2-ROW-ENG50K
+  - A-RES-ISOLOSS
+  - A-RES-ISOFLOPS
+  - A-RES-EXTREME
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: experiment_tests_claim
+  source_object_id: SETUP-LONGCTX
+  target_object_id: CLAIM-FREE-ATTENTION
+  evidence_atom_ids:
+  - A-SETUP-CONFIGS
+  - A-SETUP-ISOLOSS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: result_supports_claim
+  source_object_id: RESULT-TABLE2
+  target_object_id: CLAIM-FREE-ATTENTION
+  evidence_atom_ids:
+  - A-T2-ROW-ENG46K
+  - A-T2-ROW-MOE50K
+  - A-RES-ISOLOSS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: result_supports_claim
+  source_object_id: RESULT-TABLE2
+  target_object_id: CLAIM-ALIGN-LOSS
+  evidence_atom_ids:
+  - A-T2-ROW-ENG41K
+  - A-T2-ROW-ENG50K
+  - A-RES-COUPLING
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-04
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-LOOKUP-DELEGATION
+  target_object_id: RESULT-TABLE2
+  evidence_atom_ids:
+  - A-INTRO-MECH
+  - A-RES-ISOLOSS
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-05
+  relation_type: mechanism_explains_claim
+  source_object_id: MECH-LOOKUP-DELEGATION
+  target_object_id: CLAIM-FREE-ATTENTION
+  evidence_atom_ids:
+  - A-INTRO-MECH
+  - A-INTRO-CLAIM
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: result_reported_in_setup
+  source_object_id: RESULT-TABLE2
+  target_object_id: SETUP-LONGCTX
+  evidence_atom_ids:
+  - A-T2-CAPTION
+  - A-SETUP-RULER
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+do_not_extract:
+- text: (Peng et al., 2024)
+  atom_id: A-SETUP-YARN
+  reason: inline author-year citation, not a knowledge object.
+  kind: citation
+- text: (Fang et al.)
+  atom_id: A-SETUP-LONGPPL
+  reason: inline citation for the LongPPL benchmark; the benchmark is the object, not the citation.
+  kind: citation
+- text: (Press et al., 2022; Su et al., 2024; Xiao et al., 2024; Yang et al., 2025)
+  source_lines:
+  - 214
+  - 214
+  reason: inline citation cluster in the result prose.
+  kind: citation
+- pattern: inline_author_year_citation
+  examples:
+  - (Peng et al., 2024)
+  - (Fang et al.)
+  - (Hsieh et al.)
+  - (Liu et al., 2024a)
+  - (Gao et al., 2025)
+  reason: inline author-year citations are not knowledge objects; suppress citation over-extraction consistently.
+  kind: citation_policy
+- text: Figure 4 | Analysis of representational alignment and convergence speed.
+  source_lines:
+  - 222
+  - 222
+  reason: Figure 4 belongs to Section 6 Analysis (physically just after the 5.2 prose); a forward figure reference, not a Section 5 result object.
+  kind: cross_section_forward_reference

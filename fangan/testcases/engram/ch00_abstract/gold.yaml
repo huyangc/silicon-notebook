@@ -1,0 +1,689 @@
+# Gold fixture v0.3.3 - Engram paper Abstract (profile: article_research)
+# Upgraded from v0.1: dual coordinates (source_span authoritative + viewer_span),
+# raw/normalized discipline, object evidence split into local/supporting + home_package,
+# per-chunk context_packages with expected_objects, gold_label/difficulty/evidence_strength
+# (no decimal confidence), do_not_extract negatives, and auto-generated source_elements.
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Abstract only
+  title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models - Abstract'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 9
+  - 11
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 9-11; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: academic_paper
+  profile_cues:
+  - Abstract
+  - we introduce
+  - we observe
+  - scaling law
+  - iso-parameter and iso-FLOPs
+  - MMLU +3.4
+  - Code available at
+  extraction_targets:
+  - ArticleClaim
+  - ArticleMethod
+  - ScalingLaw
+  - ExperimentResult
+  - MechanisticExplanation
+  - SystemDesignClaim
+  - Implication
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math (O(1), arrow ->), and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. The Abstract is a single chunk/package, so there are no cross-package objects and no expected_local_fields.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: figure atoms separate physical_section_id from semantic_section_ids; forward references set include_in_chapter2_core_chunks:false and are isolated in a cross_reference_block. The Abstract contains no figures.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    context_only: an atom not consumed by any object or relation may be flagged context_only:true; the Abstract has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - The entire Abstract is a single contiguous paragraph (source line 11) with no sub-sections, lists, or display formulas; section_tree has only the Abstract node.
+  - Author superscripts on lines 1-7 render as inline math ($^{1,2}$ / $^{2}$); they belong to the title/author block and are not atomized.
+  - Inside the Abstract, $O(1)$ is inline math and is normalized to ASCII 'O(1)'.
+  - The long-context arrow '84.2 → 97.0' is a Unicode right arrow (U+2192) normalized to '84.2 -> 97.0'.
+  - Benchmark gains use inline '+3.4' style numbers; the knowledge/reasoning/code-math results sit inside one sentence (a 'while ... we observe ...' construction) and are split into sub-span atoms.
+  - All gains are relative to the strictly iso-parameter and iso-FLOPs MoE baseline.
+source_elements:
+- id: SE-ABS-H
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 9
+  line_end: 9
+- id: SE-ABS-P
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 11
+  line_end: 11
+section_tree:
+- id: SEC-ABS
+  path: Abstract
+  title: Abstract
+evidence_atoms:
+- id: A-ABS-PROBLEM
+  section_id: SEC-ABS
+  atom_type: claim_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 526
+    char_end: 730
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 159
+    char_end: 363
+    viewer_only: true
+  raw_text: While Mixture-of-Experts (MoE) scales capacity via conditional computation, Transformers lack a native primitive for knowledge lookup, forcing them to inefficiently simulate retrieval through computation.
+  normalized_text: While Mixture-of-Experts (MoE) scales capacity via conditional computation, Transformers lack a native primitive for knowledge lookup, forcing them to inefficiently simulate retrieval through computation.
+  evidence_strength: direct
+- id: A-ABS-INTRO-ENGRAM
+  section_id: SEC-ABS
+  atom_type: method_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 731
+    char_end: 907
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 364
+    char_end: 540
+    viewer_only: true
+  raw_text: To address this, we introduce conditional memory as a complementary sparsity axis, instantiated via Engram, a module that modernizes classic N-gram embedding for $O(1)$ lookup.
+  normalized_text: To address this, we introduce conditional memory as a complementary sparsity axis, instantiated via Engram, a module that modernizes classic N-gram embedding for O(1) lookup.
+  evidence_strength: direct
+- id: A-ABS-SCALING-LAW
+  section_id: SEC-ABS
+  atom_type: scaling_law_result_atom
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 908
+    char_end: 1079
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 541
+    char_end: 712
+    viewer_only: true
+  raw_text: By formulating the Sparsity Allocation problem, we uncover a U-shaped scaling law that optimizes the trade-off between neural computation (MoE) and static memory (Engram).
+  normalized_text: By formulating the Sparsity Allocation problem, we uncover a U-shaped scaling law that optimizes the trade-off between neural computation (MoE) and static memory (Engram).
+  evidence_strength: direct
+- id: A-ABS-SCALE-27B
+  section_id: SEC-ABS
+  atom_type: result_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1080
+    char_end: 1223
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 713
+    char_end: 856
+    viewer_only: true
+  raw_text: Guided by this law, we scale Engram to 27B parameters, achieving superior performance over a strictly iso-parameter and iso-FLOPs MoE baseline.
+  normalized_text: Guided by this law, we scale Engram to 27B parameters, achieving superior performance over a strictly iso-parameter and iso-FLOPs MoE baseline.
+  evidence_strength: direct
+- id: A-ABS-RESULT-KNOWLEDGE
+  section_id: SEC-ABS
+  atom_type: result_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1238
+    char_end: 1330
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 871
+    char_end: 963
+    viewer_only: true
+  raw_text: while the memory module is expected to aid knowledge retrieval (e.g., MMLU +3.4; CMMLU +4.0)
+  normalized_text: while the memory module is expected to aid knowledge retrieval (e.g., MMLU +3.4; CMMLU +4.0)
+  evidence_strength: direct
+- id: A-ABS-RESULT-REASONING
+  section_id: SEC-ABS
+  atom_type: result_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1332
+    char_end: 1418
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 965
+    char_end: 1051
+    viewer_only: true
+  raw_text: we observe even larger gains in general reasoning (e.g., BBH +5.0; ARC-Challenge +3.7)
+  normalized_text: we observe even larger gains in general reasoning (e.g., BBH +5.0; ARC-Challenge +3.7)
+  evidence_strength: direct
+- id: A-ABS-RESULT-CODEMATH
+  section_id: SEC-ABS
+  atom_type: result_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1423
+    char_end: 1468
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1056
+    char_end: 1101
+    viewer_only: true
+  raw_text: code/math domains (HumanEval +3.0; MATH +2.4)
+  normalized_text: code/math domains (HumanEval +3.0; MATH +2.4)
+  evidence_strength: direct
+- id: A-ABS-MECH-DEPTH
+  section_id: SEC-ABS
+  atom_type: mechanism_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1470
+    char_end: 1631
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1103
+    char_end: 1264
+    viewer_only: true
+  raw_text: Mechanistic analyses reveal that Engram relieves the backbone's early layers from static reconstruction, effectively deepening the network for complex reasoning.
+  normalized_text: Mechanistic analyses reveal that Engram relieves the backbone's early layers from static reconstruction, effectively deepening the network for complex reasoning.
+  evidence_strength: direct
+- id: A-ABS-MECH-ATTENTION
+  section_id: SEC-ABS
+  atom_type: mechanism_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1645
+    char_end: 1825
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1278
+    char_end: 1458
+    viewer_only: true
+  raw_text: 'by delegating local dependencies to lookups, it frees up attention capacity for global context, substantially boosting long-context retrieval (e.g., Multi-Query NIAH: 84.2 → 97.0).'
+  normalized_text: 'by delegating local dependencies to lookups, it [Engram] frees up attention capacity for global context, substantially boosting long-context retrieval (e.g., Multi-Query NIAH: 84.2 -> 97.0).'
+  evidence_strength: direct
+- id: A-ABS-SYS-EFFICIENCY
+  section_id: SEC-ABS
+  atom_type: claim_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1835
+    char_end: 1992
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1468
+    char_end: 1625
+    viewer_only: true
+  raw_text: 'Engram establishes infrastructure-aware efficiency: its deterministic addressing enables runtime prefetching from host memory, incurring negligible overhead.'
+  normalized_text: 'Engram establishes infrastructure-aware efficiency: its deterministic addressing enables runtime prefetching from host memory, incurring negligible overhead.'
+  evidence_strength: direct
+- id: A-ABS-VISION
+  section_id: SEC-ABS
+  atom_type: claim_sentence
+  source_element_id: SE-ABS-P
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 11
+    line_end: 11
+    char_start: 1993
+    char_end: 2154
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 1626
+    char_end: 1787
+    viewer_only: true
+  raw_text: 'We envision conditional memory as an indispensable modeling primitive for next-generation sparse models. Code available at: https://github.com/deepseek-ai/Engram'
+  normalized_text: 'We envision conditional memory as an indispensable modeling primitive for next-generation sparse models. Code available at: https://github.com/deepseek-ai/Engram'
+  evidence_strength: direct
+semantic_chunks:
+- id: C-ABS
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: Abstract
+  atom_ids:
+  - A-ABS-PROBLEM
+  - A-ABS-INTRO-ENGRAM
+  - A-ABS-SCALING-LAW
+  - A-ABS-SCALE-27B
+  - A-ABS-RESULT-KNOWLEDGE
+  - A-ABS-RESULT-REASONING
+  - A-ABS-RESULT-CODEMATH
+  - A-ABS-MECH-DEPTH
+  - A-ABS-MECH-ATTENTION
+  - A-ABS-SYS-EFFICIENCY
+  - A-ABS-VISION
+  central_atom_ids:
+  - A-ABS-INTRO-ENGRAM
+  - A-ABS-SCALING-LAW
+  boundary_reason: 'The Abstract is a single contiguous paragraph forming the paper''s core claim/contribution block; problem->method->scaling law->scale->results->mechanism->efficiency->vision are kept intact because they jointly support one set of ArticleClaim/ArticleMethod/ScalingLaw objects (qiefen Section 5.3: keep the core-claim block intact).'
+  extraction_targets:
+  - ArticleClaim
+  - ArticleMethod
+  - ScalingLaw
+  - ExperimentResult
+  - MechanisticExplanation
+  - SystemDesignClaim
+  - Implication
+  gold_must_cover_atoms:
+  - A-ABS-INTRO-ENGRAM
+  - A-ABS-SCALING-LAW
+  - A-ABS-SCALE-27B
+  - A-ABS-RESULT-KNOWLEDGE
+  - A-ABS-RESULT-REASONING
+context_packages:
+- id: PKG-ABS
+  profile: article_research
+  chunk_id: C-ABS
+  section_path: Abstract
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models'
+  atoms:
+  - atom_id: A-ABS-PROBLEM
+    atom_type: claim_sentence
+  - atom_id: A-ABS-INTRO-ENGRAM
+    atom_type: method_sentence
+  - atom_id: A-ABS-SCALING-LAW
+    atom_type: scaling_law_result_atom
+  - atom_id: A-ABS-SCALE-27B
+    atom_type: result_sentence
+  - atom_id: A-ABS-RESULT-KNOWLEDGE
+    atom_type: result_sentence
+  - atom_id: A-ABS-RESULT-REASONING
+    atom_type: result_sentence
+  - atom_id: A-ABS-RESULT-CODEMATH
+    atom_type: result_sentence
+  - atom_id: A-ABS-MECH-DEPTH
+    atom_type: mechanism_sentence
+  - atom_id: A-ABS-MECH-ATTENTION
+    atom_type: mechanism_sentence
+  - atom_id: A-ABS-SYS-EFFICIENCY
+    atom_type: claim_sentence
+  - atom_id: A-ABS-VISION
+    atom_type: claim_sentence
+  linked_context:
+    previous_heading: (document title) Conditional Memory via Scalable Lookup
+    next_heading: 1. Introduction
+  extraction_targets:
+  - ArticleClaim
+  - ArticleMethod
+  - ScalingLaw
+  - ExperimentResult
+  - MechanisticExplanation
+  - SystemDesignClaim
+  expected_objects:
+  - CLAIM-CONDITIONAL-MEMORY
+  - CLAIM-VISION-PRIMITIVE
+  - METHOD-ENGRAM
+  - SCALINGLAW-U-SHAPED
+  - RESULT-VS-MOE-BASELINE
+  - RESULT-LONG-CONTEXT
+  - MECH-EFFECTIVE-DEPTH
+  - MECH-FREED-ATTENTION
+  - SYS-DETERMINISTIC-PREFETCH
+mentions:
+- id: M-01
+  text: conditional memory
+  type: Concept
+  atom_id: A-ABS-INTRO-ENGRAM
+  canonical_key: conditional_memory
+- id: M-02
+  text: Engram
+  type: ArticleMethod
+  atom_id: A-ABS-INTRO-ENGRAM
+  canonical_key: engram
+- id: M-03
+  text: MoE
+  type: ArticleMethod
+  atom_id: A-ABS-PROBLEM
+  canonical_key: moe
+- id: M-04
+  text: conditional computation
+  type: Concept
+  atom_id: A-ABS-PROBLEM
+  canonical_key: conditional_computation
+- id: M-05
+  text: O(1) lookup
+  type: Concept
+  atom_id: A-ABS-INTRO-ENGRAM
+  canonical_key: o1_lookup
+- id: M-06
+  text: Sparsity Allocation
+  type: ScalingLaw
+  atom_id: A-ABS-SCALING-LAW
+  canonical_key: sparsity_allocation
+- id: M-07
+  text: U-shaped scaling law
+  type: ScalingLaw
+  atom_id: A-ABS-SCALING-LAW
+  canonical_key: u_shaped_scaling_law
+- id: M-08
+  text: MMLU
+  type: ExperimentResult
+  atom_id: A-ABS-RESULT-KNOWLEDGE
+  canonical_key: mmlu
+- id: M-09
+  text: BBH
+  type: ExperimentResult
+  atom_id: A-ABS-RESULT-REASONING
+  canonical_key: bbh
+- id: M-10
+  text: Multi-Query NIAH
+  type: ExperimentResult
+  atom_id: A-ABS-MECH-ATTENTION
+  canonical_key: multi_query_niah
+- id: M-11
+  text: deterministic addressing
+  type: SystemDesignClaim
+  atom_id: A-ABS-SYS-EFFICIENCY
+  canonical_key: deterministic_prefetch
+canonicalization:
+- canonical: conditional_memory
+  aliases:
+  - conditional memory
+  - static memory
+  - Engram memory module
+  - memory module
+  note: In the Abstract 'static memory (Engram)' and 'the memory module' both refer to conditional memory as the sparsity axis.
+- canonical: u_shaped_scaling_law
+  aliases:
+  - U-shaped scaling law
+  - Sparsity Allocation problem
+  - trade-off between neural computation (MoE) and static memory (Engram)
+- canonical: engram
+  aliases:
+  - Engram
+  - Engram-27B
+  - conditional memory module
+objects:
+- id: CLAIM-CONDITIONAL-MEMORY
+  type: ArticleClaim
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    statement: Conditional memory is a complementary sparsity axis to MoE's conditional computation, addressing Transformers' lack of a native knowledge-lookup primitive.
+    problem_addressed: Transformers inefficiently simulate retrieval through computation.
+    novelty: introduces conditional memory as a new sparsity axis, instantiated via Engram (O(1) lookup).
+  local_evidence_atom_ids:
+  - A-ABS-PROBLEM
+  - A-ABS-INTRO-ENGRAM
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-VISION-PRIMITIVE
+  type: ArticleClaim
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    statement: Conditional memory should be an indispensable modeling primitive for next-generation sparse models.
+  local_evidence_atom_ids:
+  - A-ABS-VISION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: METHOD-ENGRAM
+  type: ArticleMethod
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    name: Engram
+    description: A module that modernizes classic N-gram embedding to provide O(1) knowledge lookup, instantiating conditional memory as a sparsity axis.
+    mechanism:
+    - modernized N-gram embedding
+    - O(1) lookup
+    - deterministic addressing enabling host-memory runtime prefetch
+    scale: scaled to 27B parameters
+  local_evidence_atom_ids:
+  - A-ABS-INTRO-ENGRAM
+  - A-ABS-SCALE-27B
+  - A-ABS-SYS-EFFICIENCY
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SCALINGLAW-U-SHAPED
+  type: ScalingLaw
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    name: U-shaped Sparsity Allocation scaling law
+    statement: Validation performance follows a U-shaped law in the allocation ratio between neural computation (MoE) and static memory (Engram); an optimal trade-off exists.
+    governs: trade-off between MoE compute and Engram memory
+  local_evidence_atom_ids:
+  - A-ABS-SCALING-LAW
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-VS-MOE-BASELINE
+  type: ExperimentResult
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    setup: Engram-27B vs strictly iso-parameter and iso-FLOPs MoE baseline
+    finding: Engram achieves superior overall performance over the iso-param/iso-FLOPs MoE baseline.
+    knowledge:
+      MMLU: '+3.4'
+      CMMLU: '+4.0'
+    reasoning:
+      BBH: '+5.0'
+      ARC-Challenge: '+3.7'
+    code_math:
+      HumanEval: '+3.0'
+      MATH: '+2.4'
+  local_evidence_atom_ids:
+  - A-ABS-SCALE-27B
+  - A-ABS-RESULT-KNOWLEDGE
+  - A-ABS-RESULT-REASONING
+  - A-ABS-RESULT-CODEMATH
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-LONG-CONTEXT
+  type: ExperimentResult
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    metric: Multi-Query NIAH (long-context retrieval)
+    before: '84.2'
+    after: '97.0'
+    note: improvement attributed to freed attention capacity for global context.
+  local_evidence_atom_ids:
+  - A-ABS-MECH-ATTENTION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-EFFECTIVE-DEPTH
+  type: MechanisticExplanation
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    mechanism: Engram relieves the backbone's early layers from static reconstruction, effectively deepening the network for complex reasoning.
+    explains: larger-than-expected gains in general reasoning
+  local_evidence_atom_ids:
+  - A-ABS-MECH-DEPTH
+  - A-ABS-RESULT-REASONING
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: MECH-FREED-ATTENTION
+  type: MechanisticExplanation
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    mechanism: By delegating local dependencies to lookups, Engram frees up attention capacity for global context.
+    explains: boosted long-context retrieval (Multi-Query NIAH 84.2 -> 97.0)
+  local_evidence_atom_ids:
+  - A-ABS-MECH-ATTENTION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SYS-DETERMINISTIC-PREFETCH
+  type: SystemDesignClaim
+  section_path: Abstract
+  home_package: PKG-ABS
+  payload:
+    claim: Engram establishes infrastructure-aware efficiency.
+    mechanism: deterministic addressing enables runtime prefetching from host memory
+    benefit: negligible overhead
+  local_evidence_atom_ids:
+  - A-ABS-SYS-EFFICIENCY
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: method_addresses_problem
+  source_object_id: METHOD-ENGRAM
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-ABS-PROBLEM
+  - A-ABS-INTRO-ENGRAM
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: result_supports_claim
+  source_object_id: RESULT-VS-MOE-BASELINE
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-ABS-SCALE-27B
+  - A-ABS-RESULT-KNOWLEDGE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: result_supports_claim
+  source_object_id: SCALINGLAW-U-SHAPED
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-ABS-SCALING-LAW
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-04
+  relation_type: experiment_tests_claim
+  source_object_id: RESULT-VS-MOE-BASELINE
+  target_object_id: METHOD-ENGRAM
+  evidence_atom_ids:
+  - A-ABS-SCALE-27B
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-05
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-EFFECTIVE-DEPTH
+  target_object_id: RESULT-VS-MOE-BASELINE
+  evidence_atom_ids:
+  - A-ABS-MECH-DEPTH
+  - A-ABS-RESULT-REASONING
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-06
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-FREED-ATTENTION
+  target_object_id: RESULT-LONG-CONTEXT
+  evidence_atom_ids:
+  - A-ABS-MECH-ATTENTION
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-07
+  relation_type: system_design_enables_efficiency
+  source_object_id: METHOD-ENGRAM
+  target_object_id: SYS-DETERMINISTIC-PREFETCH
+  evidence_atom_ids:
+  - A-ABS-SYS-EFFICIENCY
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-08
+  relation_type: result_supports_claim
+  source_object_id: RESULT-LONG-CONTEXT
+  target_object_id: CLAIM-VISION-PRIMITIVE
+  evidence_atom_ids:
+  - A-ABS-MECH-ATTENTION
+  - A-ABS-VISION
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-09
+  relation_type: claim_guided_by_scaling_law
+  source_object_id: METHOD-ENGRAM
+  target_object_id: SCALINGLAW-U-SHAPED
+  evidence_atom_ids:
+  - A-ABS-SCALING-LAW
+  - A-ABS-SCALE-27B
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+do_not_extract:
+- text: https://github.com/deepseek-ai/Engram
+  atom_id: A-ABS-VISION
+  reason: Code repository URL; a resource link, not a knowledge object.
+  kind: out_of_slice_reference
+- pattern: inline_author_year_citation
+  examples:
+  - (Vaswani et al., 2017)
+  - (Xie et al., 2025)
+  reason: inline author-year citations are not knowledge objects; the Abstract paragraph itself contains none, but this policy entry suppresses citation over-extraction consistently with other chapters.
+  kind: citation_policy

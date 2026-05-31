@@ -1,0 +1,1185 @@
+# Gold fixture v0.3.3 - Engram paper Chapter 4 Large Scale Pre-training (profile: article_research)
+# Upgraded from v0.1: dual coordinates (source_span authoritative + viewer_span), verbatim raw_text +
+# within-span normalized_text, Table 1 atomized as caption + header <tr> + anchored <tr>/<td> row
+# substrings (NUMERIC over-span audited), object evidence split into local/supporting + home_package,
+# per-chunk context_packages with expected_objects, gold_label/difficulty/evidence_strength
+# (no decimal confidence), and do_not_extract negatives (citations + out-of-slice Table 2 / Figure 3).
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Chapter 4 only (4.1 Experimental Setup + 4.2 Experimental Results + Table 1)
+  title: 'Engram: Conditional Memory Complements Conditional Computation - Chapter 4 Large Scale Pre-training'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 158
+  - 189
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 158-189; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - Experimental Setup
+  - Experimental Results
+  - Table 1
+  - we train four models
+  - validation loss
+  - iso-FLOPs
+  - Appendix B
+  extraction_targets:
+  - ExperimentSetup
+  - ExperimentResult
+  - ArticleClaim
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate. Some Section 4.2 prose atoms (rendered by MinerU after Table 2 at lines 194/196) carry source_span only and are flagged metadata.out_of_viewer_slice:true.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math (rho, 5x, N-gram, arrow ->), and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. For table_row_atom the normalized text re-expresses the anchored <tr>/<td> substring as a readable row; every number in the normalized text must occur in the raw substring (NUMERIC over-span audit).'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. Chapter 4 has no cross-package objects (every object's evidence is local to its home package), so no expected_local_fields are declared.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: Chapter 4 contains no figures; Figure 3 (Chapter 3) is referenced just before the slice and is recorded in do_not_extract as out_of_slice_reference.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref; none needed in Chapter 4.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    tables: Table 1 is a single MinerU HTML <table> on one line. Its caption is a separate paragraph atom (table_caption_atom). The header <tr> and each kept metric row are anchored as verbatim substrings of the <table> line (table_header_atom / table_row_atom). rowspan cells (Language Modeling / Knowledge & Reasoning / Reading Comprehension / Code & Math) are metric-group labels, not data columns; the HTML entity &amp; is normalized to 'and'.
+    context_only: an atom not consumed by any object or relation may be flagged metadata.context_only:true; Chapter 4 has none (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - 'Table 1 is a single HTML <table> (source line 164): one header <tr> + metric rows; left rowspan cells (Language Modeling / Knowledge & Reasoning / Reading Comprehension / Code & Math) are metric-group labels, not data columns. The leading empty <td> in the header is the rowspan placeholder column.'
+  - 'Header columns are: Benchmark (Metric) | # Shots | Dense-4B | MoE-27B | Engram-27B | Engram-40B. Each table_row_atom is the anchored verbatim <tr>/<td> substring for that row; its normalized text re-expresses the four model columns.'
+  - The HTML entity &amp; appears in the group labels 'Knowledge &amp; Reasoning' and 'Code &amp; Math' and is normalized to 'and'.
+  - The Table 1 caption (line 162, above the <table>) holds the key control variables (262B tokens, 3.8B activated, 72 -> 55 expert reallocation, 5.7B / 18.5B Engram) and is a separate table_caption_atom.
+  - 'The chapter-intro sentence is split by Table 1: it starts on line 160 (models 1-2) and resumes on line 166 (models 3-4 + control variables). The two halves are atoms A-CH4-INTRO and A-CH4-INTRO-CONT.'
+  - 'MinerU rendered three Section 4.2 prose sentences AFTER Table 2: line 194 (Engram-27B vs MoE-27B deltas + the support-hypothesis sentence) and line 196 (Engram-40B under-training). They are Section 4.2 content but fall OUTSIDE the 158-189 viewer slice, so atoms A-RES-ENGRAM-VS-MOE / A-RES-CLAIM / A-RES-ENGRAM40 carry source_span only (no viewer_span) and are flagged out_of_viewer_slice.'
+  - Table 2 (lines 190-192) belongs to Chapter 5 (Long Context Training) and is OUT of slice (see do_not_extract).
+  - 'Inline math is ASCII-normalized: $\rho = 74.3\%$ -> rho = 74.3%, $5\times$ -> 5x, $N$ -gram -> N-gram.'
+source_elements:
+- id: SE-H-4
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 158
+  line_end: 158
+- id: SE-4-INTRO
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 160
+  line_end: 160
+- id: SE-T1-CAP
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 162
+  line_end: 162
+  note: Table 1 caption paragraph (above the <table>)
+- id: SE-T1
+  type: table
+  file: engram_paper_mineru.md
+  line_start: 164
+  line_end: 164
+  metadata:
+    table_id: Table 1
+    format: html
+    note: 'single MinerU HTML <table>: 1 header <tr> + metric rows; rowspan cells (Language Modeling / Knowledge & Reasoning / Reading Comprehension / Code & Math) are metric-group labels, not data columns.'
+- id: SE-4-INTRO-CONT
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 166
+  line_end: 166
+  note: continuation of the chapter-intro sentence after Table 1
+- id: SE-H-4.1
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 168
+  line_end: 168
+- id: SE-4.1-DATA
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 170
+  line_end: 170
+  note: run-in heading 'Training Data and Model Configurations'; continues on line 172 across a page break
+- id: SE-4.1-BACKBONE
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 172
+  line_end: 172
+- id: SE-4.1-DENSE
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 174
+  line_end: 174
+- id: SE-4.1-MOE
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 175
+  line_end: 175
+- id: SE-4.1-ENGRAM27
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 176
+  line_end: 176
+- id: SE-4.1-ENGRAM40
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 177
+  line_end: 177
+- id: SE-4.1-EVAL
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 179
+  line_end: 179
+  note: run-in heading 'Evaluation Protocol'
+- id: SE-H-4.2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 186
+  line_end: 186
+- id: SE-4.2-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 188
+  line_end: 188
+- id: SE-4.2-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 194
+  line_end: 194
+  note: 4.2 prose rendered after Table 2 by MinerU; OUT of the 158-189 viewer slice
+- id: SE-4.2-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 196
+  line_end: 196
+  note: 4.2 prose rendered after Table 2 by MinerU; OUT of the 158-189 viewer slice
+section_tree:
+- id: SEC-4
+  path: '4'
+  title: Large Scale Pre-training
+- id: SEC-4.1
+  path: 4 > 4.1
+  title: Experimental Setup
+  parent: SEC-4
+- id: SEC-4.2
+  path: 4 > 4.2
+  title: Experimental Results
+  parent: SEC-4
+evidence_atoms:
+- id: A-CH4-INTRO
+  section_id: SEC-4
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4-INTRO
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 160
+    line_end: 160
+    char_start: 24416
+    char_end: 24501
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 378
+    char_end: 463
+    viewer_only: true
+  raw_text: 'Specifically, we train four models: (1) Dense-4B (4.1B total parameters), (2) MoE-27B'
+  normalized_text: 'Engram is scaled to the multi-billion-parameter regime for real-world LM pre-training; four models are trained: (1) Dense-4B (4.1B total parameters), (2) MoE-27B [...].'
+  evidence_strength: direct
+  metadata:
+    note: 'MinerU split this sentence: Table 1 (caption line 162 + <table> line 164) is inserted, and the sentence continues on line 166 with models (3)/(4) and the control-variable clause (see A-CH4-INTRO-CONT).'
+- id: A-CH4-INTRO-CONT
+  section_id: SEC-4
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4-INTRO-CONT
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 166
+    line_end: 166
+    char_start: 28713
+    char_end: 28976
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 4675
+    char_end: 4938
+    viewer_only: true
+  raw_text: (26.7B total parameters), (3) Engram-27B (26.7B total parameters), and (4) Engram-40B (39.5B total parameters). All models are trained using an identical data curriculum (same token budget and order) and are strictly matched in the number of activated parameters.
+  normalized_text: '[...] (26.7B total parameters), (3) Engram-27B (26.7B total parameters), and (4) Engram-40B (39.5B total parameters). All models use an identical data curriculum (same token budget and order) and are strictly matched in the number of activated parameters.'
+  evidence_strength: direct
+  metadata:
+    note: continuation of A-CH4-INTRO after Table 1; supplies models (3)/(4) total params + control variables.
+- id: A-SETUP-DATA
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-DATA
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 170
+    line_end: 170
+    char_start: 29044
+    char_end: 29202
+  viewer_span:
+    file: source.md
+    line_start: 14
+    line_end: 14
+    char_start: 5006
+    char_end: 5164
+    viewer_only: true
+  raw_text: All models are pre-trained on a corpus of 262 billion tokens and we utilize the tokenizer from DeepSeek-v3 (Liu et al., 2024a) with a vocabulary size of 128k.
+  normalized_text: All models are pre-trained on a corpus of 262 billion tokens using the DeepSeek-v3 tokenizer with a vocabulary size of 128k.
+  evidence_strength: direct
+- id: A-SETUP-BACKBONE
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-BACKBONE
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 172
+    line_end: 172
+    char_start: 29411
+    char_end: 29661
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 5373
+    char_end: 5623
+    viewer_only: true
+  raw_text: Each block integrates a Multi-head Latent Attention (MLA) (DeepSeek-AI et al., 2024) with 32 heads, connected to FFNs via mHC (Xie et al., 2025) with an expansion rate of 4. All models are optimized using Muon (Jordan et al., 2024; Team et al., 2025)
+  normalized_text: 'Shared backbone (30-block Transformer, hidden size 2560): each block uses Multi-head Latent Attention (MLA) with 32 heads, connected to FFNs via mHC with an expansion rate of 4; all models are optimized using Muon.'
+  evidence_strength: direct
+  metadata:
+    note: hidden size 2560 / '30-block Transformer' are on line 170-172 boundary; backbone normalized summary keeps in-span numbers (32 heads, expansion rate 4).
+- id: A-SETUP-DENSE
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-DENSE
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 174
+    line_end: 174
+    char_start: 29758
+    char_end: 29904
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 5720
+    char_end: 5866
+    viewer_only: true
+  raw_text: Dense-4B serves as the baseline model. It utilizes the backbone architecture described above, incorporating a standard dense FFN into every block.
+  normalized_text: 'Dense-4B is the baseline: the shared backbone with a standard dense FFN in every block.'
+  evidence_strength: direct
+- id: A-SETUP-MOE
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-MOE
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 175
+    line_end: 175
+    char_start: 29907
+    char_end: 30205
+  viewer_span:
+    file: source.md
+    line_start: 19
+    line_end: 19
+    char_start: 5869
+    char_end: 6167
+    viewer_only: true
+  raw_text: MoE-27B replaces the standard dense FFN with a DeepSeekMoE module (Dai et al., 2024). Configured with 72 routed experts and 2 shared experts (activating the top-k = 6 routed experts per token), this model scales to 26.7B total parameters while maintaining the same activated parameters as Dense-4B.
+  normalized_text: 'MoE-27B replaces the dense FFN with a DeepSeekMoE module: 72 routed experts + 2 shared experts, activating the top-k = 6 routed experts per token; 26.7B total parameters while keeping the same activated parameters as Dense-4B.'
+  evidence_strength: direct
+- id: A-SETUP-ENGRAM27
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-ENGRAM27
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 176
+    line_end: 176
+    char_start: 30208
+    char_end: 30933
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 6170
+    char_end: 6895
+    viewer_only: true
+  raw_text: Engram-27B is strictly derived from the MoE-27B architecture to ensure fair comparison. We reduce the number of routed experts from 72 to 55 and reallocate the freed parameters to a 5.7B-parameter embedding module ( $\rho = 74.3\%$ ), keeping the total model size constant at 26.7B. Regarding the Engram configuration, we instantiate the module at layers 2 and 15 and set the maximum $N$ -gram size to 3, the number of heads to 8, and the dimension to 1280. For optimization, the embedding parameters are updated using Adam (Kingma, 2014) with a learning rate scaled by $5\times$ and no weight decay, while the convolution parameters are initialized to zero to strictly preserve the identity mapping at the start of training.
+  normalized_text: Engram-27B is derived from MoE-27B by reducing routed experts from 72 to 55 and reallocating the freed parameters to a 5.7B-parameter embedding module (rho = 74.3%), keeping total model size at 26.7B. The Engram module is instantiated at layers 2 and 15, with maximum N-gram size 3, 8 heads, and dimension 1280. Embedding parameters use Adam with learning rate scaled by 5x and no weight decay; convolution parameters are zero-initialized to preserve the identity mapping at the start of training.
+  evidence_strength: direct
+- id: A-SETUP-ENGRAM40
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-ENGRAM40
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 177
+    line_end: 177
+    char_start: 30936
+    char_end: 31169
+  viewer_span:
+    file: source.md
+    line_start: 21
+    line_end: 21
+    char_start: 6898
+    char_end: 7131
+    viewer_only: true
+  raw_text: Engram-40B retains the same backbone and computation budget as Engram-27B but scales the sparse embedding module to 18.5B parameters (totaling 39.5B parameters). This model is designed to investigate the scaling properties of Engram.
+  normalized_text: Engram-40B keeps the same backbone and compute budget as Engram-27B but scales the sparse embedding module to 18.5B parameters (39.5B total), to investigate Engram's scaling properties.
+  evidence_strength: direct
+- id: A-SETUP-EVAL
+  section_id: SEC-4.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-4.1-EVAL
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 179
+    line_end: 179
+    char_start: 31191
+    char_end: 31413
+  viewer_span:
+    file: source.md
+    line_start: 23
+    line_end: 23
+    char_start: 7153
+    char_end: 7375
+    viewer_only: true
+  raw_text: We evaluate models on a diverse suite of benchmarks spanning language modeling, knowledge, reasoning, reading comprehension, and code/math. For each benchmark, we follow standard prompting protocols and evaluation metrics.
+  normalized_text: Evaluation spans language modeling, knowledge, reasoning, reading comprehension, and code/math; each benchmark uses standard prompting protocols and evaluation metrics.
+  evidence_strength: direct
+- id: A-T1-CAP
+  section_id: SEC-4
+  atom_type: table_caption_atom
+  source_element_id: SE-T1-CAP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 162
+    line_end: 162
+    char_start: 24503
+    char_end: 24992
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 6
+    char_start: 465
+    char_end: 954
+    viewer_only: true
+  raw_text: Table 1 | Pre-training performance comparison between dense, MoE, and Engram models. All models are trained for 262B tokens and are matched in activated parameters (3.8B). Engram-27B is iso-parameters with MoE-27B by reallocating parameters from routed experts (72 → 55) to a 5.7B-parameter Engram memory. Engram-40B further increases Engram memory (18.5B parameters) while keeping the activated-parameter budget fixed. Full training-time benchmark trajectories are reported in Appendix B.
+  normalized_text: Table 1 | Pre-training performance comparison between dense, MoE, and Engram models. All models trained for 262B tokens and matched in activated parameters (3.8B). Engram-27B is iso-parameters with MoE-27B by reallocating routed experts (72 -> 55) to a 5.7B-parameter Engram memory; Engram-40B further increases Engram memory (18.5B parameters) at a fixed activated-parameter budget. Full training-time benchmark trajectories are reported in Appendix B.
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+- id: A-T1-HEADER
+  section_id: SEC-4
+  atom_type: table_header_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 25001
+    char_end: 25133
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 963
+    char_end: 1095
+    viewer_only: true
+  raw_text: <tr><td></td><td>Benchmark (Metric)</td><td># Shots</td><td>Dense-4B</td><td>MoE-27B</td><td>Engram-27B</td><td>Engram-40B</td></tr>
+  normalized_text: 'Benchmark (Metric) | # Shots | Dense-4B | MoE-27B | Engram-27B | Engram-40B'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    role: column_header
+    note: single HTML header <tr>; leading empty <td> is the rowspan group-label placeholder column, not a data column.
+- id: A-T1-TOTALPARAMS
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 25158
+    char_end: 25245
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1120
+    char_end: 1207
+    viewer_only: true
+  raw_text: <td># Total Params</td><td></td><td>4.1B</td><td>26.7B</td><td>26.7B</td><td>39.5B</td>
+  normalized_text: '# Total Params | 4.1B | 26.7B | 26.7B | 39.5B'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Model Config
+- id: A-T1-ENGRAMPARAMS
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 25597
+    char_end: 25677
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1559
+    char_end: 1639
+    viewer_only: true
+  raw_text: <td># Engram Params</td><td></td><td>-</td><td>-</td><td>5.7B</td><td>18.5B</td>
+  normalized_text: '# Engram Params | - | - | 5.7B | 18.5B'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Model Config
+- id: A-T1-VALLOSS
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 25819
+    char_end: 25915
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1781
+    char_end: 1877
+    viewer_only: true
+  raw_text: <td>Validation Set (loss)</td><td>-</td><td>1.768</td><td>1.634</td><td>1.622</td><td>1.610</td>
+  normalized_text: Validation Set (loss) | 1.768 | 1.634 | 1.622 | 1.610 (lower is better)
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Language Modeling
+    metric: loss
+- id: A-T1-MMLU
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 25971
+    char_end: 26058
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1933
+    char_end: 2020
+    viewer_only: true
+  raw_text: <td>MMLU (Acc.)</td><td>5-shot</td><td>48.6</td><td>57.4</td><td>60.4</td><td>60.6</td>
+  normalized_text: MMLU (Acc.) 5-shot | 48.6 | 57.4 | 60.4 | 60.6
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Knowledge and Reasoning
+- id: A-T1-MMLUPRO
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 26169
+    char_end: 26260
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 2131
+    char_end: 2222
+    viewer_only: true
+  raw_text: <td>MMLU-Pro (Acc.)</td><td>5-shot</td><td>21.1</td><td>28.3</td><td>30.1</td><td>31.3</td>
+  normalized_text: MMLU-Pro (Acc.) 5-shot | 21.1 | 28.3 | 30.1 | 31.3
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Knowledge and Reasoning
+- id: A-T1-CMMLU
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 26269
+    char_end: 26357
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 2231
+    char_end: 2319
+    viewer_only: true
+  raw_text: <td>CMMLU (Acc.)</td><td>5-shot</td><td>47.9</td><td>57.9</td><td>61.9</td><td>63.4</td>
+  normalized_text: CMMLU (Acc.) 5-shot | 47.9 | 57.9 | 61.9 | 63.4
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Knowledge and Reasoning
+- id: A-T1-BBH
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 27161
+    char_end: 27245
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 3123
+    char_end: 3207
+    viewer_only: true
+  raw_text: <td>BBH (EM)</td><td>3-shot</td><td>42.8</td><td>50.9</td><td>55.9</td><td>57.5</td>
+  normalized_text: BBH (EM) 3-shot | 42.8 | 50.9 | 55.9 | 57.5
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Knowledge and Reasoning
+- id: A-T1-ARCC
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 26664
+    char_end: 26761
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 2626
+    char_end: 2723
+    viewer_only: true
+  raw_text: <td>ARC-Challenge (Acc.)</td><td>25-shot</td><td>59.3</td><td>70.1</td><td>73.8</td><td>76.4</td>
+  normalized_text: ARC-Challenge (Acc.) 25-shot | 59.3 | 70.1 | 73.8 | 76.4
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Knowledge and Reasoning
+- id: A-T1-DROP
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 27595
+    char_end: 27680
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 3557
+    char_end: 3642
+    viewer_only: true
+  raw_text: <td>DROP (F1)</td><td>1-shot</td><td>41.6</td><td>55.7</td><td>59.0</td><td>60.7</td>
+  normalized_text: DROP (F1) 1-shot | 41.6 | 55.7 | 59.0 | 60.7
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Reading Comprehension
+- id: A-T1-HUMANEVAL
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 28023
+    char_end: 28117
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 3985
+    char_end: 4079
+    viewer_only: true
+  raw_text: <td>HumanEval (Pass@1)</td><td>0-shot</td><td>26.8</td><td>37.8</td><td>40.8</td><td>38.4</td>
+  normalized_text: HumanEval (Pass@1) 0-shot | 26.8 | 37.8 | 40.8 | 38.4
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Code and Math
+- id: A-T1-GSM8K
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 28424
+    char_end: 28510
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 4386
+    char_end: 4472
+    viewer_only: true
+  raw_text: <td>GSM8K (EM)</td><td>8-shot</td><td>35.5</td><td>58.4</td><td>60.6</td><td>62.6</td>
+  normalized_text: GSM8K (EM) 8-shot | 35.5 | 58.4 | 60.6 | 62.6
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Code and Math
+- id: A-T1-MATH
+  section_id: SEC-4
+  atom_type: table_row_atom
+  source_element_id: SE-T1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 164
+    line_end: 164
+    char_start: 28613
+    char_end: 28698
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 4575
+    char_end: 4660
+    viewer_only: true
+  raw_text: <td>MATH (EM)</td><td>4-shot</td><td>15.2</td><td>28.3</td><td>30.7</td><td>30.6</td>
+  normalized_text: MATH (EM) 4-shot | 15.2 | 28.3 | 30.7 | 30.6
+  evidence_strength: direct
+  metadata:
+    table_id: Table 1
+    row_group: Code and Math
+- id: A-RES-SPARSE-DENSE
+  section_id: SEC-4.2
+  atom_type: result_sentence
+  source_element_id: SE-4.2-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 188
+    line_end: 188
+    char_start: 32430
+    char_end: 32779
+  viewer_span:
+    file: source.md
+    line_start: 32
+    line_end: 32
+    char_start: 8392
+    char_end: 8741
+    viewer_only: true
+  raw_text: First, consistent with prior literature (Borgeaud et al., 2022; He, 2024; Shazeer et al., 2017), sparse architectures demonstrate superior scaling laws compared to dense models. Under the same training compute budget, all three sparse variants (MoE-27B, Engram-27B/40B) significantly outperform the iso-FLOPs Dense-4B baseline across all benchmarks.
+  normalized_text: 'Consistent with prior literature, sparse architectures demonstrate superior scaling laws compared to dense models: under the same training compute budget all three sparse variants (MoE-27B, Engram-27B/40B) significantly outperform the iso-FLOPs Dense-4B baseline across all benchmarks.'
+  evidence_strength: direct
+- id: A-RES-ENGRAM-VS-MOE
+  section_id: SEC-4.2
+  atom_type: result_sentence
+  source_element_id: SE-4.2-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 194
+    line_end: 194
+    char_start: 34553
+    char_end: 35060
+  raw_text: 'More importantly, Engram-27B consistently improves over the iso-parameter and iso-FLOPs MoE-27B baseline. Interestingly, these gains are not limited to knowledge-intensive tasks (e.g., MMLU: +3.0, MMLU-Pro: +1.8, CMMLU: +4.0), where memory capacity is intuitively beneficial. We observe even more significant improvements in general-reasoning domains (e.g., BBH: +5.0, ARC-Challenge: +3.7, DROP: +3.3), as well as code and mathematical reasoning (e.g., HumanEval: +3.0, MBPP: +1.6, GSM8K: +2.2, MATH: +2.4).'
+  normalized_text: Engram-27B consistently improves over the iso-parameter, iso-FLOPs MoE-27B baseline. Gains are not limited to knowledge tasks (MMLU +3.0, MMLU-Pro +1.8, CMMLU +4.0) but extend to general reasoning (BBH +5.0, ARC-Challenge +3.7, DROP +3.3) and code/math (HumanEval +3.0, MBPP +1.6, GSM8K +2.2, MATH +2.4).
+  evidence_strength: direct
+  metadata:
+    out_of_viewer_slice: true
+    note: Section 4.2 prose that MinerU rendered after Table 2 (line 194); authoritative source_span only, no viewer_span (outside the 158-189 viewer slice).
+- id: A-RES-CLAIM
+  section_id: SEC-4.2
+  atom_type: result_sentence
+  source_element_id: SE-4.2-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 194
+    line_end: 194
+    char_start: 35211
+    char_end: 35433
+  raw_text: These results support our hypothesis that introducing a dedicated knowledge lookup primitive improves representation efficiency beyond what can be achieved by allocating the entire sparse budget to conditional computation.
+  normalized_text: These results support the hypothesis that a dedicated knowledge-lookup primitive improves representation efficiency beyond allocating the entire sparse budget to conditional computation.
+  evidence_strength: direct
+  metadata:
+    out_of_viewer_slice: true
+    note: Section 4.2 conclusion sentence rendered after Table 2 (line 194); source_span only.
+- id: A-RES-ENGRAM40
+  section_id: SEC-4.2
+  atom_type: result_sentence
+  source_element_id: SE-4.2-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 196
+    line_end: 196
+    char_start: 35435
+    char_end: 35892
+  raw_text: Finally, scaling to Engram-40B further reduces pre-training loss and improves performance across most benchmarks. Although it does not yet strictly dominate Engram-27B on every task, this is likely an artifact of under-training. We observe that the training loss gap between Engram-40B and the baselines continues to widen towards the end of training, suggesting that the expanded memory capacity has not yet fully saturated within the current token budget.
+  normalized_text: 'Engram-40B further reduces pre-training loss and improves most benchmarks but does not strictly dominate Engram-27B on every task, likely an artifact of under-training: the training-loss gap to the baselines keeps widening toward the end of training, so the expanded memory capacity is not yet saturated within the token budget.'
+  evidence_strength: direct
+  metadata:
+    out_of_viewer_slice: true
+    note: Section 4.2 prose rendered after Table 2 (line 196); source_span only.
+semantic_chunks:
+- id: C-SETUP
+  profile: article_research
+  chunk_type: experiment_setup_block
+  section_path: 4 > 4.1
+  atom_ids:
+  - A-CH4-INTRO
+  - A-CH4-INTRO-CONT
+  - A-SETUP-DATA
+  - A-SETUP-BACKBONE
+  - A-SETUP-DENSE
+  - A-SETUP-MOE
+  - A-SETUP-ENGRAM27
+  - A-SETUP-ENGRAM40
+  - A-SETUP-EVAL
+  central_atom_ids:
+  - A-SETUP-ENGRAM27
+  - A-SETUP-BACKBONE
+  boundary_reason: 'experiment_setup_result_dependency: the data curriculum, shared backbone, the four model configurations, and the evaluation protocol form one complete setup unit kept in a single chunk so it binds to one ExperimentSetup object (qiefen Section 5.3).'
+  extraction_targets:
+  - ExperimentSetup
+  gold_must_cover_atoms:
+  - A-SETUP-DATA
+  - A-SETUP-BACKBONE
+  - A-SETUP-MOE
+  - A-SETUP-ENGRAM27
+  - A-SETUP-ENGRAM40
+- id: C-TABLE1
+  profile: article_research
+  chunk_type: experiment_result_block
+  section_path: 4 > 4.2
+  atom_ids:
+  - A-T1-CAP
+  - A-T1-HEADER
+  - A-T1-TOTALPARAMS
+  - A-T1-ENGRAMPARAMS
+  - A-T1-VALLOSS
+  - A-T1-MMLU
+  - A-T1-MMLUPRO
+  - A-T1-CMMLU
+  - A-T1-BBH
+  - A-T1-ARCC
+  - A-T1-DROP
+  - A-T1-HUMANEVAL
+  - A-T1-GSM8K
+  - A-T1-MATH
+  - A-RES-SPARSE-DENSE
+  - A-RES-ENGRAM-VS-MOE
+  - A-RES-CLAIM
+  - A-RES-ENGRAM40
+  central_atom_ids:
+  - A-T1-VALLOSS
+  - A-RES-ENGRAM-VS-MOE
+  boundary_reason: 'table_header_row_dependency: caption + header + all metric rows must stay with the prose result sentences, otherwise the table rows lose their column semantics; result_sentence atoms share the chunk with the table_row atoms they summarize so ExperimentResult -> ArticleClaim is supported.'
+  extraction_targets:
+  - ExperimentResult
+  - ArticleClaim
+  gold_must_cover_atoms:
+  - A-T1-CAP
+  - A-T1-HEADER
+  - A-T1-VALLOSS
+  - A-T1-MMLU
+  - A-T1-BBH
+  - A-T1-ARCC
+  - A-T1-GSM8K
+  - A-T1-MATH
+  - A-RES-ENGRAM-VS-MOE
+context_packages:
+- id: PKG-SETUP
+  profile: article_research
+  chunk_id: C-SETUP
+  section_path: Chapter 4 > 4.1 Experimental Setup
+  document_title: 'Engram: Conditional Memory Complements Conditional Computation'
+  atoms:
+  - atom_id: A-CH4-INTRO
+    atom_type: experiment_setup_atom
+  - atom_id: A-CH4-INTRO-CONT
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-DATA
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-BACKBONE
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-DENSE
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-MOE
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-ENGRAM27
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-ENGRAM40
+    atom_type: experiment_setup_atom
+  - atom_id: A-SETUP-EVAL
+    atom_type: experiment_setup_atom
+  linked_context:
+    previous_heading: 4. Large Scale Pre-training
+    next_heading: 4.2 Experimental Results
+  extraction_targets:
+  - ExperimentSetup
+  expected_objects:
+  - SETUP-PRETRAIN
+- id: PKG-TABLE1
+  profile: article_research
+  chunk_id: C-TABLE1
+  section_path: Chapter 4 > 4.2 Experimental Results > Table 1
+  document_title: 'Engram: Conditional Memory Complements Conditional Computation'
+  atoms:
+  - atom_id: A-T1-CAP
+    atom_type: table_caption_atom
+  - atom_id: A-T1-HEADER
+    atom_type: table_header_atom
+  - atom_id: A-T1-TOTALPARAMS
+    atom_type: table_row_atom
+  - atom_id: A-T1-ENGRAMPARAMS
+    atom_type: table_row_atom
+  - atom_id: A-T1-VALLOSS
+    atom_type: table_row_atom
+  - atom_id: A-T1-MMLU
+    atom_type: table_row_atom
+  - atom_id: A-T1-MMLUPRO
+    atom_type: table_row_atom
+  - atom_id: A-T1-CMMLU
+    atom_type: table_row_atom
+  - atom_id: A-T1-BBH
+    atom_type: table_row_atom
+  - atom_id: A-T1-ARCC
+    atom_type: table_row_atom
+  - atom_id: A-T1-DROP
+    atom_type: table_row_atom
+  - atom_id: A-T1-HUMANEVAL
+    atom_type: table_row_atom
+  - atom_id: A-T1-GSM8K
+    atom_type: table_row_atom
+  - atom_id: A-T1-MATH
+    atom_type: table_row_atom
+  - atom_id: A-RES-SPARSE-DENSE
+    atom_type: result_sentence
+  - atom_id: A-RES-ENGRAM-VS-MOE
+    atom_type: result_sentence
+  - atom_id: A-RES-CLAIM
+    atom_type: result_sentence
+  - atom_id: A-RES-ENGRAM40
+    atom_type: result_sentence
+  linked_context:
+    table_caption: Table 1 | Pre-training performance comparison between dense, MoE, and Engram models (262B tokens, 3.8B activated).
+    table_headers: 'Benchmark (Metric) | # Shots | Dense-4B | MoE-27B | Engram-27B | Engram-40B'
+    previous_heading: 4.2 Experimental Results
+    next_heading: 5. Long Context Training
+  extraction_targets:
+  - ExperimentResult
+  - ArticleClaim
+  expected_objects:
+  - RESULT-TABLE1
+  - CLAIM-MEMORY-BEYOND-KNOWLEDGE
+  - CLAIM-SPARSE-OVER-DENSE
+mentions:
+- id: M-01
+  text: Dense-4B
+  type: ExperimentSetup
+  atom_id: A-SETUP-DENSE
+  canonical_key: model_dense_4b
+- id: M-02
+  text: MoE-27B
+  type: ExperimentSetup
+  atom_id: A-SETUP-MOE
+  canonical_key: model_moe_27b
+- id: M-03
+  text: Engram-27B
+  type: ExperimentSetup
+  atom_id: A-SETUP-ENGRAM27
+  canonical_key: model_engram_27b
+- id: M-04
+  text: Engram-40B
+  type: ExperimentSetup
+  atom_id: A-SETUP-ENGRAM40
+  canonical_key: model_engram_40b
+- id: M-05
+  text: DeepSeek-v3 tokenizer
+  type: ExperimentSetup
+  atom_id: A-SETUP-DATA
+  canonical_key: deepseek_v3_tokenizer
+- id: M-06
+  text: MLA
+  type: ExperimentSetup
+  atom_id: A-SETUP-BACKBONE
+  canonical_key: multi_head_latent_attention
+- id: M-07
+  text: Muon
+  type: ExperimentSetup
+  atom_id: A-SETUP-BACKBONE
+  canonical_key: muon_optimizer
+- id: M-08
+  text: DeepSeekMoE
+  type: ExperimentSetup
+  atom_id: A-SETUP-MOE
+  canonical_key: deepseekmoe
+- id: M-09
+  text: validation loss
+  type: ExperimentResult
+  atom_id: A-T1-VALLOSS
+  canonical_key: validation_loss
+- id: M-10
+  text: MMLU
+  type: ExperimentResult
+  atom_id: A-T1-MMLU
+  canonical_key: mmlu
+- id: M-11
+  text: BBH
+  type: ExperimentResult
+  atom_id: A-T1-BBH
+  canonical_key: bbh
+- id: M-12
+  text: ARC-Challenge
+  type: ExperimentResult
+  atom_id: A-T1-ARCC
+  canonical_key: arc_challenge
+- id: M-13
+  text: GSM8K
+  type: ExperimentResult
+  atom_id: A-T1-GSM8K
+  canonical_key: gsm8k
+- id: M-14
+  text: MATH
+  type: ExperimentResult
+  atom_id: A-T1-MATH
+  canonical_key: math_benchmark
+- id: M-15
+  text: iso-FLOPs
+  type: ArticleClaim
+  atom_id: A-RES-SPARSE-DENSE
+  canonical_key: iso_flops
+- id: M-16
+  text: conditional computation
+  type: ArticleClaim
+  atom_id: A-RES-CLAIM
+  canonical_key: conditional_computation
+canonicalization:
+- canonical: model_engram_27b
+  aliases:
+  - Engram-27B
+  - Engram 27B
+  - the Engram-27B model
+  note: iso-parameter / iso-FLOPs counterpart to MoE-27B; rho=74.3%, 5.7B Engram.
+- canonical: model_moe_27b
+  aliases:
+  - MoE-27B
+  - MoE 27B
+  - the MoE-27B baseline
+  - iso-parameter MoE baseline
+- canonical: validation_loss
+  aliases:
+  - validation loss
+  - Validation Set (loss)
+  - validation-set loss
+- canonical: conditional_memory
+  aliases:
+  - conditional memory
+  - Engram memory
+  - knowledge lookup primitive
+  - dedicated knowledge lookup primitive
+  note: 'qiefen Section 7.3 style: Engram''s memory mechanism is referred to by several co-referring names.'
+objects:
+- id: SETUP-PRETRAIN
+  type: ExperimentSetup
+  section_path: 4 > 4.1
+  home_package: PKG-SETUP
+  payload:
+    name: Large-scale pre-training setup
+    models:
+    - Dense-4B (4.1B total / 3.8B act)
+    - MoE-27B (26.7B / 3.8B act, 72 routed + 2 shared, top-6)
+    - Engram-27B (26.7B / 3.8B act, 55 routed + 2 shared, 5.7B Engram, rho=74.3%)
+    - Engram-40B (39.5B / 3.8B act, 18.5B Engram)
+    tokens: 262B
+    tokenizer: DeepSeek-v3, 128k vocab
+    backbone: 30-block Transformer, hidden 2560, MLA 32 heads, mHC expansion 4, Muon optimizer
+    engram_config: layers 2 and 15, max N-gram 3, 8 heads, dim 1280; Adam lr x5, no weight decay, zero-init conv (identity at start)
+    control: identical data curriculum (same token budget and order); strictly matched activated parameters (3.8B)
+    evaluation: language modeling, knowledge, reasoning, reading comprehension, code/math; standard prompting protocols and metrics per benchmark
+  local_evidence_atom_ids:
+  - A-CH4-INTRO
+  - A-CH4-INTRO-CONT
+  - A-SETUP-DATA
+  - A-SETUP-BACKBONE
+  - A-SETUP-DENSE
+  - A-SETUP-MOE
+  - A-SETUP-ENGRAM27
+  - A-SETUP-ENGRAM40
+  - A-SETUP-EVAL
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-TABLE1
+  type: ExperimentResult
+  section_path: 4 > 4.2
+  home_package: PKG-TABLE1
+  payload:
+    name: Table 1 pre-training benchmark results
+    table_id: Table 1
+    models_compared:
+    - Dense-4B
+    - MoE-27B
+    - Engram-27B
+    - Engram-40B
+    config:
+    - total params 4.1B / 26.7B / 26.7B / 39.5B
+    - Engram params - / - / 5.7B / 18.5B
+    key_findings:
+    - validation loss 1.768 / 1.634 / 1.622 / 1.610 (lower better)
+    - MMLU 48.6 / 57.4 / 60.4 / 60.6
+    - CMMLU 47.9 / 57.9 / 61.9 / 63.4
+    - BBH 42.8 / 50.9 / 55.9 / 57.5
+    - ARC-Challenge 59.3 / 70.1 / 73.8 / 76.4
+    - DROP 41.6 / 55.7 / 59.0 / 60.7
+    - HumanEval 26.8 / 37.8 / 40.8 / 38.4
+    - GSM8K 35.5 / 58.4 / 60.6 / 62.6
+    - MATH 15.2 / 28.3 / 30.7 / 30.6
+    ordering: all sparse variants > Dense-4B across all benchmarks; Engram-27B > MoE-27B on essentially all metrics; Engram-40B lowest loss but not strictly dominant (under-training)
+  local_evidence_atom_ids:
+  - A-T1-CAP
+  - A-T1-HEADER
+  - A-T1-TOTALPARAMS
+  - A-T1-ENGRAMPARAMS
+  - A-T1-VALLOSS
+  - A-T1-MMLU
+  - A-T1-MMLUPRO
+  - A-T1-CMMLU
+  - A-T1-BBH
+  - A-T1-ARCC
+  - A-T1-DROP
+  - A-T1-HUMANEVAL
+  - A-T1-GSM8K
+  - A-T1-MATH
+  - A-RES-ENGRAM40
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-MEMORY-BEYOND-KNOWLEDGE
+  type: ArticleClaim
+  section_path: 4 > 4.2
+  home_package: PKG-TABLE1
+  payload:
+    statement: A dedicated knowledge-lookup primitive (Engram conditional memory) improves representation efficiency beyond allocating the entire sparse budget to conditional computation; gains extend past knowledge to general reasoning, code, and math.
+    supporting_deltas: 'Engram-27B over MoE-27B: MMLU +3.0, MMLU-Pro +1.8, CMMLU +4.0, BBH +5.0, ARC-Challenge +3.7, DROP +3.3, HumanEval +3.0, MBPP +1.6, GSM8K +2.2, MATH +2.4'
+  local_evidence_atom_ids:
+  - A-RES-ENGRAM-VS-MOE
+  - A-RES-CLAIM
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-SPARSE-OVER-DENSE
+  type: ArticleClaim
+  section_path: 4 > 4.2
+  home_package: PKG-TABLE1
+  payload:
+    statement: 'Sparse architectures (MoE / Engram) follow superior scaling laws to dense models: under iso-FLOPs all sparse variants outperform Dense-4B across all benchmarks.'
+  local_evidence_atom_ids:
+  - A-RES-SPARSE-DENSE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: experiment_tests_setup
+  source_object_id: RESULT-TABLE1
+  target_object_id: SETUP-PRETRAIN
+  evidence_atom_ids:
+  - A-T1-CAP
+  - A-SETUP-ENGRAM27
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: result_supports_claim
+  source_object_id: RESULT-TABLE1
+  target_object_id: CLAIM-MEMORY-BEYOND-KNOWLEDGE
+  evidence_atom_ids:
+  - A-T1-MMLU
+  - A-T1-CMMLU
+  - A-T1-BBH
+  - A-T1-ARCC
+  - A-T1-DROP
+  - A-T1-HUMANEVAL
+  - A-T1-GSM8K
+  - A-T1-MATH
+  - A-RES-ENGRAM-VS-MOE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: result_supports_claim
+  source_object_id: RESULT-TABLE1
+  target_object_id: CLAIM-SPARSE-OVER-DENSE
+  evidence_atom_ids:
+  - A-T1-VALLOSS
+  - A-RES-SPARSE-DENSE
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+do_not_extract:
+- text: (Liu et al., 2024a)
+  atom_id: A-SETUP-DATA
+  reason: inline author-year citation, not a knowledge object
+  kind: citation
+- text: (Xie et al., 2025)
+  atom_id: A-SETUP-BACKBONE
+  reason: inline author-year citation, not a knowledge object
+  kind: citation
+- text: (Borgeaud et al., 2022; He, 2024; Shazeer et al., 2017)
+  atom_id: A-RES-SPARSE-DENSE
+  reason: inline author-year citations, not knowledge objects
+  kind: citation
+- pattern: inline_author_year_citation
+  examples:
+  - (Liu et al., 2024a)
+  - (DeepSeek-AI et al., 2024)
+  - (Xie et al., 2025)
+  - (Jordan et al., 2024; Team et al., 2025)
+  - (Dai et al., 2024)
+  - (Kingma, 2014)
+  - (Borgeaud et al., 2022; He, 2024; Shazeer et al., 2017)
+  reason: inline author-year citations are not knowledge objects; this policy suppresses citation over-extraction consistently across chapters.
+  kind: citation_policy
+- text: Appendix B
+  atom_id: A-T1-CAP
+  reason: cross-reference to an appendix outside the chapter slice; not a knowledge object
+  kind: out_of_slice_reference
+- text: the Appendix A
+  atom_id: A-SETUP-BACKBONE
+  reason: cross-reference to an appendix outside the chapter slice
+  kind: out_of_slice_reference
+- text: Table 2 | Long-context performance comparison
+  source_lines:
+  - 190
+  - 190
+  reason: Table 2 belongs to Chapter 5 (Long Context Training); it is outside the 158-189 slice and must not be atomized here.
+  kind: out_of_slice_reference
+- text: Figure 3 (right)
+  source_lines:
+  - 156
+  - 156
+  reason: Figure 3 (scaling-law figure) belongs to Chapter 3; it precedes the slice and is referenced out of scope.
+  kind: out_of_slice_reference

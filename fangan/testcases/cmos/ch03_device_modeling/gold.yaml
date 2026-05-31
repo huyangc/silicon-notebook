@@ -1,0 +1,3926 @@
+# Gold fixture v0.3.3-textbook - CMOS Analog Circuit Design, Chapter 3 CMOS Device Modeling (profile: textbook)
+# Upgraded from the v0.1 fixture to the engram-ch2 v0.3.3 process (textbook TYPES retained):
+# dual coordinates (authoritative source_span into the mineru .md + viewer_span into source.md);
+# verbatim raw_text + within-span normalized_text (formula/condition normalized = formula only);
+# source_elements; gold_label/difficulty/evidence_strength (no decimal confidence);
+# objects with local_evidence/supporting_context/home_package; one package per chunk with
+# expected_objects (+expected_local_fields for cross-package VAR-LAMBDA/COMP-SPICE-LEVEL1);
+# do_not_extract negatives. Per-sub-section formula tag windows resolve the reset tag numbering.
+# Spans are computed by build.py; do NOT hand-edit.
+
+schema_version: 0.3.3-textbook
+source_meta:
+  source_id: cmos
+  scope: Chapter 3 (CMOS Device Modeling) only
+  title: CMOS Analog Circuit Design - Allen & Holberg - Chapter 3 CMOS Device Modeling
+  source_file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  source_line_range:
+  - 3189
+  - 4872
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 3189-4872; NOT the authoritative source)
+  profile: textbook
+  profile_detected_as: textbook
+  profile_cues:
+  - Chapter 3
+  - Example 3.1-1
+  - Example 3.3-1
+  - Example 3.6-1
+  - PROBLEMS
+  - Eq. (18)
+  - Fig. 3.1-2
+  - Table 3.1-2
+  - SPICE LEVEL 1
+  - BSIM3v3
+  extraction_targets:
+  - Concept
+  - Definition
+  - Formula
+  - Variable
+  - Derivation
+  - ExampleProblem
+  - ExampleSolution
+  - ComponentModel
+  - PhysicalEffect
+  - DesignPrinciple
+  - ProblemStatement
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span (may rephrase, transliterate LaTeX math like mu/gamma/phi/lambda/eps, resolve in-span pronouns) but MUST NOT introduce facts/names/numbers outside the span. MinerU spaces digits (''1 1 0'', ''0. 7'', ''5 2 0'') and uses LaTeX in $...$ / $$...$$; normalized gives the readable ascii form. EXCEPTION: a formula_atom / condition_atom may carry symbolic interpretation via metadata.supported_by_context_atoms, and its normalized renders only the formula (no surrounding gloss; semantics live in the object payload).'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside its home_package's chunk) + supporting_context_atom_ids (atoms from other chunks). Package object-recall (expected_objects) is scored on local evidence only.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = payload fields derivable from that package alone. VAR-LAMBDA and COMP-SPICE-LEVEL1 (home PKG-LS-REGIONS) draw supporting evidence from Table 3.1-2 / the Sah equation in PKG-LS-MODEL; PKG-EX-361 can identify COMP-SPICE-LEVEL1 by name from the LEVEL 1 netlist.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of a decimal confidence.
+    tables_and_figures: Tables render as HTML <table> lines (Table 3.1-1/3.1-2/3.2-1/3.3-1/3.3-2/3.4-1). MOSFET/BJT symbol figures render as <details><summary>chemical</summary>; waveforms/curves as <details><summary>line</summary>; the overlap-capacitance profile as a mermaid flowchart. Figure-internal labels, bracket [n] citations, and SPICE deck keywords are listed in do_not_extract.
+    context_only: an atom with context_only:true is background/framing (chapter intro A-INTRO, chapter summary A-SUMMARY) that should NOT yield a typed object; its home package (PKG-OV) legitimately lists no expected_object.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects are the objects whose home_package is that package.
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+    numeric_over_span: 'for every table_row_atom and result_atom: each number appearing in normalized_text must occur verbatim in raw_text (after removing MinerU digit-spacing), guarding against cross-row / cross-example numeric leakage.'
+    formula_normalized_no_gloss: 'for every formula_atom / condition_atom: normalized_text is the formula rendering only; descriptive semantics belong to the object payload, not the atom.'
+  parsing_notes:
+  - 'Formula tags reset per sub-section: 3.1 has tag1..20, 3.2 restarts at tag1 (with split sub-equations 9a/9b/9c, 10a/10b/10c, 11a/11b/11c), 3.3 restarts (Eqs 1..9, then nonsat 10/11/12 between the two examples), SPICE Level 3 restarts (tag1..22, then a second temperature block tag15..24), 3.5 restarts (tag1..6), Example 3.6 SPICE-parameter prose restarts (tag1..4). A formula atom is located by tag WITHIN its sub-section''s line window (build.py by_tag).'
+  - MinerU spaces out digits inside math ('1 1 0', '0. 7', '5 2 0 \mu A'); applied voltages print with a U+2212 minus ('−3 V'); temperatures use 'K'; KOhm prints as 'K\Omega'. normalized_text gives the ascii reading.
+  - Eqs 9/10/11 (per-region charge-storage capacitances) render as nine separate single-line sub-equations (lines 3714-3764); A-LS2-CGREGIONS anchors the introducing prose line and carries the region allocation in the object payload (the formula content is not a single contiguous line).
+  - SPICE Level 3 uses uppercase parameter names (BETA/KP/GAMMA/PHI/COX/U0/NSUB/KAPPA/THETA/ETA/DELTA/NFS) for the same physical quantities the simple model writes lowercase (mu_o, C_ox, 2 phi_F); canonicalization aligns K'~KP and 2|phi_F|~PHI.
+  - BSIM3v3 has no equations in the text, only a parameter-count lineage (BSIM1 60 / BSIM2 99 / BSIM3 40) and an 8-item deep-submicron effect list; modeled as a ComponentModel + a PhysicalEffect, linked to Level 3 by model_refines_model.
+  - Examples 3.6-1/-2/-3/-4 share the same Fig. 3.6-4 amplifier; their bodies are SPICE netlists in ```batch / ```txt code blocks plus simulation curves (whose <details><summary>line</summary> table values are approximate placeholders, not exact results). Example 3.6-2 (dc transfer) is present but excluded from the curated example set and listed in do_not_extract.
+  - The PHI/SPICE-naming definition (A-CS-L3-PHI-NOTE) physically sits in the 3.6 SPICE-parameter prose (line 4417) but conceptually defines the Level 3 / SPICE naming, so it is filed under SEC-3.4-L3.
+source_elements:
+- id: SE-3-INTRO
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3195
+  line_end: 3195
+- id: SE-3.1-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3233
+  line_end: 3233
+- id: SE-3.1-PARAMS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3236
+  line_end: 3236
+- id: SE-3.1-EQ2
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3249
+  line_end: 3249
+- id: SE-3.1-EQ4
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3257
+  line_end: 3257
+- id: SE-3.1-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3312
+  line_end: 3312
+- id: SE-3.1-EQ13
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3318
+  line_end: 3318
+- id: SE-3.1-T312
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3325
+  line_end: 3325
+- id: SE-3.1-EQ14
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3330
+  line_end: 3330
+- id: SE-3.1-EQ15
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3338
+  line_end: 3338
+- id: SE-3.1-EQ16
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3357
+  line_end: 3357
+- id: SE-3.1-EQ17
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3365
+  line_end: 3365
+- id: SE-3.1-CLM
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3368
+  line_end: 3368
+- id: SE-3.1-EQ18
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3371
+  line_end: 3371
+- id: SE-3.1-FIVE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3405
+  line_end: 3405
+- id: SE-EX311-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3411
+  line_end: 3411
+- id: SE-EX311-GIVEN
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3411
+  line_end: 3411
+- id: SE-EX311-USE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3413
+  line_end: 3413
+- id: SE-EX311-RES
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3420
+  line_end: 3420
+- id: SE-3.1-EQ20
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3444
+  line_end: 3444
+- id: SE-3.2-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3466
+  line_end: 3466
+- id: SE-3.2-RDRS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3477
+  line_end: 3477
+- id: SE-3.2-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3488
+  line_end: 3488
+- id: SE-3.2-EQ4
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3524
+  line_end: 3524
+- id: SE-3.2-EQ5
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3549
+  line_end: 3549
+- id: SE-3.2-T321
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3619
+  line_end: 3619
+- id: SE-3.2-EQ7
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3626
+  line_end: 3626
+- id: SE-3.2-EQ8
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3667
+  line_end: 3667
+- id: SE-3.2-CGREG
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3710
+  line_end: 3710
+- id: SE-3.2-EQ12N
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3773
+  line_end: 3773
+- id: SE-3.3-INTRO
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3865
+  line_end: 3865
+- id: SE-3.3-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3872
+  line_end: 3872
+- id: SE-3.3-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3884
+  line_end: 3884
+- id: SE-3.3-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3928
+  line_end: 3928
+- id: SE-3.3-EQ8
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3940
+  line_end: 3940
+- id: SE-3.3-EQ9
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3948
+  line_end: 3948
+- id: SE-EX331-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3957
+  line_end: 3957
+- id: SE-EX331-USE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3959
+  line_end: 3959
+- id: SE-EX331-RES
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3959
+  line_end: 3959
+- id: SE-3.3-T331
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3963
+  line_end: 3963
+- id: SE-EX332-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3993
+  line_end: 3993
+- id: SE-EX332-RES
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 3995
+  line_end: 3995
+- id: SE-3.4-INTRO
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4023
+  line_end: 4023
+- id: SE-3.4-L3-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4036
+  line_end: 4036
+- id: SE-3.4-L3-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4088
+  line_end: 4088
+- id: SE-3.4-L3-EQ16
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4108
+  line_end: 4108
+- id: SE-3.4-L3-EQ18
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4120
+  line_end: 4120
+- id: SE-3.4-L3-EQ20
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4132
+  line_end: 4132
+- id: SE-3.4-L3-T341
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4153
+  line_end: 4153
+- id: SE-3.4-L3-EQ15T
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4158
+  line_end: 4158
+- id: SE-3.4-BSIM-HIST
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4213
+  line_end: 4213
+- id: SE-3.4-BSIM-EFF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4215
+  line_end: 4215
+- id: SE-3.4-BSIM-CMP
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4226
+  line_end: 4226
+- id: SE-3.5-CONCEPT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4233
+  line_end: 4233
+- id: SE-3.5-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4268
+  line_end: 4268
+- id: SE-3.5-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4280
+  line_end: 4280
+- id: SE-3.5-EQ5
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4292
+  line_end: 4292
+- id: SE-3.5-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4298
+  line_end: 4298
+- id: SE-3.5-TEMP
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4317
+  line_end: 4317
+- id: SE-3.6-NETLIST
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4348
+  line_end: 4348
+- id: SE-3.6-MULT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4372
+  line_end: 4372
+- id: SE-3.4-L3-PHI
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4417
+  line_end: 4417
+- id: SE-EX361-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4455
+  line_end: 4455
+- id: SE-EX361-RES
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4455
+  line_end: 4455
+- id: SE-EX361-NET
+  type: code
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4484
+  line_end: 4484
+- id: SE-EX363-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4577
+  line_end: 4577
+- id: SE-EX363-RES
+  type: code
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4592
+  line_end: 4592
+- id: SE-EX364-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4637
+  line_end: 4637
+- id: SE-EX364-RES
+  type: code
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4665
+  line_end: 4665
+- id: SE-3.7-SUM
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4696
+  line_end: 4696
+- id: SE-PROB-1
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4702
+  line_end: 4702
+- id: SE-PROB-5
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4713
+  line_end: 4713
+- id: SE-PROB-11
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4754
+  line_end: 4754
+- id: SE-PROB-15
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4784
+  line_end: 4784
+- id: SE-PROB-16
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 4785
+  line_end: 4785
+section_tree:
+- id: SEC-3
+  path: '3'
+  title: CMOS Device Modeling
+- id: SEC-3.1
+  path: 3 > 3.1
+  title: Simple MOS Large-Signal Model
+  parent: SEC-3
+- id: SEC-EX311
+  path: 3 > 3.1 > Example 3.1-1
+  title: Example 3.1-1 Application of the Simple MOS Large Signal Model
+  parent: SEC-3.1
+  kind: example
+- id: SEC-3.2
+  path: 3 > 3.2
+  title: Other MOS Large-Signal Model Parameters
+  parent: SEC-3
+- id: SEC-3.3
+  path: 3 > 3.3
+  title: Small-Signal Model for the MOS Transistor
+  parent: SEC-3
+- id: SEC-EX331
+  path: 3 > 3.3 > Example 3.3-1
+  title: Example 3.3-1 Typical Values of Small Signal Model Parameters
+  parent: SEC-3.3
+  kind: example
+- id: SEC-EX332
+  path: 3 > 3.3 > Example 3.3-2
+  title: Example 3.3-2 Small-Signal Parameters in the Nonsaturated Region
+  parent: SEC-3.3
+  kind: example
+- id: SEC-3.4
+  path: 3 > 3.4
+  title: Computer Simulation Models
+  parent: SEC-3
+- id: SEC-3.4-L3
+  path: 3 > 3.4 > SPICE Level 3 Model
+  title: SPICE Level 3 Model
+  parent: SEC-3.4
+- id: SEC-3.4-BSIM
+  path: 3 > 3.4 > BSIM3v3 Model
+  title: BSIM3v3 Model
+  parent: SEC-3.4
+- id: SEC-3.5
+  path: 3 > 3.5
+  title: Subthreshold MOS Model
+  parent: SEC-3
+- id: SEC-3.6
+  path: 3 > 3.6
+  title: SPICE Simulation of MOS Circuits
+  parent: SEC-3
+- id: SEC-EX361
+  path: 3 > 3.6 > Example 3.6-1
+  title: Example 3.6-1 Use of SPICE to Simulate MOS Output Characteristics
+  parent: SEC-3.6
+  kind: example
+- id: SEC-EX363
+  path: 3 > 3.6 > Example 3.6-3
+  title: Example 3.6-3 ac Analysis of Fig. 3.6-4
+  parent: SEC-3.6
+  kind: example
+- id: SEC-EX364
+  path: 3 > 3.6 > Example 3.6-4
+  title: Example 3.6-4 Transient Analysis of Fig. 3.6-4
+  parent: SEC-3.6
+  kind: example
+- id: SEC-3.7
+  path: 3 > 3.7
+  title: Summary
+  parent: SEC-3
+- id: SEC-PROB
+  path: 3 > PROBLEMS
+  title: PROBLEMS
+  parent: SEC-3
+evidence_atoms:
+- id: A-INTRO
+  section_id: SEC-3
+  atom_type: concept_definition_atom
+  source_element_id: SE-3-INTRO
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3195
+    line_end: 3195
+    char_start: 203174
+    char_end: 203576
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1319
+    char_end: 1721
+    viewer_only: true
+  raw_text: This text will concentrate only three of these models. The simplest model which is appropriate for hand calculations was described in Sec 2.3 and will be further developed here to include capacitance, noise, and ohmic resistance. In SPICE terminology, this simple model is called the LEVEL 1 model. Next, a small-signal model is derived from the LEVEL 1 large-signal model and is presented in Sec. 3.3.
+  normalized_text: This text concentrates on three SPICE models. The simplest model, appropriate for hand calculations (described in Sec 2.3 and developed here to include capacitance, noise, and ohmic resistance), is in SPICE terminology the LEVEL 1 model. A small-signal model is then derived from the LEVEL 1 large-signal model in Sec. 3.3.
+  evidence_strength: direct
+  metadata:
+    context_only: true
+  context_only: true
+- id: A-SUMMARY
+  section_id: SEC-3.7
+  atom_type: summary_atom
+  source_element_id: SE-3.7-SUM
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4696
+    line_end: 4696
+    char_start: 295888
+    char_end: 296198
+  viewer_span:
+    file: source.md
+    line_start: 1509
+    line_end: 1509
+    char_start: 94033
+    char_end: 94343
+    viewer_only: true
+  raw_text: This program normally has three levels of MOS models which are available to the user. The function of models is to solve for the dc operating conditions and then use this information to develop a linear small-signal model. Sec. 3.1 described the LEVEL 1 model used by SPICE to solve for the dc operating point.
+  normalized_text: SPICE has three levels of MOS models. Models solve for the dc operating conditions and then build a linear small-signal model. Sec. 3.1 described the LEVEL 1 model used to solve for the dc operating point.
+  evidence_strength: direct
+  metadata:
+    context_only: true
+  context_only: true
+- id: A-LS-SAH-1
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3233
+    line_end: 3233
+    char_start: 206685
+    char_end: 206829
+  viewer_span:
+    file: source.md
+    line_start: 46
+    line_end: 46
+    char_start: 4830
+    char_end: 4974
+    viewer_only: true
+  raw_text: i _ {D} = \frac {\mu_ {o} C _ {o x} W}{L} \left[ \left(v _ {G S} - V _ {T}\right) - \left(\frac {v _ {D S}}{2}\right) \right] v _ {D S} \tag {1}
+  normalized_text: i_D = (mu_o C_ox W / L) [ (v_GS - V_T) - (v_DS / 2) ] v_DS
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: drain_current_physical
+- id: A-LS-VT-2
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3249
+    line_end: 3249
+    char_start: 207395
+    char_end: 207509
+  viewer_span:
+    file: source.md
+    line_start: 62
+    line_end: 62
+    char_start: 5540
+    char_end: 5654
+    viewer_only: true
+  raw_text: V _ {T} = V _ {T 0} + \gamma \left[ \sqrt {2 | \phi_ {F} | + v _ {S B}} - \sqrt {2 | \phi_ {F} |} \right] \tag {2}
+  normalized_text: V_T = V_T0 + gamma [ sqrt(2|phi_F| + v_SB) - sqrt(2|phi_F|) ]
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: threshold_voltage
+- id: A-LS-GAMMA-4
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ4
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3257
+    line_end: 3257
+    char_start: 207712
+    char_end: 207866
+  viewer_span:
+    file: source.md
+    line_start: 70
+    line_end: 70
+    char_start: 5857
+    char_end: 6011
+    viewer_only: true
+  raw_text: \gamma = \text { bulk   threshold   parameter } \left(\mathrm{V} ^ {1 / 2}\right) = \frac {\sqrt {2 \varepsilon_ {s i} q N _ {S U B}}}{C _ {o x}} \tag {4}
+  normalized_text: gamma = bulk threshold parameter (V^1/2) = sqrt(2 eps_si q N_SUB) / C_ox
+  evidence_strength: direct
+  metadata:
+    tag: '4'
+    role: body_factor
+- id: A-LS-PARAMS
+  section_id: SEC-3.1
+  atom_type: definition_atom
+  source_element_id: SE-3.1-PARAMS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3236
+    line_end: 3236
+    char_start: 206834
+    char_end: 206956
+  viewer_span:
+    file: source.md
+    line_start: 49
+    line_end: 49
+    char_start: 4979
+    char_end: 5101
+    viewer_only: true
+  raw_text: The terminal voltages and currents have been defined in the previous chapter. The various parameters of (1) are defined as
+  normalized_text: mu_o = surface mobility of the channel (cm2/V-s); C_ox = eps_ox/t_ox = gate-oxide capacitance per unit area (F/cm2); W = effective channel width; L = effective channel length; phi_F = strong-inversion surface potential.
+  evidence_strength: direct
+  metadata:
+    supported_by_context_atoms:
+    - A-LS-SAH-1
+- id: A-LS-ID-K-12
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3312
+    line_end: 3312
+    char_start: 210260
+    char_end: 210386
+  viewer_span:
+    file: source.md
+    line_start: 125
+    line_end: 125
+    char_start: 8405
+    char_end: 8531
+    viewer_only: true
+  raw_text: i _ {D} = K ^ {\prime} \frac {W}{L} \left[ \left(v _ {G S} - V _ {T}\right) - \frac {v _ {D S}}{2} \right] v _ {D S} \tag {12}
+  normalized_text: i_D = K'(W/L) [ (v_GS - V_T) - v_DS/2 ] v_DS
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: drain_current_nonsat
+- id: A-LS-BETA-13
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ13
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3318
+    line_end: 3318
+    char_start: 210484
+    char_end: 210629
+  viewer_span:
+    file: source.md
+    line_start: 131
+    line_end: 131
+    char_start: 8629
+    char_end: 8774
+    viewer_only: true
+  raw_text: \beta = \left(K ^ {\prime}\right) \frac {W}{L} \cong \left(\mu_ {o} C _ {o x}\right) \frac {W}{L} \quad (\mathrm{A} / \mathrm{V} ^ {2}) \tag {13}
+  normalized_text: beta = (K')(W/L) ~= (mu_o C_ox)(W/L)  (A/V^2)
+  evidence_strength: direct
+  metadata:
+    tag: '13'
+    role: transconductance_param
+- id: A-LS-T312
+  section_id: SEC-3.1
+  atom_type: table_row_atom
+  source_element_id: SE-3.1-T312
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3325
+    line_end: 3325
+    char_start: 211287
+    char_end: 212127
+  viewer_span:
+    file: source.md
+    line_start: 138
+    line_end: 138
+    char_start: 9432
+    char_end: 10272
+    viewer_only: true
+  raw_text: <table><tr><td rowspan="2">Parameter Symbol</td><td rowspan="2">Parameter Description</td><td colspan="3">Typical Parameter Value</td></tr><tr><td>N-Channel</td><td>P-Channel</td><td>Units</td></tr><tr><td> $V_{T0}$ </td><td>Threshold Voltage (VBS=0)</td><td>0.7 ± 0.15</td><td>-0.7 ± 0.15</td><td>V</td></tr><tr><td> $K'$ </td><td>Transconductance Parameter (in saturation)</td><td>110.0 ± 10%</td><td>50.0 ± 10%</td><td> $\mu A/V^2$ </td></tr><tr><td> $\gamma$ </td><td>Bulk threshold parameter</td><td>0.4</td><td>0.57</td><td> $(V)^{1/2}$ </td></tr><tr><td> $\lambda$ </td><td>Channel length modulation parameter</td><td>0.04 (L=1 μm)0.01 (L=2 μm)</td><td>0.05 (L = 1 μm)0.01 (L = 2 μm)</td><td> $(V)^{-1}$ </td></tr><tr><td> $2|\phi_F|$ </td><td>Surface potential at strong inversion</td><td>0.7</td><td>0.8</td><td>V</td></tr></table>
+  normalized_text: 'Table 3.1-2 simple-model parameters (0.8um Si-Gate Bulk CMOS n-Well) N/P: V_T0 = 0.7/-0.7 V; K'' = 110.0/50.0 uA/V^2 (in saturation); gamma = 0.4/0.57 V^1/2; lambda = 0.04/0.05 V^-1 (L=1um); 2|phi_F| = 0.7/0.8 V.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3.1-2
+- id: A-LS-CUTOFF-14
+  section_id: SEC-3.1
+  atom_type: condition_atom
+  source_element_id: SE-3.1-EQ14
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3330
+    line_end: 3330
+    char_start: 212435
+    char_end: 212490
+  viewer_span:
+    file: source.md
+    line_start: 143
+    line_end: 143
+    char_start: 10580
+    char_end: 10635
+    viewer_only: true
+  raw_text: i _ {D} = 0, \quad v _ {G S} - V _ {T} \leq 0 \tag {14}
+  normalized_text: i_D = 0,  v_GS - V_T <= 0
+  evidence_strength: direct
+  metadata:
+    tag: '14'
+    atom_role: condition
+- id: A-LS-VDSAT-15
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ15
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3338
+    line_end: 3338
+    char_start: 212870
+    char_end: 212926
+  viewer_span:
+    file: source.md
+    line_start: 151
+    line_end: 151
+    char_start: 11015
+    char_end: 11071
+    viewer_only: true
+  raw_text: v _ {D S} (\mathrm{sat}) = v _ {G S} - V _ {T} \tag {15}
+  normalized_text: v_DS(sat) = v_GS - V_T
+  evidence_strength: direct
+  metadata:
+    tag: '15'
+    role: saturation_voltage
+- id: A-LS-NONSAT-16
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3357
+    line_end: 3357
+    char_start: 213584
+    char_end: 213746
+  viewer_span:
+    file: source.md
+    line_start: 170
+    line_end: 170
+    char_start: 11729
+    char_end: 11891
+    viewer_only: true
+  raw_text: i _ {D} = (K ^ {\prime}) \frac {W}{L} \bigg [ (v _ {G S} - V _ {T}) - \frac {v _ {D S}}{2} \bigg ] v _ {D S}; 0 <   v _ {D S} \leq (v _ {G S} - V _ {T}) \tag {16}
+  normalized_text: i_D = (K')(W/L) [ (v_GS - V_T) - v_DS/2 ] v_DS;  0 < v_DS <= (v_GS - V_T)
+  evidence_strength: direct
+  metadata:
+    tag: '16'
+    role: drain_current_nonsat
+- id: A-LS-SAT-17
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ17
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3365
+    line_end: 3365
+    char_start: 214230
+    char_end: 214355
+  viewer_span:
+    file: source.md
+    line_start: 178
+    line_end: 178
+    char_start: 12375
+    char_end: 12500
+    viewer_only: true
+  raw_text: i _ {D} = K ^ {\prime} \frac {W}{2 L} (v _ {G S} - V _ {T}) ^ {2}, \quad 0 <   (v _ {G S} - V _ {T}) \leq v _ {D S} \tag {17}
+  normalized_text: i_D = K'(W/2L)(v_GS - V_T)^2,  0 < (v_GS - V_T) <= v_DS
+  evidence_strength: direct
+  metadata:
+    tag: '17'
+    role: drain_current_sat
+- id: A-LS-CLM-EFFECT
+  section_id: SEC-3.1
+  atom_type: physical_effect_atom
+  source_element_id: SE-3.1-CLM
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3368
+    line_end: 3368
+    char_start: 214517
+    char_end: 214873
+  viewer_span:
+    file: source.md
+    line_start: 181
+    line_end: 181
+    char_start: 12662
+    char_end: 13018
+    viewer_only: true
+  raw_text: As drain voltage increases, the channel length is reduced resulting in increased current. This phenomenon is called channel length modulation and is accounted for in the saturation model with the addition of the factor, $( 1 + \lambda \nu _ { D S } )$ where $\nu _ { D S }$ is the actual drain-source voltage and not $\nu _ { D S } ( \mathrm { s a t } )$ .
+  normalized_text: As drain voltage increases the channel length is reduced, increasing current. This is channel length modulation, accounted for in the saturation model by the factor (1 + lambda v_DS), where v_DS is the actual drain-source voltage, not v_DS(sat).
+  evidence_strength: direct
+- id: A-LS-SAT-CLM-18
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ18
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3371
+    line_end: 3371
+    char_start: 214973
+    char_end: 215122
+  viewer_span:
+    file: source.md
+    line_start: 184
+    line_end: 184
+    char_start: 13118
+    char_end: 13267
+    viewer_only: true
+  raw_text: i _ {D} = K ^ {\prime} \frac {W}{2 L} (v _ {G S} - V _ {T}) ^ {2} (1 + \lambda v _ {D S}), \quad 0 <   (v _ {G S} - V _ {T}) \leq v _ {D S} \tag {18}
+  normalized_text: i_D = K'(W/2L)(v_GS - V_T)^2 (1 + lambda v_DS),  0 < (v_GS - V_T) <= v_DS
+  evidence_strength: direct
+  metadata:
+    tag: '18'
+    role: drain_current_sat_clm
+- id: A-LS-FIVE-PARAMS
+  section_id: SEC-3.1
+  atom_type: definition_atom
+  source_element_id: SE-3.1-FIVE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3405
+    line_end: 3405
+    char_start: 218821
+    char_end: 218989
+  viewer_span:
+    file: source.md
+    line_start: 218
+    line_end: 218
+    char_start: 16966
+    char_end: 17134
+    viewer_only: true
+  raw_text: This simple model has five electrical and process parameters that completely define it. These parameters are K', $V _ { T } , \gamma , \lambda$ , and $2 \phi _ { F }$ .
+  normalized_text: 'The simple (SPICE Level 1) model is completely defined by five electrical/process parameters: K'', V_T, gamma, lambda, and 2 phi_F.'
+  evidence_strength: direct
+- id: A-LS-VON-20
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ20
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3444
+    line_end: 3444
+    char_start: 221592
+    char_end: 221646
+  viewer_span:
+    file: source.md
+    line_start: 257
+    line_end: 257
+    char_start: 19737
+    char_end: 19791
+    viewer_only: true
+  raw_text: V _ {O N} = \sqrt {\frac {2 i _ {D}}{\beta}} \tag {20}
+  normalized_text: V_ON = sqrt(2 i_D / beta)
+  evidence_strength: direct
+  metadata:
+    tag: '20'
+    role: overdrive_voltage
+    related_tags:
+    - '19'
+    - '20'
+    supported_by_context_atoms:
+    - A-LS-VDSAT-15
+- id: A-EX311-PROBLEM
+  section_id: SEC-EX311
+  atom_type: example_problem_atom
+  source_element_id: SE-EX311-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3411
+    line_end: 3411
+    char_start: 219667
+    char_end: 219891
+  viewer_span:
+    file: source.md
+    line_start: 224
+    line_end: 224
+    char_start: 17812
+    char_end: 18036
+    viewer_only: true
+  raw_text: If the drain, gate, source, and bulk voltages of the n-channel transistor is 3 V, 2 V, 0 V, and 0 V, respectively, find the drain current. Repeat for the p-channel transistor if the drain, gate, source, and bulk voltages are
+  normalized_text: For W/L = 5um/1um and Table 3.1-2 parameters, find the n-channel drain current with v_D,v_G,v_S,v_B = 3,2,0,0 V; repeat for the p-channel transistor with -3,-2,0,0 V.
+  evidence_strength: direct
+- id: A-EX311-GIVEN
+  section_id: SEC-EX311
+  atom_type: given_atom
+  source_element_id: SE-EX311-GIVEN
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3411
+    line_end: 3411
+    char_start: 219522
+    char_end: 219666
+  viewer_span:
+    file: source.md
+    line_start: 224
+    line_end: 224
+    char_start: 17667
+    char_end: 17811
+    viewer_only: true
+  raw_text: Assume that the transistors in Fig. 3.1-1 have a W/L ratio of 5 m/1 m and that the large signal model parameters are those given in Table 3.1-2.
+  normalized_text: 'Given: W/L = 5um/1um; large-signal model parameters from Table 3.1-2 (K''_N=110, K''_P=50 uA/V^2, V_T=0.7 V, lambda_N=0.04, lambda_P=0.05 V^-1).'
+  evidence_strength: direct
+- id: A-EX311-USE
+  section_id: SEC-EX311
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX311-USE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3413
+    line_end: 3413
+    char_start: 220002
+    char_end: 220217
+  viewer_span:
+    file: source.md
+    line_start: 226
+    line_end: 226
+    char_start: 18147
+    char_end: 18362
+    viewer_only: true
+  raw_text: Eq. (15) gives $\nu _ { D S } ( \mathrm { s a t } )$ as 2 V − 0.7 V = 1.3 V. Since $\nu _ { D S }$ is 3 V, the n-channel transistor is in the saturation region. Using Eq. (18) and the values from Table 3.1-2 we have
+  normalized_text: Eq. (15) gives v_DS(sat) = 2 V - 0.7 V = 1.3 V. Since v_DS is 3 V, the n-channel transistor is in saturation; apply Eq. (18) saturation-with-CLM current using Table 3.1-2 values.
+  evidence_strength: direct
+- id: A-EX311-RESULT
+  section_id: SEC-EX311
+  atom_type: result_atom
+  source_element_id: SE-EX311-RES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3420
+    line_end: 3420
+    char_start: 220332
+    char_end: 220469
+  viewer_span:
+    file: source.md
+    line_start: 233
+    line_end: 233
+    char_start: 18477
+    char_end: 18614
+    viewer_only: true
+  raw_text: = \frac {1 1 0 \times 1 0 ^ {- 6} (5 \mu \mathrm{m})}{2 (1 \mu \mathrm{m})} (2 - 0. 7) ^ {2} (1 + 0. 0 4 \times 3) = 5 2 0 \mu \mathrm{A}
+  normalized_text: 'n-channel: i_D = (110e-6 x 5um)/(2 x 1um) (2 - 0.7)^2 (1 + 0.04 x 3) = 520 uA.'
+  evidence_strength: direct
+  metadata:
+    note: p-channel result 243 uA is computed on line 3432 (separate sub-equation block).
+- id: A-LS2-DIODE-1
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3466
+    line_end: 3466
+    char_start: 222698
+    char_end: 222788
+  viewer_span:
+    file: source.md
+    line_start: 279
+    line_end: 279
+    char_start: 20843
+    char_end: 20933
+    viewer_only: true
+  raw_text: i _ {B D} = I _ {S} \left[ \exp \left(\frac {q v _ {B D}}{k T}\right) - 1 \right] \tag {1}
+  normalized_text: i_BD = I_S [ exp(q v_BD / kT) - 1 ]
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: bulk_junction_diodes
+    related_tags:
+    - '1'
+    - '2'
+- id: A-LS2-RDRS
+  section_id: SEC-3.2
+  atom_type: component_model_atom
+  source_element_id: SE-3.2-RDRS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3477
+    line_end: 3477
+    char_start: 223066
+    char_end: 223275
+  viewer_span:
+    file: source.md
+    line_start: 290
+    line_end: 290
+    char_start: 21211
+    char_end: 21420
+    viewer_only: true
+  raw_text: The resistors $r _ { D }$ and $r _ { S }$ represent the ohmic resistance of the drain and source, respectively. Typically, these resistors may be 50 to 100 ohmsi and can often be ignored at low drain currents.
+  normalized_text: Resistors r_D and r_S model the ohmic resistance of drain and source (typically 50 to 100 ohms) and can often be ignored at low drain currents.
+  evidence_strength: direct
+- id: A-LS2-CBX-3
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3488
+    line_end: 3488
+    char_start: 224074
+    char_end: 224242
+  viewer_span:
+    file: source.md
+    line_start: 301
+    line_end: 301
+    char_start: 22219
+    char_end: 22387
+    viewer_only: true
+  raw_text: C _ {B X} = (\mathrm{CJ}) (\mathrm{AX}) \left[ 1 - \frac {\nu_ {B X}}{\mathrm{PB}} \right] ^ {- \mathrm{MJ}}, \quad \nu_ {B X} \leq (\mathrm{FC}) (\mathrm{PB}) \tag {3}
+  normalized_text: C_BX = (CJ)(AX) [ 1 - v_BX/PB ]^(-MJ),  v_BX <= (FC)(PB)
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: depletion_cap_region1
+- id: A-LS2-CBX-4
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ4
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3524
+    line_end: 3524
+    char_start: 225115
+    char_end: 225353
+  viewer_span:
+    file: source.md
+    line_start: 337
+    line_end: 337
+    char_start: 23260
+    char_end: 23498
+    viewer_only: true
+  raw_text: C _ {B X} = \frac {(\mathrm{CJ}) (\mathrm{AX})}{(1 - \mathrm{FC}) ^ {1 + \mathrm{MJ}}} \left[ 1 - (1 + \mathrm{MJ}) \mathrm{FC} + \mathrm{MJ} \frac {\nu_ {B X}}{\mathrm{PB}} \right], \quad \nu_ {B X} > (\mathrm{FC}) (\mathrm{PB}) \tag {4}
+  normalized_text: C_BX = (CJ)(AX)/(1-FC)^(1+MJ) [ 1 - (1+MJ)FC + MJ v_BX/PB ],  v_BX > (FC)(PB)
+  evidence_strength: direct
+  metadata:
+    tag: '4'
+    role: depletion_cap_region2
+- id: A-LS2-CBX-SW-5
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ5
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3549
+    line_end: 3549
+    char_start: 226488
+    char_end: 226793
+  viewer_span:
+    file: source.md
+    line_start: 362
+    line_end: 362
+    char_start: 24633
+    char_end: 24938
+    viewer_only: true
+  raw_text: C _ {B X} = \frac {(\mathrm{CJ}) (\mathrm{AX})}{\left[ 1 - \left(\frac {\nu_ {B X}}{\mathrm{PB}}\right) \right] ^ {\mathrm{MJ}}} + \frac {(\mathrm{CJSW}) (\mathrm{PX})}{\left[ 1 - \left(\frac {\nu_ {B X}}{\mathrm{PB}}\right) \right] ^ {\mathrm{MJSW}}}, \nu_ {B X} \leq (\mathrm{FC}) (\mathrm{PB}) \tag {5}
+  normalized_text: C_BX = (CJ)(AX)/[1-(v_BX/PB)]^MJ + (CJSW)(PX)/[1-(v_BX/PB)]^MJSW
+  evidence_strength: direct
+  metadata:
+    tag: '5'
+    role: depletion_cap_sidewall
+- id: A-LS2-COVERLAP-7
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ7
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3626
+    line_end: 3626
+    char_start: 230784
+    char_end: 230896
+  viewer_span:
+    file: source.md
+    line_start: 439
+    line_end: 439
+    char_start: 28929
+    char_end: 29041
+    viewer_only: true
+  raw_text: C _ {1} = C _ {3} \cong (\mathrm{LD}) (W _ {\text {eff}}) C _ {o x} = (\mathrm{CGXO}) W _ {\text {eff}} \tag {7}
+  normalized_text: C_1 = C_3 ~= (LD)(W_eff) C_ox = (CGXO) W_eff
+  evidence_strength: direct
+  metadata:
+    tag: '7'
+    role: overlap_capacitance
+- id: A-LS2-C2-8
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ8
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3667
+    line_end: 3667
+    char_start: 232979
+    char_end: 233101
+  viewer_span:
+    file: source.md
+    line_start: 480
+    line_end: 480
+    char_start: 31124
+    char_end: 31246
+    viewer_only: true
+  raw_text: C _ {2} = W _ {\text { eff }} (L - 2 \mathrm{LD}) C _ {o x} = W _ {\text { eff }} (L _ {\text { eff }}) C _ {o x} \tag {8}
+  normalized_text: C_2 = W_eff (L - 2 LD) C_ox = W_eff (L_eff) C_ox
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+    role: gate_channel_capacitance
+- id: A-LS2-CGREGIONS
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-CGREG
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3710
+    line_end: 3710
+    char_start: 236678
+    char_end: 236839
+  viewer_span:
+    file: source.md
+    line_start: 523
+    line_end: 523
+    char_start: 34823
+    char_end: 34984
+    viewer_only: true
+  raw_text: As a consequence of the above considerations, we shall use the following formulas for the charge-storage capacitances of the MOS device in the indicated regions.
+  normalized_text: 'Charge-storage caps by region: Off C_GB=C_2+2C_5, C_GS=C_1, C_GD=C_3 (Eq.9); Saturation C_GB=2C_5, C_GS=C_1+(2/3)C_2, C_GD=C_3 (Eq.10); Nonsaturated C_GB=2C_5, C_GS=C_1+0.5C_2, C_GD=C_3+0.5C_2 (Eq.11).'
+  evidence_strength: direct
+  metadata:
+    related_tags:
+    - 9a
+    - 9b
+    - 9c
+    - 10a
+    - 10b
+    - 10c
+    - 11a
+    - 11b
+    - 11c
+    note: Eqs 9/10/11 render as multi-line sub-equations (lines 3714-3764); this atom anchors the prose that introduces the per-region charge-storage capacitances; formula content is in the object payload.
+- id: A-LS2-T321
+  section_id: SEC-3.2
+  atom_type: table_row_atom
+  source_element_id: SE-3.2-T321
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3619
+    line_end: 3619
+    char_start: 229430
+    char_end: 230119
+  viewer_span:
+    file: source.md
+    line_start: 432
+    line_end: 432
+    char_start: 27575
+    char_end: 28264
+    viewer_only: true
+  raw_text: <table><tr><td>Type</td><td>P-Channel</td><td>N-Channel</td><td>Units</td></tr><tr><td>CGSO</td><td> $220 \times 10^{-12}$ </td><td> $220 \times 10^{-12}$ </td><td>F/m</td></tr><tr><td>CGDO</td><td> $220 \times 10^{-12}$ </td><td> $220 \times 10^{-12}$ </td><td>F/m</td></tr><tr><td>CGBO</td><td> $700 \times 10^{-12}$ </td><td> $700 \times 10^{-12}$ </td><td>F/m</td></tr><tr><td>CJ</td><td> $560 \times 10^{-6}$ </td><td> $770 \times 10^{-6}$ </td><td> $F/m^2$ </td></tr><tr><td>CJSW</td><td> $350 \times 10^{-12}$ </td><td> $380 \times 10^{-12}$ </td><td>F/m</td></tr><tr><td>MJ</td><td>0.5</td><td>0.5</td><td></td></tr><tr><td>MJSW</td><td>0.35</td><td>0.38</td><td></td></tr></table>
+  normalized_text: 'Table 3.2-1 capacitance values/coefficients (t_ox=140A) P/N: CGSO 220e-12/220e-12 F/m; CGDO 220e-12/220e-12 F/m; CGBO 700e-12/700e-12 F/m; CJ 770e-6/560e-6 F/m2; CJSW 350e-12/380e-12 F/m; MJ 0.5/0.5; MJSW 0.35/0.38.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3.2-1
+- id: A-LS2-NOISE-12
+  section_id: SEC-3.2
+  atom_type: formula_atom
+  source_element_id: SE-3.2-EQ12N
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3773
+    line_end: 3773
+    char_start: 239396
+    char_end: 239540
+  viewer_span:
+    file: source.md
+    line_start: 586
+    line_end: 586
+    char_start: 37541
+    char_end: 37685
+    viewer_only: true
+  raw_text: \overline {{i}} _ {N} ^ {2} = \left[ \frac {8 k T g _ {m} (1 + \eta)}{3} + \frac {(K F) I _ {D}}{f C _ {o x} L ^ {2}} \right] \Delta f \tag {12}
+  normalized_text: i_N^2 = [ 8 kT g_m (1+eta)/3 + (KF) I_D/(f C_ox L^2) ] df
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: drain_current_noise
+- id: A-SS-INTRO
+  section_id: SEC-3.3
+  atom_type: concept_definition_atom
+  source_element_id: SE-3.3-INTRO
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3865
+    line_end: 3865
+    char_start: 243136
+    char_end: 243357
+  viewer_span:
+    file: source.md
+    line_start: 678
+    line_end: 678
+    char_start: 41281
+    char_end: 41502
+    viewer_only: true
+  raw_text: The small-signal model is a linear model which helps to simplify calculations. It is only valid over voltage or current regions where the large-signal voltage and currents can be adequately represented by a straight line.
+  normalized_text: The small-signal model is a linear model valid over regions where the large-signal variables can be represented by a straight line; its parameters are partial derivatives of one large-signal variable with respect to another at the quiescent point.
+  evidence_strength: direct
+- id: A-SS-GBDGBS-1
+  section_id: SEC-3.3
+  atom_type: formula_atom
+  source_element_id: SE-3.3-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3872
+    line_end: 3872
+    char_start: 244145
+    char_end: 244261
+  viewer_span:
+    file: source.md
+    line_start: 685
+    line_end: 685
+    char_start: 42290
+    char_end: 42406
+    viewer_only: true
+  raw_text: g _ {b d} = \frac {\partial I _ {B D}}{\partial V _ {B D}} (\text { at   the   quiescent   point }) \cong 0 \tag {1}
+  normalized_text: g_bd = dI_BD/dV_BD ~= 0
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: bulk_conductances
+    related_tags:
+    - '1'
+    - '2'
+- id: A-SS-DEFS-3
+  section_id: SEC-3.3
+  atom_type: formula_atom
+  source_element_id: SE-3.3-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3884
+    line_end: 3884
+    char_start: 244488
+    char_end: 244592
+  viewer_span:
+    file: source.md
+    line_start: 697
+    line_end: 697
+    char_start: 42633
+    char_end: 42737
+    viewer_only: true
+  raw_text: g _ {m} = \frac {\partial I _ {D}}{\partial V _ {G S}} (\text { at   the   quiescent   point }) \tag {3}
+  normalized_text: g_m = dI_D/dV_GS
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: channel_conductance_defs
+    related_tags:
+    - '3'
+    - '4'
+    - '5'
+- id: A-SS-GM-6
+  section_id: SEC-3.3
+  atom_type: formula_atom
+  source_element_id: SE-3.3-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3928
+    line_end: 3928
+    char_start: 245312
+    char_end: 245446
+  viewer_span:
+    file: source.md
+    line_start: 741
+    line_end: 741
+    char_start: 43457
+    char_end: 43591
+    viewer_only: true
+  raw_text: g _ {m} = \sqrt {(2 K ^ {\prime} W / L) | I _ {D} | (1 + \lambda V _ {D S})} \cong \sqrt {(2 K ^ {\prime} W / L) | I _ {D} |} \tag {6}
+  normalized_text: g_m = sqrt((2 K' W/L) |I_D| (1 + lambda V_DS)) ~= sqrt((2 K' W/L) |I_D|)
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: gm_saturation
+- id: A-SS-GMBS-8
+  section_id: SEC-3.3
+  atom_type: formula_atom
+  source_element_id: SE-3.3-EQ8
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3940
+    line_end: 3940
+    char_start: 246035
+    char_end: 246138
+  viewer_span:
+    file: source.md
+    line_start: 753
+    line_end: 753
+    char_start: 44180
+    char_end: 44283
+    viewer_only: true
+  raw_text: g _ {m b s} = g _ {m} \frac {\gamma}{2 (2 | \phi_ {F} | + V _ {S B}) ^ {1 / 2}} = \eta g _ {m} \tag {8}
+  normalized_text: g_mbs = g_m gamma / (2 (2|phi_F| + V_SB)^1/2) = eta g_m
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+    role: gmbs
+- id: A-SS-GDS-9
+  section_id: SEC-3.3
+  atom_type: formula_atom
+  source_element_id: SE-3.3-EQ9
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3948
+    line_end: 3948
+    char_start: 246410
+    char_end: 246509
+  viewer_span:
+    file: source.md
+    line_start: 761
+    line_end: 761
+    char_start: 44555
+    char_end: 44654
+    viewer_only: true
+  raw_text: g _ {d s} = g _ {o} = \frac {I _ {D} \lambda}{1 + \lambda V _ {D S}} \cong I _ {D} \lambda \tag {9}
+  normalized_text: g_ds = g_o = I_D lambda / (1 + lambda V_DS) ~= I_D lambda
+  evidence_strength: direct
+  metadata:
+    tag: '9'
+    role: gds
+- id: A-SS-T331
+  section_id: SEC-3.3
+  atom_type: table_row_atom
+  source_element_id: SE-3.3-T331
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3963
+    line_end: 3963
+    char_start: 248120
+    char_end: 248640
+  viewer_span:
+    file: source.md
+    line_start: 776
+    line_end: 776
+    char_start: 46265
+    char_end: 46785
+    viewer_only: true
+  raw_text: <table><tr><td>Small Signal Model Parameters</td><td>DC Current</td><td>DC Current and Voltage</td><td>DC Voltage</td></tr><tr><td> $g_m$ </td><td> $\cong (2K' I_D W/L)^{1/2}$ </td><td>—</td><td> $\cong \frac{K' W}{L}(V_{GS} - V_T)$ </td></tr><tr><td> $g_{mbs}$ </td><td>—</td><td> $\frac{\gamma(2I_D\beta)^{1/2}}{2(2|\phi_F| + V_{SB})^{1/2}}$ </td><td> $\frac{\gamma[\beta(V_{GS}-V_T)]^{1/2}}{2(2|\phi_F| + V_{SB})^{1/2}}$ </td></tr><tr><td> $g_{ds}$ </td><td> $\cong \lambda I_D$ </td><td>—</td><td>—</td></tr></table>
+  normalized_text: 'Table 3.3-1 saturation small-signal relations: g_m ~= (2 K'' I_D W/L)^1/2 or (K''W/L)(V_GS-V_T); g_mbs = gamma(2 I_D beta)^1/2 / (2(2|phi_F|+V_SB)^1/2); g_ds ~= lambda I_D.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3.3-1
+- id: A-EX331-PROBLEM
+  section_id: SEC-EX331
+  atom_type: example_problem_atom
+  source_element_id: SE-EX331-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3957
+    line_end: 3957
+    char_start: 247161
+    char_end: 247494
+  viewer_span:
+    file: source.md
+    line_start: 770
+    line_end: 770
+    char_start: 45306
+    char_end: 45639
+    viewer_only: true
+  raw_text: Find the values of $g _ { m } , g _ { m b s } ,$ and $g _ { d s }$ using the large signal model parameters in Table 3.1-2 for both an n-channel and p-channel device if the dc value of the magnitude of the drain current is 50 A and the magnitude of the dc value of the source-bulk voltage is 2 V. Assume that the W/L ratio is 1 m/1 m.
+  normalized_text: Find g_m, g_mbs, g_ds (Table 3.1-2 parameters) for n- and p-channel devices if |I_D| = 50 uA, |V_SB| = 2 V, W/L = 1um/1um.
+  evidence_strength: direct
+- id: A-EX331-USE
+  section_id: SEC-EX331
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX331-USE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3959
+    line_end: 3959
+    char_start: 247496
+    char_end: 247560
+  viewer_span:
+    file: source.md
+    line_start: 772
+    line_end: 772
+    char_start: 45641
+    char_end: 45705
+    viewer_only: true
+  raw_text: Using the values of Table 3.1-2 and Eqs. (6), (8), and (9) gives
+  normalized_text: Apply saturation small-signal Eqs.(6),(8),(9) with Table 3.1-2 values.
+  evidence_strength: direct
+- id: A-EX331-RESULT
+  section_id: SEC-EX331
+  atom_type: result_atom
+  source_element_id: SE-EX331-RES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3959
+    line_end: 3959
+    char_start: 247561
+    char_end: 247985
+  viewer_span:
+    file: source.md
+    line_start: 772
+    line_end: 772
+    char_start: 45706
+    char_end: 46130
+    viewer_only: true
+  raw_text: $g _ { m } = 1 0 5 \mu \mathrm { A } / \mathrm { V } , g _ { m b s }$ $= 1 2 . 8 \mu \mathrm { { A } } / \mathrm { { V } }$ , and $g _ { d s } \cong 2 . 0 ~ \mu \mathrm { A } / \mathrm { V }$ for the n-channel device and $g _ { m } = 7 0 . 7 ~ \mu \mathrm { A } / \mathrm { V } , g _ { m b s } =$ $1 2 . 0 \mu \mathrm { { A } / V }$ , and $g _ { d s } \cong 2 . 5 \mu \mathrm { A } / \mathrm { V }$ for the p-channel device.
+  normalized_text: 'n-channel: g_m = 105 uA/V, g_mbs = 12.8 uA/V, g_ds ~= 2.0 uA/V. p-channel: g_m = 70.7 uA/V, g_mbs = 12.0 uA/V, g_ds ~= 2.5 uA/V.'
+  evidence_strength: direct
+- id: A-EX332-PROBLEM
+  section_id: SEC-EX332
+  atom_type: example_problem_atom
+  source_element_id: SE-EX332-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3993
+    line_end: 3993
+    char_start: 250196
+    char_end: 250494
+  viewer_span:
+    file: source.md
+    line_start: 806
+    line_end: 806
+    char_start: 48341
+    char_end: 48639
+    viewer_only: true
+  raw_text: Find the values of the small-signal model parameters in the nonsaturation region for an n-channel and p-channel transistor if $V _ { G S } = 5 \mathrm { ~ V } , V _ { D S } = 1 \mathrm { ~ V } ,$ and $| V _ { B S } | = 2 \mathrm { V } .$ . Assume that the W/L ratios of both transistors is 1 m/1 m.
+  normalized_text: Find nonsaturation-region small-signal parameters for n- and p-channel transistors if V_GS=5 V, V_DS=1 V, |V_BS|=2 V, W/L=1um/1um (K' same as saturation).
+  evidence_strength: direct
+- id: A-EX332-RESULT
+  section_id: SEC-EX332
+  atom_type: result_atom
+  source_element_id: SE-EX332-RES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 3995
+    line_end: 3995
+    char_start: 250948
+    char_end: 251337
+  viewer_span:
+    file: source.md
+    line_start: 808
+    line_end: 808
+    char_start: 49093
+    char_end: 49482
+    viewer_only: true
+  raw_text: we get $g _ { m } = 1 1 0 ~ \mu \mathrm { A } / \mathrm { V } , g _ { m b s } = 4 6 . 6 ~ \mu \mathrm { A } / \mathrm { V }$ , and $r _ { d s } = 3 . 0 5$ KΩ for the nchannel transistor and $g _ { m } = 5 0 ~ \mu \mathrm { A } / \mathrm { V } , ~ g _ { m b s } = 2 8 . 6 ~ \mu \mathrm { A } / \mathrm { V }$ , and $r _ { d s } = 6 . 9 9 ~ \mathrm { K } \Omega$ for the pchannel transistor.
+  normalized_text: 'n-channel: g_m = 110 uA/V, g_mbs = 46.6 uA/V, r_ds = 3.05 KOhm. p-channel: g_m = 50 uA/V, g_mbs = 28.6 uA/V, r_ds = 6.99 KOhm.'
+  evidence_strength: direct
+- id: A-CS-INTRO
+  section_id: SEC-3.4
+  atom_type: concept_definition_atom
+  source_element_id: SE-3.4-INTRO
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4023
+    line_end: 4023
+    char_start: 253815
+    char_end: 254092
+  viewer_span:
+    file: source.md
+    line_start: 836
+    line_end: 836
+    char_start: 51960
+    char_end: 52237
+    viewer_only: true
+  raw_text: The SPICE Level 3 dc model will be covered in some detail because it is a relatively straightforward extension of the Level 2 model. The BSIM3v3 model will be introduced but the detailed equations will not be presented because of the volume of equations required to describe it
+  normalized_text: The SPICE Level 3 dc model is covered in detail (a straightforward extension of the Level 2 model); BSIM3v3 is introduced without detailed equations because of their volume. The simple large-signal model neglects second-order effects of narrow/short channels; many simulators offer model binning across W/L geometries.
+  evidence_strength: direct
+  metadata:
+    supported_by_context_atoms: []
+- id: A-CS-L3-DRAIN-1
+  section_id: SEC-3.4-L3
+  atom_type: formula_atom
+  source_element_id: SE-3.4-L3-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4036
+    line_end: 4036
+    char_start: 255719
+    char_end: 255853
+  viewer_span:
+    file: source.md
+    line_start: 849
+    line_end: 849
+    char_start: 53864
+    char_end: 53998
+    viewer_only: true
+  raw_text: i _ {D S} = \text { BETA } \left[ v _ {G S} - V _ {T} - \left(\frac {1 + f _ {b}}{2}\right) v _ {D E} \right] \cdot v _ {D E} \tag {1}
+  normalized_text: i_DS = BETA [ v_GS - V_T - ((1+f_b)/2) v_DE ] . v_DE
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: level3_drain_current
+    related_tags:
+    - '1'
+    - '2'
+    - '5'
+    - '6'
+- id: A-CS-L3-PHI-NOTE
+  section_id: SEC-3.4-L3
+  atom_type: definition_atom
+  source_element_id: SE-3.4-L3-PHI
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4417
+    line_end: 4417
+    char_start: 280409
+    char_end: 280550
+  viewer_span:
+    file: source.md
+    line_start: 1230
+    line_end: 1230
+    char_start: 78554
+    char_end: 78695
+    viewer_only: true
+  raw_text: the bulk threshold parameter, GAMMA ( ) in $\mathrm { v o l t } ^ { 1 / 2 }$ , the surface potential at strong inversion, PHI (2 f), in volts
+  normalized_text: PHI is the SPICE model term for 2 phi_f (always positive in SPICE regardless of transistor type); KP, GAMMA, COX, U0, NSUB are the SPICE uppercase names for K', gamma, C_ox, mu_o, N_SUB.
+  evidence_strength: direct
+  metadata:
+    section_note: definition_text appears in the 3.6 SPICE-parameter prose; conceptually defines the Level 3 / SPICE naming.
+- id: A-CS-L3-VT-12
+  section_id: SEC-3.4-L3
+  atom_type: formula_atom
+  source_element_id: SE-3.4-L3-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4088
+    line_end: 4088
+    char_start: 257472
+    char_end: 257717
+  viewer_span:
+    file: source.md
+    line_start: 901
+    line_end: 901
+    char_start: 55617
+    char_end: 55862
+    viewer_only: true
+  raw_text: V _ {T} = V _ {b i} - \left(\frac {\mathrm{ETA} \cdot 8 . 1 5 ^ {- 2 2}}{C _ {\mathrm{ox}} L _ {\mathrm{eff}} ^ {3}}\right) v _ {D S} + \text {GAMMA} \cdot f _ {s} (\text {PHI} + v _ {S B}) ^ {1 / 2} + f _ {n} (\text {PHI} + v _ {S B}) \tag {12}
+  normalized_text: V_T = V_bi - (ETA . 8.15e-22/(C_ox L_eff^3)) v_DS + GAMMA f_s (PHI+v_SB)^1/2 + f_n (PHI+v_SB)
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: level3_threshold
+- id: A-CS-L3-VSAT-16
+  section_id: SEC-3.4-L3
+  atom_type: formula_atom
+  source_element_id: SE-3.4-L3-EQ16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4108
+    line_end: 4108
+    char_start: 257971
+    char_end: 258097
+  viewer_span:
+    file: source.md
+    line_start: 921
+    line_end: 921
+    char_start: 56116
+    char_end: 56242
+    viewer_only: true
+  raw_text: v _ {D S} (\text { sat }) = v _ {s a t} + v _ {C} - \left(v _ {\text { sat }} ^ {2} + v _ {C} ^ {2}\right) ^ {1 / 2} \tag {16}
+  normalized_text: v_DS(sat) = v_sat + v_C - (v_sat^2 + v_C^2)^1/2
+  evidence_strength: direct
+  metadata:
+    tag: '16'
+    role: level3_saturation_voltage
+    related_tags:
+    - '15'
+    - '16'
+- id: A-CS-L3-MOB-18
+  section_id: SEC-3.4-L3
+  atom_type: formula_atom
+  source_element_id: SE-3.4-L3-EQ18
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4120
+    line_end: 4120
+    char_start: 258320
+    char_end: 258433
+  viewer_span:
+    file: source.md
+    line_start: 933
+    line_end: 933
+    char_start: 56465
+    char_end: 56578
+    viewer_only: true
+  raw_text: \mu_ {s} = \frac {\mathrm{U0}}{1 + \text { THETA } (v _ {G S} - V _ {T})} \text {   when   VMAX   } = 0 \tag {18}
+  normalized_text: mu_s = U0/(1 + THETA(v_GS - V_T)) when VMAX=0; mu_eff = mu_s/(1 + v_DE/v_C) when VMAX>0
+  evidence_strength: direct
+  metadata:
+    tag: '18'
+    role: level3_effective_mobility
+    related_tags:
+    - '18'
+    - '19'
+- id: A-CS-L3-CLM-20
+  section_id: SEC-3.4-L3
+  atom_type: formula_atom
+  source_element_id: SE-3.4-L3-EQ20
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4132
+    line_end: 4132
+    char_start: 258661
+    char_end: 258766
+  viewer_span:
+    file: source.md
+    line_start: 945
+    line_end: 945
+    char_start: 56806
+    char_end: 56911
+    viewer_only: true
+  raw_text: \Delta L = x d \left[ \text { KAPPA } (v _ {D S} - v _ {D S} (\text { sat })) \right] ^ {1 / 2} \tag {20}
+  normalized_text: deltaL = xd [ KAPPA (v_DS - v_DS(sat)) ]^1/2 (VMAX=0); i_DS = i_DS/(1 - deltaL)
+  evidence_strength: direct
+  metadata:
+    tag: '20'
+    role: level3_channel_length_modulation
+    related_tags:
+    - '20'
+    - '21'
+- id: A-CS-L3-MOBT-15
+  section_id: SEC-3.4-L3
+  atom_type: formula_atom
+  source_element_id: SE-3.4-L3-EQ15T
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4158
+    line_end: 4158
+    char_start: 261765
+    char_end: 261863
+  viewer_span:
+    file: source.md
+    line_start: 971
+    line_end: 971
+    char_start: 59910
+    char_end: 60008
+    viewer_only: true
+  raw_text: \mathrm{UO} (T) = \mathrm{UO} (T _ {0}) \left(\frac {T}{T _ {0}}\right) ^ {\mathrm{BEX}} \tag {15}
+  normalized_text: UO(T) = UO(T0)(T/T0)^BEX
+  evidence_strength: direct
+  metadata:
+    tag: '15'
+    role: mobility_temperature
+- id: A-CS-L3-T341
+  section_id: SEC-3.4-L3
+  atom_type: table_row_atom
+  source_element_id: SE-3.4-L3-T341
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4153
+    line_end: 4153
+    char_start: 259431
+    char_end: 261290
+  viewer_span:
+    file: source.md
+    line_start: 966
+    line_end: 966
+    char_start: 57576
+    char_end: 59435
+    viewer_only: true
+  raw_text: <table><tr><td rowspan="2">Parameter Symbol</td><td rowspan="2">Parameter Description</td><td colspan="3">Typical Parameter Value</td></tr><tr><td>N-Channel</td><td>P-Channel</td><td>Units</td></tr><tr><td>VTO</td><td>Threshold</td><td>0.7 ± 0.15</td><td>-0.7 ± 0.15</td><td>V</td></tr><tr><td>UO</td><td>mobility</td><td>660</td><td>210</td><td>cm2/V-s</td></tr><tr><td>DELTA</td><td>Narrow-width threshold adjust factor</td><td>2.4</td><td>1.25</td><td>—</td></tr><tr><td>ETA</td><td>Static-feedback threshold adjust factor</td><td>0.1</td><td>0.1</td><td>—</td></tr><tr><td>KAPPA</td><td>Saturation field factor in channel-length modulation</td><td>0.15</td><td>2.5</td><td>1/V</td></tr><tr><td>THETA</td><td>Mobility degradation factor</td><td>0.1</td><td>0.1</td><td>1/V</td></tr><tr><td>NSUB</td><td>Substrate doping</td><td>3×1016</td><td>6×1016</td><td>cm-3</td></tr><tr><td>TOX</td><td>Oxide thickness</td><td>140</td><td>140</td><td>Å</td></tr><tr><td>XJ</td><td>Mettallurgical junction depth</td><td>0.2</td><td>0.2</td><td>μm</td></tr><tr><td>WD</td><td>Delta width</td><td></td><td></td><td>μm</td></tr><tr><td>LD</td><td>Lateral diffusion</td><td>0.016</td><td>0.015</td><td>μm</td></tr><tr><td>NFS</td><td>Parameter for weak inversion modeling</td><td>7×1011</td><td>6×1011</td><td>cm-2</td></tr><tr><td>CGSO</td><td></td><td>220 × 10-12</td><td>220 × 10-12</td><td>F/m</td></tr><tr><td>CGDO</td><td></td><td>220 × 10-12</td><td>220 × 10-12</td><td>F/m</td></tr><tr><td>CGBO</td><td></td><td>700 × 10-12</td><td>700 × 10-12</td><td>F/m</td></tr><tr><td>CJ</td><td></td><td>770 × 10-6</td><td>560 × 10-6</td><td>F/m2</td></tr><tr><td>CJSW</td><td></td><td>380 × 10-12</td><td>350 × 10-12</td><td>F/m</td></tr><tr><td>MJ</td><td></td><td>0.5</td><td>0.5</td><td></td></tr><tr><td>MJSW</td><td></td><td>0.38</td><td>0.35</td><td></td></tr></table>
+  normalized_text: 'Table 3.4-1 Level-3 parameters (0.8um Si-Gate Bulk CMOS n-Well) N/P: VTO 0.7/-0.7 V; U0 660/210 cm2/V-s; DELTA 2.4/1.25; ETA 0.1/0.1; KAPPA 0.15/2.5 1/V; THETA 0.1/0.1 1/V; NSUB 3e16/6e16 cm-3; TOX 140 A; XJ 0.2 um; LD 0.016/0.015 um; NFS 7e11/6e11 cm-2.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3.4-1
+- id: A-CS-BSIM-HISTORY
+  section_id: SEC-3.4-BSIM
+  atom_type: component_model_atom
+  source_element_id: SE-3.4-BSIM-HIST
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4213
+    line_end: 4213
+    char_start: 265124
+    char_end: 265543
+  viewer_span:
+    file: source.md
+    line_start: 1026
+    line_end: 1026
+    char_start: 63269
+    char_end: 63688
+    viewer_only: true
+  raw_text: In 1994, U.C. Berkeley introduced the BSIM3 model (version 2) which, unlike the earlier BSIM models, returned to a more device-physic based modeling approach. The model is simpler to use and only has 40 dc parameters. Moreover, the BSIM3 provides good performance when applied to analog as well as digital circuit simulation. In its third version, BSIM3v3 [26], it has become the industry standard MOS transistor model.
+  normalized_text: 'BSIM model lineage (UC Berkeley): BSIM1 (1984, 60 dc params, curve-fit), BSIM2 (1991, 99 dc params, better output-resistance/hot-electron modeling), BSIM3 v2 (1994, device-physics based, 40 dc params, analog+digital). BSIM3v3 has become the industry-standard MOS transistor model; detailed equations are not given due to their volume.'
+  evidence_strength: direct
+- id: A-CS-BSIM-EFFECTS
+  section_id: SEC-3.4-BSIM
+  atom_type: physical_effect_atom
+  source_element_id: SE-3.4-BSIM-EFF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4215
+    line_end: 4215
+    char_start: 265545
+    char_end: 265643
+  viewer_span:
+    file: source.md
+    line_start: 1028
+    line_end: 1028
+    char_start: 63690
+    char_end: 63788
+    viewer_only: true
+  raw_text: 'The BSIM3 model addresses the following important effects seen in deep-submicron MOSFET operation:'
+  normalized_text: 'BSIM3 addresses deep-submicron effects: threshold voltage reduction, mobility degradation from a vertical field, velocity saturation, drain-induced barrier lowering (DIBL), channel length modulation, subthreshold (weak inversion) conduction, source/drain parasitic resistance, and hot-electron effects on output resistance.'
+  evidence_strength: direct
+- id: A-CS-MODEL-COMPARE
+  section_id: SEC-3.4-BSIM
+  atom_type: result_atom
+  source_element_id: SE-3.4-BSIM-CMP
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4226
+    line_end: 4226
+    char_start: 266187
+    char_end: 266450
+  viewer_span:
+    file: source.md
+    line_start: 1039
+    line_end: 1039
+    char_start: 64332
+    char_end: 64595
+    viewer_only: true
+  raw_text: Assuming that the BSIM3v3 model closely approximates actual transistor performance, this figure indicates that the Level 1 model is grossly in error, the Level 3 model shows a significant difference in modeling the transition from non-saturation to linear region.
+  normalized_text: Fig.3.4-2 compares a 20/0.8 device using Level 1, Level 3, and BSIM3v3. Assuming BSIM3v3 approximates actual behavior, the Level 1 model is grossly in error and the Level 3 model differs significantly in the nonsaturation-to-linear transition.
+  evidence_strength: direct
+- id: A-ST-CONCEPT
+  section_id: SEC-3.5
+  atom_type: physical_effect_atom
+  source_element_id: SE-3.5-CONCEPT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4233
+    line_end: 4233
+    char_start: 266869
+    char_end: 267257
+  viewer_span:
+    file: source.md
+    line_start: 1046
+    line_end: 1046
+    char_start: 65014
+    char_end: 65402
+    viewer_only: true
+  raw_text: As vGS approaches $V _ { T }$ the $i _ { D } - \nu _ { G S }$ characteristics change from square-law to exponential. Whereas the region where $\nu _ { G S }$ is above the threshold is called the strong inversion region, the region below (actually, the transition between the two regions is not well defined as will be explained later) is called the subthreshold, or weak inversion region.
+  normalized_text: 'Subthreshold (weak inversion) conduction: as v_GS approaches V_T the i_D - v_GS characteristic changes from square-law (strong inversion) to exponential (weak inversion). Current flows at or below threshold, contradicting the strong-inversion models.'
+  evidence_strength: direct
+- id: A-ST-VON-1
+  section_id: SEC-3.5
+  atom_type: formula_atom
+  source_element_id: SE-3.5-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4268
+    line_end: 4268
+    char_start: 268698
+    char_end: 268736
+  viewer_span:
+    file: source.md
+    line_start: 1081
+    line_end: 1081
+    char_start: 66843
+    char_end: 66881
+    viewer_only: true
+  raw_text: v _ {o n} = V _ {T} + f a s t \tag {1}
+  normalized_text: v_on = V_T + fast
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: weak_inversion_transition
+    related_tags:
+    - '1'
+    - '2'
+- id: A-ST-IDS-3
+  section_id: SEC-3.5
+  atom_type: formula_atom
+  source_element_id: SE-3.5-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4280
+    line_end: 4280
+    char_start: 269198
+    char_end: 269331
+  viewer_span:
+    file: source.md
+    line_start: 1093
+    line_end: 1093
+    char_start: 67343
+    char_end: 67476
+    viewer_only: true
+  raw_text: i _ {D S} = i _ {D S} \left(v _ {o n}, v _ {D E}, v _ {S B}\right) e ^ {\left(\frac {v _ {G S} - v _ {o n}}{f a s t}\right)} \tag {3}
+  normalized_text: i_DS = i_DS(v_on, v_DE, v_SB) exp((v_GS - v_on)/fast)
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: weak_inversion_current_spice
+- id: A-ST-IDS-HAND-5
+  section_id: SEC-3.5
+  atom_type: formula_atom
+  source_element_id: SE-3.5-EQ5
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4292
+    line_end: 4292
+    char_start: 269687
+    char_end: 269782
+  viewer_span:
+    file: source.md
+    line_start: 1105
+    line_end: 1105
+    char_start: 67832
+    char_end: 67927
+    viewer_only: true
+  raw_text: i _ {D} \cong \frac {W}{L} I _ {D O} \exp \left(\frac {\nu_ {G S}}{n (k T / q)}\right) \tag {5}
+  normalized_text: i_D ~= (W/L) I_DO exp(v_GS / (n (kT/q)))
+  evidence_strength: direct
+  metadata:
+    tag: '5'
+    role: weak_inversion_current_hand
+- id: A-ST-ENTRY-6
+  section_id: SEC-3.5
+  atom_type: condition_atom
+  source_element_id: SE-3.5-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4298
+    line_end: 4298
+    char_start: 270174
+    char_end: 270223
+  viewer_span:
+    file: source.md
+    line_start: 1111
+    line_end: 1111
+    char_start: 68319
+    char_end: 68368
+    viewer_only: true
+  raw_text: v _ {g s} <   V _ {T} + n \frac {k T}{q} \tag {6}
+  normalized_text: v_gs < V_T + n (kT/q)
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+- id: A-ST-TEMP
+  section_id: SEC-3.5
+  atom_type: physical_effect_atom
+  source_element_id: SE-3.5-TEMP
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4317
+    line_end: 4317
+    char_start: 271132
+    char_end: 271492
+  viewer_span:
+    file: source.md
+    line_start: 1130
+    line_end: 1130
+    char_start: 69277
+    char_end: 69637
+    viewer_only: true
+  raw_text: the temperature coefficient of the threshold voltage is negative in the subthreshold region. The variation of current due to temperature of a device operating in weak inversion is dominated by the negative temperature coefficient of the threshold voltage. Therefore, for a given gate-source voltage, subthreshold current increases as the temperature increases.
+  normalized_text: In weak inversion the threshold-voltage temperature coefficient is negative, so for a given v_GS the subthreshold current increases as temperature increases. Weak-inversion operation is important for low-power circuits.
+  evidence_strength: direct
+- id: A-SP-NETLIST
+  section_id: SEC-3.6
+  atom_type: technology_process_atom
+  source_element_id: SE-3.6-NETLIST
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4348
+    line_end: 4348
+    char_start: 273769
+    char_end: 273897
+  viewer_span:
+    file: source.md
+    line_start: 1161
+    line_end: 1161
+    char_start: 71914
+    char_end: 72042
+    viewer_only: true
+  raw_text: The four numbers following”M1” specify the nets (or nodes) to which the drain, gate, source, and substrate (bulk) are connected.
+  normalized_text: 'A SPICE MOS simulation needs instance declarations and model descriptions. Instance: M<number> <DRAIN> <GATE> <SOURCE> <BULK> <model> W=.. L=.. ; the four nets after M1 are drain, gate, source, substrate (bulk). The .MODEL line gives type NMOS/PMOS, LEVEL, and parameters (VTO, KP, GAMMA, LAMBDA, PHI).'
+  evidence_strength: direct
+- id: A-SP-MULT
+  section_id: SEC-3.6
+  atom_type: design_principle_atom
+  source_element_id: SE-3.6-MULT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4372
+    line_end: 4372
+    char_start: 275650
+    char_end: 275822
+  viewer_span:
+    file: source.md
+    line_start: 1185
+    line_end: 1185
+    char_start: 73795
+    char_end: 73967
+    viewer_only: true
+  raw_text: This principle prescribes that when one device needs to be “M” times larger than another device, then the larger device should be made from “M” units of the smaller device.
+  normalized_text: 'The unit-matching principle (Sec.2.6): an M-times-larger device should be made from M parallel unit devices, instantiated in SPICE with the multiplier parameter M= rather than a single scaled-up device.'
+  evidence_strength: direct
+- id: A-EX361-PROBLEM
+  section_id: SEC-EX361
+  atom_type: example_problem_atom
+  source_element_id: SE-EX361-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4455
+    line_end: 4455
+    char_start: 285338
+    char_end: 285664
+  viewer_span:
+    file: source.md
+    line_start: 1268
+    line_end: 1268
+    char_start: 83483
+    char_end: 83809
+    viewer_only: true
+  raw_text: Use SPICE to obtain the output characteristics of the n-channel transistor shown in Fig. 3.6-2 using the LEVEL 1 model and the parameter values of Table 3.1-2. The output curves are to be plotted for drain-source voltages from 0 to 5 V and for gate-source voltages of 1, 2, 3, 4, and 5 V. Assume that the bulk voltage is zero.
+  normalized_text: 'Use SPICE (LEVEL 1, Table 3.1-2 parameters) to obtain the output characteristics of an n-channel transistor: i_D vs v_DS from 0 to 5 V for v_GS = 1,2,3,4,5 V, bulk at 0 V.'
+  evidence_strength: direct
+- id: A-EX361-NETLIST
+  section_id: SEC-EX361
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX361-NET
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4484
+    line_end: 4484
+    char_start: 287258
+    char_end: 287320
+  viewer_span:
+    file: source.md
+    line_start: 1297
+    line_end: 1297
+    char_start: 85403
+    char_end: 85465
+    viewer_only: true
+  raw_text: .MODEL MOS1 NMOS VTO=0.7 KP=110U GAMMA=0.4 LAMBDA=0.04 PHI=0.7
+  normalized_text: Table 3.6-1 SPICE input (.MODEL MOS1 NMOS VTO=0.7 KP=110U GAMMA=0.4 LAMBDA=0.04 PHI=0.7; with M1 2 1 0 0 MOS1 W=5U L=1.0U; .DC VDS 0 5 0.2 VGS 1 5 1; .PRINT DC V(2) I(VDS); .END) - a nested dc sweep.
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3.6-1
+    code_block_lines:
+    - 4479
+    - 4488
+- id: A-EX361-RESULT
+  section_id: SEC-EX361
+  atom_type: result_atom
+  source_element_id: SE-EX361-RES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4455
+    line_end: 4455
+    char_start: 286691
+    char_end: 286895
+  viewer_span:
+    file: source.md
+    line_start: 1268
+    line_end: 1268
+    char_start: 84836
+    char_end: 85040
+    viewer_only: true
+  raw_text: The “.PRINT...” line directs the program to print the values of the dc sweeps. The last line of every SPICE input file must be .END which is line eleven. Fig. 3.6-3 shows the output plot of this analysis.
+  normalized_text: 'Fig.3.6-3 output: a family of i_D vs v_DS curves rising and then saturating, one curve per v_GS = 2,3,4,5 V (higher v_GS gives higher saturated current).'
+  evidence_strength: direct
+- id: A-EX363-PROBLEM
+  section_id: SEC-EX363
+  atom_type: example_problem_atom
+  source_element_id: SE-EX363-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4577
+    line_end: 4577
+    char_start: 289786
+    char_end: 290131
+  viewer_span:
+    file: source.md
+    line_start: 1390
+    line_end: 1390
+    char_start: 87931
+    char_end: 88276
+    viewer_only: true
+  raw_text: Use SPICE to obtain a small signal frequency response of $V _ { \mathrm { O U T } } ( \omega ) / V _ { \mathrm { I N } } ( \omega )$ when the amplifier is biased in the transition region. Assume that a 5 pF capacitor is attached to the output of Fig. 3.6-4 and find the magnitude and phase response over the frequency range of 100 Hz to 100 MHz.
+  normalized_text: Use SPICE for a small-signal ac analysis V_OUT(w)/V_IN(w) of the Fig.3.6-4 amplifier biased in the transition region, with a 5 pF output capacitor, from 100 Hz to 100 MHz.
+  evidence_strength: direct
+- id: A-EX363-RESULT
+  section_id: SEC-EX363
+  atom_type: result_atom
+  source_element_id: SE-EX363-RES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4592
+    line_end: 4592
+    char_start: 291589
+    char_end: 291612
+  viewer_span:
+    file: source.md
+    line_start: 1405
+    line_end: 1405
+    char_start: 89734
+    char_end: 89757
+    viewer_only: true
+  raw_text: VIN 1 0 DC -2.42 AC 1.0
+  normalized_text: '.AC DEC 20 100 100MEG with VIN 1 0 DC -2.42 AC 1.0. Result (Fig.3.6-6): ~36 dB low-frequency gain rolling off above ~100 kHz; phase from 180 deg to 90 deg.'
+  evidence_strength: direct
+  metadata:
+    result_figure: Fig.3.6-6 (36 dB; 180->90 deg)
+- id: A-EX364-PROBLEM
+  section_id: SEC-EX364
+  atom_type: example_problem_atom
+  source_element_id: SE-EX364-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4637
+    line_end: 4637
+    char_start: 292708
+    char_end: 292929
+  viewer_span:
+    file: source.md
+    line_start: 1450
+    line_end: 1450
+    char_start: 90853
+    char_end: 91074
+    viewer_only: true
+  raw_text: The last simulation to be made with Fig. 3.6-4 is the transient response to an input pulse. This simulation will include the 5 pF output capacitor of the previous example and will be made from time zero to 4 microseconds.
+  normalized_text: Use SPICE for the transient response of the Fig.3.6-4 amplifier (5 pF output cap) to an input pulse, from 0 to 4 microseconds.
+  evidence_strength: direct
+- id: A-EX364-RESULT
+  section_id: SEC-EX364
+  atom_type: result_atom
+  source_element_id: SE-EX364-RES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4665
+    line_end: 4665
+    char_start: 294701
+    char_end: 294754
+  viewer_span:
+    file: source.md
+    line_start: 1478
+    line_end: 1478
+    char_start: 92846
+    char_end: 92899
+    viewer_only: true
+  raw_text: VIN 1 0 PWL(0 0V 1U 0V 1.05U 3V 3U 3V 3.05U 0V 6U 0V)
+  normalized_text: .TRAN 0.01U 4U with the input as a PWL pulse (VIN 1 0 PWL(0 0V 1U 0V 1.05U 3V 3U 3V 3.05U 0V 6U 0V)). Output Fig.3.6-7 shows v_IN(t) and v_OUT(t) (inverted pulse response).
+  evidence_strength: direct
+  metadata:
+    result_figure: Fig.3.6-7
+- id: A-PROB-1
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4702
+    line_end: 4702
+    char_start: 297556
+    char_end: 297877
+  viewer_span:
+    file: source.md
+    line_start: 1515
+    line_end: 1515
+    char_start: 95701
+    char_end: 96022
+    viewer_only: true
+  raw_text: 1 Sketch to scale the output characteristics of an enhancement n-channel device if $V _ { T } = 0 . 7$ volt and $I _ { D } = 5 0 0 \mu \mathrm { A }$ when $V _ { G S } = 5 \mathrm { ~ V ~ }$ in saturation. Choose values of $V _ { G S }$ $= 1 , 2 , 3 , 4 ,$ , and 5 V. Assume that the channel modulation parameter is zero.
+  normalized_text: 1. Sketch to scale the output characteristics of an enhancement n-channel device if V_T=0.7 V and I_D=500 uA at V_GS=5 V in saturation, for V_GS=1,2,3,4,5 V, with channel modulation parameter zero.
+  evidence_strength: direct
+- id: A-PROB-5
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-5
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4713
+    line_end: 4713
+    char_start: 299529
+    char_end: 299637
+  viewer_span:
+    file: source.md
+    line_start: 1526
+    line_end: 1526
+    char_start: 97674
+    char_end: 97782
+    viewer_only: true
+  raw_text: How would you change Eq. (18) so that it would agree with Eq. (11) at $\nu _ { D S } = \nu _ { D S }$ (sat)?
+  normalized_text: 5. Eqs.(11) and (18) of Sec.3.1 do not agree at the nonsaturation-saturation transition. How would you change Eq.(18) so it agrees with Eq.(11) at v_DS = v_DS(sat)?
+  evidence_strength: direct
+- id: A-PROB-11
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-11
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4754
+    line_end: 4754
+    char_start: 301228
+    char_end: 301295
+  viewer_span:
+    file: source.md
+    line_start: 1567
+    line_end: 1567
+    char_start: 99373
+    char_end: 99440
+    viewer_only: true
+  raw_text: 11. Repeat Examples 3.3-1 and 3.3-2 if the W/L ratio is 100 m/10 m.
+  normalized_text: 11. Repeat Examples 3.3-1 and 3.3-2 if the W/L ratio is 100um/10um.
+  evidence_strength: direct
+- id: A-PROB-15
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-15
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4784
+    line_end: 4784
+    char_start: 302570
+    char_end: 302716
+  viewer_span:
+    file: source.md
+    line_start: 1597
+    line_end: 1597
+    char_start: 100715
+    char_end: 100861
+    viewer_only: true
+  raw_text: 15. Calculate the value for $V _ { O N }$ for n MOS transistor in weak inversion assuming that $f s$ and fn can be approximated to be unity (1.0).
+  normalized_text: 15. Calculate V_ON for an MOS transistor in weak inversion assuming fs and fn can be approximated as unity.
+  evidence_strength: direct
+- id: A-PROB-16
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 4785
+    line_end: 4785
+    char_start: 302720
+    char_end: 302885
+  viewer_span:
+    file: source.md
+    line_start: 1598
+    line_end: 1598
+    char_start: 100865
+    char_end: 101030
+    viewer_only: true
+  raw_text: 16. Develop an expression for the small signal transconductance of a MOS device operating in weak inversion using the large signal expression of Eq. (5) of Sec. 3.5.
+  normalized_text: 16. Develop an expression for the small-signal transconductance of a MOS device in weak inversion using the large-signal expression of Eq.(5) of Sec.3.5.
+  evidence_strength: direct
+semantic_chunks:
+- id: C-OV
+  profile: textbook
+  chunk_type: chapter_overview_block
+  section_path: '3'
+  atom_ids:
+  - A-INTRO
+  - A-SUMMARY
+  central_atom_ids:
+  - A-INTRO
+  boundary_reason: 'chapter scope: three model levels (intro + summary); framing text, not typed objects.'
+  extraction_targets:
+  - Concept
+  gold_must_cover_atoms:
+  - A-INTRO
+- id: C-LS-MODEL
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 3 > 3.1
+  atom_ids:
+  - A-LS-SAH-1
+  - A-LS-VT-2
+  - A-LS-GAMMA-4
+  - A-LS-PARAMS
+  - A-LS-ID-K-12
+  - A-LS-BETA-13
+  - A-LS-T312
+  central_atom_ids:
+  - A-LS-SAH-1
+  - A-LS-ID-K-12
+  boundary_reason: Sah/Shichman-Hodges drain-current equation with its parameter definitions (mu_o,C_ox,V_T,gamma,K',beta) and Table 3.1-2; formula + variable definitions kept together.
+  extraction_targets:
+  - Formula
+  - Variable
+  gold_must_cover_atoms:
+  - A-LS-SAH-1
+  - A-LS-ID-K-12
+  - A-LS-BETA-13
+  - A-LS-PARAMS
+- id: C-LS-REGIONS
+  profile: textbook
+  chunk_type: derivation_block
+  section_path: 3 > 3.1
+  atom_ids:
+  - A-LS-CUTOFF-14
+  - A-LS-VDSAT-15
+  - A-LS-NONSAT-16
+  - A-LS-SAT-17
+  - A-LS-CLM-EFFECT
+  - A-LS-SAT-CLM-18
+  - A-LS-FIVE-PARAMS
+  - A-LS-VON-20
+  central_atom_ids:
+  - A-LS-SAT-CLM-18
+  - A-LS-VDSAT-15
+  boundary_reason: 'regions of operation derived from Eq.(1): cutoff -> v_DS(sat) boundary -> nonsaturation -> saturation -> saturation with channel-length modulation; one continuous derivation chain.'
+  extraction_targets:
+  - Formula
+  - PhysicalEffect
+  - Variable
+  gold_must_cover_atoms:
+  - A-LS-VDSAT-15
+  - A-LS-NONSAT-16
+  - A-LS-SAT-17
+  - A-LS-SAT-CLM-18
+  - A-LS-CLM-EFFECT
+- id: C-EX-311
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 3 > 3.1 > Example 3.1-1
+  atom_ids:
+  - A-EX311-PROBLEM
+  - A-EX311-GIVEN
+  - A-EX311-USE
+  - A-EX311-RESULT
+  central_atom_ids:
+  - A-EX311-PROBLEM
+  boundary_reason: problem/given/formula-usage/result continuous (example_solution_continuity).
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX311-PROBLEM
+  - A-EX311-GIVEN
+  - A-EX311-USE
+  - A-EX311-RESULT
+- id: C-LS2-JUNC
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 3 > 3.2
+  atom_ids:
+  - A-LS2-DIODE-1
+  - A-LS2-RDRS
+  - A-LS2-CBX-3
+  - A-LS2-CBX-4
+  - A-LS2-CBX-SW-5
+  central_atom_ids:
+  - A-LS2-CBX-3
+  boundary_reason: bulk-source/drain pn-junction diodes, ohmic r_D/r_S, and the two-region (plus sidewall) depletion-capacitance formulas kept together.
+  extraction_targets:
+  - Formula
+  - ComponentModel
+  gold_must_cover_atoms:
+  - A-LS2-DIODE-1
+  - A-LS2-CBX-3
+  - A-LS2-CBX-SW-5
+- id: C-LS2-CAPS
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 3 > 3.2
+  atom_ids:
+  - A-LS2-COVERLAP-7
+  - A-LS2-C2-8
+  - A-LS2-CGREGIONS
+  - A-LS2-T321
+  - A-LS2-NOISE-12
+  central_atom_ids:
+  - A-LS2-CGREGIONS
+  boundary_reason: charge-storage capacitor model (overlap C_1/C_3, gate-channel C_2, per-region C_GS/C_GD/C_GB) + Table 3.2-1 coefficients + noise current source.
+  extraction_targets:
+  - Formula
+  - ComponentModel
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-LS2-COVERLAP-7
+  - A-LS2-CGREGIONS
+  - A-LS2-T321
+- id: C-SS-MODEL
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 3 > 3.3
+  atom_ids:
+  - A-SS-INTRO
+  - A-SS-GBDGBS-1
+  - A-SS-DEFS-3
+  - A-SS-GM-6
+  - A-SS-GMBS-8
+  - A-SS-GDS-9
+  - A-SS-T331
+  central_atom_ids:
+  - A-SS-GM-6
+  boundary_reason: 'small-signal MOS model: definitions of g_m/g_mbs/g_ds as partials + their saturation-region closed forms + Table 3.3-1; one component model.'
+  extraction_targets:
+  - Concept
+  - Formula
+  - Variable
+  - ComponentModel
+  gold_must_cover_atoms:
+  - A-SS-GM-6
+  - A-SS-GMBS-8
+  - A-SS-GDS-9
+  - A-SS-DEFS-3
+- id: C-EX-331
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 3 > 3.3 > Example 3.3-1
+  atom_ids:
+  - A-EX331-PROBLEM
+  - A-EX331-USE
+  - A-EX331-RESULT
+  central_atom_ids:
+  - A-EX331-PROBLEM
+  boundary_reason: small-signal-parameter worked example (saturation) continuous.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX331-PROBLEM
+  - A-EX331-RESULT
+- id: C-EX-332
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 3 > 3.3 > Example 3.3-2
+  atom_ids:
+  - A-EX332-PROBLEM
+  - A-EX332-RESULT
+  central_atom_ids:
+  - A-EX332-PROBLEM
+  boundary_reason: small-signal-parameter worked example (nonsaturation) continuous.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX332-PROBLEM
+  - A-EX332-RESULT
+- id: C-L3
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 3 > 3.4 > SPICE Level 3 Model
+  atom_ids:
+  - A-CS-INTRO
+  - A-CS-L3-DRAIN-1
+  - A-CS-L3-PHI-NOTE
+  - A-CS-L3-VT-12
+  - A-CS-L3-VSAT-16
+  - A-CS-L3-MOB-18
+  - A-CS-L3-CLM-20
+  - A-CS-L3-MOBT-15
+  - A-CS-L3-T341
+  central_atom_ids:
+  - A-CS-L3-DRAIN-1
+  boundary_reason: 'SPICE Level 3 model parameter set: drain current, threshold, saturation voltage, effective mobility, channel-length modulation subsections + Table 3.4-1; one model definition.'
+  extraction_targets:
+  - Formula
+  - Variable
+  - ComponentModel
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-CS-L3-DRAIN-1
+  - A-CS-L3-VT-12
+  - A-CS-L3-MOB-18
+  - A-CS-L3-CLM-20
+  - A-CS-L3-T341
+- id: C-BSIM
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 3 > 3.4 > BSIM3v3 Model
+  atom_ids:
+  - A-CS-BSIM-HISTORY
+  - A-CS-BSIM-EFFECTS
+  - A-CS-MODEL-COMPARE
+  central_atom_ids:
+  - A-CS-BSIM-HISTORY
+  boundary_reason: BSIM model family + deep-submicron effects it models + Level1/Level3/BSIM3v3 accuracy comparison.
+  extraction_targets:
+  - ComponentModel
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-CS-BSIM-HISTORY
+  - A-CS-BSIM-EFFECTS
+- id: C-SUBTHRESHOLD
+  profile: textbook
+  chunk_type: physical_effect_block
+  section_path: 3 > 3.5
+  atom_ids:
+  - A-ST-CONCEPT
+  - A-ST-VON-1
+  - A-ST-IDS-3
+  - A-ST-IDS-HAND-5
+  - A-ST-ENTRY-6
+  - A-ST-TEMP
+  central_atom_ids:
+  - A-ST-CONCEPT
+  - A-ST-IDS-HAND-5
+  boundary_reason: weak-inversion physical effect + both SPICE Level 3 and hand-calculation exponential i_D models + entry condition + temperature behavior.
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  - Variable
+  gold_must_cover_atoms:
+  - A-ST-CONCEPT
+  - A-ST-IDS-HAND-5
+  - A-ST-VON-1
+- id: C-SPICE
+  profile: textbook
+  chunk_type: technology_process_block
+  section_path: 3 > 3.6
+  atom_ids:
+  - A-SP-NETLIST
+  - A-SP-MULT
+  central_atom_ids:
+  - A-SP-NETLIST
+  boundary_reason: SPICE instance/model syntax + unit-matching-to-multiplier principle.
+  extraction_targets:
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-SP-NETLIST
+- id: C-EX-361
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 3 > 3.6 > Example 3.6-1
+  atom_ids:
+  - A-EX361-PROBLEM
+  - A-EX361-NETLIST
+  - A-EX361-RESULT
+  central_atom_ids:
+  - A-EX361-PROBLEM
+  boundary_reason: 'SPICE output-characteristic example: problem + netlist (Table 3.6-1) + plotted result kept together.'
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX361-PROBLEM
+  - A-EX361-NETLIST
+  - A-EX361-RESULT
+- id: C-EX-363
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 3 > 3.6 > Example 3.6-3
+  atom_ids:
+  - A-EX363-PROBLEM
+  - A-EX363-RESULT
+  central_atom_ids:
+  - A-EX363-PROBLEM
+  boundary_reason: SPICE ac-analysis example continuous.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX363-PROBLEM
+  - A-EX363-RESULT
+- id: C-EX-364
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 3 > 3.6 > Example 3.6-4
+  atom_ids:
+  - A-EX364-PROBLEM
+  - A-EX364-RESULT
+  central_atom_ids:
+  - A-EX364-PROBLEM
+  boundary_reason: SPICE transient-analysis example continuous.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX364-PROBLEM
+  - A-EX364-RESULT
+- id: C-PROB
+  profile: textbook
+  chunk_type: problem_set_block
+  section_path: 3 > PROBLEMS
+  atom_ids:
+  - A-PROB-1
+  - A-PROB-5
+  - A-PROB-11
+  - A-PROB-15
+  - A-PROB-16
+  central_atom_ids:
+  - A-PROB-1
+  boundary_reason: end-of-chapter problems.
+  extraction_targets:
+  - ProblemStatement
+  gold_must_cover_atoms:
+  - A-PROB-1
+  - A-PROB-11
+  - A-PROB-15
+context_packages:
+- id: PKG-OV
+  profile: textbook
+  chunk_id: C-OV
+  section_path: Chapter 3 > 3 CMOS Device Modeling
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-INTRO
+    atom_type: concept_definition_atom
+  - atom_id: A-SUMMARY
+    atom_type: summary_atom
+  linked_context:
+    previous_heading: Chapter 2 CMOS Technology
+    next_heading: 3.1 Simple MOS Large-Signal
+  extraction_targets:
+  - Concept
+  expected_objects: []
+  note: All atoms are context_only chapter framing (intro + summary); no typed objects are expected from this package.
+- id: PKG-LS-MODEL
+  profile: textbook
+  chunk_id: C-LS-MODEL
+  section_path: Chapter 3 > 3.1 Simple MOS Large-Signal Model
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-LS-SAH-1
+    atom_type: formula_atom
+  - atom_id: A-LS-VT-2
+    atom_type: formula_atom
+  - atom_id: A-LS-GAMMA-4
+    atom_type: formula_atom
+  - atom_id: A-LS-PARAMS
+    atom_type: definition_atom
+  - atom_id: A-LS-ID-K-12
+    atom_type: formula_atom
+  - atom_id: A-LS-BETA-13
+    atom_type: formula_atom
+  - atom_id: A-LS-T312
+    atom_type: table_row_atom
+  linked_context:
+    table: Table 3.1-2 simple-model parameters (0.8um n-well process)
+    previous_heading: Chapter 3 intro
+    next_heading: Regions of Operation
+  extraction_targets:
+  - Formula
+  - Variable
+  - ComponentModel
+  expected_objects:
+  - FORMULA-SAH-DRAIN
+  - FORMULA-BETA
+  - FORMULA-THRESHOLD
+  - VAR-KPRIME
+- id: PKG-LS-REGIONS
+  profile: textbook
+  chunk_id: C-LS-REGIONS
+  section_path: Chapter 3 > 3.1 Simple MOS Large-Signal Model > Regions of Operation
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-LS-CUTOFF-14
+    atom_type: condition_atom
+  - atom_id: A-LS-VDSAT-15
+    atom_type: formula_atom
+  - atom_id: A-LS-NONSAT-16
+    atom_type: formula_atom
+  - atom_id: A-LS-SAT-17
+    atom_type: formula_atom
+  - atom_id: A-LS-CLM-EFFECT
+    atom_type: physical_effect_atom
+  - atom_id: A-LS-SAT-CLM-18
+    atom_type: formula_atom
+  - atom_id: A-LS-FIVE-PARAMS
+    atom_type: definition_atom
+  - atom_id: A-LS-VON-20
+    atom_type: formula_atom
+  linked_context:
+    formula_context: saturation current Eq.(17) modified by channel-length modulation factor (1+lambda v_DS) -> Eq.(18); boundary v_DS(sat)=v_GS-V_T
+    previous_heading: 3.1 Simple MOS Large-Signal Model (Eq.1 Sah equation)
+    next_heading: Example 3.1-1 Application of the Simple MOS Large Signal Model
+  extraction_targets:
+  - Formula
+  - Variable
+  - PhysicalEffect
+  - Derivation
+  - ComponentModel
+  expected_objects:
+  - FORMULA-VDSSAT
+  - FORMULA-ID-NONSAT
+  - FORMULA-ID-SAT
+  - VAR-LAMBDA
+  - DERIV-REGIONS
+  - COMP-SPICE-LEVEL1
+  - PHYS-CLM
+  expected_local_fields:
+    VAR-LAMBDA:
+    - symbol
+    - name
+    - units
+    COMP-SPICE-LEVEL1:
+    - name
+    - note
+- id: PKG-EX-311
+  profile: textbook
+  chunk_id: C-EX-311
+  section_path: Chapter 3 > 3.1 > Example 3.1-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX311-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX311-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX311-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX311-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: uses Eq.(15) v_DS(sat) and Eq.(18) saturation current
+    previous_heading: 3.1 Simple MOS Large-Signal Model
+    next_heading: 3.2 Other MOS Large-Signal Model Parameters
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-3.1-1
+- id: PKG-LS2-JUNC
+  profile: textbook
+  chunk_id: C-LS2-JUNC
+  section_path: Chapter 3 > 3.2 Other MOS Large-Signal Model Parameters
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-LS2-DIODE-1
+    atom_type: formula_atom
+  - atom_id: A-LS2-RDRS
+    atom_type: component_model_atom
+  - atom_id: A-LS2-CBX-3
+    atom_type: formula_atom
+  - atom_id: A-LS2-CBX-4
+    atom_type: formula_atom
+  - atom_id: A-LS2-CBX-SW-5
+    atom_type: formula_atom
+  linked_context:
+    figure: Fig. 3.2-1 complete large-signal model
+    previous_heading: Example 3.1-1
+    next_heading: charge-storage capacitances
+  extraction_targets:
+  - Formula
+  - ComponentModel
+  expected_objects:
+  - COMP-BULK-JUNCTIONS
+  - COMP-DEPLETION-CAPS
+- id: PKG-LS2-CAPS
+  profile: textbook
+  chunk_id: C-LS2-CAPS
+  section_path: Chapter 3 > 3.2 Other MOS Large-Signal Model Parameters
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-LS2-COVERLAP-7
+    atom_type: formula_atom
+  - atom_id: A-LS2-C2-8
+    atom_type: formula_atom
+  - atom_id: A-LS2-CGREGIONS
+    atom_type: formula_atom
+  - atom_id: A-LS2-T321
+    atom_type: table_row_atom
+  - atom_id: A-LS2-NOISE-12
+    atom_type: formula_atom
+  linked_context:
+    table: Table 3.2-1 capacitance values/coefficients
+    previous_heading: depletion capacitance
+    next_heading: 3.3 Small-Signal Model
+  extraction_targets:
+  - Formula
+  - ComponentModel
+  - PhysicalEffect
+  expected_objects:
+  - COMP-CHARGE-STORAGE-CAPS
+  - PHYS-NOISE
+- id: PKG-SS-MODEL
+  profile: textbook
+  chunk_id: C-SS-MODEL
+  section_path: Chapter 3 > 3.3 Small-Signal Model for the MOS Transistor
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SS-INTRO
+    atom_type: concept_definition_atom
+  - atom_id: A-SS-GBDGBS-1
+    atom_type: formula_atom
+  - atom_id: A-SS-DEFS-3
+    atom_type: formula_atom
+  - atom_id: A-SS-GM-6
+    atom_type: formula_atom
+  - atom_id: A-SS-GMBS-8
+    atom_type: formula_atom
+  - atom_id: A-SS-GDS-9
+    atom_type: formula_atom
+  - atom_id: A-SS-T331
+    atom_type: table_row_atom
+  linked_context:
+    table: Table 3.3-1 saturation small-signal relations
+    previous_heading: 3.2 Other MOS Large-Signal Model Parameters
+    next_heading: Example 3.3-1
+  extraction_targets:
+  - Concept
+  - Formula
+  - Variable
+  - ComponentModel
+  expected_objects:
+  - CONCEPT-SMALL-SIGNAL
+  - COMP-SMALL-SIGNAL-MODEL
+- id: PKG-EX-331
+  profile: textbook
+  chunk_id: C-EX-331
+  section_path: Chapter 3 > 3.3 > Example 3.3-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX331-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX331-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX331-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: uses small-signal Eqs.(6),(8),(9) with Table 3.1-2
+    previous_heading: 3.3 Small-Signal Model
+    next_heading: Example 3.3-2
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-3.3-1
+- id: PKG-EX-332
+  profile: textbook
+  chunk_id: C-EX-332
+  section_path: Chapter 3 > 3.3 > Example 3.3-2
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX332-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX332-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: uses nonsaturation small-signal Eqs.(10),(11),(12)
+    previous_heading: Example 3.3-1
+    next_heading: 3.4 Computer Simulation Models
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-3.3-2
+- id: PKG-L3
+  profile: textbook
+  chunk_id: C-L3
+  section_path: Chapter 3 > 3.4 Computer Simulation Models > SPICE Level 3 Model
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-CS-INTRO
+    atom_type: concept_definition_atom
+  - atom_id: A-CS-L3-DRAIN-1
+    atom_type: formula_atom
+  - atom_id: A-CS-L3-PHI-NOTE
+    atom_type: definition_atom
+  - atom_id: A-CS-L3-VT-12
+    atom_type: formula_atom
+  - atom_id: A-CS-L3-VSAT-16
+    atom_type: formula_atom
+  - atom_id: A-CS-L3-MOB-18
+    atom_type: formula_atom
+  - atom_id: A-CS-L3-CLM-20
+    atom_type: formula_atom
+  - atom_id: A-CS-L3-MOBT-15
+    atom_type: formula_atom
+  - atom_id: A-CS-L3-T341
+    atom_type: table_row_atom
+  linked_context:
+    table: Table 3.4-1 Level-3 model parameters for a 0.8um n-well process
+    previous_heading: 3.4 Computer Simulation Models
+    next_heading: BSIM3v3 Model
+  extraction_targets:
+  - Formula
+  - Variable
+  - ComponentModel
+  - PhysicalEffect
+  expected_objects:
+  - COMP-SPICE-LEVEL3
+- id: PKG-BSIM
+  profile: textbook
+  chunk_id: C-BSIM
+  section_path: Chapter 3 > 3.4 Computer Simulation Models > BSIM3v3 Model
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-CS-BSIM-HISTORY
+    atom_type: component_model_atom
+  - atom_id: A-CS-BSIM-EFFECTS
+    atom_type: physical_effect_atom
+  - atom_id: A-CS-MODEL-COMPARE
+    atom_type: result_atom
+  linked_context:
+    figure: Fig. 3.4-2 Level1/Level3/BSIM3v3 comparison
+    previous_heading: SPICE Level 3 Model
+    next_heading: 3.5 Subthreshold MOS Model
+  extraction_targets:
+  - ComponentModel
+  - PhysicalEffect
+  expected_objects:
+  - COMP-BSIM3V3
+  - PHYS-BSIM-EFFECTS
+- id: PKG-SUBTHRESHOLD
+  profile: textbook
+  chunk_id: C-SUBTHRESHOLD
+  section_path: Chapter 3 > 3.5 Subthreshold MOS Model
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-ST-CONCEPT
+    atom_type: physical_effect_atom
+  - atom_id: A-ST-VON-1
+    atom_type: formula_atom
+  - atom_id: A-ST-IDS-3
+    atom_type: formula_atom
+  - atom_id: A-ST-IDS-HAND-5
+    atom_type: formula_atom
+  - atom_id: A-ST-ENTRY-6
+    atom_type: condition_atom
+  - atom_id: A-ST-TEMP
+    atom_type: physical_effect_atom
+  linked_context:
+    formula_context: SPICE Level 3 v_on/weak-inversion current Eqs.(1)-(4); hand-calc exponential Eq.(5)
+    previous_heading: BSIM3v3 Model
+    next_heading: 3.6 SPICE Simulation of MOS Circuits
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  - Variable
+  expected_objects:
+  - PHYS-SUBTHRESHOLD
+- id: PKG-SPICE
+  profile: textbook
+  chunk_id: C-SPICE
+  section_path: Chapter 3 > 3.6 SPICE Simulation of MOS Circuits
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SP-NETLIST
+    atom_type: technology_process_atom
+  - atom_id: A-SP-MULT
+    atom_type: design_principle_atom
+  linked_context:
+    previous_heading: 3.5 Subthreshold MOS Model
+    next_heading: Example 3.6-1
+  extraction_targets:
+  - DesignPrinciple
+  expected_objects:
+  - PRINCIPLE-MULTIPLIER
+- id: PKG-EX-361
+  profile: textbook
+  chunk_id: C-EX-361
+  section_path: Chapter 3 > 3.6 > Example 3.6-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX361-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX361-NETLIST
+    atom_type: formula_usage_atom
+  - atom_id: A-EX361-RESULT
+    atom_type: result_atom
+  linked_context:
+    table: Table 3.6-1 SPICE input file (LEVEL 1)
+    previous_heading: 3.6 SPICE Simulation of MOS Circuits
+    next_heading: Example 3.6-3
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-3.6-1
+  expected_local_fields:
+    COMP-SPICE-LEVEL1:
+    - name
+- id: PKG-EX-363
+  profile: textbook
+  chunk_id: C-EX-363
+  section_path: Chapter 3 > 3.6 > Example 3.6-3
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX363-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX363-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: .AC DEC 20 100 100MEG ac analysis; 36 dB / 180->90 deg result
+    previous_heading: Example 3.6-1
+    next_heading: Example 3.6-4
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-3.6-3
+- id: PKG-EX-364
+  profile: textbook
+  chunk_id: C-EX-364
+  section_path: Chapter 3 > 3.6 > Example 3.6-4
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX364-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX364-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: .TRAN 0.01U 4U transient analysis with PWL input
+    previous_heading: Example 3.6-3
+    next_heading: 3.7 Summary
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-3.6-4
+- id: PKG-PROB
+  profile: textbook
+  chunk_id: C-PROB
+  section_path: Chapter 3 > PROBLEMS
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-PROB-1
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-5
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-11
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-15
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-16
+    atom_type: problem_statement_atom
+  linked_context:
+    previous_heading: 3.7 Summary
+    next_heading: REFERENCES
+  extraction_targets:
+  - ProblemStatement
+  expected_objects:
+  - PROB-1
+  - PROB-5
+  - PROB-11
+  - PROB-15
+  - PROB-16
+mentions:
+- id: M-01
+  text: Sah equation
+  type: Formula
+  atom_id: A-LS-SAH-1
+  canonical_key: sah_drain_current
+- id: M-02
+  text: channel length modulation
+  type: PhysicalEffect
+  atom_id: A-LS-CLM-EFFECT
+  canonical_key: channel_length_modulation
+- id: M-03
+  text: lambda
+  type: Variable
+  atom_id: A-LS-SAT-CLM-18
+  canonical_key: lambda_clm
+- id: M-04
+  text: K'
+  type: Variable
+  atom_id: A-LS-BETA-13
+  canonical_key: transconductance_parameter_kprime
+- id: M-05
+  text: threshold voltage
+  type: Variable
+  atom_id: A-LS-VT-2
+  canonical_key: threshold_voltage_vt
+- id: M-06
+  text: saturation voltage
+  type: Variable
+  atom_id: A-LS-VDSAT-15
+  canonical_key: saturation_voltage_vdssat
+- id: M-07
+  text: g_m
+  type: Variable
+  atom_id: A-SS-GM-6
+  canonical_key: transconductance_gm
+- id: M-08
+  text: g_ds
+  type: Variable
+  atom_id: A-SS-GDS-9
+  canonical_key: output_conductance_gds
+- id: M-09
+  text: g_mbs
+  type: Variable
+  atom_id: A-SS-GMBS-8
+  canonical_key: bulk_transconductance_gmbs
+- id: M-10
+  text: small-signal model
+  type: ComponentModel
+  atom_id: A-SS-INTRO
+  canonical_key: small_signal_model
+- id: M-11
+  text: SPICE Level 3 model
+  type: ComponentModel
+  atom_id: A-CS-L3-DRAIN-1
+  canonical_key: spice_level3_model
+- id: M-12
+  text: BSIM3v3
+  type: ComponentModel
+  atom_id: A-CS-BSIM-HISTORY
+  canonical_key: bsim3v3_model
+- id: M-13
+  text: weak inversion
+  type: PhysicalEffect
+  atom_id: A-ST-CONCEPT
+  canonical_key: subthreshold_conduction
+- id: M-14
+  text: depletion capacitance
+  type: Formula
+  atom_id: A-LS2-CBX-3
+  canonical_key: bulk_depletion_capacitance
+- id: M-15
+  text: overlap capacitance
+  type: Formula
+  atom_id: A-LS2-COVERLAP-7
+  canonical_key: gate_overlap_capacitance
+canonicalization:
+- canonical: channel_length_modulation
+  aliases:
+  - channel length modulation
+  - channel-length modulation
+  - CLM
+  - lambda effect
+- canonical: transconductance_parameter_kprime
+  aliases:
+  - K'
+  - KP
+  - intrinsic transconductance parameter
+  - device transconductance parameter
+  note: the simple model uses K' (= mu_o C_ox); SPICE Level 1/3 uses uppercase KP; same physical quantity.
+- canonical: subthreshold_conduction
+  aliases:
+  - subthreshold
+  - weak inversion
+  - weak-inversion region
+  - subthreshold conduction
+- canonical: sah_drain_current
+  aliases:
+  - Sah equation
+  - Shichman-Hodges model
+  - Level 1 drain current
+  - simple large-signal model
+- canonical: surface_potential_2phiF
+  aliases:
+  - 2 phi_F
+  - 2|phi_F|
+  - PHI
+  - surface potential at strong inversion
+  note: Sec 3.6 states PHI is the SPICE term for 2 phi_f and is always positive in SPICE.
+objects:
+- id: CONCEPT-SMALL-SIGNAL
+  type: Concept
+  section_path: 3 > 3.3
+  home_package: PKG-SS-MODEL
+  payload:
+    term: small-signal model
+    definition: Linear MOS model whose parameters are partial derivatives of large-signal variables at the quiescent point; valid where large-signal behavior is approximately linear.
+  local_evidence_atom_ids:
+  - A-SS-INTRO
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-SAH-DRAIN
+  type: Formula
+  section_path: 3 > 3.1
+  home_package: PKG-LS-MODEL
+  payload:
+    name: Sah/Shichman-Hodges drain current
+    expression: i_D = K'(W/L)[(v_GS - V_T) - v_DS/2] v_DS
+    variables:
+      K': mu_o C_ox = transconductance parameter
+      W/L: aspect ratio
+      V_T: threshold voltage
+      v_DS: drain-source voltage
+  local_evidence_atom_ids:
+  - A-LS-SAH-1
+  - A-LS-ID-K-12
+  - A-LS-PARAMS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BETA
+  type: Formula
+  section_path: 3 > 3.1
+  home_package: PKG-LS-MODEL
+  payload:
+    name: transconductance parameter
+    expression: beta = K'(W/L) ~= (mu_o C_ox)(W/L)
+  local_evidence_atom_ids:
+  - A-LS-BETA-13
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-VDSSAT
+  type: Formula
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    name: saturation voltage
+    expression: v_DS(sat) = v_GS - V_T
+    note: = V_ON; boundary between nonsaturation and saturation.
+  local_evidence_atom_ids:
+  - A-LS-VDSAT-15
+  - A-LS-VON-20
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-ID-NONSAT
+  type: Formula
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    name: nonsaturation drain current
+    expression: i_D = K'(W/L)[(v_GS - V_T) - v_DS/2] v_DS, 0 < v_DS <= v_GS - V_T
+  local_evidence_atom_ids:
+  - A-LS-NONSAT-16
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-ID-SAT
+  type: Formula
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    name: saturation drain current with channel-length modulation
+    expression: i_D = K'(W/2L)(v_GS - V_T)^2 (1 + lambda v_DS)
+    variables:
+      lambda: channel-length modulation parameter (V^-1)
+  local_evidence_atom_ids:
+  - A-LS-SAT-17
+  - A-LS-SAT-CLM-18
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-THRESHOLD
+  type: Formula
+  section_path: 3 > 3.1
+  home_package: PKG-LS-MODEL
+  payload:
+    name: threshold voltage with body effect
+    expression: V_T = V_T0 + gamma[sqrt(2|phi_F| + v_SB) - sqrt(2|phi_F|)]
+  local_evidence_atom_ids:
+  - A-LS-VT-2
+  - A-LS-GAMMA-4
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: VAR-LAMBDA
+  type: Variable
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    symbol: lambda
+    name: channel-length modulation parameter
+    units: V^-1
+    typical: 0.04 (N) / 0.05 (P) at L=1um (Table 3.1-2)
+  local_evidence_atom_ids:
+  - A-LS-SAT-CLM-18
+  supporting_context_atom_ids:
+  - A-LS-T312
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: VAR-KPRIME
+  type: Variable
+  section_path: 3 > 3.1
+  home_package: PKG-LS-MODEL
+  payload:
+    symbol: K'
+    name: transconductance parameter
+    expression: mu_o C_ox
+    units: uA/V^2
+    typical: 110 (N) / 50 (P) in saturation
+  local_evidence_atom_ids:
+  - A-LS-BETA-13
+  - A-LS-T312
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: DERIV-REGIONS
+  type: Derivation
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    name: regions of operation of the MOS drain current
+    steps:
+    - cutoff i_D=0 (Eq.14)
+    - boundary v_DS(sat)=v_GS-V_T (Eq.15)
+    - nonsaturation (Eq.16)
+    - saturation lambda=0 (Eq.17)
+    - saturation with channel-length modulation (Eq.18)
+  local_evidence_atom_ids:
+  - A-LS-CUTOFF-14
+  - A-LS-VDSAT-15
+  - A-LS-NONSAT-16
+  - A-LS-SAT-17
+  - A-LS-SAT-CLM-18
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-3.1-1
+  type: ExampleSolution
+  section_path: 3 > 3.1 > Example 3.1-1
+  home_package: PKG-EX-311
+  payload:
+    title: Example 3.1-1 Simple MOS Large-Signal Model
+    problem: Find i_D of n- and p-channel transistors, W/L=5/1, given terminal voltages.
+    given: v_D,v_G,v_S,v_B = 3,2,0,0 (N) and -3,-2,0,0 (P).
+    result: i_D = 520 uA (N), 243 uA (P).
+  local_evidence_atom_ids:
+  - A-EX311-PROBLEM
+  - A-EX311-GIVEN
+  - A-EX311-USE
+  - A-EX311-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-3.3-1
+  type: ExampleSolution
+  section_path: 3 > 3.3 > Example 3.3-1
+  home_package: PKG-EX-331
+  payload:
+    title: Example 3.3-1 Typical Small-Signal Parameters (saturation)
+    problem: Find g_m,g_mbs,g_ds for |I_D|=50 uA, |V_SB|=2 V, W/L=1/1.
+    result: 'N: g_m=105, g_mbs=12.8, g_ds=2.0 uA/V; P: g_m=70.7, g_mbs=12.0, g_ds=2.5 uA/V.'
+  local_evidence_atom_ids:
+  - A-EX331-PROBLEM
+  - A-EX331-USE
+  - A-EX331-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-3.3-2
+  type: ExampleSolution
+  section_path: 3 > 3.3 > Example 3.3-2
+  home_package: PKG-EX-332
+  payload:
+    title: Example 3.3-2 Small-Signal Parameters (nonsaturation)
+    problem: Find nonsaturation g_m,g_mbs,r_ds for V_GS=5,V_DS=1,|V_BS|=2,W/L=1/1.
+    result: 'N: g_m=110 uA/V, g_mbs=46.6 uA/V, r_ds=3.05 KOhm; P: g_m=50 uA/V, g_mbs=28.6 uA/V, r_ds=6.99 KOhm.'
+  local_evidence_atom_ids:
+  - A-EX332-PROBLEM
+  - A-EX332-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-3.6-1
+  type: ExampleSolution
+  section_path: 3 > 3.6 > Example 3.6-1
+  home_package: PKG-EX-361
+  payload:
+    title: Example 3.6-1 SPICE Output Characteristics
+    problem: Plot i_D vs v_DS (0-5 V) for v_GS=1..5 V using LEVEL 1 model.
+    netlist: .MODEL MOS1 NMOS VTO=0.7 KP=110U GAMMA=0.4 LAMBDA=0.04 PHI=0.7; .DC VDS 0 5 0.2 VGS 1 5 1
+    result: Family of saturating i_D-v_DS curves (Fig.3.6-3).
+  local_evidence_atom_ids:
+  - A-EX361-PROBLEM
+  - A-EX361-NETLIST
+  - A-EX361-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-3.6-3
+  type: ExampleSolution
+  section_path: 3 > 3.6 > Example 3.6-3
+  home_package: PKG-EX-363
+  payload:
+    title: Example 3.6-3 SPICE ac Analysis
+    problem: Small-signal V_OUT/V_IN of Fig.3.6-4 amplifier, 5 pF load, 100 Hz-100 MHz.
+    result: ~36 dB gain rolling off above ~100 kHz; phase 180->90 deg.
+  local_evidence_atom_ids:
+  - A-EX363-PROBLEM
+  - A-EX363-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-3.6-4
+  type: ExampleSolution
+  section_path: 3 > 3.6 > Example 3.6-4
+  home_package: PKG-EX-364
+  payload:
+    title: Example 3.6-4 SPICE Transient Analysis
+    problem: Transient response of Fig.3.6-4 amplifier to a PWL input pulse, 0-4 us.
+    result: .TRAN 0.01U 4U; inverted pulse response (Fig.3.6-7).
+  local_evidence_atom_ids:
+  - A-EX364-PROBLEM
+  - A-EX364-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-BULK-JUNCTIONS
+  type: ComponentModel
+  section_path: 3 > 3.2
+  home_package: PKG-LS2-JUNC
+  payload:
+    name: bulk source/drain pn junctions
+    note: i_BD=I_S[exp(q v_BD/kT)-1], i_BS=I_S[exp(q v_BS/kT)-1]; reverse-biased diodes modeling leakage; r_D,r_S = 50-100 Ohm ohmic resistance.
+  local_evidence_atom_ids:
+  - A-LS2-DIODE-1
+  - A-LS2-RDRS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-DEPLETION-CAPS
+  type: ComponentModel
+  section_path: 3 > 3.2
+  home_package: PKG-LS2-JUNC
+  payload:
+    name: bulk-junction depletion capacitances C_BD/C_BS
+    expression: C_BX = (CJ)(AX)[1-v_BX/PB]^(-MJ) (region 1); bottom + sidewall (CJSW,MJSW) form Eq.(5)
+    variants:
+    - bottom (CJ,MJ)
+    - sidewall (CJSW,MJSW)
+  local_evidence_atom_ids:
+  - A-LS2-CBX-3
+  - A-LS2-CBX-4
+  - A-LS2-CBX-SW-5
+  supporting_context_atom_ids:
+  - A-LS2-T321
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-CHARGE-STORAGE-CAPS
+  type: ComponentModel
+  section_path: 3 > 3.2
+  home_package: PKG-LS2-CAPS
+  payload:
+    name: gate charge-storage capacitances C_GS/C_GD/C_GB
+    note: overlap C_1=C_3=(LD)(W_eff)C_ox; gate-channel C_2=W_eff L_eff C_ox; allocated by region (off/saturation/nonsaturation).
+  local_evidence_atom_ids:
+  - A-LS2-COVERLAP-7
+  - A-LS2-C2-8
+  - A-LS2-CGREGIONS
+  - A-LS2-T321
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-SMALL-SIGNAL-MODEL
+  type: ComponentModel
+  section_path: 3 > 3.3
+  home_package: PKG-SS-MODEL
+  payload:
+    name: MOS small-signal model
+    parameters:
+      g_m: sqrt(2 K' (W/L) I_D)
+      g_mbs: g_m gamma/(2(2|phi_F|+V_SB)^1/2) = eta g_m
+      g_ds: I_D lambda
+  local_evidence_atom_ids:
+  - A-SS-GBDGBS-1
+  - A-SS-DEFS-3
+  - A-SS-GM-6
+  - A-SS-GMBS-8
+  - A-SS-GDS-9
+  - A-SS-T331
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-SPICE-LEVEL1
+  type: ComponentModel
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    name: SPICE LEVEL 1 model
+    note: the simple large-signal model; five defining parameters K', V_T, gamma, lambda, 2 phi_F; good for L,W > ~10um, hand calculations.
+  local_evidence_atom_ids:
+  - A-LS-FIVE-PARAMS
+  supporting_context_atom_ids:
+  - A-LS-SAH-1
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-SPICE-LEVEL3
+  type: ComponentModel
+  section_path: 3 > 3.4 > SPICE Level 3 Model
+  home_package: PKG-L3
+  payload:
+    name: SPICE Level 3 model
+    note: short-channel parameter set (BETA/KP, GAMMA, PHI, ETA, DELTA, KAPPA, THETA, U0, NSUB, NFS); drain current, threshold, saturation voltage, effective mobility, channel-length modulation; good to ~0.8um.
+    effects:
+    - narrow/short-channel threshold adjust
+    - mobility degradation (THETA)
+    - channel-length modulation (KAPPA)
+    - weak inversion (NFS)
+  local_evidence_atom_ids:
+  - A-CS-INTRO
+  - A-CS-L3-DRAIN-1
+  - A-CS-L3-PHI-NOTE
+  - A-CS-L3-VT-12
+  - A-CS-L3-VSAT-16
+  - A-CS-L3-MOB-18
+  - A-CS-L3-CLM-20
+  - A-CS-L3-MOBT-15
+  - A-CS-L3-T341
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+- id: COMP-BSIM3V3
+  type: ComponentModel
+  section_path: 3 > 3.4 > BSIM3v3 Model
+  home_package: PKG-BSIM
+  payload:
+    name: BSIM3v3 model
+    note: UC Berkeley deep-submicron MOS model; device-physics based with 40 dc parameters; industry-standard. Lineage BSIM1(60)->BSIM2(99)->BSIM3(40)->BSIM3v3.
+  local_evidence_atom_ids:
+  - A-CS-BSIM-HISTORY
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-CLM
+  type: PhysicalEffect
+  section_path: 3 > 3.1
+  home_package: PKG-LS-REGIONS
+  payload:
+    name: channel length modulation
+    description: Drain-voltage-induced shortening of the channel increases saturation current; modeled by the factor (1 + lambda v_DS).
+  local_evidence_atom_ids:
+  - A-LS-CLM-EFFECT
+  - A-LS-SAT-CLM-18
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-SUBTHRESHOLD
+  type: PhysicalEffect
+  section_path: 3 > 3.5
+  home_package: PKG-SUBTHRESHOLD
+  payload:
+    name: subthreshold (weak inversion) conduction
+    description: Below V_T the i_D-v_GS relation is exponential, not zero; current flows in weak inversion, important for low-power circuits; positive temperature dependence of current.
+    expression: i_D ~= (W/L) I_DO exp(v_GS/(n kT/q)), 1 < n < 3
+  local_evidence_atom_ids:
+  - A-ST-CONCEPT
+  - A-ST-IDS-HAND-5
+  - A-ST-ENTRY-6
+  - A-ST-TEMP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-BSIM-EFFECTS
+  type: PhysicalEffect
+  section_path: 3 > 3.4 > BSIM3v3 Model
+  home_package: PKG-BSIM
+  payload:
+    name: deep-submicron MOSFET effects
+    description: Threshold reduction, vertical-field mobility degradation, velocity saturation, DIBL, channel-length modulation, weak-inversion conduction, S/D parasitic resistance, hot-electron output-resistance effects.
+  local_evidence_atom_ids:
+  - A-CS-BSIM-EFFECTS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-NOISE
+  type: PhysicalEffect
+  section_path: 3 > 3.2
+  home_package: PKG-LS2-CAPS
+  payload:
+    name: MOS drain-current noise
+    description: Thermal + flicker noise; i_N^2 = [8 kT g_m(1+eta)/3 + KF I_D/(f C_ox L^2)] df.
+  local_evidence_atom_ids:
+  - A-LS2-NOISE-12
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-MULTIPLIER
+  type: DesignPrinciple
+  section_path: 3 > 3.6
+  home_package: PKG-SPICE
+  payload:
+    statement: Implement an M-times-larger device as M parallel unit devices and use the SPICE multiplier parameter M= (unit-matching principle from Sec.2.6).
+    applies_to:
+    - device matching
+    - SPICE instantiation
+  local_evidence_atom_ids:
+  - A-SP-MULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-1
+  type: ProblemStatement
+  section_path: 3 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Sketch output characteristics of an enhancement n-channel device (V_T=0.7, I_D=500uA at V_GS=5V), lambda=0.
+  local_evidence_atom_ids:
+  - A-PROB-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-5
+  type: ProblemStatement
+  section_path: 3 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Modify Eq.(18) so it agrees with Eq.(11) at v_DS = v_DS(sat) (model continuity at the saturation boundary).
+  local_evidence_atom_ids:
+  - A-PROB-5
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-11
+  type: ProblemStatement
+  section_path: 3 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Repeat Examples 3.3-1 and 3.3-2 if W/L = 100um/10um.
+  local_evidence_atom_ids:
+  - A-PROB-11
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-15
+  type: ProblemStatement
+  section_path: 3 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Calculate V_ON for an MOS transistor in weak inversion assuming fs=fn=1.
+  local_evidence_atom_ids:
+  - A-PROB-15
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-16
+  type: ProblemStatement
+  section_path: 3 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Derive the weak-inversion small-signal transconductance from Eq.(5) of Sec.3.5.
+  local_evidence_atom_ids:
+  - A-PROB-16
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-SAH-DRAIN
+  target_object_id: VAR-KPRIME
+  evidence_atom_ids:
+  - A-LS-SAH-1
+  - A-LS-BETA-13
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: formula_derived_from_formula
+  source_object_id: FORMULA-ID-SAT
+  target_object_id: FORMULA-ID-NONSAT
+  evidence_atom_ids:
+  - A-LS-NONSAT-16
+  - A-LS-SAT-17
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-03
+  relation_type: formula_derived_from_formula
+  source_object_id: FORMULA-ID-SAT
+  target_object_id: FORMULA-SAH-DRAIN
+  evidence_atom_ids:
+  - A-LS-SAH-1
+  - A-LS-SAT-17
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-04
+  relation_type: physical_effect_modifies_formula
+  source_object_id: PHYS-CLM
+  target_object_id: FORMULA-ID-SAT
+  evidence_atom_ids:
+  - A-LS-CLM-EFFECT
+  - A-LS-SAT-CLM-18
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-05
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-ID-SAT
+  target_object_id: VAR-LAMBDA
+  evidence_atom_ids:
+  - A-LS-SAT-CLM-18
+  - A-LS-T312
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: formula_derived_from_formula
+  source_object_id: FORMULA-VDSSAT
+  target_object_id: FORMULA-SAH-DRAIN
+  evidence_atom_ids:
+  - A-LS-VDSAT-15
+  - A-LS-SAH-1
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-07
+  relation_type: derivation_produces_formula
+  source_object_id: DERIV-REGIONS
+  target_object_id: FORMULA-ID-SAT
+  evidence_atom_ids:
+  - A-LS-SAT-CLM-18
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-08
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-ID-SAT
+  target_object_id: EXAMPLE-3.1-1
+  evidence_atom_ids:
+  - A-EX311-USE
+  - A-EX311-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-09
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-VDSSAT
+  target_object_id: EXAMPLE-3.1-1
+  evidence_atom_ids:
+  - A-EX311-USE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-10
+  relation_type: model_includes_formula
+  source_object_id: COMP-SPICE-LEVEL1
+  target_object_id: FORMULA-SAH-DRAIN
+  evidence_atom_ids:
+  - A-LS-FIVE-PARAMS
+  - A-LS-SAH-1
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-11
+  relation_type: model_includes_component
+  source_object_id: COMP-SPICE-LEVEL1
+  target_object_id: COMP-DEPLETION-CAPS
+  evidence_atom_ids:
+  - A-LS2-CBX-3
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-12
+  relation_type: model_includes_component
+  source_object_id: COMP-SPICE-LEVEL1
+  target_object_id: COMP-CHARGE-STORAGE-CAPS
+  evidence_atom_ids:
+  - A-LS2-CGREGIONS
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-13
+  relation_type: component_has_property
+  source_object_id: COMP-BULK-JUNCTIONS
+  target_object_id: COMP-DEPLETION-CAPS
+  evidence_atom_ids:
+  - A-LS2-CBX-3
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-14
+  relation_type: component_has_property
+  source_object_id: COMP-SMALL-SIGNAL-MODEL
+  target_object_id: PHYS-NOISE
+  evidence_atom_ids:
+  - A-LS2-NOISE-12
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-15
+  relation_type: formula_derived_from_formula
+  source_object_id: COMP-SMALL-SIGNAL-MODEL
+  target_object_id: FORMULA-ID-SAT
+  evidence_atom_ids:
+  - A-SS-GM-6
+  - A-SS-GDS-9
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-16
+  relation_type: formula_defines_variable
+  source_object_id: COMP-SMALL-SIGNAL-MODEL
+  target_object_id: VAR-LAMBDA
+  evidence_atom_ids:
+  - A-SS-GDS-9
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-17
+  relation_type: formula_used_in_example
+  source_object_id: COMP-SMALL-SIGNAL-MODEL
+  target_object_id: EXAMPLE-3.3-1
+  evidence_atom_ids:
+  - A-EX331-USE
+  - A-EX331-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-18
+  relation_type: formula_used_in_example
+  source_object_id: COMP-SMALL-SIGNAL-MODEL
+  target_object_id: EXAMPLE-3.3-2
+  evidence_atom_ids:
+  - A-EX332-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-19
+  relation_type: concept_defines_term
+  source_object_id: CONCEPT-SMALL-SIGNAL
+  target_object_id: COMP-SMALL-SIGNAL-MODEL
+  evidence_atom_ids:
+  - A-SS-INTRO
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-20
+  relation_type: model_refines_model
+  source_object_id: COMP-SPICE-LEVEL3
+  target_object_id: COMP-SPICE-LEVEL1
+  evidence_atom_ids:
+  - A-CS-INTRO
+  - A-CS-MODEL-COMPARE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-21
+  relation_type: model_refines_model
+  source_object_id: COMP-BSIM3V3
+  target_object_id: COMP-SPICE-LEVEL3
+  evidence_atom_ids:
+  - A-CS-BSIM-HISTORY
+  - A-CS-MODEL-COMPARE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-22
+  relation_type: component_models_effect
+  source_object_id: COMP-BSIM3V3
+  target_object_id: PHYS-BSIM-EFFECTS
+  evidence_atom_ids:
+  - A-CS-BSIM-EFFECTS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-23
+  relation_type: physical_effect_modifies_formula
+  source_object_id: PHYS-CLM
+  target_object_id: COMP-SPICE-LEVEL3
+  evidence_atom_ids:
+  - A-CS-L3-CLM-20
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-24
+  relation_type: component_models_effect
+  source_object_id: COMP-SPICE-LEVEL3
+  target_object_id: PHYS-SUBTHRESHOLD
+  evidence_atom_ids:
+  - A-ST-VON-1
+  - A-ST-IDS-3
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-25
+  relation_type: physical_effect_modifies_formula
+  source_object_id: PHYS-SUBTHRESHOLD
+  target_object_id: FORMULA-ID-SAT
+  evidence_atom_ids:
+  - A-ST-CONCEPT
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-26
+  relation_type: model_used_in_example
+  source_object_id: COMP-SPICE-LEVEL1
+  target_object_id: EXAMPLE-3.6-1
+  evidence_atom_ids:
+  - A-SP-NETLIST
+  - A-EX361-NETLIST
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-27
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-MULTIPLIER
+  target_object_id: COMP-SPICE-LEVEL1
+  evidence_atom_ids:
+  - A-SP-MULT
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-28
+  relation_type: problem_extends_example
+  source_object_id: PROB-11
+  target_object_id: EXAMPLE-3.3-1
+  evidence_atom_ids:
+  - A-PROB-11
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-29
+  relation_type: problem_extends_formula
+  source_object_id: PROB-5
+  target_object_id: FORMULA-ID-SAT
+  evidence_atom_ids:
+  - A-PROB-5
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-30
+  relation_type: problem_extends_effect
+  source_object_id: PROB-15
+  target_object_id: PHYS-SUBTHRESHOLD
+  evidence_atom_ids:
+  - A-PROB-15
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+do_not_extract:
+- pattern: bracket_numeric_citation
+  examples:
+  - '[1]'
+  - '[2]'
+  - '[3]'
+  - '[23]'
+  - '[25]'
+  - '[26]'
+  - '[27]'
+  reason: bracket [n] reference-list citations are not knowledge objects.
+  kind: citation_policy
+- text: '[2]'
+  atom_id: A-LS-SAH-1
+  reason: bracket citation to Sah's paper within the Sah-equation line; the equation is the object, not the citation.
+  kind: citation
+- pattern: equation_cross_reference
+  examples:
+  - Eq. (28) of Sec. 2.3
+  - Eq. (19) of Sec. 2.3
+  - Eq. (6) of Sec. 2.2
+  - Eqs. (5) and (6) of Sec. 3.2
+  reason: Eq./Fig./Table cross-references point at numbered artifacts, not new knowledge objects.
+  kind: out_of_slice_reference
+- text: described in Sec 2.3
+  atom_id: A-INTRO
+  reason: cross-reference to Chapter 2 (outside this chapter slice).
+  kind: out_of_slice_reference
+- pattern: spice_keyword_token
+  examples:
+  - NMOS
+  - PMOS
+  - LEVEL=1
+  - .DC
+  - .AC
+  - .TRAN
+  - .PRINT
+  - .MODEL
+  - .END
+  - .OP
+  - PWL
+  reason: SPICE deck keywords / control-card tokens are syntax, not knowledge objects (the model object COMP-SPICE-LEVEL1 is the knowledge, not the .MODEL keyword).
+  kind: citation_policy
+- text: (a)
+  source_lines:
+  - 3217
+  - 3217
+  reason: figure-internal sub-label for Fig. 3.1-1(a).
+  kind: figure_label
+- text: Figure 3.1-1 Positive sign convention for (a) n-channel, and (b) p-channel MOS transistor.
+  source_lines:
+  - 3228
+  - 3228
+  reason: figure caption rendered as plain text; the MOSFET symbol figure is not a chapter knowledge object.
+  kind: figure_label
+- text: Example 3.6-2 dc Analysis of Fig. 3.6-4.
+  source_lines:
+  - 4512
+  - 4512
+  reason: Example 3.6-2 (dc transfer) is present in the slice but not part of the curated example set; listed to suppress spurious extraction.
+  kind: out_of_slice_reference
+- text: Chapter 2
+  atom_id: A-LS2-CBX-3
+  reason: PB 'same as phi_o given in Eq.(6), sec. 2.2' is a cross-chapter reference, not a Chapter 3 object.
+  kind: out_of_slice_reference

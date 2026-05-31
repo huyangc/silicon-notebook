@@ -1,0 +1,1108 @@
+# Gold fixture v0.3.3 - Engram paper Chapter 1 Introduction (profile: article_research)
+# Upgraded from v0.1 WITHOUT changing atom/chunk/object/relation IDs or meaning:
+# dual coordinates (source_span authoritative + viewer_span), verbatim raw_text +
+# normalized_text discipline, object evidence split into local/supporting + home_package,
+# per-chunk context_packages with expected_objects (+ expected_local_fields), labels
+# gold_label/difficulty/evidence_strength (NO decimal confidence), inline-citation and
+# forward-reference do_not_extract negatives, auto-generated source_elements.
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Chapter 1 (Introduction) only
+  title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs - Introduction'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 13
+  - 30
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 13-30; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - 1. Introduction
+  - we propose Engram
+  - we formulate the Sparsity Allocation problem
+  - U-shaped scaling law
+  - iso-parameter and iso-FLOPs MoE baseline
+  - (see Table 3)
+  - Figure 1
+  - (detailed in Section 2)
+  extraction_targets:
+  - ArticleClaim
+  - ArticleMethod
+  - ArchitectureComponent
+  - MechanisticExplanation
+  - ScalingLaw
+  - SystemDesignClaim
+  - ExperimentResult
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file (it may include inline (Author, year) citations, em-dashes, inline math $O(1)$, and a page-break-hyphenated word ''knowl- / edge''). normalized_text renders EXACTLY that span: it may rephrase, transliterate math ($O(1)$ -> O(1)), normalize the em-dash and the broken word, and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by (the Introduction has no display formula, hence no formula_atom).'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone (the remaining fields require supporting_context atoms from other packages).
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: figure atoms separate physical_section_id from semantic_section_ids; forward references set include_in_chapter2_core_chunks:false and are isolated in a cross_reference_block. The Introduction's only figure is Figure 1, whose caption is physically and semantically in Chapter 1 (architecture overview), so it stays in the method chunk.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref. The Introduction previews results detailed in later chapters but states their numbers verbatim, so no atom is marked external.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    context_only: an atom not consumed by any object or relation may be flagged context_only:true; the Introduction has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - The Introduction is a single-level section (# 1. Introduction) with no sub-sections; section_tree has only SEC-1.
+  - 'PAGE-BREAK SPLIT: MinerU split one semantic paragraph (source lines 17 and 19, with blank line 18 between) leaving a hyphenated page-break word ''compositional reasoning and knowl-'' / ''edge retrieval''. A-LINGUISTIC-DUALITY''s raw_text spans the break verbatim (''knowl-\n\nedge''); normalized_text rejoins it to ''knowledge''.'
+  - The only math is inline $O(1)$ (no $$...\tag{N}$$ block) -> the Introduction has no formula_atom.
+  - Em-dashes are Unicode U+2014 ('text—such as ...'); normalized_text renders them as ' - '.
+  - Inline author-year citations (e.g., (Vaswani et al., 2017)) are dense; they are kept verbatim in raw_text as evidence but dropped from normalized_text and listed in do_not_extract.
+  - Forward references '(see Table 3)' and '(detailed in Section 2)' point outside Chapter 1 and are negatives (do_not_extract).
+  - Figure 1 caption (source line 29) renders as a 'Figure 1 | ...' text paragraph (no image) and is the architecture overview; it is the figure_caption_atom A-FIG1-CAPTION in the method chunk.
+  - 'Benchmark gains use ''NAME: +X.Y'' format inside one sentence; A-GAINS-PREVIEW keeps them as one atom, A-LONGCONTEXT keeps the ''X vs. Y'' pairs.'
+source_elements:
+- id: SE-1-H
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 13
+  line_end: 13
+- id: SE-1-P15
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 15
+  line_end: 15
+- id: SE-1-P17
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 17
+  line_end: 19
+  note: linguistic-duality paragraph; MinerU split it across a page break (lines 17 and 19, blank line 18) with a hyphenated word 'knowl- / edge'.
+- id: SE-1-P21
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 21
+  line_end: 21
+- id: SE-1-P23
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 23
+  line_end: 23
+- id: SE-1-P25
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 25
+  line_end: 25
+- id: SE-1-P27
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 27
+  line_end: 27
+- id: SE-1-FIG1
+  type: figure_caption
+  file: engram_paper_mineru.md
+  line_start: 29
+  line_end: 29
+section_tree:
+- id: SEC-1
+  path: '1'
+  title: Introduction
+evidence_atoms:
+- id: A-SPARSITY-PRINCIPLE
+  section_id: SEC-1
+  atom_type: claim_sentence
+  source_element_id: SE-1-P15
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 15
+    line_end: 15
+    char_start: 2175
+    char_end: 2537
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 167
+    char_end: 529
+    viewer_only: true
+  raw_text: Sparsity is a recurring design principle for intelligent systems, spanning from biological neural circuits (Lennie, 2003; Olshausen and Field, 1997) to modern Large Language Models (LLMs). Currently, this principle is primarily realized through Mixture-of-Experts (MoE) (Dai et al., 2024; Shazeer et al., 2017), which scales capacity via conditional computation.
+  normalized_text: Sparsity is a recurring design principle for intelligent systems, spanning from biological neural circuits to modern Large Language Models (LLMs); currently this principle is primarily realized through Mixture-of-Experts (MoE), which scales capacity via conditional computation.
+  evidence_strength: direct
+- id: A-MOE-DEFACTO
+  section_id: SEC-1
+  atom_type: claim_sentence
+  source_element_id: SE-1-P15
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 15
+    line_end: 15
+    char_start: 2538
+    char_end: 2755
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 530
+    char_end: 747
+    viewer_only: true
+  raw_text: Owing to its ability to drastically increase model size without proportional increases in compute, MoE has become the de facto standard for frontier models (Comanici et al., 2025; Guo et al., 2025; Team et al., 2025).
+  normalized_text: Owing to its ability to drastically increase model size without proportional increases in compute, MoE has become the de facto standard for frontier models.
+  evidence_strength: direct
+- id: A-LINGUISTIC-DUALITY
+  section_id: SEC-1
+  atom_type: claim_sentence
+  source_element_id: SE-1-P17
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 17
+    line_end: 19
+    char_start: 2924
+    char_end: 3261
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 8
+    char_start: 916
+    char_end: 1253
+    viewer_only: true
+  raw_text: 'Specifically, language modeling entails two qualitatively different sub-tasks: compositional reasoning and knowl-
+
+
+    edge retrieval. While the former demands deep, dynamic computation, a substantial portion of text—such as named entities and formulaic patterns—is local, static, and highly stereotyped (Constant et al., 2017; Erman, 2000).'
+  normalized_text: 'Specifically, language modeling entails two qualitatively different sub-tasks: compositional reasoning and knowledge retrieval. While the former demands deep, dynamic computation, a substantial portion of text - such as named entities and formulaic patterns - is local, static, and highly stereotyped.'
+  evidence_strength: direct
+- id: A-NGRAM-LOCAL
+  section_id: SEC-1
+  atom_type: mechanism_sentence
+  source_element_id: SE-1-P17
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 19
+    line_end: 19
+    char_start: 3262
+    char_end: 3496
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1254
+    char_end: 1488
+    viewer_only: true
+  raw_text: The effectiveness of classical N-gram models (Brants et al., 2007; Liu et al., 2024b; Nguyen, 2024) in capturing such local dependencies implies that these regularities are naturally represented as computationally inexpensive lookups.
+  normalized_text: The effectiveness of classical N-gram models in capturing such local dependencies implies that these regularities are naturally represented as computationally inexpensive lookups.
+  evidence_strength: direct
+- id: A-NO-LOOKUP-PRIMITIVE
+  section_id: SEC-1
+  atom_type: claim_sentence
+  source_element_id: SE-1-P17
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 19
+    line_end: 19
+    char_start: 3497
+    char_end: 3656
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1489
+    char_end: 1648
+    viewer_only: true
+  raw_text: Since standard Transformers (Vaswani et al., 2017) lack a native knowledge lookup primitive, current LLMs are forced to simulate retrieval through computation.
+  normalized_text: Since standard Transformers lack a native knowledge lookup primitive, current LLMs are forced to simulate retrieval through computation.
+  evidence_strength: direct
+- id: A-RECONSTRUCTION-WASTE
+  section_id: SEC-1
+  atom_type: mechanism_sentence
+  source_element_id: SE-1-P17
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 19
+    line_end: 19
+    char_start: 3657
+    char_end: 4065
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1649
+    char_end: 2057
+    viewer_only: true
+  raw_text: For instance, resolving a common multi-token entity requires consuming multiple early layers of attention and feed-forward networks (Ghandeharioun et al., 2024; Jin et al., 2025) (see Table 3). This process essentially amounts to an expensive runtime reconstruction of a static lookup table, wasting valuable sequential depth on trivial operations that could otherwise be allocated to higher-level reasoning.
+  normalized_text: For instance, resolving a common multi-token entity requires consuming multiple early layers of attention and feed-forward networks (see Table 3). This process essentially amounts to an expensive runtime reconstruction of a static lookup table, wasting valuable sequential depth on trivial operations that could otherwise be allocated to higher-level reasoning.
+  evidence_strength: direct
+- id: A-CONDITIONAL-MEMORY
+  section_id: SEC-1
+  atom_type: claim_sentence
+  source_element_id: SE-1-P21
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 21
+    line_end: 21
+    char_start: 4067
+    char_end: 4431
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 2059
+    char_end: 2423
+    viewer_only: true
+  raw_text: 'To align model architecture with this linguistic duality, we advocate for a complementary axis of sparsity: conditional memory. Whereas conditional computation sparsely activates parameters to process dynamic logic (Bengio et al., 2013; Shazeer et al., 2017), conditional memory relies on sparse lookup operations to retrieve static embeddings for fixed knowledge.'
+  normalized_text: 'To align model architecture with this linguistic duality, we advocate for a complementary axis of sparsity: conditional memory. Whereas conditional computation sparsely activates parameters to process dynamic logic, conditional memory relies on sparse lookup operations to retrieve static embeddings for fixed knowledge.'
+  evidence_strength: direct
+- id: A-NGRAM-O1-LOOKUP
+  section_id: SEC-1
+  atom_type: mechanism_sentence
+  source_element_id: SE-1-P21
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 21
+    line_end: 21
+    char_start: 4432
+    char_end: 4935
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 2424
+    char_end: 2927
+    viewer_only: true
+  raw_text: 'As a preliminary exploration of this paradigm, we revisit N-gram embeddings (Bojanowski et al., 2017) as a canonical instantiation: local context serves as a key to index a massive embedding table via constant-time $O(1)$ lookups (Huang et al., 2025a; Pagnoni et al., 2025; Tito Svenstrup et al., 2017; Yu et al., 2025). Our investigation reveals that, perhaps surprisingly, this static retrieval mechanism can serve as an ideal complement to modern MoE architecture—but only if it is properly designed.'
+  normalized_text: 'As a preliminary exploration of this paradigm, we revisit N-gram embeddings as a canonical instantiation: local context serves as a key to index a massive embedding table via constant-time O(1) lookups. Our investigation reveals that, perhaps surprisingly, this static retrieval mechanism can serve as an ideal complement to modern MoE architecture - but only if it is properly designed.'
+  evidence_strength: direct
+- id: A-ENGRAM-METHOD
+  section_id: SEC-1
+  atom_type: method_sentence
+  source_element_id: SE-1-P21
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 21
+    line_end: 21
+    char_start: 4936
+    char_end: 5203
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 2928
+    char_end: 3195
+    viewer_only: true
+  raw_text: In this paper, we propose Engram, a conditional memory module grounded in the classic N-gram structure but equipped with modern adaptations such as tokenizer compression, multi-head hashing, contextualized gating, and multi-branch integration (detailed in Section 2).
+  normalized_text: In this paper, we propose Engram, a conditional memory module grounded in the classic N-gram structure but equipped with modern adaptations such as tokenizer compression, multi-head hashing, contextualized gating, and multi-branch integration (detailed in Section 2).
+  evidence_strength: direct
+- id: A-SPARSITY-ALLOCATION
+  section_id: SEC-1
+  atom_type: method_sentence
+  source_element_id: SE-1-P23
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 23
+    line_end: 23
+    char_start: 5205
+    char_end: 5416
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 3197
+    char_end: 3408
+    viewer_only: true
+  raw_text: 'To quantify the synergy between these two primitives, we formulate the Sparsity Allocation problem: given a fixed total parameter budget, how should capacity be distributed between MoE experts and Engram memory?'
+  normalized_text: 'To quantify the synergy between these two primitives, we formulate the Sparsity Allocation problem: given a fixed total parameter budget, how should capacity be distributed between MoE experts and Engram memory?'
+  evidence_strength: direct
+- id: A-USHAPED-LAW
+  section_id: SEC-1
+  atom_type: scaling_law_result_atom
+  source_element_id: SE-1-P23
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 23
+    line_end: 23
+    char_start: 5417
+    char_end: 5621
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 3409
+    char_end: 3613
+    viewer_only: true
+  raw_text: Our experiments uncover a distinct U-shaped scaling law, revealing that even simple lookup mechanisms, when treated as a first-class modeling primitive, act as essential complements to neural computation.
+  normalized_text: Our experiments uncover a distinct U-shaped scaling law, revealing that even simple lookup mechanisms, when treated as a first-class modeling primitive, act as essential complements to neural computation.
+  evidence_strength: direct
+- id: A-SCALE-27B
+  section_id: SEC-1
+  atom_type: result_sentence
+  source_element_id: SE-1-P23
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 23
+    line_end: 23
+    char_start: 5622
+    char_end: 5823
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 3614
+    char_end: 3815
+    viewer_only: true
+  raw_text: Guided by this allocation law, we scale Engram to a 27B-parameter model. Compared to a strictly iso-parameter and iso-FLOPs MoE baseline, Engram-27B achieves superior efficiency across diverse domains.
+  normalized_text: Guided by this allocation law, we scale Engram to a 27B-parameter model; compared to a strictly iso-parameter and iso-FLOPs MoE baseline, Engram-27B achieves superior efficiency across diverse domains.
+  evidence_strength: direct
+- id: A-GAINS-PREVIEW
+  section_id: SEC-1
+  atom_type: result_sentence
+  source_element_id: SE-1-P23
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 23
+    line_end: 23
+    char_start: 5824
+    char_end: 6177
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 3816
+    char_end: 4169
+    viewer_only: true
+  raw_text: 'Crucially, the gains are not limited to knowledge-intensive tasks (e.g., MMLU: +3.4; CMMLU: +4.0; MMLU-Pro: +1.8), where memory capacity is intuitively beneficial; we observe even more significant improvements in general reasoning (e.g., BBH: +5.0; ARC-Challenge: +3.7; DROP: +3.3) and code/math domains (e.g., HumanEval: +3.0; MATH: +2.4; GSM8K: +2.2).'
+  normalized_text: 'Crucially, the gains are not limited to knowledge-intensive tasks (e.g., MMLU: +3.4; CMMLU: +4.0; MMLU-Pro: +1.8), where memory capacity is intuitively beneficial; we observe even more significant improvements in general reasoning (e.g., BBH: +5.0; ARC-Challenge: +3.7; DROP: +3.3) and code/math domains (e.g., HumanEval: +3.0; MATH: +2.4; GSM8K: +2.2).'
+  evidence_strength: direct
+- id: A-MECH-EARLY-LAYERS
+  section_id: SEC-1
+  atom_type: mechanism_sentence
+  source_element_id: SE-1-P25
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 25
+    line_end: 25
+    char_start: 6179
+    char_end: 6456
+  viewer_span:
+    file: source.md
+    line_start: 14
+    line_end: 14
+    char_start: 4171
+    char_end: 4448
+    viewer_only: true
+  raw_text: 'Mechanistic analysis via LogitLens (nostalgebraist, 2020) and CKA (Hendrycks et al., 2021a) reveals the source of these gains: Engram relieves the backbone from reconstructing static knowledge in early layers, thereby increasing effective depth available for complex reasoning.'
+  normalized_text: 'Mechanistic analysis via LogitLens and CKA reveals the source of these gains: Engram relieves the backbone from reconstructing static knowledge in early layers, thereby increasing effective depth available for complex reasoning.'
+  evidence_strength: direct
+- id: A-LONGCONTEXT
+  section_id: SEC-1
+  atom_type: result_sentence
+  source_element_id: SE-1-P25
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 25
+    line_end: 25
+    char_start: 6457
+    char_end: 6799
+  viewer_span:
+    file: source.md
+    line_start: 14
+    line_end: 14
+    char_start: 4449
+    char_end: 4791
+    viewer_only: true
+  raw_text: 'Furthermore, by delegating local dependencies to lookups, Engram frees up attention capacity to focus on global context, enabling exceptional performance in long-context scenarios—substantially outperforming baselines on LongPPL (Fang et al.) and RULER (Hsieh et al.) (e.g., Multi-Query NIAH: 97.0 vs. 84.2; Variable Tracking: 89.0 vs. 77.0).'
+  normalized_text: 'Furthermore, by delegating local dependencies to lookups, Engram frees up attention capacity to focus on global context, enabling exceptional performance in long-context scenarios - substantially outperforming baselines on LongPPL and RULER (e.g., Multi-Query NIAH: 97.0 vs. 84.2; Variable Tracking: 89.0 vs. 77.0).'
+  evidence_strength: direct
+- id: A-INFRA-PREFETCH
+  section_id: SEC-1
+  atom_type: method_sentence
+  source_element_id: SE-1-P27
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 27
+    line_end: 27
+    char_start: 6801
+    char_end: 7020
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 4793
+    char_end: 5012
+    viewer_only: true
+  raw_text: Finally, we establish infrastructure-aware efficiency as a first-class principle. Unlike MoE's dynamic routing, Engram employs deterministic IDs to enable runtime prefetching, overlapping communication with computation.
+  normalized_text: Finally, we establish infrastructure-aware efficiency as a first-class principle. Unlike MoE's dynamic routing, Engram employs deterministic IDs to enable runtime prefetching, overlapping communication with computation.
+  evidence_strength: direct
+- id: A-INFRA-RESULT
+  section_id: SEC-1
+  atom_type: result_sentence
+  source_element_id: SE-1-P27
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 27
+    line_end: 27
+    char_start: 7021
+    char_end: 7252
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 5013
+    char_end: 5244
+    viewer_only: true
+  raw_text: Empirical results show that offloading a 100B-parameter table to host memory incurs negligible overhead (< 3%). This demonstrates that Engram effectively bypasses GPU memory constraints, facilitating aggressive parameter expansion.
+  normalized_text: Empirical results show that offloading a 100B-parameter table to host memory incurs negligible overhead (< 3%). This demonstrates that Engram effectively bypasses GPU memory constraints, facilitating aggressive parameter expansion.
+  evidence_strength: direct
+- id: A-FIG1-CAPTION
+  section_id: SEC-1
+  atom_type: figure_caption_atom
+  source_element_id: SE-1-FIG1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 29
+    line_end: 29
+    char_start: 7254
+    char_end: 7573
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 5246
+    char_end: 5565
+    viewer_only: true
+  raw_text: Figure 1 | The Engram Architecture. The module augments the backbone by retrieving static N-gram memory and fusing it with dynamic hidden states via context-aware gating. This module is applied only to specific layers to decouple memory from compute, leaving the standard input embedding and un-embedding module intact.
+  normalized_text: Figure 1 | The Engram Architecture. The module augments the backbone by retrieving static N-gram memory and fusing it with dynamic hidden states via context-aware gating. This module is applied only to specific layers to decouple memory from compute, leaving the standard input embedding and un-embedding module intact.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 1
+    physical_section_id: SEC-1
+    semantic_section_ids:
+    - SEC-1
+semantic_chunks:
+- id: C-PROBLEM
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: '1'
+  atom_ids:
+  - A-SPARSITY-PRINCIPLE
+  - A-MOE-DEFACTO
+  - A-LINGUISTIC-DUALITY
+  - A-NGRAM-LOCAL
+  - A-NO-LOOKUP-PRIMITIVE
+  - A-RECONSTRUCTION-WASTE
+  central_atom_ids:
+  - A-NO-LOOKUP-PRIMITIVE
+  - A-RECONSTRUCTION-WASTE
+  boundary_reason: 'problem framing: sparsity principle + MoE + linguistic duality + Transformers lack a lookup primitive and waste early-layer depth reconstructing static tables; kept together as one motivation block (qiefen 5.3 claim-evidence continuity).'
+  extraction_targets:
+  - ArticleClaim
+  - MechanisticExplanation
+  gold_must_cover_atoms:
+  - A-NO-LOOKUP-PRIMITIVE
+  - A-RECONSTRUCTION-WASTE
+  - A-LINGUISTIC-DUALITY
+- id: C-METHOD
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: '1'
+  atom_ids:
+  - A-CONDITIONAL-MEMORY
+  - A-NGRAM-O1-LOOKUP
+  - A-ENGRAM-METHOD
+  - A-FIG1-CAPTION
+  central_atom_ids:
+  - A-CONDITIONAL-MEMORY
+  - A-ENGRAM-METHOD
+  boundary_reason: 'thesis + method overview: conditional memory as a complementary sparsity axis, instantiated via Engram (4 adaptations); the Figure 1 caption is the architecture overview and stays with the method (qiefen 5.3).'
+  extraction_targets:
+  - ArticleClaim
+  - ArticleMethod
+  - ArchitectureComponent
+  gold_must_cover_atoms:
+  - A-CONDITIONAL-MEMORY
+  - A-ENGRAM-METHOD
+  - A-NGRAM-O1-LOOKUP
+- id: C-ALLOCATION
+  profile: article_research
+  chunk_type: scaling_law_block
+  section_path: '1'
+  atom_ids:
+  - A-SPARSITY-ALLOCATION
+  - A-USHAPED-LAW
+  - A-SCALE-27B
+  - A-GAINS-PREVIEW
+  central_atom_ids:
+  - A-USHAPED-LAW
+  - A-GAINS-PREVIEW
+  boundary_reason: Sparsity Allocation problem -> U-shaped law -> scale to 27B -> headline gains; the allocation question and its result + scaled-up evidence kept contiguous (qiefen 5.3 setup-result continuity).
+  extraction_targets:
+  - ScalingLaw
+  - ExperimentResult
+  gold_must_cover_atoms:
+  - A-SPARSITY-ALLOCATION
+  - A-USHAPED-LAW
+  - A-SCALE-27B
+  - A-GAINS-PREVIEW
+- id: C-MECH-EFF
+  profile: article_research
+  chunk_type: system_efficiency_block
+  section_path: '1'
+  atom_ids:
+  - A-MECH-EARLY-LAYERS
+  - A-LONGCONTEXT
+  - A-INFRA-PREFETCH
+  - A-INFRA-RESULT
+  central_atom_ids:
+  - A-MECH-EARLY-LAYERS
+  - A-INFRA-PREFETCH
+  boundary_reason: 'why-it-works previews: mechanistic (effective depth) + long-context (attention freed) + infra-aware efficiency (deterministic prefetch, <3% overhead); all explain/quantify the same contribution rather than introducing a new method.'
+  extraction_targets:
+  - MechanisticExplanation
+  - SystemDesignClaim
+  - ExperimentResult
+  gold_must_cover_atoms:
+  - A-MECH-EARLY-LAYERS
+  - A-LONGCONTEXT
+  - A-INFRA-PREFETCH
+  - A-INFRA-RESULT
+context_packages:
+- id: PKG-PROBLEM
+  profile: article_research
+  chunk_id: C-PROBLEM
+  section_path: Engram > 1. Introduction > problem framing (sparsity / MoE / linguistic duality)
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs'
+  atoms:
+  - atom_id: A-SPARSITY-PRINCIPLE
+    atom_type: claim_sentence
+  - atom_id: A-MOE-DEFACTO
+    atom_type: claim_sentence
+  - atom_id: A-LINGUISTIC-DUALITY
+    atom_type: claim_sentence
+  - atom_id: A-NGRAM-LOCAL
+    atom_type: mechanism_sentence
+  - atom_id: A-NO-LOOKUP-PRIMITIVE
+    atom_type: claim_sentence
+  - atom_id: A-RECONSTRUCTION-WASTE
+    atom_type: mechanism_sentence
+  linked_context:
+    previous_heading: (document Abstract)
+    next_heading: 1. Introduction (proposal of conditional memory / Engram)
+  extraction_targets:
+  - ArticleClaim
+  - MechanisticExplanation
+  expected_objects:
+  - CLAIM-PROBLEM
+  - CLAIM-MOE-PRIOR
+- id: PKG-METHOD
+  profile: article_research
+  chunk_id: C-METHOD
+  section_path: Engram > 1. Introduction > proposal of conditional memory / Engram
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs'
+  atoms:
+  - atom_id: A-CONDITIONAL-MEMORY
+    atom_type: claim_sentence
+  - atom_id: A-NGRAM-O1-LOOKUP
+    atom_type: mechanism_sentence
+  - atom_id: A-ENGRAM-METHOD
+    atom_type: method_sentence
+  - atom_id: A-FIG1-CAPTION
+    atom_type: figure_caption_atom
+  linked_context:
+    figure_context: Figure 1 | The Engram Architecture (retrieval + context-aware gating fusion, applied to specific layers)
+    previous_heading: 1. Introduction (problem framing)
+    next_heading: 2. Architecture (Section 2 detail)
+  extraction_targets:
+  - ArticleClaim
+  - ArticleMethod
+  - ArchitectureComponent
+  expected_objects:
+  - CLAIM-CONDITIONAL-MEMORY
+  - METHOD-ENGRAM
+  - COMPONENT-CONTEXT-GATING
+- id: PKG-ALLOCATION
+  profile: article_research
+  chunk_id: C-ALLOCATION
+  section_path: Engram > 1. Introduction > Sparsity Allocation / scaling to 27B
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs'
+  atoms:
+  - atom_id: A-SPARSITY-ALLOCATION
+    atom_type: method_sentence
+  - atom_id: A-USHAPED-LAW
+    atom_type: scaling_law_result_atom
+  - atom_id: A-SCALE-27B
+    atom_type: result_sentence
+  - atom_id: A-GAINS-PREVIEW
+    atom_type: result_sentence
+  linked_context:
+    previous_heading: 1. Introduction (proposal of conditional memory / Engram)
+    next_heading: 1. Introduction (mechanism / long-context / infra-aware efficiency)
+  extraction_targets:
+  - ScalingLaw
+  - ExperimentResult
+  - ArticleMethod
+  expected_objects:
+  - METHOD-SPARSITY-ALLOCATION
+  - SCALINGLAW-USHAPED
+  - RESULT-27B-GAINS
+- id: PKG-MECH-EFF
+  profile: article_research
+  chunk_id: C-MECH-EFF
+  section_path: Engram > 1. Introduction > mechanism / long-context / infra-aware efficiency
+  document_title: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs'
+  atoms:
+  - atom_id: A-MECH-EARLY-LAYERS
+    atom_type: mechanism_sentence
+  - atom_id: A-LONGCONTEXT
+    atom_type: result_sentence
+  - atom_id: A-INFRA-PREFETCH
+    atom_type: method_sentence
+  - atom_id: A-INFRA-RESULT
+    atom_type: result_sentence
+  linked_context:
+    previous_heading: 1. Introduction (Sparsity Allocation / scaling to 27B)
+    next_heading: 2. Architecture
+  extraction_targets:
+  - MechanisticExplanation
+  - SystemDesignClaim
+  - ExperimentResult
+  expected_objects:
+  - RESULT-LONGCONTEXT
+  - RESULT-INFRA
+  - MECH-EFFECTIVE-DEPTH
+  - MECH-ATTENTION-FREED
+  - SYS-PREFETCH
+mentions:
+- id: M-01
+  text: Sparsity
+  type: Concept
+  atom_id: A-SPARSITY-PRINCIPLE
+  canonical_key: sparsity
+- id: M-02
+  text: Mixture-of-Experts (MoE)
+  type: ArchitectureComponent
+  atom_id: A-SPARSITY-PRINCIPLE
+  canonical_key: moe
+- id: M-03
+  text: conditional computation
+  type: Concept
+  atom_id: A-CONDITIONAL-MEMORY
+  canonical_key: conditional_computation
+- id: M-04
+  text: conditional memory
+  type: Concept
+  atom_id: A-CONDITIONAL-MEMORY
+  canonical_key: conditional_memory
+- id: M-05
+  text: knowledge lookup primitive
+  type: Concept
+  atom_id: A-NO-LOOKUP-PRIMITIVE
+  canonical_key: knowledge_lookup_primitive
+- id: M-06
+  text: N-gram embeddings
+  type: Concept
+  atom_id: A-NGRAM-O1-LOOKUP
+  canonical_key: ngram_embedding
+- id: M-07
+  text: Engram
+  type: ArticleMethod
+  atom_id: A-ENGRAM-METHOD
+  canonical_key: engram
+- id: M-08
+  text: contextualized gating
+  type: ArchitectureComponent
+  atom_id: A-ENGRAM-METHOD
+  canonical_key: contextualized_gating
+- id: M-09
+  text: Sparsity Allocation problem
+  type: Concept
+  atom_id: A-SPARSITY-ALLOCATION
+  canonical_key: sparsity_allocation
+- id: M-10
+  text: U-shaped scaling law
+  type: ScalingLaw
+  atom_id: A-USHAPED-LAW
+  canonical_key: u_shaped_scaling_law
+- id: M-11
+  text: Engram-27B
+  type: ArticleMethod
+  atom_id: A-SCALE-27B
+  canonical_key: engram
+- id: M-12
+  text: linguistic duality
+  type: Concept
+  atom_id: A-LINGUISTIC-DUALITY
+  canonical_key: linguistic_duality
+canonicalization:
+- canonical: engram
+  aliases:
+  - Engram
+  - Engram-27B
+  - conditional memory module
+  note: method and its 27B instantiation are one entity.
+- canonical: conditional_memory
+  aliases:
+  - conditional memory
+  - sparse lookup
+  - scalable lookup
+- canonical: moe
+  aliases:
+  - MoE
+  - Mixture-of-Experts
+  - conditional computation paradigm
+- canonical: contextualized_gating
+  aliases:
+  - contextualized gating
+  - context-aware gating
+  note: Intro text and Figure 1 caption co-refer.
+objects:
+- id: CLAIM-PROBLEM
+  type: ArticleClaim
+  section_path: '1'
+  home_package: PKG-PROBLEM
+  payload:
+    statement: Transformers lack a native knowledge lookup primitive, forcing LLMs to simulate retrieval through computation; resolving multi-token entities wastes early-layer depth on runtime reconstruction of a static lookup table.
+    role: problem_statement
+    supporting_evidence: 'linguistic duality: compositional reasoning vs static/local stereotyped patterns (N-grams)'
+  local_evidence_atom_ids:
+  - A-NO-LOOKUP-PRIMITIVE
+  - A-RECONSTRUCTION-WASTE
+  - A-LINGUISTIC-DUALITY
+  - A-NGRAM-LOCAL
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-CONDITIONAL-MEMORY
+  type: ArticleClaim
+  section_path: '1'
+  home_package: PKG-METHOD
+  payload:
+    statement: 'Conditional memory is a complementary axis of sparsity to conditional computation (MoE): sparse lookups retrieve static embeddings for fixed knowledge, serving as an ideal complement to MoE when properly designed.'
+    role: thesis
+  local_evidence_atom_ids:
+  - A-CONDITIONAL-MEMORY
+  - A-NGRAM-O1-LOOKUP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-MOE-PRIOR
+  type: ArticleClaim
+  section_path: '1'
+  home_package: PKG-PROBLEM
+  payload:
+    statement: Sparsity is realized in current LLMs primarily through MoE / conditional computation, the de facto standard for frontier models.
+    role: prior_work_baseline
+  local_evidence_atom_ids:
+  - A-SPARSITY-PRINCIPLE
+  - A-MOE-DEFACTO
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: METHOD-ENGRAM
+  type: ArticleMethod
+  section_path: '1'
+  home_package: PKG-METHOD
+  payload:
+    name: Engram
+    description: A conditional memory module grounded in the classic N-gram structure with modern adaptations; indexes a massive embedding table via O(1) lookups and fuses with hidden states.
+    components:
+    - tokenizer compression
+    - multi-head hashing
+    - contextualized gating
+    - multi-branch integration
+    detailed_in: Section 2
+  local_evidence_atom_ids:
+  - A-ENGRAM-METHOD
+  - A-NGRAM-O1-LOOKUP
+  - A-FIG1-CAPTION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: METHOD-SPARSITY-ALLOCATION
+  type: ArticleMethod
+  section_path: '1'
+  home_package: PKG-ALLOCATION
+  payload:
+    name: Sparsity Allocation problem
+    description: Given a fixed total parameter budget, distribute capacity between MoE experts and Engram memory.
+    outcome: yields the U-shaped scaling law and guides scaling to 27B
+  local_evidence_atom_ids:
+  - A-SPARSITY-ALLOCATION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-CONTEXT-GATING
+  type: ArchitectureComponent
+  section_path: '1'
+  home_package: PKG-METHOD
+  payload:
+    name: contextualized (context-aware) gating
+    role: dynamically modulate retrieved static embeddings by the current hidden state during fusion.
+  local_evidence_atom_ids:
+  - A-ENGRAM-METHOD
+  - A-FIG1-CAPTION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SCALINGLAW-USHAPED
+  type: ScalingLaw
+  section_path: '1'
+  home_package: PKG-ALLOCATION
+  payload:
+    name: U-shaped sparsity-allocation scaling law
+    finding: Optimal trade-off between neural computation (MoE) and static memory (Engram) is U-shaped; even simple lookups, as a first-class primitive, are essential complements to computation.
+  local_evidence_atom_ids:
+  - A-USHAPED-LAW
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-27B-GAINS
+  type: ExperimentResult
+  section_path: '1'
+  home_package: PKG-ALLOCATION
+  payload:
+    setting: Engram-27B vs strictly iso-parameter and iso-FLOPs MoE baseline
+    knowledge: MMLU +3.4; CMMLU +4.0; MMLU-Pro +1.8
+    reasoning: BBH +5.0; ARC-Challenge +3.7; DROP +3.3
+    code_math: HumanEval +3.0; MATH +2.4; GSM8K +2.2
+  local_evidence_atom_ids:
+  - A-SCALE-27B
+  - A-GAINS-PREVIEW
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-LONGCONTEXT
+  type: ExperimentResult
+  section_path: '1'
+  home_package: PKG-MECH-EFF
+  payload:
+    setting: long-context retrieval on LongPPL and RULER
+    numbers: Multi-Query NIAH 97.0 vs 84.2; Variable Tracking 89.0 vs 77.0
+  local_evidence_atom_ids:
+  - A-LONGCONTEXT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-INFRA
+  type: ExperimentResult
+  section_path: '1'
+  home_package: PKG-MECH-EFF
+  payload:
+    setting: offloading a 100B-parameter table to host memory
+    numbers: negligible overhead (< 3%)
+  local_evidence_atom_ids:
+  - A-INFRA-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-EFFECTIVE-DEPTH
+  type: MechanisticExplanation
+  section_path: '1'
+  home_package: PKG-MECH-EFF
+  payload:
+    mechanism: Engram relieves the backbone from reconstructing static knowledge in early layers (shown via LogitLens and CKA), increasing effective depth available for complex reasoning.
+  local_evidence_atom_ids:
+  - A-MECH-EARLY-LAYERS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-ATTENTION-FREED
+  type: MechanisticExplanation
+  section_path: '1'
+  home_package: PKG-MECH-EFF
+  payload:
+    mechanism: Delegating local dependencies to lookups frees attention capacity to focus on global context, improving long-context retrieval.
+  local_evidence_atom_ids:
+  - A-LONGCONTEXT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SYS-PREFETCH
+  type: SystemDesignClaim
+  section_path: '1'
+  home_package: PKG-MECH-EFF
+  payload:
+    claim: Engram's deterministic IDs enable runtime prefetching that overlaps communication with computation (unlike MoE dynamic routing), establishing infrastructure-aware efficiency and bypassing GPU memory constraints.
+  local_evidence_atom_ids:
+  - A-INFRA-PREFETCH
+  - A-INFRA-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: method_addresses_problem
+  source_object_id: METHOD-ENGRAM
+  target_object_id: CLAIM-PROBLEM
+  evidence_atom_ids:
+  - A-ENGRAM-METHOD
+  - A-NO-LOOKUP-PRIMITIVE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: claim_extends_prior_work
+  source_object_id: CLAIM-CONDITIONAL-MEMORY
+  target_object_id: CLAIM-MOE-PRIOR
+  evidence_atom_ids:
+  - A-CONDITIONAL-MEMORY
+  - A-SPARSITY-PRINCIPLE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: method_has_component
+  source_object_id: METHOD-ENGRAM
+  target_object_id: COMPONENT-CONTEXT-GATING
+  evidence_atom_ids:
+  - A-ENGRAM-METHOD
+  - A-FIG1-CAPTION
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-04
+  relation_type: method_has_component
+  source_object_id: METHOD-ENGRAM
+  target_object_id: METHOD-SPARSITY-ALLOCATION
+  evidence_atom_ids:
+  - A-SPARSITY-ALLOCATION
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-05
+  relation_type: result_supports_claim
+  source_object_id: RESULT-27B-GAINS
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-SCALE-27B
+  - A-GAINS-PREVIEW
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: result_supports_claim
+  source_object_id: SCALINGLAW-USHAPED
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-USHAPED-LAW
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-07
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-EFFECTIVE-DEPTH
+  target_object_id: RESULT-27B-GAINS
+  evidence_atom_ids:
+  - A-MECH-EARLY-LAYERS
+  - A-GAINS-PREVIEW
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-08
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-ATTENTION-FREED
+  target_object_id: RESULT-LONGCONTEXT
+  evidence_atom_ids:
+  - A-LONGCONTEXT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-09
+  relation_type: system_design_enables_efficiency
+  source_object_id: SYS-PREFETCH
+  target_object_id: RESULT-INFRA
+  evidence_atom_ids:
+  - A-INFRA-PREFETCH
+  - A-INFRA-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-10
+  relation_type: result_supports_claim
+  source_object_id: SCALINGLAW-USHAPED
+  target_object_id: METHOD-SPARSITY-ALLOCATION
+  evidence_atom_ids:
+  - A-USHAPED-LAW
+  - A-SPARSITY-ALLOCATION
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+do_not_extract:
+- text: (Lennie, 2003; Olshausen and Field, 1997)
+  atom_id: A-SPARSITY-PRINCIPLE
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Dai et al., 2024; Shazeer et al., 2017)
+  atom_id: A-SPARSITY-PRINCIPLE
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Comanici et al., 2025; Guo et al., 2025; Team et al., 2025)
+  atom_id: A-MOE-DEFACTO
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Constant et al., 2017; Erman, 2000)
+  atom_id: A-LINGUISTIC-DUALITY
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Brants et al., 2007; Liu et al., 2024b; Nguyen, 2024)
+  atom_id: A-NGRAM-LOCAL
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Vaswani et al., 2017)
+  atom_id: A-NO-LOOKUP-PRIMITIVE
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Ghandeharioun et al., 2024; Jin et al., 2025)
+  atom_id: A-RECONSTRUCTION-WASTE
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Bengio et al., 2013; Shazeer et al., 2017)
+  atom_id: A-CONDITIONAL-MEMORY
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Bojanowski et al., 2017)
+  atom_id: A-NGRAM-O1-LOOKUP
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Huang et al., 2025a; Pagnoni et al., 2025; Tito Svenstrup et al., 2017; Yu et al., 2025)
+  atom_id: A-NGRAM-O1-LOOKUP
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (nostalgebraist, 2020)
+  atom_id: A-MECH-EARLY-LAYERS
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Hendrycks et al., 2021a)
+  atom_id: A-MECH-EARLY-LAYERS
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Fang et al.)
+  atom_id: A-LONGCONTEXT
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- text: (Hsieh et al.)
+  atom_id: A-LONGCONTEXT
+  reason: inline author-year citation kept verbatim as evidence; not a knowledge object.
+  kind: citation
+- pattern: inline_author_year_citation
+  examples:
+  - (Vaswani et al., 2017)
+  - (Dai et al., 2024; Shazeer et al., 2017)
+  - (nostalgebraist, 2020)
+  - (Fang et al.)
+  reason: inline author-year citations are not knowledge objects; suppress citation over-extraction.
+  kind: citation_policy
+- text: (see Table 3)
+  atom_id: A-RECONSTRUCTION-WASTE
+  reason: forward reference to a results table in a later section; not an Introduction object.
+  kind: cross_section_forward_reference
+- text: (detailed in Section 2)
+  atom_id: A-ENGRAM-METHOD
+  reason: forward reference to the Architecture chapter; not an Introduction object.
+  kind: cross_section_forward_reference

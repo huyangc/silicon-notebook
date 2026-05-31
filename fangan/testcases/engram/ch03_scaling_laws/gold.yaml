@@ -1,0 +1,1014 @@
+# Gold fixture v0.3.3 - Engram paper Chapter 3 Scaling Laws and Sparsity Allocation (profile: article_research)
+# Upgraded from v0.1: dual coordinates (source_span authoritative + viewer_span), verbatim raw_text +
+# within-span normalized_text, object evidence split into local/supporting + home_package, ONE context_package
+# per chunk with expected_objects (+ expected_local_fields for the cross-package CLAIM-COMPLEMENTARITY),
+# gold_label/difficulty/evidence_strength (no decimal confidence), do_not_extract negatives, source_meta
+# conventions/validation/parsing_notes. Same atom/chunk/object/relation IDs and meaning as v0.1.
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Chapter 3 (Scaling Laws and Sparsity Allocation, sections 3.1-3.2) only
+  title: 'Engram: Conditional Memory as a Scalable Axis of Sparsity - Chapter 3 Scaling Laws and Sparsity Allocation'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 110
+  - 157
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 110-157; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - Compute-matched formulation
+  - Experimental protocol
+  - Results and Analysis
+  - validation loss
+  - Figure 3
+  - FLOPs
+  - U-shaped relationship
+  - power law
+  extraction_targets:
+  - ArticleClaim
+  - ScalingLaw
+  - ExperimentSetup
+  - ExperimentResult
+  - MechanisticExplanation
+  - DerivedRuleCandidate
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math (rho, ->, x for multiplication, delta), and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. CLAIM-COMPLEMENTARITY is the only cross-package object here (home PKG-INTRO, completed by A-INF-CLAIM-001 in PKG-INF).
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: 'figure atoms separate physical_section_id from semantic_section_ids; forward references set include_in_chapter2_core_chunks:false and are isolated in a cross_reference_block. Chapter 3 renders no figure as image/table: Figure 3 (left/right) results are read from prose, so ''Figure 3 (left)''/''Figure 3 (right)'' labels are listed in do_not_extract as figure_label.'
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    context_only: an atom not consumed by any object or relation may be flagged context_only:true; Chapter 3 has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+    numeric_audit: 'for every non-formula atom: every numeric token in normalized_text must also occur in its raw_text span (no over-span numbers).'
+  parsing_notes:
+  - Formula tags are globally continuous across the paper; Eq.(7) (allocation ratio) is the ONLY tagged display formula in this chapter, rendered as $$...\tag{7}$$ on source line 130 (delimiters on lines 129/131).
+  - Figure 3 (left)=allocation U-shape; Figure 3 (right)=infinite-memory power law; neither figure is rendered as <table>/image in the slice, so all result numbers (1.7248->1.7109, rho 75-80%, slot sweep) come from prose.
+  - 'MinerU renders the dotted section numbers as level-1 headings: ''# 3.'', ''# 3.1.'', ''# 3.2.''.'
+  - Inline variables ($P_{\text{tot}}$, $P_{\text{act}}$, $P_{\text{sparse}} \triangleq P_{\text{tot}} - P_{\text{act}}$, $\rho \in [0,1]$) normalize to ASCII (P_tot/P_act/P_sparse/rho); := for \triangleq.
+  - rho is written with both percent (100%/40%/80%) and the [0,1] fraction in the source; normalized_text keeps the percent form as it appears in each span. The en-dashes in '20%-25%' and '75%-80%' (U+2013) are normalized to ASCII hyphen.
+  - The P_tot/P_act/P_sparse definition is a 3-item bullet list (source lines 121-123) captured as one contiguous span; the two FLOPs regimes are bullets on lines 140-141 inside the setup span (138-143).
+source_elements:
+- id: SE-H-3
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 110
+  line_end: 110
+- id: SE-H-3.1
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 117
+  line_end: 117
+- id: SE-H-3.2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 150
+  line_end: 150
+- id: SE-3-INTRO
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 112
+  line_end: 112
+- id: SE-3-Q
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 114
+  line_end: 115
+- id: SE-3.1-PDEF
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 121
+  line_end: 123
+- id: SE-3.1-CONTROL
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 125
+  line_end: 125
+- id: SE-3.1-EQ7
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 130
+  line_end: 130
+  metadata:
+    tag: '7'
+- id: SE-3.1-RHODEF
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 127
+  line_end: 127
+- id: SE-3.1-RHOLIM
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 135
+  line_end: 136
+- id: SE-3.1-SETUP
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 138
+  line_end: 143
+- id: SE-3.1-RESULT
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 145
+  line_end: 145
+- id: SE-3.1-MECH-MOE
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 147
+  line_end: 147
+- id: SE-3.1-MECH-ENGRAM
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 148
+  line_end: 148
+- id: SE-3.2-SETUP
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 154
+  line_end: 154
+- id: SE-3.2-RESULT
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 156
+  line_end: 156
+section_tree:
+- id: SEC-3
+  path: '3'
+  title: Scaling Laws and Sparsity Allocation
+- id: SEC-3.1
+  path: 3 > 3.1
+  title: Optimal Allocation Ratio Between MoE and Engram
+  parent: SEC-3
+- id: SEC-3.2
+  path: 3 > 3.2
+  title: Engram under Infinite Memory Regime
+  parent: SEC-3
+evidence_atoms:
+- id: A-SCALE-CLAIM-001
+  section_id: SEC-3
+  atom_type: claim_sentence
+  source_element_id: SE-3-INTRO
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 112
+    line_end: 112
+    char_start: 17941
+    char_end: 18189
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 193
+    char_end: 441
+    viewer_only: true
+  raw_text: Engram, as an instantiation of conditional memory, is structurally complementary to the conditional computation provided by MoE experts. This section investigates the scaling properties of this duality and how to optimally allocate sparse capacity.
+  normalized_text: Engram, as an instantiation of conditional memory, is structurally complementary to the conditional computation provided by MoE experts. This section investigates the scaling properties of this duality and how to optimally allocate sparse capacity.
+  evidence_strength: direct
+- id: A-SCALE-Q-001
+  section_id: SEC-3
+  atom_type: claim_sentence
+  source_element_id: SE-3-Q
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 114
+    line_end: 115
+    char_start: 18243
+    char_end: 18640
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 7
+    char_start: 495
+    char_end: 892
+    viewer_only: true
+  raw_text: '1. Allocation under Finite Constraints. When total parameters and training compute are fixed (Iso-parameter and Iso-FLOPs), how should we split the sparse capacity between MoE experts and Engram embeddings?
+
+    2. Infinite Memory Regime. Considering the non-scaling $O(1)$ overhead of Engram, if the memory budget is relaxed or scaled aggressively, what scaling behavior does Engram exhibit by itself?'
+  normalized_text: 'Two questions drive the study: (1) Allocation under finite constraints - given fixed total params and training compute (iso-parameter, iso-FLOPs), how to split sparse capacity between MoE experts and Engram embeddings; (2) Infinite memory regime - given Engram''s non-scaling O(1) overhead, what scaling behavior does Engram exhibit by itself under aggressive memory scaling.'
+  evidence_strength: direct
+- id: A-ALLOC-DEF-001
+  section_id: SEC-3.1
+  atom_type: definition_atom
+  source_element_id: SE-3.1-PDEF
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 121
+    line_end: 123
+    char_start: 18784
+    char_end: 19242
+  viewer_span:
+    file: source.md
+    line_start: 13
+    line_end: 15
+    char_start: 1036
+    char_end: 1494
+    viewer_only: true
+  raw_text: '- $P_{\text{tot}}$ : total trainable parameters, excluding vocabulary embedding and LM head.
+
+    - $P_{\text{act}}$ : activated parameters per token. This quantity determines the training cost (FLOPs).
+
+    - $P_{\text{sparse}} \triangleq P_{\text{tot}} - P_{\text{act}}$ : the inactive parameters, which represents the “free” parameter budget available for scaling model size without incurring computational cost (e.g., unselected experts or unretrieved embeddings).'
+  normalized_text: 'Three parameter metrics: P_tot = total trainable parameters (excluding vocabulary embedding and LM head); P_act = activated parameters per token (determines training cost / FLOPs); P_sparse := P_tot - P_act = the inactive ''free'' parameter budget for scaling model size without incurring computational cost (e.g., unselected experts or unretrieved embeddings).'
+  evidence_strength: direct
+- id: A-ALLOC-CONTROL-001
+  section_id: SEC-3.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-3.1-CONTROL
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 125
+    line_end: 125
+    char_start: 19244
+    char_end: 19691
+  viewer_span:
+    file: source.md
+    line_start: 17
+    line_end: 17
+    char_start: 1496
+    char_end: 1943
+    viewer_only: true
+  raw_text: We keep $P_{tot}$ and $P_{act}$ fixed within each FLOPs budget, so that models have the same number of parameters and the same per-token FLOPs. For MoE, $P_{act}$ is determined by the top-k selected experts, while the parameters of non-selected experts contribute to $P_{sparse}$ . For Engram, only a constant number of slots are retrieved per token, so scaling the number of embedding slots increases $P_{tot}$ without increasing per-token FLOPs.
+  normalized_text: 'Control: P_tot and P_act are held fixed within each FLOPs budget (same number of parameters, same per-token FLOPs). For MoE, P_act is determined by the top-k selected experts and non-selected experts contribute to P_sparse; for Engram only a constant number of slots are retrieved per token, so scaling embedding slots increases P_tot without increasing per-token FLOPs.'
+  evidence_strength: direct
+- id: A-ALLOC-RHO-007
+  section_id: SEC-3.1
+  atom_type: formula_atom
+  source_element_id: SE-3.1-EQ7
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 130
+    line_end: 130
+    char_start: 19845
+    char_end: 19984
+  viewer_span:
+    file: source.md
+    line_start: 22
+    line_end: 22
+    char_start: 2097
+    char_end: 2236
+    viewer_only: true
+  raw_text: P _ {\mathrm{MoE}} ^ {(\text {sparse})} = \rho P _ {\text {sparse}}, \quad P _ {\text {Engram}} = (1 - \rho) P _ {\text {sparse}}. \tag {7}
+  normalized_text: P_MoE^(sparse) = rho * P_sparse ;  P_Engram = (1 - rho) * P_sparse
+  evidence_strength: direct
+  metadata:
+    tag: '7'
+    role: allocation_ratio
+    supported_by_context_atoms:
+    - A-ALLOC-RHO-DEF
+    note: rho in [0,1] is the fraction of the inactive-parameter budget assigned to MoE (definition lives in adjacent prose A-ALLOC-RHO-DEF).
+- id: A-ALLOC-RHO-DEF
+  section_id: SEC-3.1
+  atom_type: definition_atom
+  source_element_id: SE-3.1-RHODEF
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 127
+    line_end: 127
+    char_start: 19693
+    char_end: 19840
+  viewer_span:
+    file: source.md
+    line_start: 19
+    line_end: 19
+    char_start: 1945
+    char_end: 2092
+    viewer_only: true
+  raw_text: 'Allocation ratio. We define the allocation ratio $\rho \in [0,1]$ as the fraction of the inactive-parameter budget assigned to MoE expert capacity:'
+  normalized_text: 'Allocation ratio: rho in [0,1] is the fraction of the inactive-parameter budget assigned to MoE expert capacity.'
+  evidence_strength: direct
+- id: A-ALLOC-RHO-LIMITS
+  section_id: SEC-3.1
+  atom_type: definition_atom
+  source_element_id: SE-3.1-RHOLIM
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 135
+    line_end: 136
+    char_start: 20003
+    char_end: 20207
+  viewer_span:
+    file: source.md
+    line_start: 27
+    line_end: 28
+    char_start: 2255
+    char_end: 2459
+    viewer_only: true
+  raw_text: '- $\rho = 1$ corresponds to a pure MoE model (all inactive parameters are routed experts).
+
+    - $\rho < 1$ reduces the number of routed experts and reallocates the freed parameters to Engram embedding slots.'
+  normalized_text: rho = 1 corresponds to a pure MoE model (all inactive parameters are routed experts); rho < 1 reduces the number of routed experts and reallocates the freed parameters to Engram embedding slots.
+  evidence_strength: direct
+- id: A-ALLOC-SETUP-001
+  section_id: SEC-3.1
+  atom_type: experiment_setup_atom
+  source_element_id: SE-3.1-SETUP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 138
+    line_end: 143
+    char_start: 20209
+    char_end: 20926
+  viewer_span:
+    file: source.md
+    line_start: 30
+    line_end: 35
+    char_start: 2461
+    char_end: 3178
+    viewer_only: true
+  raw_text: 'Experimental protocol. We evaluate this trade-off at two compute regimes and maintain a constant sparsity ratio $P_{tot}/P_{act} \approx 10$ across both settings:
+
+
+    - $C = 2 \times 10^{20}$ FLOPs: $P_{\text{tot}} \approx 5.7 \text{B}$ and $P_{\text{act}} = 568 \text{M}$ . The baseline ( $\rho = 1$ ) has a total of 106 experts.
+
+    - $C = 6 \times 10^{20}$ FLOPs: $P_{\text{tot}} \approx 9.9\text{B}$ and $P_{\text{act}} = 993\text{M}$ . The baseline ( $\rho = 1$ ) has a total of 99 experts.
+
+
+    For different $\rho$ , we construct the corresponding model only by adjusting the number of routed experts and the number of Engram embedding slots. All runs use the identical training pipeline and optimization hyperparameters.'
+  normalized_text: 'Experimental protocol: two compute regimes with constant sparsity ratio P_tot/P_act ~= 10. C = 2 x 10^20 FLOPs: P_tot ~= 5.7B, P_act = 568M, baseline (rho = 1) has 106 experts. C = 6 x 10^20 FLOPs: P_tot ~= 9.9B, P_act = 993M, baseline (rho = 1) has 99 experts. For each rho only the routed-expert count and Engram embedding-slot count change; all runs use the identical training pipeline and optimization hyperparameters.'
+  evidence_strength: direct
+- id: A-ALLOC-RESULT-USHAPE
+  section_id: SEC-3.1
+  atom_type: scaling_law_result_atom
+  source_element_id: SE-3.1-RESULT
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 145
+    line_end: 145
+    char_start: 20928
+    char_end: 21323
+  viewer_span:
+    file: source.md
+    line_start: 37
+    line_end: 37
+    char_start: 3180
+    char_end: 3575
+    viewer_only: true
+  raw_text: Results and Analysis. Figure 3 (left) reveals a consistent U-shaped relationship between validation loss and the allocation ratio $\rho$ . Remarkably, the Engram model achieves comparable performance to the pure MoE baseline ( $\rho = 100\%$ ) even when the MoE allocation is reduced to just $\rho \approx 40\%$ (i.e., a total of 46 experts for the 5.7B model and 43 experts for the 9.9B model).
+  normalized_text: Figure 3 (left) shows a consistent U-shaped relationship between validation loss and the allocation ratio rho. The Engram model matches the pure MoE baseline (rho = 100%) even when the MoE allocation is reduced to just rho ~= 40% (46 experts for the 5.7B model and 43 experts for the 9.9B model).
+  evidence_strength: direct
+- id: A-ALLOC-RESULT-OPT
+  section_id: SEC-3.1
+  atom_type: scaling_law_result_atom
+  source_element_id: SE-3.1-RESULT
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 145
+    line_end: 145
+    char_start: 21324
+    char_end: 21857
+  viewer_span:
+    file: source.md
+    line_start: 37
+    line_end: 37
+    char_start: 3576
+    char_end: 4109
+    viewer_only: true
+  raw_text: 'Furthermore, the pure MoE baseline proves suboptimal: reallocating roughly 20%–25% of the sparse parameter budget to Engram yields the best performance. Quantitatively, in the 10B regime ( $C = 6 \times 10^{20}$ ), validation loss improves from 1.7248 (at $\rho = 100\%$ ) to 1.7109 near the optimum of $\rho \approx 80\%$ ( $\Delta = 0.0139$ ). Crucially, the location of this optimum is stable across regimes ( $\rho \approx 75\%–80\%$ ), suggesting a robust allocation preference across the examined scales (under fixed sparsity).'
+  normalized_text: 'The pure MoE baseline is suboptimal: reallocating roughly 20%-25% of the sparse parameter budget to Engram yields the best performance. In the 10B regime (C = 6 x 10^20), validation loss improves from 1.7248 (at rho = 100%) to 1.7109 near the optimum of rho ~= 80% (delta = 0.0139). The optimum is stable across regimes (rho ~= 75%-80%) under fixed sparsity.'
+  evidence_strength: direct
+- id: A-ALLOC-MECH-MOE
+  section_id: SEC-3.1
+  atom_type: mechanism_sentence
+  source_element_id: SE-3.1-MECH-MOE
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 147
+    line_end: 147
+    char_start: 21946
+    char_end: 22121
+  viewer_span:
+    file: source.md
+    line_start: 39
+    line_end: 39
+    char_start: 4198
+    char_end: 4373
+    viewer_only: true
+  raw_text: '- MoE-dominated ( $\rho \rightarrow 100\%$ ): The model lacks dedicated memory for static patterns, forcing it to inefficiently reconstruct them through depth and computation.'
+  normalized_text: 'MoE-dominated (rho -> 100%): the model lacks dedicated memory for static patterns, forcing it to inefficiently reconstruct them through depth and computation.'
+  evidence_strength: direct
+- id: A-ALLOC-MECH-ENGRAM
+  section_id: SEC-3.1
+  atom_type: mechanism_sentence
+  source_element_id: SE-3.1-MECH-ENGRAM
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 148
+    line_end: 148
+    char_start: 22122
+    char_end: 22333
+  viewer_span:
+    file: source.md
+    line_start: 40
+    line_end: 40
+    char_start: 4374
+    char_end: 4585
+    viewer_only: true
+  raw_text: '- Engram-dominated ( $\rho \rightarrow 0\%$ ): The model loses conditional computation capacity, hurting tasks that require dynamic, context-dependent reasoning; memory cannot replace computation in this regime.'
+  normalized_text: 'Engram-dominated (rho -> 0%): the model loses conditional computation capacity, hurting tasks that require dynamic, context-dependent reasoning; memory cannot replace computation in this regime.'
+  evidence_strength: direct
+- id: A-INF-SETUP-001
+  section_id: SEC-3.2
+  atom_type: experiment_setup_atom
+  source_element_id: SE-3.2-SETUP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 154
+    line_end: 154
+    char_start: 22642
+    char_end: 22972
+  viewer_span:
+    file: source.md
+    line_start: 46
+    line_end: 46
+    char_start: 4894
+    char_end: 5224
+    viewer_only: true
+  raw_text: Experimental protocol. We utilize a fixed MoE backbone with $P_{tot} \approx 3B$ and $P_{act} = 568M$ , trained for 100B tokens to ensure convergence. On top of this backbone, we attach an Engram table and sweep the number of slots M from $2.58 \times 10^{5}$ to $1.0 \times 10^{7}$ (adding up to $\approx 13$ billion parameters).
+  normalized_text: 'Aggressive-memory-scaling setup: a fixed MoE backbone with P_tot ~= 3B and P_act = 568M, trained for 100B tokens to ensure convergence; an Engram table is attached and the slot count M is swept from 2.58 x 10^5 to 1.0 x 10^7 (adding up to ~= 13 billion parameters).'
+  evidence_strength: direct
+- id: A-INF-BASELINE-001
+  section_id: SEC-3.2
+  atom_type: experiment_setup_atom
+  source_element_id: SE-3.2-SETUP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 154
+    line_end: 154
+    char_start: 22973
+    char_end: 23413
+  viewer_span:
+    file: source.md
+    line_start: 46
+    line_end: 46
+    char_start: 5225
+    char_end: 5665
+    viewer_only: true
+  raw_text: For baselines, we compare against OverEncoding (Huang et al., 2025a), which integrates N-gram embeddings via averaging with the vocabulary embedding. We note that while other work such as SCONE (Yu et al., 2025) also investigates large-scale embeddings, it is primarily inference-focused and includes extra module (f-gram model) and additional training FLOPs, rendering it incompatible with the strict iso-compute constraints of this study.
+  normalized_text: 'Baseline is OverEncoding (Huang et al., 2025a), which integrates N-gram embeddings by averaging with the vocabulary embedding. SCONE (Yu et al., 2025) is excluded: it is primarily inference-focused and adds an extra module (f-gram model) and additional training FLOPs, making it incompatible with the strict iso-compute constraints of this study.'
+  evidence_strength: direct
+- id: A-INF-RESULT-POWERLAW
+  section_id: SEC-3.2
+  atom_type: scaling_law_result_atom
+  source_element_id: SE-3.2-RESULT
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 156
+    line_end: 156
+    char_start: 23415
+    char_end: 23779
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 5667
+    char_end: 6031
+    viewer_only: true
+  raw_text: 'Results. Figure 3 (right) demonstrates that scaling the number of memory slots yields a clear and consistent improvement in validation loss. Across the explored range, the curve follows a strict power law (linear in log-space), indicating that Engram provides a predictable scaling knob: larger memory continues to pay off without requiring additional computation.'
+  normalized_text: Figure 3 (right) shows that scaling the number of memory slots yields a clear, consistent improvement in validation loss; across the explored range the curve follows a strict power law (linear in log-space), so Engram provides a predictable scaling knob - larger memory keeps paying off without requiring additional computation.
+  evidence_strength: direct
+- id: A-INF-RESULT-VS-OE
+  section_id: SEC-3.2
+  atom_type: result_sentence
+  source_element_id: SE-3.2-RESULT
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 156
+    line_end: 156
+    char_start: 23780
+    char_end: 23982
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 6032
+    char_end: 6234
+    viewer_only: true
+  raw_text: 'Crucially, regarding scaling efficiency: while the direct averaging approach of OverEncoding benefits from larger memory tables, Engram unlocks much larger scaling potential from the same memory budget.'
+  normalized_text: 'On scaling efficiency: while OverEncoding''s direct averaging approach also benefits from larger memory tables, Engram unlocks much larger scaling potential from the same memory budget.'
+  evidence_strength: direct
+- id: A-INF-CLAIM-001
+  section_id: SEC-3.2
+  atom_type: claim_sentence
+  source_element_id: SE-3.2-RESULT
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 156
+    line_end: 156
+    char_start: 23983
+    char_end: 24186
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 6235
+    char_end: 6438
+    viewer_only: true
+  raw_text: Together with the allocation law in Section 3.1, these results validate that conditional memory serves as a distinct, scalable axis of sparse capacity that complements the conditional computation of MoE.
+  normalized_text: Together with the allocation law of Section 3.1, these results validate that conditional memory is a distinct, scalable axis of sparse capacity that complements the conditional computation of MoE.
+  evidence_strength: direct
+semantic_chunks:
+- id: C3-INTRO
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: '3'
+  atom_ids:
+  - A-SCALE-CLAIM-001
+  - A-SCALE-Q-001
+  central_atom_ids:
+  - A-SCALE-CLAIM-001
+  boundary_reason: 'section framing: the complementarity thesis plus the two research questions that scope 3.1/3.2; kept as one core-claim block.'
+  extraction_targets:
+  - ArticleClaim
+  gold_must_cover_atoms:
+  - A-SCALE-CLAIM-001
+  - A-SCALE-Q-001
+- id: C3-ALLOC
+  profile: article_research
+  chunk_type: scaling_law_block
+  section_path: 3 > 3.1
+  atom_ids:
+  - A-ALLOC-DEF-001
+  - A-ALLOC-CONTROL-001
+  - A-ALLOC-RHO-007
+  - A-ALLOC-RHO-DEF
+  - A-ALLOC-RHO-LIMITS
+  - A-ALLOC-SETUP-001
+  - A-ALLOC-RESULT-USHAPE
+  - A-ALLOC-RESULT-OPT
+  - A-ALLOC-MECH-MOE
+  - A-ALLOC-MECH-ENGRAM
+  central_atom_ids:
+  - A-ALLOC-RESULT-USHAPE
+  - A-ALLOC-RHO-007
+  boundary_reason: 'qiefen Section 5.2 anchor expansion: anchor ''U-shaped relationship between validation loss and allocation ratio'' expands BACK over P_def/control/rho definition+formula (Eq.7)/setup and FORWARD over optimum rho + loss numbers + MoE-/Engram-dominated mechanism; the whole scaling law is one knowledge unit and must not be split (formula_continuity + experiment setup-result coupling).'
+  extraction_targets:
+  - ScalingLaw
+  - ExperimentSetup
+  - ExperimentResult
+  - MechanisticExplanation
+  - DerivedRuleCandidate
+  gold_must_cover_atoms:
+  - A-ALLOC-RHO-007
+  - A-ALLOC-SETUP-001
+  - A-ALLOC-RESULT-USHAPE
+  - A-ALLOC-RESULT-OPT
+  - A-ALLOC-MECH-MOE
+- id: C3-INF
+  profile: article_research
+  chunk_type: scaling_law_block
+  section_path: 3 > 3.2
+  atom_ids:
+  - A-INF-SETUP-001
+  - A-INF-BASELINE-001
+  - A-INF-RESULT-POWERLAW
+  - A-INF-RESULT-VS-OE
+  - A-INF-CLAIM-001
+  central_atom_ids:
+  - A-INF-RESULT-POWERLAW
+  boundary_reason: 'infinite-memory experiment: setup + baseline kept with their power-law result and the OverEncoding comparison (experiment setup-result coupling); the closing claim that conditional memory is a distinct scalable axis stays in-block as the result it supports.'
+  extraction_targets:
+  - ExperimentSetup
+  - ExperimentResult
+  - ScalingLaw
+  - ArticleClaim
+  gold_must_cover_atoms:
+  - A-INF-SETUP-001
+  - A-INF-RESULT-POWERLAW
+  - A-INF-RESULT-VS-OE
+context_packages:
+- id: PKG-INTRO
+  profile: article_research
+  chunk_id: C3-INTRO
+  section_path: Chapter 3 > 3. Scaling Laws and Sparsity Allocation
+  document_title: 'Engram: Conditional Memory as a Scalable Axis of Sparsity'
+  atoms:
+  - atom_id: A-SCALE-CLAIM-001
+    atom_type: claim_sentence
+  - atom_id: A-SCALE-Q-001
+    atom_type: claim_sentence
+  linked_context:
+    previous_heading: 2.5 Infrastructure-aware Efficiency
+    next_heading: 3.1 Optimal Allocation Ratio Between MoE and Engram
+  extraction_targets:
+  - ArticleClaim
+  expected_objects:
+  - CLAIM-COMPLEMENTARITY
+  expected_local_fields:
+    CLAIM-COMPLEMENTARITY:
+    - statement
+    - scoped_by
+- id: PKG-ALLOC
+  profile: article_research
+  chunk_id: C3-ALLOC
+  section_path: Chapter 3 > 3.1 Optimal Allocation Ratio Between MoE and Engram
+  document_title: 'Engram: Conditional Memory as a Scalable Axis of Sparsity'
+  atoms:
+  - atom_id: A-ALLOC-DEF-001
+    atom_type: definition_atom
+  - atom_id: A-ALLOC-CONTROL-001
+    atom_type: experiment_setup_atom
+  - atom_id: A-ALLOC-RHO-007
+    atom_type: formula_atom
+  - atom_id: A-ALLOC-RHO-DEF
+    atom_type: definition_atom
+  - atom_id: A-ALLOC-RHO-LIMITS
+    atom_type: definition_atom
+  - atom_id: A-ALLOC-SETUP-001
+    atom_type: experiment_setup_atom
+  - atom_id: A-ALLOC-RESULT-USHAPE
+    atom_type: scaling_law_result_atom
+  - atom_id: A-ALLOC-RESULT-OPT
+    atom_type: scaling_law_result_atom
+  - atom_id: A-ALLOC-MECH-MOE
+    atom_type: mechanism_sentence
+  - atom_id: A-ALLOC-MECH-ENGRAM
+    atom_type: mechanism_sentence
+  linked_context:
+    formula_context: Eq.(7) allocation ratio rho splits P_sparse between MoE experts and Engram embeddings
+    figure: 'Figure 3 (left): validation loss vs allocation ratio rho (U-shaped)'
+    previous_heading: 3. Scaling Laws and Sparsity Allocation
+    next_heading: 3.2 Engram under Infinite Memory Regime
+  extraction_targets:
+  - ScalingLaw
+  - ExperimentSetup
+  - ExperimentResult
+  - MechanisticExplanation
+  - DerivedRuleCandidate
+  expected_objects:
+  - SETUP-ALLOC
+  - SCALINGLAW-USHAPE
+  - RESULT-ALLOC
+  - MECH-COMPLEMENTARITY
+  - RULE-OPTIMAL-RHO
+- id: PKG-INF
+  profile: article_research
+  chunk_id: C3-INF
+  section_path: Chapter 3 > 3.2 Engram under Infinite Memory Regime
+  document_title: 'Engram: Conditional Memory as a Scalable Axis of Sparsity'
+  atoms:
+  - atom_id: A-INF-SETUP-001
+    atom_type: experiment_setup_atom
+  - atom_id: A-INF-BASELINE-001
+    atom_type: experiment_setup_atom
+  - atom_id: A-INF-RESULT-POWERLAW
+    atom_type: scaling_law_result_atom
+  - atom_id: A-INF-RESULT-VS-OE
+    atom_type: result_sentence
+  - atom_id: A-INF-CLAIM-001
+    atom_type: claim_sentence
+  linked_context:
+    figure: 'Figure 3 (right): validation loss vs number of memory slots (power law)'
+    previous_heading: 3.1 Optimal Allocation Ratio Between MoE and Engram
+    next_heading: 4. Large Scale Pre-training
+  extraction_targets:
+  - ExperimentSetup
+  - ExperimentResult
+  - ScalingLaw
+  - ArticleClaim
+  expected_objects:
+  - SETUP-INF
+  - SCALINGLAW-INF
+  - RESULT-INF
+  expected_local_fields:
+    CLAIM-COMPLEMENTARITY:
+    - statement
+mentions:
+- id: M3-01
+  text: P_sparse
+  type: Variable
+  atom_id: A-ALLOC-DEF-001
+  canonical_key: p_sparse
+- id: M3-02
+  text: allocation ratio rho
+  type: Variable
+  atom_id: A-ALLOC-RHO-007
+  canonical_key: allocation_ratio_rho
+- id: M3-03
+  text: iso-FLOPs setup
+  type: ExperimentSetup
+  atom_id: A-ALLOC-SETUP-001
+  canonical_key: alloc_iso_flops_setup
+- id: M3-04
+  text: U-shaped relationship
+  type: ScalingLaw
+  atom_id: A-ALLOC-RESULT-USHAPE
+  canonical_key: u_shaped_allocation_law
+- id: M3-05
+  text: optimal rho 75-80%
+  type: DerivedRuleCandidate
+  atom_id: A-ALLOC-RESULT-OPT
+  canonical_key: optimal_allocation_rho
+- id: M3-06
+  text: MoE-dominated regime
+  type: MechanisticExplanation
+  atom_id: A-ALLOC-MECH-MOE
+  canonical_key: moe_dominated_mechanism
+- id: M3-07
+  text: infinite memory regime
+  type: ExperimentSetup
+  atom_id: A-INF-SETUP-001
+  canonical_key: infinite_memory_setup
+- id: M3-08
+  text: OverEncoding
+  type: ArticleClaim
+  atom_id: A-INF-BASELINE-001
+  canonical_key: overencoding_baseline
+- id: M3-09
+  text: power law (log-linear)
+  type: ScalingLaw
+  atom_id: A-INF-RESULT-POWERLAW
+  canonical_key: infinite_memory_power_law
+- id: M3-10
+  text: conditional memory
+  type: Concept
+  atom_id: A-SCALE-CLAIM-001
+  canonical_key: conditional_memory
+canonicalization:
+- canonical: allocation_ratio_rho
+  aliases:
+  - allocation ratio
+  - rho
+  - rho in [0,1]
+  - fraction of inactive budget to MoE
+- canonical: u_shaped_allocation_law
+  aliases:
+  - U-shaped relationship
+  - U-shape
+  - U-shaped scaling law
+  - allocation law
+- canonical: optimal_allocation_rho
+  aliases:
+  - optimal rho
+  - rho ~= 75%-80%
+  - rho ~= 80%
+  - best allocation
+  note: 'DerivedRuleCandidate: allocate roughly 20-25% of the sparse budget to Engram (rho 75-80%) for the optimum.'
+- canonical: infinite_memory_power_law
+  aliases:
+  - power law
+  - linear in log-space
+  - log-linear scaling
+  - memory-slot scaling
+- canonical: conditional_memory
+  aliases:
+  - conditional memory
+  - Engram
+  - memory module
+  note: Engram instantiates conditional memory, complementary to MoE's conditional computation.
+objects:
+- id: CLAIM-COMPLEMENTARITY
+  type: ArticleClaim
+  section_path: '3'
+  home_package: PKG-INTRO
+  payload:
+    statement: Conditional memory (Engram) is a distinct, scalable axis of sparse capacity that is structurally complementary to the conditional computation of MoE experts.
+    scoped_by: 'two research questions: allocation under finite constraints (3.1) and the infinite memory regime (3.2)'
+  local_evidence_atom_ids:
+  - A-SCALE-CLAIM-001
+  - A-SCALE-Q-001
+  supporting_context_atom_ids:
+  - A-INF-CLAIM-001
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SETUP-ALLOC
+  type: ExperimentSetup
+  section_path: 3 > 3.1
+  home_package: PKG-ALLOC
+  payload:
+    design: Iso-parameter / iso-FLOPs allocation sweep over the allocation ratio rho
+    metrics: P_tot, P_act, P_sparse := P_tot - P_act
+    control: P_tot and P_act fixed within each FLOPs budget; only the routed-expert count and Engram slot count vary; identical pipeline and hyperparameters
+    regimes:
+    - 'C = 2 x 10^20 FLOPs: P_tot ~= 5.7B, P_act = 568M, baseline rho=1 has 106 experts'
+    - 'C = 6 x 10^20 FLOPs: P_tot ~= 9.9B, P_act = 993M, baseline rho=1 has 99 experts'
+    sparsity_ratio: P_tot/P_act ~= 10 (constant across regimes)
+  local_evidence_atom_ids:
+  - A-ALLOC-DEF-001
+  - A-ALLOC-CONTROL-001
+  - A-ALLOC-RHO-007
+  - A-ALLOC-RHO-DEF
+  - A-ALLOC-RHO-LIMITS
+  - A-ALLOC-SETUP-001
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SCALINGLAW-USHAPE
+  type: ScalingLaw
+  section_path: 3 > 3.1
+  home_package: PKG-ALLOC
+  payload:
+    shape: 'U-shaped: validation loss vs allocation ratio rho (Figure 3 left)'
+    finding: Engram matches pure MoE (rho=100%) even at rho ~= 40% (46 experts @5.7B, 43 experts @9.9B); pure MoE is suboptimal
+    optimum: rho ~= 75%-80% (reallocate ~20%-25% of the sparse budget to Engram), stable across regimes
+    quantitative: '10B regime (C = 6 x 10^20): loss 1.7248 (rho=100%) -> 1.7109 (rho ~= 80%), delta = 0.0139'
+  local_evidence_atom_ids:
+  - A-ALLOC-RESULT-USHAPE
+  - A-ALLOC-RESULT-OPT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-ALLOC
+  type: ExperimentResult
+  section_path: 3 > 3.1
+  home_package: PKG-ALLOC
+  payload:
+    result: U-shaped loss-vs-rho curve; optimum at rho ~= 75%-80%; best 10B-regime loss 1.7109 vs 1.7248 baseline (delta 0.0139)
+    figure: Figure 3 (left)
+  local_evidence_atom_ids:
+  - A-ALLOC-RESULT-USHAPE
+  - A-ALLOC-RESULT-OPT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-COMPLEMENTARITY
+  type: MechanisticExplanation
+  section_path: 3 > 3.1
+  home_package: PKG-ALLOC
+  payload:
+    moe_dominated: 'rho -> 100%: no dedicated memory; static patterns reconstructed inefficiently via depth/computation'
+    engram_dominated: 'rho -> 0%: loses conditional computation; hurts dynamic context-dependent reasoning; memory cannot replace computation'
+    conclusion: the U-shape confirms the structural complementarity of the two modules
+  local_evidence_atom_ids:
+  - A-ALLOC-MECH-MOE
+  - A-ALLOC-MECH-ENGRAM
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RULE-OPTIMAL-RHO
+  type: DerivedRuleCandidate
+  section_path: 3 > 3.1
+  home_package: PKG-ALLOC
+  payload:
+    rule: Allocate ~20%-25% of the sparse-parameter budget to Engram (allocation ratio rho ~= 75%-80%) rather than using pure MoE.
+    basis: U-shaped optimum stable across the 5.7B and 9.9B regimes under fixed sparsity
+  local_evidence_atom_ids:
+  - A-ALLOC-RESULT-OPT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: SETUP-INF
+  type: ExperimentSetup
+  section_path: 3 > 3.2
+  home_package: PKG-INF
+  payload:
+    design: Aggressive memory scaling on a fixed backbone
+    backbone: fixed MoE backbone P_tot ~= 3B, P_act = 568M, 100B training tokens
+    sweep: Engram slot count M from 2.58 x 10^5 to 1.0 x 10^7 (adds up to ~= 13 billion params)
+    baseline: OverEncoding (Huang et al., 2025a); SCONE excluded as inference-focused with extra f-gram FLOPs (breaks iso-compute)
+  local_evidence_atom_ids:
+  - A-INF-SETUP-001
+  - A-INF-BASELINE-001
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SCALINGLAW-INF
+  type: ScalingLaw
+  section_path: 3 > 3.2
+  home_package: PKG-INF
+  payload:
+    shape: 'Strict power law (linear in log-space): validation loss vs number of memory slots (Figure 3 right)'
+    finding: Memory is a predictable scaling knob; larger memory keeps improving loss without extra compute
+    vs_baseline: Engram unlocks much larger scaling potential than OverEncoding from the same memory budget
+  local_evidence_atom_ids:
+  - A-INF-RESULT-POWERLAW
+  - A-INF-RESULT-VS-OE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-INF
+  type: ExperimentResult
+  section_path: 3 > 3.2
+  home_package: PKG-INF
+  payload:
+    result: Power-law (log-linear) validation-loss improvement with memory slots; Engram > OverEncoding in scaling efficiency
+    figure: Figure 3 (right)
+  local_evidence_atom_ids:
+  - A-INF-RESULT-POWERLAW
+  - A-INF-RESULT-VS-OE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R3-01
+  relation_type: experiment_tests_claim
+  source_object_id: SETUP-ALLOC
+  target_object_id: CLAIM-COMPLEMENTARITY
+  evidence_atom_ids:
+  - A-ALLOC-SETUP-001
+  - A-ALLOC-RHO-007
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R3-02
+  relation_type: result_supports_claim
+  source_object_id: RESULT-ALLOC
+  target_object_id: CLAIM-COMPLEMENTARITY
+  evidence_atom_ids:
+  - A-ALLOC-RESULT-USHAPE
+  - A-ALLOC-RESULT-OPT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R3-03
+  relation_type: result_supports_claim
+  source_object_id: RESULT-ALLOC
+  target_object_id: SCALINGLAW-USHAPE
+  evidence_atom_ids:
+  - A-ALLOC-RESULT-USHAPE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R3-04
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-COMPLEMENTARITY
+  target_object_id: RESULT-ALLOC
+  evidence_atom_ids:
+  - A-ALLOC-MECH-MOE
+  - A-ALLOC-MECH-ENGRAM
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R3-05
+  relation_type: claim_suggests_design_rule
+  source_object_id: SCALINGLAW-USHAPE
+  target_object_id: RULE-OPTIMAL-RHO
+  evidence_atom_ids:
+  - A-ALLOC-RESULT-OPT
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R3-06
+  relation_type: experiment_tests_claim
+  source_object_id: SETUP-INF
+  target_object_id: CLAIM-COMPLEMENTARITY
+  evidence_atom_ids:
+  - A-INF-SETUP-001
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R3-07
+  relation_type: result_supports_claim
+  source_object_id: RESULT-INF
+  target_object_id: SCALINGLAW-INF
+  evidence_atom_ids:
+  - A-INF-RESULT-POWERLAW
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R3-08
+  relation_type: result_supports_claim
+  source_object_id: RESULT-INF
+  target_object_id: CLAIM-COMPLEMENTARITY
+  evidence_atom_ids:
+  - A-INF-RESULT-POWERLAW
+  - A-INF-CLAIM-001
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+do_not_extract:
+- text: (Huang et al., 2025a)
+  atom_id: A-INF-BASELINE-001
+  reason: inline author-year citation for the OverEncoding baseline; not a knowledge object.
+  kind: citation
+- text: (Yu et al., 2025)
+  atom_id: A-INF-BASELINE-001
+  reason: inline author-year citation for SCONE; not a knowledge object.
+  kind: citation
+- pattern: inline_author_year_citation
+  examples:
+  - (Huang et al., 2025a)
+  - (Yu et al., 2025)
+  - (Vaswani et al., 2017)
+  reason: inline author-year citations are not knowledge objects; suppress citation over-extraction consistently with other chapters.
+  kind: citation_policy
+- text: Figure 3 (left)
+  atom_id: A-ALLOC-RESULT-USHAPE
+  reason: figure reference label; the numerical results are read from prose, the figure itself is not an extractable object in this slice.
+  kind: figure_label
+- text: Figure 3 (right)
+  atom_id: A-INF-RESULT-POWERLAW
+  reason: figure reference label; the numerical results are read from prose, the figure itself is not an extractable object in this slice.
+  kind: figure_label
+- text: detailed in Section 2.5
+  atom_id: A-INF-SETUP-001
+  reason: backward cross-reference to Section 2.5 (decoupled storage/compute), outside this chapter slice.
+  kind: out_of_slice_reference
+- text: Section 3.1
+  atom_id: A-INF-CLAIM-001
+  reason: cross-reference to the sibling section 3.1; not itself a knowledge object.
+  kind: out_of_slice_reference

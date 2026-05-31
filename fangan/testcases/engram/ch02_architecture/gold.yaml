@@ -1,0 +1,2275 @@
+# Gold fixture v0.3.2 - Engram paper Chapter 2 Architecture (profile: article_research)
+# v0.3.2 (per fourth review): objects split evidence into local_evidence_atom_ids + supporting_context_atom_ids
+# + home_package (expected_objects scored on local evidence only); A-GATE-RMSNORM split into A-GATE-WKV-DEF +
+# A-GATE-RMSNORM (FORM-EQ3 uses WKV-DEF, FORM-EQ4 uses RMSNORM); do_not_extract adds Xie-2025, the two Figure-2
+# subfigure labels, and an inline-citation policy; R-07 += A-MB-BACKBONE, R-16 += A-FIG2, R-05 += A-OV-ROADMAP/A-GATE-OUT;
+# packages add expected_local_fields for cross-package objects.
+
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Chapter 2 (Architecture) only
+  title: Engram - Conditional Memory Module - Chapter 2 Architecture
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 31
+  - 109
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 31-109; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - Section 2.2
+  - Figure 1/2/3
+  - Eq. (1)-(6)
+  - ablation in Section 6.2
+  - (Vaswani et al., 2017)
+  - Appendix C
+  extraction_targets:
+  - ArticleMethod
+  - ArchitectureComponent
+  - Formula
+  - ExperimentSetup
+  - IntermediateRepresentation
+  - MechanisticExplanation
+  - SystemDesignClaim
+  - Implication
+  - Limitation
+  - Risk
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math, and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone (the remaining fields require supporting_context atoms from other packages).
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: figure atoms separate physical_section_id from semantic_section_ids; forward references set include_in_chapter2_core_chunks:false and are isolated in a cross_reference_block.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids.
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - Formulas render as $$...\tag{N}$$ with chapter-continuous numbering 1-6.
+  - Figure 1/2/3 render as 'Figure N | ...' text paragraphs, no images; Figure 2 is preceded by stray '(a) Engram at training'/'(b) Engram at inference' subfigure labels (orig lines 81/83) -> see do_not_extract.
+  - Tokenizer Compression / Multi-Head Hashing are run-in sub-headings under 2.2 -> SEC-2.2-TC / SEC-2.2-MH.
+  - The 2.2 tokenizer paragraph breaks across a page boundary (orig lines 41 and 43).
+source_elements:
+- id: SE-H-2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 31
+  line_end: 31
+- id: SE-H-2.1
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 33
+  line_end: 33
+- id: SE-2.1-OV
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 35
+  line_end: 35
+- id: SE-H-2.2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 37
+  line_end: 37
+- id: SE-2.2-INTRO
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 39
+  line_end: 39
+- id: SE-2.2-TC
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 41
+  line_end: 43
+  note: run-in heading 'Tokenizer Compression'; spans page break
+- id: SE-2.2-MH
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 45
+  line_end: 45
+  note: run-in heading 'Multi-Head Hashing.'
+- id: SE-2.2-EQ1
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 47
+  line_end: 49
+  metadata:
+    tag: '1'
+- id: SE-2.2-MH2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 51
+  line_end: 51
+- id: SE-2.2-EQ2
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 53
+  line_end: 55
+  metadata:
+    tag: '2'
+- id: SE-H-2.3
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 57
+  line_end: 57
+- id: SE-2.3-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 59
+  line_end: 59
+- id: SE-2.3-EQ3
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 61
+  line_end: 63
+  metadata:
+    tag: '3'
+- id: SE-2.3-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 65
+  line_end: 65
+  note: W_K/W_V definition + RMSNorm/gradient-stability
+- id: SE-2.3-EQ4
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 67
+  line_end: 69
+  metadata:
+    tag: '4'
+- id: SE-2.3-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 71
+  line_end: 71
+- id: SE-2.3-P4
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 73
+  line_end: 73
+- id: SE-2.3-EQ5
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 75
+  line_end: 77
+  metadata:
+    tag: '5'
+- id: SE-2.3-P5
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 79
+  line_end: 79
+- id: SE-FIG2
+  type: figure_caption
+  file: engram_paper_mineru.md
+  line_start: 84
+  line_end: 84
+- id: SE-H-2.4
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 86
+  line_end: 86
+- id: SE-2.4-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 88
+  line_end: 88
+- id: SE-2.4-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 90
+  line_end: 90
+- id: SE-2.4-EQ6
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 92
+  line_end: 94
+  metadata:
+    tag: '6'
+- id: SE-2.4-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 96
+  line_end: 96
+- id: SE-FIG3
+  type: figure_caption
+  file: engram_paper_mineru.md
+  line_start: 98
+  line_end: 98
+- id: SE-H-2.5
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 100
+  line_end: 100
+- id: SE-2.5-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 102
+  line_end: 102
+- id: SE-2.5-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 104
+  line_end: 104
+- id: SE-2.5-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 106
+  line_end: 106
+- id: SE-2.5-P4
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 108
+  line_end: 108
+section_tree:
+- id: SEC-2
+  path: '2'
+  title: Architecture
+- id: SEC-2.1
+  path: 2 > 2.1
+  title: Overview
+  parent: SEC-2
+- id: SEC-2.2
+  path: 2 > 2.2
+  title: Sparse Retrieval via Hashed N-grams
+  parent: SEC-2
+- id: SEC-2.2-TC
+  path: 2 > 2.2 > Tokenizer Compression
+  title: Tokenizer Compression
+  parent: SEC-2.2
+  kind: run_in_heading
+- id: SEC-2.2-MH
+  path: 2 > 2.2 > Multi-Head Hashing
+  title: Multi-Head Hashing
+  parent: SEC-2.2
+  kind: run_in_heading
+- id: SEC-2.3
+  path: 2 > 2.3
+  title: Context-aware Gating
+  parent: SEC-2
+- id: SEC-2.4
+  path: 2 > 2.4
+  title: Integration with Multi-branch Architecture
+  parent: SEC-2
+- id: SEC-2.5
+  path: 2 > 2.5
+  title: 'System Efficiency: Decoupling Compute and Memory'
+  parent: SEC-2
+- id: SEC-XREF-SCALING
+  path: (cross-ref) Section 3
+  title: Forward reference to Section 3 Scaling Laws
+  parent: SEC-2
+  kind: cross_reference
+evidence_atoms:
+- id: A-OV-DEF
+  section_id: SEC-2.1
+  atom_type: method_sentence
+  source_element_id: SE-2.1-OV
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 35
+    line_end: 35
+    char_start: 7611
+    char_end: 7791
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 332
+    char_end: 512
+    viewer_only: true
+  raw_text: As shown in Figure 1, Engram is a conditional memory module designed to augment the Transformer backbone by structurally separating static pattern storage from dynamic computation.
+  normalized_text: Engram is a conditional memory module designed to augment the Transformer backbone by structurally separating static pattern storage from dynamic computation (Figure 1).
+  evidence_strength: direct
+  metadata:
+    figure: Figure 1
+- id: A-OV-PHASES
+  section_id: SEC-2.1
+  atom_type: method_sentence
+  source_element_id: SE-2.1-OV
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 35
+    line_end: 35
+    char_start: 7792
+    char_end: 8025
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 513
+    char_end: 746
+    viewer_only: true
+  raw_text: 'Formally, given an input sequence $X = (x_{1}, \ldots, x_{T})$ and hidden states $\mathbf{H}^{(\ell)} \in \mathbb{R}^{T \times d}$ at layer $\ell$ , the module processes each position t in two functional phases: retrieval and fusion.'
+  normalized_text: 'Given input sequence X=(x_1,...,x_T) and hidden states H^(l) at layer l, the module processes each position t in two functional phases: retrieval and fusion.'
+  evidence_strength: direct
+- id: A-OV-ROADMAP
+  section_id: SEC-2.1
+  atom_type: method_sentence
+  source_element_id: SE-2.1-OV
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 35
+    line_end: 35
+    char_start: 8026
+    char_end: 8448
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 747
+    char_end: 1169
+    viewer_only: true
+  raw_text: First, as detailed in Section 2.2, we extract and compress suffix N-grams to deterministically retrieve static embedding vectors via hashing. Subsequently, in Section 2.3, these retrieved embeddings are dynamically modulated by the current hidden state and refined via a lightweight convolution. Finally, we discuss the integration with multi-branch architectures in Section 2.4 and the system-level design in Section 2.5.
+  normalized_text: Retrieval is detailed in Section 2.2 (extract/compress suffix N-grams, retrieve static embeddings via hashing); fusion in Section 2.3 (modulate retrieved embeddings by the hidden state, refine via convolution); multi-branch integration in Section 2.4; system-level design in Section 2.5.
+  evidence_strength: direct
+  metadata:
+    role: phase_to_section_roadmap
+- id: A-RETR-INTRO
+  section_id: SEC-2.2
+  atom_type: method_sentence
+  source_element_id: SE-2.2-INTRO
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 39
+    line_end: 39
+    char_start: 8497
+    char_end: 8643
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 1218
+    char_end: 1364
+    viewer_only: true
+  raw_text: The first phase maps local contexts to static memory entries, involving tokenizer compression and retrieving embeddings via deterministic hashing.
+  normalized_text: The first phase maps local contexts to static memory entries, involving tokenizer compression and retrieving embeddings via deterministic hashing.
+  evidence_strength: direct
+- id: A-TC-MOTIV
+  section_id: SEC-2.2-TC
+  atom_type: method_sentence
+  source_element_id: SE-2.2-TC
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 41
+    line_end: 41
+    char_start: 8667
+    char_end: 9018
+  viewer_span:
+    file: source.md
+    line_start: 14
+    line_end: 14
+    char_start: 1388
+    char_end: 1739
+    viewer_only: true
+  raw_text: While $N$ -gram models typically operate directly on tokenizer outputs, standard subword tokenizers prioritize lossless reconstruction, often assigning disjoint IDs to semantically equivalent terms (e.g., Apple vs. $\sqcup$ apple) (Kudo and Richardson, 2018; Li et al., 2023b). To maximize semantic density, we implement a vocabulary projection layer.
+  normalized_text: While N-gram models typically operate on tokenizer outputs, standard subword tokenizers prioritize lossless reconstruction and assign disjoint IDs to semantically equivalent terms (e.g., Apple vs. _apple); to maximize semantic density we implement a vocabulary projection layer.
+  evidence_strength: direct
+- id: A-TC-PROJ
+  section_id: SEC-2.2-TC
+  atom_type: method_sentence
+  source_element_id: SE-2.2-TC
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 41
+    line_end: 43
+    char_start: 9033
+    char_end: 9240
+  viewer_span:
+    file: source.md
+    line_start: 14
+    line_end: 16
+    char_start: 1754
+    char_end: 1961
+    viewer_only: true
+  raw_text: 'we pre-compute a surjective function $\mathcal{P}: V \to V''$ that collapses raw token IDs into canonical
+
+
+    identifiers based on normalized textual equivalence (using NFKC (Whistler, 2025), lowercasing, etc.).'
+  normalized_text: 'A pre-computed surjective function P: V -> V'' collapses raw token IDs into canonical identifiers based on normalized textual equivalence (NFKC, lowercasing, etc.).'
+  evidence_strength: direct
+- id: A-TC-REDUCTION
+  section_id: SEC-2.2-TC
+  atom_type: result_sentence
+  source_element_id: SE-2.2-TC
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 43
+    line_end: 43
+    char_start: 9254
+    char_end: 9363
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 1975
+    char_end: 2084
+    viewer_only: true
+  raw_text: this process achieves a 23% reduction in the effective vocabulary size for a 128k tokenizer (see Appendix C).
+  normalized_text: This process achieves a 23% reduction in the effective vocabulary size for a 128k tokenizer (see Appendix C).
+  evidence_strength: direct
+- id: A-TC-NGRAM
+  section_id: SEC-2.2-TC
+  atom_type: formula_atom
+  source_element_id: SE-2.2-TC
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 43
+    line_end: 43
+    char_start: 9401
+    char_end: 9567
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 2122
+    char_end: 2288
+    viewer_only: true
+  raw_text: we map its raw ID $x_{t}$ to a canonical ID $x_{t}^{\prime} = \mathcal{P}(x_{t})$ to form the suffix N-gram $g_{t,n} = (x_{t-n+1}^{\prime}, \ldots, x_{t}^{\prime})$ .
+  normalized_text: Map raw ID x_t to canonical ID x'_t = P(x_t); suffix N-gram g_{t,n} = (x'_{t-n+1}, ..., x'_t).
+  evidence_strength: direct
+  metadata:
+    role: suffix_ngram_def
+- id: A-MH-MOTIV
+  section_id: SEC-2.2-MH
+  atom_type: method_sentence
+  source_element_id: SE-2.2-MH
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 45
+    line_end: 45
+    char_start: 9589
+    char_end: 9751
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 2310
+    char_end: 2472
+    viewer_only: true
+  raw_text: Directly parameterizing the combinatorial space of all possible N-grams is intractable. Following Tito Svenstrup et al. (2017), we adopt a hashing-based approach.
+  normalized_text: Directly parameterizing the combinatorial space of all possible N-grams is intractable; following Tito Svenstrup et al. (2017) we adopt a hashing-based approach.
+  evidence_strength: direct
+- id: A-MH-HEADS
+  section_id: SEC-2.2-MH
+  atom_type: method_sentence
+  source_element_id: SE-2.2-MH
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 45
+    line_end: 45
+    char_start: 9752
+    char_end: 9994
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 2473
+    char_end: 2715
+    viewer_only: true
+  raw_text: 'To mitigate collisions, we employ K distinct hash heads for each N-gram order n. Each head k maps the compressed context to an index within an embedding table $E_{n,k}$ (of prime size $M_{n,k}$ ) via a deterministic function $\varphi_{n,k}$ :'
+  normalized_text: K distinct hash heads are employed for each N-gram order n; each head k maps the compressed context to an index within an embedding table E_{n,k} of prime size M_{n,k} via a deterministic function phi_{n,k}.
+  evidence_strength: direct
+- id: A-MH-EQ1
+  section_id: SEC-2.2-MH
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 48
+    line_end: 48
+    char_start: 9999
+    char_end: 10134
+  viewer_span:
+    file: source.md
+    line_start: 21
+    line_end: 21
+    char_start: 2720
+    char_end: 2855
+    viewer_only: true
+  raw_text: z _ {t, n, k} \triangleq \varphi_ {n, k} (g _ {t, n}), \quad \mathbf {e} _ {t, n, k} = \mathbf {E} _ {n, k} [ z _ {t, n, k} ]. \tag {1}
+  normalized_text: z_{t,n,k} := phi_{n,k}(g_{t,n}) ;  e_{t,n,k} = E_{n,k}[z_{t,n,k}]
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: hash_index_and_lookup
+- id: A-MH-HASHFN
+  section_id: SEC-2.2-MH
+  atom_type: method_sentence
+  source_element_id: SE-2.2-MH2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 51
+    line_end: 51
+    char_start: 10139
+    char_end: 10224
+  viewer_span:
+    file: source.md
+    line_start: 24
+    line_end: 24
+    char_start: 2860
+    char_end: 2945
+    viewer_only: true
+  raw_text: In practice, $\varphi_{n,k}$ is implemented as a lightweight multiplicative-XOR hash.
+  normalized_text: In practice phi_{n,k} is implemented as a lightweight multiplicative-XOR hash.
+  evidence_strength: direct
+- id: A-MH-CONCAT
+  section_id: SEC-2.2-MH
+  atom_type: method_sentence
+  source_element_id: SE-2.2-MH2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 51
+    line_end: 51
+    char_start: 10225
+    char_end: 10328
+  viewer_span:
+    file: source.md
+    line_start: 24
+    line_end: 24
+    char_start: 2946
+    char_end: 3049
+    viewer_only: true
+  raw_text: 'We construct the final memory vector $e_{t} \in R^{d_{mem}}$ by concatenating all retrieved embeddings:'
+  normalized_text: The final memory vector e_t in R^{d_mem} is constructed by concatenating all retrieved embeddings.
+  evidence_strength: direct
+  metadata:
+    role: memory_vector_concat_evidence
+- id: A-MH-EQ2
+  section_id: SEC-2.2-MH
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 54
+    line_end: 54
+    char_start: 10333
+    char_end: 10437
+  viewer_span:
+    file: source.md
+    line_start: 27
+    line_end: 27
+    char_start: 3054
+    char_end: 3158
+    viewer_only: true
+  raw_text: \mathbf {e} _ {t} \triangleq \prod_ {n = 2} ^ {N} \prod_ {k = 1} ^ {K} \mathbf {e} _ {t, n, k}. \tag {2}
+  normalized_text: e_t := concat over n=2..N, k=1..K of e_{t,n,k}  (e_t in R^{d_mem})
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: memory_vector_concat
+    note: product symbol in source denotes concatenation
+    interpretation_supported_by:
+    - A-MH-CONCAT
+- id: A-GATE-PRIOR
+  section_id: SEC-2.3
+  atom_type: method_sentence
+  source_element_id: SE-2.3-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 59
+    line_end: 59
+    char_start: 10471
+    char_end: 10540
+  viewer_span:
+    file: source.md
+    line_start: 32
+    line_end: 32
+    char_start: 3192
+    char_end: 3261
+    viewer_only: true
+  raw_text: The retrieved embeddings $e_{t}$ serve as context-independent priors.
+  normalized_text: The retrieved embeddings e_t serve as context-independent priors.
+  evidence_strength: direct
+- id: A-GATE-RISK
+  section_id: SEC-2.3
+  atom_type: risk_sentence
+  source_element_id: SE-2.3-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 59
+    line_end: 59
+    char_start: 10541
+    char_end: 10695
+  viewer_span:
+    file: source.md
+    line_start: 32
+    line_end: 32
+    char_start: 3262
+    char_end: 3416
+    viewer_only: true
+  raw_text: Being static, however, they inherently lack contextual adaptability and may suffer from noise due to hash collisions or polysemy (Haber and Poesio, 2024).
+  normalized_text: Being static, the retrieved embeddings lack contextual adaptability and may suffer from noise due to hash collisions or polysemy.
+  evidence_strength: direct
+- id: A-GATE-QKV
+  section_id: SEC-2.3
+  atom_type: method_sentence
+  source_element_id: SE-2.3-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 59
+    line_end: 59
+    char_start: 10860
+    char_end: 11097
+  viewer_span:
+    file: source.md
+    line_start: 32
+    line_end: 32
+    char_start: 3581
+    char_end: 3818
+    viewer_only: true
+  raw_text: 'Specifically, we utilize the current hidden state $h_{t}$ —which has aggregated global context via preceding attention layers—as a dynamic Query, while the retrieved memory $e_{t}$ serves as the source for both Key and Value projections:'
+  normalized_text: The current hidden state h_t is used as a dynamic Query, while the retrieved memory e_t is the source for both Key and Value projections.
+  evidence_strength: direct
+- id: A-GATE-EQ3
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 62
+    line_end: 62
+    char_start: 11102
+    char_end: 11229
+  viewer_span:
+    file: source.md
+    line_start: 35
+    line_end: 35
+    char_start: 3823
+    char_end: 3950
+    viewer_only: true
+  raw_text: \mathbf {k} _ {t} = \mathbf {W} _ {K} \mathbf {e} _ {t}, \quad \mathbf {v} _ {t} = \mathbf {W} _ {V} \mathbf {e} _ {t} \tag {3}
+  normalized_text: k_t = W_K e_t ;  v_t = W_V e_t
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: key_value_projection
+    supported_by_context_atoms:
+    - A-GATE-WKV-DEF
+- id: A-GATE-WKV-DEF
+  section_id: SEC-2.3
+  atom_type: method_sentence
+  source_element_id: SE-2.3-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 65
+    line_end: 65
+    char_start: 11234
+    char_end: 11289
+  viewer_span:
+    file: source.md
+    line_start: 38
+    line_end: 38
+    char_start: 3955
+    char_end: 4010
+    viewer_only: true
+  raw_text: where $W_{K}, W_{V}$ are learnable projection matrices.
+  normalized_text: W_K and W_V are learnable projection matrices.
+  evidence_strength: direct
+- id: A-GATE-RMSNORM
+  section_id: SEC-2.3
+  atom_type: method_sentence
+  source_element_id: SE-2.3-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 65
+    line_end: 65
+    char_start: 11290
+    char_end: 11466
+  viewer_span:
+    file: source.md
+    line_start: 38
+    line_end: 38
+    char_start: 4011
+    char_end: 4187
+    viewer_only: true
+  raw_text: 'To ensure gradient stability (Dehghani et al., 2023), we apply RMSNorm (Zhang and Sennrich, 2019) to the Query and Key before computing the scalar gate $\alpha_{t} \in (0,1)$ :'
+  normalized_text: For gradient stability, RMSNorm is applied to the Query and Key before computing the scalar gate alpha_t in (0,1).
+  evidence_strength: direct
+- id: A-GATE-EQ4
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 68
+    line_end: 68
+    char_start: 11471
+    char_end: 11616
+  viewer_span:
+    file: source.md
+    line_start: 41
+    line_end: 41
+    char_start: 4192
+    char_end: 4337
+    viewer_only: true
+  raw_text: \alpha_ {t} = \sigma \left(\frac {\mathrm{RMSNorm} (\mathbf {h} _ {t}) ^ {\top} \mathrm{RMSNorm} (\mathbf {k} _ {t})}{\sqrt {d}}\right). \tag {4}
+  normalized_text: alpha_t = sigma( RMSNorm(h_t)^T RMSNorm(k_t) / sqrt(d) )
+  evidence_strength: direct
+  metadata:
+    tag: '4'
+    role: scalar_gate
+    supported_by_context_atoms:
+    - A-GATE-RMSNORM
+- id: A-GATE-OUT
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 71
+    line_end: 71
+    char_start: 11621
+    char_end: 11694
+  viewer_span:
+    file: source.md
+    line_start: 44
+    line_end: 44
+    char_start: 4342
+    char_end: 4415
+    viewer_only: true
+  raw_text: The gated output is defined as $\tilde{v}_{t} = \alpha_{t} \cdot v_{t}$ .
+  normalized_text: gated output v~_t = alpha_t * v_t
+  evidence_strength: direct
+  metadata:
+    role: gated_value
+- id: A-GATE-MECH
+  section_id: SEC-2.3
+  atom_type: mechanism_sentence
+  source_element_id: SE-2.3-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 71
+    line_end: 71
+    char_start: 11695
+    char_end: 11885
+  viewer_span:
+    file: source.md
+    line_start: 44
+    line_end: 44
+    char_start: 4416
+    char_end: 4606
+    viewer_only: true
+  raw_text: 'This design enforces semantic alignment: if the retrieved memory $e_{t}$ contradicts the current context $h_{t}$ , the gate $\alpha_{t}$ tends toward zero, effectively suppressing the noise.'
+  normalized_text: If the retrieved memory e_t contradicts the current context h_t, the gate alpha_t tends toward zero, effectively suppressing the noise.
+  evidence_strength: direct
+- id: A-GATE-CONV
+  section_id: SEC-2.3
+  atom_type: method_sentence
+  source_element_id: SE-2.3-P4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 73
+    line_end: 73
+    char_start: 11887
+    char_end: 12320
+  viewer_span:
+    file: source.md
+    line_start: 46
+    line_end: 46
+    char_start: 4608
+    char_end: 5041
+    viewer_only: true
+  raw_text: 'Finally, to expand the receptive field and enhance the model''s non-linearity, we introduce a short, depthwise causal convolution (Gu et al., 2022; Peng et al., 2023). Let $\tilde{\mathbf{V}} \in \mathbb{R}^{T \times d}$ denote the sequence of gated values. Using a kernel size $w$ (set to 4), dilation $\delta$ (set to the max $N$ -gram order) and SiLU activation (Elfwing et al., 2018), the final output $\mathbf{Y}$ is computed as:'
+  normalized_text: A short depthwise causal convolution (kernel size w=4, dilation delta = max N-gram order) with SiLU activation expands the receptive field and enhances non-linearity.
+  evidence_strength: direct
+- id: A-GATE-EQ5
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ5
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 76
+    line_end: 76
+    char_start: 12325
+    char_end: 12474
+  viewer_span:
+    file: source.md
+    line_start: 49
+    line_end: 49
+    char_start: 5046
+    char_end: 5195
+    viewer_only: true
+  raw_text: \mathbf {Y} = \operatorname{SiLU} \left(\operatorname{Conv1D} (\operatorname{RMSNorm} (\tilde {\mathbf {V}}))\right) + \tilde {\mathbf {V}}, \tag {5}
+  normalized_text: Y = SiLU( Conv1D( RMSNorm(V~) ) ) + V~
+  evidence_strength: direct
+  metadata:
+    tag: '5'
+    role: conv_residual_output
+- id: A-GATE-RESID
+  section_id: SEC-2.3
+  atom_type: method_sentence
+  source_element_id: SE-2.3-P5
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 79
+    line_end: 79
+    char_start: 12479
+    char_end: 12816
+  viewer_span:
+    file: source.md
+    line_start: 52
+    line_end: 52
+    char_start: 5200
+    char_end: 5537
+    viewer_only: true
+  raw_text: 'The Engram module is integrated into the backbone via a residual connection: $\mathbf{H}^{(\ell)} \leftarrow \mathbf{H}^{(\ell)} + \mathbf{Y}$ , followed by the standard Attention and MoE. Crucially, Engram is not applied to every layer; its specific placement is governed by the system-level latency constraints detailed in Section 2.5.'
+  normalized_text: Engram is integrated into the backbone via a residual connection H^(l) <- H^(l) + Y, followed by standard Attention and MoE; it is not applied to every layer, placement governed by system-level latency constraints (Section 2.5).
+  evidence_strength: direct
+- id: A-FIG2
+  section_id: SEC-2.3
+  atom_type: figure_caption_atom
+  source_element_id: SE-FIG2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 84
+    line_end: 84
+    char_start: 12866
+    char_end: 13358
+  viewer_span:
+    file: source.md
+    line_start: 57
+    line_end: 57
+    char_start: 5587
+    char_end: 6079
+    viewer_only: true
+  raw_text: 'Figure 2 | System implementation of Engram. (a) Training Phase: The massive embedding tables are sharded across available GPUs. An All-to-All communication primitive is employed to retrieve active embedding rows across devices. (b) Inference Phase: Engram tables are offloaded to host memory. By exploiting the deterministic retrieval logic, the host asynchronously prefetches and transfers embeddings, overlapping communication with the on-device computation of preceding Transformer blocks.'
+  normalized_text: 'Figure 2 | System implementation of Engram. (a) Training: embedding tables sharded across GPUs, All-to-All retrieves active rows. (b) Inference: tables offloaded to host memory; deterministic retrieval lets the host prefetch and overlap communication with preceding-block computation.'
+  evidence_strength: cross_reference
+  metadata:
+    figure: Figure 2
+    physical_section_id: SEC-2.3
+    semantic_section_ids:
+    - SEC-2.5
+    linked_objects:
+    - SYSDESIGN-DETERMINISTIC-PREFETCH
+    note: physically after 2.3 but semantically the 2.5 system-implementation figure
+- id: A-MB-BACKBONE
+  section_id: SEC-2.4
+  atom_type: method_sentence
+  source_element_id: SE-2.4-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 88
+    line_end: 88
+    char_start: 13411
+    char_end: 13873
+  viewer_span:
+    file: source.md
+    line_start: 61
+    line_end: 61
+    char_start: 6132
+    char_end: 6594
+    viewer_only: true
+  raw_text: In this work, rather than standard single-stream connections (He et al., 2016), we adopt the advanced multi-branch architecture as our default backbone, chosen for its superior modeling capabilities (Larsson et al., 2017; Szegedy et al., 2015; Xie et al., 2025; Zhu et al., 2025). A defining characteristic of this architecture is the expansion of the residual stream into M parallel branches, where information flow is modulated by learnable connection weights.
+  normalized_text: Rather than standard single-stream connections, the default backbone is a multi-branch architecture that expands the residual stream into M parallel branches with information flow modulated by learnable connection weights.
+  evidence_strength: direct
+- id: A-MB-SHARE
+  section_id: SEC-2.4
+  atom_type: method_sentence
+  source_element_id: SE-2.4-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 90
+    line_end: 90
+    char_start: 14069
+    char_end: 14352
+  viewer_span:
+    file: source.md
+    line_start: 63
+    line_end: 63
+    char_start: 6790
+    char_end: 7073
+    viewer_only: true
+  raw_text: 'we implement a parameter-sharing strategy: a single sparse embedding table and a Value projection matrix $W_{V}$ are shared across all M branches, whereas M distinct Key projection matrices $\{\mathbf{W}_{K}^{(m)}\}_{m=1}^{M}$ are employed to enable branch-specific gating behaviors.'
+  normalized_text: A parameter-sharing strategy shares a single sparse embedding table and a Value projection matrix W_V across all M branches, while M distinct Key projection matrices {W_K^(m)} enable branch-specific gating.
+  evidence_strength: direct
+- id: A-MB-EQ6
+  section_id: SEC-2.4
+  atom_type: formula_atom
+  source_element_id: SE-2.4-EQ6
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 93
+    line_end: 93
+    char_start: 14470
+    char_end: 14657
+  viewer_span:
+    file: source.md
+    line_start: 66
+    line_end: 66
+    char_start: 7191
+    char_end: 7378
+    viewer_only: true
+  raw_text: \alpha_ {t} ^ {(m)} = \sigma \left(\frac {\mathrm{RMSNorm} (\mathbf {h} _ {t} ^ {(m)}) ^ {\top} \mathrm{RMSNorm} (\mathbf {W} _ {K} ^ {(m)} \mathbf {e} _ {t})}{\sqrt {d}}\right). \tag {6}
+  normalized_text: alpha_t^(m) = sigma( RMSNorm(h_t^(m))^T RMSNorm(W_K^(m) e_t) / sqrt(d) )
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: branch_specific_gate
+- id: A-MB-FUSE
+  section_id: SEC-2.4
+  atom_type: method_sentence
+  source_element_id: SE-2.4-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 96
+    line_end: 96
+    char_start: 14662
+    char_end: 15050
+  viewer_span:
+    file: source.md
+    line_start: 69
+    line_end: 69
+    char_start: 7383
+    char_end: 7771
+    viewer_only: true
+  raw_text: 'The retrieved memory is then modulated by these independent gates applied to the shared value vector: $\mathbf{u}_{t}^{(m)} = \alpha_{t}^{(m)} \cdot (\mathbf{W}_{V} \mathbf{e}_{t})$ . This design allows the linear projections (one $W_{V}$ and M distinct $\mathbf{W}_{K}^{(m)}$ ) to be fused into a single dense FP8 matrix multiplication, maximizing the compute utilization of modern GPUs.'
+  normalized_text: Modulated output u_t^(m) = alpha_t^(m) * (W_V e_t); the linear projections (one W_V and M distinct W_K^(m)) are fused into a single dense FP8 matrix multiplication to maximize GPU compute utilization.
+  evidence_strength: direct
+- id: A-MB-MHC
+  section_id: SEC-2.4
+  atom_type: experiment_setup_atom
+  source_element_id: SE-2.4-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 96
+    line_end: 96
+    char_start: 15051
+    char_end: 15188
+  viewer_span:
+    file: source.md
+    line_start: 69
+    line_end: 69
+    char_start: 7772
+    char_end: 7909
+    viewer_only: true
+  raw_text: Unless otherwise stated, all experiments utilize this integration with Manifold-Constrained Hyper-Connections (M = 4) (Xie et al., 2025).
+  normalized_text: Unless otherwise stated, all experiments use this integration with Manifold-Constrained Hyper-Connections (M=4) (Xie et al., 2025).
+  evidence_strength: direct
+- id: A-FIG3
+  section_id: SEC-XREF-SCALING
+  atom_type: cross_section_figure_caption_atom
+  source_element_id: SE-FIG3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 98
+    line_end: 98
+    char_start: 15190
+    char_end: 15566
+  viewer_span:
+    file: source.md
+    line_start: 71
+    line_end: 71
+    char_start: 7911
+    char_end: 8287
+    viewer_only: true
+  raw_text: 'Figure 3 | Sparsity allocation and Engram scaling. Left: Validation loss across allocation ratios $\rho$ . Two compute budgets are shown (2e20 and 6e20 FLOPs). Both regimes exhibit a U-shape, with hybrid allocation surpassing Pure MoE. Right: Scaling behavior in the infinite-memory regime. Validation loss exhibits a log-linear trend with respect to the number of embeddings.'
+  normalized_text: 'Figure 3 | Sparsity allocation and Engram scaling. Left: validation loss across allocation ratios rho for two FLOPs budgets, both U-shaped with hybrid surpassing Pure MoE. Right: infinite-memory regime, validation loss log-linear in the number of embeddings.'
+  evidence_strength: cross_reference
+  metadata:
+    figure: Figure 3
+    physical_position_after: SEC-2.4
+    semantic_owner: Section 3 Scaling Laws and Sparsity Allocation
+    include_in_chapter2_core_chunks: false
+    note: forward reference to Section 3
+- id: A-SYS-DECOUPLE
+  section_id: SEC-2.5
+  atom_type: claim_sentence
+  source_element_id: SE-2.5-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 102
+    line_end: 102
+    char_start: 15625
+    char_end: 15879
+  viewer_span:
+    file: source.md
+    line_start: 75
+    line_end: 75
+    char_start: 8346
+    char_end: 8600
+    viewer_only: true
+  raw_text: Scaling memory-augmented models is often constrained by the limited capacity of GPU high-bandwidth memory (HBM). However, the deterministic retrieval mechanism of Engram naturally supports the decoupling of parameter storage from computational resources.
+  normalized_text: Scaling memory-augmented models is constrained by limited GPU HBM capacity, but the deterministic retrieval mechanism of Engram supports decoupling parameter storage from computational resources.
+  evidence_strength: direct
+- id: A-SYS-DETERM
+  section_id: SEC-2.5
+  atom_type: mechanism_sentence
+  source_element_id: SE-2.5-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 102
+    line_end: 102
+    char_start: 15880
+    char_end: 16149
+  viewer_span:
+    file: source.md
+    line_start: 75
+    line_end: 75
+    char_start: 8601
+    char_end: 8870
+    viewer_only: true
+  raw_text: Unlike MoE, which relies on runtime hidden states for dynamic routing, Engram's retrieval indices depend solely on the input token sequence. This predictability facilitates specialized optimization strategies for both training and inference, as illustrated in Figure 2.
+  normalized_text: Unlike MoE, which relies on runtime hidden states for dynamic routing, Engram's retrieval indices depend solely on the input token sequence; this predictability enables specialized training and inference optimizations.
+  evidence_strength: direct
+- id: A-SYS-TRAIN
+  section_id: SEC-2.5
+  atom_type: method_sentence
+  source_element_id: SE-2.5-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 104
+    line_end: 104
+    char_start: 16151
+    char_end: 16514
+  viewer_span:
+    file: source.md
+    line_start: 77
+    line_end: 77
+    char_start: 8872
+    char_end: 9235
+    viewer_only: true
+  raw_text: During training, to accommodate large-scale embedding tables, we employ standard model parallelism by sharding the tables across available GPUs. An All-to-All communication primitive is used to gather active rows in the forward pass and dispatch gradients in the backward pass, enabling the total memory capacity to scale linearly with the number of accelerators.
+  normalized_text: During training, embedding tables are sharded across GPUs; an All-to-All primitive gathers active rows in the forward pass and dispatches gradients in the backward pass, so memory capacity scales linearly with the number of accelerators.
+  evidence_strength: direct
+- id: A-SYS-INFER
+  section_id: SEC-2.5
+  atom_type: method_sentence
+  source_element_id: SE-2.5-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 106
+    line_end: 106
+    char_start: 16516
+    char_end: 16937
+  viewer_span:
+    file: source.md
+    line_start: 79
+    line_end: 79
+    char_start: 9237
+    char_end: 9658
+    viewer_only: true
+  raw_text: During inference, this deterministic nature enables a prefetch-and-overlap strategy. Since memory indices are known prior to the forward pass, the system can asynchronously retrieve embeddings from abundant host memory via PCIe. To effectively mask communication latency, the Engram module is placed at specific layers within the backbone, leveraging the computation of preceding layers as a buffer to prevent GPU stalls.
+  normalized_text: 'During inference a prefetch-and-overlap strategy is used: since memory indices are known prior to the forward pass, the system asynchronously retrieves embeddings from host memory via PCIe; the Engram module is placed at specific layers so preceding-layer computation masks latency and prevents GPU stalls.'
+  evidence_strength: direct
+- id: A-SYS-PLACEMENT
+  section_id: SEC-2.5
+  atom_type: limitation_sentence
+  source_element_id: SE-2.5-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 106
+    line_end: 106
+    char_start: 16938
+    char_end: 17315
+  viewer_span:
+    file: source.md
+    line_start: 79
+    line_end: 79
+    char_start: 9659
+    char_end: 10036
+    viewer_only: true
+  raw_text: 'This necessitates a hardware-algorithm co-design strategy: while placing Engram deeper extends the compute window available for hiding latency, our ablation in Section 6.2 shows that modeling performance favors early intervention to offload local pattern reconstruction. Therefore, the optimal placement must simultaneously satisfy both modeling and system latency constraints.'
+  normalized_text: 'Placement requires hardware-algorithm co-design: deeper placement extends the latency-hiding window, but the ablation in Section 6.2 shows modeling performance favors early intervention, so optimal placement must satisfy both modeling and system latency constraints.'
+  evidence_strength: indirect
+  metadata:
+    cross_ref: Section 6.2 ablation
+    requires_external_evidence: true
+    external_evidence_ref: Section 6.2
+- id: A-SYS-ZIPF
+  section_id: SEC-2.5
+  atom_type: claim_sentence
+  source_element_id: SE-2.5-P4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 108
+    line_end: 108
+    char_start: 17317
+    char_end: 17896
+  viewer_span:
+    file: source.md
+    line_start: 81
+    line_end: 81
+    char_start: 10038
+    char_end: 10617
+    viewer_only: true
+  raw_text: 'Furthermore, natural language N-grams inherently follow a Zipfian distribution (Chao and Zipf, 1950; Piantadosi, 2014), where a small fraction of patterns accounts for the vast majority of memory accesses. This statistical property motivates a Multi-Level Cache Hierarchy: frequently accessed embeddings can be cached in faster storage tiers (e.g., GPU HBM or Host DRAM), while the long tail of rare patterns resides in slower, high-capacity media (e.g., NVMe SSD). This stratification allows Engram to scale to massive memory capacities with minimal impact on effective latency.'
+  normalized_text: 'Natural-language N-grams follow a Zipfian distribution, motivating a Multi-Level Cache Hierarchy: frequent embeddings in fast tiers (GPU HBM / Host DRAM), the long tail in slower high-capacity media (NVMe SSD), letting Engram scale to massive capacity with minimal latency impact.'
+  evidence_strength: direct
+semantic_chunks:
+- id: C-OV
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: 2 > 2.1
+  atom_ids:
+  - A-OV-DEF
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+  central_atom_ids:
+  - A-OV-DEF
+  boundary_reason: 'Overview: method definition + two-phase retrieval/fusion roadmap (incl. phase->section mapping A-OV-ROADMAP).'
+  extraction_targets:
+  - ArticleMethod
+  gold_must_cover_atoms:
+  - A-OV-DEF
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+- id: C-RETRIEVAL
+  profile: article_research
+  chunk_type: architecture_component_block
+  section_path: 2 > 2.2
+  atom_ids:
+  - A-RETR-INTRO
+  - A-TC-MOTIV
+  - A-TC-PROJ
+  - A-TC-REDUCTION
+  - A-TC-NGRAM
+  - A-MH-MOTIV
+  - A-MH-HEADS
+  - A-MH-EQ1
+  - A-MH-HASHFN
+  - A-MH-CONCAT
+  - A-MH-EQ2
+  central_atom_ids:
+  - A-MH-EQ1
+  - A-MH-EQ2
+  boundary_reason: 'Sparse-retrieval phase: phase intro + tokenizer compression + multi-head hashing; Eq.1/Eq.2 kept with the sentences that define and interpret them (A-MH-CONCAT supports the concat reading of Eq.2).'
+  extraction_targets:
+  - ArchitectureComponent
+  - ArticleMethod
+  - Formula
+  - IntermediateRepresentation
+  gold_must_cover_atoms:
+  - A-RETR-INTRO
+  - A-TC-PROJ
+  - A-TC-NGRAM
+  - A-MH-HEADS
+  - A-MH-EQ1
+  - A-MH-CONCAT
+  - A-MH-EQ2
+- id: C-GATING
+  profile: article_research
+  chunk_type: architecture_component_block
+  section_path: 2 > 2.3
+  atom_ids:
+  - A-GATE-PRIOR
+  - A-GATE-RISK
+  - A-GATE-QKV
+  - A-GATE-EQ3
+  - A-GATE-WKV-DEF
+  - A-GATE-RMSNORM
+  - A-GATE-EQ4
+  - A-GATE-OUT
+  - A-GATE-MECH
+  - A-GATE-CONV
+  - A-GATE-EQ5
+  - A-GATE-RESID
+  central_atom_ids:
+  - A-GATE-EQ4
+  - A-GATE-MECH
+  boundary_reason: 'Fusion phase: risk -> QKV projection (Eq.3) -> W_K/W_V def -> RMSNorm/gradient-stability -> scalar gate (Eq.4) -> gated value -> noise-suppression mechanism -> conv residual (Eq.5) -> backbone integration. Figure 2 NOT here (system figure, semantically 2.5).'
+  extraction_targets:
+  - ArchitectureComponent
+  - MechanisticExplanation
+  - Formula
+  gold_must_cover_atoms:
+  - A-GATE-RISK
+  - A-GATE-EQ3
+  - A-GATE-WKV-DEF
+  - A-GATE-RMSNORM
+  - A-GATE-EQ4
+  - A-GATE-MECH
+  - A-GATE-EQ5
+- id: C-MULTIBRANCH
+  profile: article_research
+  chunk_type: architecture_component_block
+  section_path: 2 > 2.4
+  atom_ids:
+  - A-MB-BACKBONE
+  - A-MB-SHARE
+  - A-MB-EQ6
+  - A-MB-FUSE
+  - A-MB-MHC
+  central_atom_ids:
+  - A-MB-SHARE
+  - A-MB-EQ6
+  boundary_reason: 'Multi-branch integration: backbone + parameter-sharing + branch gate (Eq.6) + FP8 fusion + mHC(M=4) default setting. Figure 3 excluded -> C-XREF.'
+  extraction_targets:
+  - ArchitectureComponent
+  - Formula
+  - ExperimentSetup
+  gold_must_cover_atoms:
+  - A-MB-BACKBONE
+  - A-MB-SHARE
+  - A-MB-EQ6
+  - A-MB-FUSE
+  - A-MB-MHC
+- id: C-SYSEFF
+  profile: article_research
+  chunk_type: system_efficiency_block
+  section_path: 2 > 2.5
+  atom_ids:
+  - A-SYS-DECOUPLE
+  - A-SYS-DETERM
+  - A-SYS-TRAIN
+  - A-SYS-INFER
+  - A-SYS-PLACEMENT
+  - A-SYS-ZIPF
+  - A-FIG2
+  central_atom_ids:
+  - A-SYS-DECOUPLE
+  - A-SYS-INFER
+  boundary_reason: 'System efficiency: decouple -> training All-to-All -> inference prefetch-and-overlap -> placement co-design tradeoff -> Zipfian multi-level cache. Figure 2 attached by semantic ownership.'
+  extraction_targets:
+  - SystemDesignClaim
+  - Limitation
+  - Implication
+  gold_must_cover_atoms:
+  - A-SYS-DECOUPLE
+  - A-SYS-DETERM
+  - A-SYS-INFER
+  - A-SYS-ZIPF
+- id: C-XREF
+  profile: article_research
+  chunk_type: cross_reference_block
+  section_path: (cross-ref) Section 3
+  atom_ids:
+  - A-FIG3
+  central_atom_ids:
+  - A-FIG3
+  boundary_reason: 'Isolation chunk for a forward reference: Figure 3 content belongs to Section 3.'
+  extraction_targets: []
+  gold_must_cover_atoms: []
+  core: false
+context_packages:
+- id: PKG-OV
+  profile: article_research
+  chunk_id: C-OV
+  section_path: Chapter 2 > 2.1 Overview
+  document_title: Engram - Conditional Memory Module
+  atoms:
+  - atom_id: A-OV-DEF
+    atom_type: method_sentence
+  - atom_id: A-OV-PHASES
+    atom_type: method_sentence
+  - atom_id: A-OV-ROADMAP
+    atom_type: method_sentence
+  linked_context:
+    figure: Figure 1 (Engram architecture)
+    previous_heading: 2 Architecture
+    next_heading: 2.2 Sparse Retrieval via Hashed N-grams
+  extraction_targets:
+  - ArticleMethod
+  expected_objects:
+  - METHOD-ENGRAM
+  expected_local_fields:
+    METHOD-ENGRAM:
+    - name
+    - summary
+    - phases
+- id: PKG-RETRIEVAL
+  profile: article_research
+  chunk_id: C-RETRIEVAL
+  section_path: Chapter 2 > 2.2 Sparse Retrieval via Hashed N-grams
+  document_title: Engram - Conditional Memory Module
+  atoms:
+  - atom_id: A-RETR-INTRO
+    atom_type: method_sentence
+  - atom_id: A-TC-MOTIV
+    atom_type: method_sentence
+  - atom_id: A-TC-PROJ
+    atom_type: method_sentence
+  - atom_id: A-TC-REDUCTION
+    atom_type: result_sentence
+  - atom_id: A-TC-NGRAM
+    atom_type: formula_atom
+  - atom_id: A-MH-MOTIV
+    atom_type: method_sentence
+  - atom_id: A-MH-HEADS
+    atom_type: method_sentence
+  - atom_id: A-MH-EQ1
+    atom_type: formula_atom
+  - atom_id: A-MH-HASHFN
+    atom_type: method_sentence
+  - atom_id: A-MH-CONCAT
+    atom_type: method_sentence
+  - atom_id: A-MH-EQ2
+    atom_type: formula_atom
+  linked_context:
+    formula_context: Eq.1 z=phi(g), e=E[z]; Eq.2 e_t = concat (A-MH-CONCAT)
+    run_in_headings:
+    - Tokenizer Compression
+    - Multi-Head Hashing
+    previous_heading: 2.1 Overview
+    next_heading: 2.3 Context-aware Gating
+  extraction_targets:
+  - ArchitectureComponent
+  - ArticleMethod
+  - Formula
+  - IntermediateRepresentation
+  expected_objects:
+  - COMPONENT-SPARSE-RETRIEVAL
+  - COMPONENT-TOKENIZER-COMPRESSION
+  - COMPONENT-MULTI-HEAD-HASHING
+  - FORM-EQ1-HASH-LOOKUP
+  - FORM-EQ2-MEMORY-CONCAT
+  - INTERMEDIATE-RETRIEVED-MEMORY
+  expected_local_fields:
+    COMPONENT-SPARSE-RETRIEVAL:
+    - name
+    - description
+    - children
+    INTERMEDIATE-RETRIEVED-MEMORY:
+    - name
+    - description
+    - produced_by
+- id: PKG-GATING
+  profile: article_research
+  chunk_id: C-GATING
+  section_path: Chapter 2 > 2.3 Context-aware Gating
+  document_title: Engram - Conditional Memory Module
+  atoms:
+  - atom_id: A-GATE-PRIOR
+    atom_type: method_sentence
+  - atom_id: A-GATE-RISK
+    atom_type: risk_sentence
+  - atom_id: A-GATE-QKV
+    atom_type: method_sentence
+  - atom_id: A-GATE-EQ3
+    atom_type: formula_atom
+  - atom_id: A-GATE-WKV-DEF
+    atom_type: method_sentence
+  - atom_id: A-GATE-RMSNORM
+    atom_type: method_sentence
+  - atom_id: A-GATE-EQ4
+    atom_type: formula_atom
+  - atom_id: A-GATE-OUT
+    atom_type: formula_atom
+  - atom_id: A-GATE-MECH
+    atom_type: mechanism_sentence
+  - atom_id: A-GATE-CONV
+    atom_type: method_sentence
+  - atom_id: A-GATE-EQ5
+    atom_type: formula_atom
+  - atom_id: A-GATE-RESID
+    atom_type: method_sentence
+  linked_context:
+    formula_context: Eq.3 (k_t,v_t) ; W_K/W_V def (A-GATE-WKV-DEF) ; RMSNorm (A-GATE-RMSNORM) ; Eq.4 scalar gate ; Eq.5 conv residual
+    previous_heading: 2.2 Sparse Retrieval via Hashed N-grams
+    next_heading: 2.4 Integration with Multi-branch Architecture
+  extraction_targets:
+  - ArchitectureComponent
+  - MechanisticExplanation
+  - Formula
+  expected_objects:
+  - COMPONENT-FUSION
+  - COMPONENT-CONTEXT-AWARE-GATING
+  - COMPONENT-DEPTHWISE-CAUSAL-CONV
+  - RISK-HASH-COLLISION-POLYSEMY
+  - MECH-GATE-SUPPRESSES-NOISE
+  - FORM-EQ3-KV-PROJECTION
+  - FORM-EQ4-SCALAR-GATE
+  - FORM-EQ5-CONV-RESIDUAL
+  expected_local_fields:
+    COMPONENT-FUSION:
+    - name
+    - description
+    - children
+- id: PKG-MULTIBRANCH
+  profile: article_research
+  chunk_id: C-MULTIBRANCH
+  section_path: Chapter 2 > 2.4 Integration with Multi-branch Architecture
+  document_title: Engram - Conditional Memory Module
+  atoms:
+  - atom_id: A-MB-BACKBONE
+    atom_type: method_sentence
+  - atom_id: A-MB-SHARE
+    atom_type: method_sentence
+  - atom_id: A-MB-EQ6
+    atom_type: formula_atom
+  - atom_id: A-MB-FUSE
+    atom_type: method_sentence
+  - atom_id: A-MB-MHC
+    atom_type: experiment_setup_atom
+  linked_context:
+    formula_context: Eq.6 branch gate; generalizes Eq.4
+    previous_heading: 2.3 Context-aware Gating
+    next_heading: 2.5 System Efficiency
+    excluded_forward_reference: Figure 3 (Section 3 scaling)
+  extraction_targets:
+  - ArchitectureComponent
+  - Formula
+  - ExperimentSetup
+  expected_objects:
+  - COMPONENT-MULTI-BRANCH-INTEGRATION
+  - FORM-EQ6-BRANCH-GATE
+  - EXPSETUP-MHC-M4
+- id: PKG-SYSEFF
+  profile: article_research
+  chunk_id: C-SYSEFF
+  section_path: 'Chapter 2 > 2.5 System Efficiency: Decoupling Compute and Memory'
+  document_title: Engram - Conditional Memory Module
+  atoms:
+  - atom_id: A-SYS-DECOUPLE
+    atom_type: claim_sentence
+  - atom_id: A-SYS-DETERM
+    atom_type: mechanism_sentence
+  - atom_id: A-SYS-TRAIN
+    atom_type: method_sentence
+  - atom_id: A-SYS-INFER
+    atom_type: method_sentence
+  - atom_id: A-SYS-PLACEMENT
+    atom_type: limitation_sentence
+  - atom_id: A-SYS-ZIPF
+    atom_type: claim_sentence
+  - atom_id: A-FIG2
+    atom_type: figure_caption_atom
+  linked_context:
+    figure: Figure 2 (a) training All-to-All (b) inference prefetch-and-overlap
+    previous_heading: 2.4 Integration with Multi-branch Architecture
+    next_heading: 3 Scaling Laws and Sparsity Allocation
+  extraction_targets:
+  - SystemDesignClaim
+  - Limitation
+  - Implication
+  expected_objects:
+  - SYSDESIGN-DETERMINISTIC-PREFETCH
+  - IMPL-DECOUPLED-SCALING
+  - LIMIT-PLACEMENT-COASESIGN
+- id: PKG-XREF
+  profile: article_research
+  chunk_id: C-XREF
+  section_path: (cross-ref) Section 3
+  document_title: Engram - Conditional Memory Module
+  atoms:
+  - atom_id: A-FIG3
+    atom_type: cross_section_figure_caption_atom
+  linked_context:
+    note: forward reference; tests routing to Section 3 rather than extracting a Chapter-2 component
+  extraction_targets: []
+  expected_objects: []
+  expected_classification: forward_reference
+mentions:
+- id: M-01
+  text: Engram
+  type: ArticleMethod
+  atom_id: A-OV-DEF
+  canonical_key: engram
+- id: M-02
+  text: Transformer backbone
+  type: Concept
+  atom_id: A-OV-DEF
+  canonical_key: transformer_backbone
+- id: M-03
+  text: static pattern storage
+  type: Concept
+  atom_id: A-OV-DEF
+  canonical_key: static_pattern_storage
+- id: M-04
+  text: dynamic computation
+  type: Concept
+  atom_id: A-OV-DEF
+  canonical_key: dynamic_computation
+- id: M-05
+  text: retrieval phase
+  type: ArchitectureComponent
+  atom_id: A-OV-PHASES
+  canonical_key: sparse_retrieval
+- id: M-06
+  text: fusion phase
+  type: ArchitectureComponent
+  atom_id: A-OV-PHASES
+  canonical_key: fusion
+- id: M-07
+  text: vocabulary projection layer
+  type: ArchitectureComponent
+  atom_id: A-TC-PROJ
+  canonical_key: tokenizer_compression
+- id: M-08
+  text: surjective function P
+  type: Variable
+  atom_id: A-TC-PROJ
+  canonical_key: tokenizer_compression
+- id: M-09
+  text: canonical ID x'_t
+  type: Variable
+  atom_id: A-TC-NGRAM
+  canonical_key: canonical_id
+- id: M-10
+  text: suffix N-gram
+  type: ArchitectureComponent
+  atom_id: A-TC-NGRAM
+  canonical_key: tokenizer_compression
+- id: M-11
+  text: Multi-Head Hashing
+  type: ArchitectureComponent
+  atom_id: A-MH-HEADS
+  canonical_key: multi_head_hashing
+- id: M-12
+  text: embedding table E_{n,k}
+  type: Variable
+  atom_id: A-MH-HEADS
+  canonical_key: embedding_table
+- id: M-13
+  text: multiplicative-XOR hash
+  type: ArchitectureComponent
+  atom_id: A-MH-HASHFN
+  canonical_key: multi_head_hashing
+- id: M-14
+  text: hash index z_{t,n,k}
+  type: Variable
+  atom_id: A-MH-EQ1
+  canonical_key: hash_index
+- id: M-15
+  text: retrieved embedding e_t
+  type: Variable
+  atom_id: A-GATE-PRIOR
+  canonical_key: retrieved_memory
+- id: M-16
+  text: context-aware gating
+  type: ArchitectureComponent
+  atom_id: A-GATE-QKV
+  canonical_key: context_aware_gating
+- id: M-17
+  text: Key projection W_K
+  type: Variable
+  atom_id: A-GATE-WKV-DEF
+  canonical_key: key_projection
+- id: M-18
+  text: Value projection W_V
+  type: Variable
+  atom_id: A-GATE-WKV-DEF
+  canonical_key: value_projection
+- id: M-19
+  text: scalar gate alpha_t
+  type: Variable
+  atom_id: A-GATE-EQ4
+  canonical_key: context_aware_gating
+- id: M-20
+  text: RMSNorm
+  type: ArchitectureComponent
+  atom_id: A-GATE-RMSNORM
+  canonical_key: rmsnorm
+- id: M-21
+  text: hash collisions or polysemy
+  type: Risk
+  atom_id: A-GATE-RISK
+  canonical_key: hash_collision_polysemy
+- id: M-22
+  text: depthwise causal convolution
+  type: ArchitectureComponent
+  atom_id: A-GATE-CONV
+  canonical_key: depthwise_causal_conv
+- id: M-23
+  text: residual connection
+  type: ArchitectureComponent
+  atom_id: A-GATE-RESID
+  canonical_key: residual_connection
+- id: M-24
+  text: multi-branch architecture
+  type: ArchitectureComponent
+  atom_id: A-MB-BACKBONE
+  canonical_key: multi_branch_integration
+- id: M-25
+  text: Manifold-Constrained Hyper-Connections
+  type: ExperimentSetup
+  atom_id: A-MB-MHC
+  canonical_key: mhc_m4
+- id: M-26
+  text: deterministic retrieval
+  type: SystemDesignClaim
+  atom_id: A-SYS-DETERM
+  canonical_key: deterministic_prefetch
+- id: M-27
+  text: MoE runtime routing
+  type: Concept
+  atom_id: A-SYS-DETERM
+  canonical_key: moe_routing
+- id: M-28
+  text: All-to-All
+  type: SystemDesignClaim
+  atom_id: A-SYS-TRAIN
+  canonical_key: all_to_all
+- id: M-29
+  text: host memory
+  type: Concept
+  atom_id: A-SYS-INFER
+  canonical_key: host_memory
+- id: M-30
+  text: PCIe
+  type: Concept
+  atom_id: A-SYS-INFER
+  canonical_key: pcie
+- id: M-31
+  text: prefetch-and-overlap
+  type: SystemDesignClaim
+  atom_id: A-SYS-INFER
+  canonical_key: deterministic_prefetch
+- id: M-32
+  text: GPU HBM
+  type: Concept
+  atom_id: A-SYS-DECOUPLE
+  canonical_key: gpu_hbm
+- id: M-33
+  text: Zipfian distribution
+  type: Concept
+  atom_id: A-SYS-ZIPF
+  canonical_key: zipfian
+- id: M-34
+  text: Multi-Level Cache Hierarchy
+  type: SystemDesignClaim
+  atom_id: A-SYS-ZIPF
+  canonical_key: multi_level_cache
+- id: M-35
+  text: NVMe SSD
+  type: Concept
+  atom_id: A-SYS-ZIPF
+  canonical_key: nvme_ssd
+canonicalization:
+- canonical: engram
+  aliases:
+  - Engram
+  - Engram module
+  - conditional memory module
+- canonical: sparse_retrieval
+  aliases:
+  - retrieval phase
+  - Sparse Retrieval
+  - first phase
+  - retrieval
+- canonical: fusion
+  aliases:
+  - fusion phase
+  - fusion
+  - second phase
+- canonical: tokenizer_compression
+  aliases:
+  - Tokenizer Compression
+  - vocabulary projection layer
+  - surjective function P
+  - suffix N-gram
+- canonical: multi_head_hashing
+  aliases:
+  - Multi-Head Hashing
+  - hashing-based approach
+  - hash heads
+  - multiplicative-XOR hash
+- canonical: context_aware_gating
+  aliases:
+  - Context-aware Gating
+  - scalar gate
+  - alpha_t
+- canonical: retrieved_memory
+  aliases:
+  - retrieved embedding e_t
+  - retrieved memory
+  - e_t
+  - context-independent priors
+- canonical: hash_collision_polysemy
+  aliases:
+  - hash collisions
+  - polysemy
+  - noise due to hash collisions or polysemy
+- canonical: multi_branch_integration
+  aliases:
+  - multi-branch architecture
+  - Multi-branch Integration
+  - M parallel branches
+  - branch-specific gating
+- canonical: deterministic_prefetch
+  aliases:
+  - deterministic retrieval
+  - prefetch-and-overlap
+  - decoupling compute and memory
+- canonical: multi_level_cache
+  aliases:
+  - Multi-Level Cache Hierarchy
+  - Zipfian distribution caching
+objects:
+- id: METHOD-ENGRAM
+  type: ArticleMethod
+  section_path: 2 > 2.1
+  home_package: PKG-OV
+  payload:
+    name: Engram
+    summary: Conditional memory module augmenting a Transformer backbone by separating static pattern storage from dynamic computation; two phases (retrieval, fusion).
+    phases:
+    - Sparse Retrieval (Section 2.2)
+    - Fusion (Section 2.3)
+    integration: residual connection H^(l) <- H^(l) + Y, then Attention and MoE
+  local_evidence_atom_ids:
+  - A-OV-DEF
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+  supporting_context_atom_ids:
+  - A-GATE-RESID
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: COMPONENT-SPARSE-RETRIEVAL
+  type: ArchitectureComponent
+  section_path: 2 > 2.2
+  home_package: PKG-RETRIEVAL
+  payload:
+    name: Sparse Retrieval
+    phase_of: Engram
+    description: 'First phase: maps local contexts to static memory entries via tokenizer compression and deterministic hashing; produces retrieved memory e_t.'
+    children:
+    - COMPONENT-TOKENIZER-COMPRESSION
+    - COMPONENT-MULTI-HEAD-HASHING
+  local_evidence_atom_ids:
+  - A-RETR-INTRO
+  supporting_context_atom_ids:
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-FUSION
+  type: ArchitectureComponent
+  section_path: 2 > 2.3
+  home_package: PKG-GATING
+  payload:
+    name: Fusion
+    phase_of: Engram
+    description: 'Second phase: dynamically modulates retrieved priors with the current hidden state and refines via convolution.'
+    children:
+    - COMPONENT-CONTEXT-AWARE-GATING
+    - COMPONENT-DEPTHWISE-CAUSAL-CONV
+  local_evidence_atom_ids:
+  - A-GATE-QKV
+  supporting_context_atom_ids:
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-TOKENIZER-COMPRESSION
+  type: ArchitectureComponent
+  section_path: 2 > 2.2 > Tokenizer Compression
+  home_package: PKG-RETRIEVAL
+  payload:
+    name: Tokenizer Compression
+    mechanism: 'Pre-computed surjective vocabulary projection P: V -> V'' collapsing token IDs by normalized textual equivalence (NFKC, lowercasing); forms suffix N-gram g_{t,n}.'
+    effect: ~23% reduction in effective vocabulary size for a 128k tokenizer
+  local_evidence_atom_ids:
+  - A-TC-MOTIV
+  - A-TC-PROJ
+  - A-TC-REDUCTION
+  - A-TC-NGRAM
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-MULTI-HEAD-HASHING
+  type: ArchitectureComponent
+  section_path: 2 > 2.2 > Multi-Head Hashing
+  home_package: PKG-RETRIEVAL
+  payload:
+    name: Multi-Head Hashing
+    mechanism: K distinct hash heads per N-gram order n; each maps the compressed context to an index in table E_{n,k} (prime size M_{n,k}) via multiplicative-XOR hash phi_{n,k} (Eq.1); memory vector e_t = concatenation of retrieved embeddings (Eq.2).
+    purpose: mitigate hash collisions over the intractable N-gram space
+  local_evidence_atom_ids:
+  - A-MH-MOTIV
+  - A-MH-HEADS
+  - A-MH-HASHFN
+  - A-MH-CONCAT
+  - A-MH-EQ1
+  - A-MH-EQ2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-CONTEXT-AWARE-GATING
+  type: ArchitectureComponent
+  section_path: 2 > 2.3
+  home_package: PKG-GATING
+  payload:
+    name: Context-aware Gating
+    mechanism: h_t as Query, e_t as Key/Value source (Eq.3); scalar gate alpha_t (Eq.4); gated output v~_t = alpha_t*v_t.
+    role: dynamically modulates static retrieved priors to enhance expressivity and resolve ambiguity
+    consumes: retrieved memory e_t (output of Sparse Retrieval)
+  local_evidence_atom_ids:
+  - A-GATE-PRIOR
+  - A-GATE-QKV
+  - A-GATE-EQ3
+  - A-GATE-EQ4
+  - A-GATE-OUT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-DEPTHWISE-CAUSAL-CONV
+  type: ArchitectureComponent
+  section_path: 2 > 2.3
+  home_package: PKG-GATING
+  payload:
+    name: Depthwise Causal Convolution
+    mechanism: Short depthwise causal conv (kernel w=4, dilation = max N-gram order) with SiLU on gated values; Y = SiLU(Conv1D(RMSNorm(V~))) + V~ (Eq.5).
+    role: expands receptive field and adds non-linearity within the fusion phase
+  local_evidence_atom_ids:
+  - A-GATE-CONV
+  - A-GATE-EQ5
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMPONENT-MULTI-BRANCH-INTEGRATION
+  type: ArchitectureComponent
+  section_path: 2 > 2.4
+  home_package: PKG-MULTIBRANCH
+  payload:
+    name: Multi-branch Integration
+    mechanism: Shared sparse embedding table E and Value matrix W_V across M branches; M distinct Key matrices W_K^(m) give branch-specific gates alpha_t^(m) (Eq.6); projections fused into a single dense FP8 matmul.
+    relation_to_gating: Eq.6 is the branch-specific generalization of single-stream gate Eq.4
+  local_evidence_atom_ids:
+  - A-MB-BACKBONE
+  - A-MB-SHARE
+  - A-MB-EQ6
+  - A-MB-FUSE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXPSETUP-MHC-M4
+  type: ExperimentSetup
+  section_path: 2 > 2.4
+  home_package: PKG-MULTIBRANCH
+  payload:
+    name: Default multi-branch integration setting
+    setting: Manifold-Constrained Hyper-Connections
+    M: 4
+    scope: all experiments unless otherwise stated
+    source: Xie et al., 2025
+  local_evidence_atom_ids:
+  - A-MB-MHC
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: INTERMEDIATE-RETRIEVED-MEMORY
+  type: IntermediateRepresentation
+  section_path: 2 > 2.2
+  home_package: PKG-RETRIEVAL
+  payload:
+    name: Retrieved memory e_t
+    description: The static memory vector produced by Sparse Retrieval (concatenation of hashed N-gram embeddings) and consumed as Key/Value source by Context-aware Gating.
+    produced_by: COMPONENT-SPARSE-RETRIEVAL
+    consumed_by: COMPONENT-CONTEXT-AWARE-GATING
+  local_evidence_atom_ids:
+  - A-MH-EQ2
+  - A-MH-CONCAT
+  supporting_context_atom_ids:
+  - A-GATE-PRIOR
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RISK-HASH-COLLISION-POLYSEMY
+  type: Risk
+  section_path: 2 > 2.3
+  home_package: PKG-GATING
+  payload:
+    name: Hash-collision / polysemy noise
+    description: Static retrieved embeddings may carry noise from hash collisions or polysemy and lack contextual adaptability.
+  local_evidence_atom_ids:
+  - A-GATE-PRIOR
+  - A-GATE-RISK
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: MECH-GATE-SUPPRESSES-NOISE
+  type: MechanisticExplanation
+  section_path: 2 > 2.3
+  home_package: PKG-GATING
+  payload:
+    name: Gate suppresses contradictory memory
+    explanation: When retrieved memory e_t contradicts the current context h_t, the scalar gate alpha_t tends toward zero, suppressing noise and enforcing semantic alignment.
+  local_evidence_atom_ids:
+  - A-GATE-MECH
+  - A-GATE-EQ4
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORM-EQ1-HASH-LOOKUP
+  type: Formula
+  section_path: '2'
+  home_package: PKG-RETRIEVAL
+  payload:
+    name: Hash index and lookup
+    expression: z_{t,n,k} = phi_{n,k}(g_{t,n}); e_{t,n,k} = E_{n,k}[z_{t,n,k}]
+    tag: '1'
+    role: hash_index_and_lookup
+  local_evidence_atom_ids:
+  - A-MH-EQ1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORM-EQ2-MEMORY-CONCAT
+  type: Formula
+  section_path: '2'
+  home_package: PKG-RETRIEVAL
+  payload:
+    name: Memory vector concatenation
+    expression: e_t = concat_{n,k} e_{t,n,k}
+    tag: '2'
+    role: memory_vector_concat
+  local_evidence_atom_ids:
+  - A-MH-EQ2
+  - A-MH-CONCAT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORM-EQ3-KV-PROJECTION
+  type: Formula
+  section_path: '2'
+  home_package: PKG-GATING
+  payload:
+    name: Key/Value projection
+    expression: k_t = W_K e_t; v_t = W_V e_t
+    tag: '3'
+    role: key_value_projection
+  local_evidence_atom_ids:
+  - A-GATE-EQ3
+  - A-GATE-WKV-DEF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORM-EQ4-SCALAR-GATE
+  type: Formula
+  section_path: '2'
+  home_package: PKG-GATING
+  payload:
+    name: Scalar gate
+    expression: alpha_t = sigma(RMSNorm(h_t)^T RMSNorm(k_t)/sqrt d)
+    tag: '4'
+    role: scalar_gate
+  local_evidence_atom_ids:
+  - A-GATE-EQ4
+  - A-GATE-RMSNORM
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORM-EQ5-CONV-RESIDUAL
+  type: Formula
+  section_path: '2'
+  home_package: PKG-GATING
+  payload:
+    name: Conv residual output
+    expression: Y = SiLU(Conv1D(RMSNorm(V~))) + V~
+    tag: '5'
+    role: conv_residual_output
+  local_evidence_atom_ids:
+  - A-GATE-EQ5
+  - A-GATE-CONV
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORM-EQ6-BRANCH-GATE
+  type: Formula
+  section_path: '2'
+  home_package: PKG-MULTIBRANCH
+  payload:
+    name: Branch-specific gate
+    expression: alpha_t^(m) = sigma(RMSNorm(h_t^(m))^T RMSNorm(W_K^(m) e_t)/sqrt d)
+    tag: '6'
+    role: branch_specific_gate
+  local_evidence_atom_ids:
+  - A-MB-EQ6
+  - A-MB-SHARE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: SYSDESIGN-DETERMINISTIC-PREFETCH
+  type: SystemDesignClaim
+  section_path: 2 > 2.5
+  home_package: PKG-SYSEFF
+  payload:
+    name: Deterministic retrieval decouples storage from compute
+    claim: 'Retrieval indices depend solely on the input token sequence (unlike MoE runtime routing), so storage decouples from compute: training shards tables with All-to-All; inference prefetches from host memory via PCIe and overlaps with preceding-layer compute; Zipfian access motivates a multi-level cache.'
+    training: All-to-All sharding; memory scales linearly with accelerators
+    inference: prefetch-and-overlap from host memory via PCIe; placement at specific layers
+    caching: Multi-Level Cache Hierarchy (HBM / Host DRAM / NVMe SSD)
+  local_evidence_atom_ids:
+  - A-SYS-DECOUPLE
+  - A-SYS-DETERM
+  - A-SYS-TRAIN
+  - A-SYS-INFER
+  - A-SYS-ZIPF
+  - A-FIG2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+- id: IMPL-DECOUPLED-SCALING
+  type: Implication
+  section_path: 2 > 2.5
+  home_package: PKG-SYSEFF
+  payload:
+    name: Decoupled scaling of memory capacity
+    implication: Because storage is decoupled from compute, total memory capacity can scale with the number of accelerators (training) and with abundant host memory (inference), reaching massive capacity with minimal latency impact.
+  local_evidence_atom_ids:
+  - A-SYS-DECOUPLE
+  - A-SYS-TRAIN
+  - A-SYS-INFER
+  - A-SYS-ZIPF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: LIMIT-PLACEMENT-COASESIGN
+  type: Limitation
+  section_path: 2 > 2.5
+  home_package: PKG-SYSEFF
+  payload:
+    name: Placement hardware-algorithm co-design tradeoff
+    description: Deeper placement extends the latency-hiding window, but modeling performance (ablation Section 6.2, not in this chapter) favors early intervention; optimal placement must satisfy both modeling and system constraints.
+    requires_external_evidence: true
+    external_evidence_ref: Section 6.2
+  local_evidence_atom_ids:
+  - A-SYS-PLACEMENT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+relations:
+- id: R-01
+  relation_type: method_has_phase
+  source_object_id: METHOD-ENGRAM
+  target_object_id: COMPONENT-SPARSE-RETRIEVAL
+  evidence_atom_ids:
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+  - A-RETR-INTRO
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-02
+  relation_type: method_has_phase
+  source_object_id: METHOD-ENGRAM
+  target_object_id: COMPONENT-FUSION
+  evidence_atom_ids:
+  - A-OV-PHASES
+  - A-OV-ROADMAP
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-03
+  relation_type: component_has_component
+  source_object_id: COMPONENT-SPARSE-RETRIEVAL
+  target_object_id: COMPONENT-TOKENIZER-COMPRESSION
+  evidence_atom_ids:
+  - A-RETR-INTRO
+  - A-TC-PROJ
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-04
+  relation_type: component_has_component
+  source_object_id: COMPONENT-SPARSE-RETRIEVAL
+  target_object_id: COMPONENT-MULTI-HEAD-HASHING
+  evidence_atom_ids:
+  - A-RETR-INTRO
+  - A-MH-HEADS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-05
+  relation_type: component_has_component
+  source_object_id: COMPONENT-FUSION
+  target_object_id: COMPONENT-CONTEXT-AWARE-GATING
+  evidence_atom_ids:
+  - A-OV-ROADMAP
+  - A-GATE-QKV
+  - A-GATE-OUT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: component_has_component
+  source_object_id: COMPONENT-FUSION
+  target_object_id: COMPONENT-DEPTHWISE-CAUSAL-CONV
+  evidence_atom_ids:
+  - A-GATE-CONV
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-07
+  relation_type: method_has_component
+  source_object_id: METHOD-ENGRAM
+  target_object_id: COMPONENT-MULTI-BRANCH-INTEGRATION
+  evidence_atom_ids:
+  - A-MB-BACKBONE
+  - A-MB-SHARE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-08
+  relation_type: component_produces_representation
+  source_object_id: COMPONENT-SPARSE-RETRIEVAL
+  target_object_id: INTERMEDIATE-RETRIEVED-MEMORY
+  evidence_atom_ids:
+  - A-MH-EQ2
+  - A-MH-CONCAT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-09
+  relation_type: component_consumes_representation
+  source_object_id: COMPONENT-CONTEXT-AWARE-GATING
+  target_object_id: INTERMEDIATE-RETRIEVED-MEMORY
+  evidence_atom_ids:
+  - A-GATE-PRIOR
+  - A-GATE-QKV
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-10
+  relation_type: component_mitigates_risk
+  source_object_id: COMPONENT-CONTEXT-AWARE-GATING
+  target_object_id: RISK-HASH-COLLISION-POLYSEMY
+  evidence_atom_ids:
+  - A-GATE-RISK
+  - A-GATE-MECH
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-11
+  relation_type: component_has_mechanism
+  source_object_id: COMPONENT-CONTEXT-AWARE-GATING
+  target_object_id: MECH-GATE-SUPPRESSES-NOISE
+  evidence_atom_ids:
+  - A-GATE-MECH
+  - A-GATE-EQ4
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-12
+  relation_type: component_defined_by_formula
+  source_object_id: COMPONENT-CONTEXT-AWARE-GATING
+  target_object_id: FORM-EQ4-SCALAR-GATE
+  evidence_atom_ids:
+  - A-GATE-EQ4
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-13
+  relation_type: component_adapts_component
+  source_object_id: COMPONENT-MULTI-BRANCH-INTEGRATION
+  target_object_id: COMPONENT-CONTEXT-AWARE-GATING
+  evidence_atom_ids:
+  - A-MB-SHARE
+  - A-MB-EQ6
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-14
+  relation_type: formula_generalizes_formula
+  source_object_id: FORM-EQ6-BRANCH-GATE
+  target_object_id: FORM-EQ4-SCALAR-GATE
+  evidence_atom_ids:
+  - A-MB-EQ6
+  - A-GATE-EQ4
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-15
+  relation_type: component_has_default_setting
+  source_object_id: COMPONENT-MULTI-BRANCH-INTEGRATION
+  target_object_id: EXPSETUP-MHC-M4
+  evidence_atom_ids:
+  - A-MB-MHC
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-16
+  relation_type: method_has_system_design
+  source_object_id: METHOD-ENGRAM
+  target_object_id: SYSDESIGN-DETERMINISTIC-PREFETCH
+  evidence_atom_ids:
+  - A-SYS-DECOUPLE
+  - A-SYS-DETERM
+  - A-FIG2
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-17
+  relation_type: system_design_enables_efficiency
+  source_object_id: SYSDESIGN-DETERMINISTIC-PREFETCH
+  target_object_id: IMPL-DECOUPLED-SCALING
+  evidence_atom_ids:
+  - A-SYS-DECOUPLE
+  - A-SYS-DETERM
+  - A-SYS-INFER
+  - A-SYS-ZIPF
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-18
+  relation_type: system_design_has_tradeoff
+  source_object_id: SYSDESIGN-DETERMINISTIC-PREFETCH
+  target_object_id: LIMIT-PLACEMENT-COASESIGN
+  evidence_atom_ids:
+  - A-SYS-PLACEMENT
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+do_not_extract:
+- ref: A-FIG3
+  reason: Forward reference to Section 3 (Sparsity Allocation / scaling laws); not a Chapter-2 component.
+  kind: cross_section_forward_reference
+- text: (a) Engram at training
+  source_lines:
+  - 81
+  - 81
+  reason: subfigure label printed before the Figure 2 caption; not a knowledge object
+  kind: figure_label
+- text: (b) Engram at inference
+  source_lines:
+  - 83
+  - 83
+  reason: subfigure label printed before the Figure 2 caption; not a knowledge object
+  kind: figure_label
+- text: (Vaswani et al., 2017)
+  atom_id: A-GATE-QKV
+  reason: inline citation, not a knowledge object
+  kind: citation
+- text: (He et al., 2016)
+  atom_id: A-MB-BACKBONE
+  reason: inline citation, not a knowledge object
+  kind: citation
+- text: (Haber and Poesio, 2024)
+  atom_id: A-GATE-RISK
+  reason: inline citation, not a knowledge object
+  kind: citation
+- text: (Dehghani et al., 2023)
+  atom_id: A-GATE-RMSNORM
+  reason: inline citation, not a knowledge object
+  kind: citation
+- text: (Xie et al., 2025)
+  atom_id: A-MB-MHC
+  reason: inline citation; mHC(M=4) is captured as EXPSETUP-MHC-M4, but the citation token itself is not an object
+  kind: citation
+- text: Figure 1
+  atom_id: A-OV-DEF
+  reason: Figure 1 referenced but its caption is not within the Chapter-2 slice
+  kind: out_of_slice_reference
+- pattern: inline_author_year_citation
+  examples:
+  - (Vaswani et al., 2017)
+  - (He et al., 2016)
+  - (Haber and Poesio, 2024)
+  - (Dehghani et al., 2023)
+  - (Xie et al., 2025)
+  reason: inline (Author, year) citations are not knowledge objects unless citation analysis is the active extraction target
+  kind: citation_policy

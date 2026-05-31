@@ -1,0 +1,2349 @@
+# Gold fixture v0.3.3 - Engram paper Section 6 Analysis (profile: article_research)
+# Upgraded from v0.1: dual coordinates (source_span authoritative + viewer_span),
+# raw/normalized discipline, object evidence split into local/supporting + home_package,
+# per-chunk context_packages with expected_objects (+ expected_local_fields for cross-package
+# objects MECH-EFFECTIVE-DEPTH and COMP-GATING), gold_label/difficulty/evidence_strength
+# (no decimal confidence), do_not_extract negatives, and auto-generated source_elements.
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Section 6 (Analysis) only
+  title: 'Engram: Conditional Memory for Language Models - Section 6 Analysis'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 224
+  - 321
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 224-321; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - Section 6 Analysis
+  - we ablate
+  - validation loss
+  - Table 3
+  - Table 4
+  - Figure 4/5/6/7
+  - LogitLens
+  - CKA
+  - throughput
+  - case study
+  extraction_targets:
+  - MechanisticExplanation
+  - AblationFinding
+  - ArchitectureComponent
+  - ExperimentResult
+  - ExperimentSetup
+  - SystemDesignClaim
+  - Formula
+  - Implication
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math/Chinese to ASCII (X^T, a_j, alpha_t, sida famming), and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package holding only some of its evidence may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. Here MECH-EFFECTIVE-DEPTH (home PKG-EFFECTIVE-DEPTH, supporting atoms in C-DEPTH-LL) and COMP-GATING (home PKG-ABLATION, supporting atom A-CASE-SETUP in C-CASE) declare partial fields on PKG-DEPTH-LL / PKG-CASE.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: Figures 4-7 are referenced by caption/prose only (no images in the text slice); mechanistic atoms bind to the prose with metadata.figure recording the figure id. No forward-reference figure atoms are isolated in Section 6.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    context_only: an atom not consumed by any object or relation may be flagged metadata.context_only:true; Section 6 has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - Equation tags are paper-continuous; only Eq.(8) (CKA, lines 250-252) and Eq.(9) (soft alignment index a_j, lines 258-260) appear in this slice. LaTeX uses \top, \mathcal{I}, \operatorname{argtop} -> normalized to ASCII (X^T, I_j, argtop-k).
+  - Eq.(9)'s tag is on the formula line (259) inside the $$...$$ block; the a_j prose definition is split across lines 256 (before Figure 5) and 266 (after Figure 5).
+  - Table 3 (line 242) and Table 4 (line 312) are single-line MinerU HTML <table> blocks. Table 4 uses colspan=3 section banners and rowspan=2 on the Base Model column, so table_row_atoms (A-T4-R4B/R8B) reassemble each backbone's baseline-vs-offload pair as anchored <tr>...</tr> substrings.
+  - 'Several prose paragraphs are split by inserted floats: 6.1.1 (lines 238 + 244 around Table 3), 6.1.2 a_j (256 + 266 around Figure 5), 6.3 (294 + 298 around Figure 6), 6.4 conservative-baseline (308 + 314 around Table 4). Atoms use contiguous single-line substrings on each side; source_element notes record the split.'
+  - Figures 4-7 are referenced by caption/prose; mechanistic/result atoms bind to the prose with metadata.figure. Chinese case-study tokens are transliterated to ASCII in normalized_text (originals listed in do_not_extract).
+  - '''infernce'' in the Table 4 caption (line 310) is a source typo; raw_text preserves it verbatim, normalized_text corrects to ''inference''.'
+source_elements:
+- id: SE-H-6
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 224
+  line_end: 224
+- id: SE-H-6.1
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 228
+  line_end: 228
+- id: SE-H-6.1.1
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 234
+  line_end: 234
+- id: SE-H-6.1.2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 246
+  line_end: 246
+- id: SE-H-6.2
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 272
+  line_end: 272
+- id: SE-H-6.3
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 290
+  line_end: 290
+- id: SE-H-6.4
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 300
+  line_end: 300
+- id: SE-H-6.5
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 316
+  line_end: 316
+- id: SE-6-INTRO
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 226
+  line_end: 226
+- id: SE-6.1-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 230
+  line_end: 230
+- id: SE-6.1-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 232
+  line_end: 232
+- id: SE-6.1-T3CAP
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 240
+  line_end: 240
+- id: SE-6.1-T3
+  type: table
+  file: engram_paper_mineru.md
+  line_start: 242
+  line_end: 242
+  metadata:
+    table_id: Table 3
+- id: SE-6.1.1-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 236
+  line_end: 236
+- id: SE-6.1.1-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 238
+  line_end: 244
+  metadata:
+    note: prose split by Table 3 insertion (lines 238 + 244)
+- id: SE-6.1.2-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 254
+  line_end: 254
+- id: SE-6.1.2-EQ8
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 250
+  line_end: 252
+  metadata:
+    tag: '8'
+- id: SE-6.1.2-EQ9
+  type: formula
+  file: engram_paper_mineru.md
+  line_start: 258
+  line_end: 260
+  metadata:
+    tag: '9'
+- id: SE-6.1.2-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 256
+  line_end: 256
+- id: SE-6.1.2-P4
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 262
+  line_end: 266
+  metadata:
+    note: prose split by Figure 5 insertion (lines 262 + 266)
+- id: SE-6.1.2-P5
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 268
+  line_end: 268
+- id: SE-6.1.2-P6
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 270
+  line_end: 270
+- id: SE-6.2-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 274
+  line_end: 274
+- id: SE-6.2-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 276
+  line_end: 276
+- id: SE-6.2-P4
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 280
+  line_end: 280
+- id: SE-6.2-P5
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 282
+  line_end: 282
+- id: SE-6.2-P6
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 284
+  line_end: 284
+- id: SE-6.2-P7
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 286
+  line_end: 286
+- id: SE-6.2-P8
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 288
+  line_end: 288
+- id: SE-6.3-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 292
+  line_end: 292
+- id: SE-6.3-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 294
+  line_end: 298
+  metadata:
+    note: prose split by Figure 6 insertion (lines 294 + 298)
+- id: SE-6.4-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 302
+  line_end: 302
+- id: SE-6.4-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 304
+  line_end: 304
+- id: SE-6.4-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 306
+  line_end: 306
+- id: SE-6.4-P4
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 308
+  line_end: 308
+- id: SE-6.4-P5
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 314
+  line_end: 314
+- id: SE-6.4-T4CAP
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 310
+  line_end: 310
+- id: SE-6.4-T4
+  type: table
+  file: engram_paper_mineru.md
+  line_start: 312
+  line_end: 312
+  metadata:
+    table_id: Table 4
+- id: SE-6.5-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 318
+  line_end: 318
+- id: SE-6.5-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 320
+  line_end: 320
+section_tree:
+- id: SEC-6
+  path: '6'
+  title: Analysis
+- id: SEC-6.1
+  path: 6 > 6.1
+  title: Is Engram functionally equivalent to increasing the model's depth?
+  parent: SEC-6
+- id: SEC-6.1.1
+  path: 6 > 6.1 > 6.1.1
+  title: Accelerated Prediction Convergence
+  parent: SEC-6.1
+- id: SEC-6.1.2
+  path: 6 > 6.1 > 6.1.2
+  title: Representational Alignment and Effective Depth
+  parent: SEC-6.1
+- id: SEC-6.2
+  path: 6 > 6.2
+  title: Structural Ablation and Layer Sensitivity
+  parent: SEC-6
+- id: SEC-6.3
+  path: 6 > 6.3
+  title: Sensitivity Analysis
+  parent: SEC-6
+- id: SEC-6.4
+  path: 6 > 6.4
+  title: System Efficiency
+  parent: SEC-6
+- id: SEC-6.5
+  path: 6 > 6.5
+  title: 'Case Study: Gating Visualization'
+  parent: SEC-6
+evidence_atoms:
+- id: A-INTRO
+  section_id: SEC-6
+  atom_type: claim_sentence
+  source_element_id: SE-6-INTRO
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 226
+    line_end: 226
+    char_start: 41016
+    char_end: 41330
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 165
+    char_end: 479
+    viewer_only: true
+  raw_text: In this section, we investigate the internal mechanisms of Engram, including its effective depth (Section 6.1), core module design (Section 6.2), and parametric sensitivity (Section 6.3). Additionally, we evaluate the inference throughput with offloading (Section 6.4) and conclude with a case study (Section 6.5).
+  normalized_text: 'Section 6 investigates Engram''s internal mechanisms: effective depth (6.1), core module design (6.2), parametric sensitivity (6.3), inference throughput with offloading (6.4), and a case study (6.5).'
+  evidence_strength: direct
+- id: A-DEPTH-MOTIV
+  section_id: SEC-6.1
+  atom_type: mechanism_sentence
+  source_element_id: SE-6.1-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 230
+    line_end: 230
+    char_start: 41407
+    char_end: 41684
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 556
+    char_end: 833
+    viewer_only: true
+  raw_text: Current LLMs lack a dedicated knowledge lookup primitive and they rely on computation to simulate memory recall. As shown in Table 3, to recognize the entity "Diana, Princess of Wales", an LLM must consume multiple layers of Attention and FFNs to progressively compose features
+  normalized_text: Current LLMs lack a dedicated knowledge lookup primitive and rely on computation to simulate memory recall; as shown in Table 3, recognizing the entity "Diana, Princess of Wales" requires consuming multiple layers of Attention and FFNs to progressively compose features.
+  evidence_strength: direct
+- id: A-DEPTH-HYP
+  section_id: SEC-6.1
+  atom_type: claim_sentence
+  source_element_id: SE-6.1-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 232
+    line_end: 232
+    char_start: 41853
+    char_end: 42055
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 1002
+    char_end: 1204
+    viewer_only: true
+  raw_text: we posit that by equipping the model with an explicit knowledge lookup capability, Engram effectively mimics an increase in model depth by relieving the model of the early stages of feature composition.
+  normalized_text: We posit that by equipping the model with an explicit knowledge lookup capability, Engram effectively mimics an increase in model depth by relieving the model of the early stages of feature composition.
+  evidence_strength: direct
+- id: A-DEPTH-TOOLS
+  section_id: SEC-6.1
+  atom_type: method_sentence
+  source_element_id: SE-6.1-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 232
+    line_end: 232
+    char_start: 42056
+    char_end: 42281
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 1205
+    char_end: 1430
+    viewer_only: true
+  raw_text: 'To validate this hypothesis, we employ two mechanistic interpretability tools: LogitLens (Belrose et al., 2023; nostalgebraist, 2020) and Centered Kernel Alignment analysis (CKA) (Davari et al., 2023; Kornblith et al., 2019).'
+  normalized_text: 'To validate this hypothesis, two mechanistic interpretability tools are employed: LogitLens and Centered Kernel Alignment analysis (CKA).'
+  evidence_strength: direct
+- id: A-T3-CAP
+  section_id: SEC-6.1
+  atom_type: table_caption_atom
+  source_element_id: SE-6.1-T3CAP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 240
+    line_end: 240
+    char_start: 42978
+    char_end: 43498
+  viewer_span:
+    file: source.md
+    line_start: 18
+    line_end: 18
+    char_start: 2127
+    char_end: 2647
+    viewer_only: true
+  raw_text: 'Table 3 | Entity resolution example reproduced from Ghandeharioun et al. (2024). This table illustrates how LLMs gradually integrate context tokens through layers of attention and FFNs to construct the internal representation of the entity: "Diana, Princess of Wales". The "Latent State Translation" column displays the automatically generated text for the last token: "Wales" by PatchScope (Ghandeharioun et al., 2024), while the "Explanation" column presents the manual interpretation provided by the original authors.'
+  normalized_text: 'Table 3: Entity resolution example (reproduced from Ghandeharioun et al. 2024) showing how LLMs gradually integrate context tokens through layers of attention and FFNs to construct the internal representation of "Diana, Princess of Wales"; the "Latent State Translation" column is PatchScope-generated text for the last token "Wales", and the "Explanation" column is the original authors'' manual interpretation.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3
+- id: A-T3-HDR
+  section_id: SEC-6.1
+  atom_type: table_header_atom
+  source_element_id: SE-6.1-T3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 242
+    line_end: 242
+    char_start: 43507
+    char_end: 43583
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 2656
+    char_end: 2732
+    viewer_only: true
+  raw_text: <tr><td>Layer</td><td>Latent State Translation</td><td>Explanation</td></tr>
+  normalized_text: Layer | Latent State Translation | Explanation
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3
+- id: A-T3-R12
+  section_id: SEC-6.1
+  atom_type: table_row_atom
+  source_element_id: SE-6.1-T3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 242
+    line_end: 242
+    char_start: 43583
+    char_end: 43658
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 2732
+    char_end: 2807
+    viewer_only: true
+  raw_text: '<tr><td>1-2</td><td>: Country in the United Kingdom</td><td>Wales</td></tr>'
+  normalized_text: 'Layers 1-2: ''Country in the United Kingdom'' -> Explanation: Wales.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3
+- id: A-T3-R4
+  section_id: SEC-6.1
+  atom_type: table_row_atom
+  source_element_id: SE-6.1-T3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 242
+    line_end: 242
+    char_start: 43719
+    char_end: 43859
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 2868
+    char_end: 3008
+    viewer_only: true
+  raw_text: '<tr><td>4</td><td>: Title held by female sovereigns in their own right or by queens consort</td><td>Princess of Wales (unspecific)</td></tr>'
+  normalized_text: 'Layer 4: ''Title held by female sovereigns in their own right or by queens consort'' -> Explanation: Princess of Wales (unspecific).'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3
+- id: A-T3-R6
+  section_id: SEC-6.1
+  atom_type: table_row_atom
+  source_element_id: SE-6.1-T3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 242
+    line_end: 242
+    char_start: 43991
+    char_end: 44194
+  viewer_span:
+    file: source.md
+    line_start: 20
+    line_end: 20
+    char_start: 3140
+    char_end: 3343
+    viewer_only: true
+  raw_text: '<tr><td>6</td><td>: Diana, Princess of Wales (1961-1997), the first wife of Prince Charles, Prince of Wales, who was famous for her beauty and humanitarian work</td><td>Diana, Princess of Wales</td></tr>'
+  normalized_text: 'Layer 6: ''Diana, Princess of Wales (1961-1997), the first wife of Prince Charles...'' -> Explanation: Diana, Princess of Wales (fully resolved only by layer 6).'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 3
+- id: A-LL-METHOD
+  section_id: SEC-6.1.1
+  atom_type: method_sentence
+  source_element_id: SE-6.1.1-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 236
+    line_end: 236
+    char_start: 42428
+    char_end: 42752
+  viewer_span:
+    file: source.md
+    line_start: 14
+    line_end: 14
+    char_start: 1577
+    char_end: 1901
+    viewer_only: true
+  raw_text: By projecting each intermediate layer's hidden state with the final LM Head, we compute the Kullback–Leibler divergence (Kullback and Leibler, 1951) between the intermediate output distribution and the model's final output distribution. This metric quantifies how close a latent representation is to being “prediction-ready”
+  normalized_text: LogitLens projects each intermediate layer's hidden state with the final LM Head and computes the Kullback-Leibler divergence between the intermediate output distribution and the model's final output distribution; this metric quantifies how close a latent representation is to being 'prediction-ready'.
+  evidence_strength: direct
+- id: A-LL-RESULT
+  section_id: SEC-6.1.1
+  atom_type: result_sentence
+  source_element_id: SE-6.1.1-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 238
+    line_end: 238
+    char_start: 42800
+    char_end: 42976
+  viewer_span:
+    file: source.md
+    line_start: 16
+    line_end: 16
+    char_start: 1949
+    char_end: 2125
+    viewer_only: true
+  raw_text: Figure 4 (a) reports the layer-wise KL divergence. Compared to the MoE baseline, both Engram variants exhibit systematically smaller KL divergence, with the most pronounced gap
+  normalized_text: 'Figure 4(a) reports the layer-wise KL divergence: compared to the MoE baseline, both Engram variants exhibit systematically smaller KL divergence, with the most pronounced gap (appearing in the early blocks).'
+  evidence_strength: direct
+  metadata:
+    figure: Figure 4(a)
+- id: A-LL-INTERP
+  section_id: SEC-6.1.1
+  atom_type: mechanism_sentence
+  source_element_id: SE-6.1.1-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 244
+    line_end: 244
+    char_start: 44235
+    char_end: 44566
+  viewer_span:
+    file: source.md
+    line_start: 22
+    line_end: 22
+    char_start: 3384
+    char_end: 3715
+    viewer_only: true
+  raw_text: 'The steeper descent in the Engram curves indicates that the model finishes feature composition much faster. This observation aligns with our hypothesis: by accessing external knowledge explicitly, Engram reduces the computational steps required, thereby reaching high-confidence, valid predictions earlier in the network hierarchy.'
+  normalized_text: 'The steeper descent in the Engram curves indicates the model finishes feature composition much faster: by accessing external knowledge explicitly, Engram reduces the computational steps required, reaching high-confidence valid predictions earlier in the network hierarchy.'
+  evidence_strength: direct
+- id: A-CKA-METHOD
+  section_id: SEC-6.1.2
+  atom_type: method_sentence
+  source_element_id: SE-6.1.2-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 254
+    line_end: 254
+    char_start: 45130
+    char_end: 45524
+  viewer_span:
+    file: source.md
+    line_start: 32
+    line_end: 32
+    char_start: 4279
+    char_end: 4673
+    viewer_only: true
+  raw_text: where $K = XX^{\top}$ and $L = YY^{\top}$ denote the Gram matrices (using a linear kernel) and HSIC is Hilbert-Schmidt Independence Criterion (Gretton et al., 2005). We employ a minibatch implementation with an unbiased estimator of HSIC (Davari et al., 2023) and evaluate on the Few-NERD dataset (Ding et al., 2021), extracting hidden states corresponding to the final token of named entities.
+  normalized_text: K = X X^T and L = Y Y^T are the linear-kernel Gram matrices, and HSIC is the Hilbert-Schmidt Independence Criterion; a minibatch unbiased HSIC estimator is used, evaluated on the Few-NERD dataset using hidden states of the final token of named entities.
+  evidence_strength: direct
+- id: A-CKA-EQ8
+  section_id: SEC-6.1.2
+  atom_type: formula_atom
+  source_element_id: SE-6.1.2-EQ8
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 251
+    line_end: 251
+    char_start: 45012
+    char_end: 45125
+  viewer_span:
+    file: source.md
+    line_start: 29
+    line_end: 29
+    char_start: 4161
+    char_end: 4274
+    viewer_only: true
+  raw_text: \mathrm{CKA} (K, L) = \frac {\mathrm{HSIC} (K , L)}{\sqrt {\mathrm{HSIC} (K , K) \mathrm{HSIC} (L , L)}} \tag {8}
+  normalized_text: CKA(K,L) = HSIC(K,L) / sqrt( HSIC(K,K) HSIC(L,L) )
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+    role: cka_definition
+    supported_by_context_atoms:
+    - A-CKA-METHOD
+- id: A-CKA-EQ9
+  section_id: SEC-6.1.2
+  atom_type: formula_atom
+  source_element_id: SE-6.1.2-EQ9
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 259
+    line_end: 259
+    char_start: 45844
+    char_end: 46065
+  viewer_span:
+    file: source.md
+    line_start: 37
+    line_end: 37
+    char_start: 4993
+    char_end: 5214
+    viewer_only: true
+  raw_text: a _ {j} = \frac {\sum_ {i \in \mathcal {I} _ {j}} S _ {i , j} \cdot i}{\sum_ {i \in \mathcal {I} _ {j}} S _ {i , j}}, \quad \text {where} \mathcal {I} _ {j} = \underset {i} {\operatorname{argtop}} k (S _ {i, j}). \tag {9}
+  normalized_text: a_j = ( sum_{i in I_j} S_{i,j} * i ) / ( sum_{i in I_j} S_{i,j} ), where I_j = argtop-k_i(S_{i,j})
+  evidence_strength: direct
+  metadata:
+    tag: '9'
+    role: soft_alignment_index
+    supported_by_context_atoms:
+    - A-CKA-AINDEX
+- id: A-CKA-AINDEX
+  section_id: SEC-6.1.2
+  atom_type: method_sentence
+  source_element_id: SE-6.1.2-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 256
+    line_end: 256
+    char_start: 45580
+    char_end: 45839
+  viewer_span:
+    file: source.md
+    line_start: 34
+    line_end: 34
+    char_start: 4729
+    char_end: 4988
+    viewer_only: true
+  raw_text: 'we first compute the pairwise CKA similarity matrix $S \in [0,1]^{L \times L}$ , where L is the number of layers. We then introduce a soft alignment index $a_{j}$ , defined as the weighted centroid of the top-k most similar MoE layers for each Engram layer j:'
+  normalized_text: The pairwise CKA similarity matrix S in [0,1]^(LxL) (L = number of layers) is computed; the soft alignment index a_j is the weighted centroid of the top-k most similar MoE layers for each Engram layer j.
+  evidence_strength: direct
+- id: A-CKA-AINDEX2
+  section_id: SEC-6.1.2
+  atom_type: method_sentence
+  source_element_id: SE-6.1.2-P4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 266
+    line_end: 266
+    char_start: 46683
+    char_end: 46843
+  viewer_span:
+    file: source.md
+    line_start: 44
+    line_end: 44
+    char_start: 5832
+    char_end: 5992
+    viewer_only: true
+  raw_text: serves as a robust proxy for the “effective MoE depth” corresponding to Engram layer j, utilizing top-k filtering (with k = 5) to mitigate low-similarity noise.
+  normalized_text: a_j serves as a robust proxy for the 'effective MoE depth' corresponding to Engram layer j, using top-k filtering (k = 5) to mitigate low-similarity noise.
+  evidence_strength: direct
+- id: A-CKA-RESULT
+  section_id: SEC-6.1.2
+  atom_type: result_sentence
+  source_element_id: SE-6.1.2-P5
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 268
+    line_end: 268
+    char_start: 46957
+    char_end: 47206
+  viewer_span:
+    file: source.md
+    line_start: 46
+    line_end: 46
+    char_start: 6106
+    char_end: 6355
+    viewer_only: true
+  raw_text: We observe a distinct upward shift from the diagonal, meaning that $a_{j} > j$ for a wide range of layers. For instance, the representations formed at layer 5 of Engram-27B align most closely with those at approximately layer 12 of the MoE baseline.
+  normalized_text: A distinct upward shift from the diagonal means a_j > j for a wide range of layers; e.g. representations at layer 5 of Engram-27B align most closely with approximately layer 12 of the MoE baseline.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 4(b-c)
+- id: A-DEPTH-CONCL
+  section_id: SEC-6.1.2
+  atom_type: claim_sentence
+  source_element_id: SE-6.1.2-P6
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 270
+    line_end: 270
+    char_start: 47208
+    char_end: 47554
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 6357
+    char_end: 6703
+    viewer_only: true
+  raw_text: 'The consistent off-diagonal shift, which aligns with the LogitLens results (Section 6.1.1), confirms that Engram achieves deeper representations at earlier layers. This validates our central hypothesis: by bypassing early-stage feature composition via explicit lookups, Engram is functionally equivalent to increasing the model''s effective depth.'
+  normalized_text: 'The consistent off-diagonal shift, aligning with the LogitLens results, confirms Engram achieves deeper representations at earlier layers: by bypassing early-stage feature composition via explicit lookups, Engram is functionally equivalent to increasing the model''s effective depth.'
+  evidence_strength: direct
+- id: A-ABL-SETUP
+  section_id: SEC-6.2
+  atom_type: experiment_setup_atom
+  source_element_id: SE-6.2-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 274
+    line_end: 274
+    char_start: 47727
+    char_end: 47953
+  viewer_span:
+    file: source.md
+    line_start: 52
+    line_end: 52
+    char_start: 6876
+    char_end: 7102
+    viewer_only: true
+  raw_text: Unless otherwise specified, the backbone is a 12-layer 3B MoE model (0.56B activated parameters) trained for 100B tokens. Figure 5 reports validation loss. The dashed orange line denotes the 3B MoE baseline (Val Loss = 1.808).
+  normalized_text: The ablation backbone is a 12-layer 3B MoE model (0.56B activated parameters) trained for 100B tokens; Figure 5 reports validation loss, with the 3B MoE baseline at Val Loss = 1.808.
+  evidence_strength: direct
+- id: A-ABL-REFCFG
+  section_id: SEC-6.2
+  atom_type: experiment_setup_atom
+  source_element_id: SE-6.2-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 276
+    line_end: 276
+    char_start: 47980
+    char_end: 48294
+  viewer_span:
+    file: source.md
+    line_start: 54
+    line_end: 54
+    char_start: 7129
+    char_end: 7443
+    viewer_only: true
+  raw_text: We augment the backbone with a fixed 1.6B-parameter Engram memory. Our reference model uses $\{2,3\}$ -grams and inserts Engram at Layers 2 and 6, achieving Val Loss = 1.768, a substantial improvement over the MoE baseline ( $\Delta = 0.04$ ). All structural ablations below are defined relative to this reference.
+  normalized_text: The reference configuration augments the backbone with a fixed 1.6B-parameter Engram memory using {2,3}-grams inserted at Layers 2 and 6, achieving Val Loss = 1.768 (Delta = 0.04 vs the MoE baseline); all structural ablations are defined relative to this reference.
+  evidence_strength: direct
+- id: A-ABL-TRADEOFF
+  section_id: SEC-6.2
+  atom_type: mechanism_sentence
+  source_element_id: SE-6.2-P4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 280
+    line_end: 280
+    char_start: 48623
+    char_end: 49329
+  viewer_span:
+    file: source.md
+    line_start: 58
+    line_end: 58
+    char_start: 7772
+    char_end: 8478
+    viewer_only: true
+  raw_text: 'Injecting Engram early allows it to offload local pattern reconstruction before the backbone expends computational depth, aligning with the backbone''s natural hierarchical processing (Ghandeharioun et al., 2024; Jin et al., 2025; Li and Subramani, 2025; Tenney et al., 2019). However, this incurs a cost in gating precision: early hidden states have not yet aggregated sufficient global context via attention, and the parallel branches lack the representational divergence required for fine-grained modulation (Xie et al., 2025; Zhu et al., 2025). Consequently, optimal placement requires balancing (i) offloading static local patterns early and (ii) utilizing stronger contextual queries for gating later.'
+  normalized_text: Injecting Engram early offloads local pattern reconstruction before the backbone expends computational depth, but early hidden states have not yet aggregated sufficient global context via attention (hurting gating precision); optimal placement balances (i) offloading static local patterns early and (ii) stronger contextual queries for gating later.
+  evidence_strength: direct
+- id: A-ABL-LAYER2
+  section_id: SEC-6.2
+  atom_type: ablation_finding_atom
+  source_element_id: SE-6.2-P5
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 282
+    line_end: 282
+    char_start: 49331
+    char_end: 49710
+  viewer_span:
+    file: source.md
+    line_start: 60
+    line_end: 60
+    char_start: 8480
+    char_end: 8859
+    viewer_only: true
+  raw_text: The sweep shows that Layer 2 achieves the best single-layer performance (Val Loss = 1.770), outperforming Layer 1 and degrading as the insertion point moves deeper. This indicates that one round of attention is already sufficient to provide a meaningfully contextualized $h_{t}$ for gating, while still being early enough to replace the backbone's bottom-layer local aggregation.
+  normalized_text: Sweeping a single Engram module, Layer 2 achieves the best single-layer performance (Val Loss = 1.770), outperforming Layer 1 and degrading as insertion moves deeper; one round of attention already yields a meaningfully contextualized h_t for gating.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 5 (Layer Sweep)
+- id: A-ABL-LAYER26
+  section_id: SEC-6.2
+  atom_type: ablation_finding_atom
+  source_element_id: SE-6.2-P6
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 284
+    line_end: 284
+    char_start: 49774
+    char_end: 50225
+  viewer_span:
+    file: source.md
+    line_start: 62
+    line_end: 62
+    char_start: 8923
+    char_end: 9374
+    viewer_only: true
+  raw_text: we find that dividing the same 1.6B memory into two smaller modules (achieved by reducing the embedding dimension $d_{mem}$ ) and placing them at Layers 2 and 6 performs even better (Val Loss = 1.768). This layered design reconciles the trade-off by combining early intervention with rich, late-stage contextual gating. More importantly, layered insertion also provides a practical system advantage, enabling better utilization of the memory hierarchy
+  normalized_text: Dividing the same 1.6B memory into two smaller modules (reduced d_mem) at Layers 2 and 6 performs even better (Val Loss = 1.768), combining early intervention with rich late-stage contextual gating and improving utilization of the memory hierarchy.
+  evidence_strength: direct
+- id: A-ABL-COMPONENTS
+  section_id: SEC-6.2
+  atom_type: ablation_finding_atom
+  source_element_id: SE-6.2-P7
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 286
+    line_end: 286
+    char_start: 50453
+    char_end: 50926
+  viewer_span:
+    file: source.md
+    line_start: 64
+    line_end: 64
+    char_start: 9602
+    char_end: 10075
+    viewer_only: true
+  raw_text: 'We find that three components yield the most significant gains: (i) branch-specific fusion within the multi-branch backbone, (ii) context-aware gating, and (iii) tokenizer compression. Removing any of these causes the largest regressions in validation loss. Specifically, for the “w/o multi branch” ablation, we retain the mHC backbone structure but replace the branch-specific gating with a single Engram fusion applied to the hidden states after the pre-mapping $H^{pre}$'
+  normalized_text: 'Three components yield the most significant gains and the largest validation-loss regressions when removed: (i) branch-specific fusion within the multi-branch backbone, (ii) context-aware gating, and (iii) tokenizer compression. (''w/o multi branch'' replaces branch-specific gating with a single Engram fusion on the hidden states H^pre.)'
+  evidence_strength: direct
+  metadata:
+    figure: Figure 5 (Component Ablation markers)
+- id: A-ABL-MINOR
+  section_id: SEC-6.2
+  atom_type: ablation_finding_atom
+  source_element_id: SE-6.2-P8
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 288
+    line_end: 288
+    char_start: 50948
+    char_end: 51319
+  viewer_span:
+    file: source.md
+    line_start: 66
+    line_end: 66
+    char_start: 10097
+    char_end: 10468
+    viewer_only: true
+  raw_text: 'Other changes have smaller effects: removing the lightweight depthwise convolution only marginally degrades performance. Allocating capacity to 4-grams is slightly suboptimal under a fixed 1.6B budget—likely because it dilutes capacity from the more frequent 2/3-gram patterns—though we do not rule out that higher-order N-grams become beneficial at larger memory scales.'
+  normalized_text: 'Smaller effects: removing the lightweight depthwise convolution only marginally degrades performance; allocating capacity to 4-grams is slightly suboptimal under a fixed 1.6B budget (dilutes capacity from more frequent 2/3-gram patterns), though higher-order N-grams may help at larger memory scales.'
+  evidence_strength: direct
+- id: A-SENS-METHOD
+  section_id: SEC-6.3
+  atom_type: experiment_setup_atom
+  source_element_id: SE-6.3-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 292
+    line_end: 292
+    char_start: 51416
+    char_end: 51895
+  viewer_span:
+    file: source.md
+    line_start: 70
+    line_end: 70
+    char_start: 10565
+    char_end: 11044
+    viewer_only: true
+  raw_text: we evaluate the model by completely suppressing the sparse embedding output during inference while keeping the backbone unchanged. Crucially, this post-hoc ablation induces a training-inference inconsistency, potentially introducing noise in complex, mixed-capability tasks. Consequently, we prioritize the analysis of Factual Knowledge and Reading Comprehension—the two extremes of the sensitivity spectrum—which exhibit the highest signal-to-noise ratio under this stress test.
+  normalized_text: The model is evaluated by completely suppressing the sparse embedding (Engram) output during inference while keeping the backbone unchanged; this post-hoc ablation induces a training-inference inconsistency, so analysis prioritizes Factual Knowledge and Reading Comprehension, the two extremes with the highest signal-to-noise ratio.
+  evidence_strength: direct
+- id: A-SENS-FACTUAL
+  section_id: SEC-6.3
+  atom_type: result_sentence
+  source_element_id: SE-6.3-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 298
+    line_end: 298
+    char_start: 52166
+    char_end: 52374
+  viewer_span:
+    file: source.md
+    line_start: 76
+    line_end: 76
+    char_start: 11315
+    char_end: 11523
+    viewer_only: true
+  raw_text: benchmarks suffer a catastrophic collapse, retaining only 29–44% of the original performance (e.g., TriviaQA at 29%), confirming that the Engram module acts as the primary repository for parametric knowledge.
+  normalized_text: Factual-knowledge benchmarks suffer a catastrophic collapse, retaining only 29-44% of original performance (e.g. TriviaQA at 29%), confirming Engram acts as the primary repository for parametric knowledge.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 6
+- id: A-SENS-READING
+  section_id: SEC-6.3
+  atom_type: result_sentence
+  source_element_id: SE-6.3-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 298
+    line_end: 298
+    char_start: 52375
+    char_end: 52588
+  viewer_span:
+    file: source.md
+    line_start: 76
+    line_end: 76
+    char_start: 11524
+    char_end: 11737
+    viewer_only: true
+  raw_text: Conversely, reading comprehension tasks are remarkably resilient, retaining 81–93% (e.g., C3 at 93%), suggesting that context-grounded tasks rely primarily on the backbone's attention mechanism rather than Engram.
+  normalized_text: Reading-comprehension tasks are remarkably resilient, retaining 81-93% (e.g. C3 at 93%), suggesting context-grounded tasks rely primarily on the backbone's attention mechanism rather than Engram.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 6
+- id: A-SYS-DETERMINISTIC
+  section_id: SEC-6.4
+  atom_type: claim_sentence
+  source_element_id: SE-6.4-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 302
+    line_end: 302
+    char_start: 52616
+    char_end: 52949
+  viewer_span:
+    file: source.md
+    line_start: 80
+    line_end: 80
+    char_start: 11765
+    char_end: 12098
+    viewer_only: true
+  raw_text: 'A pivotal system advantage of Engram over routing-based MoE is that its sparse activations are addressed by explicit, static hash IDs. This yields a strictly deterministic memory access pattern: indices for the next Engram lookup are fixed once the token sequence is known and can be computed before the corresponding layer executes.'
+  normalized_text: 'A pivotal system advantage of Engram over routing-based MoE: its sparse activations are addressed by explicit, static hash IDs, yielding a strictly deterministic memory access pattern whose indices are fixed once the token sequence is known and can be computed before the corresponding layer executes.'
+  evidence_strength: direct
+- id: A-SYS-SETUP
+  section_id: SEC-6.4
+  atom_type: experiment_setup_atom
+  source_element_id: SE-6.4-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 304
+    line_end: 304
+    char_start: 53225
+    char_end: 53582
+  viewer_span:
+    file: source.md
+    line_start: 82
+    line_end: 82
+    char_start: 12374
+    char_end: 12731
+    viewer_only: true
+  raw_text: we benchmark on two dense backbones (Dense-4B and Dense-8B). We insert a massive 100B-parameter Engram layer into the second Transformer block, with the entire embedding table resident in host DRAM. During inference, the system prefetches embeddings for the Engram layer asynchronously, overlapping the PCIe transfer with the computation of the first block.
+  normalized_text: 'Benchmarked on two dense backbones (Dense-4B and Dense-8B): a 100B-parameter Engram layer is inserted into the second Transformer block with the entire embedding table resident in host DRAM, prefetched asynchronously to overlap the PCIe transfer with the first block''s computation.'
+  evidence_strength: direct
+- id: A-SYS-HARNESS
+  section_id: SEC-6.4
+  atom_type: experiment_setup_atom
+  source_element_id: SE-6.4-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 304
+    line_end: 304
+    char_start: 52971
+    char_end: 53115
+  viewer_span:
+    file: source.md
+    line_start: 82
+    line_end: 82
+    char_start: 12120
+    char_end: 12264
+    viewer_only: true
+  raw_text: We implemented an inference harness based on nano-vLLM $^{1}$ —a streamlined prototype of the industry-standard vLLM engine (Kwon et al., 2023).
+  normalized_text: The inference harness is based on nano-vLLM, a streamlined prototype of the industry-standard vLLM engine.
+  evidence_strength: direct
+- id: A-SYS-RESULT
+  section_id: SEC-6.4
+  atom_type: result_sentence
+  source_element_id: SE-6.4-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 306
+    line_end: 306
+    char_start: 53593
+    char_end: 54014
+  viewer_span:
+    file: source.md
+    line_start: 84
+    line_end: 84
+    char_start: 12742
+    char_end: 13163
+    viewer_only: true
+  raw_text: As detailed in Table 4, offloading a 100B-parameter embedding table incurs a negligible throughput penalty, peaking at only 2.8% on the 8B backbone. This confirms that the compute intensity of early dense blocks provides a sufficient temporal window to mask the retrieval latency. Crucially, the effective communication volume per step scales with the number of activated slots rather than the total embedding table size.
+  normalized_text: Offloading a 100B-parameter embedding table incurs a negligible throughput penalty, peaking at only 2.8% on the 8B backbone; the compute intensity of early dense blocks provides enough temporal window to mask retrieval latency, and per-step communication volume scales with the number of activated slots rather than the total embedding table size.
+  evidence_strength: direct
+  metadata:
+    figure: Table 4
+- id: A-SYS-CONSERVATIVE
+  section_id: SEC-6.4
+  atom_type: claim_sentence
+  source_element_id: SE-6.4-P4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 308
+    line_end: 308
+    char_start: 54027
+    char_end: 54268
+  viewer_span:
+    file: source.md
+    line_start: 86
+    line_end: 86
+    char_start: 13176
+    char_end: 13417
+    viewer_only: true
+  raw_text: this experiment serves as a conservative baseline. While the hierarchical design in Section 2.5 exploits Zipfian locality to cache frequent items in HBM, our experimental setup forces all retrievals to traverse the PCIe bus from host memory.
+  normalized_text: 'This experiment is a conservative baseline: unlike the hierarchical design that exploits Zipfian locality to cache frequent items in HBM, the setup forces all retrievals to traverse the PCIe bus from host memory.'
+  evidence_strength: direct
+- id: A-SYS-CONSERVATIVE2
+  section_id: SEC-6.4
+  atom_type: claim_sentence
+  source_element_id: SE-6.4-P5
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 314
+    line_end: 314
+    char_start: 55082
+    char_end: 55239
+  viewer_span:
+    file: source.md
+    line_start: 92
+    line_end: 92
+    char_start: 14231
+    char_end: 14388
+    viewer_only: true
+  raw_text: retrieval strategy yields minimal overhead strongly suggests that a fully optimized, locality-aware implementation would incur negligible throughput penalty.
+  normalized_text: That this baseline retrieval strategy yields minimal overhead strongly suggests a fully optimized, locality-aware implementation would incur negligible throughput penalty.
+  evidence_strength: direct
+- id: A-T4-CAP
+  section_id: SEC-6.4
+  atom_type: table_caption_atom
+  source_element_id: SE-6.4-T4CAP
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 310
+    line_end: 310
+    char_start: 54298
+    char_end: 54441
+  viewer_span:
+    file: source.md
+    line_start: 88
+    line_end: 88
+    char_start: 13447
+    char_end: 13590
+    viewer_only: true
+  raw_text: Table 4 | End-to-end Inference Throughput. We measure infernce throughput with a 100B-parameter Engram layer entirely offloaded to host memory.
+  normalized_text: 'Table 4: End-to-end inference throughput, measured with a 100B-parameter Engram layer entirely offloaded to host memory.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 4
+- id: A-T4-HDR
+  section_id: SEC-6.4
+  atom_type: table_header_atom
+  source_element_id: SE-6.4-T4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 312
+    line_end: 312
+    char_start: 54727
+    char_end: 54804
+  viewer_span:
+    file: source.md
+    line_start: 90
+    line_end: 90
+    char_start: 13876
+    char_end: 13953
+    viewer_only: true
+  raw_text: <tr><td>Base Model</td><td>Configuration</td><td>Throughput (tok/s)</td></tr>
+  normalized_text: Base Model | Configuration | Throughput (tok/s)
+  evidence_strength: direct
+  metadata:
+    table_id: Table 4
+- id: A-T4-R4B
+  section_id: SEC-6.4
+  atom_type: table_row_atom
+  source_element_id: SE-6.4-T4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 312
+    line_end: 312
+    char_start: 54804
+    char_end: 54938
+  viewer_span:
+    file: source.md
+    line_start: 90
+    line_end: 90
+    char_start: 13953
+    char_end: 14087
+    viewer_only: true
+  raw_text: <tr><td rowspan="2">4B-Dense</td><td>Baseline</td><td>9,031.62</td></tr><tr><td>+ 100B Engram (CPU Offload)</td><td>8,858.28</td></tr>
+  normalized_text: '4B-Dense: Baseline = 9,031.62 tok/s; + 100B Engram (CPU Offload) = 8,858.28 tok/s (penalty ~1.9%).'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 4
+- id: A-T4-R8B
+  section_id: SEC-6.4
+  atom_type: table_row_atom
+  source_element_id: SE-6.4-T4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 312
+    line_end: 312
+    char_start: 54938
+    char_end: 55072
+  viewer_span:
+    file: source.md
+    line_start: 90
+    line_end: 90
+    char_start: 14087
+    char_end: 14221
+    viewer_only: true
+  raw_text: <tr><td rowspan="2">8B-Dense</td><td>Baseline</td><td>6,315.52</td></tr><tr><td>+ 100B Engram (CPU Offload)</td><td>6,140.02</td></tr>
+  normalized_text: '8B-Dense: Baseline = 6,315.52 tok/s; + 100B Engram (CPU Offload) = 6,140.02 tok/s (peak penalty 2.8%).'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 4
+- id: A-T4-SETUP
+  section_id: SEC-6.4
+  atom_type: table_row_atom
+  source_element_id: SE-6.4-T4
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 312
+    line_end: 312
+    char_start: 54498
+    char_end: 54679
+  viewer_span:
+    file: source.md
+    line_start: 90
+    line_end: 90
+    char_start: 13647
+    char_end: 13828
+    viewer_only: true
+  raw_text: <tr><td>Hardware</td><td></td><td>NVIDIA H800</td></tr><tr><td>Workload</td><td></td><td>512 Sequences</td></tr><tr><td>Sequence Length</td><td></td><td>Uniform(100, 1024)</td></tr>
+  normalized_text: 'Experimental setup: Hardware = NVIDIA H800; Workload = 512 Sequences; Sequence Length = Uniform(100, 1024).'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 4
+- id: A-CASE-SETUP
+  section_id: SEC-6.5
+  atom_type: method_sentence
+  source_element_id: SE-6.5-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 318
+    line_end: 318
+    char_start: 55282
+    char_end: 55603
+  viewer_span:
+    file: source.md
+    line_start: 96
+    line_end: 96
+    char_start: 14431
+    char_end: 14752
+    viewer_only: true
+  raw_text: In Section 2.3, we introduced the context-aware gating mechanism, designed to dynamically modulate the integration of retrieved static memory into the backbone. To empirically validate whether Engram behaves as intended, we visualize the gating scalar $\alpha_{t}$ of Engram-27B $^{2}$ across various samples in Figure 7.
+  normalized_text: To validate the context-aware gating mechanism (which dynamically modulates the integration of retrieved static memory into the backbone), the gating scalar alpha_t of Engram-27B is visualized across samples in Figure 7.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 7
+- id: A-CASE-EN
+  section_id: SEC-6.5
+  atom_type: result_sentence
+  source_element_id: SE-6.5-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 320
+    line_end: 320
+    char_start: 55664
+    char_end: 55946
+  viewer_span:
+    file: source.md
+    line_start: 98
+    line_end: 98
+    char_start: 14813
+    char_end: 15095
+    viewer_only: true
+  raw_text: The gating mechanism consistently activates (shown in red) upon completing local, static patterns. In English, we observe strong activations on multi-token named entities (e.g., “Alexander the Great”, “the Milky Way”) and formulaic phrases (e.g., “By the way”, “Princess of Wales”).
+  normalized_text: The gating mechanism consistently activates (red) upon completing local static patterns; in English, strong activations on multi-token named entities (e.g. 'Alexander the Great', 'the Milky Way') and formulaic phrases (e.g. 'By the way', 'Princess of Wales').
+  evidence_strength: direct
+  metadata:
+    figure: Figure 7
+- id: A-CASE-ZH
+  section_id: SEC-6.5
+  atom_type: result_sentence
+  source_element_id: SE-6.5-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 320
+    line_end: 320
+    char_start: 55947
+    char_end: 56183
+  viewer_span:
+    file: source.md
+    line_start: 98
+    line_end: 98
+    char_start: 15096
+    char_end: 15332
+    viewer_only: true
+  raw_text: This behavior generalizes effectively across languages. In the Chinese examples, Engram identifies and retrieves distinct idiomatic expressions and historical entities, such as “Four Great Inventions” (四大发明) and “Zhang Zhongjing” (张仲景).
+  normalized_text: The behavior generalizes across languages; in the Chinese examples Engram identifies idiomatic expressions and historical entities such as 'Four Great Inventions' (sida famming) and 'Zhang Zhongjing'.
+  evidence_strength: direct
+  metadata:
+    figure: Figure 7
+    note: 'Chinese originals transliterated to ASCII: sida famming, Zhang Zhongjing'
+- id: A-CASE-CONCL
+  section_id: SEC-6.5
+  atom_type: claim_sentence
+  source_element_id: SE-6.5-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 320
+    line_end: 320
+    char_start: 56184
+    char_end: 56392
+  viewer_span:
+    file: source.md
+    line_start: 98
+    line_end: 98
+    char_start: 15333
+    char_end: 15541
+    viewer_only: true
+  raw_text: These qualitative results confirm that Engram successfully identifies and handles stereotyped linguistic dependencies, effectively relieving the Transformer backbone from memorizing these static associations.
+  normalized_text: These qualitative results confirm Engram successfully identifies and handles stereotyped linguistic dependencies, relieving the Transformer backbone from memorizing these static associations.
+  evidence_strength: direct
+semantic_chunks:
+- id: C-INTRO
+  profile: article_research
+  chunk_type: article_core_claim_block
+  section_path: '6'
+  atom_ids:
+  - A-INTRO
+  central_atom_ids:
+  - A-INTRO
+  boundary_reason: Section roadmap; one short overview unit listing the five analysis threads.
+  extraction_targets:
+  - Implication
+  gold_must_cover_atoms:
+  - A-INTRO
+- id: C-DEPTH-LL
+  profile: article_research
+  chunk_type: ablation_finding_block
+  section_path: 6 > 6.1 > 6.1.1
+  atom_ids:
+  - A-DEPTH-MOTIV
+  - A-DEPTH-HYP
+  - A-DEPTH-TOOLS
+  - A-T3-CAP
+  - A-T3-HDR
+  - A-T3-R12
+  - A-T3-R4
+  - A-T3-R6
+  - A-LL-METHOD
+  - A-LL-RESULT
+  - A-LL-INTERP
+  central_atom_ids:
+  - A-DEPTH-HYP
+  - A-LL-RESULT
+  - A-LL-INTERP
+  boundary_reason: Effective-depth hypothesis + the Table 3 motivating example + the LogitLens method/result/interpretation kept together (mechanism_explains_result dependency); table caption/header/rows stay with their analysis.
+  extraction_targets:
+  - MechanisticExplanation
+  - ExperimentResult
+  gold_must_cover_atoms:
+  - A-DEPTH-HYP
+  - A-T3-R6
+  - A-LL-RESULT
+  - A-LL-INTERP
+- id: C-DEPTH-CKA
+  profile: article_research
+  chunk_type: ablation_finding_block
+  section_path: 6 > 6.1 > 6.1.2
+  atom_ids:
+  - A-CKA-METHOD
+  - A-CKA-EQ8
+  - A-CKA-EQ9
+  - A-CKA-AINDEX
+  - A-CKA-AINDEX2
+  - A-CKA-RESULT
+  - A-DEPTH-CONCL
+  central_atom_ids:
+  - A-CKA-RESULT
+  - A-DEPTH-CONCL
+  boundary_reason: CKA definition (Eq.8) + soft-alignment index (Eq.9) + a_j>j result + effective-depth conclusion held together (formula-explanation continuity, mechanism_explains_result).
+  extraction_targets:
+  - MechanisticExplanation
+  - Formula
+  gold_must_cover_atoms:
+  - A-CKA-EQ8
+  - A-CKA-EQ9
+  - A-CKA-RESULT
+  - A-DEPTH-CONCL
+- id: C-ABL
+  profile: article_research
+  chunk_type: ablation_finding_block
+  section_path: 6 > 6.2
+  atom_ids:
+  - A-ABL-SETUP
+  - A-ABL-REFCFG
+  - A-ABL-TRADEOFF
+  - A-ABL-LAYER2
+  - A-ABL-LAYER26
+  - A-ABL-COMPONENTS
+  - A-ABL-MINOR
+  central_atom_ids:
+  - A-ABL-REFCFG
+  - A-ABL-COMPONENTS
+  boundary_reason: 'Controlled ablation: setup + reference config + placement trade-off + layer sweep + component importance all share the same baseline (experiment_uses_setup, ablation_supports_component_importance).'
+  extraction_targets:
+  - AblationFinding
+  - ExperimentSetup
+  - ArchitectureComponent
+  gold_must_cover_atoms:
+  - A-ABL-REFCFG
+  - A-ABL-LAYER2
+  - A-ABL-LAYER26
+  - A-ABL-COMPONENTS
+- id: C-SENS
+  profile: article_research
+  chunk_type: ablation_finding_block
+  section_path: 6 > 6.3
+  atom_ids:
+  - A-SENS-METHOD
+  - A-SENS-FACTUAL
+  - A-SENS-READING
+  central_atom_ids:
+  - A-SENS-FACTUAL
+  - A-SENS-READING
+  boundary_reason: Suppression-at-inference setup + the factual-vs-reading dichotomy results (setup-result dependency).
+  extraction_targets:
+  - AblationFinding
+  - ExperimentResult
+  - MechanisticExplanation
+  gold_must_cover_atoms:
+  - A-SENS-FACTUAL
+  - A-SENS-READING
+- id: C-SYS
+  profile: article_research
+  chunk_type: system_efficiency_block
+  section_path: 6 > 6.4
+  atom_ids:
+  - A-SYS-DETERMINISTIC
+  - A-SYS-SETUP
+  - A-SYS-HARNESS
+  - A-SYS-RESULT
+  - A-SYS-CONSERVATIVE
+  - A-SYS-CONSERVATIVE2
+  - A-T4-CAP
+  - A-T4-HDR
+  - A-T4-SETUP
+  - A-T4-R4B
+  - A-T4-R8B
+  central_atom_ids:
+  - A-SYS-DETERMINISTIC
+  - A-SYS-RESULT
+  boundary_reason: Deterministic-hash-ID claim enables the offloading design; setup + Table 4 throughput results + conservative-baseline caveat kept together (system_design_enables_efficiency, setup-result-table dependency).
+  extraction_targets:
+  - SystemDesignClaim
+  - ExperimentResult
+  - ExperimentSetup
+  gold_must_cover_atoms:
+  - A-SYS-DETERMINISTIC
+  - A-SYS-RESULT
+  - A-T4-R4B
+  - A-T4-R8B
+- id: C-CASE
+  profile: article_research
+  chunk_type: ablation_finding_block
+  section_path: 6 > 6.5
+  atom_ids:
+  - A-CASE-SETUP
+  - A-CASE-EN
+  - A-CASE-ZH
+  - A-CASE-CONCL
+  central_atom_ids:
+  - A-CASE-EN
+  - A-CASE-CONCL
+  boundary_reason: 'Gating-visualization case study: method + English/Chinese activation examples + conclusion form one qualitative finding.'
+  extraction_targets:
+  - MechanisticExplanation
+  - ArchitectureComponent
+  gold_must_cover_atoms:
+  - A-CASE-EN
+  - A-CASE-ZH
+  - A-CASE-CONCL
+context_packages:
+- id: PKG-INTRO
+  profile: article_research
+  chunk_id: C-INTRO
+  section_path: '6'
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-INTRO
+    atom_type: claim_sentence
+  linked_context:
+    previous_heading: 5 Experiments
+    next_heading: 6.1 Is Engram functionally equivalent to increasing the model's depth?
+  extraction_targets:
+  - Implication
+  expected_objects:
+  - IMPL-SCOPE
+- id: PKG-DEPTH-LL
+  profile: article_research
+  chunk_id: C-DEPTH-LL
+  section_path: 6 > 6.1 > 6.1.1 Accelerated Prediction Convergence
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-DEPTH-MOTIV
+    atom_type: mechanism_sentence
+  - atom_id: A-DEPTH-HYP
+    atom_type: claim_sentence
+  - atom_id: A-DEPTH-TOOLS
+    atom_type: method_sentence
+  - atom_id: A-T3-CAP
+    atom_type: table_caption_atom
+  - atom_id: A-T3-HDR
+    atom_type: table_header_atom
+  - atom_id: A-T3-R12
+    atom_type: table_row_atom
+  - atom_id: A-T3-R4
+    atom_type: table_row_atom
+  - atom_id: A-T3-R6
+    atom_type: table_row_atom
+  - atom_id: A-LL-METHOD
+    atom_type: method_sentence
+  - atom_id: A-LL-RESULT
+    atom_type: result_sentence
+  - atom_id: A-LL-INTERP
+    atom_type: mechanism_sentence
+  linked_context:
+    table_caption: 'Table 3: layer-wise entity resolution for ''Diana, Princess of Wales'' (PatchScope Latent State Translation + manual Explanation).'
+    figure: 'Figure 4(a): layer-wise KL divergence; both Engram variants below MoE baseline, steepest in early blocks.'
+    previous_heading: 6.1 Is Engram functionally equivalent to increasing the model's depth?
+    next_heading: 6.1.2 Representational Alignment and Effective Depth
+  extraction_targets:
+  - MechanisticExplanation
+  - ExperimentResult
+  expected_objects:
+  - MECH-CONVERGENCE
+  - RESULT-ENTITY-RESOLUTION
+  expected_local_fields:
+    MECH-EFFECTIVE-DEPTH:
+    - claim
+    - mechanism
+    - evidence
+- id: PKG-EFFECTIVE-DEPTH
+  profile: article_research
+  chunk_id: C-DEPTH-CKA
+  section_path: 6 > 6.1 > 6.1.2 Representational Alignment and Effective Depth
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-CKA-METHOD
+    atom_type: method_sentence
+  - atom_id: A-CKA-EQ8
+    atom_type: formula_atom
+  - atom_id: A-CKA-EQ9
+    atom_type: formula_atom
+  - atom_id: A-CKA-AINDEX
+    atom_type: method_sentence
+  - atom_id: A-CKA-AINDEX2
+    atom_type: method_sentence
+  - atom_id: A-CKA-RESULT
+    atom_type: result_sentence
+  - atom_id: A-DEPTH-CONCL
+    atom_type: claim_sentence
+  linked_context:
+    formula_context: Eq.(8) CKA defines layer-pair similarity; Eq.(9) a_j is the top-k weighted centroid used to read effective MoE depth.
+    figure: 'Figure 4(b-c): CKA heatmap with soft-alignment curve a_j showing upward shift a_j > j (Engram layer 5 ~ MoE layer 12).'
+    previous_heading: 6.1.1 Accelerated Prediction Convergence
+    next_heading: 6.2 Structural Ablation and Layer Sensitivity
+  extraction_targets:
+  - MechanisticExplanation
+  - Formula
+  expected_objects:
+  - MECH-EFFECTIVE-DEPTH
+  - MECH-ALIGNMENT
+  - FORMULA-CKA
+  - FORMULA-ALIGNMENT-INDEX
+- id: PKG-ABLATION
+  profile: article_research
+  chunk_id: C-ABL
+  section_path: 6 > 6.2 Structural Ablation and Layer Sensitivity
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-ABL-SETUP
+    atom_type: experiment_setup_atom
+  - atom_id: A-ABL-REFCFG
+    atom_type: experiment_setup_atom
+  - atom_id: A-ABL-TRADEOFF
+    atom_type: mechanism_sentence
+  - atom_id: A-ABL-LAYER2
+    atom_type: ablation_finding_atom
+  - atom_id: A-ABL-LAYER26
+    atom_type: ablation_finding_atom
+  - atom_id: A-ABL-COMPONENTS
+    atom_type: ablation_finding_atom
+  - atom_id: A-ABL-MINOR
+    atom_type: ablation_finding_atom
+  linked_context:
+    figure: 'Figure 5: dark-blue Layer Sweep curve (Layer 2 optimal) + right-side Component Ablation markers; MoE baseline Val Loss 1.808.'
+    previous_heading: 6.1.2 Representational Alignment and Effective Depth
+    next_heading: 6.3 Sensitivity Analysis
+  extraction_targets:
+  - AblationFinding
+  - ExperimentSetup
+  - ArchitectureComponent
+  expected_objects:
+  - SETUP-ABLATION
+  - ABL-LAYER-PLACEMENT
+  - ABL-COMPONENT-IMPORTANCE
+  - COMP-BRANCH-FUSION
+  - COMP-GATING
+  - COMP-TOKENIZER
+  - COMP-CONV
+- id: PKG-SENSITIVITY
+  profile: article_research
+  chunk_id: C-SENS
+  section_path: 6 > 6.3 Sensitivity Analysis
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-SENS-METHOD
+    atom_type: experiment_setup_atom
+  - atom_id: A-SENS-FACTUAL
+    atom_type: result_sentence
+  - atom_id: A-SENS-READING
+    atom_type: result_sentence
+  linked_context:
+    figure: 'Figure 6: retained performance under Engram ablation; factual knowledge collapses, reading comprehension preserved.'
+    previous_heading: 6.2 Structural Ablation and Layer Sensitivity
+    next_heading: 6.4 System Efficiency
+  extraction_targets:
+  - AblationFinding
+  - ExperimentResult
+  - MechanisticExplanation
+  expected_objects:
+  - MECH-FUNCTIONAL-DICHOTOMY
+  - SETUP-SENSITIVITY
+  - RESULT-SENSITIVITY
+- id: PKG-SYSTEM
+  profile: article_research
+  chunk_id: C-SYS
+  section_path: 6 > 6.4 System Efficiency
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-SYS-DETERMINISTIC
+    atom_type: claim_sentence
+  - atom_id: A-SYS-SETUP
+    atom_type: experiment_setup_atom
+  - atom_id: A-SYS-HARNESS
+    atom_type: experiment_setup_atom
+  - atom_id: A-SYS-RESULT
+    atom_type: result_sentence
+  - atom_id: A-SYS-CONSERVATIVE
+    atom_type: claim_sentence
+  - atom_id: A-SYS-CONSERVATIVE2
+    atom_type: claim_sentence
+  - atom_id: A-T4-CAP
+    atom_type: table_caption_atom
+  - atom_id: A-T4-HDR
+    atom_type: table_header_atom
+  - atom_id: A-T4-SETUP
+    atom_type: table_row_atom
+  - atom_id: A-T4-R4B
+    atom_type: table_row_atom
+  - atom_id: A-T4-R8B
+    atom_type: table_row_atom
+  linked_context:
+    table_caption: 'Table 4: end-to-end inference throughput with a 100B Engram layer offloaded to host memory.'
+    table_headers: 'Base Model | Configuration | Throughput (tok/s); setup: NVIDIA H800, 512 sequences, Uniform(100,1024).'
+    previous_heading: 6.3 Sensitivity Analysis
+    next_heading: '6.5 Case Study: Gating Visualization'
+  extraction_targets:
+  - SystemDesignClaim
+  - ExperimentResult
+  - ExperimentSetup
+  expected_objects:
+  - SETUP-THROUGHPUT
+  - RESULT-THROUGHPUT
+  - CLAIM-DETERMINISTIC-ACCESS
+- id: PKG-CASE
+  profile: article_research
+  chunk_id: C-CASE
+  section_path: '6 > 6.5 Case Study: Gating Visualization'
+  document_title: 'Engram: Conditional Memory for Language Models'
+  atoms:
+  - atom_id: A-CASE-SETUP
+    atom_type: method_sentence
+  - atom_id: A-CASE-EN
+    atom_type: result_sentence
+  - atom_id: A-CASE-ZH
+    atom_type: result_sentence
+  - atom_id: A-CASE-CONCL
+    atom_type: claim_sentence
+  linked_context:
+    figure: 'Figure 7: gating scalar alpha_t of Engram-27B across English/Chinese samples; red on completed static patterns.'
+    previous_heading: 6.4 System Efficiency
+    next_heading: 7 Related Work
+  extraction_targets:
+  - MechanisticExplanation
+  - ArchitectureComponent
+  expected_objects:
+  - MECH-GATING-SELECTIVITY
+  expected_local_fields:
+    COMP-GATING:
+    - name
+    - role
+mentions:
+- id: M-01
+  text: LogitLens
+  type: ExperimentSetup
+  atom_id: A-LL-METHOD
+  canonical_key: logitlens
+- id: M-02
+  text: KL divergence
+  type: ExperimentResult
+  atom_id: A-LL-RESULT
+  canonical_key: kl_divergence
+- id: M-03
+  text: CKA
+  type: ExperimentSetup
+  atom_id: A-CKA-EQ8
+  canonical_key: cka
+- id: M-04
+  text: soft alignment index a_j
+  type: Formula
+  atom_id: A-CKA-EQ9
+  canonical_key: soft_alignment_index_aj
+- id: M-05
+  text: effective depth
+  type: MechanisticExplanation
+  atom_id: A-DEPTH-CONCL
+  canonical_key: effective_depth
+- id: M-06
+  text: Engram
+  type: ArchitectureComponent
+  atom_id: A-ABL-REFCFG
+  canonical_key: engram
+- id: M-07
+  text: MoE baseline
+  type: ExperimentSetup
+  atom_id: A-ABL-SETUP
+  canonical_key: moe_baseline
+- id: M-08
+  text: context-aware gating
+  type: ArchitectureComponent
+  atom_id: A-ABL-COMPONENTS
+  canonical_key: context_aware_gating
+- id: M-09
+  text: branch-specific fusion
+  type: ArchitectureComponent
+  atom_id: A-ABL-COMPONENTS
+  canonical_key: branch_specific_fusion
+- id: M-10
+  text: tokenizer compression
+  type: ArchitectureComponent
+  atom_id: A-ABL-COMPONENTS
+  canonical_key: tokenizer_compression
+- id: M-11
+  text: factual knowledge
+  type: ExperimentResult
+  atom_id: A-SENS-FACTUAL
+  canonical_key: factual_knowledge_sensitivity
+- id: M-12
+  text: TriviaQA
+  type: ExperimentResult
+  atom_id: A-SENS-FACTUAL
+  canonical_key: triviaqa
+- id: M-13
+  text: C3
+  type: ExperimentResult
+  atom_id: A-SENS-READING
+  canonical_key: c3
+- id: M-14
+  text: static hash IDs
+  type: SystemDesignClaim
+  atom_id: A-SYS-DETERMINISTIC
+  canonical_key: static_hash_ids
+- id: M-15
+  text: host DRAM
+  type: SystemDesignClaim
+  atom_id: A-SYS-SETUP
+  canonical_key: host_dram_offload
+- id: M-16
+  text: throughput
+  type: ExperimentResult
+  atom_id: A-SYS-RESULT
+  canonical_key: inference_throughput
+- id: M-17
+  text: nano-vLLM
+  type: ExperimentSetup
+  atom_id: A-SYS-HARNESS
+  canonical_key: nano_vllm
+- id: M-18
+  text: gating scalar
+  type: ArchitectureComponent
+  atom_id: A-CASE-SETUP
+  canonical_key: context_aware_gating
+- id: M-19
+  text: Princess of Wales
+  type: ExperimentResult
+  atom_id: A-CASE-EN
+  canonical_key: princess_of_wales
+- id: M-20
+  text: Val Loss
+  type: ExperimentResult
+  atom_id: A-ABL-REFCFG
+  canonical_key: validation_loss
+- id: M-21
+  text: Few-NERD
+  type: ExperimentSetup
+  atom_id: A-CKA-METHOD
+  canonical_key: few_nerd
+- id: M-22
+  text: HSIC
+  type: Formula
+  atom_id: A-CKA-EQ8
+  canonical_key: hsic
+- id: M-23
+  text: PCIe
+  type: SystemDesignClaim
+  atom_id: A-SYS-SETUP
+  canonical_key: pcie
+- id: M-24
+  text: Zipfian locality
+  type: SystemDesignClaim
+  atom_id: A-SYS-CONSERVATIVE
+  canonical_key: zipfian_locality
+canonicalization:
+- canonical: context_aware_gating
+  aliases:
+  - context-aware gating
+  - gating mechanism
+  - gating scalar
+  - alpha_t
+  note: 6.5 introduces the gating scalar alpha_t as the same context-aware gating component ablated in 6.2.
+- canonical: effective_depth
+  aliases:
+  - effective depth
+  - effective MoE depth
+  - increasing the model's effective depth
+  - deeper representations at earlier layers
+- canonical: engram
+  aliases:
+  - Engram
+  - Engram-27B
+  - Engram memory
+  - Engram module
+  - sparse embedding
+- canonical: moe_baseline
+  aliases:
+  - MoE baseline
+  - 3B MoE
+  - 12-layer 3B MoE model
+  - routing-based MoE
+objects:
+- id: IMPL-SCOPE
+  type: Implication
+  section_path: '6'
+  home_package: PKG-INTRO
+  payload:
+    statement: Section 6 establishes Engram's effective-depth mechanism (6.1), validates its core module design via ablation (6.2), characterizes its parametric-knowledge role (6.3), shows offloading is cheap (6.4), and visualizes gating (6.5).
+  local_evidence_atom_ids:
+  - A-INTRO
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: MECH-EFFECTIVE-DEPTH
+  type: MechanisticExplanation
+  section_path: 6 > 6.1
+  home_package: PKG-EFFECTIVE-DEPTH
+  payload:
+    claim: Engram is functionally equivalent to increasing the model's effective depth.
+    mechanism: An explicit knowledge lookup relieves the model of early-stage feature composition, so high-confidence predictions are reached earlier in the hierarchy.
+    evidence:
+    - 'LogitLens: lower early-layer KL divergence => faster prediction convergence'
+    - 'CKA: soft alignment a_j > j, e.g. Engram layer 5 ~ MoE layer 12'
+  local_evidence_atom_ids:
+  - A-CKA-RESULT
+  - A-DEPTH-CONCL
+  supporting_context_atom_ids:
+  - A-DEPTH-HYP
+  - A-LL-INTERP
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+- id: MECH-CONVERGENCE
+  type: MechanisticExplanation
+  section_path: 6 > 6.1 > 6.1.1
+  home_package: PKG-DEPTH-LL
+  payload:
+    name: accelerated prediction convergence
+    finding: Both Engram variants show systematically smaller layer-wise KL divergence than the MoE baseline, with the largest gap in early blocks (Figure 4a).
+    tool: LogitLens (KL divergence of intermediate vs final output distribution)
+    validation_tools: LogitLens and CKA (two mechanistic interpretability tools)
+  local_evidence_atom_ids:
+  - A-DEPTH-TOOLS
+  - A-LL-METHOD
+  - A-LL-RESULT
+  - A-LL-INTERP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-ENTITY-RESOLUTION
+  type: ExperimentResult
+  section_path: 6 > 6.1 > 6.1.1
+  home_package: PKG-DEPTH-LL
+  payload:
+    name: Table 3 entity-resolution example (reproduced from Ghandeharioun et al. 2024)
+    finding: 'An LLM resolves the entity ''Diana, Princess of Wales'' only gradually across layers (layers 1-2: a UK country; layer 4: unspecific title; layer 6: fully resolved), illustrating that recognition consumes multiple layers of attention/FFNs.'
+    method: PatchScope Latent State Translation of the last token 'Wales' plus the authors' manual Explanation, read layer by layer.
+    motivates: the need for an explicit knowledge-lookup primitive (effective-depth hypothesis).
+  local_evidence_atom_ids:
+  - A-DEPTH-MOTIV
+  - A-T3-CAP
+  - A-T3-HDR
+  - A-T3-R12
+  - A-T3-R4
+  - A-T3-R6
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: MECH-ALIGNMENT
+  type: MechanisticExplanation
+  section_path: 6 > 6.1 > 6.1.2
+  home_package: PKG-EFFECTIVE-DEPTH
+  payload:
+    name: representational alignment / effective depth
+    finding: a_j > j for a wide layer range; layer 5 of Engram-27B aligns with ~layer 12 of the MoE baseline.
+    tool: CKA (Eq.8) with soft alignment index a_j (Eq.9), top-k=5, on Few-NERD
+  local_evidence_atom_ids:
+  - A-CKA-METHOD
+  - A-CKA-EQ8
+  - A-CKA-EQ9
+  - A-CKA-AINDEX
+  - A-CKA-AINDEX2
+  - A-CKA-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-FUNCTIONAL-DICHOTOMY
+  type: MechanisticExplanation
+  section_path: 6 > 6.3
+  home_package: PKG-SENSITIVITY
+  payload:
+    name: factual vs reading-comprehension dichotomy
+    finding: Suppressing Engram collapses factual knowledge (retain 29-44%, TriviaQA 29%) but reading comprehension is resilient (retain 81-93%, C3 93%).
+    interpretation: Engram is the primary repository for parametric knowledge; context-grounded tasks rely on backbone attention.
+  local_evidence_atom_ids:
+  - A-SENS-FACTUAL
+  - A-SENS-READING
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-GATING-SELECTIVITY
+  type: MechanisticExplanation
+  section_path: 6 > 6.5
+  home_package: PKG-CASE
+  payload:
+    name: gating selectivity on static patterns
+    finding: 'alpha_t activates on completed local static patterns: English named entities/phrases (''Alexander the Great'', ''Princess of Wales'') and Chinese idioms/entities (''Four Great Inventions'', ''Zhang Zhongjing'').'
+    interpretation: Engram handles stereotyped linguistic dependencies, relieving the backbone from memorizing static associations.
+  local_evidence_atom_ids:
+  - A-CASE-SETUP
+  - A-CASE-EN
+  - A-CASE-ZH
+  - A-CASE-CONCL
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-CKA
+  type: Formula
+  section_path: 6 > 6.1 > 6.1.2
+  home_package: PKG-EFFECTIVE-DEPTH
+  payload:
+    name: Centered Kernel Alignment
+    expression: CKA(K,L) = HSIC(K,L)/sqrt(HSIC(K,K) HSIC(L,L))
+    variables:
+      K: X X^T linear-kernel Gram matrix
+      L: Y Y^T Gram matrix
+      HSIC: Hilbert-Schmidt Independence Criterion
+  local_evidence_atom_ids:
+  - A-CKA-EQ8
+  - A-CKA-METHOD
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-ALIGNMENT-INDEX
+  type: Formula
+  section_path: 6 > 6.1 > 6.1.2
+  home_package: PKG-EFFECTIVE-DEPTH
+  payload:
+    name: soft alignment index
+    expression: a_j = (sum_{i in I_j} S_{i,j} i)/(sum_{i in I_j} S_{i,j}), I_j = argtop-k_i(S_{i,j})
+    variables:
+      a_j: effective MoE depth proxy for Engram layer j
+      S_ij: CKA similarity of MoE layer i and Engram layer j
+      k: '5'
+  local_evidence_atom_ids:
+  - A-CKA-EQ9
+  - A-CKA-AINDEX
+  - A-CKA-AINDEX2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SETUP-ABLATION
+  type: ExperimentSetup
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    backbone: 12-layer 3B MoE (0.56B activated)
+    training: 100B tokens
+    engram_budget: fixed 1.6B parameters
+    reference_config: '{2,3}-grams at Layers 2 and 6'
+    baseline_val_loss: 1.808
+    reference_val_loss: 1.768
+    metric: validation loss (Figure 5)
+  local_evidence_atom_ids:
+  - A-ABL-SETUP
+  - A-ABL-REFCFG
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SETUP-SENSITIVITY
+  type: ExperimentSetup
+  section_path: 6 > 6.3
+  home_package: PKG-SENSITIVITY
+  payload:
+    method: suppress the sparse embedding (Engram) output at inference, backbone unchanged
+    caveat: post-hoc ablation induces training-inference inconsistency; focus on Factual Knowledge and Reading Comprehension extremes.
+  local_evidence_atom_ids:
+  - A-SENS-METHOD
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: SETUP-THROUGHPUT
+  type: ExperimentSetup
+  section_path: 6 > 6.4
+  home_package: PKG-SYSTEM
+  payload:
+    harness: nano-vLLM
+    hardware: NVIDIA H800
+    workload: 512 sequences
+    seq_len: Uniform(100, 1024)
+    config: 100B-parameter Engram layer in the 2nd Transformer block, embedding table in host DRAM, async prefetch overlapping first-block compute
+    backbones:
+    - Dense-4B
+    - Dense-8B
+  local_evidence_atom_ids:
+  - A-SYS-SETUP
+  - A-SYS-HARNESS
+  - A-T4-CAP
+  - A-T4-HDR
+  - A-T4-SETUP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: ABL-LAYER-PLACEMENT
+  type: AblationFinding
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    question: Where should Engram memory be injected?
+    finding: Layer 2 is the best single-layer placement (Val Loss 1.770); splitting the 1.6B memory across Layers 2 and 6 is better still (Val Loss 1.768).
+    trade_off: early offloading of static local patterns vs stronger contextual queries for gating later
+  local_evidence_atom_ids:
+  - A-ABL-TRADEOFF
+  - A-ABL-LAYER2
+  - A-ABL-LAYER26
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: ABL-COMPONENT-IMPORTANCE
+  type: AblationFinding
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    question: Which components matter?
+    finding: Removing branch-specific fusion, context-aware gating, or tokenizer compression causes the largest validation-loss regressions; removing the depthwise convolution is marginal; 4-grams are slightly suboptimal at fixed 1.6B budget.
+    most_important:
+    - branch-specific fusion
+    - context-aware gating
+    - tokenizer compression
+  local_evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  - A-ABL-MINOR
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-BRANCH-FUSION
+  type: ArchitectureComponent
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    name: branch-specific fusion
+    role: fuses Engram memory per branch within the multi-branch (mHC) backbone; replacing it with a single fusion on H^pre regresses loss.
+  local_evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-GATING
+  type: ArchitectureComponent
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    name: context-aware gating
+    role: scalar gate alpha_t in [0,1] modulating integration of retrieved static memory; one of the three most important components; activates on completed local static patterns.
+  local_evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  supporting_context_atom_ids:
+  - A-CASE-SETUP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-TOKENIZER
+  type: ArchitectureComponent
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    name: tokenizer compression
+    role: one of the three most important Engram components; removal causes a large validation-loss regression.
+  local_evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-CONV
+  type: ArchitectureComponent
+  section_path: 6 > 6.2
+  home_package: PKG-ABLATION
+  payload:
+    name: lightweight depthwise convolution
+    role: minor component; removal only marginally degrades performance.
+  local_evidence_atom_ids:
+  - A-ABL-MINOR
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: RESULT-SENSITIVITY
+  type: ExperimentResult
+  section_path: 6 > 6.3
+  home_package: PKG-SENSITIVITY
+  payload:
+    name: Engram-suppression sensitivity (Figure 6)
+    factual_knowledge: retain 29-44% (TriviaQA 29%)
+    reading_comprehension: retain 81-93% (C3 93%)
+  local_evidence_atom_ids:
+  - A-SENS-FACTUAL
+  - A-SENS-READING
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RESULT-THROUGHPUT
+  type: ExperimentResult
+  section_path: 6 > 6.4
+  home_package: PKG-SYSTEM
+  payload:
+    name: End-to-end inference throughput (Table 4)
+    dense_4b:
+      baseline: 9,031.62 tok/s
+      with_100b_engram_cpu_offload: 8,858.28 tok/s
+    dense_8b:
+      baseline: 6,315.52 tok/s
+      with_100b_engram_cpu_offload: 6,140.02 tok/s
+    peak_penalty: 2.8% (8B backbone)
+  local_evidence_atom_ids:
+  - A-SYS-RESULT
+  - A-T4-R4B
+  - A-T4-R8B
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-DETERMINISTIC-ACCESS
+  type: SystemDesignClaim
+  section_path: 6 > 6.4
+  home_package: PKG-SYSTEM
+  payload:
+    statement: Engram's sparse activations use explicit static hash IDs, giving a strictly deterministic memory access pattern whose indices are known before the layer executes, enabling asynchronous prefetch and host-DRAM offloading.
+    advantage_over: routing-based MoE
+    caveat: the throughput experiment is a conservative baseline (no HBM caching of Zipfian-frequent items).
+  local_evidence_atom_ids:
+  - A-SYS-DETERMINISTIC
+  - A-SYS-CONSERVATIVE
+  - A-SYS-CONSERVATIVE2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-EFFECTIVE-DEPTH
+  target_object_id: MECH-CONVERGENCE
+  evidence_atom_ids:
+  - A-LL-RESULT
+  - A-LL-INTERP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-EFFECTIVE-DEPTH
+  target_object_id: MECH-ALIGNMENT
+  evidence_atom_ids:
+  - A-CKA-RESULT
+  - A-DEPTH-CONCL
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: component_defined_by_formula
+  source_object_id: MECH-ALIGNMENT
+  target_object_id: FORMULA-CKA
+  evidence_atom_ids:
+  - A-CKA-EQ8
+  - A-CKA-METHOD
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-04
+  relation_type: component_defined_by_formula
+  source_object_id: MECH-ALIGNMENT
+  target_object_id: FORMULA-ALIGNMENT-INDEX
+  evidence_atom_ids:
+  - A-CKA-EQ9
+  - A-CKA-AINDEX
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-05
+  relation_type: formula_generalizes_formula
+  source_object_id: FORMULA-CKA
+  target_object_id: FORMULA-ALIGNMENT-INDEX
+  evidence_atom_ids:
+  - A-CKA-EQ8
+  - A-CKA-EQ9
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-06
+  relation_type: ablation_supports_component_importance
+  source_object_id: ABL-COMPONENT-IMPORTANCE
+  target_object_id: COMP-BRANCH-FUSION
+  evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-07
+  relation_type: ablation_supports_component_importance
+  source_object_id: ABL-COMPONENT-IMPORTANCE
+  target_object_id: COMP-GATING
+  evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-08
+  relation_type: ablation_supports_component_importance
+  source_object_id: ABL-COMPONENT-IMPORTANCE
+  target_object_id: COMP-TOKENIZER
+  evidence_atom_ids:
+  - A-ABL-COMPONENTS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-09
+  relation_type: ablation_supports_component_importance
+  source_object_id: ABL-COMPONENT-IMPORTANCE
+  target_object_id: COMP-CONV
+  evidence_atom_ids:
+  - A-ABL-MINOR
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-10
+  relation_type: experiment_tests_claim
+  source_object_id: ABL-COMPONENT-IMPORTANCE
+  target_object_id: SETUP-ABLATION
+  evidence_atom_ids:
+  - A-ABL-SETUP
+  - A-ABL-REFCFG
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-11
+  relation_type: experiment_tests_claim
+  source_object_id: ABL-LAYER-PLACEMENT
+  target_object_id: SETUP-ABLATION
+  evidence_atom_ids:
+  - A-ABL-REFCFG
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-12
+  relation_type: experiment_tests_claim
+  source_object_id: RESULT-SENSITIVITY
+  target_object_id: SETUP-SENSITIVITY
+  evidence_atom_ids:
+  - A-SENS-METHOD
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-13
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-FUNCTIONAL-DICHOTOMY
+  target_object_id: RESULT-SENSITIVITY
+  evidence_atom_ids:
+  - A-SENS-FACTUAL
+  - A-SENS-READING
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-14
+  relation_type: result_supports_claim
+  source_object_id: RESULT-SENSITIVITY
+  target_object_id: MECH-FUNCTIONAL-DICHOTOMY
+  evidence_atom_ids:
+  - A-SENS-FACTUAL
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-15
+  relation_type: system_design_enables_efficiency
+  source_object_id: CLAIM-DETERMINISTIC-ACCESS
+  target_object_id: RESULT-THROUGHPUT
+  evidence_atom_ids:
+  - A-SYS-DETERMINISTIC
+  - A-SYS-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-16
+  relation_type: experiment_tests_claim
+  source_object_id: RESULT-THROUGHPUT
+  target_object_id: SETUP-THROUGHPUT
+  evidence_atom_ids:
+  - A-SYS-SETUP
+  - A-T4-CAP
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-17
+  relation_type: system_design_has_tradeoff
+  source_object_id: CLAIM-DETERMINISTIC-ACCESS
+  target_object_id: RESULT-THROUGHPUT
+  evidence_atom_ids:
+  - A-SYS-CONSERVATIVE
+  - A-SYS-CONSERVATIVE2
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-18
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-GATING-SELECTIVITY
+  target_object_id: COMP-GATING
+  evidence_atom_ids:
+  - A-CASE-EN
+  - A-CASE-ZH
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-19
+  relation_type: result_supports_claim
+  source_object_id: MECH-GATING-SELECTIVITY
+  target_object_id: MECH-EFFECTIVE-DEPTH
+  evidence_atom_ids:
+  - A-CASE-CONCL
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-20
+  relation_type: result_supports_claim
+  source_object_id: RESULT-ENTITY-RESOLUTION
+  target_object_id: MECH-EFFECTIVE-DEPTH
+  evidence_atom_ids:
+  - A-DEPTH-MOTIV
+  - A-T3-R6
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+do_not_extract:
+- text: (Ghandeharioun et al., 2024; Jin et al., 2025; Li and Subramani, 2025)
+  atom_id: A-DEPTH-MOTIV
+  reason: inline author-year citations are not knowledge objects.
+  kind: citation
+- text: (Belrose et al., 2023; nostalgebraist, 2020)
+  atom_id: A-DEPTH-TOOLS
+  reason: inline author-year citations.
+  kind: citation
+- text: (Xie et al., 2025; Zhu et al., 2025)
+  atom_id: A-ABL-TRADEOFF
+  reason: inline author-year citations.
+  kind: citation
+- text: 四大发明
+  atom_id: A-CASE-ZH
+  reason: Chinese-script token; transliterated to ASCII 'sida famming' in normalized_text, not a separate knowledge object.
+  kind: out_of_slice_reference
+- text: 张仲景
+  atom_id: A-CASE-ZH
+  reason: Chinese-script token; transliterated to ASCII 'Zhang Zhongjing' in normalized_text, not a separate knowledge object.
+  kind: out_of_slice_reference
+- text: Section 2.5
+  atom_id: A-ABL-LAYER26
+  reason: forward/cross-section reference to the memory-hierarchy discussion in Section 2.5, outside this slice.
+  kind: out_of_slice_reference
+- text: Section 2.3
+  atom_id: A-CASE-SETUP
+  reason: back-reference to where context-aware gating was introduced; not a Section 6 object.
+  kind: out_of_slice_reference
+- pattern: inline_author_year_citation
+  examples:
+  - (Ghandeharioun et al., 2024)
+  - (Kornblith et al., 2019)
+  - (Kwon et al., 2023)
+  - (Xie et al., 2025)
+  reason: inline author-year citations are not knowledge objects; this policy suppresses citation over-extraction consistently across chapters.
+  kind: citation_policy

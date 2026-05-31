@@ -1,0 +1,4391 @@
+# Gold fixture v0.3.3-textbook - CMOS Analog Circuit Design Chapter 9 Switched Capacitor Circuits (profile: textbook)
+# Upgraded from v0.1: dual coordinates (source_span authoritative + viewer_span), verbatim raw_text +
+# within-span normalized_text (formula/condition normalized are formula-only), object evidence split into
+# local/supporting + home_package, ONE context_package per chunk with expected_objects (+ expected_local_fields
+# for cross-package objects), gold_label/difficulty/evidence_strength (no decimal confidence), do_not_extract
+# negatives, source_meta conventions/validation/parsing_notes. Same atom/chunk/object/relation IDs and meaning
+# as v0.1. Spans are computed by build.py against the MinerU .md; do NOT hand-edit.
+schema_version: 0.3.3-textbook
+source_meta:
+  source_id: cmos
+  scope: Chapter 9 (Switched Capacitor Circuits) only
+  title: CMOS Analog Circuit Design - Allen & Holberg - Chapter 9 Switched Capacitor Circuits
+  source_file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  source_line_range:
+  - 7496
+  - 13705
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 7496-13705; NOT the authoritative source)
+  profile: textbook
+  profile_detected_as: textbook
+  profile_cues:
+  - Chapter 9
+  - Example 9.1-1
+  - Example 9.2-4
+  - Eq. (12)
+  - Fig. 9.1-1
+  - Table 9.1-1
+  - 9.8 - Summary
+  - Homework Problems
+  extraction_targets:
+  - Concept
+  - Formula
+  - Variable
+  - CircuitBlock
+  - ComponentModel
+  - PhysicalEffect
+  - DesignPrinciple
+  - Derivation
+  - ExampleProblem
+  - ExampleSolution
+  - ProblemStatement
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math (z^-1, omega, alpha, phi, tau, +-), and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. MinerU spaces digits inside math (''1 0 ^ {- 5}'', ''0. 6 2 8 3'') and uses LaTeX in $...$ / $$...$$; normalized gives the readable ascii form. EXCEPTION: a formula_atom MAY carry symbolic interpretation/context via metadata.note (cross-tag glue) but the normalized formula itself stays formula-only.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside its home_package's chunk) + supporting_context_atom_ids (atoms from other chunks). Package object-recall (expected_objects) is scored on local evidence only.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = payload fields derivable from that package alone.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of a decimal confidence.
+    tables_and_figures: Tables render as HTML <table> (Table 9.1-1, Table 9.3-1) sometimes with $...$ inline formulas; the 9.7 PSpice netlist is a huge noise <table> (excluded). SC schematics render as <details> chemical/text_image OCR blocks with scrambled node labels; figure-internal labels and inline [n] citations are listed in do_not_extract.
+    context_only: an atom with context_only:true is background/framing (chapter intro A-INTRO, summary A-SUMMARY) that should NOT yield a typed object on its own; its home package may legitimately list no expected_object for it.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects are the objects whose home_package is that package. PKG-AMP-CT is an all-context prerequisite block (no homed object); its note records this.
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+    numeric_audit: 'for every non-formula atom: every numeric token in normalized_text must also occur in its raw_text span (no over-span numbers).'
+  parsing_notes:
+  - Formula tags reset per sub-section (9.1 has tag1..51, 9.2 restarts at 1, 9.3/9.5/9.6/9.7 likewise); a formula atom is located by tag WITHIN its sub-section's line window (e.g. R=T/C is Eq.12 in 9.1 @ line 7628; SC amp gain is Eq.19 in 9.2 @ line 8384).
+  - MinerU spaces out digits inside math ('1 0 ^ {- 5}', '0. 6 2 8 3', '9 . 9 0 1') and renders variables as 'C _ {1}', '\nu _ {1}', '\phi _ {1}'; the LaTeX in formula raw_text is verbatim and may look scrambled.
+  - z-domain superscripts H^{oo}/H^{ee}/H^{oe} (even/odd phase) survive in the display formulas (Eq.37/16/24/19) but the e/o tags on inline variables and inside <details> OCR are often lost.
+  - 'SC schematics render as <details> chemical/text_image blocks whose OCR is noisy: node labels (phi_1/phi_2, C_1/C_2, v_C) are scrambled and the topology is unreliable, so all knowledge is taken from prose + numbered formulas, never the figure OCR.'
+  - Table 9.1-1 (four SC resistor equivalents) and Table 9.3-1 (GB influence) are HTML <table> with $...$ inline formulas; the 9.7 ladder-filter PSpice netlist (starting at line ~12294) is one giant HTML <table> of SPICE cards and is excluded as noise.
+  - The viewer slice (lines 7496-13705, ~6200 lines) is large because this is the whole chapter; only the ~69 v0.1 atoms are spanned, located via each atom's sub-section line window.
+source_elements:
+- id: SE-H-9
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7496
+  line_end: 7496
+- id: SE-H-9.1
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7504
+  line_end: 7504
+- id: SE-H-EX911
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7633
+  line_end: 7633
+- id: SE-H-EX912
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7684
+  line_end: 7684
+- id: SE-H-EX913
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7810
+  line_end: 7810
+- id: SE-H-9.2
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8100
+  line_end: 8100
+- id: SE-H-EX921
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8209
+  line_end: 8209
+- id: SE-H-EX924
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8731
+  line_end: 8731
+- id: SE-H-9.3
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8788
+  line_end: 8788
+- id: SE-H-EX933
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9325
+  line_end: 9325
+- id: SE-H-9.4
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9409
+  line_end: 9409
+- id: SE-H-9.5
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9985
+  line_end: 9985
+- id: SE-H-EX951
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10113
+  line_end: 10113
+- id: SE-H-9.6
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10350
+  line_end: 10350
+- id: SE-H-EX961
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10582
+  line_end: 10582
+- id: SE-H-9.7
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10930
+  line_end: 10930
+- id: SE-H-9.8
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 12647
+  line_end: 12647
+- id: SE-H-PROB
+  type: heading
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 12655
+  line_end: 12655
+- id: SE-9-INTRO
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7498
+  line_end: 7498
+- id: SE-9-INTRO-ACC
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7498
+  line_end: 7498
+- id: SE-9.1-RES-CONCEPT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7542
+  line_end: 7542
+- id: SE-9.1-NONOVERLAP
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7542
+  line_end: 7542
+- id: SE-9.1-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7592
+  line_end: 7592
+  metadata:
+    tag: '6'
+- id: SE-9.1-EQ10
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7616
+  line_end: 7616
+  metadata:
+    tag: '10'
+- id: SE-9.1-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7628
+  line_end: 7628
+  metadata:
+    tag: '12'
+- id: SE-9.1-EQ17
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7681
+  line_end: 7681
+  metadata:
+    tag: '17'
+- id: SE-9.1-TABLE
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7700
+  line_end: 7700
+- id: SE-9.1-EQ20
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7724
+  line_end: 7724
+  metadata:
+    tag: '20'
+- id: SE-9.1-EQ22
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7748
+  line_end: 7748
+  metadata:
+    tag: '22'
+- id: SE-9.1-EQ25
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7777
+  line_end: 7777
+  metadata:
+    tag: '25'
+- id: SE-9.1-EQ37
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7922
+  line_end: 7922
+  metadata:
+    tag: '37'
+- id: SE-EX911-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7637
+  line_end: 7637
+- id: SE-EX911-USE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7641
+  line_end: 7641
+- id: SE-EX911-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7644
+  line_end: 7644
+- id: SE-EX912-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7688
+  line_end: 7688
+- id: SE-EX912-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7695
+  line_end: 7695
+- id: SE-EX913-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7814
+  line_end: 7814
+- id: SE-EX913-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 7882
+  line_end: 7882
+  metadata:
+    tag: '32'
+- id: SE-9.2-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8109
+  line_end: 8109
+  metadata:
+    tag: '1'
+- id: SE-9.2-EQ3
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8150
+  line_end: 8150
+  metadata:
+    tag: '3'
+- id: SE-9.2-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8204
+  line_end: 8204
+  metadata:
+    tag: '6'
+- id: SE-9.2-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8289
+  line_end: 8289
+  metadata:
+    tag: '12'
+- id: SE-9.2-CHARGE-USE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8308
+  line_end: 8308
+- id: SE-9.2-EVOLVE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8314
+  line_end: 8314
+- id: SE-9.2-EQ19
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8384
+  line_end: 8384
+  metadata:
+    tag: '19'
+- id: SE-9.2-EQ28
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8492
+  line_end: 8492
+  metadata:
+    tag: '28'
+- id: SE-9.2-PARASITIC
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8439
+  line_end: 8439
+- id: SE-9.2-NOEXCESS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8585
+  line_end: 8585
+- id: SE-9.2-EQ50
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8726
+  line_end: 8726
+  metadata:
+    tag: '50'
+- id: SE-9.2-FIX
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8729
+  line_end: 8729
+- id: SE-9.2-EQ52
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8756
+  line_end: 8756
+  metadata:
+    tag: '52'
+- id: SE-EX921-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8213
+  line_end: 8213
+- id: SE-EX921-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8217
+  line_end: 8217
+- id: SE-EX924-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8735
+  line_end: 8735
+- id: SE-EX924-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8742
+  line_end: 8742
+- id: SE-9.3-ROLE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8790
+  line_end: 8790
+- id: SE-9.3-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 8797
+  line_end: 8797
+  metadata:
+    tag: '1'
+- id: SE-9.3-EQ16
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9029
+  line_end: 9029
+  metadata:
+    tag: '16'
+- id: SE-9.3-EQ24
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9143
+  line_end: 9143
+  metadata:
+    tag: '24'
+- id: SE-9.3-EQ19
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9047
+  line_end: 9047
+  metadata:
+    tag: '19'
+- id: SE-9.3-PHASE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9205
+  line_end: 9205
+- id: SE-9.3-NONIDEAL
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9227
+  line_end: 9227
+- id: SE-9.3-EQ36
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9314
+  line_end: 9314
+  metadata:
+    tag: '36'
+- id: SE-9.3-EQ41
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9396
+  line_end: 9396
+  metadata:
+    tag: '41'
+- id: SE-EX933-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9329
+  line_end: 9329
+- id: SE-EX933-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9342
+  line_end: 9342
+- id: SE-9.4-CONCEPT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9413
+  line_end: 9413
+- id: SE-9.4-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9453
+  line_end: 9453
+  metadata:
+    tag: '1'
+- id: SE-9.4-FOURPORTS
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9413
+  line_end: 9413
+- id: SE-9.5-APPROACH
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9987
+  line_end: 9987
+- id: SE-9.5-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 9994
+  line_end: 9994
+  metadata:
+    tag: '1'
+- id: SE-9.5-EQ4
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10071
+  line_end: 10071
+  metadata:
+    tag: '4'
+- id: SE-9.5-EQ13
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10163
+  line_end: 10163
+  metadata:
+    tag: '13'
+- id: SE-9.5-DIFF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10343
+  line_end: 10343
+- id: SE-9.5-DIFFCOST
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10343
+  line_end: 10343
+- id: SE-EX951-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10117
+  line_end: 10117
+- id: SE-EX951-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10145
+  line_end: 10145
+- id: SE-9.6-CASCADE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10352
+  line_end: 10352
+- id: SE-9.6-BIQUAD
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10394
+  line_end: 10394
+- id: SE-9.6-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10403
+  line_end: 10403
+  metadata:
+    tag: '1'
+- id: SE-9.6-EQ11
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10569
+  line_end: 10569
+  metadata:
+    tag: '11'
+- id: SE-9.6-LOWQ
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10572
+  line_end: 10572
+- id: SE-EX961-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10586
+  line_end: 10586
+- id: SE-EX961-R
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10590
+  line_end: 10590
+- id: SE-9.7-APP
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 10940
+  line_end: 10940
+- id: SE-9.7-CASCADE
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 11183
+  line_end: 11183
+- id: SE-9.7-LADDER
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 11647
+  line_end: 11647
+- id: SE-9.8-SUMMARY
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 12651
+  line_end: 12651
+- id: SE-PROB-911
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 12659
+  line_end: 12659
+- id: SE-PROB-913
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 12661
+  line_end: 12661
+- id: SE-PROB-955
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 13040
+  line_end: 13040
+section_tree:
+- id: SEC-9
+  path: '9'
+  title: Switched Capacitor Circuits
+- id: SEC-9.1
+  path: 9 > 9.1
+  title: Switched Capacitor Circuits (Resistor Emulation)
+  parent: SEC-9
+- id: SEC-EX911
+  path: 9 > 9.1 > Example 9.1-1
+  title: Example 9.1-1 Parallel SC Resistor Emulation
+  parent: SEC-9.1
+  kind: example
+- id: SEC-EX912
+  path: 9 > 9.1 > Example 9.1-2
+  title: Example 9.1-2 Series-Parallel SC Resistor Emulation
+  parent: SEC-9.1
+  kind: example
+- id: SEC-EX913
+  path: 9 > 9.1 > Example 9.1-3
+  title: Example 9.1-3 Analysis of a SC First-order Lowpass Filter
+  parent: SEC-9.1
+  kind: example
+- id: SEC-9.2
+  path: 9 > 9.2
+  title: Switched Capacitor Amplifiers
+  parent: SEC-9
+- id: SEC-EX921
+  path: 9 > 9.2 > Example 9.2-1
+  title: Example 9.2-1 Accuracy Limitation due to Finite Voltage Gain
+  parent: SEC-9.2
+  kind: example
+- id: SEC-EX924
+  path: 9 > 9.2 > Example 9.2-4
+  title: Example 9.2-4 Clock Feedthrough on a SC Voltage Amplifier
+  parent: SEC-9.2
+  kind: example
+- id: SEC-9.3
+  path: 9 > 9.3
+  title: Switched Capacitor Integrators
+  parent: SEC-9
+- id: SEC-EX933
+  path: 9 > 9.3 > Example 9.3-3
+  title: Example 9.3-3 Integrator Errors due to Finite A_vd(0)
+  parent: SEC-9.3
+  kind: example
+- id: SEC-9.4
+  path: 9 > 9.4
+  title: z-domain Models of Two-Phase SC Circuits
+  parent: SEC-9
+- id: SEC-9.5
+  path: 9 > 9.5
+  title: First-Order Switched Capacitor Circuits
+  parent: SEC-9
+- id: SEC-EX951
+  path: 9 > 9.5 > Example 9.5-1
+  title: Example 9.5-1 Design of a SC First-Order Circuit
+  parent: SEC-9.5
+  kind: example
+- id: SEC-9.6
+  path: 9 > 9.6
+  title: Second-Order Switched Capacitor Circuits
+  parent: SEC-9
+- id: SEC-EX961
+  path: 9 > 9.6 > Example 9.6-1
+  title: Example 9.6-1 Design of a SC Low-Q Biquad
+  parent: SEC-9.6
+  kind: example
+- id: SEC-9.7
+  path: 9 > 9.7
+  title: Switched Capacitor Filters
+  parent: SEC-9
+- id: SEC-9.8
+  path: 9 > 9.8
+  title: Summary
+  parent: SEC-9
+- id: SEC-PROB
+  path: 9 > Homework Problems
+  title: Homework Problems
+  parent: SEC-9
+evidence_atoms:
+- id: A-INTRO
+  section_id: SEC-9
+  atom_type: concept_definition_atom
+  source_element_id: SE-9-INTRO
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7498
+    line_end: 7498
+    char_start: 443100
+    char_end: 443267
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 782
+    char_end: 949
+    viewer_only: true
+  raw_text: These circuits are called switched capacitor circuits and have become a popular method of implementing analog signal processing circuits in standard CMOS technologies.
+  normalized_text: These circuits are called switched capacitor circuits and have become a popular method of implementing analog signal processing circuits in standard CMOS technologies.
+  evidence_strength: direct
+  context_only: true
+- id: A-INTRO-ACCURACY
+  section_id: SEC-9
+  atom_type: design_principle_atom
+  source_element_id: SE-9-INTRO-ACC
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7498
+    line_end: 7498
+    char_start: 443268
+    char_end: 443448
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 950
+    char_end: 1130
+    viewer_only: true
+  raw_text: One the important reasons for the success of switched capacitor circuits is that the accuracy of the signal processing function is proportional to the accuracy of capacitor ratios.
+  normalized_text: One important reason for the success of switched capacitor circuits is that the accuracy of the signal processing function is proportional to the accuracy of capacitor ratios.
+  evidence_strength: direct
+- id: A-SC-RES-CONCEPT
+  section_id: SEC-9.1
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.1-RES-CONCEPT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7542
+    line_end: 7542
+    char_start: 447475
+    char_end: 447724
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 5157
+    char_end: 5406
+    viewer_only: true
+  raw_text: The parallel switched capacitor equivalent resistor circuit in Fig. 9.1-1(a) consists two independent voltage sources, $\nu _ { 1 } ( t )$ and $\nu _ { 2 } ( t )$ , two controlled switches, $S _ { 1 }$ and $\mathbf { S } _ { 2 }$ and a capacitor, C.
+  normalized_text: The parallel switched capacitor equivalent resistor circuit (Fig. 9.1-1a) consists of two independent voltage sources v_1(t) and v_2(t), two controlled switches S_1 and S_2, and a capacitor C.
+  evidence_strength: direct
+- id: A-SC-NONOVERLAP
+  section_id: SEC-9.1
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.1-NONOVERLAP
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7542
+    line_end: 7542
+    char_start: 448053
+    char_end: 448310
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 5735
+    char_end: 5992
+    viewer_only: true
+  raw_text: Note, that $\phi _ { 1 }$ and $\phi _ { 2 }$ never have the value of 1 at the same time. This type of clock is called a nonoverlapping clock. The period of the clock waveforms in Fig. 9.1-2 is T. The width of each individual clock is slightly less than T/2.
+  normalized_text: phi_1 and phi_2 never have the value of 1 at the same time; this type of clock is called a nonoverlapping clock. The period of the clock waveforms is T and the width of each individual clock is slightly less than T/2.
+  evidence_strength: direct
+- id: A-SC-IAVG-6
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7592
+    line_end: 7592
+    char_start: 449881
+    char_end: 449967
+  viewer_span:
+    file: source.md
+    line_start: 98
+    line_end: 98
+    char_start: 7563
+    char_end: 7649
+    viewer_only: true
+  raw_text: i _ {1} (\text { average }) = \frac {C [ v _ {C} (T / 2) - v _ {C} (0) ]}{T}. \tag {6}
+  normalized_text: i_1(average) = C[v_C(T/2) - v_C(0)] / T
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: avg_current_into_C
+- id: A-SC-IAVG-10
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ10
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7616
+    line_end: 7616
+    char_start: 450958
+    char_end: 451031
+  viewer_span:
+    file: source.md
+    line_start: 122
+    line_end: 122
+    char_start: 8640
+    char_end: 8713
+    viewer_only: true
+  raw_text: i _ {1} (\text { average }) = \frac {C (V _ {1} - V _ {2})}{T}. \tag {10}
+  normalized_text: i_1(average) = C(V_1 - V_2) / T
+  evidence_strength: direct
+  metadata:
+    tag: '10'
+    note: assuming v_1,v_2 nearly constant over the clock period T
+- id: A-SC-REQ-12
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7628
+    line_end: 7628
+    char_start: 451326
+    char_end: 451380
+  viewer_span:
+    file: source.md
+    line_start: 134
+    line_end: 134
+    char_start: 9008
+    char_end: 9062
+    viewer_only: true
+  raw_text: \mathrm{R} = \frac {\mathrm{T}}{\mathrm{C}}. \tag {12}
+  normalized_text: R = T/C
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: equivalent_resistance
+    note: equivalent resistance of the parallel switched-capacitor resistor; R = 1/(f_c C); valid when changes in v_1,v_2 are negligible over period T
+- id: A-SC-REQ-SP-17
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ17
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7681
+    line_end: 7681
+    char_start: 454919
+    char_end: 454962
+  viewer_span:
+    file: source.md
+    line_start: 187
+    line_end: 187
+    char_start: 12601
+    char_end: 12644
+    viewer_only: true
+  raw_text: R = \frac {T}{C _ {1} + C _ {2}}. \tag {17}
+  normalized_text: R = T/(C_1 + C_2)
+  evidence_strength: direct
+  metadata:
+    tag: '17'
+    role: equivalent_resistance_seriesparallel
+- id: A-SC-TABLE-911
+  section_id: SEC-9.1
+  atom_type: table_row_atom
+  source_element_id: SE-9.1-TABLE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7700
+    line_end: 7700
+    char_start: 455462
+    char_end: 455725
+  viewer_span:
+    file: source.md
+    line_start: 206
+    line_end: 206
+    char_start: 13144
+    char_end: 13407
+    viewer_only: true
+  raw_text: Table 9.1-1 summarizes the equivalent resistance of each of the four switched capacitor resistor emulation circuits that we have considered. It is significant to note that in each case, the emulated resistance is proportional to the reciprocal of the capacitance.
+  normalized_text: Table 9.1-1 summarizes the equivalent resistance of each of the four switched capacitor resistor emulation circuits; in each case the emulated resistance is proportional to the reciprocal of the capacitance.
+  evidence_strength: direct
+  metadata:
+    table_id: Table 9.1-1
+- id: A-SC-ACC-TAUC-20
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ20
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7724
+    line_end: 7724
+    char_start: 457551
+    char_end: 457650
+  viewer_span:
+    file: source.md
+    line_start: 230
+    line_end: 230
+    char_start: 15233
+    char_end: 15332
+    viewer_only: true
+  raw_text: \frac {d \tau_ {C}}{\tau_ {C}} = \frac {d R _ {1}}{R _ {1}} + \frac {d C _ {2}}{C _ {2}}. \tag {20}
+  normalized_text: d(tau_C)/tau_C = dR_1/R_1 + dC_2/C_2
+  evidence_strength: direct
+  metadata:
+    tag: '20'
+    role: ct_time_constant_accuracy
+    note: continuous-time RC time-constant accuracy = sum of R and C accuracy; 5% to 20% in CMOS
+- id: A-SC-ACC-TAUD-22
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ22
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7748
+    line_end: 7748
+    char_start: 458893
+    char_end: 459021
+  viewer_span:
+    file: source.md
+    line_start: 254
+    line_end: 254
+    char_start: 16575
+    char_end: 16703
+    viewer_only: true
+  raw_text: \frac {d \tau_ {D}}{\tau_ {D}} = \frac {d C _ {2}}{C _ {2}} - \frac {d C _ {1}}{C _ {1}} - \frac {d f _ {c}}{f _ {c}}. \tag {22}
+  normalized_text: d(tau_D)/tau_D = dC_2/C_2 - dC_1/C_1 - df_c/f_c
+  evidence_strength: direct
+  metadata:
+    tag: '22'
+    role: sc_time_constant_accuracy
+    note: discrete-time SC time-constant accuracy = relative accuracy of C_1,C_2 and clock; as small as 0.1% in CMOS
+- id: A-SC-ZTRANS-25
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ25
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7777
+    line_end: 7777
+    char_start: 461564
+    char_end: 461678
+  viewer_span:
+    file: source.md
+    line_start: 283
+    line_end: 283
+    char_start: 19246
+    char_end: 19360
+    viewer_only: true
+  raw_text: V (z) = \sum_ {n = 0} ^ {\infty} v (n T) z ^ {- n} = v (0) + v (T) z ^ {- 1} + v (2 T) z ^ {- 2} + \dots \tag {25}
+  normalized_text: V(z) = sum_{n=0..inf} v(nT) z^-n = v(0) + v(T) z^-1 + v(2T) z^-2 + ...
+  evidence_strength: direct
+  metadata:
+    tag: '25'
+    role: z_transform
+- id: A-SC-LPF-HZ-37
+  section_id: SEC-9.1
+  atom_type: formula_atom
+  source_element_id: SE-9.1-EQ37
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7922
+    line_end: 7922
+    char_start: 469552
+    char_end: 469804
+  viewer_span:
+    file: source.md
+    line_start: 428
+    line_end: 428
+    char_start: 27234
+    char_end: 27486
+    viewer_only: true
+  raw_text: H ^ {o o} (z) = \frac {V _ {2} ^ {o} (z)}{V _ {1} ^ {o} (z)} = \frac {z ^ {- 1} \left(\frac {C _ {1}}{C _ {1} + C _ {2}}\right)}{1 - z ^ {- 1} \left(\frac {C _ {2}}{C _ {1} + C _ {2}}\right)} = \frac {z ^ {- 1}}{1 + \alpha - \alpha z ^ {- 1}} \tag {37}
+  normalized_text: H^oo(z) = V_2^o(z)/V_1^o(z) = z^-1 (C_1/(C_1+C_2)) / (1 - z^-1 (C_2/(C_1+C_2))) = z^-1 / (1 + alpha - alpha z^-1)
+  evidence_strength: direct
+  metadata:
+    tag: '37'
+    role: sc_lowpass_transfer_function
+    note: alpha = C_2/C_1 (Eq.38); z-domain transfer function of the SC first-order lowpass of Fig. 9.1-7a
+- id: A-EX911-PROBLEM
+  section_id: SEC-EX911
+  atom_type: example_problem_atom
+  source_element_id: SE-EX911-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7637
+    line_end: 7637
+    char_start: 451825
+    char_end: 451943
+  viewer_span:
+    file: source.md
+    line_start: 143
+    line_end: 143
+    char_start: 9507
+    char_end: 9625
+    viewer_only: true
+  raw_text: If the clock frequency of Fig. 9.1-1(a) is 100kHz, find the value of the capacitor C that will emulate a 1MΩ resistor.
+  normalized_text: If the clock frequency of Fig. 9.1-1a is 100 kHz, find the value of the capacitor C that will emulate a 1 MOhm resistor.
+  evidence_strength: direct
+- id: A-EX911-USE
+  section_id: SEC-EX911
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX911-USE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7641
+    line_end: 7641
+    char_start: 451955
+    char_end: 452041
+  viewer_span:
+    file: source.md
+    line_start: 147
+    line_end: 147
+    char_start: 9637
+    char_end: 9723
+    viewer_only: true
+  raw_text: The period of a 100kHz clock waveform is 10µsec. Therefore, using Eq. (12) we get that
+  normalized_text: The period of a 100 kHz clock waveform is 10 usec; therefore, using Eq.(12) R = T/C.
+  evidence_strength: direct
+- id: A-EX911-RESULT
+  section_id: SEC-EX911
+  atom_type: result_atom
+  source_element_id: SE-EX911-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7644
+    line_end: 7644
+    char_start: 452046
+    char_end: 452105
+  viewer_span:
+    file: source.md
+    line_start: 150
+    line_end: 150
+    char_start: 9728
+    char_end: 9787
+    viewer_only: true
+  raw_text: C = \frac {T}{R} = \frac {1 0 ^ {- 5}}{1 0 ^ {6}} = 1 0 p F
+  normalized_text: C = T/R = 10^-5 / 10^6 = 10 pF
+  evidence_strength: direct
+- id: A-EX912-PROBLEM
+  section_id: SEC-EX912
+  atom_type: example_problem_atom
+  source_element_id: SE-EX912-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7688
+    line_end: 7688
+    char_start: 455053
+    char_end: 455155
+  viewer_span:
+    file: source.md
+    line_start: 194
+    line_end: 194
+    char_start: 12735
+    char_end: 12837
+    viewer_only: true
+  raw_text: If C1 = C2 = C, find the value of C that will emulate a 1MΩ resistor if the clock frequency is 250kHz.
+  normalized_text: If C1 = C2 = C, find the value of C that will emulate a 1 MOhm resistor if the clock frequency is 250 kHz.
+  evidence_strength: direct
+- id: A-EX912-RESULT
+  section_id: SEC-EX912
+  atom_type: result_atom
+  source_element_id: SE-EX912-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7695
+    line_end: 7695
+    char_start: 455256
+    char_end: 455359
+  viewer_span:
+    file: source.md
+    line_start: 201
+    line_end: 201
+    char_start: 12938
+    char_end: 13041
+    viewer_only: true
+  raw_text: 2 \mathrm{C} = \frac {\mathrm{T}}{\mathrm{R}} = \frac {4 \mathrm{x} 1 0 ^ {- 6}}{1 0 6} = 4 \mathrm{pF}
+  normalized_text: 2C = T/R = 4 x 10^-6 / 10^6 = 4 pF  (so C1 = C2 = C = 2 pF)
+  evidence_strength: direct
+- id: A-EX913-PROBLEM
+  section_id: SEC-EX913
+  atom_type: example_problem_atom
+  source_element_id: SE-EX913-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7814
+    line_end: 7814
+    char_start: 464520
+    char_end: 464810
+  viewer_span:
+    file: source.md
+    line_start: 320
+    line_end: 320
+    char_start: 22202
+    char_end: 22492
+    viewer_only: true
+  raw_text: Use the above approach to find the z-domain transfer function of the first-order, lowpass switched capacitor circuit shown in Fig. 9.1-7a. This circuit was developed by replacing the resistor, $R _ { 1 } ,$ of Fig. 9.1-4 with the parallel switched capacitor resistor circuit of Table 9.1-1.
+  normalized_text: Find the z-domain transfer function of the first-order lowpass SC circuit of Fig. 9.1-7a, developed by replacing the resistor R_1 of Fig. 9.1-4 with the parallel switched capacitor resistor circuit of Table 9.1-1.
+  evidence_strength: direct
+- id: A-EX913-RESULT
+  section_id: SEC-EX913
+  atom_type: result_atom
+  source_element_id: SE-EX913-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 7882
+    line_end: 7882
+    char_start: 467930
+    char_end: 468108
+  viewer_span:
+    file: source.md
+    line_start: 388
+    line_end: 388
+    char_start: 25612
+    char_end: 25790
+    viewer_only: true
+  raw_text: v _ {2} ^ {o} (n T) = \left(\frac {C _ {1}}{C _ {1} + C _ {2}}\right) v _ {1} ^ {o} (n - 1) T + \left(\frac {C _ {2}}{C _ {1} + C _ {2}}\right) v _ {2} ^ {o} (n - 1) T. \tag {32}
+  normalized_text: v_2^o(nT) = (C_1/(C_1+C_2)) v_1^o((n-1)T) + (C_2/(C_1+C_2)) v_2^o((n-1)T)  -> H^oo(z) = z^-1/(1 + alpha - alpha z^-1), alpha = C_2/C_1
+  evidence_strength: direct
+  metadata:
+    tag: '32'
+- id: A-AMP-CT-12
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8109
+    line_end: 8109
+    char_start: 479828
+    char_end: 479904
+  viewer_span:
+    file: source.md
+    line_start: 615
+    line_end: 615
+    char_start: 37510
+    char_end: 37586
+    viewer_only: true
+  raw_text: \frac {v _ {O U T}}{v _ {I N}} = \frac {R _ {1} + R _ {2}}{R _ {1}} \tag {1}
+  normalized_text: v_OUT/v_IN = (R_1 + R_2)/R_1
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: ct_amp_gain
+    note: inverting counterpart v_OUT/v_IN = -R_2/R_1 (Eq.2); noninverting continuous-time amplifier gain, Av -> inf
+  context_only: true
+- id: A-AMP-AVD-3
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ3
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8150
+    line_end: 8150
+    char_start: 480999
+    char_end: 481170
+  viewer_span:
+    file: source.md
+    line_start: 656
+    line_end: 656
+    char_start: 38681
+    char_end: 38852
+    viewer_only: true
+  raw_text: A _ {v d} (s) = \frac {A _ {v d} (0) \omega_ {a}}{s + \omega_ {a}} = \frac {G B}{s + \omega_ {a}} \approx \frac {G B}{s} \quad \text { if } \omega > > \omega_ {a} \tag {3}
+  normalized_text: A_vd(s) = A_vd(0) omega_a / (s + omega_a) = GB / (s + omega_a) ~= GB/s  if omega >> omega_a
+  evidence_strength: direct
+  metadata:
+    tag: '3'
+    role: opamp_gain_model
+    note: A_vd(0) low-frequency gain, GB unity-gainbandwidth
+  context_only: true
+- id: A-AMP-FINITE-6
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8204
+    line_end: 8204
+    char_start: 482672
+    char_end: 483056
+  viewer_span:
+    file: source.md
+    line_start: 710
+    line_end: 710
+    char_start: 40354
+    char_end: 40738
+    viewer_only: true
+  raw_text: \frac {V _ {\text {out}}}{V _ {\text {in}}} = \frac {\frac {- R _ {2} A _ {v d} (0)}{R _ {1} + R _ {2}}}{1 + \frac {A _ {v d} (0) R _ {1}}{R _ {1} + R _ {2}}} = - \left(\frac {R _ {2}}{R _ {1}}\right) \frac {\frac {R _ {1} A _ {v d} (0)}{R _ {1} + R _ {2}}}{1 + \frac {A _ {v d} (0) R _ {1}}{R _ {1} + R _ {2}}} = - \left(\frac {R _ {2}}{R _ {1}}\right) \frac {L G}{1 + L G}. \tag {6}
+  normalized_text: V_out/V_in = -(R_2/R_1) LG/(1+LG),  LG = A_vd(0) R_1/(R_1+R_2)  (finite-gain inverting amplifier; approaches ideal -R_2/R_1 for large LG)
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: finite_gain_amp
+  context_only: true
+- id: A-CHARGE-AMP-12
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8289
+    line_end: 8289
+    char_start: 487257
+    char_end: 487378
+  viewer_span:
+    file: source.md
+    line_start: 795
+    line_end: 795
+    char_start: 44939
+    char_end: 45060
+    viewer_only: true
+  raw_text: \frac {V _ {\text { out }}}{V _ {\text { in }}} = - \left(\frac {C _ {1}}{C _ {2}}\right) \frac {L G}{1 + L G}, \tag {12}
+  normalized_text: V_out/V_in = -(C_1/C_2) LG/(1+LG)
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: charge_amp_gain
+    note: inverting charge amplifier; resistors replaced by capacitors, LG = A_vd(0) C_2/(C_1+C_2)
+  context_only: true
+- id: A-CHARGE-AMP-USE
+  section_id: SEC-9.2
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.2-CHARGE-USE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8308
+    line_end: 8308
+    char_start: 488534
+    char_end: 488734
+  viewer_span:
+    file: source.md
+    line_start: 814
+    line_end: 814
+    char_start: 46216
+    char_end: 46416
+    viewer_only: true
+  raw_text: It turns out in switched capacitor circuits that the voltages are redefined at least once every clock cycle. Therefore, charge amplifiers find use in switched capacitor circuits as voltage amplifiers.
+  normalized_text: In switched capacitor circuits the voltages are redefined at least once every clock cycle, so leakage has no effect; therefore charge amplifiers find use in switched capacitor circuits as voltage amplifiers.
+  evidence_strength: direct
+  context_only: true
+- id: A-SCAMP-EVOLVE
+  section_id: SEC-9.2
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.2-EVOLVE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8314
+    line_end: 8314
+    char_start: 489433
+    char_end: 489701
+  viewer_span:
+    file: source.md
+    line_start: 820
+    line_end: 820
+    char_start: 47115
+    char_end: 47383
+    viewer_only: true
+  raw_text: Figure 9.2-4 shows the evolution of an inverting switched capacitor amplifier. The resistors of the inverting voltage amplifier of Fig. 9.2-1b are replaced by the parallel switched capacitor resistor emulation of Fig. 9.1-1 or of Table 9.1-1 resulting in Fig. 9.2- 4a.
+  normalized_text: The inverting switched capacitor amplifier (Fig. 9.2-4) is obtained by replacing the resistors of the continuous-time inverting voltage amplifier of Fig. 9.2-1b with the parallel switched capacitor resistor emulation of Fig. 9.1-1 / Table 9.1-1.
+  evidence_strength: direct
+- id: A-SCAMP-HZ-19
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ19
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8384
+    line_end: 8384
+    char_start: 492779
+    char_end: 492929
+  viewer_span:
+    file: source.md
+    line_start: 890
+    line_end: 890
+    char_start: 50461
+    char_end: 50611
+    viewer_only: true
+  raw_text: H ^ {o e} (z) = \frac {V _ {\text { out }} ^ {e} (z)}{V _ {\text { in }} ^ {o} (z)} = - \left(\frac {C _ {1}}{C _ {2}}\right) z ^ {- 1 / 2}. \tag {19}
+  normalized_text: H^oe(z) = V_out^e(z)/V_in^o(z) = -(C_1/C_2) z^-1/2
+  evidence_strength: direct
+  metadata:
+    tag: '19'
+    role: sc_amp_gain
+    note: SC inverting amplifier; H^ee(z) = -(C_1/C_2) z^-1, Eq.23; gain magnitude = C_1/C_2 set by a capacitor ratio
+- id: A-SCAMP-TRANSR-28
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ28
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8492
+    line_end: 8492
+    char_start: 498251
+    char_end: 498351
+  viewer_span:
+    file: source.md
+    line_start: 998
+    line_end: 998
+    char_start: 55933
+    char_end: 56033
+    viewer_only: true
+  raw_text: R _ {T} = \frac {v _ {1} (t)}{i _ {2} (t)} = \frac {v _ {1}}{i _ {2} (\text { average })}. \tag {28}
+  normalized_text: R_T = v_1(t)/i_2(t) = v_1/i_2(average)
+  evidence_strength: direct
+  metadata:
+    tag: '28'
+    role: transresistance
+    note: transresistance of Fig. 9.2-6; Fig. 9.2-6b gives R_T = -T/C, Fig. 9.2-6a gives R_T = +T/C, valid only when f_c >> f
+- id: A-SCAMP-PARASITIC
+  section_id: SEC-9.2
+  atom_type: design_principle_atom
+  source_element_id: SE-9.2-PARASITIC
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8439
+    line_end: 8439
+    char_start: 496487
+    char_end: 496745
+  viewer_span:
+    file: source.md
+    line_start: 945
+    line_end: 945
+    char_start: 54169
+    char_end: 54427
+    viewer_only: true
+  raw_text: Switched capacitor circuits have been developed that are insensitive to the capacitor parasitics [7]. Figure 9.2-6a and 9.2-6b show a positive and negative, switched capacitor transresistor equivalent circuit that are independent of the capacitor parasitics.
+  normalized_text: 'Switched capacitor circuits insensitive to capacitor parasitics have been developed: Fig. 9.2-6a and 9.2-6b show positive and negative switched capacitor transresistor equivalent circuits that are independent of the capacitor parasitics.'
+  evidence_strength: direct
+- id: A-SCAMP-NOEXCESS
+  section_id: SEC-9.2
+  atom_type: design_principle_atom
+  source_element_id: SE-9.2-NOEXCESS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8585
+    line_end: 8585
+    char_start: 502980
+    char_end: 503125
+  viewer_span:
+    file: source.md
+    line_start: 1091
+    line_end: 1091
+    char_start: 60662
+    char_end: 60807
+    viewer_only: true
+  raw_text: Compared with Fig. 9.2-4b which is characterized by Eqs. (19) or (23), Fig. 9.2-7b has the same magnitude response but has no excess phase delay.
+  normalized_text: Compared with Fig. 9.2-4b (characterized by Eqs.19/23), the parasitic-insensitive inverting amplifier Fig. 9.2-7b has the same magnitude response but no excess phase delay.
+  evidence_strength: direct
+- id: A-SCAMP-FEEDTHRU-50
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ50
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8726
+    line_end: 8726
+    char_start: 511589
+    char_end: 511912
+  viewer_span:
+    file: source.md
+    line_start: 1232
+    line_end: 1232
+    char_start: 69271
+    char_end: 69594
+    viewer_only: true
+  raw_text: v _ {o u t} \approx \frac {C _ {1}}{C _ {2}} \left(v _ {i n} - \frac {C _ {O L}}{2 C _ {1}} v _ {i n}\right) + \left(\frac {C _ {O L}}{C _ {2}}\right) V _ {T} = \left(\frac {C _ {1}}{C _ {2}}\right) v _ {i n} - \left(\frac {C _ {O L}}{2 C _ {2}}\right) v _ {i n} + \left(\frac {C _ {O L}}{C _ {2}}\right) V _ {T}. \tag {50}
+  normalized_text: v_out ~= (C_1/C_2) v_in - (C_OL/2C_2) v_in + (C_OL/C_2) V_T
+  evidence_strength: direct
+  metadata:
+    tag: '50'
+    role: clock_feedthrough
+    note: 'clock-feedthrough output: ideal term + input-dependent distortion term + constant offset term; C_OL = MOSFET overlap capacitance, V_T = switch threshold'
+- id: A-SCAMP-FEEDTHRU-FIX
+  section_id: SEC-9.2
+  atom_type: design_principle_atom
+  source_element_id: SE-9.2-FIX
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8729
+    line_end: 8729
+    char_start: 512138
+    char_end: 512542
+  viewer_span:
+    file: source.md
+    line_start: 1235
+    line_end: 1235
+    char_start: 69820
+    char_end: 70224
+    viewer_only: true
+  raw_text: The input independent or constant term can be eliminated using the concept of autozeroing, discussed in Chap. 8. The most annoying term is the one that is proportional to the input because this introduces distortion into the signal being processed by the switched capacitor circuit. We will show in the next section, how to eliminate the input dependent term of Eq. (50) by modifying the clocks slightly.
+  normalized_text: The input-independent (constant) feedthrough term can be eliminated by autozeroing; the input-dependent (distortion) term, which is the most annoying, can be eliminated by modifying/delaying the clocks slightly.
+  evidence_strength: direct
+- id: A-SCAMP-AVD-52
+  section_id: SEC-9.2
+  atom_type: formula_atom
+  source_element_id: SE-9.2-EQ52
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8756
+    line_end: 8756
+    char_start: 514623
+    char_end: 514850
+  viewer_span:
+    file: source.md
+    line_start: 1262
+    line_end: 1262
+    char_start: 72305
+    char_end: 72532
+    viewer_only: true
+  raw_text: H ^ {o e} (z) = \frac {V _ {\text { out }} ^ {e} (z)}{V _ {\text { in }} ^ {o} (z)} = \left(\frac {C _ {1}}{C _ {2}}\right) z ^ {- 1 / 2} \left[ \frac {1}{1 + \frac {C _ {1} + C _ {2}}{A _ {v d} (0) C _ {2}}} \right]. \tag {52}
+  normalized_text: H^oe(z) = V_out^e(z)/V_in^o(z) = (C_1/C_2) z^-1/2 [ 1 / (1 + (C_1+C_2)/(A_vd(0) C_2)) ]
+  evidence_strength: direct
+  metadata:
+    tag: '52'
+    role: finite_gain_sc_amp
+    note: finite op-amp gain affects the magnitude response only, not phase
+- id: A-EX921-PROBLEM
+  section_id: SEC-EX921
+  atom_type: example_problem_atom
+  source_element_id: SE-EX921-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8213
+    line_end: 8213
+    char_start: 483279
+    char_end: 483465
+  viewer_span:
+    file: source.md
+    line_start: 719
+    line_end: 719
+    char_start: 40961
+    char_end: 41147
+    viewer_only: true
+  raw_text: Assume that the voltage amplifiers of Fig. 9.2-1 have been designed for a voltage gain of +10 and -10. If $A _ { \nu d } ( 0 )$ is 1000, find the actual voltage gains for each amplifier.
+  normalized_text: Voltage amplifiers of Fig. 9.2-1 designed for gains +10 and -10 with A_vd(0) = 1000; find the actual voltage gains.
+  evidence_strength: direct
+- id: A-EX921-RESULT
+  section_id: SEC-EX921
+  atom_type: result_atom
+  source_element_id: SE-EX921-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8217
+    line_end: 8217
+    char_start: 483647
+    char_end: 483985
+  viewer_span:
+    file: source.md
+    line_start: 723
+    line_end: 723
+    char_start: 41329
+    char_end: 41667
+    viewer_only: true
+  raw_text: From Eq. (4), the actual gain is $1 0 ( 1 0 0 / 1 0 1 ) = 9 . 9 0 1$ rather than 10. For the inverting amplifier, the ratio of ${ R _ { 2 } } / { R _ { 1 } }$ is 10. In this case, the feedback loop gain is $L G = 1 0 0 0 / ( 1 { + } 1 0 ) = 9 0 . 9 0 9$ . Substituting this value in Eq. (6) gives an actual gain of -9.891 rather than -10.
+  normalized_text: 'Noninverting: actual gain 10(100/101) = 9.901. Inverting: R_2/R_1 = 10, LG = 1000/(1+10) = 90.909, actual gain -9.891 (from Eq.6).'
+  evidence_strength: direct
+- id: A-EX924-PROBLEM
+  section_id: SEC-EX924
+  atom_type: example_problem_atom
+  source_element_id: SE-EX924-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8735
+    line_end: 8735
+    char_start: 512701
+    char_end: 513041
+  viewer_span:
+    file: source.md
+    line_start: 1241
+    line_end: 1241
+    char_start: 70383
+    char_end: 70723
+    viewer_only: true
+  raw_text: For the noninverting, voltage amplifier of Fig. 9.2-9, find the ideal output voltage and the input dependent and independent terms due to feedthrough if $C _ { 1 } =$ 10pF, $C _ { 2 } = 1 \mathrm { p F }$ , and $C _ { O L } = 1 0 0 \mathrm { f F }$ . Assume that ${ \nu _ { i n } } = 0 . 1 \mathrm { V }$ and $V _ { T } = 1 \mathrm { V }$ .
+  normalized_text: For the noninverting voltage amplifier of Fig. 9.2-9, find the ideal output and the input-dependent and -independent feedthrough terms with C_1 = 10 pF, C_2 = 1 pF, C_OL = 100 fF, v_in = 0.1 V, V_T = 1 V.
+  evidence_strength: direct
+- id: A-EX924-RESULT
+  section_id: SEC-EX924
+  atom_type: result_atom
+  source_element_id: SE-EX924-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8742
+    line_end: 8742
+    char_start: 513078
+    char_end: 513162
+  viewer_span:
+    file: source.md
+    line_start: 1248
+    line_end: 1248
+    char_start: 70760
+    char_end: 70844
+    viewer_only: true
+  raw_text: v _ {o u t} = 1 0 v _ {i n} - 0. 0 5 v _ {i n} - 0. 1 V = 1 V - 0. 0 0 5 V + 0. 1 V.
+  normalized_text: v_out = 10 v_in - 0.05 v_in - 0.1 V = 1 V - 0.005 V + 0.1 V
+  evidence_strength: direct
+- id: A-INT-ROLE
+  section_id: SEC-9.3
+  atom_type: design_principle_atom
+  source_element_id: SE-9.3-ROLE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8790
+    line_end: 8790
+    char_start: 517157
+    char_end: 517328
+  viewer_span:
+    file: source.md
+    line_start: 1296
+    line_end: 1296
+    char_start: 74839
+    char_end: 75010
+    viewer_only: true
+  raw_text: The switched capacitor integrator is a key building block in analog signal processing circuits. All filter design can be reduced to noninverting and inverting integrators.
+  normalized_text: The switched capacitor integrator is a key building block in analog signal processing; all filter design can be reduced to noninverting and inverting integrators.
+  evidence_strength: direct
+- id: A-INT-CT-1
+  section_id: SEC-9.3
+  atom_type: formula_atom
+  source_element_id: SE-9.3-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 8797
+    line_end: 8797
+    char_start: 518308
+    char_end: 518486
+  viewer_span:
+    file: source.md
+    line_start: 1303
+    line_end: 1303
+    char_start: 75990
+    char_end: 76168
+    viewer_only: true
+  raw_text: \frac {V _ {\text {out}} (j \omega)}{V _ {\text {in}} (j \omega)} = \frac {1}{j \omega R _ {1} C _ {2}} = \frac {\omega_ {I}}{j \omega} = \frac {- j \omega_ {I}}{\omega} \tag {1}
+  normalized_text: V_out(jw)/V_in(jw) = 1/(jw R_1 C_2) = omega_I/(jw) = -j omega_I/omega
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: ct_integrator
+    note: continuous-time noninverting integrator; inverting counterpart is the negative, Eq.2; omega_I is the integrator frequency
+- id: A-INT-NONINV-16
+  section_id: SEC-9.3
+  atom_type: formula_atom
+  source_element_id: SE-9.3-EQ16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9029
+    line_end: 9029
+    char_start: 527812
+    char_end: 528036
+  viewer_span:
+    file: source.md
+    line_start: 1535
+    line_end: 1535
+    char_start: 85494
+    char_end: 85718
+    viewer_only: true
+  raw_text: H ^ {o o} (z) = \frac {V _ {\text { out }} ^ {o} (z)}{V _ {\text { in }} ^ {o} (z)} = \left(\frac {C _ {1}}{C _ {2}}\right) \frac {z ^ {- 1}}{1 - z ^ {- 1}} = \left(\frac {C _ {1}}{C _ {2}}\right) \frac {1}{z - 1}. \tag {16}
+  normalized_text: H^oo(z) = V_out^o(z)/V_in^o(z) = (C_1/C_2) z^-1/(1 - z^-1) = (C_1/C_2) 1/(z - 1)
+  evidence_strength: direct
+  metadata:
+    tag: '16'
+    role: noninverting_integrator_Hz
+    note: noninverting SC integrator, Fig. 9.3-4a
+- id: A-INT-INV-24
+  section_id: SEC-9.3
+  atom_type: formula_atom
+  source_element_id: SE-9.3-EQ24
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9143
+    line_end: 9143
+    char_start: 533497
+    char_end: 533717
+  viewer_span:
+    file: source.md
+    line_start: 1649
+    line_end: 1649
+    char_start: 91179
+    char_end: 91399
+    viewer_only: true
+  raw_text: H ^ {e e} (z) = \frac {V _ {\text { out }} ^ {e} (z)}{V _ {\text { in }} ^ {e} (z)} = - \left(\frac {C _ {1}}{C _ {2}}\right) \frac {1}{1 - z ^ {- 1}} = - \left(\frac {C _ {1}}{C _ {2}}\right) \frac {z}{z - 1}. \tag {24}
+  normalized_text: H^ee(z) = V_out^e(z)/V_in^e(z) = -(C_1/C_2) 1/(1 - z^-1) = -(C_1/C_2) z/(z - 1)
+  evidence_strength: direct
+  metadata:
+    tag: '24'
+    role: inverting_integrator_Hz
+    note: inverting SC integrator, Fig. 9.3-4b; same magnitude as noninverting, opposite-sign phase error
+- id: A-INT-WI-19
+  section_id: SEC-9.3
+  atom_type: formula_atom
+  source_element_id: SE-9.3-EQ19
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9047
+    line_end: 9047
+    char_start: 529403
+    char_end: 529454
+  viewer_span:
+    file: source.md
+    line_start: 1553
+    line_end: 1553
+    char_start: 87085
+    char_end: 87136
+    viewer_only: true
+  raw_text: \omega_ {I} = \frac {C _ {1}}{T C _ {2}}. \tag {19}
+  normalized_text: omega_I = C_1/(T C_2) = (C_1/C_2) f_c
+  evidence_strength: direct
+  metadata:
+    tag: '19'
+    role: integrator_frequency
+    note: integrator frequency; well defined because proportional to a capacitor ratio
+- id: A-INT-PHASE-CANCEL
+  section_id: SEC-9.3
+  atom_type: design_principle_atom
+  source_element_id: SE-9.3-PHASE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9205
+    line_end: 9205
+    char_start: 535905
+    char_end: 536135
+  viewer_span:
+    file: source.md
+    line_start: 1711
+    line_end: 1711
+    char_start: 93587
+    char_end: 93817
+    viewer_only: true
+  raw_text: In many applications, a noninverting and inverting integrator are in series in a feedback loop. It should be noted using the configurations of Fig. 9.3-4 that the phase errors of each integrator cancel resulting in no phase error.
+  normalized_text: When a noninverting and an inverting integrator (Fig. 9.3-4) are placed in series in a feedback loop, the phase errors of each integrator cancel, resulting in no phase error.
+  evidence_strength: direct
+- id: A-INT-NONIDEAL
+  section_id: SEC-9.3
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.3-NONIDEAL
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9227
+    line_end: 9227
+    char_start: 537360
+    char_end: 537566
+  viewer_span:
+    file: source.md
+    line_start: 1733
+    line_end: 1733
+    char_start: 95042
+    char_end: 95248
+    viewer_only: true
+  raw_text: The nonideal behavior of switched capacitor integrators includes clock feedthrough, finite differential voltage gain of the op amp, finite unity gainbandwidth of the op amp, and the slew rate of the op amp.
+  normalized_text: The nonideal behavior of switched capacitor integrators includes clock feedthrough, finite differential voltage gain of the op amp, finite unity-gainbandwidth GB, and slew rate of the op amp.
+  evidence_strength: direct
+- id: A-INT-AVD-ERR-36
+  section_id: SEC-9.3
+  atom_type: formula_atom
+  source_element_id: SE-9.3-EQ36
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9314
+    line_end: 9314
+    char_start: 543837
+    char_end: 543934
+  viewer_span:
+    file: source.md
+    line_start: 1820
+    line_end: 1820
+    char_start: 101519
+    char_end: 101616
+    viewer_only: true
+  raw_text: m (j \omega) = - \frac {1}{A _ {v d} (0)} \left[ 1 + \frac {C _ {1}}{2 C _ {2}} \right] \tag {36}
+  normalized_text: m(jw) = -(1/A_vd(0))[1 + C_1/(2C_2)]
+  evidence_strength: direct
+  metadata:
+    tag: '36'
+    role: integrator_finite_gain_error
+    note: integrator magnitude error from finite A_vd(0); phase error theta(jw) = (C_1/C_2)/(2 A_vd(0) tan(wT/2)), Eq.37; the phase error is generally more serious
+- id: A-INT-KTC-41
+  section_id: SEC-9.3
+  atom_type: formula_atom
+  source_element_id: SE-9.3-EQ41
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9396
+    line_end: 9396
+    char_start: 549122
+    char_end: 549394
+  viewer_span:
+    file: source.md
+    line_start: 1902
+    line_end: 1902
+    char_start: 106804
+    char_end: 107076
+    viewer_only: true
+  raw_text: v _ {R _ {o n}} ^ {2} = \frac {2 k T R _ {o n}}{\pi} \int_ {0} ^ {\infty} \frac {\omega_ {1} {} ^ {2} d \omega}{\omega_ {1} {} ^ {2} + \omega^ {2}} = \frac {2 k T R _ {o n}}{\pi} \left(\frac {\pi \omega_ {1}}{2}\right) = \frac {k T}{C} \text { Volts(rms) } ^ {2} \tag {41}
+  normalized_text: v_Ron^2 = (2kT R_on/pi) integral_0^inf omega_1^2 dw/(omega_1^2 + w^2) = (2kT R_on/pi)(pi omega_1/2) = kT/C Volts(rms)^2
+  evidence_strength: direct
+  metadata:
+    tag: '41'
+    role: ktc_noise
+    note: switch thermal kT/C noise
+- id: A-EX933-PROBLEM
+  section_id: SEC-EX933
+  atom_type: example_problem_atom
+  source_element_id: SE-EX933-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9329
+    line_end: 9329
+    char_start: 544354
+    char_end: 544584
+  viewer_span:
+    file: source.md
+    line_start: 1835
+    line_end: 1835
+    char_start: 102036
+    char_end: 102266
+    viewer_only: true
+  raw_text: Assume that the clock frequency and integrator frequency of a switch capacitor integrator is 100kHz and 10kHz, respectively. If the value of $A _ { \nu d } ( 0 )$ is 100, find the value of m(j ) and $\theta ( j \omega )$ at 10kHz.
+  normalized_text: For an SC integrator with clock frequency 100 kHz and integrator frequency 10 kHz, and A_vd(0) = 100, find m(jw) and theta(jw) at 10 kHz.
+  evidence_strength: direct
+- id: A-EX933-RESULT
+  section_id: SEC-EX933
+  atom_type: result_atom
+  source_element_id: SE-EX933-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9342
+    line_end: 9342
+    char_start: 544877
+    char_end: 544950
+  viewer_span:
+    file: source.md
+    line_start: 1848
+    line_end: 1848
+    char_start: 102559
+    char_end: 102632
+    viewer_only: true
+  raw_text: m (j \omega) = - \left[ 1 + \frac {0 . 6 2 8 3}{2} \right] = - 1. 0 1 3 1
+  normalized_text: m(jw) = -[1 + 0.6283/2] = -1.0131
+  evidence_strength: direct
+- id: A-Z-MODEL-CONCEPT
+  section_id: SEC-9.4
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.4-CONCEPT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9413
+    line_end: 9413
+    char_start: 550531
+    char_end: 550711
+  viewer_span:
+    file: source.md
+    line_start: 1919
+    line_end: 1919
+    char_start: 108213
+    char_end: 108393
+    viewer_only: true
+  raw_text: The development of z-domain models for switched capacitor circuits using a twophase, nonoverlapping clock is based on decomposing time-varient circuits into timeinvarient circuits.
+  normalized_text: The development of z-domain models for switched capacitor circuits using a two-phase nonoverlapping clock is based on decomposing time-variant circuits into time-invariant ones.
+  evidence_strength: direct
+- id: A-Z-ADMITTANCE
+  section_id: SEC-9.4
+  atom_type: formula_atom
+  source_element_id: SE-9.4-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9453
+    line_end: 9453
+    char_start: 553492
+    char_end: 553546
+  viewer_span:
+    file: source.md
+    line_start: 1959
+    line_end: 1959
+    char_start: 111174
+    char_end: 111228
+    viewer_only: true
+  raw_text: I (z) = Y \cdot z ^ {0} V (z) = Y \cdot V (z) \tag {1}
+  normalized_text: I(z) = Y z^0 V(z) = Y V(z)
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: z_admittance_types
+    note: no-delay admittance; the other two types are I(z) = Y z^-1/2 V(z) (Eq.2, half-period delay) and I(z) = (1 - z^-1) Y V(z) (Eq.3); Y equals the switched capacitor value C in all three
+- id: A-Z-FOURPORTS
+  section_id: SEC-9.4
+  atom_type: component_model_atom
+  source_element_id: SE-9.4-FOURPORTS
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9413
+    line_end: 9413
+    char_start: 551118
+    char_end: 551312
+  viewer_span:
+    file: source.md
+    line_start: 1919
+    line_end: 1919
+    char_start: 108800
+    char_end: 108994
+    viewer_only: true
+  raw_text: They are the parallel or toggle switched capacitor of Fig. 9.1-1, the positive and negative switched capacitors of Fig. 9.2-6, and a capacitor in series with a switch which we have not used yet.
+  normalized_text: The four switched-capacitor two-ports are the parallel/toggle switched capacitor (Fig. 9.1-1), the positive and negative switched capacitors (Fig. 9.2-6), and a capacitor in series with a switch.
+  evidence_strength: direct
+- id: A-FO-APPROACH
+  section_id: SEC-9.5
+  atom_type: design_principle_atom
+  source_element_id: SE-9.5-APPROACH
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9987
+    line_end: 9987
+    char_start: 574949
+    char_end: 575144
+  viewer_span:
+    file: source.md
+    line_start: 2493
+    line_end: 2493
+    char_start: 132631
+    char_end: 132826
+    viewer_only: true
+  raw_text: There are two approaches to switched capacitor filter design. One uses integrators coupled together and the other uses cascades of first-order and second-order switched capacitor building blocks.
+  normalized_text: 'There are two approaches to SC filter design: one uses integrators coupled together, and the other uses cascades of first-order and second-order switched capacitor building blocks.'
+  evidence_strength: direct
+- id: A-FO-HS-1
+  section_id: SEC-9.5
+  atom_type: formula_atom
+  source_element_id: SE-9.5-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 9994
+    line_end: 9994
+    char_start: 575339
+    char_end: 575398
+  viewer_span:
+    file: source.md
+    line_start: 2500
+    line_end: 2500
+    char_start: 133021
+    char_end: 133080
+    viewer_only: true
+  raw_text: H (s) = \frac {s a _ {1} \pm a _ {0}}{s + b _ {0}} \tag {1}
+  normalized_text: H(s) = (s a_1 +- a_0)/(s + b_0)
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: first_order_tf
+    note: 'general first-order s-domain TF: a_1=0 -> lowpass, a_0=0 -> highpass, neither -> allpass; z-domain H(z) = (A_1 +- A_0 z^-1)/(1 - B_0 z^-1), Eq.2'
+- id: A-FO-LP-4
+  section_id: SEC-9.5
+  atom_type: formula_atom
+  source_element_id: SE-9.5-EQ4
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10071
+    line_end: 10071
+    char_start: 577536
+    char_end: 577747
+  viewer_span:
+    file: source.md
+    line_start: 2577
+    line_end: 2577
+    char_start: 135218
+    char_end: 135429
+    viewer_only: true
+  raw_text: \frac {V _ {o} ^ {o} (z)}{V _ {i} ^ {o} (z)} = \frac {\alpha_ {1} z ^ {- 1}}{1 + \alpha_ {2} - z ^ {- 1}} = \frac {\frac {\alpha_ {1} z ^ {- 1}}{1 + \alpha_ {2}}}{1 - \frac {z ^ {- 1}}{1 + \alpha_ {2}}} \tag {4}
+  normalized_text: V_o^o(z)/V_i^o(z) = alpha_1 z^-1/(1 + alpha_2 - z^-1)
+  evidence_strength: direct
+  metadata:
+    tag: '4'
+    role: first_order_lowpass
+    note: first-order SC lowpass, Fig. 9.5-1; design eqns alpha_1 = A_0/B_0, alpha_2 = (1-B_0)/B_0, Eq.5; alpha_2 C is the switched capacitor placed across the integrating capacitor C, the damping that turns the integrator into a lowpass
+- id: A-FO-HP-13
+  section_id: SEC-9.5
+  atom_type: formula_atom
+  source_element_id: SE-9.5-EQ13
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10163
+    line_end: 10163
+    char_start: 581721
+    char_end: 581987
+  viewer_span:
+    file: source.md
+    line_start: 2669
+    line_end: 2669
+    char_start: 139403
+    char_end: 139669
+    viewer_only: true
+  raw_text: H ^ {e e} (z) = \frac {V _ {o} ^ {e} (z)}{V _ {i} ^ {e} (z)} = \frac {- \alpha_ {1} \left(1 - z ^ {- 1}\right)}{\alpha_ {2} + 1 - z ^ {- 1}} = \frac {\frac {\alpha_ {1}}{\alpha_ {2} + 1} \left(1 - z ^ {- 1}\right)}{1 - \frac {1}{\alpha_ {2} + 1} z ^ {- 1}} \tag {13}
+  normalized_text: H^ee(z) = V_o^e(z)/V_i^e(z) = -alpha_1(1 - z^-1)/(alpha_2 + 1 - z^-1)
+  evidence_strength: direct
+  metadata:
+    tag: '13'
+    role: first_order_highpass
+    note: first-order SC highpass, Fig. 9.5-3
+- id: A-FO-DIFF
+  section_id: SEC-9.5
+  atom_type: design_principle_atom
+  source_element_id: SE-9.5-DIFF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10343
+    line_end: 10343
+    char_start: 586855
+    char_end: 587191
+  viewer_span:
+    file: source.md
+    line_start: 2849
+    line_end: 2849
+    char_start: 144537
+    char_end: 144873
+    viewer_only: true
+  raw_text: In practice, differential versions of these circuits are used to reduce clock feedthrough, common mode noise sources and enhance the signal swing. Fig. 9.5-8 shows one possible differential version of Fig. 9.5-1, 9.5-3, and 9.5-5. Differential operation of switched capacitor circuits requires op amps or OTAs with differential outputs.
+  normalized_text: In practice, differential versions of the first-order circuits are used to reduce clock feedthrough and common-mode noise and to enhance signal swing; differential operation requires op amps/OTAs with differential outputs.
+  evidence_strength: direct
+- id: A-FO-DIFF-COST
+  section_id: SEC-9.5
+  atom_type: design_principle_atom
+  source_element_id: SE-9.5-DIFFCOST
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10343
+    line_end: 10343
+    char_start: 587492
+    char_end: 587672
+  viewer_span:
+    file: source.md
+    line_start: 2849
+    line_end: 2849
+    char_start: 145174
+    char_end: 145354
+    viewer_only: true
+  raw_text: Although, differential operation increases the component count and the amplifier complexity, the signal swing is increased by a factor of two and the even harmonics are diminished.
+  normalized_text: Differential operation increases component count and amplifier complexity, but the signal swing is doubled and the even harmonics are diminished.
+  evidence_strength: direct
+- id: A-EX951-PROBLEM
+  section_id: SEC-EX951
+  atom_type: example_problem_atom
+  source_element_id: SE-EX951-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10117
+    line_end: 10117
+    char_start: 578901
+    char_end: 579127
+  viewer_span:
+    file: source.md
+    line_start: 2623
+    line_end: 2623
+    char_start: 136583
+    char_end: 136809
+    viewer_only: true
+  raw_text: Design a switched capacitor first-order circuit that has a low frequency gain of +10 and a -3dB frequency of 1kHz. Give the value of the capacitor ratios $\alpha _ { 1 }$ and $\alpha _ { 2 } .$ Use a clock frequency of 100kHz.
+  normalized_text: Design a first-order SC circuit with low-frequency gain +10 and -3 dB frequency 1 kHz; give the capacitor ratios alpha_1 and alpha_2 for a clock frequency of 100 kHz.
+  evidence_strength: direct
+- id: A-EX951-RESULT
+  section_id: SEC-EX951
+  atom_type: result_atom
+  source_element_id: SE-EX951-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10145
+    line_end: 10145
+    char_start: 580327
+    char_end: 580479
+  viewer_span:
+    file: source.md
+    line_start: 2651
+    line_end: 2651
+    char_start: 138009
+    char_end: 138161
+    viewer_only: true
+  raw_text: Therefore, we see that $\alpha _ { 2 } = 6 2 8 3 / 1 0 0 , 0 0 0 = 0 . 0 6 2 8$ and $\begin{array} { r } { \alpha _ { 1 } = 0 . 6 2 8 3 . } \end{array}$
+  normalized_text: alpha_2 = 6283/100,000 = 0.0628 and alpha_1 = 0.6283.
+  evidence_strength: direct
+- id: A-SO-CASCADE
+  section_id: SEC-9.6
+  atom_type: design_principle_atom
+  source_element_id: SE-9.6-CASCADE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10352
+    line_end: 10352
+    char_start: 588420
+    char_end: 588857
+  viewer_span:
+    file: source.md
+    line_start: 2858
+    line_end: 2858
+    char_start: 146102
+    char_end: 146539
+    viewer_only: true
+  raw_text: One approach to designing higher order filters is to take the design in polynomial form and break it into products of second-order products. If the filter order is odd, then one first-order product will result. The implementation of each product can then be accomplished by a cascade of second-order circuits that each individually realize a pair of complex conjugate poles and two zeros (which may be at infinity or zero or in between).
+  normalized_text: Higher-order filters are realized by factoring the transfer function into products of second-order functions, each implemented as a cascade of second-order circuits realizing a pair of complex-conjugate poles and two zeros; if the order is odd, one first-order product remains.
+  evidence_strength: direct
+- id: A-SO-BIQUAD-CONCEPT
+  section_id: SEC-9.6
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.6-BIQUAD
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10394
+    line_end: 10394
+    char_start: 590044
+    char_end: 590389
+  viewer_span:
+    file: source.md
+    line_start: 2900
+    line_end: 2900
+    char_start: 147726
+    char_end: 148071
+    viewer_only: true
+  raw_text: The biquad circuit has the ability to realize both complex poles and complex zeros. The poles are generated by the primary feedback path which generally consists of a noninverting integrator and an inverting integrator. One of the integrators is damped to avoid oscillation. The zeros are generated by how the input signal is applied to circuit.
+  normalized_text: A biquad realizes both complex poles and complex zeros. The poles come from the primary feedback path - generally a noninverting integrator plus an inverting integrator, one of which is damped to avoid oscillation. The zeros come from how the input signal is applied.
+  evidence_strength: direct
+- id: A-SO-BIQUAD-HS-1
+  section_id: SEC-9.6
+  atom_type: formula_atom
+  source_element_id: SE-9.6-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10403
+    line_end: 10403
+    char_start: 591056
+    char_end: 591242
+  viewer_span:
+    file: source.md
+    line_start: 2909
+    line_end: 2909
+    char_start: 148738
+    char_end: 148924
+    viewer_only: true
+  raw_text: H _ {a} (s) = \frac {V _ {\text { out }} (s)}{V _ {\text { in }} (s)} = \frac {- (K _ {2} s ^ {2} + K _ {1} s + K _ {0})}{s ^ {2} + \frac {\omega_ {o}}{Q} s + \omega_ {o} ^ {2}} \tag {1}
+  normalized_text: H_a(s) = V_out(s)/V_in(s) = -(K_2 s^2 + K_1 s + K_0)/(s^2 + (omega_o/Q) s + omega_o^2)
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: biquad_tf
+    note: continuous-time biquad; omega_o = pole frequency, Q = pole Q, K_0,K_1,K_2 set the zeros
+- id: A-SO-BIQUAD-ALPHA-11
+  section_id: SEC-9.6
+  atom_type: formula_atom
+  source_element_id: SE-9.6-EQ11
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10569
+    line_end: 10569
+    char_start: 596311
+    char_end: 596539
+  viewer_span:
+    file: source.md
+    line_start: 3075
+    line_end: 3075
+    char_start: 153993
+    char_end: 154221
+    viewer_only: true
+  raw_text: \alpha_ {1} = \frac {K _ {0} T}{\omega_ {o}}, \quad \alpha_ {2} = | \alpha_ {5} | = \omega_ {o} T, \quad \alpha_ {3} = K _ {2}, \quad \alpha_ {4} = K _ {1} T, \text { and } \quad \alpha_ {6} = \frac {\omega_ {o} T}{Q}. \tag {11}
+  normalized_text: alpha_1 = K_0 T/omega_o, alpha_2 = |alpha_5| = omega_o T, alpha_3 = K_2, alpha_4 = K_1 T, alpha_6 = omega_o T/Q
+  evidence_strength: direct
+  metadata:
+    tag: '11'
+    role: biquad_capacitor_ratios
+    note: low-Q SC biquad capacitor ratios, Fig. 9.6-4
+- id: A-SO-BIQUAD-LOWQ
+  section_id: SEC-9.6
+  atom_type: design_principle_atom
+  source_element_id: SE-9.6-LOWQ
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10572
+    line_end: 10572
+    char_start: 596903
+    char_end: 597059
+  viewer_span:
+    file: source.md
+    line_start: 3078
+    line_end: 3078
+    char_start: 154585
+    char_end: 154741
+    viewer_only: true
+  raw_text: If Q becomes too large, i.e. greater than 5, $\alpha _ { 5 }$ becomes too small which causes the biquad of Fig. 9.6-4 to be suitable for low-Q applications.
+  normalized_text: If Q becomes greater than 5, alpha_5 becomes too small, so the biquad of Fig. 9.6-4 is suitable only for low-Q applications.
+  evidence_strength: direct
+- id: A-EX961-PROBLEM
+  section_id: SEC-EX961
+  atom_type: example_problem_atom
+  source_element_id: SE-EX961-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10586
+    line_end: 10586
+    char_start: 597826
+    char_end: 598295
+  viewer_span:
+    file: source.md
+    line_start: 3092
+    line_end: 3092
+    char_start: 155508
+    char_end: 155977
+    viewer_only: true
+  raw_text: Assume that the specifications of a biquad ar $\begin{array} { r } { \mathbf { \nabla } \cdot f _ { o } = 1 \mathrm { k H z } , Q = 2 , K _ { 0 } = K _ { \gamma } = 0 , } \end{array}$ , and $K _ { \mathrm { 1 } } = 2 \pi f _ { \mathrm { 0 } } / Q$ (a bandpass filter). The clock frequency is 100kHz. Design the capacitor ratios of Fig. 9.6-4 and determine the maximum capacitor ratio and the total capacitance assuming that $C _ { 1 }$ and $C _ { 2 }$ have unit values.
+  normalized_text: For a biquad with f_o = 1 kHz, Q = 2, K_0 = K_2 = 0, K_1 = 2 pi f_o/Q (bandpass) and clock frequency 100 kHz, design the capacitor ratios of Fig. 9.6-4 and find the maximum capacitor ratio and total capacitance (C_1 = C_2 = 1).
+  evidence_strength: direct
+- id: A-EX961-RESULT
+  section_id: SEC-EX961
+  atom_type: result_atom
+  source_element_id: SE-EX961-R
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10590
+    line_end: 10590
+    char_start: 598309
+    char_end: 598593
+  viewer_span:
+    file: source.md
+    line_start: 3096
+    line_end: 3096
+    char_start: 155991
+    char_end: 156275
+    viewer_only: true
+  raw_text: From Eq. (11) we get $\alpha _ { 1 } = \alpha _ { 3 } = 0 , \alpha _ { 2 } = \alpha _ { 5 } = 0 . 0 6 2 8$ , and $\begin{array} { r } { \alpha _ { 4 } = \alpha _ { 6 } = 0 . 0 3 1 4 . } \end{array}$ . The largest capacitor ratio is $\alpha _ { 4 }$ or $\alpha _ { 6 }$ and is 1/31.83.
+  normalized_text: alpha_1 = alpha_3 = 0, alpha_2 = alpha_5 = 0.0628, alpha_4 = alpha_6 = 0.0314; the largest capacitor ratio is alpha_4 or alpha_6 and is 1/31.83.
+  evidence_strength: direct
+- id: A-FILT-APP
+  section_id: SEC-9.7
+  atom_type: concept_definition_atom
+  source_element_id: SE-9.7-APP
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 10940
+    line_end: 10940
+    char_start: 618420
+    char_end: 618611
+  viewer_span:
+    file: source.md
+    line_start: 3446
+    line_end: 3446
+    char_start: 176102
+    char_end: 176293
+    viewer_only: true
+  raw_text: Based on the above discussion, all linear filters are characterized by three properties. These properties are the passband ripple, the transition frequency, and the stopband gain/attenuation.
+  normalized_text: 'All linear filters are characterized by three properties: the passband ripple, the transition frequency, and the stopband gain/attenuation.'
+  evidence_strength: direct
+- id: A-FILT-CASCADE
+  section_id: SEC-9.7
+  atom_type: design_principle_atom
+  source_element_id: SE-9.7-CASCADE
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 11183
+    line_end: 11183
+    char_start: 638068
+    char_end: 638549
+  viewer_span:
+    file: source.md
+    line_start: 3689
+    line_end: 3689
+    char_start: 195750
+    char_end: 196231
+    viewer_only: true
+  raw_text: All approaches start with a normalized, low pass filter with a passband of 1 radian/second and an impedance of 1Ω that will satisfy the filter specification. In the cascade approach, the root locations for the desired are identified and then transformed to the roots of an unnormalized low pass realizations. If the filter is to be low pass, then these roots are grouped into products of second-order functions. If the filter order is odd, then one first-order product is required.
+  normalized_text: 'Cascade approach: start from a normalized lowpass prototype (passband 1 rad/s, impedance 1 Ohm); identify the root locations, transform them to an unnormalized lowpass realization, and group the roots into products of second-order functions (one first-order product if the order is odd).'
+  evidence_strength: direct
+- id: A-FILT-LADDER
+  section_id: SEC-9.7
+  atom_type: design_principle_atom
+  source_element_id: SE-9.7-LADDER
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 11647
+    line_end: 11647
+    char_start: 665534
+    char_end: 666159
+  viewer_span:
+    file: source.md
+    line_start: 4153
+    line_end: 4153
+    char_start: 223216
+    char_end: 223841
+    viewer_only: true
+  raw_text: The second major approach to designing higher-order, switched capacitor circuits shown in Fig. 9.7-6 is called the ladder approach. It has the advantage of being less sensitive to the capacitor ratios than the cascade approach. Its disadvantage is that the design approach is slightly more complex and is only applicable to filters that can be expressed as RLC circuits. The ladder approach begins with the normalized, low pass, RLC prototype filter structure. Next, state equations are written based on the RLC prototype circuit. Lastly, the state equations are synthesized using the appropriate switched capacitor circuits.
+  normalized_text: 'Ladder approach: begins with a normalized lowpass RLC prototype, writes state equations from the RLC circuit, and synthesizes them with the appropriate switched capacitor circuits. Advantage: less sensitive to capacitor ratios than the cascade approach. Disadvantage: more complex and only applicable to filters expressible as RLC circuits.'
+  evidence_strength: direct
+- id: A-SUMMARY
+  section_id: SEC-9.8
+  atom_type: summary_atom
+  source_element_id: SE-9.8-SUMMARY
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 12651
+    line_end: 12651
+    char_start: 718908
+    char_end: 719146
+  viewer_span:
+    file: source.md
+    line_start: 5157
+    line_end: 5157
+    char_start: 276590
+    char_end: 276828
+    viewer_only: true
+  raw_text: A disadvantage of switched capacitor circuits is the clock feedthrough that occurs via the overlap capacitance of the switches. While the feedthrough can be minimized, it represents the ultimate accuracy of the switched capacitor circuit.
+  normalized_text: A disadvantage of switched capacitor circuits is the clock feedthrough that occurs via the overlap capacitance of the switches; while it can be minimized, it represents the ultimate accuracy of the switched capacitor circuit.
+  evidence_strength: direct
+  context_only: true
+- id: A-PROB-911
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-911
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 12659
+    line_end: 12659
+    char_start: 719810
+    char_end: 719937
+  viewer_span:
+    file: source.md
+    line_start: 5165
+    line_end: 5165
+    char_start: 277492
+    char_end: 277619
+    viewer_only: true
+  raw_text: 9.1-1 Develop the equivalent resistance expression in Table 9.1-1 for the series switched capacitor resistor emulation circuit.
+  normalized_text: 9.1-1 Develop the equivalent resistance expression in Table 9.1-1 for the series switched capacitor resistor emulation circuit.
+  evidence_strength: direct
+- id: A-PROB-913
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-913
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 12661
+    line_end: 12661
+    char_start: 720074
+    char_end: 720454
+  viewer_span:
+    file: source.md
+    line_start: 5167
+    line_end: 5167
+    char_start: 277756
+    char_end: 278136
+    viewer_only: true
+  raw_text: 9.1-3 What is the accuracy of a time constant implemented with a resistor and capacitor having a tolerance of 10% and 5%, respectively. What is the accuracy of a time constant implemented by a switched capacitor resistor emulation and a capacitor if the tolerances of the capacitors are 5% and the relative tolerance is 0.5%. Assume that the clock frequency is perfectly accurate.
+  normalized_text: 9.1-3 Compare the accuracy of a time constant built from a resistor (10% tolerance) and capacitor (5%) with one built from a switched-capacitor resistor emulation and a capacitor (5% absolute, 0.5% relative tolerance, clock perfectly accurate).
+  evidence_strength: direct
+- id: A-PROB-955
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB-955
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 13040
+    line_end: 13040
+    char_start: 734368
+    char_end: 734523
+  viewer_span:
+    file: source.md
+    line_start: 5546
+    line_end: 5546
+    char_start: 292050
+    char_end: 292205
+    viewer_only: true
+  raw_text: 9.5-1 Develop Eq. (6) for the inverting low pass circuit obtained from Fig. 9.1-5(a.) by reversing the phases of the leftmost two switches. Verify Eq. (7).
+  normalized_text: 9.5-1 Develop the transfer function (Eq.6) for the inverting first-order lowpass circuit obtained by reversing the phases of the two leftmost switches; verify Eq.(7).
+  evidence_strength: direct
+semantic_chunks:
+- id: C-OV
+  profile: textbook
+  chunk_type: chapter_overview_block
+  section_path: '9'
+  atom_ids:
+  - A-INTRO
+  - A-INTRO-ACCURACY
+  - A-SUMMARY
+  central_atom_ids:
+  - A-INTRO-ACCURACY
+  boundary_reason: 'chapter framing: intro (9.0) + the foundational capacitor-ratio accuracy principle + summary (9.8) kept together. A-INTRO/A-SUMMARY are context_only framing.'
+  extraction_targets:
+  - Concept
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-INTRO
+  - A-INTRO-ACCURACY
+  - A-SUMMARY
+- id: C-RES-EMU
+  profile: textbook
+  chunk_type: design_principle_block
+  section_path: 9 > 9.1
+  atom_ids:
+  - A-SC-RES-CONCEPT
+  - A-SC-NONOVERLAP
+  - A-SC-IAVG-6
+  - A-SC-IAVG-10
+  - A-SC-REQ-12
+  - A-SC-REQ-SP-17
+  - A-SC-TABLE-911
+  central_atom_ids:
+  - A-SC-REQ-12
+  boundary_reason: resistor-emulation derivation chain i_avg -> R=T/C kept with its concept, nonoverlapping-clock definition, and the Table 9.1-1 summary of all four emulations (formula-explanation continuity).
+  extraction_targets:
+  - Concept
+  - Formula
+  - DesignPrinciple
+  - CircuitBlock
+  gold_must_cover_atoms:
+  - A-SC-RES-CONCEPT
+  - A-SC-REQ-12
+  - A-SC-TABLE-911
+- id: C-ACCURACY
+  profile: textbook
+  chunk_type: design_principle_block
+  section_path: 9 > 9.1
+  atom_ids:
+  - A-SC-ACC-TAUC-20
+  - A-SC-ACC-TAUD-22
+  central_atom_ids:
+  - A-SC-ACC-TAUD-22
+  boundary_reason: 'the accuracy argument: continuous-time tau_C accuracy vs discrete-time tau_D accuracy (depends on capacitor ratio + clock) - the core SC value proposition.'
+  extraction_targets:
+  - Formula
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-SC-ACC-TAUC-20
+  - A-SC-ACC-TAUD-22
+- id: C-Z-ANALYSIS
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 9 > 9.1
+  atom_ids:
+  - A-SC-ZTRANS-25
+  - A-SC-LPF-HZ-37
+  central_atom_ids:
+  - A-SC-LPF-HZ-37
+  boundary_reason: z-transform definition + the resulting SC lowpass z-domain transfer function.
+  extraction_targets:
+  - Formula
+  gold_must_cover_atoms:
+  - A-SC-ZTRANS-25
+  - A-SC-LPF-HZ-37
+- id: C-EX-911
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.1 > Example 9.1-1
+  atom_ids:
+  - A-EX911-PROBLEM
+  - A-EX911-USE
+  - A-EX911-RESULT
+  central_atom_ids:
+  - A-EX911-PROBLEM
+  boundary_reason: problem/formula-usage/result continuous (example_solution_continuity).
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX911-PROBLEM
+  - A-EX911-USE
+  - A-EX911-RESULT
+- id: C-EX-912
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.1 > Example 9.1-2
+  atom_ids:
+  - A-EX912-PROBLEM
+  - A-EX912-RESULT
+  central_atom_ids:
+  - A-EX912-PROBLEM
+  boundary_reason: series-parallel SC resistor worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX912-PROBLEM
+  - A-EX912-RESULT
+- id: C-EX-913
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.1 > Example 9.1-3
+  atom_ids:
+  - A-EX913-PROBLEM
+  - A-EX913-RESULT
+  central_atom_ids:
+  - A-EX913-PROBLEM
+  boundary_reason: SC lowpass z-domain analysis worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX913-PROBLEM
+  - A-EX913-RESULT
+- id: C-AMP-CT
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 9 > 9.2
+  atom_ids:
+  - A-AMP-CT-12
+  - A-AMP-AVD-3
+  - A-AMP-FINITE-6
+  - A-CHARGE-AMP-12
+  - A-CHARGE-AMP-USE
+  central_atom_ids:
+  - A-AMP-CT-12
+  boundary_reason: continuous-time amplifier gains + finite-gain op-amp model + charge amplifier - the prerequisites the SC amplifier is built on.
+  extraction_targets:
+  - Formula
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-AMP-CT-12
+  - A-CHARGE-AMP-12
+- id: C-SCAMP
+  profile: textbook
+  chunk_type: circuit_hierarchy_block
+  section_path: 9 > 9.2
+  atom_ids:
+  - A-SCAMP-EVOLVE
+  - A-SCAMP-HZ-19
+  - A-SCAMP-TRANSR-28
+  - A-SCAMP-PARASITIC
+  - A-SCAMP-NOEXCESS
+  central_atom_ids:
+  - A-SCAMP-HZ-19
+  boundary_reason: SC amplifier built from SC-resistor/transresistance blocks; gain = -C1/C2; parasitic-insensitive variant - the composition story kept together.
+  extraction_targets:
+  - CircuitBlock
+  - Formula
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-SCAMP-HZ-19
+  - A-SCAMP-TRANSR-28
+  - A-SCAMP-PARASITIC
+- id: C-FEEDTHRU
+  profile: textbook
+  chunk_type: physical_effect_block
+  section_path: 9 > 9.2
+  atom_ids:
+  - A-SCAMP-FEEDTHRU-50
+  - A-SCAMP-FEEDTHRU-FIX
+  - A-SCAMP-AVD-52
+  central_atom_ids:
+  - A-SCAMP-FEEDTHRU-50
+  boundary_reason: clock feedthrough (three output terms) + its mitigations + finite-gain error - the SC nonideality cluster.
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-SCAMP-FEEDTHRU-50
+  - A-SCAMP-FEEDTHRU-FIX
+- id: C-EX-921
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.2 > Example 9.2-1
+  atom_ids:
+  - A-EX921-PROBLEM
+  - A-EX921-RESULT
+  central_atom_ids:
+  - A-EX921-PROBLEM
+  boundary_reason: finite-gain accuracy worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX921-PROBLEM
+  - A-EX921-RESULT
+- id: C-EX-924
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.2 > Example 9.2-4
+  atom_ids:
+  - A-EX924-PROBLEM
+  - A-EX924-RESULT
+  central_atom_ids:
+  - A-EX924-PROBLEM
+  boundary_reason: clock-feedthrough numeric worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX924-PROBLEM
+  - A-EX924-RESULT
+- id: C-INT
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 9 > 9.3
+  atom_ids:
+  - A-INT-ROLE
+  - A-INT-CT-1
+  - A-INT-NONINV-16
+  - A-INT-INV-24
+  - A-INT-WI-19
+  - A-INT-PHASE-CANCEL
+  central_atom_ids:
+  - A-INT-NONINV-16
+  - A-INT-INV-24
+  boundary_reason: continuous-time integrator -> noninverting/inverting SC integrator z-domain transfer functions + integrator frequency + phase-cancellation, the core building block kept whole.
+  extraction_targets:
+  - Formula
+  - CircuitBlock
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-INT-NONINV-16
+  - A-INT-INV-24
+  - A-INT-WI-19
+- id: C-INT-NONIDEAL
+  profile: textbook
+  chunk_type: physical_effect_block
+  section_path: 9 > 9.3
+  atom_ids:
+  - A-INT-NONIDEAL
+  - A-INT-AVD-ERR-36
+  - A-INT-KTC-41
+  central_atom_ids:
+  - A-INT-AVD-ERR-36
+  boundary_reason: 'integrator nonidealities: feedthrough/finite-gain magnitude & phase error + kT/C noise.'
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  gold_must_cover_atoms:
+  - A-INT-NONIDEAL
+  - A-INT-AVD-ERR-36
+- id: C-EX-933
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.3 > Example 9.3-3
+  atom_ids:
+  - A-EX933-PROBLEM
+  - A-EX933-RESULT
+  central_atom_ids:
+  - A-EX933-PROBLEM
+  boundary_reason: integrator finite-gain error worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX933-PROBLEM
+  - A-EX933-RESULT
+- id: C-ZMODEL
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 9 > 9.4
+  atom_ids:
+  - A-Z-MODEL-CONCEPT
+  - A-Z-ADMITTANCE
+  - A-Z-FOURPORTS
+  central_atom_ids:
+  - A-Z-ADMITTANCE
+  boundary_reason: 'z-domain modeling method: decomposition concept + three admittance types + the catalog of two-port models.'
+  extraction_targets:
+  - Concept
+  - Formula
+  - ComponentModel
+  gold_must_cover_atoms:
+  - A-Z-MODEL-CONCEPT
+  - A-Z-ADMITTANCE
+- id: C-FIRSTORDER
+  profile: textbook
+  chunk_type: design_process_block
+  section_path: 9 > 9.5
+  atom_ids:
+  - A-FO-APPROACH
+  - A-FO-HS-1
+  - A-FO-LP-4
+  - A-FO-HP-13
+  - A-FO-DIFF
+  - A-FO-DIFF-COST
+  central_atom_ids:
+  - A-FO-LP-4
+  boundary_reason: 'first-order building blocks: general first-order TF + lowpass/highpass realizations + design equations + differential practice.'
+  extraction_targets:
+  - Formula
+  - CircuitBlock
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-FO-HS-1
+  - A-FO-LP-4
+- id: C-EX-951
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.5 > Example 9.5-1
+  atom_ids:
+  - A-EX951-PROBLEM
+  - A-EX951-RESULT
+  central_atom_ids:
+  - A-EX951-PROBLEM
+  boundary_reason: first-order SC design worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX951-PROBLEM
+  - A-EX951-RESULT
+- id: C-SECONDORDER
+  profile: textbook
+  chunk_type: circuit_hierarchy_block
+  section_path: 9 > 9.6
+  atom_ids:
+  - A-SO-CASCADE
+  - A-SO-BIQUAD-CONCEPT
+  - A-SO-BIQUAD-HS-1
+  - A-SO-BIQUAD-ALPHA-11
+  - A-SO-BIQUAD-LOWQ
+  central_atom_ids:
+  - A-SO-BIQUAD-CONCEPT
+  boundary_reason: biquad = two integrators (one damped) + input zeros; continuous-time TF + capacitor-ratio design; cascade composition into higher-order filters.
+  extraction_targets:
+  - CircuitBlock
+  - Formula
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-SO-BIQUAD-CONCEPT
+  - A-SO-BIQUAD-ALPHA-11
+- id: C-EX-961
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 9 > 9.6 > Example 9.6-1
+  atom_ids:
+  - A-EX961-PROBLEM
+  - A-EX961-RESULT
+  central_atom_ids:
+  - A-EX961-PROBLEM
+  boundary_reason: low-Q biquad design worked example.
+  extraction_targets:
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX961-PROBLEM
+  - A-EX961-RESULT
+- id: C-FILTERS
+  profile: textbook
+  chunk_type: circuit_hierarchy_block
+  section_path: 9 > 9.7
+  atom_ids:
+  - A-FILT-APP
+  - A-FILT-CASCADE
+  - A-FILT-LADDER
+  central_atom_ids:
+  - A-FILT-LADDER
+  boundary_reason: SC filters built from biquad/first-order blocks (cascade) or from RLC ladder prototypes via integrators (ladder) - the top of the composition hierarchy.
+  extraction_targets:
+  - Concept
+  - DesignPrinciple
+  - CircuitBlock
+  gold_must_cover_atoms:
+  - A-FILT-CASCADE
+  - A-FILT-LADDER
+- id: C-PROB
+  profile: textbook
+  chunk_type: problem_set_block
+  section_path: 9 > Homework Problems
+  atom_ids:
+  - A-PROB-911
+  - A-PROB-913
+  - A-PROB-955
+  central_atom_ids:
+  - A-PROB-911
+  boundary_reason: end-of-chapter problems.
+  extraction_targets:
+  - ProblemStatement
+  gold_must_cover_atoms:
+  - A-PROB-911
+  - A-PROB-913
+  - A-PROB-955
+context_packages:
+- id: PKG-OV
+  profile: textbook
+  chunk_id: C-OV
+  section_path: Chapter 9 > 9 Switched Capacitor Circuits (overview/summary)
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-INTRO
+    atom_type: concept_definition_atom
+  - atom_id: A-INTRO-ACCURACY
+    atom_type: design_principle_atom
+  - atom_id: A-SUMMARY
+    atom_type: summary_atom
+  linked_context:
+    previous_heading: Chapter 8
+    next_heading: 9.1 Switched Capacitor Circuits
+  extraction_targets:
+  - Concept
+  - DesignPrinciple
+  expected_objects:
+  - CONCEPT-SC-CIRCUIT
+  - PRINCIPLE-CAP-RATIO
+  - PRINCIPLE-OVERSAMPLING
+  expected_local_fields:
+    PRINCIPLE-OVERSAMPLING:
+    - statement
+    - applies_to
+  note: Chapter intro (A-INTRO) and summary (A-SUMMARY) are context_only framing; only A-INTRO-ACCURACY (capacitor-ratio principle) and the oversampling/clock principle are typed here.
+- id: PKG-RES-EMU
+  profile: textbook
+  chunk_id: C-RES-EMU
+  section_path: Chapter 9 > 9.1 Switched Capacitor Circuits > Resistor Emulation
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SC-RES-CONCEPT
+    atom_type: concept_definition_atom
+  - atom_id: A-SC-NONOVERLAP
+    atom_type: concept_definition_atom
+  - atom_id: A-SC-IAVG-6
+    atom_type: formula_atom
+  - atom_id: A-SC-IAVG-10
+    atom_type: formula_atom
+  - atom_id: A-SC-REQ-12
+    atom_type: formula_atom
+  - atom_id: A-SC-REQ-SP-17
+    atom_type: formula_atom
+  - atom_id: A-SC-TABLE-911
+    atom_type: table_row_atom
+  linked_context:
+    formula_context: R = T/C derived by equating i_1(average)=C(V_1-V_2)/T with i_1(average)=(V_1-V_2)/R
+    table: Table 9.1-1 emulated resistance of four SC resistor circuits (Parallel/Series T/C, Series-Parallel T/(C1+C2), Bilinear T/4C)
+    previous_heading: Chapter 9 intro
+    next_heading: Example 9.1-1
+  extraction_targets:
+  - Concept
+  - Formula
+  - DesignPrinciple
+  - CircuitBlock
+  expected_objects:
+  - CONCEPT-NONOVERLAP-CLOCK
+  - FORMULA-REQ
+  - FORMULA-REQ-SP
+  - BLOCK-SC-RESISTOR
+- id: PKG-ACCURACY
+  profile: textbook
+  chunk_id: C-ACCURACY
+  section_path: Chapter 9 > 9.1 > Accuracy of Switched Capacitor Circuits
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SC-ACC-TAUC-20
+    atom_type: formula_atom
+  - atom_id: A-SC-ACC-TAUD-22
+    atom_type: formula_atom
+  linked_context:
+    formula_context: continuous-time tau_C accuracy (Eq.20) vs discrete-time tau_D accuracy (Eq.22)
+    previous_heading: Resistor Emulation / Table 9.1-1
+    next_heading: Analysis Methods
+  extraction_targets:
+  - Formula
+  - DesignPrinciple
+  expected_objects:
+  - FORMULA-TAUD-ACC
+- id: PKG-Z-ANALYSIS
+  profile: textbook
+  chunk_id: C-Z-ANALYSIS
+  section_path: Chapter 9 > 9.1 > Analysis Methods (z-transform)
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SC-ZTRANS-25
+    atom_type: formula_atom
+  - atom_id: A-SC-LPF-HZ-37
+    atom_type: formula_atom
+  linked_context:
+    formula_context: one-sided z-transform definition (Eq.25) and SC lowpass H^oo(z) (Eq.37)
+    previous_heading: Accuracy of Switched Capacitor Circuits
+    next_heading: Example 9.1-3
+  extraction_targets:
+  - Formula
+  expected_objects:
+  - FORMULA-SC-LPF
+- id: PKG-EX-911
+  profile: textbook
+  chunk_id: C-EX-911
+  section_path: Chapter 9 > 9.1 > Example 9.1-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX911-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX911-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX911-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: Eq.(12) R = T/C
+    previous_heading: Resistor Emulation
+    next_heading: Example 9.1-2
+  extraction_targets:
+  - ExampleProblem
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.1-1
+- id: PKG-EX-912
+  profile: textbook
+  chunk_id: C-EX-912
+  section_path: Chapter 9 > 9.1 > Example 9.1-2
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX912-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX912-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: Eq.(17) R = T/(C_1+C_2)
+    previous_heading: Example 9.1-1
+    next_heading: Table 9.1-1
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.1-2
+- id: PKG-EX-913
+  profile: textbook
+  chunk_id: C-EX-913
+  section_path: Chapter 9 > 9.1 > Example 9.1-3
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX913-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX913-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: SC lowpass H^oo(z) (Eq.37)
+    previous_heading: Analysis Methods
+    next_heading: 9.2 Switched Capacitor Amplifiers
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.1-3
+- id: PKG-AMP-CT
+  profile: textbook
+  chunk_id: C-AMP-CT
+  section_path: Chapter 9 > 9.2 > Continuous-time / Charge Amplifiers
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-AMP-CT-12
+    atom_type: formula_atom
+  - atom_id: A-AMP-AVD-3
+    atom_type: formula_atom
+  - atom_id: A-AMP-FINITE-6
+    atom_type: formula_atom
+  - atom_id: A-CHARGE-AMP-12
+    atom_type: formula_atom
+  - atom_id: A-CHARGE-AMP-USE
+    atom_type: concept_definition_atom
+  linked_context:
+    formula_context: continuous-time gains (Eq.1/2), op-amp gain model (Eq.3), finite-gain inverting (Eq.6), charge amp (Eq.12)
+    previous_heading: 9.2 Switched Capacitor Amplifiers
+    next_heading: Switched Capacitor Amplifiers
+  extraction_targets:
+  - Formula
+  - PhysicalEffect
+  expected_objects: []
+  note: All atoms here are continuous-time/charge-amplifier prerequisites; no typed object is homed here (the SC amplifier objects live in PKG-SCAMP). Context-only support block.
+- id: PKG-SCAMP
+  profile: textbook
+  chunk_id: C-SCAMP
+  section_path: Chapter 9 > 9.2 > Switched Capacitor Amplifiers
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SCAMP-EVOLVE
+    atom_type: concept_definition_atom
+  - atom_id: A-SCAMP-HZ-19
+    atom_type: formula_atom
+  - atom_id: A-SCAMP-TRANSR-28
+    atom_type: formula_atom
+  - atom_id: A-SCAMP-PARASITIC
+    atom_type: design_principle_atom
+  - atom_id: A-SCAMP-NOEXCESS
+    atom_type: design_principle_atom
+  linked_context:
+    formula_context: SC amplifier H(z) = -(C_1/C_2) z^-1 (Eq.19/23); transresistance R_T = +/- T/C (Eq.28/29)
+    previous_heading: Charge Amplifiers
+    next_heading: Clock Feedthrough
+  extraction_targets:
+  - CircuitBlock
+  - Formula
+  - DesignPrinciple
+  expected_objects:
+  - FORMULA-SC-AMP-GAIN
+  - FORMULA-TRANSRES
+  - BLOCK-TRANSRESISTANCE
+  - BLOCK-SC-AMPLIFIER
+  - PRINCIPLE-PARASITIC-INSENSITIVE
+- id: PKG-FEEDTHRU
+  profile: textbook
+  chunk_id: C-FEEDTHRU
+  section_path: Chapter 9 > 9.2 > Clock Feedthrough / Finite Gain
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SCAMP-FEEDTHRU-50
+    atom_type: formula_atom
+  - atom_id: A-SCAMP-FEEDTHRU-FIX
+    atom_type: design_principle_atom
+  - atom_id: A-SCAMP-AVD-52
+    atom_type: formula_atom
+  linked_context:
+    formula_context: clock-feedthrough output (Eq.50); finite-gain SC amp H^oe(z) (Eq.52)
+    previous_heading: Switched Capacitor Amplifiers
+    next_heading: Example 9.2-1
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  - DesignPrinciple
+  expected_objects:
+  - FORMULA-FEEDTHRU
+  - PRINCIPLE-FEEDTHRU-FIX
+  - PHYS-CLOCK-FEEDTHRU
+- id: PKG-EX-921
+  profile: textbook
+  chunk_id: C-EX-921
+  section_path: Chapter 9 > 9.2 > Example 9.2-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX921-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX921-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: finite-gain amp (Eq.5/6)
+    previous_heading: Switched Capacitor Amplifiers
+    next_heading: Example 9.2-2
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.2-1
+- id: PKG-EX-924
+  profile: textbook
+  chunk_id: C-EX-924
+  section_path: Chapter 9 > 9.2 > Example 9.2-4
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX924-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX924-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: clock-feedthrough output (Eq.50)
+    previous_heading: Example 9.2-3
+    next_heading: Finite gain / GB / slew rate
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.2-4
+- id: PKG-INT
+  profile: textbook
+  chunk_id: C-INT
+  section_path: Chapter 9 > 9.3 Switched Capacitor Integrators
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-INT-ROLE
+    atom_type: design_principle_atom
+  - atom_id: A-INT-CT-1
+    atom_type: formula_atom
+  - atom_id: A-INT-NONINV-16
+    atom_type: formula_atom
+  - atom_id: A-INT-INV-24
+    atom_type: formula_atom
+  - atom_id: A-INT-WI-19
+    atom_type: formula_atom
+  - atom_id: A-INT-PHASE-CANCEL
+    atom_type: design_principle_atom
+  linked_context:
+    formula_context: SC integrators obtained by replacing R_1 of the continuous-time integrator with positive/negative transresistance circuits of Fig 9.2-6
+    previous_heading: Continuous Time Integrators
+    next_heading: Nonideal Characteristics of Switched Capacitor Integrators
+  extraction_targets:
+  - Formula
+  - CircuitBlock
+  - DesignPrinciple
+  expected_objects:
+  - FORMULA-INT-NONINV
+  - FORMULA-INT-INV
+  - FORMULA-INT-WI
+  - BLOCK-SC-INTEGRATOR
+  - PRINCIPLE-INTEGRATOR-BASIS
+- id: PKG-INT-NONIDEAL
+  profile: textbook
+  chunk_id: C-INT-NONIDEAL
+  section_path: Chapter 9 > 9.3 > Nonideal Characteristics
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-INT-NONIDEAL
+    atom_type: concept_definition_atom
+  - atom_id: A-INT-AVD-ERR-36
+    atom_type: formula_atom
+  - atom_id: A-INT-KTC-41
+    atom_type: formula_atom
+  linked_context:
+    formula_context: integrator finite-gain m(jw)/theta(jw) (Eq.36/37); kT/C noise (Eq.41)
+    previous_heading: Switched Capacitor Integrators
+    next_heading: Example 9.3-3
+  extraction_targets:
+  - PhysicalEffect
+  - Formula
+  expected_objects:
+  - FORMULA-INT-AVD-ERR
+  - FORMULA-KTC
+  - PHYS-FINITE-GAIN
+  - PHYS-KTC-NOISE
+  expected_local_fields:
+    PHYS-FINITE-GAIN:
+    - name
+    - description
+- id: PKG-EX-933
+  profile: textbook
+  chunk_id: C-EX-933
+  section_path: Chapter 9 > 9.3 > Example 9.3-3
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX933-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX933-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: integrator finite-gain error (Eq.36/37); w_I (Eq.19)
+    previous_heading: Nonideal Characteristics
+    next_heading: 9.4 z-domain Models
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.3-3
+- id: PKG-ZMODEL
+  profile: textbook
+  chunk_id: C-ZMODEL
+  section_path: Chapter 9 > 9.4 z-domain Models of Two-Phase SC Circuits
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-Z-MODEL-CONCEPT
+    atom_type: concept_definition_atom
+  - atom_id: A-Z-ADMITTANCE
+    atom_type: formula_atom
+  - atom_id: A-Z-FOURPORTS
+    atom_type: component_model_atom
+  linked_context:
+    formula_context: three z-domain admittance types (Eq.1/2/3), Y = C; catalog of two-port + irreducible models (Fig 9.4-3/9.4-4)
+    previous_heading: Example 9.3-3
+    next_heading: 9.5 First-Order SC Circuits
+  extraction_targets:
+  - Concept
+  - Formula
+  - ComponentModel
+  expected_objects:
+  - CONCEPT-Z-MODEL
+  - FORMULA-Z-ADMITTANCE
+  - COMP-Z-TWOPORTS
+- id: PKG-FIRSTORDER
+  profile: textbook
+  chunk_id: C-FIRSTORDER
+  section_path: Chapter 9 > 9.5 First-Order Switched Capacitor Circuits
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-FO-APPROACH
+    atom_type: design_principle_atom
+  - atom_id: A-FO-HS-1
+    atom_type: formula_atom
+  - atom_id: A-FO-LP-4
+    atom_type: formula_atom
+  - atom_id: A-FO-HP-13
+    atom_type: formula_atom
+  - atom_id: A-FO-DIFF
+    atom_type: design_principle_atom
+  - atom_id: A-FO-DIFF-COST
+    atom_type: design_principle_atom
+  linked_context:
+    formula_context: general first-order TF (Eq.1/2); SC lowpass (Eq.4/5); SC highpass (Eq.13)
+    previous_heading: 9.5 First-Order SC Circuits
+    next_heading: Example 9.5-1
+  extraction_targets:
+  - Formula
+  - CircuitBlock
+  - DesignPrinciple
+  expected_objects:
+  - FORMULA-FO-LP
+  - BLOCK-FIRST-ORDER
+- id: PKG-EX-951
+  profile: textbook
+  chunk_id: C-EX-951
+  section_path: Chapter 9 > 9.5 > Example 9.5-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX951-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX951-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: first-order SC lowpass (Eq.4) with z^-1 ~= 1 - sT approximation
+    previous_heading: First-Order Circuits
+    next_heading: High Pass Circuit
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.5-1
+- id: PKG-SECONDORDER
+  profile: textbook
+  chunk_id: C-SECONDORDER
+  section_path: Chapter 9 > 9.6 Second-Order Switched Capacitor Circuits
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-SO-CASCADE
+    atom_type: design_principle_atom
+  - atom_id: A-SO-BIQUAD-CONCEPT
+    atom_type: concept_definition_atom
+  - atom_id: A-SO-BIQUAD-HS-1
+    atom_type: formula_atom
+  - atom_id: A-SO-BIQUAD-ALPHA-11
+    atom_type: formula_atom
+  - atom_id: A-SO-BIQUAD-LOWQ
+    atom_type: design_principle_atom
+  linked_context:
+    formula_context: continuous-time biquad H_a(s) (Eq.1); low-Q biquad capacitor ratios (Eq.11)
+    previous_heading: 9.6 Second-Order SC Circuits
+    next_heading: Example 9.6-1
+  extraction_targets:
+  - CircuitBlock
+  - Formula
+  - DesignPrinciple
+  - Concept
+  expected_objects:
+  - CONCEPT-BIQUAD
+  - FORMULA-BIQUAD-HS
+  - FORMULA-BIQUAD-ALPHA
+  - BLOCK-BIQUAD
+- id: PKG-EX-961
+  profile: textbook
+  chunk_id: C-EX-961
+  section_path: Chapter 9 > 9.6 > Example 9.6-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX961-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX961-RESULT
+    atom_type: result_atom
+  linked_context:
+    formula_context: low-Q biquad capacitor ratios (Eq.11)
+    previous_heading: Low-Q Biquad
+    next_heading: High-Q Biquad
+  extraction_targets:
+  - ExampleSolution
+  expected_objects:
+  - EXAMPLE-9.6-1
+- id: PKG-FILTERS
+  profile: textbook
+  chunk_id: C-FILTERS
+  section_path: Chapter 9 > 9.7 Switched Capacitor Filters
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-FILT-APP
+    atom_type: concept_definition_atom
+  - atom_id: A-FILT-CASCADE
+    atom_type: design_principle_atom
+  - atom_id: A-FILT-LADDER
+    atom_type: design_principle_atom
+  linked_context:
+    formula_context: three filter properties (passband ripple/transition/stopband); cascade vs ladder design routes
+    previous_heading: 9.7 Switched Capacitor Filters
+    next_heading: 9.8 Summary
+  extraction_targets:
+  - Concept
+  - DesignPrinciple
+  - CircuitBlock
+  expected_objects:
+  - BLOCK-SC-FILTER
+  - PRINCIPLE-FILTER-DESIGN
+- id: PKG-PROB
+  profile: textbook
+  chunk_id: C-PROB
+  section_path: Chapter 9 > Homework Problems
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-PROB-911
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-913
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-955
+    atom_type: problem_statement_atom
+  linked_context:
+    previous_heading: 9.8 Summary
+    next_heading: References
+  extraction_targets:
+  - ProblemStatement
+  expected_objects:
+  - PROB-9.1-1
+  - PROB-9.1-3
+  - PROB-9.5-1
+mentions:
+- id: M-01
+  text: switched capacitor circuit
+  type: Concept
+  atom_id: A-INTRO
+  canonical_key: switched_capacitor_circuit
+- id: M-02
+  text: capacitor ratio accuracy
+  type: DesignPrinciple
+  atom_id: A-INTRO-ACCURACY
+  canonical_key: capacitor_ratio_accuracy
+- id: M-03
+  text: nonoverlapping clock
+  type: Concept
+  atom_id: A-SC-NONOVERLAP
+  canonical_key: nonoverlapping_clock
+- id: M-04
+  text: R = T/C
+  type: Formula
+  atom_id: A-SC-REQ-12
+  canonical_key: equivalent_resistance_req
+- id: M-05
+  text: parallel SC resistor
+  type: CircuitBlock
+  atom_id: A-SC-RES-CONCEPT
+  canonical_key: sc_resistor
+- id: M-06
+  text: SC amplifier gain -C1/C2
+  type: Formula
+  atom_id: A-SCAMP-HZ-19
+  canonical_key: sc_amp_gain
+- id: M-07
+  text: transresistance T/C
+  type: CircuitBlock
+  atom_id: A-SCAMP-TRANSR-28
+  canonical_key: sc_transresistance
+- id: M-08
+  text: clock feedthrough
+  type: PhysicalEffect
+  atom_id: A-SCAMP-FEEDTHRU-50
+  canonical_key: clock_feedthrough
+- id: M-09
+  text: switched capacitor integrator
+  type: CircuitBlock
+  atom_id: A-INT-NONINV-16
+  canonical_key: sc_integrator
+- id: M-10
+  text: integrator frequency w_I
+  type: Variable
+  atom_id: A-INT-WI-19
+  canonical_key: integrator_frequency
+- id: M-11
+  text: kT/C noise
+  type: PhysicalEffect
+  atom_id: A-INT-KTC-41
+  canonical_key: ktc_noise
+- id: M-12
+  text: biquad
+  type: CircuitBlock
+  atom_id: A-SO-BIQUAD-CONCEPT
+  canonical_key: biquad
+- id: M-13
+  text: switched capacitor filter
+  type: CircuitBlock
+  atom_id: A-FILT-APP
+  canonical_key: sc_filter
+- id: M-14
+  text: ladder filter
+  type: CircuitBlock
+  atom_id: A-FILT-LADDER
+  canonical_key: ladder_filter
+- id: M-15
+  text: first-order lowpass
+  type: CircuitBlock
+  atom_id: A-FO-LP-4
+  canonical_key: first_order_lowpass
+canonicalization:
+- canonical: capacitor_ratio_accuracy
+  aliases:
+  - capacitor ratio accuracy
+  - accuracy proportional to capacitor ratios
+  - relative accuracy of capacitors
+- canonical: clock_feedthrough
+  aliases:
+  - clock feedthrough
+  - feedthrough
+  - charge injection
+  - switch overlap-capacitor feedthrough
+- canonical: sc_integrator
+  aliases:
+  - switched capacitor integrator
+  - SC integrator
+  - noninverting integrator
+  - inverting integrator
+  note: noninverting/inverting are two variants of the same building block (left two switches differ in phase only).
+- canonical: equivalent_resistance_req
+  aliases:
+  - R = T/C
+  - R_eq
+  - equivalent resistance
+  - emulated resistance
+  - 1/(f_c C)
+objects:
+- id: CONCEPT-SC-CIRCUIT
+  type: Concept
+  section_path: '9'
+  home_package: PKG-OV
+  payload:
+    term: switched capacitor circuit
+    definition: Analog sampled-data circuit (continuous in amplitude, discrete in time) of MOSFET switches, capacitors and op amps that emulates resistors/time-constants for analog signal processing in CMOS.
+  local_evidence_atom_ids:
+  - A-INTRO
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: CONCEPT-NONOVERLAP-CLOCK
+  type: Concept
+  section_path: 9 > 9.1
+  home_package: PKG-RES-EMU
+  payload:
+    term: two-phase nonoverlapping clock
+    definition: Clocks phi_1, phi_2 never at logic 1 simultaneously; period T, each phase < T/2; controls the switches.
+  local_evidence_atom_ids:
+  - A-SC-NONOVERLAP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: CONCEPT-Z-MODEL
+  type: Concept
+  section_path: 9 > 9.4
+  home_package: PKG-ZMODEL
+  payload:
+    term: z-domain model of SC circuit
+    definition: Decomposition of time-variant SC circuits into time-invariant z-domain models for analysis and SPICE-type frequency simulation.
+  local_evidence_atom_ids:
+  - A-Z-MODEL-CONCEPT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CONCEPT-BIQUAD
+  type: Concept
+  section_path: 9 > 9.6
+  home_package: PKG-SECONDORDER
+  payload:
+    term: biquad
+    definition: Second-order section realizing complex poles (from two integrators, one damped) and complex zeros (from how the input is applied).
+  local_evidence_atom_ids:
+  - A-SO-BIQUAD-CONCEPT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-REQ
+  type: Formula
+  section_path: 9 > 9.1
+  home_package: PKG-RES-EMU
+  payload:
+    name: switched-capacitor equivalent resistance
+    expression: R = T/C = 1/(f_c C)
+    variables:
+      T: clock period
+      C: switched capacitor
+      f_c: clock frequency
+    condition: v_1,v_2 nearly constant over T (f signal << f clock)
+  local_evidence_atom_ids:
+  - A-SC-REQ-12
+  - A-SC-IAVG-10
+  - A-SC-IAVG-6
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-REQ-SP
+  type: Formula
+  section_path: 9 > 9.1
+  home_package: PKG-RES-EMU
+  payload:
+    name: series-parallel SC equivalent resistance
+    expression: R = T/(C_1 + C_2)
+  local_evidence_atom_ids:
+  - A-SC-REQ-SP-17
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-TAUD-ACC
+  type: Formula
+  section_path: 9 > 9.1
+  home_package: PKG-ACCURACY
+  payload:
+    name: SC time-constant accuracy
+    expression: d(tau_D)/tau_D = dC_2/C_2 - dC_1/C_1 - df_c/f_c
+    note: as small as 0.1% in CMOS vs 5-20% for continuous-time tau_C
+  local_evidence_atom_ids:
+  - A-SC-ACC-TAUD-22
+  - A-SC-ACC-TAUC-20
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-SC-LPF
+  type: Formula
+  section_path: 9 > 9.1
+  home_package: PKG-Z-ANALYSIS
+  payload:
+    name: SC first-order lowpass transfer function
+    expression: H^oo(z) = z^-1/(1 + alpha - alpha z^-1), alpha = C_2/C_1
+  local_evidence_atom_ids:
+  - A-SC-LPF-HZ-37
+  - A-SC-ZTRANS-25
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-SC-AMP-GAIN
+  type: Formula
+  section_path: 9 > 9.2
+  home_package: PKG-SCAMP
+  payload:
+    name: switched-capacitor amplifier gain
+    expression: H(z) = V_out/V_in = -(C_1/C_2) z^-1  (magnitude = C_1/C_2, set by a capacitor ratio)
+    variables:
+      C_1: input capacitor
+      C_2: feedback capacitor
+  local_evidence_atom_ids:
+  - A-SCAMP-HZ-19
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-TRANSRES
+  type: Formula
+  section_path: 9 > 9.2
+  home_package: PKG-SCAMP
+  payload:
+    name: parasitic-insensitive SC transresistance
+    expression: R_T = +/- T/C
+    condition: f_c >> f
+  local_evidence_atom_ids:
+  - A-SCAMP-TRANSR-28
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-FEEDTHRU
+  type: Formula
+  section_path: 9 > 9.2
+  home_package: PKG-FEEDTHRU
+  payload:
+    name: clock-feedthrough output
+    expression: v_out ~= (C_1/C_2) v_in - (C_OL/2C_2) v_in + (C_OL/C_2) V_T
+    note: ideal term + input-dependent (distortion) term + constant (offset) term
+  local_evidence_atom_ids:
+  - A-SCAMP-FEEDTHRU-50
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-INT-NONINV
+  type: Formula
+  section_path: 9 > 9.3
+  home_package: PKG-INT
+  payload:
+    name: noninverting SC integrator transfer function
+    expression: H^oo(z) = (C_1/C_2) z^-1/(1 - z^-1)
+  local_evidence_atom_ids:
+  - A-INT-NONINV-16
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-INT-INV
+  type: Formula
+  section_path: 9 > 9.3
+  home_package: PKG-INT
+  payload:
+    name: inverting SC integrator transfer function
+    expression: H^ee(z) = -(C_1/C_2) 1/(1 - z^-1)
+  local_evidence_atom_ids:
+  - A-INT-INV-24
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-INT-WI
+  type: Formula
+  section_path: 9 > 9.3
+  home_package: PKG-INT
+  payload:
+    name: integrator frequency
+    expression: w_I = C_1/(T C_2) = (C_1/C_2) f_c
+    note: well defined because proportional to a capacitor ratio
+  local_evidence_atom_ids:
+  - A-INT-WI-19
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-INT-AVD-ERR
+  type: Formula
+  section_path: 9 > 9.3
+  home_package: PKG-INT-NONIDEAL
+  payload:
+    name: integrator finite-gain magnitude/phase error
+    expression: m(jw) = -(1/A_vd(0))[1 + C_1/(2C_2)]; theta(jw) = (C_1/C_2)/(2 A_vd(0) tan(wT/2))
+  local_evidence_atom_ids:
+  - A-INT-AVD-ERR-36
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+- id: FORMULA-KTC
+  type: Formula
+  section_path: 9 > 9.3
+  home_package: PKG-INT-NONIDEAL
+  payload:
+    name: kT/C switch noise
+    expression: v_Ron^2 = kT/C Volts(rms)^2
+  local_evidence_atom_ids:
+  - A-INT-KTC-41
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-Z-ADMITTANCE
+  type: Formula
+  section_path: 9 > 9.4
+  home_package: PKG-ZMODEL
+  payload:
+    name: z-domain admittance types
+    expression: I=YV; I=Y z^-1/2 V; I=(1-z^-1) Y V; Y = switched capacitor value C
+  local_evidence_atom_ids:
+  - A-Z-ADMITTANCE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-FO-LP
+  type: Formula
+  section_path: 9 > 9.5
+  home_package: PKG-FIRSTORDER
+  payload:
+    name: first-order SC lowpass
+    expression: V_o^o(z)/V_i^o(z) = alpha_1 z^-1/(1 + alpha_2 - z^-1); alpha_1=A_0/B_0, alpha_2=(1-B_0)/B_0
+  local_evidence_atom_ids:
+  - A-FO-LP-4
+  - A-FO-HS-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BIQUAD-HS
+  type: Formula
+  section_path: 9 > 9.6
+  home_package: PKG-SECONDORDER
+  payload:
+    name: continuous-time biquad transfer function
+    expression: H_a(s) = -(K_2 s^2 + K_1 s + K_0)/(s^2 + (w_o/Q) s + w_o^2)
+  local_evidence_atom_ids:
+  - A-SO-BIQUAD-HS-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BIQUAD-ALPHA
+  type: Formula
+  section_path: 9 > 9.6
+  home_package: PKG-SECONDORDER
+  payload:
+    name: low-Q biquad capacitor ratios
+    expression: alpha_1=K_0 T/w_o, alpha_2=|alpha_5|=w_o T, alpha_3=K_2, alpha_4=K_1 T, alpha_6=w_o T/Q
+  local_evidence_atom_ids:
+  - A-SO-BIQUAD-ALPHA-11
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: direct
+- id: BLOCK-SC-RESISTOR
+  type: CircuitBlock
+  section_path: 9 > 9.1
+  home_package: PKG-RES-EMU
+  payload:
+    name: switched-capacitor resistor
+    composition: two switches + one capacitor + nonoverlapping clock
+    function: emulates R = T/C between two terminals
+    variants:
+    - parallel
+    - series
+    - series-parallel
+    - bilinear
+  local_evidence_atom_ids:
+  - A-SC-RES-CONCEPT
+  - A-SC-TABLE-911
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: BLOCK-TRANSRESISTANCE
+  type: CircuitBlock
+  section_path: 9 > 9.2
+  home_package: PKG-SCAMP
+  payload:
+    name: parasitic-insensitive SC transresistance
+    function: two-port giving R_T = +/- T/C; immune to capacitor parasitics
+  local_evidence_atom_ids:
+  - A-SCAMP-TRANSR-28
+  - A-SCAMP-PARASITIC
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: BLOCK-SC-AMPLIFIER
+  type: CircuitBlock
+  section_path: 9 > 9.2
+  home_package: PKG-SCAMP
+  payload:
+    name: switched-capacitor amplifier
+    composition: op amp + SC resistor/transresistance (input) + feedback capacitor
+    function: gain = -C_1/C_2; parasitic-insensitive realization in Fig 9.2-7
+  local_evidence_atom_ids:
+  - A-SCAMP-EVOLVE
+  - A-SCAMP-HZ-19
+  - A-SCAMP-PARASITIC
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: BLOCK-SC-INTEGRATOR
+  type: CircuitBlock
+  section_path: 9 > 9.3
+  home_package: PKG-INT
+  payload:
+    name: switched-capacitor integrator
+    composition: op amp + transresistance (input) + integrating capacitor C_2
+    function: noninverting H^oo=(C1/C2)z^-1/(1-z^-1) or inverting H^ee=-(C1/C2)/(1-z^-1); w_I=(C1/C2)f_c
+    note: key building block; all filters reduce to noninverting+inverting integrators
+  local_evidence_atom_ids:
+  - A-INT-ROLE
+  - A-INT-NONINV-16
+  - A-INT-INV-24
+  - A-INT-CT-1
+  supporting_context_atom_ids:
+  - A-SCAMP-TRANSR-28
+  - A-INT-NONIDEAL
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: BLOCK-FIRST-ORDER
+  type: CircuitBlock
+  section_path: 9 > 9.5
+  home_package: PKG-FIRSTORDER
+  payload:
+    name: first-order SC building block
+    composition: integrator + a switched capacitor alpha_2 C across the integrating capacitor (damping)
+    function: lowpass / highpass / allpass first-order sections
+  local_evidence_atom_ids:
+  - A-FO-LP-4
+  - A-FO-HP-13
+  - A-FO-APPROACH
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: BLOCK-BIQUAD
+  type: CircuitBlock
+  section_path: 9 > 9.6
+  home_package: PKG-SECONDORDER
+  payload:
+    name: switched-capacitor biquad
+    composition: noninverting integrator + inverting integrator (one damped) in a feedback loop
+    function: second-order section realizing complex poles and zeros
+  local_evidence_atom_ids:
+  - A-SO-BIQUAD-CONCEPT
+  - A-SO-BIQUAD-ALPHA-11
+  - A-SO-BIQUAD-LOWQ
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: BLOCK-SC-FILTER
+  type: CircuitBlock
+  section_path: 9 > 9.7
+  home_package: PKG-FILTERS
+  payload:
+    name: switched-capacitor filter
+    composition: cascade of first-/second-order (biquad) sections, OR a ladder of integrators synthesized from an RLC prototype
+    function: frequency-selective filtering (lowpass/bandpass/highpass/bandstop)
+  local_evidence_atom_ids:
+  - A-FILT-APP
+  - A-FILT-CASCADE
+  - A-FILT-LADDER
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-Z-TWOPORTS
+  type: ComponentModel
+  section_path: 9 > 9.4
+  home_package: PKG-ZMODEL
+  payload:
+    name: SC two-port z-domain models
+    variants:
+    - parallel/toggle
+    - positive
+    - negative
+    - capacitor-in-series-with-switch
+    - unswitched capacitor
+    - capacitor + shunt switch
+  local_evidence_atom_ids:
+  - A-Z-FOURPORTS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-CAP-RATIO
+  type: DesignPrinciple
+  section_path: '9'
+  home_package: PKG-OV
+  payload:
+    statement: SC signal-processing accuracy is proportional to the accuracy of capacitor RATIOS (not absolute R/C values); capacitor ratios are the most accurate aspect of CMOS, which is why SC techniques work.
+    applies_to:
+    - analog signal processing in CMOS
+    - time-constant accuracy
+  local_evidence_atom_ids:
+  - A-INTRO-ACCURACY
+  supporting_context_atom_ids:
+  - A-SC-ACC-TAUD-22
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-INTEGRATOR-BASIS
+  type: DesignPrinciple
+  section_path: 9 > 9.3
+  home_package: PKG-INT
+  payload:
+    statement: All filter design can be reduced to noninverting and inverting integrators; pairing them in a loop also cancels their phase errors.
+    applies_to:
+    - SC filter synthesis
+  local_evidence_atom_ids:
+  - A-INT-ROLE
+  - A-INT-PHASE-CANCEL
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-PARASITIC-INSENSITIVE
+  type: DesignPrinciple
+  section_path: 9 > 9.2
+  home_package: PKG-SCAMP
+  payload:
+    statement: Use positive/negative transresistance circuits so capacitor parasitics sit at a virtual ground or are shorted, making SC amplifiers/integrators insensitive to parasitic capacitance.
+    applies_to:
+    - SC amplifier
+    - SC integrator
+  local_evidence_atom_ids:
+  - A-SCAMP-PARASITIC
+  - A-SCAMP-NOEXCESS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-FEEDTHRU-FIX
+  type: DesignPrinciple
+  section_path: 9 > 9.2
+  home_package: PKG-FEEDTHRU
+  payload:
+    statement: Remove the constant feedthrough term by autozeroing and the input-dependent (distortion) term by delaying/modifying the clocks; differential circuits further reduce feedthrough.
+    applies_to:
+    - SC amplifier
+    - SC integrator
+    - first-order circuits
+    tradeoff: differential operation doubles component count and amplifier complexity
+  local_evidence_atom_ids:
+  - A-SCAMP-FEEDTHRU-FIX
+  supporting_context_atom_ids:
+  - A-FO-DIFF
+  - A-FO-DIFF-COST
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-OVERSAMPLING
+  type: DesignPrinciple
+  section_path: '9'
+  home_package: PKG-OV
+  payload:
+    statement: The clock frequency must be much greater than the signal bandwidth (oversampling) so the sampled-data and continuous-time domains are equivalent; this also limits SC filters to signal bands well below op-amp bandwidths.
+    applies_to:
+    - all SC circuits
+  local_evidence_atom_ids:
+  - A-SUMMARY
+  supporting_context_atom_ids:
+  - A-SC-REQ-12
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: PRINCIPLE-FILTER-DESIGN
+  type: DesignPrinciple
+  section_path: 9 > 9.7
+  home_package: PKG-FILTERS
+  payload:
+    statement: Higher-order SC filters are designed either by cascading first-/second-order sections (cascade) or by synthesizing the state equations of a normalized RLC ladder prototype with integrators (ladder, less capacitor-ratio sensitive).
+    applies_to:
+    - higher-order SC filter design
+  local_evidence_atom_ids:
+  - A-FILT-CASCADE
+  - A-FILT-LADDER
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-CLOCK-FEEDTHRU
+  type: PhysicalEffect
+  section_path: 9 > 9.2
+  home_package: PKG-FEEDTHRU
+  payload:
+    name: clock feedthrough
+    description: MOSFET switch overlap capacitance C_OL couples the falling/rising clock onto the capacitors, adding an input-dependent distortion term and a constant offset to the output; sets the ultimate accuracy of SC circuits.
+  local_evidence_atom_ids:
+  - A-SCAMP-FEEDTHRU-50
+  supporting_context_atom_ids:
+  - A-SUMMARY
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-FINITE-GAIN
+  type: PhysicalEffect
+  section_path: 9 > 9.3
+  home_package: PKG-INT-NONIDEAL
+  payload:
+    name: finite op-amp gain error
+    description: A finite A_vd(0) introduces a gain (magnitude) error in SC amplifiers/integrators; for integrators it also yields a phase error theta(jw), generally the more serious.
+  local_evidence_atom_ids:
+  - A-INT-AVD-ERR-36
+  supporting_context_atom_ids:
+  - A-SCAMP-AVD-52
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-KTC-NOISE
+  type: PhysicalEffect
+  section_path: 9 > 9.3
+  home_package: PKG-INT-NONIDEAL
+  payload:
+    name: kT/C noise
+    description: Thermal noise of the switch on-resistance integrated over the RC bandwidth gives an rms noise of kT/C, independent of R_on.
+  local_evidence_atom_ids:
+  - A-INT-KTC-41
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-9.1-1
+  type: ExampleSolution
+  section_path: 9 > 9.1 > Example 9.1-1
+  home_package: PKG-EX-911
+  payload:
+    title: Example 9.1-1 Parallel SC Resistor Emulation
+    problem: C to emulate 1 MOhm at f_c=100kHz.
+    result: C = T/R = 10pF.
+  local_evidence_atom_ids:
+  - A-EX911-PROBLEM
+  - A-EX911-USE
+  - A-EX911-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: EXAMPLE-9.1-2
+  type: ExampleSolution
+  section_path: 9 > 9.1 > Example 9.1-2
+  home_package: PKG-EX-912
+  payload:
+    title: Example 9.1-2 Series-Parallel SC Resistor
+    problem: C1=C2=C to emulate 1 MOhm at 250kHz.
+    result: 2C=4pF, C=2pF.
+  local_evidence_atom_ids:
+  - A-EX912-PROBLEM
+  - A-EX912-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: EXAMPLE-9.1-3
+  type: ExampleSolution
+  section_path: 9 > 9.1 > Example 9.1-3
+  home_package: PKG-EX-913
+  payload:
+    title: Example 9.1-3 SC Lowpass z-domain Analysis
+    problem: H(z) of Fig 9.1-7a.
+    result: H^oo(z)=z^-1/(1+alpha-alpha z^-1), alpha=C_2/C_1.
+  local_evidence_atom_ids:
+  - A-EX913-PROBLEM
+  - A-EX913-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-9.2-1
+  type: ExampleSolution
+  section_path: 9 > 9.2 > Example 9.2-1
+  home_package: PKG-EX-921
+  payload:
+    title: Example 9.2-1 Finite-Gain Accuracy
+    problem: +10/-10 designs, A_vd(0)=1000.
+    result: actual gains 9.901 and -9.891.
+  local_evidence_atom_ids:
+  - A-EX921-PROBLEM
+  - A-EX921-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-9.2-4
+  type: ExampleSolution
+  section_path: 9 > 9.2 > Example 9.2-4
+  home_package: PKG-EX-924
+  payload:
+    title: Example 9.2-4 Clock Feedthrough
+    given: C1=10pF, C2=1pF, C_OL=100fF, v_in=0.1V, V_T=1V.
+    result: ideal 1V, input-dependent -5mV, input-independent 100mV.
+  local_evidence_atom_ids:
+  - A-EX924-PROBLEM
+  - A-EX924-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-9.3-3
+  type: ExampleSolution
+  section_path: 9 > 9.3 > Example 9.3-3
+  home_package: PKG-EX-933
+  payload:
+    title: Example 9.3-3 Integrator Errors from Finite A_vd(0)
+    given: f_c=100kHz, w_I=10kHz, A_vd(0)=100.
+    result: C1/C2=0.6283, m=-1.0131, theta=0.554 deg.
+  local_evidence_atom_ids:
+  - A-EX933-PROBLEM
+  - A-EX933-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-9.5-1
+  type: ExampleSolution
+  section_path: 9 > 9.5 > Example 9.5-1
+  home_package: PKG-EX-951
+  payload:
+    title: Example 9.5-1 First-Order SC Design
+    problem: gain +10, -3dB 1kHz, f_c=100kHz.
+    result: alpha_2=0.0628, alpha_1=0.6283.
+  local_evidence_atom_ids:
+  - A-EX951-PROBLEM
+  - A-EX951-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-9.6-1
+  type: ExampleSolution
+  section_path: 9 > 9.6 > Example 9.6-1
+  home_package: PKG-EX-961
+  payload:
+    title: Example 9.6-1 Low-Q Biquad Design
+    given: f_o=1kHz, Q=2, bandpass, f_c=100kHz.
+    result: alpha_2=alpha_5=0.0628, alpha_4=alpha_6=0.0314; max ratio 1/31.83; total 52.76 units.
+  local_evidence_atom_ids:
+  - A-EX961-PROBLEM
+  - A-EX961-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-9.1-1
+  type: ProblemStatement
+  section_path: 9 > Homework Problems
+  home_package: PKG-PROB
+  payload:
+    question: Develop the equivalent resistance of the series SC resistor emulation (Table 9.1-1).
+  local_evidence_atom_ids:
+  - A-PROB-911
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-9.1-3
+  type: ProblemStatement
+  section_path: 9 > Homework Problems
+  home_package: PKG-PROB
+  payload:
+    question: Compare time-constant accuracy of an RC vs an SC-resistor + capacitor implementation.
+  local_evidence_atom_ids:
+  - A-PROB-913
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-9.5-1
+  type: ProblemStatement
+  section_path: 9 > Homework Problems
+  home_package: PKG-PROB
+  payload:
+    question: Develop the inverting first-order lowpass transfer function from the lowpass circuit with the two leftmost switch phases reversed.
+  local_evidence_atom_ids:
+  - A-PROB-955
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-REQ
+  target_object_id: BLOCK-SC-RESISTOR
+  evidence_atom_ids:
+  - A-SC-REQ-12
+  - A-SC-RES-CONCEPT
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-02
+  relation_type: formula_derived_from_formula
+  source_object_id: FORMULA-REQ
+  target_object_id: FORMULA-REQ-SP
+  evidence_atom_ids:
+  - A-SC-REQ-12
+  - A-SC-REQ-SP-17
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-03
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-REQ
+  target_object_id: EXAMPLE-9.1-1
+  evidence_atom_ids:
+  - A-EX911-USE
+  - A-EX911-RESULT
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-04
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-REQ-SP
+  target_object_id: EXAMPLE-9.1-2
+  evidence_atom_ids:
+  - A-EX912-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-05
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-SC-LPF
+  target_object_id: EXAMPLE-9.1-3
+  evidence_atom_ids:
+  - A-EX913-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-CAP-RATIO
+  target_object_id: CONCEPT-SC-CIRCUIT
+  evidence_atom_ids:
+  - A-INTRO-ACCURACY
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-07
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-CAP-RATIO
+  target_object_id: FORMULA-TAUD-ACC
+  evidence_atom_ids:
+  - A-SC-ACC-TAUD-22
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-08
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-CAP-RATIO
+  target_object_id: PHYS-CLOCK-FEEDTHRU
+  evidence_atom_ids:
+  - A-INTRO-ACCURACY
+  - A-SUMMARY
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-09
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-OVERSAMPLING
+  target_object_id: FORMULA-REQ
+  evidence_atom_ids:
+  - A-SUMMARY
+  - A-SC-REQ-12
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-10
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-SC-AMPLIFIER
+  target_object_id: BLOCK-TRANSRESISTANCE
+  evidence_atom_ids:
+  - A-SCAMP-EVOLVE
+  - A-SCAMP-PARASITIC
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-11
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-TRANSRESISTANCE
+  target_object_id: BLOCK-SC-RESISTOR
+  evidence_atom_ids:
+  - A-SCAMP-TRANSR-28
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-12
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-SC-AMP-GAIN
+  target_object_id: BLOCK-SC-AMPLIFIER
+  evidence_atom_ids:
+  - A-SCAMP-HZ-19
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-13
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-PARASITIC-INSENSITIVE
+  target_object_id: BLOCK-SC-AMPLIFIER
+  evidence_atom_ids:
+  - A-SCAMP-PARASITIC
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-14
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-SC-AMP-GAIN
+  target_object_id: EXAMPLE-9.2-1
+  evidence_atom_ids:
+  - A-EX921-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-15
+  relation_type: component_has_property
+  source_object_id: BLOCK-SC-AMPLIFIER
+  target_object_id: PHYS-CLOCK-FEEDTHRU
+  evidence_atom_ids:
+  - A-SCAMP-FEEDTHRU-50
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-16
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-FEEDTHRU
+  target_object_id: PHYS-CLOCK-FEEDTHRU
+  evidence_atom_ids:
+  - A-SCAMP-FEEDTHRU-50
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-17
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-FEEDTHRU
+  target_object_id: EXAMPLE-9.2-4
+  evidence_atom_ids:
+  - A-EX924-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-18
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-FEEDTHRU-FIX
+  target_object_id: PHYS-CLOCK-FEEDTHRU
+  evidence_atom_ids:
+  - A-SCAMP-FEEDTHRU-FIX
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-19
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-FEEDTHRU-FIX
+  target_object_id: BLOCK-FIRST-ORDER
+  evidence_atom_ids:
+  - A-FO-DIFF
+  - A-FO-DIFF-COST
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-20
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-SC-INTEGRATOR
+  target_object_id: BLOCK-TRANSRESISTANCE
+  evidence_atom_ids:
+  - A-INT-NONINV-16
+  - A-SCAMP-TRANSR-28
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-21
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-INT-NONINV
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-INT-NONINV-16
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-22
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-INT-INV
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-INT-INV-24
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-23
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-INT-WI
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-INT-WI-19
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-24
+  relation_type: component_has_property
+  source_object_id: BLOCK-SC-INTEGRATOR
+  target_object_id: PHYS-FINITE-GAIN
+  evidence_atom_ids:
+  - A-INT-AVD-ERR-36
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-25
+  relation_type: component_has_property
+  source_object_id: BLOCK-SC-INTEGRATOR
+  target_object_id: PHYS-KTC-NOISE
+  evidence_atom_ids:
+  - A-INT-KTC-41
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-26
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-INT-AVD-ERR
+  target_object_id: EXAMPLE-9.3-3
+  evidence_atom_ids:
+  - A-EX933-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-27
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-INTEGRATOR-BASIS
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-INT-ROLE
+  - A-INT-PHASE-CANCEL
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-28
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-FIRST-ORDER
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-FO-LP-4
+  - A-FO-APPROACH
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-29
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-FO-LP
+  target_object_id: EXAMPLE-9.5-1
+  evidence_atom_ids:
+  - A-EX951-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-30
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-BIQUAD
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-SO-BIQUAD-CONCEPT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-31
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-BIQUAD-ALPHA
+  target_object_id: BLOCK-BIQUAD
+  evidence_atom_ids:
+  - A-SO-BIQUAD-ALPHA-11
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-32
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-BIQUAD-ALPHA
+  target_object_id: EXAMPLE-9.6-1
+  evidence_atom_ids:
+  - A-EX961-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-33
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-SC-FILTER
+  target_object_id: BLOCK-BIQUAD
+  evidence_atom_ids:
+  - A-FILT-CASCADE
+  - A-SO-CASCADE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-34
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-SC-FILTER
+  target_object_id: BLOCK-FIRST-ORDER
+  evidence_atom_ids:
+  - A-FILT-CASCADE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-35
+  relation_type: circuit_block_composed_of_block
+  source_object_id: BLOCK-SC-FILTER
+  target_object_id: BLOCK-SC-INTEGRATOR
+  evidence_atom_ids:
+  - A-FILT-LADDER
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-36
+  relation_type: design_principle_applies_to_scenario
+  source_object_id: PRINCIPLE-FILTER-DESIGN
+  target_object_id: BLOCK-SC-FILTER
+  evidence_atom_ids:
+  - A-FILT-CASCADE
+  - A-FILT-LADDER
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-37
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-FILTER-DESIGN
+  target_object_id: BLOCK-SC-FILTER
+  evidence_atom_ids:
+  - A-FILT-LADDER
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-38
+  relation_type: formula_defines_variable
+  source_object_id: FORMULA-Z-ADMITTANCE
+  target_object_id: COMP-Z-TWOPORTS
+  evidence_atom_ids:
+  - A-Z-ADMITTANCE
+  - A-Z-FOURPORTS
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-39
+  relation_type: concept_defines_term
+  source_object_id: CONCEPT-Z-MODEL
+  target_object_id: COMP-Z-TWOPORTS
+  evidence_atom_ids:
+  - A-Z-MODEL-CONCEPT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-40
+  relation_type: problem_extends_example
+  source_object_id: PROB-9.1-1
+  target_object_id: EXAMPLE-9.1-2
+  evidence_atom_ids:
+  - A-PROB-911
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-41
+  relation_type: problem_extends_example
+  source_object_id: PROB-9.5-1
+  target_object_id: EXAMPLE-9.5-1
+  evidence_atom_ids:
+  - A-PROB-955
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+do_not_extract:
+- pattern: bracket_reference_citation
+  examples:
+  - '[1,2]'
+  - '[3]'
+  - '[4]'
+  - '[7]'
+  - '[9,10,11]'
+  - '[12]'
+  - '[15, 16]'
+  - '[24,25]'
+  reason: inline numeric reference citations are not knowledge objects.
+  kind: citation_policy
+- pattern: figure_or_equation_cross_reference
+  examples:
+  - Fig. 9.1-1
+  - Fig. 9.2-6
+  - Fig. 9.3-4
+  - Table 9.3-1
+  - Eq. (12)
+  - Eq. (50)
+  reason: cross-references to figures/equations/tables are pointers, not objects to extract.
+  kind: reference
+- text: i₁(t) φ₁ φ₂ i₂(t)
+  source_lines:
+  - 7517
+  - 7517
+  reason: OCR'd node labels inside a <details> text_image figure block (Fig 9.1-1); SC schematic labels are scrambled and not knowledge objects.
+  kind: figure_label
+- pattern: details_figure_ocr_label
+  examples:
+  - v₁(t) v_C(t) v₂(t)
+  - S₁ S₂
+  - φ₂ φ₁ φ₂ φ₁ φ₂
+  - Electrical circuit diagram with capacitors and switches labeled C1, C2, φ1, φ2, v1, v2
+  - Op amp with finite value of A_vd(0)
+  reason: <details> chemical/text_image OCR blocks for SC schematics are noisy (node order scrambled, e/o superscripts lost); not knowledge objects.
+  kind: figure_label
+- pattern: image_markup
+  examples:
+  - '![](images/<hash>.jpg)'
+  - <img src="images/<hash>.jpg"/>
+  reason: image embeds carry no extractable text.
+  kind: image_markup
+- text: PSpice 5.2 (Jul 1992)
+  source_lines:
+  - 12294
+  - 12294
+  reason: the 9.7 ladder-filter PSpice netlist is a single huge HTML <table> of node/subcircuit cards (NC11, PC1, DELAY, .SUBCKT, .AC ...); pure noise, excluded.
+  kind: reference
+- text: discussed in Chap. 8
+  atom_id: A-SCAMP-FEEDTHRU-FIX
+  reason: backward cross-reference to Chapter 8 (autozeroing), outside this chapter slice.
+  kind: cross_reference
+- pattern: out_of_chapter_cross_reference
+  examples:
+  - In Section 5.1
+  - discussed in Chap. 8
+  - used extensively in the next chapter
+  - reference [7]
+  reason: references to other chapters/sections/appendices are not Chapter-9 objects.
+  kind: cross_reference

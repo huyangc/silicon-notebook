@@ -1,0 +1,4805 @@
+# Gold fixture v0.3.3 (textbook) - CMOS Analog Circuit Design, Chapter 2 CMOS Technology (profile: textbook)
+# Upgraded to the engram-ch2 v0.3.3 process/requirements (textbook types retained):
+# dual coordinates (authoritative source_span into the mineru .md + viewer_span into source.md);
+# verbatim raw_text + within-span normalized_text; source_elements; gold_label/difficulty/evidence_strength;
+# objects with local_evidence/supporting_context/home_package; one package per chunk with expected_objects
+# (+ expected_local_fields for the cross-package TECH-ETCHING); do_not_extract negatives.
+
+schema_version: 0.3.3-textbook
+source_meta:
+  source_id: cmos
+  scope: Chapter 2 (CMOS Technology) only
+  title: CMOS Analog Circuit Design - Allen & Holberg - Chapter 2 CMOS Technology
+  source_file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  source_line_range:
+  - 743
+  - 2916
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 743-2916; NOT the authoritative source)
+  profile: textbook
+  profile_detected_as: textbook
+  profile_cues:
+  - Chapter 2
+  - Example 2.2-1
+  - Example 2.3-1
+  - PROBLEMS
+  - Eq. (12)
+  - Fig. 2.2-1
+  - Table 2.3-1
+  extraction_targets:
+  - Concept
+  - Formula
+  - Variable
+  - Derivation
+  - TechnologyProcess
+  - ProcessFlow
+  - ExampleProblem
+  - ExampleSolution
+  - ComponentModel
+  - PhysicalEffect
+  - DesignPrinciple
+  - DesignRule
+  - ProblemStatement
+  - Tradeoff
+  - ChecklistCandidate
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders that span (may rephrase / transliterate math like phi,rho,eps,mu / condense a paragraph into a summary) but MUST NOT introduce facts not in the span. MinerU spaces digits (e.g. ''2 0 0'', ''0. 3 0 6'') and uses LaTeX in $...$ / $$...$$; normalized gives the readable ascii form. EXCEPTION: a formula_atom may carry symbolic interpretation via metadata.supported_by_context_atoms.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside its home_package's chunk) + supporting_context_atom_ids (atoms from other chunks). Package object-recall (expected_objects) is scored on local evidence only.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = payload fields derivable from that package alone.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of a decimal confidence.
+    tables_and_figures: Tables render as HTML <table> or <details> blocks; figure cross-sections render as <details> text_image/flowchart OCR blocks. Figure-internal labels and inline [n] citations are listed in do_not_extract.
+    context_only: an atom with context_only:true is background/framing (e.g. chapter intro/summary) that should NOT yield a typed object; its home package may legitimately list no expected_object for it.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects are the objects whose home_package is that package.
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - Formula tags reset per sub-section (2.1 has tag1/2, 2.2 has tag1..24, 2.3 restarts, ...); a formula atom must be located by tag WITHIN its section's line window.
+  - MinerU spaces out digits inside math ('2 0 0', '0. 3 0 6'); applied voltage prints as '−4 V' with a U+2212 minus; temperatures use Greek Kappa 'Κ'.
+  - The N-Well flow (a)-(o) is a single paragraph element (SE-2.1-NW-FLOW); channel-stop / LOCOS / bird's beak / LDD are anchored substrings within it.
+  - 'Tables: Table 2.3-1 / 2.4-1 are single HTML <table> lines; Table 2.6-1 is an HTML <table> followed by a plain-text rule list (the design_rule atom spans both).'
+source_elements:
+- id: SE-2-P0
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 745
+  line_end: 745
+- id: SE-2.1-OX-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 787
+  line_end: 787
+- id: SE-2.1-DIF-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 805
+  line_end: 807
+- id: SE-2.1-IMP-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 839
+  line_end: 841
+- id: SE-2.1-DEP-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 845
+  line_end: 845
+- id: SE-2.1-ETCH-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 849
+  line_end: 849
+- id: SE-2.1-ETCH-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 852
+  line_end: 852
+- id: SE-2.1-ETCH-EQ2
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 858
+  line_end: 858
+- id: SE-2.1-PHO-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 896
+  line_end: 896
+- id: SE-2.1-PHO-PRINT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 933
+  line_end: 937
+- id: SE-2.1-NW-FLOW
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 951
+  line_end: 959
+- id: SE-2.1-SAL-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1225
+  line_end: 1225
+- id: SE-2.2-P1
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1257
+  line_end: 1257
+- id: SE-2.2-EQ1
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1309
+  line_end: 1309
+- id: SE-2.2-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1343
+  line_end: 1343
+- id: SE-2.2-EQ7
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1351
+  line_end: 1351
+- id: SE-2.2-EQ8
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1357
+  line_end: 1357
+- id: SE-2.2-EQ9
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1363
+  line_end: 1363
+- id: SE-2.2-EQ10
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1371
+  line_end: 1371
+- id: SE-2.2-EQ11
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1379
+  line_end: 1379
+- id: SE-2.2-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1387
+  line_end: 1387
+- id: SE-2.2-P-CJ0
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1390
+  line_end: 1390
+- id: SE-2.2-P-COND
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1394
+  line_end: 1394
+- id: SE-EX221
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1424
+  line_end: 1426
+- id: SE-2.2-EQ13
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1431
+  line_end: 1431
+- id: SE-2.2-P-BV
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1434
+  line_end: 1442
+- id: SE-2.2-EQ14
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1439
+  line_end: 1439
+- id: SE-2.2-EQ24
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1528
+  line_end: 1528
+- id: SE-EX222
+  type: example_block
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1535
+  line_end: 1543
+- id: SE-2.3-P1
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1549
+  line_end: 1549
+- id: SE-2.3-EQ10-11
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1671
+  line_end: 1677
+- id: SE-2.3-P-INV
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1698
+  line_end: 1698
+- id: SE-2.3-EQ16
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1707
+  line_end: 1707
+- id: SE-2.3-EQ18
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1719
+  line_end: 1719
+- id: SE-2.3-EQ19
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1725
+  line_end: 1725
+- id: SE-2.3-EQ20
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1731
+  line_end: 1731
+- id: SE-2.3-EQ21
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1737
+  line_end: 1737
+- id: SE-2.3-T231
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1744
+  line_end: 1744
+- id: SE-EX231
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1748
+  line_end: 1796
+- id: SE-2.3-EQ27
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1833
+  line_end: 1833
+- id: SE-2.3-EQ28
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1839
+  line_end: 1839
+- id: SE-2.3-EQ29
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1845
+  line_end: 1845
+- id: SE-2.4-CAP-DESIRED
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1856
+  line_end: 1861
+- id: SE-2.4-CAP-TYPES
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 1863
+  line_end: 1915
+- id: SE-2.4-CAP-COEFF
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2013
+  line_end: 2013
+- id: SE-2.4-RES-TYPES
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2035
+  line_end: 2039
+- id: SE-2.4-T241
+  type: table
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2090
+  line_end: 2090
+- id: SE-2.5-BJT-SUB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2096
+  line_end: 2096
+- id: SE-2.5-BJT-LAT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2178
+  line_end: 2178
+- id: SE-2.5-LATCHUP
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2180
+  line_end: 2182
+- id: SE-2.5-EQ6
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2227
+  line_end: 2227
+- id: SE-2.5-PREVENT
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2232
+  line_end: 2232
+- id: SE-2.5-ESD
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2254
+  line_end: 2254
+- id: SE-2.5-EQ7
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2262
+  line_end: 2262
+- id: SE-2.5-EQ8
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2270
+  line_end: 2270
+- id: SE-2.5-EQ9
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2276
+  line_end: 2276
+- id: SE-2.5-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2296
+  line_end: 2296
+- id: SE-EX251
+  type: example_block
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2303
+  line_end: 2311
+- id: SE-2.5-EQ18
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2352
+  line_end: 2352
+- id: SE-2.5-EQ19
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2360
+  line_end: 2360
+- id: SE-2.5-EQ20
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2368
+  line_end: 2368
+- id: SE-2.6-MATCH
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2397
+  line_end: 2399
+- id: SE-2.6-EQ12
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2652
+  line_end: 2652
+- id: SE-2.6-EQ13
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2658
+  line_end: 2658
+- id: SE-EX261
+  type: example_block
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2728
+  line_end: 2746
+- id: SE-2.6-EQ14
+  type: formula
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2763
+  line_end: 2763
+- id: SE-2.6-CENTROID
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2766
+  line_end: 2766
+- id: SE-2.6-T261
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2788
+  line_end: 2850
+- id: SE-2.7-P
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2854
+  line_end: 2862
+- id: SE-PROB
+  type: paragraph
+  file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+  line_start: 2906
+  line_end: 2916
+section_tree:
+- id: SEC-2
+  path: '2'
+  title: CMOS Technology
+- id: SEC-2.1
+  path: 2 > 2.1
+  title: Basic MOS Semiconductor Fabrication Processes
+  parent: SEC-2
+- id: SEC-2.1-OX
+  path: 2 > 2.1 > Oxidation
+  title: Oxidation
+  parent: SEC-2.1
+- id: SEC-2.1-DIF
+  path: 2 > 2.1 > Diffusion
+  title: Diffusion
+  parent: SEC-2.1
+- id: SEC-2.1-IMP
+  path: 2 > 2.1 > Ion Implantation
+  title: Ion Implantation
+  parent: SEC-2.1
+- id: SEC-2.1-DEP
+  path: 2 > 2.1 > Deposition
+  title: Deposition
+  parent: SEC-2.1
+- id: SEC-2.1-ETCH
+  path: 2 > 2.1 > Etching
+  title: Etching
+  parent: SEC-2.1
+- id: SEC-2.1-PHO
+  path: 2 > 2.1 > Photolithography
+  title: Photolithography
+  parent: SEC-2.1
+- id: SEC-2.1-NW
+  path: 2 > 2.1 > N-Well CMOS Fabrication Steps
+  title: N-Well CMOS Fabrication Steps
+  parent: SEC-2.1
+- id: SEC-2.1-SAL
+  path: 2 > 2.1 > Silicide/Salicide
+  title: Silicide/Salicide Technology
+  parent: SEC-2.1
+- id: SEC-2.2
+  path: 2 > 2.2
+  title: The pn Junction
+  parent: SEC-2
+- id: SEC-EX221
+  path: 2 > 2.2 > Example 2.2-1
+  title: Example 2.2-1 Characteristics of a pn Junction
+  parent: SEC-2.2
+  kind: example
+- id: SEC-EX222
+  path: 2 > 2.2 > Example 2.2-2
+  title: Example 2.2-2 Calculation of the Saturation Current
+  parent: SEC-2.2
+  kind: example
+- id: SEC-2.3
+  path: 2 > 2.3
+  title: The MOS Transistor
+  parent: SEC-2
+- id: SEC-EX231
+  path: 2 > 2.3 > Example 2.3-1
+  title: Example 2.3-1 Calculation of the Threshold Voltage
+  parent: SEC-2.3
+  kind: example
+- id: SEC-2.4
+  path: 2 > 2.4
+  title: Passive Components
+  parent: SEC-2
+- id: SEC-2.4-CAP
+  path: 2 > 2.4 > Capacitors
+  title: Capacitors
+  parent: SEC-2.4
+- id: SEC-2.4-RES
+  path: 2 > 2.4 > Resistors
+  title: Resistors
+  parent: SEC-2.4
+- id: SEC-2.5
+  path: 2 > 2.5
+  title: Other Considerations of CMOS Technology
+  parent: SEC-2
+- id: SEC-EX251
+  path: 2 > 2.5 > Example 2.5-1
+  title: Example 2.5-1 Reverse Diode Current Temperature Dependence
+  parent: SEC-2.5
+  kind: example
+- id: SEC-2.6
+  path: 2 > 2.6
+  title: Integrated Circuit Layout
+  parent: SEC-2
+- id: SEC-2.6-MAT
+  path: 2 > 2.6 > Matching Concepts
+  title: Matching Concepts
+  parent: SEC-2.6
+- id: SEC-EX261
+  path: 2 > 2.6 > Example 2.6-1
+  title: Example 2.6-1 Resistance Calculation
+  parent: SEC-2.6
+  kind: example
+- id: SEC-2.6-RULE
+  path: 2 > 2.6 > Layout Rules
+  title: Layout Rules
+  parent: SEC-2.6
+- id: SEC-2.7
+  path: 2 > 2.7
+  title: Summary
+  parent: SEC-2
+- id: SEC-PROB
+  path: 2 > PROBLEMS
+  title: PROBLEMS
+  parent: SEC-2
+evidence_atoms:
+- id: A-INTRO-TECH
+  section_id: SEC-2
+  atom_type: concept_definition_atom
+  source_element_id: SE-2-P0
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 745
+    line_end: 745
+    char_start: 50394
+    char_end: 52037
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 6
+    char_start: 318
+    char_end: 1961
+    viewer_only: true
+  raw_text: The two most prevalent integrated-circuit technologies are bipolar and MOS. Within each of these families are various subgroups as illustrated in Fig. 2.0-1, which shows a family tree of some of the more widely used silicon integrated-circuit technologies. For many years the dominant silicon integrated-circuit technology was bipolar, as evidenced by the ubiquitous monolithic operational amplifier and the TTL (transistor-transistor logic) family. In the early 1970s MOS technology was demonstrated to be viable in the area of dynamic random-access memories (DRAMs), microprocessors, and the 4000- series logic family. By the end of the 1970s, driven by the need for density, it was clear that MOS technology would be the vehicle for growth in the digital VLSI area. At this same time, several organizations were attempting analog circuit designs using MOS [1,2,3,4]. NMOS technology was the early technology of choice for the majority of both digital and analog MOS designs. The early 1980s saw the movement of the VLSI world toward silicon-gate CMOS which has been the dominant technology for VLSI digital and mixed-signal designs ever since [5,6]. Recently, processes that combine both CMOS and bipolar (BiCMOS) have proven themselves to be both a technological and market success where the primary market force has been improved speed for digital circuits (primarily in static random-access memories, SRAMs). BiCMOS has potential as well in analog design due to the enhanced performance that a bipolar transistor provides in the context of CMOS technology. This book focuses on the use of CMOS for analog and mixed-signal circuit design.
+  normalized_text: The two most prevalent IC technologies are bipolar and MOS; silicon-gate CMOS has been the dominant VLSI digital and mixed-signal technology; BiCMOS combines CMOS and bipolar.
+  evidence_strength: direct
+  metadata:
+    figure: Fig 2.0-1 silicon technology family tree
+  context_only: true
+- id: A-FAB-OXID
+  section_id: SEC-2.1-OX
+  atom_type: technology_process_atom
+  source_element_id: SE-2.1-OX-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 787
+    line_end: 787
+    char_start: 55994
+    char_end: 56919
+  viewer_span:
+    file: source.md
+    line_start: 48
+    line_end: 48
+    char_start: 5918
+    char_end: 6843
+    viewer_only: true
+  raw_text: The first basic processing step is oxide growth or oxidation [12]. Oxidation is the process by which a layer of silicon dioxide $( \mathrm { { S i O } } _ { 2 } )$ is formed on the surface of the silicon wafer. The oxide grows both into as well as on the silicon surface as indicated in Fig. 2.1-1. Typically about 56% of the oxide thickness is above the original surface while about 44% is below the original surface. The oxide thickness, designated $t _ { o x }$ , can be grown using either dry or wet techniques, with the former achieving lower defect densities. Typically oxide thickness varies from less than 150 Å for gate oxides to more than 10,000 Å for field oxides. Oxidation takes place at temperatures ranging from $7 0 0 ^ { \circ } \mathrm { C }$ to $1 1 0 0 ~ ^ { \circ } \mathrm { C }$ with the resulting oxide thickness being proportional to the temperature at which it is grown (for a fixed amount of time).
+  normalized_text: Oxidation grows a SiO2 layer on the silicon surface (about 56% above, 44% below the original surface); thickness t_ox from <150 A (gate) to >10000 A (field); 700-1100 C.
+  evidence_strength: direct
+- id: A-FAB-DIFF
+  section_id: SEC-2.1-DIF
+  atom_type: technology_process_atom
+  source_element_id: SE-2.1-DIF-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 805
+    line_end: 807
+    char_start: 57213
+    char_end: 59757
+  viewer_span:
+    file: source.md
+    line_start: 66
+    line_end: 68
+    char_start: 7137
+    char_end: 9681
+    viewer_only: true
+  raw_text: 'The second basic processing step is diffusion [13]. Diffusion in semiconductor material is the movement of impurity atoms at the surface of the material into the bulk of the material. Diffusion takes place at temperatures in the range of $8 0 0 ~ ^ { \circ } \mathrm { C }$ to $1 4 0 0 ~ ^ { \circ } \mathrm { C }$ in the same way as a gas diffuses in air. The concentration profile of the impurity in the semiconductor is a function of the concentration of the impurity at the surface and the time in which the semiconductor is placed in a high-temperature environment. There are two basic types of diffusion mechanisms which are distinguished by the concentration of the impurity at the surface of the semiconductor. One type of diffusion assumes that there is an infinite source of impurities at the surface $( N _ { 0 } \mathrm { { ^ { - } { } c m ^ { - 3 } } } )$ during the entire time the impurity is allowed to diffuse. The impurity profile for an infinite-source impurity as a function of diffusion time is given in Fig. 2.1-2(a). The second type of diffusion assumes that there is a finite source of impurities at the surface of the material initially. $\mathbf { A } \mathbf { t } \ t = 0$ this value is given by $N _ { 0 } .$ . However, as time increases, the impurity concentration at the surface decreases as shown in Fig. 2.1-2(b). In both cases, $N _ { B }$ is the pre-diffusion impurity concentration of the semiconductor.
+
+
+    The infinite-source and finite-source diffusions are typical of predeposition and drive-in diffusions, respectively. The object of a predeposition diffusion is to place a large concentration of impurities near the surface of the material. There is a maximum impurity concentration that can be diffused into silicon depending upon the type of impurity. This maximum concentration is due to the solid solubility limit which is in the range of $5 \times 1 0 ^ { 2 0 }$ to $2 \times 1 0 ^ { 2 1 }$ atoms/cm 3. The drive-in diffusion follows the deposition diffusion and is used to drive the impurities deeper into the semiconductor. The crossover between the pre-diffusion impurity level and the diffused impurities of the opposite type defines the semiconductor junction. This junction is between a p-type and n-type material and is simply called a pn junction. The distance between the surface of the semiconductor and the junction is called the junction depth. Typical junction depths for diffusion can range from 0.1 m for predeposition type diffusions to greater than 10 m for drive-in type diffusions.'
+  normalized_text: Diffusion moves surface impurity atoms into the bulk (800-1400 C); infinite-source (predeposition) vs finite-source (drive-in); the crossover with the opposite-type background defines the pn junction depth.
+  evidence_strength: direct
+- id: A-FAB-IMP
+  section_id: SEC-2.1-IMP
+  atom_type: technology_process_atom
+  source_element_id: SE-2.1-IMP-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 839
+    line_end: 841
+    char_start: 60782
+    char_end: 63095
+  viewer_span:
+    file: source.md
+    line_start: 100
+    line_end: 102
+    char_start: 10706
+    char_end: 13019
+    viewer_only: true
+  raw_text: 'The next basic processing step is ion implantation and is widely used in the fabrication of MOS components [14,15]. Ion implantation is the process by which ions of a particular dopant (impurity) are accelerated by an electric field to a high velocity and physically lodge within the semiconductor material. The average depth of penetration varies from 0.1 to 0.6 m depending on the velocity and angle at which the ions strike the silicon wafer. The path of each ion depends upon the collisions it experiences. Therefore, ions are typically implanted off-axis from the wafer so that they will experience collisions with lattice atoms thus avoiding undesirable channeling of ions deep into the silicon. An alternative method to address channeling is to implant through silicon dioxide which randomizes the implant direction before the ions enter the silicon. The ionimplantation process causes damage to the semiconductor crystal lattice leaving many of the implanted ions electrically inactive. This damage can be repaired by an annealing process in which the temperature of the semiconductor after implantation is raised to around $8 0 0 ~ ^ { \circ } \mathrm { C }$ to allow the ions to move to electrically active locations in the semiconductor crystal lattice.
+
+
+    Ion implantation can be used in place of diffusion since in both cases the objective is to insert impurities into the semiconductor material. Ion implantation has several advantages over thermal diffusion. One advantage is the accurate control of doping—to within ±5%. Reproducibility is very good, making it possible to adjust the thresholds of MOS devices or to create precise resistors. A second advantage is that ion implantation is a room-temperature process, although annealing at higher temperatures is required to remove the crystal damage. A third advantage is that it is possible to implant through a thin layer. Consequently, the material to be implanted does not have to be exposed to contaminants during and after the implantation process. Unlike ion implantation, diffusion requires that the surface be free of silicon dioxide or silicon nitride layers. Finally, ion implantation allows control over the profile of the implanted impurities. For example, a concentration peak can be placed below the surface of the silicon if desired.'
+  normalized_text: 'Ion implantation accelerates dopant ions into the wafer; advantages over diffusion: doping accuracy to +/-5%, room-temperature process, can implant through a thin layer, and control over the implant profile; crystal damage is repaired by annealing.'
+  evidence_strength: direct
+- id: A-FAB-DEP
+  section_id: SEC-2.1-DEP
+  atom_type: technology_process_atom
+  source_element_id: SE-2.1-DEP-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 845
+    line_end: 845
+    char_start: 63111
+    char_end: 64835
+  viewer_span:
+    file: source.md
+    line_start: 106
+    line_end: 106
+    char_start: 13035
+    char_end: 14759
+    viewer_only: true
+  raw_text: The fourth basic semiconductor process is deposition. Deposition is the means by which films of various materials may be deposited on the silicon wafer. These films may be deposited using several techniques which include deposition by evaporation [16], sputtering [17], and chemical-vapor deposition (CVD) [18,19]. In evaporation deposition, a solid material is placed in a vacuum and heated until it evaporates. The evaporant molecules strike the cooler wafer and condense into a solid film on the wafer surface. Thickness of the deposited materiel is determined by the temperature and the amount of time evaporation is allowed to take place (a thickness of 1 m is typical). The sputtering technique uses positive ions to bombard the cathode, which is coated with the material to be deposited. The bombarded or target material is dislodged by direct momentum transfer and deposited on wafers which are placed on the anode. The types of sputtering systems used for depositions in integrated circuits include dc, radio frequency (RF), or magnetron (magnetic field). Sputtering is usually done in a vacuum. Chemical vapor deposition uses a process in which a film is deposited by a chemical reaction or pyrolytic decomposition in the gas phase which occurs in the vicinity of the silicon wafer. This deposition process is generally used to deposit polysilicon, silicon dioxide $( \mathrm { { S i O } } _ { 2 } )$ , or silicon nitride $( \mathrm { S i } _ { 3 } \mathrm { N } _ { 4 } )$ . While the chemical vapor deposition is usually performed at atmospheric pressure, it can also be done at low pressures where the diffusivity increases significantly. This technique is called low-pressure chemical-vapor deposition (LPCVD).
+  normalized_text: Deposition lays films on the wafer via evaporation, sputtering, or chemical-vapor deposition (CVD); LPCVD is low-pressure CVD; used for polysilicon, SiO2, Si3N4.
+  evidence_strength: direct
+- id: A-FAB-ETCH
+  section_id: SEC-2.1-ETCH
+  atom_type: technology_process_atom
+  source_element_id: SE-2.1-ETCH-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 849
+    line_end: 849
+    char_start: 64848
+    char_end: 65839
+  viewer_span:
+    file: source.md
+    line_start: 110
+    line_end: 110
+    char_start: 14772
+    char_end: 15763
+    viewer_only: true
+  raw_text: 'The final basic semiconductor fabrication process considered here is etching. Etching is the process of removing exposed (unprotected) material. The means by which some material is exposed and some is not will be considered next in discussing the subject of photolithography. For the moment, we will assume that the situation illustrated in Fig. 2.1-3(a) exists. Here we see a top layer called a film and an underlying layer. A protective layer, called a maski, covers the film except in the area which is to be etched. The objective of etching is to remove just the section of the exposed film. To achieve this, the etching process must have two important properties: selectivity, and anisotropy. Selectivity is the characteristic of the etch whereby only the desired layer is etched with no effect on either the protective layer (masking layer) or the underlying layer. Selectivity can quantified as the ratio of the desired layer etch rate to the undesired layer etch rate as given below.'
+  normalized_text: 'Etching removes exposed (unprotected) material; the etch must have two important properties: selectivity and anisotropy.'
+  evidence_strength: direct
+- id: A-FAB-SEL-1
+  section_id: SEC-2.1-ETCH
+  atom_type: formula_atom
+  source_element_id: SE-2.1-ETCH-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 852
+    line_end: 852
+    char_start: 65844
+    char_end: 65988
+  viewer_span:
+    file: source.md
+    line_start: 113
+    line_end: 113
+    char_start: 15768
+    char_end: 15912
+    viewer_only: true
+  raw_text: \mathrm{S} _ {\mathrm{A} - \mathrm{B}} = \frac {\text { Desired   layer   etch   rate(A)}}{\text { Undesired   layer   etch   rate(B)}} \tag {1}
+  normalized_text: S_{A-B} = desired-layer etch rate (A) / undesired-layer etch rate (B)
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: etch_selectivity
+- id: A-FAB-ANI-2
+  section_id: SEC-2.1-ETCH
+  atom_type: formula_atom
+  source_element_id: SE-2.1-ETCH-EQ2
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 858
+    line_end: 858
+    char_start: 66216
+    char_end: 66315
+  viewer_span:
+    file: source.md
+    line_start: 119
+    line_end: 119
+    char_start: 16140
+    char_end: 16239
+    viewer_only: true
+  raw_text: \mathrm{A} = 1 - \frac {\text { Lateral   etch   rate }}{\text { Vertical   etch   rate }} \tag {2}
+  normalized_text: A = 1 - (lateral etch rate / vertical etch rate)
+  evidence_strength: direct
+  metadata:
+    tag: '2'
+    role: etch_anisotropy
+- id: A-FAB-PHOTO
+  section_id: SEC-2.1-PHO
+  atom_type: technology_process_atom
+  source_element_id: SE-2.1-PHO-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 896
+    line_end: 896
+    char_start: 69672
+    char_end: 71557
+  viewer_span:
+    file: source.md
+    line_start: 157
+    line_end: 157
+    char_start: 19596
+    char_end: 21481
+    viewer_only: true
+  raw_text: The photoresist is an organic polymer whose characteristics can be altered when exposed to ultraviolet light. Photoresist is classified into positive and negative photoresist. Positive photoresist is used to create a mask where patterns exist (where the photomask is opaque to UV light). Negative photoresist creates a mask where patterns do not exist (where the photomask is transparent to UV light). The first step in the photolithographic process is to apply the photoresist to the surface to be patterned. The photoresist is applied to the wafer and the wafer spun at several thousand revolutions per minute in order to disperse the photoresist evenly over the surface of the wafer. The thickness of the photoresist depends only upon the angular velocity of the spinning wafer. The second step is to “soft bake” the wafer to drive off solvents in the photoresist. The next step selectively exposes the wafer to UV light. Using positive photoresist, those areas exposed to UV light can be removed with solvents leaving only those areas that were not exposed. Conversely, if negative photoresist is used, those areas exposed to UV light will be made impervious to solvents while the unexposed areas will be removed. This process of exposing and then selectively removing the photoresist is called developing. The developed wafer is then “hard baked” at a higher temperature to achieve maximum adhesion of the remaining photoresist. The hardened photoresist protects selected areas from the etch plasma or acids used in the etching process. When its protective function is complete, the photoresist is removed with solvents or plasma ashing that will not harm underlying layers. This process must be repeated for each layer of the integrated circuit. Fig. 2.1-4 shows, by way of example, the basic photolithographic steps in defining a polysilicon geometry using positive photoresist.
+  normalized_text: 'Photoresist is an organic polymer altered by UV light. Positive photoresist: UV-exposed areas can be removed; negative photoresist: UV-exposed areas become impervious to solvents (developing); after etching the photoresist is stripped.'
+  evidence_strength: direct
+- id: A-FAB-PRINT
+  section_id: SEC-2.1-PHO
+  atom_type: concept_definition_atom
+  source_element_id: SE-2.1-PHO-PRINT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 933
+    line_end: 937
+    char_start: 72251
+    char_end: 72496
+  viewer_span:
+    file: source.md
+    line_start: 194
+    line_end: 198
+    char_start: 22175
+    char_end: 22420
+    viewer_only: true
+  raw_text: "The process of exposing selective areas of a wafer to light through a photomask is called printing. There are three basic types of printing systems used. They are listed below:\n\n• Contact printing   \n• Proximity printing   \n• Projection printing"
+  normalized_text: 'Three printing systems are used: contact printing, proximity printing, and projection printing.'
+  evidence_strength: direct
+- id: A-FAB-NWELL-FLOW
+  section_id: SEC-2.1-NW
+  atom_type: process_flow_atom
+  source_element_id: SE-2.1-NW-FLOW
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 951
+    line_end: 959
+    char_start: 75006
+    char_end: 80898
+  viewer_span:
+    file: source.md
+    line_start: 212
+    line_end: 220
+    char_start: 24930
+    char_end: 30822
+    viewer_only: true
+  raw_text: 'It is important for a circuit designer to understand some of the basic steps involved in fabricating a CMOS circuit. The fabrication steps of one of the more popular CMOS silicon-gate processes will be described in detail. The first step in the n-well silicon-gate CMOS process is to grow a thin silicon-dioxide region on a p- substrate (wafer). Subsequent to this, the regions where n-wells are to exist are defined in a masking step by depositing a photoresist material on top of the oxide. After exposing and developing the photoresist, n-type impurities are implanted into the wafer as illustrated in Fig. 2.1-5(a). Next, photoresist is removed and a high-temperature oxidation/drive-in step is performed causing the implanted ions to diffuse into the p- substrate. This is followed by oxide removal and subsequent growth of a thin pad oxide layer. [The purpose of the pad oxide is to protect the substrate from stress due to the difference in the thermal expansion of silicon and silicon nitride.] Then a layer of silicon nitride is deposited over the entire wafer as illustrated in Fig. 2.1-5(b). Photoresist is deposited, patterned, and developed as before, and the silicon nitride is removed from the areas where it has been patterned. The silicon nitride and photoresist remain in the areas where active devices will reside. These regions where silicon nitride remain are called active area or moat.
+
+
+    Next, a global n-type field (channel stop) implant is performed as illustrated in Fig. 2.1-5(c). The purpose of this is to insure that parasitic p-channel transistors do not turn on under various interconnect lines. Photoresist is removed, re-deposited and patterned using the p-type field (channel stop) implant mask followed by a p- field-implant step as shown in Fig. 2.1-5(d). This is to insure that parasitic n-channel transistors do not turn on under various interconnect lines. Next, to achieve isolation between active regions, a thick silicon-dioxide layer is grown over the entire wafer except where silicon nitride exists (silicon nitride impedes oxide growth). This particular way of building isolation between devices is called LOCOS isolation. One of the non-ideal aspects of LOCOS isolation is due to the oxide growth encroaching under the edges of the silicon nitride resulting in a reduced active-area region (the well-known “bird’s beak”). Figure 2.1-4(e) shows the results of this step. Once the thick field oxide (FOX) is grown, the remaining silicon nitride is removed and a thin oxide, which will be the gate oxide, is grown followed by a polysilicon deposition step (Fig. 2. 1-5(f)). Polysilicon is then patterned and etched, leaving only what is required to make transistor gates and interconnect lines.
+
+
+    At this point, the drain and source areas have not been diffused into the substrate. Modern processes employ lightly-doped drain/source (LDD) diffusions to minimize impact ionization. The LDD structure is built by depositing a spacer oxide over the patterned polysilicon followed by an anisotropic oxide etch leaving spacers on each side of the polysilicon gate as shown in Fig. 2.1-5(g). To make $\mathfrak { n } ^ { + }$ sources and drains, photoresist is applied and patterned everywhere n-channel transistors are required; $\mathfrak { n } ^ { + }$ is also required where metal connections are to be made to $\mathrm { \Omega } ^ { \mathrm { n } ^ { \mathrm { - } } }$ material such as the n-well. After developing, the $\mathfrak { n } ^ { + }$ areas are implanted as illustrated in Fig. 2.1-5(h). The photoresist acts as a barrier to the implant as does the polysilicon and spacer. As a result, the $\mathfrak { n } ^ { + }$ regions that result are properly aligned with the spacer oxide. The spacer is etched next, followed by a lighter $\mathfrak { n } ^ { - }$ implant (Fig. 2.1-5(i)) producing the higher resistivity source/drain regions aligned with the polysilicon gate. These steps are repeated for the pchannel transistors resulting in the cross section illustrated in Fig. 2.1-5(j). Annealing is performed in order to activate the implanted ions. At this point, as shown in Fig. 2.1-5(k), n- and p-channel LDD transistors are complete except for the necessary terminal connections.
+
+
+    In preparation for the contact step, a new, thick oxide layer is deposited over the entire wafer (Fig. 2.1-5(l)). This layer is typically borophosphosilicate glass (BPSG) which has a low reflow temperature (and thus provides a more planar surface for subsequent layers)[22]. Contacts are formed by first defining their location using the photolithographic process applied in previous steps. Next, the oxide areas where contacts are to be made are etched down to the surface of the silicon. The remaining photoresist is removed and metal (aluminum) is deposited on the wafer. First metal (Metal 1) interconnect is then defined photolithographically and subsequently etched so that all unnecessary metal is removed. To prepare for a second metal, another interlayer dielectric is deposited (Fig. 2.1-5(m)). This is usually a sandwich of CVD $\mathrm { S i O } _ { 2 }$ , spun-on glass (SOG), and CVD $\mathrm { S i O } _ { 2 }$ to achieve planarity. Intermetal connections (via’s) are defined through the photolithographic process followed by an etch and the second metal (Metal 2) is then deposited (Fig. 2.1-5(n). A photolithographic step is applied to pattern the second layer metal, followed by a metal etch step.
+
+
+    In order to protect the wafer from chemical intrusion or scratching, a passivation layer of $\mathrm { S i O } _ { 2 }$ or $\mathrm { S i N } _ { 3 }$ is applied covering the entire wafer. Pad regions are then defined (areas where wires will be bonded between the integrated circuit and the package containing the circuit) and the passivation layer removed only in these areas. Figure 2.1- 5(o) shows a cross section of the final circuit.'
+  normalized_text: 'N-well silicon-gate CMOS flow: n-well implant into p- substrate -> drive-in -> pad oxide -> Si3N4 deposit & pattern (active area/moat) -> channel-stop field implants -> LOCOS field oxide -> gate oxide + polysilicon -> LDD spacer -> n+/p+ source/drain implants -> anneal -> BPSG -> contact -> Metal 1 -> via -> Metal 2 -> passivation + pad opening.'
+  evidence_strength: direct
+- id: A-FAB-NW-CHSTOP
+  section_id: SEC-2.1-NW
+  atom_type: process_step_atom
+  source_element_id: SE-2.1-NW-FLOW
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 953
+    line_end: 953
+    char_start: 76422
+    char_end: 76631
+  viewer_span:
+    file: source.md
+    line_start: 214
+    line_end: 214
+    char_start: 26346
+    char_end: 26555
+    viewer_only: true
+  raw_text: a global n-type field (channel stop) implant is performed as illustrated in Fig. 2.1-5(c). The purpose of this is to insure that parasitic p-channel transistors do not turn on under various interconnect lines.
+  normalized_text: A field (channel-stop) implant ensures parasitic field transistors do not turn on under interconnect lines.
+  evidence_strength: direct
+- id: A-FAB-NW-LOCOS
+  section_id: SEC-2.1-NW
+  atom_type: process_step_atom
+  source_element_id: SE-2.1-NW-FLOW
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 953
+    line_end: 953
+    char_start: 76952
+    char_end: 77173
+  viewer_span:
+    file: source.md
+    line_start: 214
+    line_end: 214
+    char_start: 26876
+    char_end: 27097
+    viewer_only: true
+  raw_text: a thick silicon-dioxide layer is grown over the entire wafer except where silicon nitride exists (silicon nitride impedes oxide growth). This particular way of building isolation between devices is called LOCOS isolation.
+  normalized_text: A thick field oxide (FOX) is grown everywhere except where silicon nitride exists; this device isolation is called LOCOS isolation.
+  evidence_strength: direct
+- id: A-FAB-BIRDSBEAK
+  section_id: SEC-2.1-NW
+  atom_type: physical_effect_atom
+  source_element_id: SE-2.1-NW-FLOW
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 953
+    line_end: 953
+    char_start: 77174
+    char_end: 77363
+  viewer_span:
+    file: source.md
+    line_start: 214
+    line_end: 214
+    char_start: 27098
+    char_end: 27287
+    viewer_only: true
+  raw_text: One of the non-ideal aspects of LOCOS isolation is due to the oxide growth encroaching under the edges of the silicon nitride resulting in a reduced active-area region (the well-known “bird
+  normalized_text: A non-ideal aspect of LOCOS is oxide growth encroaching under the edges of the silicon nitride, reducing the active-area region - the well-known bird's beak.
+  evidence_strength: direct
+- id: A-FAB-LDD
+  section_id: SEC-2.1-NW
+  atom_type: process_step_atom
+  source_element_id: SE-2.1-NW-FLOW
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 955
+    line_end: 955
+    char_start: 77830
+    char_end: 78106
+  viewer_span:
+    file: source.md
+    line_start: 216
+    line_end: 216
+    char_start: 27754
+    char_end: 28030
+    viewer_only: true
+  raw_text: Modern processes employ lightly-doped drain/source (LDD) diffusions to minimize impact ionization. The LDD structure is built by depositing a spacer oxide over the patterned polysilicon followed by an anisotropic oxide etch leaving spacers on each side of the polysilicon gate
+  normalized_text: Lightly-doped drain/source (LDD) diffusions minimize impact ionization; built with a spacer oxide on each side of the polysilicon gate.
+  evidence_strength: direct
+- id: A-FAB-SALICIDE
+  section_id: SEC-2.1-SAL
+  atom_type: design_principle_atom
+  source_element_id: SE-2.1-SAL-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1225
+    line_end: 1225
+    char_start: 85980
+    char_end: 86157
+  viewer_span:
+    file: source.md
+    line_start: 486
+    line_end: 486
+    char_start: 35904
+    char_end: 36081
+    viewer_only: true
+  raw_text: For analog designs, it is important to have available polysilicon and diffusion resistors that are not salicided, so a good mixed-signal process should provide a salicide block.
+  normalized_text: For analog designs a good mixed-signal process should provide a salicide block so that high-resistance (non-salicided) polysilicon and diffusion resistors remain available.
+  evidence_strength: direct
+- id: A-PN-CONCEPT
+  section_id: SEC-2.2
+  atom_type: concept_definition_atom
+  source_element_id: SE-2.2-P1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1257
+    line_end: 1257
+    char_start: 87890
+    char_end: 88099
+  viewer_span:
+    file: source.md
+    line_start: 518
+    line_end: 518
+    char_start: 37814
+    char_end: 38023
+    viewer_only: true
+  raw_text: it is assumed that the impurity concentration changes abruptly from $N _ { D }$ donors in the n-type semiconductor to $N _ { A }$ acceptors in the p-type semiconductor. This situation is called a step junction
+  normalized_text: A step junction is one where the impurity concentration changes abruptly from N_D donors (n-type) to N_A acceptors (p-type).
+  evidence_strength: direct
+- id: A-PN-XD-1
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1309
+    line_end: 1309
+    char_start: 91221
+    char_end: 91257
+  viewer_span:
+    file: source.md
+    line_start: 570
+    line_end: 570
+    char_start: 41145
+    char_end: 41181
+    viewer_only: true
+  raw_text: x _ {d} = x _ {n} - x _ {p} \tag {1}
+  normalized_text: x_d = x_n - x_p
+  evidence_strength: direct
+  metadata:
+    tag: '1'
+    role: depletion_width_def
+- id: A-PN-PHI-6
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1343
+    line_end: 1343
+    char_start: 92710
+    char_end: 92867
+  viewer_span:
+    file: source.md
+    line_start: 604
+    line_end: 604
+    char_start: 42634
+    char_end: 42791
+    viewer_only: true
+  raw_text: \phi_ {o} = \frac {k T}{q} \ln \left(\frac {N _ {A} N _ {D}}{n _ {i} ^ {2}}\right) = V _ {t} \ln \left(\frac {N _ {A} N _ {D}}{n _ {i} ^ {2}}\right) \tag {6}
+  normalized_text: phi_o = (kT/q) ln(N_A N_D / n_i^2) = V_t ln(N_A N_D / n_i^2)
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: barrier_potential
+- id: A-PN-XN-7
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ7
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1351
+    line_end: 1351
+    char_start: 93974
+    char_end: 94107
+  viewer_span:
+    file: source.md
+    line_start: 612
+    line_end: 612
+    char_start: 43898
+    char_end: 44031
+    viewer_only: true
+  raw_text: x _ {n} = \left[ \frac {2 \varepsilon_ {s i} (\phi_ {o} - v _ {D}) N _ {A}}{q N _ {D} (N _ {A} + N _ {D})} \right] ^ {1 / 2} \tag {7}
+  normalized_text: x_n = [2 eps_si (phi_o - v_D) N_A / (q N_D (N_A+N_D))]^(1/2)
+  evidence_strength: direct
+  metadata:
+    tag: '7'
+- id: A-PN-XP-8
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ8
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1357
+    line_end: 1357
+    char_start: 94120
+    char_end: 94255
+  viewer_span:
+    file: source.md
+    line_start: 618
+    line_end: 618
+    char_start: 44044
+    char_end: 44179
+    viewer_only: true
+  raw_text: x _ {p} = - \left[ \frac {2 \varepsilon_ {s i} (\phi_ {o} - v _ {D}) N _ {D}}{q N _ {A} (N _ {A} + N _ {D})} \right] ^ {1 / 2} \tag {8}
+  normalized_text: x_p = -[2 eps_si (phi_o - v_D) N_D / (q N_A (N_A+N_D))]^(1/2)
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+- id: A-PN-XD-9
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ9
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1363
+    line_end: 1363
+    char_start: 94356
+    char_end: 94499
+  viewer_span:
+    file: source.md
+    line_start: 624
+    line_end: 624
+    char_start: 44280
+    char_end: 44423
+    viewer_only: true
+  raw_text: x _ {d} = \left[ \frac {2 \varepsilon_ {s i} (N _ {A} + N _ {D})}{q N _ {A} N _ {D}} \right] ^ {1 / 2} (\phi_ {o} - v _ {D}) ^ {1 / 2} \tag {9}
+  normalized_text: x_d = [2 eps_si (N_A+N_D) / (q N_A N_D)]^(1/2) (phi_o - v_D)^(1/2)
+  evidence_strength: direct
+  metadata:
+    tag: '9'
+    role: depletion_width
+- id: A-PN-QJ-10
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ10
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1371
+    line_end: 1371
+    char_start: 95250
+    char_end: 95464
+  viewer_span:
+    file: source.md
+    line_start: 632
+    line_end: 632
+    char_start: 45174
+    char_end: 45388
+    viewer_only: true
+  raw_text: Q _ {j} = \left| A q N _ {A} x _ {p} \right| = A q N _ {D} x _ {n} = A \left[ \frac {2 \varepsilon_ {s i} q N _ {A} N _ {D}}{N _ {A} + N _ {D}} \right] ^ {1 / 2} \left(\phi_ {o} - v _ {D}\right) ^ {1 / 2} \tag {10}
+  normalized_text: Q_j = |A q N_A x_p| = A q N_D x_n = A[2 eps_si q N_A N_D/(N_A+N_D)]^(1/2)(phi_o - v_D)^(1/2)
+  evidence_strength: direct
+  metadata:
+    tag: '10'
+    role: depletion_charge
+- id: A-PN-EO-11
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ11
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1379
+    line_end: 1379
+    char_start: 95667
+    char_end: 95811
+  viewer_span:
+    file: source.md
+    line_start: 640
+    line_end: 640
+    char_start: 45591
+    char_end: 45735
+    viewer_only: true
+  raw_text: E _ {o} = \left[ \frac {2 q N _ {A} N _ {D}}{\varepsilon_ {s i} (N _ {A} + N _ {D})} \right] ^ {1 / 2} (\phi_ {o} - v _ {D}) ^ {1 / 2} \tag {11}
+  normalized_text: E_o = [2 q N_A N_D / (eps_si (N_A+N_D))]^(1/2) (phi_o - v_D)^(1/2)
+  evidence_strength: direct
+  metadata:
+    tag: '11'
+    role: peak_field
+- id: A-PN-CJ-12
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1387
+    line_end: 1387
+    char_start: 96242
+    char_end: 96507
+  viewer_span:
+    file: source.md
+    line_start: 648
+    line_end: 648
+    char_start: 46166
+    char_end: 46431
+    viewer_only: true
+  raw_text: C _ {j} = \frac {d Q _ {j}}{d v _ {D}} = A \left[ \frac {\varepsilon_ {s i} q N _ {A} N _ {D}}{2 (N _ {A} + N _ {D})} \right] ^ {1 / 2} \frac {1}{(\phi_ {o} - v _ {D}) ^ {1 / 2}} = \frac {C _ {j 0}}{\left[ 1 - (v _ {D} / \phi_ {o}) \right] ^ {\mathrm{m}}} \tag {12}
+  normalized_text: C_j = dQ_j/dv_D = A[eps_si q N_A N_D/(2(N_A+N_D))]^(1/2)/(phi_o - v_D)^(1/2) = C_j0/[1-(v_D/phi_o)]^m
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: depletion_capacitance
+- id: A-PN-CJ0-DEF
+  section_id: SEC-2.2
+  atom_type: definition_atom
+  source_element_id: SE-2.2-P-CJ0
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1390
+    line_end: 1390
+    char_start: 96512
+    char_end: 96979
+  viewer_span:
+    file: source.md
+    line_start: 651
+    line_end: 651
+    char_start: 46436
+    char_end: 46903
+    viewer_only: true
+  raw_text: $C _ { j 0 }$ is the depletion-layer capacitance when $\nu _ { D } = 0$ and $m$ is called a grading coefficient. The coefficient m is 1/2 for the case of Fig. 2.2-1 which is called a step junction. If the junction is fabricated using diffusion techniques described in Sec. 2.1, Fig. 2.2-1(b) will become more like the profile of Fig. 2.2-2. It can be shown for this case that m is 1/3. The range of values of the grading coefficient will fall between $1 / 3$ and 1/2.
+  normalized_text: 'C_j0 is the depletion-layer capacitance at v_D=0; m is a grading coefficient: 1/2 for a step junction, 1/3 for a diffused junction; the range of m is 1/3 to 1/2.'
+  evidence_strength: direct
+- id: A-PN-COND
+  section_id: SEC-2.2
+  atom_type: condition_atom
+  source_element_id: SE-2.2-P-COND
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1394
+    line_end: 1394
+    char_start: 97104
+    char_end: 97487
+  viewer_span:
+    file: source.md
+    line_start: 655
+    line_end: 655
+    char_start: 47028
+    char_end: 47411
+    viewer_only: true
+  raw_text: when $\nu _ { D }$ is positive and approaches $\phi _ { o } ,$ the depletion-layer capacitance approaches infinity. At this value of voltage, the assumptions made in deriving the above equations are no longer valid. In particular, the assumption that the depletion region is free of charged carriers is not true. Consequently, the actual curve bends over and $C _ { j }$ decreases as
+  normalized_text: As v_D becomes positive and approaches phi_o, C_j tends to infinity and the depletion-free assumption is no longer valid; the actual curve bends over.
+  evidence_strength: direct
+- id: A-PN-BV-13
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ13
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1431
+    line_end: 1431
+    char_start: 99202
+    char_end: 99306
+  viewer_span:
+    file: source.md
+    line_start: 692
+    line_end: 692
+    char_start: 49126
+    char_end: 49230
+    viewer_only: true
+  raw_text: B V \cong \frac {\varepsilon_ {s i} (N _ {A} + N _ {D})}{2 q N _ {A} N _ {D}} E _ {\max} ^ {2} \tag {13}
+  normalized_text: BV ~= eps_si (N_A+N_D)/(2 q N_A N_D) E_max^2
+  evidence_strength: direct
+  metadata:
+    tag: '13'
+    role: breakdown_voltage
+- id: A-PN-AVALANCHE
+  section_id: SEC-2.2
+  atom_type: physical_effect_atom
+  source_element_id: SE-2.2-P-BV
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1434
+    line_end: 1442
+    char_start: 99613
+    char_end: 100843
+  viewer_span:
+    file: source.md
+    line_start: 695
+    line_end: 703
+    char_start: 49537
+    char_end: 50767
+    viewer_only: true
+  raw_text: 'This increase is due to two conduction mechanisms that can take place in a reverse-biased junction between two heavily-doped semiconductors. The first current mechanism is called avalanche multiplication and is caused by the high electric fields present in the pn junction; the second is called Zener breakdown. Zener breakdown is a direct disruption of valence bonds in high electric fields. However, the Zener mechanism does not require the presence of an energetic ionizing carrier. The current in most breakdown diodes will be a combination of these two current mechanisms.
+
+
+    If $i _ { R }$ is the reverse current in the pn junction and $\nu _ { R }$ is the reverse-bias voltage across the pn junction, then the actual reverse current $i _ { R A }$ can be expressed as
+
+
+    $$
+
+    i _ {R A} = M i _ {R} = \left[ \frac {1}{1 - (v _ {R} / B V) ^ {n}} \right] i _ {R} \tag {14}
+
+    $$
+
+
+    M is the avalanche multiplication factor and n is an exponent which adjusts the sharpness of the “knee” of the curve shown in Fig. 2.2-4. Typically, n varies between 3 and 6. If both sides of the pn junction are heavily doped, the breakdown will take place by tunneling, leading to the Zener breakdown, which generally occurs at voltages less than 6 volts.'
+  normalized_text: 'Reverse breakdown arises from two mechanisms: avalanche multiplication (high field) and Zener breakdown (disruption of valence bonds by tunneling), the latter generally below 6 V.'
+  evidence_strength: direct
+- id: A-PN-IRA-14
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ14
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1439
+    line_end: 1439
+    char_start: 100389
+    char_end: 100482
+  viewer_span:
+    file: source.md
+    line_start: 700
+    line_end: 700
+    char_start: 50313
+    char_end: 50406
+    viewer_only: true
+  raw_text: i _ {R A} = M i _ {R} = \left[ \frac {1}{1 - (v _ {R} / B V) ^ {n}} \right] i _ {R} \tag {14}
+  normalized_text: i_RA = M i_R = [1/(1-(v_R/BV)^n)] i_R
+  evidence_strength: direct
+  metadata:
+    tag: '14'
+- id: A-PN-DIODE-24
+  section_id: SEC-2.2
+  atom_type: formula_atom
+  source_element_id: SE-2.2-EQ24
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1528
+    line_end: 1528
+    char_start: 106009
+    char_end: 106237
+  viewer_span:
+    file: source.md
+    line_start: 789
+    line_end: 789
+    char_start: 55933
+    char_end: 56161
+    viewer_only: true
+  raw_text: i _ {D} = q A \left[ \frac {D p p n o}{L _ {p}} + \frac {D n n p o}{L _ {n}} \right] \left[ \exp \left(\frac {v _ {D}}{V _ {t}}\right) - 1 \right] = I _ {s} \left[ \exp \left(\frac {v _ {D}}{V _ {t}}\right) - 1 \right] \tag {24}
+  normalized_text: i_D = q A [D_p p_no/L_p + D_n n_po/L_n][exp(v_D/V_t) - 1] = I_s [exp(v_D/V_t) - 1]
+  evidence_strength: direct
+  metadata:
+    tag: '24'
+    role: diode_equation
+- id: A-EX221-PROBLEM
+  section_id: SEC-EX221
+  atom_type: example_problem_atom
+  source_element_id: SE-EX221
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1424
+    line_end: 1424
+    char_start: 98083
+    char_end: 98201
+  viewer_span:
+    file: source.md
+    line_start: 685
+    line_end: 685
+    char_start: 48007
+    char_end: 48125
+    viewer_only: true
+  raw_text: Find $x _ { p } , x _ { n } , x _ { d } , \phi _ { o } , C _ { j 0 }$ , and $C _ { j }$ for an applied voltage of −4 V
+  normalized_text: Find x_p, x_n, x_d, phi_o, C_j0, and C_j for an applied voltage of -4 V for a step-junction pn diode.
+  evidence_strength: direct
+- id: A-EX221-GIVEN
+  section_id: SEC-EX221
+  atom_type: given_atom
+  source_element_id: SE-EX221
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1424
+    line_end: 1424
+    char_start: 98202
+    char_end: 98386
+  viewer_span:
+    file: source.md
+    line_start: 685
+    line_end: 685
+    char_start: 48126
+    char_end: 48310
+    viewer_only: true
+  raw_text: for a pn diode with a step junction, $N _ { A } = 5 \times 1 0 ^ { 1 5 } / \mathrm { c m } ^ { 3 } , N _ { D } = 1 0 ^ { 2 0 } / \mathrm { c m } ^ { 3 }$ , and an area of 10 m by 10 m.
+  normalized_text: 'Given: N_A = 5e15/cm3, N_D = 1e20/cm3, area 10 um by 10 um, step junction.'
+  evidence_strength: direct
+- id: A-EX221-USE
+  section_id: SEC-EX221
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX221
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1426
+    line_end: 1426
+    char_start: 98409
+    char_end: 98696
+  viewer_span:
+    file: source.md
+    line_start: 687
+    line_end: 687
+    char_start: 48333
+    char_end: 48620
+    viewer_only: true
+  raw_text: Eq. (6) gives the barrier potential as 0.917 V. Equations (7) and (8) give $x _ { n } \cong 0$ and $x _ { p } = 1 . 1 2 8$ m. Thus, the depletion width is approximately $x _ { p }$ or 1.128 m. Using these values in Eq. (12) we find that $C _ { j 0 }$ is 20.3 fF and at a voltage of − 4 V
+  normalized_text: Use Eq.(6) for phi_o; Eqs.(7),(8) for x_n,x_p; Eq.(12) for C_j0 and C_j.
+  evidence_strength: direct
+- id: A-EX221-RESULT
+  section_id: SEC-EX221
+  atom_type: result_atom
+  source_element_id: SE-EX221
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1426
+    line_end: 1426
+    char_start: 98388
+    char_end: 98721
+  viewer_span:
+    file: source.md
+    line_start: 687
+    line_end: 687
+    char_start: 48312
+    char_end: 48645
+    viewer_only: true
+  raw_text: At room temperature, Eq. (6) gives the barrier potential as 0.917 V. Equations (7) and (8) give $x _ { n } \cong 0$ and $x _ { p } = 1 . 1 2 8$ m. Thus, the depletion width is approximately $x _ { p }$ or 1.128 m. Using these values in Eq. (12) we find that $C _ { j 0 }$ is 20.3 fF and at a voltage of − 4 V, $C _ { j }$ is 9.18 fF.
+  normalized_text: phi_o = 0.917 V; x_n ~= 0; x_p = 1.128 um (x_d ~= 1.128 um); C_j0 = 20.3 fF; C_j(-4V) = 9.18 fF.
+  evidence_strength: direct
+- id: A-EX222-PROBLEM
+  section_id: SEC-EX222
+  atom_type: example_problem_atom
+  source_element_id: SE-EX222
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1535
+    line_end: 1535
+    char_start: 106454
+    char_end: 106982
+  viewer_span:
+    file: source.md
+    line_start: 796
+    line_end: 796
+    char_start: 56378
+    char_end: 56906
+    viewer_only: true
+  raw_text: Calculate the saturation current of a pn junction diode with $N _ { A } = 5 \times 1 0 ^ { 1 5 } / \mathrm { c m } ^ { 3 } , N _ { D } =$ $1 0 ^ { 2 0 / \mathrm { c m } ^ { 3 } , D _ { n } } = 2 0 \mathrm { c m } ^ { 2 / \mathrm { s } , D _ { p } } = 1 0 \mathrm { c m } ^ { 2 / \mathrm { s } , L _ { n } } = 1 0 \mu \mathrm { m } , L _ { p } = 5 \mu \mathrm { m } , L _ { p } = 7 0 \mu \mathrm { m } , L _ { p } = 7 0 \mu \mathrm { m } , L _ { p } = 7 0 \mu \mathrm { m } , L _ { p } = 7 0 \mu \mathrm { m }$ , and $A = 1 0 0 0
+  normalized_text: Calculate the saturation current I_s of a pn junction diode (given N_A, N_D, D_n, D_p, L_n, L_p, A).
+  evidence_strength: direct
+- id: A-EX222-RESULT
+  section_id: SEC-EX222
+  atom_type: result_atom
+  source_element_id: SE-EX222
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1543
+    line_end: 1543
+    char_start: 107421
+    char_end: 107616
+  viewer_span:
+    file: source.md
+    line_start: 804
+    line_end: 804
+    char_start: 57345
+    char_end: 57540
+    viewer_only: true
+  raw_text: Changing the units of area from $\mu \mathrm { m } ^ { 2 }$ to $\mathrm { c m } ^ { 2 }$ results in a saturation current magnitude of $1 . 3 4 6 \times 1 0 ^ { - 1 5 } \mathrm { A }$ or 1.346 fA.
+  normalized_text: I_s = 1.346e-15 A = 1.346 fA.
+  evidence_strength: direct
+- id: A-MOS-STRUCT
+  section_id: SEC-2.3
+  atom_type: concept_definition_atom
+  source_element_id: SE-2.3-P1
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1549
+    line_end: 1549
+    char_start: 107929
+    char_end: 109215
+  viewer_span:
+    file: source.md
+    line_start: 810
+    line_end: 810
+    char_start: 57853
+    char_end: 59139
+    viewer_only: true
+  raw_text: The structure of an n-channel and p-channel MOS transistor using an n-well technology is shown in Fig. 2.3-1. The p-channel device is formed with two heavilydoped $\mathfrak { p } ^ { + }$ regions diffused into a lighter doped n- material called the well. The two $\mathfrak { p } ^ { + }$ regions are called drain and source, and are separated by a distance, L (referred to as the device length). At the surface between the drain and source lies a gate electrode that is separated from the silicon by a thin dielectric material (silicon dioxide). Similarly, the nchannel transistor is formed by two heavily doped $\mathfrak { n } ^ { + }$ regions within a lightly doped $\mathsf { p } ^ { - }$ substrate. It, too, has a gate on the surface between the drain and source separated from the silicon by a thin dielectric material (silicon dioxide). Essentially, both types of transistors are four-terminal devices as shown in Fig. 1.2-2(c,d). The B terminal is the bulk, or substrate, which contains the drain and source diffusions. For an n-well process, the p-bulk connection is common throughout the integrated circuit and is connected to $V _ { S S }$ (the most negative supply). Multiple n-wells can be fabricated on a single circuit, and they can be connected to different potentials
+  normalized_text: 'An MOS transistor is a four-terminal device (G,D,S,B): source/drain are heavily-doped regions separated by length L; the gate sits over a thin SiO2 dielectric; B is the bulk/substrate (p-bulk tied to V_SS in an n-well process).'
+  evidence_strength: direct
+- id: A-MOS-STRONGINV
+  section_id: SEC-2.3
+  atom_type: concept_definition_atom
+  source_element_id: SE-2.3-P-INV
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1698
+    line_end: 1698
+    char_start: 113955
+    char_end: 114680
+  viewer_span:
+    file: source.md
+    line_start: 959
+    line_end: 959
+    char_start: 63879
+    char_end: 64604
+    viewer_only: true
+  raw_text: When the gate voltage reaches a value called the threshold voltage, designated as $V _ { T } ,$ the substrate underneath the gate becomes inverted, i.e., it changes from a p-type to an ntype semiconductor. Consequently, an n-type channel exists between the source and drain that allows carriers to flow. In order to achieve this inversion, the surface potential must increase from its original negative value $( \phi _ { s } = \phi _ { F } )$ , to zero $( \phi _ { s } = 0 )$ , and then to a positive value $( \phi _ { s } = - \phi _ { F } )$ . The value of gate-source voltage necessary to cause this change in surface potential is defined as the threshold voltage, $V _ { T }$ . This condition is known as strong inversion.
+  normalized_text: 'Strong inversion: when v_GS reaches the threshold voltage V_T the surface inverts (p-type to n-type), forming an n-channel; surface potential goes from phi_s=phi_F to phi_s=-phi_F.'
+  evidence_strength: direct
+- id: A-MOS-PHIF-10
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ10-11
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1671
+    line_end: 1677
+    char_start: 113163
+    char_end: 113350
+  viewer_span:
+    file: source.md
+    line_start: 932
+    line_end: 938
+    char_start: 63087
+    char_end: 63274
+    viewer_only: true
+  raw_text: '\phi_ {F} = - V _ {t} \ln \left(N _ {A} / n _ {i}\right) \tag {10}
+
+    $$
+
+
+    and for an n-type semiconductor $\phi _ { F }$ is given as
+
+
+    $$
+
+    \phi_ {F} = V _ {t} \ln (N _ {D} / n _ {i}) \tag {11}'
+  normalized_text: phi_F(p-type) = -V_t ln(N_A/n_i) ; phi_F(n-type) = V_t ln(N_D/n_i)
+  evidence_strength: direct
+  metadata:
+    tag: 10,11
+    role: fermi_potential
+- id: A-MOS-QB-16
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ16
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1707
+    line_end: 1707
+    char_start: 115259
+    char_end: 115351
+  viewer_span:
+    file: source.md
+    line_start: 968
+    line_end: 968
+    char_start: 65183
+    char_end: 65275
+    viewer_only: true
+  raw_text: Q _ {b} \cong \sqrt {2 q N _ {A} \varepsilon_ {s i} | - 2 \phi_ {F} + v _ {S B} |} \tag {16}
+  normalized_text: Q_b ~= sqrt(2 q N_A eps_si | -2 phi_F + v_SB |)
+  evidence_strength: direct
+  metadata:
+    tag: '16'
+    role: bulk_charge
+- id: A-MOS-VT-18
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ18
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1719
+    line_end: 1719
+    char_start: 116379
+    char_end: 116684
+  viewer_span:
+    file: source.md
+    line_start: 980
+    line_end: 980
+    char_start: 66303
+    char_end: 66608
+    viewer_only: true
+  raw_text: \begin{array}{l} V _ {T} = \phi_ {M S} + \left[ - 2 \phi_ {F} - \frac {Q _ {b}}{C _ {o x}} \right] + \left[ \frac {- Q _ {s s}}{C _ {o x}} \right] \\ = \phi_ {M S} - 2 \phi_ {F} - \frac {Q _ {b 0}}{C _ {o x}} - \frac {Q _ {s s}}{C _ {o x}} - \frac {Q _ {b} - Q _ {b 0}}{C _ {o x}} \tag {18} \\ \end{array}
+  normalized_text: V_T = phi_MS - 2 phi_F - Q_b0/C_ox - Q_ss/C_ox - (Q_b - Q_b0)/C_ox
+  evidence_strength: direct
+  metadata:
+    tag: '18'
+- id: A-MOS-VT-19
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ19
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1725
+    line_end: 1725
+    char_start: 116735
+    char_end: 116863
+  viewer_span:
+    file: source.md
+    line_start: 986
+    line_end: 986
+    char_start: 66659
+    char_end: 66787
+    viewer_only: true
+  raw_text: V _ {T} = V _ {T 0} + \gamma (\sqrt {\left| - 2 \phi_ {F} + v _ {S B} \right|} - \sqrt {\left| - 2 \phi_ {F} \right|}) \tag {19}
+  normalized_text: V_T = V_T0 + gamma (sqrt|-2 phi_F + v_SB| - sqrt|-2 phi_F|)
+  evidence_strength: direct
+  metadata:
+    tag: '19'
+    role: threshold_voltage
+- id: A-MOS-VT0-20
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ20
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1731
+    line_end: 1731
+    char_start: 116878
+    char_end: 116987
+  viewer_span:
+    file: source.md
+    line_start: 992
+    line_end: 992
+    char_start: 66802
+    char_end: 66911
+    viewer_only: true
+  raw_text: V _ {T 0} = \phi_ {M S} - 2 \phi_ {F} - \frac {Q _ {b 0}}{C _ {o x}} - \frac {Q _ {s s}}{C _ {o x}} \tag {20}
+  normalized_text: V_T0 = phi_MS - 2 phi_F - Q_b0/C_ox - Q_ss/C_ox
+  evidence_strength: direct
+  metadata:
+    tag: '20'
+- id: A-MOS-GAMMA-21
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ21
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1737
+    line_end: 1737
+    char_start: 117084
+    char_end: 117160
+  viewer_span:
+    file: source.md
+    line_start: 998
+    line_end: 998
+    char_start: 67008
+    char_end: 67084
+    viewer_only: true
+  raw_text: \gamma = \frac {\sqrt {2 q \varepsilon_ {s i} N _ {A}}}{C _ {o x}} \tag {21}
+  normalized_text: gamma = sqrt(2 q eps_si N_A) / C_ox
+  evidence_strength: direct
+  metadata:
+    tag: '21'
+    role: body_factor
+- id: A-MOS-T231
+  section_id: SEC-2.3
+  atom_type: table_row_atom
+  source_element_id: SE-2.3-T231
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1744
+    line_end: 1744
+    char_start: 117368
+    char_end: 117934
+  viewer_span:
+    file: source.md
+    line_start: 1005
+    line_end: 1005
+    char_start: 67292
+    char_end: 67858
+    viewer_only: true
+  raw_text: <table><tr><td>Parameter</td><td>N-CHANNEL (p-type substrate)</td><td>P-CHANNEL (n-type substrate)</td></tr><tr><td> $\phi_{MS}$ </td><td></td><td></td></tr><tr><td>Metal</td><td>-</td><td>-</td></tr><tr><td> $n^{+}$  Si Gate</td><td>-</td><td>-</td></tr><tr><td> $p^{+}$  Si Gate</td><td>+</td><td>+</td></tr><tr><td> $\phi_{F}$ </td><td>-</td><td>+</td></tr><tr><td> $Q_{b0},Q_{b}$ </td><td>-</td><td>+</td></tr><tr><td> $Q_{ss}$ </td><td>+</td><td>+</td></tr><tr><td> $V_{SB}$ </td><td>+</td><td>-</td></tr><tr><td> $\gamma$ </td><td>+</td><td>-</td></tr></table>
+  normalized_text: 'Signs of threshold-voltage quantities, N-channel (p-type substrate) vs P-channel (n-type substrate): phi_F -/+ ; Q_b0,Q_b -/+ ; Q_ss +/+ ; V_SB +/- ; gamma +/-.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2.3-1
+- id: A-MOS-ID-27
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ27
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1833
+    line_end: 1833
+    char_start: 122326
+    char_end: 122575
+  viewer_span:
+    file: source.md
+    line_start: 1094
+    line_end: 1094
+    char_start: 72250
+    char_end: 72499
+    viewer_only: true
+  raw_text: i _ {D} = \frac {\mu_ {n} C _ {o x} W}{L} \left[ (v _ {G S} - V _ {T}) v (y) - \frac {v (y) ^ {2}}{2} \right] _ {0} ^ {v _ {D S}} = \frac {\mu_ {n} C _ {o x} W}{L} \left[ (v _ {G S} - V _ {T}) v _ {D S} - \frac {v _ {D S} ^ {2}}{2} \right] \tag {27}
+  normalized_text: i_D = (mu_n C_ox W / L)[(v_GS - V_T) v_DS - v_DS^2/2]
+  evidence_strength: direct
+  metadata:
+    tag: '27'
+    role: drain_current
+- id: A-MOS-COND-28
+  section_id: SEC-2.3
+  atom_type: condition_atom
+  source_element_id: SE-2.3-EQ28
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1839
+    line_end: 1839
+    char_start: 122750
+    char_end: 122833
+  viewer_span:
+    file: source.md
+    line_start: 1100
+    line_end: 1100
+    char_start: 72674
+    char_end: 72757
+    viewer_only: true
+  raw_text: v _ {G S} \geq V _ {T} \text { and } v _ {D S} \leq (v _ {G S} - V _ {T}) \tag {28}
+  normalized_text: v_GS >= V_T and v_DS <= (v_GS - V_T)
+  evidence_strength: direct
+  metadata:
+    tag: '28'
+- id: A-MOS-KP-29
+  section_id: SEC-2.3
+  atom_type: formula_atom
+  source_element_id: SE-2.3-EQ29
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1845
+    line_end: 1845
+    char_start: 122947
+    char_end: 123039
+  viewer_span:
+    file: source.md
+    line_start: 1106
+    line_end: 1106
+    char_start: 72871
+    char_end: 72963
+    viewer_only: true
+  raw_text: K ^ {\prime} = \mu_ {n} C _ {o x} = \frac {\mu_ {n} \varepsilon_ {o x}}{t _ {o x}} \tag {29}
+  normalized_text: K' = mu_n C_ox = mu_n eps_ox / t_ox
+  evidence_strength: direct
+  metadata:
+    tag: '29'
+    role: transconductance_param
+- id: A-EX231-PROBLEM
+  section_id: SEC-EX231
+  atom_type: example_problem_atom
+  source_element_id: SE-EX231
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1748
+    line_end: 1748
+    char_start: 117990
+    char_end: 118116
+  viewer_span:
+    file: source.md
+    line_start: 1009
+    line_end: 1009
+    char_start: 67914
+    char_end: 68040
+    viewer_only: true
+  raw_text: Find the threshold voltage and body factor $\gamma$ for an n-channel transistor with an $\mathfrak { n } ^ { + }$ silicon gate
+  normalized_text: Find the threshold voltage V_T0 and body factor gamma for an n-channel transistor with an n+ silicon gate.
+  evidence_strength: direct
+- id: A-EX231-GIVEN
+  section_id: SEC-EX231
+  atom_type: given_atom
+  source_element_id: SE-EX231
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1748
+    line_end: 1748
+    char_start: 118117
+    char_end: 118420
+  viewer_span:
+    file: source.md
+    line_start: 1009
+    line_end: 1009
+    char_start: 68041
+    char_end: 68344
+    viewer_only: true
+  raw_text: if $t _ { o x } = 2 0 0 \textup { \AA } , N _ { A } = 3 \times 1 0 ^ { 1 6 } \textup c m ^ { - 3 }$ , gate doping, $N _ { D } { = } 4 \times 1 0 ^ { 1 9 } \mathrm { c m } ^ { - 3 }$ , and if the positively-charged ions at the oxide-silicon interface per area is $1 0 ^ { 1 0 } \mathrm { c m } ^ { - 2 }$
+  normalized_text: 'Given: t_ox=200 A, N_A=3e16 cm-3, gate doping N_D=4e19 cm-3, interface charge 1e10 cm-2.'
+  evidence_strength: direct
+- id: A-EX231-USE
+  section_id: SEC-EX231
+  atom_type: formula_usage_atom
+  source_element_id: SE-EX231
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1750
+    line_end: 1796
+    char_start: 118424
+    char_end: 120250
+  viewer_span:
+    file: source.md
+    line_start: 1011
+    line_end: 1057
+    char_start: 68348
+    char_end: 70174
+    viewer_only: true
+  raw_text: 'From Eq. (10), $\phi _ { F }$ (substrate) is given as
+
+
+    $$
+
+    \phi_ {F} (\text { substrate }) = - 0. 0 2 5 9 \ln \left[ \frac {3 \times 1 0 ^ {1 6}}{1 . 4 5 \times 1 0 ^ {1 0}} \right] = - 0. 3 7 7 \mathrm{V}
+
+    $$
+
+
+    The equilibrium electrostatic potential for the $\mathfrak { n } ^ { + }$ polysilicon gate is found from Eq. (11) as
+
+
+    $$
+
+    \phi_ {F} (\text {gate}) = 0. 0 2 5 9 \ln \left[ \frac {4 \times 1 0 ^ {1 9}}{1 . 4 5 \times 1 0 ^ {1 0}} \right] = 0. 5 6 3 \mathrm{V}
+
+    $$
+
+
+    Eq. (17) gives MS as
+
+
+    $$
+
+    \phi_ {F} (\mathrm{substrate}) - \phi_ {F} (\mathrm{gate}) = - 0. 9 4 0 \mathrm{V}.
+
+    $$
+
+
+    The oxide capacitance is given as
+
+
+    $$
+
+    C _ {o x} = \varepsilon_ {o x} / t _ {o x} = \frac {3 . 9 \times 8 . 8 5 4 \times 1 0 ^ {- 1 4}}{2 0 0 \times 1 0 ^ {- 8}} = 1. 7 2 7 \times 1 0 ^ {- 7} \mathrm {F / cm^ {2}}
+
+    $$
+
+
+    The fixed charge in the depletion region, $Q _ { b 0 } ,$ is given by Eq. (15) as
+
+
+    $$
+
+    \begin{array}{l} Q _ {b 0} = - [ 2 \times 1. 6 \times 1 0 ^ {- 1 9} \times 1 1. 7 \times 8. 8 5 4 \times 1 0 ^ {- 1 4} \times 2 \times 0. 3 7 7 \times 3 \times 1 0 ^ {1 6} ] ^ {1 / 2} \\ = - 8. 6 6 \times 1 0 ^ {- 8} \mathrm {C / cm^ {2}}. \\ \end{array}
+
+    $$
+
+
+    Dividing $Q _ { b 0 }$ by $C _ { o x }$ gives −0.501 V. Finally, $Q _ { s s } / C _ { o x }$ is given as
+
+
+    $$
+
+    \frac {Q _ {s s}}{C _ {o x}} = \frac {1 0 ^ {1 0} \times 1 . 6 0 \times 1 0 ^ {- 1 9}}{1 . 7 2 7 \times 1 0 ^ {- 7}} = 9. 3 \times 1 0 ^ {- 3} \mathrm{V}
+
+    $$
+
+
+    Substituting these values in Eq. (18) gives
+
+
+    $$
+
+    V _ {T 0} = - 0. 9 4 0 + 0. 7 5 4 + 0. 5 0 1 - 9. 3 \times 1 0 ^ {- 3} = 0. 3 0 6 \mathrm{V}
+
+    $$
+
+
+    The body factor is found from Eq. (21) as
+
+
+    $$
+
+    \gamma = \frac {\left[ 2 \times 1 . 6 \times 1 0 ^ {- 1 9} \times 1 1 . 7 \times 8 . 8 5 4 \times 1 0 ^ {- 1 4} \times 3 \times 1 0 ^ {1 6} \right] ^ {1 / 2}}{1 . 7 2 7 \times 1 0 ^ {- 7}} = 0. 5 7 7 \mathrm{V} ^ {1 / 2}
+
+    $$'
+  normalized_text: Worked with Eq.(10)/(11) for phi_F, Eq.(17) for phi_MS, C_ox=eps_ox/t_ox, Eq.(15) for Q_b0, Eq.(20) for V_T0, Eq.(21) for gamma.
+  evidence_strength: direct
+- id: A-EX231-RESULT
+  section_id: SEC-EX231
+  atom_type: result_atom
+  source_element_id: SE-EX231
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1750
+    line_end: 1796
+    char_start: 118424
+    char_end: 120250
+  viewer_span:
+    file: source.md
+    line_start: 1011
+    line_end: 1057
+    char_start: 68348
+    char_end: 70174
+    viewer_only: true
+  raw_text: 'From Eq. (10), $\phi _ { F }$ (substrate) is given as
+
+
+    $$
+
+    \phi_ {F} (\text { substrate }) = - 0. 0 2 5 9 \ln \left[ \frac {3 \times 1 0 ^ {1 6}}{1 . 4 5 \times 1 0 ^ {1 0}} \right] = - 0. 3 7 7 \mathrm{V}
+
+    $$
+
+
+    The equilibrium electrostatic potential for the $\mathfrak { n } ^ { + }$ polysilicon gate is found from Eq. (11) as
+
+
+    $$
+
+    \phi_ {F} (\text {gate}) = 0. 0 2 5 9 \ln \left[ \frac {4 \times 1 0 ^ {1 9}}{1 . 4 5 \times 1 0 ^ {1 0}} \right] = 0. 5 6 3 \mathrm{V}
+
+    $$
+
+
+    Eq. (17) gives MS as
+
+
+    $$
+
+    \phi_ {F} (\mathrm{substrate}) - \phi_ {F} (\mathrm{gate}) = - 0. 9 4 0 \mathrm{V}.
+
+    $$
+
+
+    The oxide capacitance is given as
+
+
+    $$
+
+    C _ {o x} = \varepsilon_ {o x} / t _ {o x} = \frac {3 . 9 \times 8 . 8 5 4 \times 1 0 ^ {- 1 4}}{2 0 0 \times 1 0 ^ {- 8}} = 1. 7 2 7 \times 1 0 ^ {- 7} \mathrm {F / cm^ {2}}
+
+    $$
+
+
+    The fixed charge in the depletion region, $Q _ { b 0 } ,$ is given by Eq. (15) as
+
+
+    $$
+
+    \begin{array}{l} Q _ {b 0} = - [ 2 \times 1. 6 \times 1 0 ^ {- 1 9} \times 1 1. 7 \times 8. 8 5 4 \times 1 0 ^ {- 1 4} \times 2 \times 0. 3 7 7 \times 3 \times 1 0 ^ {1 6} ] ^ {1 / 2} \\ = - 8. 6 6 \times 1 0 ^ {- 8} \mathrm {C / cm^ {2}}. \\ \end{array}
+
+    $$
+
+
+    Dividing $Q _ { b 0 }$ by $C _ { o x }$ gives −0.501 V. Finally, $Q _ { s s } / C _ { o x }$ is given as
+
+
+    $$
+
+    \frac {Q _ {s s}}{C _ {o x}} = \frac {1 0 ^ {1 0} \times 1 . 6 0 \times 1 0 ^ {- 1 9}}{1 . 7 2 7 \times 1 0 ^ {- 7}} = 9. 3 \times 1 0 ^ {- 3} \mathrm{V}
+
+    $$
+
+
+    Substituting these values in Eq. (18) gives
+
+
+    $$
+
+    V _ {T 0} = - 0. 9 4 0 + 0. 7 5 4 + 0. 5 0 1 - 9. 3 \times 1 0 ^ {- 3} = 0. 3 0 6 \mathrm{V}
+
+    $$
+
+
+    The body factor is found from Eq. (21) as
+
+
+    $$
+
+    \gamma = \frac {\left[ 2 \times 1 . 6 \times 1 0 ^ {- 1 9} \times 1 1 . 7 \times 8 . 8 5 4 \times 1 0 ^ {- 1 4} \times 3 \times 1 0 ^ {1 6} \right] ^ {1 / 2}}{1 . 7 2 7 \times 1 0 ^ {- 7}} = 0. 5 7 7 \mathrm{V} ^ {1 / 2}
+
+    $$'
+  normalized_text: phi_F(sub)=-0.377 V; phi_F(gate)=0.563 V; phi_MS=-0.940 V; C_ox=1.727e-7 F/cm2; Q_b0=-8.66e-8 C/cm2; V_T0=0.306 V; gamma=0.577 V^(1/2).
+  evidence_strength: direct
+- id: A-CAP-DESIRED
+  section_id: SEC-2.4-CAP
+  atom_type: design_principle_atom
+  source_element_id: SE-2.4-CAP-DESIRED
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1856
+    line_end: 1861
+    char_start: 123539
+    char_end: 124090
+  viewer_span:
+    file: source.md
+    line_start: 1117
+    line_end: 1122
+    char_start: 73463
+    char_end: 74014
+    viewer_only: true
+  raw_text: "A good capacitor is often required when designing analog integrated circuits. They are used as compensation capacitors in amplifier designs, as bandwidth-determining components in gm/C filters, as charge storage devices in switched-capacitor filters and digital-to-analog converters, and other places as well. The desired characteristics for capacitors used in these applications are given below:\n\n• Good matching accuracy   \n• Low voltage-coefficient   \n• High ratio of desired capacitance to parasitic capacitance   \n• High capacitance per unit area"
+  normalized_text: 'Desired characteristics for analog capacitors: good matching accuracy, low voltage coefficient, high ratio of desired to parasitic capacitance, high capacitance per unit area.'
+  evidence_strength: direct
+- id: A-CAP-TYPES
+  section_id: SEC-2.4-CAP
+  atom_type: component_model_atom
+  source_element_id: SE-2.4-CAP-TYPES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 1863
+    line_end: 1915
+    char_start: 124092
+    char_end: 127501
+  viewer_span:
+    file: source.md
+    line_start: 1124
+    line_end: 1176
+    char_start: 74016
+    char_end: 77425
+    viewer_only: true
+  raw_text: "Analog CMOS processes differentiate themselves from purely digital ones by providing capacitors that meet the above criteria. For such analog processes, there are basically two types of capacitors made available. One type of capacitor is formed using one of the available interconnect layer s (metal or polysilicon) on top of crystalline silicon separated by a dielectric (silicon dioxide layer). Figure 2.4-1(a) shows an example of this capacitor using polysilicon as the top conducting plate. In order to achieve a low voltagecoefficient capacitor, the bottom plate must be heavily-doped diffusion (similar to that of the source and drain). As the process was described in Sec. 2.3, such heavily-doped diffusion is normally not available underneath polysilicon because the source/drain implant step occurs after polysilicon is deposited and defined. To solve this problem, an extra implant step must be included prior to deposition of the polysilicon layer. The mask-defined implanted region becomes the bottom plate of the capacitor. The capacitance achieved using this technique is inversely proportional to gate oxide thickness. Typical values for a 0.8 m process are given in Table 2.4-1. This capacitor achieves a high capacitance per unit area and good matching performance, but has a significant voltage dependent parasitic capacitance to the substrate.\n\n![](images/399d1383c8805168881b014a4398d48564509c970cf62f1bbd5122da0d9e774c.jpg)\n\n<details>\n<summary>text_image</summary>\n\nSiO₂\nGate SiO₂\nMetal\nPolysilicon top plate\nFOX\nFOX\nn+ bottom-plate implant\np- substrate\n</details>\n\n![](images/fa12a5923a2f5949b7c0ba2ecacac8efb21cd92b263a2c8e852ced8c39963c2b.jpg)\n\n<details>\n<summary>text_image</summary>\n\nPolysilicon top plate\nPolysilicon bottom plate\nFOX\nInter-poly SiO₂\np- substrate\n</details>\n\n(b)\n\n![](images/f13820b4c64f9359d8ffb5f8cf05b40d90366a9679d9f52a8a767a31c3796ce0.jpg)\n\n<details>\n<summary>text_image</summary>\n\nSiO₂\nGate SiO₂\nMetal\nPolysilicon top plate\nFOX\nn- well\nFOX\np- substrate\nn+ diffusion\n</details>\n\n(c)   \nFigure 2.4-1 MOS capacitors. (a) Polysilicon-oxide-channel. (b) Polysilicon-oxide-polysilicon (c) Accumulation MOS capacitor.\n\nThe second type of capacitor available in analog-taylored processes is that formed by providing an additional polysilicon layer on top of gate polysilicon (separated by a dielectric). An example of a double polysilicon capacitor is illustrated in Fig. 2.4-1(b). The dielectric is formed by a thin silicon-dioxide layer which can only be produced by using several steps beyond the usual single polysilicon process. This capacitor does an excellent job of meeting the criteria set forth above. In fact, it is the best of all possible choices for high-performance capacitors. Typical values for a 0.8µm process are given in Table 2.4-1.\n\nA third type of capacitor is illustrated in Fig. 2.4-1(c). This capacitor is constructed by putting an n-well underneath an n-channel transistor. It is similar to the capacitor in Fig2.4-1(a) except that its bottom plate (the n-well) has a much higher resistivity. Because of this fact, it is not used in circuits where a low voltage coefficient is important. It is, however, often used when one terminal of the capacitor is connected to ground (or VSS). It offers a very high capacitance per unit area, it can be matched well, and is available in all CMOS processes because no unique steps or masks are required."
+  normalized_text: 'Three analog capacitor types: (a) polysilicon-oxide over an n+ bottom-plate implant (high C/area, good matching, voltage-dependent parasitic); (b) double-polysilicon (best high-performance choice); (c) accumulation MOS capacitor (n-well bottom plate, higher resistivity, used when one terminal is at ground/VSS).'
+  evidence_strength: direct
+- id: A-CAP-COEFF
+  section_id: SEC-2.4-CAP
+  atom_type: physical_effect_atom
+  source_element_id: SE-2.4-CAP-COEFF
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2013
+    line_end: 2013
+    char_start: 131157
+    char_end: 131738
+  viewer_span:
+    file: source.md
+    line_start: 1274
+    line_end: 1274
+    char_start: 81081
+    char_end: 81662
+    viewer_only: true
+  raw_text: The voltage coefficient of integrated capacitors generally falls within the range of 0 to −200 ppm/V depending upon the structure of the capacitor and, if applicable, the doping concentration of the capacitor plates [32]. The temperature coefficient of integrated capacitors is found to be in the range of 20 to 50 ppm/°C. When considering the ratio of two capacitors on the same substrate, note that the variations on the absolute value of the capacitor due to temperature tend to cancel. Therefore temperature variations have little effect on the matching accuracy of capacitors.
+  normalized_text: Integrated-capacitor voltage coefficient is 0 to -200 ppm/V; temperature coefficient 20-50 ppm/C; in a capacitor ratio the absolute temperature variations tend to cancel, so temperature has little effect on matching.
+  evidence_strength: direct
+- id: A-RES-TYPES
+  section_id: SEC-2.4-RES
+  atom_type: component_model_atom
+  source_element_id: SE-2.4-RES-TYPES
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2035
+    line_end: 2039
+    char_start: 133939
+    char_end: 135480
+  viewer_span:
+    file: source.md
+    line_start: 1296
+    line_end: 1300
+    char_start: 83863
+    char_end: 85404
+    viewer_only: true
+  raw_text: 'A diffused resistor is formed using source/drain diffusion and is shown in Fig. 2.4-4(a). The sheet resistance of such resistors in a non-salicided process is usually in the range of 50 to 150 Ω/❑ (Ohms per square as explained in Sec 2.6). For a salicide process, these resistors are in the range of 5 to 15 Ω/❑. The fact that the source/drain diffusion is needed as a conductor in integrated circuits conflicts with its use as a resistor. Clearly the goal of a salicide process is to achieve “conductor-like” performance from source/drain diffusion. In these processes, a salicide block can be used to mask the silicide film thus allowing for a high-resistance source/drain diffusion where desired. The diffused resistor is found to have a voltage coefficient of resistance in the 100 to 500 ppm/V range. The parasitic capacitance to ground is also voltage dependent in this type of resistor.
+
+
+    A polysilicon resistor is shown in Fig. 2.4-4(b). This resistor is surrounded by thick oxide and has a sheet resistance in the range of 30 to 200 Ω/❑ depending upon doping levels. For a polysilicide process, the effective resistance of the polysilicon is about 10 Ω/❑.
+
+
+    An n-well resistor shown in Fig. 2.4-4(c) is made up of a strip of n-well contacted at both ends with $\mathfrak { n } ^ { + }$ source/drain diffusion. This type of resistor has a resistance of 1 to 10 kΩ/❑ and a high value for its voltage coefficient. In cases where accuracy is not required, such as pull-up resistors, or protection resistors, this structure is very useful.'
+  normalized_text: 'Three resistor types: diffused source/drain (50-150 Ohm/sq non-salicided, 5-15 salicided), polysilicon (30-200 Ohm/sq), n-well (1-10 kOhm/sq, high voltage coefficient, used for pull-up/protection).'
+  evidence_strength: direct
+- id: A-PASS-T241
+  section_id: SEC-2.4
+  atom_type: table_row_atom
+  source_element_id: SE-2.4-T241
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2090
+    line_end: 2090
+    char_start: 136439
+    char_end: 137678
+  viewer_span:
+    file: source.md
+    line_start: 1351
+    line_end: 1351
+    char_start: 86363
+    char_end: 87602
+    viewer_only: true
+  raw_text: <table><tr><td>Component Type</td><td>Range of Values</td><td>Matching Accuracy</td><td>Temperature Coefficient</td><td>Voltage Coefficient</td></tr><tr><td>Poly/poly capacitor</td><td> $0.8-1.0 \text{ fF}/\mu\text{m}^{2}$ </td><td>0.05%</td><td>50 ppm/°C</td><td>50ppm/V</td></tr><tr><td>MOS capacitor</td><td> $2.2-2.7 \text{ fF}/\mu\text{m}^{2}$ </td><td>0.05%</td><td>50 ppm/°C</td><td>50ppm/V</td></tr><tr><td>M1-Poly capacitor</td><td> $0.021-0.025 \text{ fF}/\mu\text{m}^{2}$ </td><td>1.5%</td><td></td><td></td></tr><tr><td>M2-M1 capacitor</td><td> $0.021-0.025 \text{ fF}/\mu\text{m}^{2}$ </td><td>1.5%</td><td></td><td></td></tr><tr><td>M3-M2 capacitor</td><td> $0.021-0.025 \text{ fF}/\mu\text{m}^{2}$ </td><td>1.5%</td><td></td><td></td></tr><tr><td>P+ Diffused resistor</td><td> $80-150 \Omega/\square$ </td><td>0.4%</td><td>1500 ppm/°C</td><td>200ppm/V</td></tr><tr><td>N+ Diffused resistor</td><td> $50-80 \Omega/\square$ </td><td>0.4%</td><td>1500 ppm/°C</td><td>200ppm/V</td></tr><tr><td>Poly resistor</td><td> $20-40 \Omega/\square$ </td><td>0.4%</td><td>1500 ppm/°C</td><td>100ppm/V</td></tr><tr><td>N-well resistor</td><td> $1-2 \text{ k}\Omega/\square$ </td><td></td><td>8000 ppm/°C</td><td>10k ppm/V</td></tr></table>
+  normalized_text: poly/poly cap 0.8-1.0 fF/um2 (match 0.05%, 50 ppm/C, 50 ppm/V); MOS cap 2.2-2.7 fF/um2; metal caps 0.021-0.025 fF/um2 (match 1.5%); P+/N+ diffused R 80-150 / 50-80 Ohm/sq (1500 ppm/C, 200 ppm/V); poly R 20-40 Ohm/sq; N-well R 1-2 kOhm/sq (8000 ppm/C, 10k ppm/V).
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2.4-1
+- id: A-BJT-SUBSTRATE
+  section_id: SEC-2.5
+  atom_type: component_model_atom
+  source_element_id: SE-2.5-BJT-SUB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2096
+    line_end: 2096
+    char_start: 138606
+    char_end: 139417
+  viewer_span:
+    file: source.md
+    line_start: 1357
+    line_end: 1357
+    char_start: 88530
+    char_end: 89341
+    viewer_only: true
+  raw_text: Figure 2.5-1 shows how the BJT is implemented for a n-well process. The emitter is the source or drain diffusion of an p-channel device, the base is the n-well (with a base width of $W _ { B } )$ and the p- substrate is the collector. Because the pn junction between the nwell and the p- substrate must be reverse biased, the collector must always be connected to the most negative power-supply voltage, $V _ { S S } .$ . The BJT will still find many useful applications even though the collector is constrained. The BJT illustrated in Fig. 2.5-1 is often called a substrate BJT. The substrate BJT functions like the BJT fabricated in a process designed for BJTs. The only difference is that the collector is constrained and the base width is not well controlled, resulting in a wide variation of current gains.
+  normalized_text: 'A substrate BJT in an n-well process: emitter = p+ S/D of a p-channel device, base = n-well (width W_B), collector = p- substrate; the collector is constrained to V_SS because the n-well/substrate junction must stay reverse biased.'
+  evidence_strength: direct
+- id: A-BJT-LATERAL
+  section_id: SEC-2.5
+  atom_type: component_model_atom
+  source_element_id: SE-2.5-BJT-LAT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2178
+    line_end: 2178
+    char_start: 142727
+    char_end: 143362
+  viewer_span:
+    file: source.md
+    line_start: 1439
+    line_end: 1439
+    char_start: 92651
+    char_end: 93286
+    viewer_only: true
+  raw_text: In addition to the substrate BJT, it is also possible to have a lateral BJT. Figure 2.3-1 can be used to show how the lateral BJT can be implemented. The emitter could be the n+ source of the n-channel device, the base the p- substrate, and the collector the n- well. Although the base is constrained to the substrate potential of the chip, the emitter and collector can have arbitrary voltages. Unfortunately the lateral BJT is not very useful because of the large base width. In fact the lateral BJT is considered more as a parasitic transistor. However, this lateral BJT becomes important in the problem of latch-up of CMOS circuits
+  normalized_text: A lateral BJT (emitter = n+ source, base = p- substrate, collector = n-well) has a large base width and is mostly a parasitic device; it becomes important in CMOS latch-up.
+  evidence_strength: direct
+- id: A-LATCHUP
+  section_id: SEC-2.5
+  atom_type: physical_effect_atom
+  source_element_id: SE-2.5-LATCHUP
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2180
+    line_end: 2182
+    char_start: 143394
+    char_end: 144369
+  viewer_span:
+    file: source.md
+    line_start: 1441
+    line_end: 1443
+    char_start: 93318
+    char_end: 94293
+    viewer_only: true
+  raw_text: 'Latch-up in integrated circuits may be defined as a high current state accompanied by a collapsing or low-voltage condition. Upon application of a radiation transient or certain electrical excitations, the latched or high current state can be triggered. Latch-up can be initiated by at least three regenerative mechanisms. They are: (1) the four-layer, silicon-controlled-rectifier (SCR), regenerative switching action; (2) secondary breakdown; and (3) sustaining voltage breakdown. Because of the multiple p and n diffusions present in CMOS, they are susceptible to SCR latch-up.
+
+
+    Fig. 2.5-3(a) shows a cross-section of Fig. 2.3-1 and how the PNPN SCR is formed. The schematic equivalent of Fig. 2.5-3(a) is given in Fig. 2.5-3(b). Here the SCR action is clearly illustrated. The resistor $R _ { N }$ is the n-well resistance from the base of the vertical PNP (Q 2) to $V _ { D D }$ . The resistor $R _ { P } .$ - is the substrate resistance from the base of the lateral NPN'
+  normalized_text: Latch-up is a high-current / low-voltage state from a parasitic PNPN silicon-controlled-rectifier (SCR) formed by the parasitic lateral NPN and vertical PNP, with n-well resistance R_N and substrate resistance R_P.
+  evidence_strength: direct
+- id: A-LATCHUP-COND-6
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ6
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2227
+    line_end: 2227
+    char_start: 145155
+    char_end: 145200
+  viewer_span:
+    file: source.md
+    line_start: 1488
+    line_end: 1488
+    char_start: 95079
+    char_end: 95124
+    viewer_only: true
+  raw_text: \beta_ {N P N} \beta_ {P N P} \geq 1 \tag {6}
+  normalized_text: beta_NPN * beta_PNP >= 1
+  evidence_strength: direct
+  metadata:
+    tag: '6'
+    role: latchup_condition
+- id: A-LATCHUP-PREVENT
+  section_id: SEC-2.5
+  atom_type: design_principle_atom
+  source_element_id: SE-2.5-PREVENT
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2232
+    line_end: 2232
+    char_start: 145589
+    char_end: 146354
+  viewer_span:
+    file: source.md
+    line_start: 1493
+    line_end: 1493
+    char_start: 95513
+    char_end: 96278
+    viewer_only: true
+  raw_text: To prevent latch-up, several standard precautions are taken. One approach is to keep the source/drain of the n-channel device as far away from the n-well as possible. This reduces the value of $\beta _ { N P N }$ and helps to prevent latch-up. Unfortunately, this is very costly in terms of area. A second approach is to reduce the values of $R _ { N }$ and $R _ { P } .$ . Smaller resistor values are helpful because more current must flow through them in order to forward bias the base-emitter regions of Q1 and Q2. These resistances can be reduced by surrounding the p-channel devices with a n+ guard ring connected to $V _ { D D }$ and by surrounding n-channel transistors with $\mathfrak { p } ^ { + }$ guard rings tied to $V _ { S S }$ as shown in Fig. 2.5-4.
+  normalized_text: 'Latch-up prevention: keep the n-channel S/D far from the n-well (reduces beta_NPN, costs area); reduce R_N/R_P with n+ guard rings to V_DD around p-channel and p+ guard rings to V_SS around n-channel.'
+  evidence_strength: direct
+- id: A-ESD
+  section_id: SEC-2.5
+  atom_type: design_principle_atom
+  source_element_id: SE-2.5-ESD
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2254
+    line_end: 2254
+    char_start: 147168
+    char_end: 148455
+  viewer_span:
+    file: source.md
+    line_start: 1515
+    line_end: 1515
+    char_start: 97092
+    char_end: 98379
+    viewer_only: true
+  raw_text: Another important consideration of CMOS technology is the electrostatic discharge protection of the gates of transistors which are externally accessible. To prevent accidental destruction of the gate oxide, a resistance and two reverse-biased pn junction diodes are employed to form an input protection circuit. One of the diodes is connected with the n side to the highest circuit potential $( V _ { D D } )$ and the p side to the gate to be protected. The other diode is connected with the n side to the gate to be protected and the p side to the lowest circuit potential $( V _ { S S } )$ . This is illustrated in Fig. 2.5-5. For an n-well process, the first diode is usually made by a $\mathfrak { p } ^ { + }$ diffusion into the n- well. The second diode is made by a $\mathfrak { n } ^ { + }$ diffusion into the substrate. The resistor is connected between the external contact and the junction between the diodes and the gate to be protected. If a large voltage is applied to the input, one of the diodes will breakdown depending upon the polarity of the voltage. If the resistor is large enough, it will limit the breakdown current so that the diode is not destroyed. This circuit should be used whenever the gates of a transistor (or transistors) are taken to external circuits.
+  normalized_text: 'ESD protection for externally-accessible gates: a series resistor plus two reverse-biased pn diodes (one to V_DD, one to V_SS) limit breakdown current and protect the gate oxide.'
+  evidence_strength: direct
+- id: A-TCF-7
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ7
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2262
+    line_end: 2262
+    char_start: 148941
+    char_end: 148997
+  viewer_span:
+    file: source.md
+    line_start: 1523
+    line_end: 1523
+    char_start: 98865
+    char_end: 98921
+    viewer_only: true
+  raw_text: T C _ {F} = \frac {1}{X} \cdot \frac {d X}{d T} \tag {7}
+  normalized_text: TC_F = (1/X)(dX/dT)
+  evidence_strength: direct
+  metadata:
+    tag: '7'
+    role: temp_coefficient
+- id: A-MOB-8
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ8
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2270
+    line_end: 2270
+    char_start: 149689
+    char_end: 149726
+  viewer_span:
+    file: source.md
+    line_start: 1531
+    line_end: 1531
+    char_start: 99613
+    char_end: 99650
+    viewer_only: true
+  raw_text: \mu = K _ {\mu} T ^ {- 1. 5} \tag {8}
+  normalized_text: mu = K_mu T^(-1.5)
+  evidence_strength: direct
+  metadata:
+    tag: '8'
+- id: A-VT-TEMP-9
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ9
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2276
+    line_end: 2276
+    char_start: 149840
+    char_end: 149932
+  viewer_span:
+    file: source.md
+    line_start: 1537
+    line_end: 1537
+    char_start: 99764
+    char_end: 99856
+    viewer_only: true
+  raw_text: V _ {T} (\mathrm{T}) = V _ {T} \left(\mathrm{T} _ {0}\right) - \alpha (T - T _ {0}) \tag {9}
+  normalized_text: V_T(T) = V_T(T0) - alpha (T - T0)
+  evidence_strength: direct
+  metadata:
+    tag: '9'
+- id: A-TCF-12
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2296
+    line_end: 2296
+    char_start: 151850
+    char_end: 151958
+  viewer_span:
+    file: source.md
+    line_start: 1557
+    line_end: 1557
+    char_start: 101774
+    char_end: 101882
+    viewer_only: true
+  raw_text: \frac {1}{I _ {S}} \frac {d I _ {S}}{d T} = \frac {3}{T} + \frac {1}{T} \frac {V _ {G o}}{V _ {t}} \tag {12}
+  normalized_text: (1/I_s)(dI_s/dT) = 3/T + (1/T)(V_Go/V_t)
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: reverse_diode_tcf
+- id: A-NOISE-SHOT-18
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ18
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2352
+    line_end: 2352
+    char_start: 155759
+    char_end: 155835
+  viewer_span:
+    file: source.md
+    line_start: 1613
+    line_end: 1613
+    char_start: 105683
+    char_end: 105759
+    viewer_only: true
+  raw_text: \overline {{i}} ^ {2} = 2 q I _ {D} \Delta f (A m p e r e s ^ {2}) \tag {18}
+  normalized_text: i^2 = 2 q I_D df
+  evidence_strength: direct
+  metadata:
+    tag: '18'
+    role: shot_noise
+- id: A-NOISE-THERMAL-19
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ19
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2360
+    line_end: 2360
+    char_start: 156455
+    char_end: 156507
+  viewer_span:
+    file: source.md
+    line_start: 1621
+    line_end: 1621
+    char_start: 106379
+    char_end: 106431
+    viewer_only: true
+  raw_text: \overline {{{v}}} ^ {2} = 4 k T R \Delta f \tag {19}
+  normalized_text: v^2 = 4 k T R df
+  evidence_strength: direct
+  metadata:
+    tag: '19'
+    role: thermal_noise
+- id: A-NOISE-FLICKER-20
+  section_id: SEC-2.5
+  atom_type: formula_atom
+  source_element_id: SE-2.5-EQ20
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2368
+    line_end: 2368
+    char_start: 157004
+    char_end: 157094
+  viewer_span:
+    file: source.md
+    line_start: 1629
+    line_end: 1629
+    char_start: 106928
+    char_end: 107018
+    viewer_only: true
+  raw_text: \overline {{i}} ^ {2} = K _ {f} \left[ \frac {I ^ {a}}{f ^ {b}} \right] \Delta f \tag {20}
+  normalized_text: i^2 = K_f (I^a / f^b) df
+  evidence_strength: direct
+  metadata:
+    tag: '20'
+    role: flicker_noise
+- id: A-EX251-PROBLEM
+  section_id: SEC-EX251
+  atom_type: example_problem_atom
+  source_element_id: SE-EX251
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2303
+    line_end: 2303
+    char_start: 152207
+    char_end: 152351
+  viewer_span:
+    file: source.md
+    line_start: 1564
+    line_end: 1564
+    char_start: 102131
+    char_end: 102275
+    viewer_only: true
+  raw_text: Assume that the temperature is 300 Κ (room temperature) and calculate the reverse diode current change and the $T C _ { F }$ for a 5 Κ increase.
+  normalized_text: At 300 K, calculate the reverse diode current change and TC_F for a 5 K increase.
+  evidence_strength: direct
+- id: A-EX251-RESULT
+  section_id: SEC-EX251
+  atom_type: result_atom
+  source_element_id: SE-EX251
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2305
+    line_end: 2311
+    char_start: 152353
+    char_end: 153047
+  viewer_span:
+    file: source.md
+    line_start: 1566
+    line_end: 1572
+    char_start: 102277
+    char_end: 102971
+    viewer_only: true
+  raw_text: 'The $T C _ { F }$ can be calculated from Eq. (12) as
+
+
+    $$
+
+    T C _ {F} = 0. 0 1 + 0. 1 5 5 = 0. 1 6 5
+
+    $$
+
+
+    Since the $T C _ { F }$ is change per degree, the reverse current will increase by a factor of 1.165 for every degree $\mathbf { K _ { \alpha } } ( \mathrm { o r ~ } ^ { \circ } \mathbf { C } )$ change in temperature. Multiplying by 1.165 five times gives an increase of approximately 2. This implies that the reverse saturation current will approximately double for every $5 ~ ^ { \circ } \mathrm { C }$ temperature increase. Experimentally, the reverse current doubles for every $8 ~ ^ { \circ } \mathrm { C }$ increase in temperature because the reverse current is in part leakage current.'
+  normalized_text: TC_F = 0.01 + 0.155 = 0.165 per degree; reverse current increases ~1.165x per degree, ~2x per 5 C (experimentally ~8 C).
+  evidence_strength: direct
+- id: A-MATCH-UNIT
+  section_id: SEC-2.6-MAT
+  atom_type: design_principle_atom
+  source_element_id: SE-2.6-MATCH
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2397
+    line_end: 2399
+    char_start: 159694
+    char_end: 161000
+  viewer_span:
+    file: source.md
+    line_start: 1658
+    line_end: 1660
+    char_start: 109618
+    char_end: 110924
+    viewer_only: true
+  raw_text: 'The rule for making two components electrically equivalent is simply to draw them as identical units. This is the unit-matching principle. To say that two components are identical means that both they and their surroundings must be identical. This concept can be explained in non-electrical terms.
+
+
+    Consider the two square components, A and B, illustrated in Fig. 2.6-1(a). In this example, these objects could be pieces of metal that are desired after deposition and etching. They have identical shape in area and perimeter as drawn. However, the surroundings seen by A and B are different due to the presence of object C. The presence of object C nearer to object B may cause that object to change in some way different than A. The solution to this is somehow force the surroundings of both geometries A and B to be the same. This can never be achieved perfectly! However, matching performance can normally be improved by at least making the immediate surroundings identical as illustrated in Fig. 2.6-1(b). This general principle will be applied repeatedly to components of various types. When it is desired to match components of different size, optimal matching is achieved when both geometries are made from integer numbers of units with all units being designed applying the unit-matching principle.'
+  normalized_text: 'Unit-matching principle: to make two components electrically equivalent, draw them as identical units (including identical surroundings); for different sizes, build each from an integer number of identical units.'
+  evidence_strength: direct
+- id: A-MATCH-CENTROID
+  section_id: SEC-2.6
+  atom_type: design_principle_atom
+  source_element_id: SE-2.6-CENTROID
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2766
+    line_end: 2766
+    char_start: 178000
+    char_end: 178145
+  viewer_span:
+    file: source.md
+    line_start: 2027
+    line_end: 2027
+    char_start: 127924
+    char_end: 128069
+    viewer_only: true
+  raw_text: If the error is caused by a uniform linear variation in the oxide thickness, then a common centroid geometry can be used to eliminate its effects
+  normalized_text: A common-centroid geometry can be used to eliminate the effect of a uniform linear variation (e.g., in oxide thickness) on a capacitor ratio.
+  evidence_strength: direct
+- id: A-LAY-R-12
+  section_id: SEC-2.6
+  atom_type: formula_atom
+  source_element_id: SE-2.6-EQ12
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2652
+    line_end: 2652
+    char_start: 172462
+    char_end: 172504
+  viewer_span:
+    file: source.md
+    line_start: 1913
+    line_end: 1913
+    char_start: 122386
+    char_end: 122428
+    viewer_only: true
+  raw_text: R = \frac {\rho L}{W T} (\Omega) \tag {12}
+  normalized_text: R = rho L / (W T)
+  evidence_strength: direct
+  metadata:
+    tag: '12'
+    role: bar_resistance
+- id: A-LAY-RS-13
+  section_id: SEC-2.6
+  atom_type: formula_atom
+  source_element_id: SE-2.6-EQ13
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2658
+    line_end: 2658
+    char_start: 172758
+    char_end: 172865
+  viewer_span:
+    file: source.md
+    line_start: 1919
+    line_end: 1919
+    char_start: 122682
+    char_end: 122789
+    viewer_only: true
+  raw_text: R = \left(\frac {\rho}{\mathrm{T}}\right) \frac {L}{W} = \rho_ {\mathrm{S}} \frac {L}{W} (\Omega) \tag {13}
+  normalized_text: R = (rho/T)(L/W) = rho_s (L/W)
+  evidence_strength: direct
+  metadata:
+    tag: '13'
+    role: sheet_resistance
+- id: A-LAY-C-14
+  section_id: SEC-2.6
+  atom_type: formula_atom
+  source_element_id: SE-2.6-EQ14
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2763
+    line_end: 2763
+    char_start: 177345
+    char_end: 177412
+  viewer_span:
+    file: source.md
+    line_start: 2024
+    line_end: 2024
+    char_start: 127269
+    char_end: 127336
+    viewer_only: true
+  raw_text: C = \frac {\varepsilon_ {o x} A}{t _ {o x}} = C _ {o x} A \tag {14}
+  normalized_text: C = eps_ox A / t_ox = C_ox A.
+  evidence_strength: direct
+  metadata:
+    tag: '14'
+    role: ic_capacitance
+- id: A-EX261-PROBLEM
+  section_id: SEC-EX261
+  atom_type: example_problem_atom
+  source_element_id: SE-EX261
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2728
+    line_end: 2728
+    char_start: 174214
+    char_end: 174542
+  viewer_span:
+    file: source.md
+    line_start: 1989
+    line_end: 1989
+    char_start: 124138
+    char_end: 124466
+    viewer_only: true
+  raw_text: Given a polysilicon resistor like that drawn in Fig. 2.6-8(a) with W=0.8 m and L=20 m, calculate $\rho _ { \mathrm { s } }$ (in Ω/❑), the number of squares of resistance, and the resistance value. Assume that $\rho$ for polysilicon is $9 \times 1 0 ^ { - 4 }$ Ω-cm and polysilicon is 3000 Å thick. Ignore any contact resistance.
+  normalized_text: For a polysilicon resistor W=0.8 um, L=20 um, compute rho_s, number of squares, and R. Given rho=9e-4 Ohm-cm, thickness 3000 A.
+  evidence_strength: direct
+- id: A-EX261-RESULT
+  section_id: SEC-EX261
+  atom_type: result_atom
+  source_element_id: SE-EX261
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2730
+    line_end: 2746
+    char_start: 174544
+    char_end: 175004
+  viewer_span:
+    file: source.md
+    line_start: 1991
+    line_end: 2007
+    char_start: 124468
+    char_end: 124928
+    viewer_only: true
+  raw_text: 'First calculate $\rho _ { \mathrm { s } }$
+
+
+    $$
+
+    \rho_ {\mathrm{S}} = \frac {\rho}{\mathrm{T}} = \frac {9 \times 1 0 ^ {- 4} \Omega \cdot \mathrm{cm}}{3 0 0 0 \times 1 0 ^ {- 8} \mathrm{cm}} = 3 0 \Omega / \square
+
+    $$
+
+
+    The number of squares of resistance, N, is
+
+
+    $$
+
+    \mathrm{N} = \frac {L}{W} = \frac {2 0 \mu \mathrm{m}}{0 . 8 \mu \mathrm{m}} = 2 5
+
+    $$
+
+
+    giving the total resistance as
+
+
+    $$
+
+    R = \rho_ {\mathrm{S}} \times \mathrm{N} = 3 0 \times 2 5 = 7 5 0 \Omega
+
+    $$'
+  normalized_text: rho_s = rho/T = 30 Ohm/sq; N = L/W = 25; R = rho_s x N = 750 Ohm.
+  evidence_strength: direct
+- id: A-RULES-T261
+  section_id: SEC-2.6-RULE
+  atom_type: design_rule_atom
+  source_element_id: SE-2.6-T261
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2788
+    line_end: 2850
+    char_start: 181447
+    char_end: 183330
+  viewer_span:
+    file: source.md
+    line_start: 2049
+    line_end: 2111
+    char_start: 131371
+    char_end: 133254
+    viewer_only: true
+  raw_text: "<table><tr><td>1.</td><td>N-Well</td></tr><tr><td></td><td>1A. width 6</td></tr><tr><td></td><td>1B. spacing (same potential)8</td></tr><tr><td></td><td>1C. spacing (different potential)22</td></tr><tr><td>2.</td><td>Active Area (AA)</td></tr><tr><td></td><td>2A. width 4</td></tr><tr><td></td><td>Spacing to Well</td></tr><tr><td></td><td>2B. AA-n contained in n-Well1</td></tr></table>\n\n<!-- MinerU pages 81-100 -->\n\n2C. AA-n external to n-Well... .10   \n2D. AA-p contained in n-Well . 3   \n2E. AA-p external to n-Well..   \nSpacing to other AA (inside or outside well)   \n2F. AA to AA (p or n) ..... .3\n\n3. Polysilicon Gate (Capacitor bottom plate)\n\n3A. width.. .2   \n3B. spacing....... .3   \n3C. spacing of polysilicon to AA (over field)...   \n3D. extension of gate beyond AA (transistor width direction) ....2   \n3E. spacing of gate to edge of AA (transistor length direction) ..4\n\n4. Polysilicon Capacitor top plate\n\n4A. width.. .2   \n4B. spacing.... .2   \n4C. spacing to inside of polysilicon gate (bottom plate)..............2\n\n5. Contacts\n\n5A. size ..2x2   \n5B. spacing.. .4   \n5C. spacing to polysilicon gate ........   \n5D. spacing polysilicon contact to AA... .2   \n5E. metal overlap of contact ....   \n5F. AA overlap of contact .... .2   \n5G. polysilicon overlap of contact . 2   \n5H. capacitor top plate overlap of contact.... .2\n\n6. Metal-1\n\n6A. width... (   \n6B. spacing.... .3\n\n7. Via\n\n7A. size ..3x3   \n7B. spacing....... .4   \n7C. enclosure by Metal-1.. .2   \n7D. enclosure by Metal-2.. .2\n\n8. Metal-2\n\n8A. width...   \n8B. spacing....... .3\n\nBonding Pad\n\n8C. spacing to AA... ..24   \n8D. spacing to metal circuitry ...... ..24   \n8E. spacing to polysilicon gate ..... .24\n\n9. Passivation Opening (Pad)\n\n9A. bonding-pad opening........ ....100 m x 100 m   \n9B. bonding-pad opening enclosed by Metal-2 . .8   \n9C. bonding-pad opening to pad opening space ...... ...40"
+  normalized_text: 'Table 2.6-1 layout rules (units of minimum resolution lambda): N-well width 6, spacing 8/22; active area width 4, AA-AA 3; poly gate width 2, spacing 3, gate extension beyond AA 2, gate-to-AA-edge 4; cap top plate width/spacing 2; contact 2x2, spacing 4, overlaps 2; metal-1 spacing 3; via 3x3, spacing 4, enclosure 2; metal-2 spacing 3; bonding-pad opening 100um x 100um.'
+  evidence_strength: direct
+  metadata:
+    table_id: Table 2.6-1
+    basis: lambda = half the minimum geometry
+- id: A-SUMMARY
+  section_id: SEC-2.7
+  atom_type: summary_atom
+  source_element_id: SE-2.7-P
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2854
+    line_end: 2862
+    char_start: 183347
+    char_end: 185594
+  viewer_span:
+    file: source.md
+    line_start: 2115
+    line_end: 2123
+    char_start: 133271
+    char_end: 135518
+    viewer_only: true
+  raw_text: 'This chapter has introduced CMOS technology from the viewpoint of its use to implement analog circuits. The basic semiconductor fabrication processes were described in order to understand the fundamental elements of this technology. The basic fabrication steps include diffusion, implantation, deposition, etching, and oxide growth. These steps are implemented by the use of photolithographic methods which limit the processing steps to certain physical areas of the silicon wafer. The basic processing steps needed to implement a typical silicon-gate CMOS process were described next.
+
+
+    The pn junction was reviewed following the introduction to CMOS technology because it plays an important role in all semiconductor devices. This review examined a step pn junction and developed the physical dimensions, the depletion capacitance, and the voltage-current characteristics of the pn junction. Next, the MOS transistor was introduced and characterized with respect to its behavior. It was shown how the channel between the source and drain is formed and the influence of the gate voltage upon this channel was discussed. The MOS transistor is physically a very simple component. Finally, the steps necessary to fabricate the transistor were presented.
+
+
+    A discussion of possible passive components that can be achieved in CMOS technology followed. These components include only resistors and capacitors. The absolute accuracy of these components depends on their edge uncertainties and improves as the components are made physically larger. The relative accuracy of passive components depends upon type and layout.
+
+
+    The next section discussed further considerations of CMOS technology. These considerations included: the substrate and lateral BJTs compatible with the CMOS process; latch-up, which occurs under certain high-current conditions; the temperature dependence of CMOS components; and the noise sources in these components.
+
+
+    The last section covered the geometrical definition of CMOS devices. This focused on the physical constraints that insure that the devices will work correctly after fabrication. This material will lead naturally to the next chapter where circuit models are developed to be used in analyzing and designing circuits.'
+  normalized_text: 'Chapter 2 summary: basic fabrication steps (oxidation, diffusion, implantation, deposition, etching) via photolithography; the silicon-gate CMOS process; the pn junction (dimensions, depletion capacitance, I-V); the MOS transistor; passive resistors/capacitors; other considerations (BJT, latch-up, temperature, noise); and IC layout.'
+  evidence_strength: direct
+  context_only: true
+- id: A-PROB-1
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2906
+    line_end: 2906
+    char_start: 186425
+    char_end: 186530
+  viewer_span:
+    file: source.md
+    line_start: 2167
+    line_end: 2167
+    char_start: 136349
+    char_end: 136454
+    viewer_only: true
+  raw_text: '1. List the five basic MOS fabrication processing steps and give the purpose or function of each step.   '
+  normalized_text: 1. List the five basic MOS fabrication processing steps and give the purpose or function of each.
+  evidence_strength: direct
+- id: A-PROB-4
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2909
+    line_end: 2909
+    char_start: 186858
+    char_end: 186916
+  viewer_span:
+    file: source.md
+    line_start: 2170
+    line_end: 2170
+    char_start: 136782
+    char_end: 136840
+    viewer_only: true
+  raw_text: '4. Repeat Example 2.2-1 if the applied voltage is -2 V.   '
+  normalized_text: 4. Repeat Example 2.2-1 if the applied voltage is -2 V.
+  evidence_strength: direct
+- id: A-PROB-8
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2913
+    line_end: 2913
+    char_start: 187348
+    char_end: 187473
+  viewer_span:
+    file: source.md
+    line_start: 2174
+    line_end: 2174
+    char_start: 137272
+    char_end: 137397
+    viewer_only: true
+  raw_text: '8. What is the breakdown voltage of a pn junction with $N _ { A } = N _ { D } = 1 0 ^ { 1 6 } / \mathrm { c m } ^ { 3 } ?$   '
+  normalized_text: 8. What is the breakdown voltage of a pn junction with N_A = N_D = 1e16 / cm3?
+  evidence_strength: direct
+- id: A-PROB-11
+  section_id: SEC-PROB
+  atom_type: problem_statement_atom
+  source_element_id: SE-PROB
+  source_span:
+    file: CMOS_Analog_Circuit_Design_-_Allen_Holberg_mineru.md
+    line_start: 2916
+    line_end: 2916
+    char_start: 187830
+    char_end: 187946
+  viewer_span:
+    file: source.md
+    line_start: 2177
+    line_end: 2177
+    char_start: 137754
+    char_end: 137870
+    viewer_only: true
+  raw_text: '11. If $V _ { S B } = 2 \mathrm { V }$ , find the value of $V _ { T }$ for the n-channel transistor of Ex. 2.3-1.   '
+  normalized_text: 11. If V_SB = 2 V, find the value of V_T for the n-channel transistor of Ex. 2.3-1.
+  evidence_strength: direct
+semantic_chunks:
+- id: C-OV
+  profile: textbook
+  chunk_type: chapter_overview_block
+  section_path: '2'
+  atom_ids:
+  - A-INTRO-TECH
+  - A-SUMMARY
+  central_atom_ids:
+  - A-INTRO-TECH
+  boundary_reason: chapter scope (intro + summary)
+  extraction_targets: &id001
+  - Concept
+  gold_must_cover_atoms:
+  - A-INTRO-TECH
+- id: C-FAB-STEPS
+  profile: textbook
+  chunk_type: technology_process_block
+  section_path: 2 > 2.1
+  atom_ids:
+  - A-FAB-OXID
+  - A-FAB-DIFF
+  - A-FAB-IMP
+  - A-FAB-DEP
+  - A-FAB-ETCH
+  central_atom_ids:
+  - A-FAB-OXID
+  - A-FAB-DIFF
+  - A-FAB-IMP
+  - A-FAB-DEP
+  - A-FAB-ETCH
+  boundary_reason: five fabrication steps, each a knowledge unit
+  extraction_targets: &id002
+  - TechnologyProcess
+  gold_must_cover_atoms:
+  - A-FAB-OXID
+  - A-FAB-DIFF
+  - A-FAB-IMP
+  - A-FAB-DEP
+  - A-FAB-ETCH
+- id: C-FAB-ETCH-F
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 2 > 2.1 > Etching
+  atom_ids:
+  - A-FAB-ETCH
+  - A-FAB-SEL-1
+  - A-FAB-ANI-2
+  central_atom_ids:
+  - A-FAB-SEL-1
+  - A-FAB-ANI-2
+  boundary_reason: selectivity/anisotropy formulas with their defining sentence
+  extraction_targets: &id003
+  - Formula
+  gold_must_cover_atoms:
+  - A-FAB-SEL-1
+  - A-FAB-ANI-2
+- id: C-FAB-PHOTO
+  profile: textbook
+  chunk_type: technology_process_block
+  section_path: 2 > 2.1 > Photolithography
+  atom_ids:
+  - A-FAB-PHOTO
+  - A-FAB-PRINT
+  central_atom_ids:
+  - A-FAB-PHOTO
+  boundary_reason: photolithography process + printing-system taxonomy
+  extraction_targets: &id004
+  - TechnologyProcess
+  - Concept
+  gold_must_cover_atoms:
+  - A-FAB-PHOTO
+  - A-FAB-PRINT
+- id: C-FAB-NWELL
+  profile: textbook
+  chunk_type: process_flow_block
+  section_path: 2 > 2.1 > N-Well CMOS Fabrication Steps
+  atom_ids:
+  - A-FAB-NWELL-FLOW
+  - A-FAB-NW-CHSTOP
+  - A-FAB-NW-LOCOS
+  - A-FAB-BIRDSBEAK
+  - A-FAB-LDD
+  - A-FAB-SALICIDE
+  central_atom_ids:
+  - A-FAB-NWELL-FLOW
+  boundary_reason: continuous (a)-(o) fabrication flow + the silicide/salicide enhancement that follows it
+  extraction_targets: &id005
+  - ProcessFlow
+  - PhysicalEffect
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-FAB-NWELL-FLOW
+  - A-FAB-NW-LOCOS
+  - A-FAB-BIRDSBEAK
+  - A-FAB-SALICIDE
+- id: C-PN-DERIV
+  profile: textbook
+  chunk_type: derivation_block
+  section_path: 2 > 2.2
+  atom_ids:
+  - A-PN-CONCEPT
+  - A-PN-XD-1
+  - A-PN-PHI-6
+  - A-PN-XN-7
+  - A-PN-XP-8
+  - A-PN-XD-9
+  - A-PN-QJ-10
+  - A-PN-EO-11
+  - A-PN-CJ-12
+  - A-PN-CJ0-DEF
+  - A-PN-COND
+  central_atom_ids:
+  - A-PN-CJ-12
+  boundary_reason: phi_o -> x_d -> Q_j -> C_j derivation chain kept continuous
+  extraction_targets: &id006
+  - Formula
+  - Variable
+  - Derivation
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-PN-PHI-6
+  - A-PN-XD-9
+  - A-PN-QJ-10
+  - A-PN-CJ-12
+  - A-PN-CJ0-DEF
+- id: C-PN-DIODE
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 2 > 2.2
+  atom_ids:
+  - A-PN-BV-13
+  - A-PN-AVALANCHE
+  - A-PN-IRA-14
+  - A-PN-DIODE-24
+  central_atom_ids:
+  - A-PN-DIODE-24
+  boundary_reason: breakdown + diode I-V equations
+  extraction_targets: &id007
+  - Formula
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-PN-DIODE-24
+  - A-PN-BV-13
+- id: C-EX-221
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 2 > 2.2 > Example 2.2-1
+  atom_ids:
+  - A-EX221-PROBLEM
+  - A-EX221-GIVEN
+  - A-EX221-USE
+  - A-EX221-RESULT
+  central_atom_ids:
+  - A-EX221-PROBLEM
+  boundary_reason: problem/given/formula-usage/result continuous
+  extraction_targets: &id008
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX221-PROBLEM
+  - A-EX221-GIVEN
+  - A-EX221-USE
+  - A-EX221-RESULT
+- id: C-EX-222
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 2 > 2.2 > Example 2.2-2
+  atom_ids:
+  - A-EX222-PROBLEM
+  - A-EX222-RESULT
+  central_atom_ids:
+  - A-EX222-PROBLEM
+  boundary_reason: saturation-current worked example
+  extraction_targets: &id009
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX222-PROBLEM
+  - A-EX222-RESULT
+- id: C-MOS-VT
+  profile: textbook
+  chunk_type: derivation_block
+  section_path: 2 > 2.3
+  atom_ids:
+  - A-MOS-STRUCT
+  - A-MOS-STRONGINV
+  - A-MOS-PHIF-10
+  - A-MOS-QB-16
+  - A-MOS-VT-18
+  - A-MOS-VT-19
+  - A-MOS-VT0-20
+  - A-MOS-GAMMA-21
+  - A-MOS-T231
+  central_atom_ids:
+  - A-MOS-VT-19
+  boundary_reason: threshold-voltage derivation chain + body factor + sign table
+  extraction_targets: &id010
+  - Concept
+  - Formula
+  - Variable
+  - Derivation
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-MOS-VT-19
+  - A-MOS-VT0-20
+  - A-MOS-GAMMA-21
+  - A-MOS-STRONGINV
+- id: C-MOS-ID
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 2 > 2.3
+  atom_ids:
+  - A-MOS-ID-27
+  - A-MOS-COND-28
+  - A-MOS-KP-29
+  central_atom_ids:
+  - A-MOS-ID-27
+  boundary_reason: Sah drain-current equation, validity condition, and K' kept together
+  extraction_targets: &id011
+  - Formula
+  - Variable
+  gold_must_cover_atoms:
+  - A-MOS-ID-27
+  - A-MOS-COND-28
+  - A-MOS-KP-29
+- id: C-EX-231
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 2 > 2.3 > Example 2.3-1
+  atom_ids:
+  - A-EX231-PROBLEM
+  - A-EX231-GIVEN
+  - A-EX231-USE
+  - A-EX231-RESULT
+  central_atom_ids:
+  - A-EX231-PROBLEM
+  boundary_reason: threshold-voltage worked example continuous
+  extraction_targets: &id012
+  - ExampleProblem
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX231-PROBLEM
+  - A-EX231-GIVEN
+  - A-EX231-USE
+  - A-EX231-RESULT
+- id: C-CAP
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 2 > 2.4 > Capacitors
+  atom_ids:
+  - A-CAP-DESIRED
+  - A-CAP-TYPES
+  - A-CAP-COEFF
+  central_atom_ids:
+  - A-CAP-TYPES
+  boundary_reason: capacitor desired characteristics + types + coefficients
+  extraction_targets: &id013
+  - DesignPrinciple
+  - ComponentModel
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-CAP-DESIRED
+  - A-CAP-TYPES
+- id: C-RES
+  profile: textbook
+  chunk_type: component_model_block
+  section_path: 2 > 2.4 > Resistors
+  atom_ids:
+  - A-RES-TYPES
+  - A-PASS-T241
+  central_atom_ids:
+  - A-RES-TYPES
+  boundary_reason: resistor types + passive performance table
+  extraction_targets: &id014
+  - ComponentModel
+  gold_must_cover_atoms:
+  - A-RES-TYPES
+  - A-PASS-T241
+- id: C-LATCHUP
+  profile: textbook
+  chunk_type: physical_effect_block
+  section_path: 2 > 2.5
+  atom_ids:
+  - A-BJT-SUBSTRATE
+  - A-BJT-LATERAL
+  - A-LATCHUP
+  - A-LATCHUP-COND-6
+  - A-LATCHUP-PREVENT
+  - A-ESD
+  central_atom_ids:
+  - A-LATCHUP
+  boundary_reason: parasitic BJTs -> latch-up SCR -> prevention -> ESD
+  extraction_targets: &id015
+  - PhysicalEffect
+  - ComponentModel
+  - DesignPrinciple
+  gold_must_cover_atoms:
+  - A-LATCHUP
+  - A-LATCHUP-COND-6
+  - A-LATCHUP-PREVENT
+- id: C-TEMP
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 2 > 2.5
+  atom_ids:
+  - A-TCF-7
+  - A-MOB-8
+  - A-VT-TEMP-9
+  - A-TCF-12
+  - A-EX251-PROBLEM
+  - A-EX251-RESULT
+  central_atom_ids:
+  - A-TCF-7
+  boundary_reason: temperature coefficients (mobility, V_T, reverse diode) + worked example
+  extraction_targets: &id016
+  - Formula
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-TCF-7
+  - A-VT-TEMP-9
+- id: C-NOISE
+  profile: textbook
+  chunk_type: formula_definition_block
+  section_path: 2 > 2.5
+  atom_ids:
+  - A-NOISE-SHOT-18
+  - A-NOISE-THERMAL-19
+  - A-NOISE-FLICKER-20
+  central_atom_ids:
+  - A-NOISE-FLICKER-20
+  boundary_reason: three CMOS noise sources
+  extraction_targets: &id017
+  - Formula
+  - PhysicalEffect
+  gold_must_cover_atoms:
+  - A-NOISE-SHOT-18
+  - A-NOISE-THERMAL-19
+  - A-NOISE-FLICKER-20
+- id: C-MATCH
+  profile: textbook
+  chunk_type: design_principle_block
+  section_path: 2 > 2.6
+  atom_ids:
+  - A-MATCH-UNIT
+  - A-MATCH-CENTROID
+  - A-LAY-R-12
+  - A-LAY-RS-13
+  - A-LAY-C-14
+  central_atom_ids:
+  - A-MATCH-UNIT
+  boundary_reason: matching principles + sheet-resistance/capacitance relations
+  extraction_targets: &id018
+  - DesignPrinciple
+  - Formula
+  gold_must_cover_atoms:
+  - A-MATCH-UNIT
+  - A-LAY-RS-13
+- id: C-EX-261
+  profile: textbook
+  chunk_type: example_solution_block
+  section_path: 2 > 2.6 > Example 2.6-1
+  atom_ids:
+  - A-EX261-PROBLEM
+  - A-EX261-RESULT
+  central_atom_ids:
+  - A-EX261-PROBLEM
+  boundary_reason: resistance-calculation worked example
+  extraction_targets: &id019
+  - ExampleSolution
+  gold_must_cover_atoms:
+  - A-EX261-PROBLEM
+  - A-EX261-RESULT
+- id: C-RULES
+  profile: textbook
+  chunk_type: layout_rule_block
+  section_path: 2 > 2.6 > Layout Rules
+  atom_ids:
+  - A-RULES-T261
+  central_atom_ids:
+  - A-RULES-T261
+  boundary_reason: Table 2.6-1 design-rule set
+  extraction_targets: &id020
+  - DesignRule
+  gold_must_cover_atoms:
+  - A-RULES-T261
+- id: C-PROB
+  profile: textbook
+  chunk_type: problem_set_block
+  section_path: 2 > PROBLEMS
+  atom_ids:
+  - A-PROB-1
+  - A-PROB-4
+  - A-PROB-8
+  - A-PROB-11
+  central_atom_ids:
+  - A-PROB-1
+  boundary_reason: end-of-chapter problems
+  extraction_targets: &id021
+  - ProblemStatement
+  gold_must_cover_atoms:
+  - A-PROB-1
+  - A-PROB-4
+  - A-PROB-8
+  - A-PROB-11
+context_packages:
+- id: PKG-OV
+  profile: textbook
+  chunk_id: C-OV
+  section_path: '2'
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-INTRO-TECH
+    atom_type: concept_definition_atom
+  - atom_id: A-SUMMARY
+    atom_type: summary_atom
+  linked_context:
+    section: '2'
+  extraction_targets: *id001
+  expected_objects: []
+  note: Chapter overview/summary atoms are context_only in this fixture; no expected typed object.
+- id: PKG-FAB-STEPS
+  profile: textbook
+  chunk_id: C-FAB-STEPS
+  section_path: 2 > 2.1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-FAB-OXID
+    atom_type: technology_process_atom
+  - atom_id: A-FAB-DIFF
+    atom_type: technology_process_atom
+  - atom_id: A-FAB-IMP
+    atom_type: technology_process_atom
+  - atom_id: A-FAB-DEP
+    atom_type: technology_process_atom
+  - atom_id: A-FAB-ETCH
+    atom_type: technology_process_atom
+  linked_context:
+    section: 2 > 2.1
+  extraction_targets: *id002
+  expected_objects:
+  - TECH-OXIDATION
+  - TECH-DIFFUSION
+  - TECH-IMPLANT
+  - TECH-DEPOSITION
+  - TECH-ETCHING
+  expected_local_fields:
+    TECH-ETCHING:
+    - name
+    - purpose
+- id: PKG-FAB-ETCH-F
+  profile: textbook
+  chunk_id: C-FAB-ETCH-F
+  section_path: 2 > 2.1 > Etching
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-FAB-ETCH
+    atom_type: technology_process_atom
+  - atom_id: A-FAB-SEL-1
+    atom_type: formula_atom
+  - atom_id: A-FAB-ANI-2
+    atom_type: formula_atom
+  linked_context:
+    section: 2 > 2.1 > Etching
+  extraction_targets: *id003
+  expected_objects:
+  - FORMULA-SELECTIVITY
+  - FORMULA-ANISOTROPY
+- id: PKG-FAB-PHOTO
+  profile: textbook
+  chunk_id: C-FAB-PHOTO
+  section_path: 2 > 2.1 > Photolithography
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-FAB-PHOTO
+    atom_type: technology_process_atom
+  - atom_id: A-FAB-PRINT
+    atom_type: concept_definition_atom
+  linked_context:
+    section: 2 > 2.1 > Photolithography
+  extraction_targets: *id004
+  expected_objects:
+  - TECH-PHOTOLITHOGRAPHY
+  - CONCEPT-PRINTING-SYSTEMS
+- id: PKG-FAB-NWELL
+  profile: textbook
+  chunk_id: C-FAB-NWELL
+  section_path: 2 > 2.1 > N-Well CMOS Fabrication Steps
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-FAB-NWELL-FLOW
+    atom_type: process_flow_atom
+  - atom_id: A-FAB-NW-CHSTOP
+    atom_type: process_step_atom
+  - atom_id: A-FAB-NW-LOCOS
+    atom_type: process_step_atom
+  - atom_id: A-FAB-BIRDSBEAK
+    atom_type: physical_effect_atom
+  - atom_id: A-FAB-LDD
+    atom_type: process_step_atom
+  - atom_id: A-FAB-SALICIDE
+    atom_type: design_principle_atom
+  linked_context:
+    section: 2 > 2.1 > N-Well CMOS Fabrication Steps
+  extraction_targets: *id005
+  expected_objects:
+  - PROCESS-NWELL-CMOS
+  - PHYS-BIRDSBEAK
+  - PRINCIPLE-SALICIDE-BLOCK
+- id: PKG-PN-DERIV
+  profile: textbook
+  chunk_id: C-PN-DERIV
+  section_path: 2 > 2.2
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-PN-CONCEPT
+    atom_type: concept_definition_atom
+  - atom_id: A-PN-XD-1
+    atom_type: formula_atom
+  - atom_id: A-PN-PHI-6
+    atom_type: formula_atom
+  - atom_id: A-PN-XN-7
+    atom_type: formula_atom
+  - atom_id: A-PN-XP-8
+    atom_type: formula_atom
+  - atom_id: A-PN-XD-9
+    atom_type: formula_atom
+  - atom_id: A-PN-QJ-10
+    atom_type: formula_atom
+  - atom_id: A-PN-EO-11
+    atom_type: formula_atom
+  - atom_id: A-PN-CJ-12
+    atom_type: formula_atom
+  - atom_id: A-PN-CJ0-DEF
+    atom_type: definition_atom
+  - atom_id: A-PN-COND
+    atom_type: condition_atom
+  linked_context:
+    section: 2 > 2.2
+  extraction_targets: *id006
+  expected_objects:
+  - CONCEPT-PN-JUNCTION
+  - FORMULA-BARRIER-POTENTIAL
+  - FORMULA-DEPLETION-WIDTH
+  - FORMULA-DEPLETION-CHARGE
+  - FORMULA-DEPLETION-CAP
+  - DERIV-PN-CAPACITANCE-CHAIN
+  - PHYS-DEPLETION-CAP
+  - FORMULA-PEAK-FIELD
+- id: PKG-PN-DIODE
+  profile: textbook
+  chunk_id: C-PN-DIODE
+  section_path: 2 > 2.2
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-PN-BV-13
+    atom_type: formula_atom
+  - atom_id: A-PN-AVALANCHE
+    atom_type: physical_effect_atom
+  - atom_id: A-PN-IRA-14
+    atom_type: formula_atom
+  - atom_id: A-PN-DIODE-24
+    atom_type: formula_atom
+  linked_context:
+    section: 2 > 2.2
+  extraction_targets: *id007
+  expected_objects:
+  - FORMULA-DIODE-EQUATION
+  - FORMULA-BREAKDOWN
+  - PHYS-REVERSE-BREAKDOWN
+  - FORMULA-REVERSE-CURRENT
+- id: PKG-EX-221
+  profile: textbook
+  chunk_id: C-EX-221
+  section_path: 2 > 2.2 > Example 2.2-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX221-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX221-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX221-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX221-RESULT
+    atom_type: result_atom
+  linked_context:
+    section: 2 > 2.2 > Example 2.2-1
+  extraction_targets: *id008
+  expected_objects:
+  - EXAMPLE-2.2-1
+- id: PKG-EX-222
+  profile: textbook
+  chunk_id: C-EX-222
+  section_path: 2 > 2.2 > Example 2.2-2
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX222-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX222-RESULT
+    atom_type: result_atom
+  linked_context:
+    section: 2 > 2.2 > Example 2.2-2
+  extraction_targets: *id009
+  expected_objects:
+  - EXAMPLE-2.2-2
+- id: PKG-MOS-VT
+  profile: textbook
+  chunk_id: C-MOS-VT
+  section_path: 2 > 2.3
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-MOS-STRUCT
+    atom_type: concept_definition_atom
+  - atom_id: A-MOS-STRONGINV
+    atom_type: concept_definition_atom
+  - atom_id: A-MOS-PHIF-10
+    atom_type: formula_atom
+  - atom_id: A-MOS-QB-16
+    atom_type: formula_atom
+  - atom_id: A-MOS-VT-18
+    atom_type: formula_atom
+  - atom_id: A-MOS-VT-19
+    atom_type: formula_atom
+  - atom_id: A-MOS-VT0-20
+    atom_type: formula_atom
+  - atom_id: A-MOS-GAMMA-21
+    atom_type: formula_atom
+  - atom_id: A-MOS-T231
+    atom_type: table_row_atom
+  linked_context:
+    section: 2 > 2.3
+  extraction_targets: *id010
+  expected_objects:
+  - CONCEPT-MOS-TRANSISTOR
+  - CONCEPT-STRONG-INVERSION
+  - FORMULA-THRESHOLD-VOLTAGE
+  - FORMULA-BODY-FACTOR
+  - DERIV-THRESHOLD-VOLTAGE
+  - PHYS-BODY-EFFECT
+- id: PKG-MOS-ID
+  profile: textbook
+  chunk_id: C-MOS-ID
+  section_path: 2 > 2.3
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-MOS-ID-27
+    atom_type: formula_atom
+  - atom_id: A-MOS-COND-28
+    atom_type: condition_atom
+  - atom_id: A-MOS-KP-29
+    atom_type: formula_atom
+  linked_context:
+    section: 2 > 2.3
+  extraction_targets: *id011
+  expected_objects:
+  - FORMULA-SAH-DRAIN-CURRENT
+  - FORMULA-KPRIME
+- id: PKG-EX-231
+  profile: textbook
+  chunk_id: C-EX-231
+  section_path: 2 > 2.3 > Example 2.3-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX231-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX231-GIVEN
+    atom_type: given_atom
+  - atom_id: A-EX231-USE
+    atom_type: formula_usage_atom
+  - atom_id: A-EX231-RESULT
+    atom_type: result_atom
+  linked_context:
+    section: 2 > 2.3 > Example 2.3-1
+  extraction_targets: *id012
+  expected_objects:
+  - EXAMPLE-2.3-1
+- id: PKG-CAP
+  profile: textbook
+  chunk_id: C-CAP
+  section_path: 2 > 2.4 > Capacitors
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-CAP-DESIRED
+    atom_type: design_principle_atom
+  - atom_id: A-CAP-TYPES
+    atom_type: component_model_atom
+  - atom_id: A-CAP-COEFF
+    atom_type: physical_effect_atom
+  linked_context:
+    section: 2 > 2.4 > Capacitors
+  extraction_targets: *id013
+  expected_objects:
+  - COMP-CAPACITORS
+  - PRINCIPLE-CAP-DESIRED
+  - CHECK-CAP-SELECTION
+  - PHYS-CAP-COEFFICIENTS
+- id: PKG-RES
+  profile: textbook
+  chunk_id: C-RES
+  section_path: 2 > 2.4 > Resistors
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-RES-TYPES
+    atom_type: component_model_atom
+  - atom_id: A-PASS-T241
+    atom_type: table_row_atom
+  linked_context:
+    section: 2 > 2.4 > Resistors
+  extraction_targets: *id014
+  expected_objects:
+  - COMP-RESISTORS
+- id: PKG-LATCHUP
+  profile: textbook
+  chunk_id: C-LATCHUP
+  section_path: 2 > 2.5
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-BJT-SUBSTRATE
+    atom_type: component_model_atom
+  - atom_id: A-BJT-LATERAL
+    atom_type: component_model_atom
+  - atom_id: A-LATCHUP
+    atom_type: physical_effect_atom
+  - atom_id: A-LATCHUP-COND-6
+    atom_type: formula_atom
+  - atom_id: A-LATCHUP-PREVENT
+    atom_type: design_principle_atom
+  - atom_id: A-ESD
+    atom_type: design_principle_atom
+  linked_context:
+    section: 2 > 2.5
+  extraction_targets: *id015
+  expected_objects:
+  - COMP-SUBSTRATE-BJT
+  - PHYS-LATCHUP
+  - PRINCIPLE-LATCHUP-PREVENT
+  - TRADEOFF-LATCHUP-AREA
+  - PRINCIPLE-ESD-PROTECTION
+- id: PKG-TEMP
+  profile: textbook
+  chunk_id: C-TEMP
+  section_path: 2 > 2.5
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-TCF-7
+    atom_type: formula_atom
+  - atom_id: A-MOB-8
+    atom_type: formula_atom
+  - atom_id: A-VT-TEMP-9
+    atom_type: formula_atom
+  - atom_id: A-TCF-12
+    atom_type: formula_atom
+  - atom_id: A-EX251-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX251-RESULT
+    atom_type: result_atom
+  linked_context:
+    section: 2 > 2.5
+  extraction_targets: *id016
+  expected_objects:
+  - FORMULA-TCF
+  - EXAMPLE-2.5-1
+  - FORMULA-MOBILITY-TEMP
+  - FORMULA-VT-TEMP
+  - FORMULA-REVERSE-DIODE-TCF
+- id: PKG-NOISE
+  profile: textbook
+  chunk_id: C-NOISE
+  section_path: 2 > 2.5
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-NOISE-SHOT-18
+    atom_type: formula_atom
+  - atom_id: A-NOISE-THERMAL-19
+    atom_type: formula_atom
+  - atom_id: A-NOISE-FLICKER-20
+    atom_type: formula_atom
+  linked_context:
+    section: 2 > 2.5
+  extraction_targets: *id017
+  expected_objects:
+  - PHYS-FLICKER-NOISE
+  - PHYS-SHOT-NOISE
+  - PHYS-THERMAL-NOISE
+- id: PKG-MATCH
+  profile: textbook
+  chunk_id: C-MATCH
+  section_path: 2 > 2.6
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-MATCH-UNIT
+    atom_type: design_principle_atom
+  - atom_id: A-MATCH-CENTROID
+    atom_type: design_principle_atom
+  - atom_id: A-LAY-R-12
+    atom_type: formula_atom
+  - atom_id: A-LAY-RS-13
+    atom_type: formula_atom
+  - atom_id: A-LAY-C-14
+    atom_type: formula_atom
+  linked_context:
+    section: 2 > 2.6
+  extraction_targets: *id018
+  expected_objects:
+  - CONCEPT-SHEET-RESISTANCE
+  - FORMULA-SHEET-RESISTANCE
+  - FORMULA-IC-CAPACITANCE
+  - PRINCIPLE-UNIT-MATCHING
+  - PRINCIPLE-COMMON-CENTROID
+- id: PKG-EX-261
+  profile: textbook
+  chunk_id: C-EX-261
+  section_path: 2 > 2.6 > Example 2.6-1
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-EX261-PROBLEM
+    atom_type: example_problem_atom
+  - atom_id: A-EX261-RESULT
+    atom_type: result_atom
+  linked_context:
+    section: 2 > 2.6 > Example 2.6-1
+  extraction_targets: *id019
+  expected_objects:
+  - EXAMPLE-2.6-1
+- id: PKG-RULES
+  profile: textbook
+  chunk_id: C-RULES
+  section_path: 2 > 2.6 > Layout Rules
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-RULES-T261
+    atom_type: design_rule_atom
+  linked_context:
+    section: 2 > 2.6 > Layout Rules
+  extraction_targets: *id020
+  expected_objects:
+  - RULE-LAYOUT-T261
+- id: PKG-PROB
+  profile: textbook
+  chunk_id: C-PROB
+  section_path: 2 > PROBLEMS
+  document_title: CMOS Analog Circuit Design
+  atoms:
+  - atom_id: A-PROB-1
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-4
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-8
+    atom_type: problem_statement_atom
+  - atom_id: A-PROB-11
+    atom_type: problem_statement_atom
+  linked_context:
+    section: 2 > PROBLEMS
+  extraction_targets: *id021
+  expected_objects:
+  - PROB-1
+  - PROB-4
+  - PROB-11
+  - PROB-8
+mentions:
+- id: M-01
+  text: oxidation
+  type: TechnologyProcess
+  atom_id: A-FAB-OXID
+  canonical_key: oxidation
+- id: M-02
+  text: ion implantation
+  type: TechnologyProcess
+  atom_id: A-FAB-IMP
+  canonical_key: ion_implantation
+- id: M-03
+  text: LOCOS
+  type: TechnologyProcess
+  atom_id: A-FAB-NW-LOCOS
+  canonical_key: locos_isolation
+- id: M-04
+  text: bird's beak
+  type: PhysicalEffect
+  atom_id: A-FAB-BIRDSBEAK
+  canonical_key: birds_beak
+- id: M-05
+  text: pn junction
+  type: Concept
+  atom_id: A-PN-CONCEPT
+  canonical_key: pn_junction
+- id: M-06
+  text: barrier potential
+  type: Variable
+  atom_id: A-PN-PHI-6
+  canonical_key: barrier_potential_phi_o
+- id: M-07
+  text: depletion capacitance
+  type: PhysicalEffect
+  atom_id: A-PN-CJ-12
+  canonical_key: depletion_capacitance
+- id: M-08
+  text: grading coefficient
+  type: Variable
+  atom_id: A-PN-CJ0-DEF
+  canonical_key: grading_coefficient_m
+- id: M-09
+  text: MOS transistor
+  type: Concept
+  atom_id: A-MOS-STRUCT
+  canonical_key: mos_transistor
+- id: M-10
+  text: threshold voltage
+  type: Variable
+  atom_id: A-MOS-VT-19
+  canonical_key: threshold_voltage_vt
+- id: M-11
+  text: strong inversion
+  type: Concept
+  atom_id: A-MOS-STRONGINV
+  canonical_key: strong_inversion
+- id: M-12
+  text: body effect
+  type: PhysicalEffect
+  atom_id: A-MOS-GAMMA-21
+  canonical_key: body_effect
+- id: M-13
+  text: latch-up
+  type: PhysicalEffect
+  atom_id: A-LATCHUP
+  canonical_key: latch_up
+- id: M-14
+  text: sheet resistance
+  type: Concept
+  atom_id: A-LAY-RS-13
+  canonical_key: sheet_resistance
+- id: M-15
+  text: flicker noise
+  type: PhysicalEffect
+  atom_id: A-NOISE-FLICKER-20
+  canonical_key: flicker_1f_noise
+- id: M-16
+  text: salicide block
+  type: Concept
+  atom_id: A-FAB-SALICIDE
+  canonical_key: salicide_block
+canonicalization:
+- canonical: depletion_capacitance
+  aliases:
+  - depletion capacitance
+  - depletion-layer capacitance
+  - C_j
+  - junction capacitance
+- canonical: body_effect
+  aliases:
+  - body effect
+  - body factor
+  - body-effect coefficient
+  - bulk-threshold parameter
+  - gamma
+- canonical: bulk_body_substrate
+  aliases:
+  - bulk
+  - substrate
+  - body
+  - B terminal
+  note: 2.3 says 'B terminal is the bulk, or substrate' - same entity.
+objects:
+- id: CONCEPT-PN-JUNCTION
+  type: Concept
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    term: pn junction (step junction)
+    definition: Abrupt N_D-to-N_A junction with a depletion region of fixed charge about the metallurgical junction.
+  local_evidence_atom_ids:
+  - A-PN-CONCEPT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: CONCEPT-MOS-TRANSISTOR
+  type: Concept
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-VT
+  payload:
+    term: MOS transistor
+    definition: Four-terminal (G,D,S,B) device; gate over thin SiO2; channel of length L between heavily-doped source/drain.
+  local_evidence_atom_ids:
+  - A-MOS-STRUCT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: CONCEPT-STRONG-INVERSION
+  type: Concept
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-VT
+  payload:
+    term: strong inversion
+    definition: Surface inverts to n-type when v_GS reaches V_T, forming the conducting channel.
+  local_evidence_atom_ids:
+  - A-MOS-STRONGINV
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: CONCEPT-SHEET-RESISTANCE
+  type: Concept
+  section_path: 2 > 2.6
+  home_package: PKG-MATCH
+  payload:
+    term: sheet resistance
+    definition: rho_s = rho/T (Ohm/square); resistance = number of squares x rho_s.
+  local_evidence_atom_ids:
+  - A-LAY-RS-13
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TECH-OXIDATION
+  type: TechnologyProcess
+  section_path: 2 > 2.1 > Oxidation
+  home_package: PKG-FAB-STEPS
+  payload:
+    name: Oxidation
+    purpose: Grow SiO2 on the silicon surface (gate/field oxide).
+  local_evidence_atom_ids:
+  - A-FAB-OXID
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TECH-DIFFUSION
+  type: TechnologyProcess
+  section_path: 2 > 2.1 > Diffusion
+  home_package: PKG-FAB-STEPS
+  payload:
+    name: Diffusion
+    purpose: Move surface impurities into the bulk; predeposition vs drive-in; defines junction depth.
+  local_evidence_atom_ids:
+  - A-FAB-DIFF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TECH-IMPLANT
+  type: TechnologyProcess
+  section_path: 2 > 2.1 > Ion Implantation
+  home_package: PKG-FAB-STEPS
+  payload:
+    name: Ion implantation
+    purpose: Accelerate dopant ions into the wafer; +/-5% accuracy, room-temp, profile control.
+  local_evidence_atom_ids:
+  - A-FAB-IMP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TECH-DEPOSITION
+  type: TechnologyProcess
+  section_path: 2 > 2.1 > Deposition
+  home_package: PKG-FAB-STEPS
+  payload:
+    name: Deposition
+    purpose: Deposit films (evaporation/sputtering/CVD/LPCVD).
+  local_evidence_atom_ids:
+  - A-FAB-DEP
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TECH-ETCHING
+  type: TechnologyProcess
+  section_path: 2 > 2.1 > Etching
+  home_package: PKG-FAB-STEPS
+  payload:
+    name: Etching
+    purpose: Remove exposed material; characterized by selectivity and anisotropy.
+  local_evidence_atom_ids:
+  - A-FAB-ETCH
+  supporting_context_atom_ids:
+  - A-FAB-SEL-1
+  - A-FAB-ANI-2
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROCESS-NWELL-CMOS
+  type: ProcessFlow
+  section_path: 2 > 2.1 > N-Well CMOS Fabrication Steps
+  home_package: PKG-FAB-NWELL
+  payload:
+    name: N-Well silicon-gate CMOS fabrication
+    steps:
+    - n-well implant & drive-in
+    - pad oxide
+    - Si3N4 deposit & pattern (active area)
+    - channel-stop field implants
+    - LOCOS field oxide
+    - gate oxide + polysilicon
+    - LDD spacer
+    - n+/p+ source/drain
+    - anneal
+    - BPSG
+    - contact + Metal 1
+    - via + Metal 2
+    - passivation + pad
+  local_evidence_atom_ids:
+  - A-FAB-NWELL-FLOW
+  - A-FAB-NW-CHSTOP
+  - A-FAB-NW-LOCOS
+  - A-FAB-LDD
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BARRIER-POTENTIAL
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: barrier potential
+    expression: phi_o = V_t ln(N_A N_D / n_i^2)
+    variables:
+      phi_o: barrier potential
+      V_t: kT/q = 25.9 mV @300K
+      n_i: 1.45e10/cm3
+  local_evidence_atom_ids:
+  - A-PN-PHI-6
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-DEPLETION-WIDTH
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: depletion-region width
+    expression: x_d = [2 eps_si (N_A+N_D)/(q N_A N_D)]^(1/2)(phi_o - v_D)^(1/2)
+  local_evidence_atom_ids:
+  - A-PN-XD-1
+  - A-PN-XN-7
+  - A-PN-XP-8
+  - A-PN-XD-9
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-DEPLETION-CHARGE
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: depletion charge
+    expression: Q_j = A[2 eps_si q N_A N_D/(N_A+N_D)]^(1/2)(phi_o - v_D)^(1/2)
+  local_evidence_atom_ids:
+  - A-PN-QJ-10
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-DEPLETION-CAP
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: pn junction depletion capacitance
+    expression: C_j = C_j0/[1-(v_D/phi_o)]^m
+    variables:
+      C_j0: zero-bias depletion capacitance
+      m: grading coefficient (1/2 step, 1/3 diffused)
+      v_D: applied voltage
+      phi_o: barrier potential
+  local_evidence_atom_ids:
+  - A-PN-CJ-12
+  - A-PN-CJ0-DEF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-DIODE-EQUATION
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DIODE
+  payload:
+    name: pn diode I-V equation
+    expression: i_D = I_s[exp(v_D/V_t) - 1]
+    variables:
+      I_s: saturation current
+  local_evidence_atom_ids:
+  - A-PN-DIODE-24
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-BREAKDOWN
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DIODE
+  payload:
+    name: reverse breakdown voltage
+    expression: BV ~= eps_si(N_A+N_D)/(2 q N_A N_D) E_max^2
+  local_evidence_atom_ids:
+  - A-PN-BV-13
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-THRESHOLD-VOLTAGE
+  type: Formula
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-VT
+  payload:
+    name: MOS threshold voltage
+    expression: V_T = V_T0 + gamma(sqrt|-2 phi_F + v_SB| - sqrt|-2 phi_F|)
+    variables:
+      V_T0: zero-body-bias threshold
+      gamma: body factor
+      phi_F: Fermi potential
+      v_SB: source-bulk voltage
+  local_evidence_atom_ids:
+  - A-MOS-VT-19
+  - A-MOS-VT0-20
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-BODY-FACTOR
+  type: Formula
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-VT
+  payload:
+    name: body factor
+    expression: gamma = sqrt(2 q eps_si N_A)/C_ox
+  local_evidence_atom_ids:
+  - A-MOS-GAMMA-21
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-SAH-DRAIN-CURRENT
+  type: Formula
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-ID
+  payload:
+    name: Sah drain-current equation
+    expression: i_D = (mu_n C_ox W/L)[(v_GS - V_T)v_DS - v_DS^2/2]
+    condition: v_GS >= V_T and v_DS <= (v_GS - V_T)
+  local_evidence_atom_ids:
+  - A-MOS-ID-27
+  - A-MOS-COND-28
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-KPRIME
+  type: Formula
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-ID
+  payload:
+    name: device transconductance parameter
+    expression: K' = mu_n C_ox = mu_n eps_ox/t_ox
+  local_evidence_atom_ids:
+  - A-MOS-KP-29
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-SELECTIVITY
+  type: Formula
+  section_path: 2 > 2.1 > Etching
+  home_package: PKG-FAB-ETCH-F
+  payload:
+    name: etch selectivity
+    expression: S_{A-B} = desired etch rate / undesired etch rate
+  local_evidence_atom_ids:
+  - A-FAB-SEL-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-ANISOTROPY
+  type: Formula
+  section_path: 2 > 2.1 > Etching
+  home_package: PKG-FAB-ETCH-F
+  payload:
+    name: etch anisotropy
+    expression: A = 1 - lateral/vertical etch rate
+  local_evidence_atom_ids:
+  - A-FAB-ANI-2
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-SHEET-RESISTANCE
+  type: Formula
+  section_path: 2 > 2.6
+  home_package: PKG-MATCH
+  payload:
+    name: sheet resistance
+    expression: R = rho_s (L/W), rho_s = rho/T
+  local_evidence_atom_ids:
+  - A-LAY-RS-13
+  - A-LAY-R-12
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-IC-CAPACITANCE
+  type: Formula
+  section_path: 2 > 2.6
+  home_package: PKG-MATCH
+  payload:
+    name: IC capacitance
+    expression: C = eps_ox A / t_ox = C_ox A
+  local_evidence_atom_ids:
+  - A-LAY-C-14
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-TCF
+  type: Formula
+  section_path: 2 > 2.5
+  home_package: PKG-TEMP
+  payload:
+    name: fractional temperature coefficient
+    expression: TC_F = (1/X)(dX/dT)
+  local_evidence_atom_ids:
+  - A-TCF-7
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: DERIV-PN-CAPACITANCE-CHAIN
+  type: Derivation
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: pn junction capacitance derivation
+    steps:
+    - phi_o (Eq.6)
+    - x_n,x_p (Eq.7,8)
+    - x_d (Eq.9)
+    - Q_j (Eq.10)
+    - C_j = dQ_j/dv_D (Eq.12)
+  local_evidence_atom_ids:
+  - A-PN-PHI-6
+  - A-PN-XN-7
+  - A-PN-XP-8
+  - A-PN-XD-9
+  - A-PN-QJ-10
+  - A-PN-CJ-12
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: DERIV-THRESHOLD-VOLTAGE
+  type: Derivation
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-VT
+  payload:
+    name: threshold-voltage derivation
+    steps:
+    - phi_F (Eq.10/11)
+    - Q_b (Eq.16)
+    - component decomposition (Eq.18)
+    - V_T0 (Eq.20)
+    - gamma (Eq.21)
+  local_evidence_atom_ids:
+  - A-MOS-PHIF-10
+  - A-MOS-QB-16
+  - A-MOS-VT-18
+  - A-MOS-VT0-20
+  - A-MOS-GAMMA-21
+  - A-MOS-T231
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: EXAMPLE-2.2-1
+  type: ExampleSolution
+  section_path: 2 > 2.2 > Example 2.2-1
+  home_package: PKG-EX-221
+  payload:
+    title: Example 2.2-1 Characteristics of a pn Junction
+    problem: Find x_p,x_n,x_d,phi_o,C_j0,C_j at v_D=-4V (step junction).
+    given: N_A=5e15, N_D=1e20, 10umx10um.
+    result: phi_o=0.917V; x_p=1.128um; C_j0=20.3fF; C_j(-4V)=9.18fF.
+  local_evidence_atom_ids:
+  - A-EX221-PROBLEM
+  - A-EX221-GIVEN
+  - A-EX221-USE
+  - A-EX221-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: EXAMPLE-2.2-2
+  type: ExampleSolution
+  section_path: 2 > 2.2 > Example 2.2-2
+  home_package: PKG-EX-222
+  payload:
+    title: Example 2.2-2 Saturation Current
+    problem: Calculate I_s.
+    result: I_s = 1.346 fA.
+  local_evidence_atom_ids:
+  - A-EX222-PROBLEM
+  - A-EX222-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: EXAMPLE-2.3-1
+  type: ExampleSolution
+  section_path: 2 > 2.3 > Example 2.3-1
+  home_package: PKG-EX-231
+  payload:
+    title: Example 2.3-1 Threshold Voltage
+    problem: Find V_T0 and gamma (n-channel, n+ gate).
+    given: t_ox=200A, N_A=3e16, N_D=4e19, Q_ss=1e10 cm-2.
+    result: phi_MS=-0.940V; C_ox=1.727e-7 F/cm2; V_T0=0.306V; gamma=0.577 V^(1/2).
+  local_evidence_atom_ids:
+  - A-EX231-PROBLEM
+  - A-EX231-GIVEN
+  - A-EX231-USE
+  - A-EX231-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: EXAMPLE-2.5-1
+  type: ExampleSolution
+  section_path: 2 > 2.5 > Example 2.5-1
+  home_package: PKG-TEMP
+  payload:
+    title: Example 2.5-1 Reverse Diode Current Temp Dependence
+    result: TC_F=0.165; reverse current ~doubles per 5 C.
+  local_evidence_atom_ids:
+  - A-EX251-PROBLEM
+  - A-EX251-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: EXAMPLE-2.6-1
+  type: ExampleSolution
+  section_path: 2 > 2.6 > Example 2.6-1
+  home_package: PKG-EX-261
+  payload:
+    title: Example 2.6-1 Resistance Calculation
+    given: poly W=0.8um, L=20um, rho=9e-4 Ohm-cm, T=3000A.
+    result: rho_s=30 Ohm/sq; N=25; R=750 Ohm.
+  local_evidence_atom_ids:
+  - A-EX261-PROBLEM
+  - A-EX261-RESULT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: COMP-CAPACITORS
+  type: ComponentModel
+  section_path: 2 > 2.4 > Capacitors
+  home_package: PKG-CAP
+  payload:
+    name: CMOS capacitors
+    variants:
+    - poly-oxide-channel
+    - double-polysilicon (best)
+    - accumulation MOS
+  local_evidence_atom_ids:
+  - A-CAP-TYPES
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-RESISTORS
+  type: ComponentModel
+  section_path: 2 > 2.4 > Resistors
+  home_package: PKG-RES
+  payload:
+    name: CMOS resistors
+    variants:
+    - diffused 50-150 Ohm/sq
+    - polysilicon 30-200 Ohm/sq
+    - n-well 1-10 kOhm/sq
+  local_evidence_atom_ids:
+  - A-RES-TYPES
+  - A-PASS-T241
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: COMP-SUBSTRATE-BJT
+  type: ComponentModel
+  section_path: 2 > 2.5
+  home_package: PKG-LATCHUP
+  payload:
+    name: substrate BJT
+    note: collector constrained to V_SS; emitter=p+ S/D, base=n-well, collector=p- substrate.
+  local_evidence_atom_ids:
+  - A-BJT-SUBSTRATE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-DEPLETION-CAP
+  type: PhysicalEffect
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: depletion-layer capacitance
+    description: Voltage-dependent capacitance of the pn depletion region.
+  local_evidence_atom_ids:
+  - A-PN-CJ-12
+  - A-PN-COND
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-BODY-EFFECT
+  type: PhysicalEffect
+  section_path: 2 > 2.3
+  home_package: PKG-MOS-VT
+  payload:
+    name: body effect
+    description: V_T increases with source-bulk reverse bias v_SB via the body factor gamma.
+  local_evidence_atom_ids:
+  - A-MOS-VT-19
+  - A-MOS-GAMMA-21
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-BIRDSBEAK
+  type: PhysicalEffect
+  section_path: 2 > 2.1 > N-Well CMOS Fabrication Steps
+  home_package: PKG-FAB-NWELL
+  payload:
+    name: bird's beak
+    description: LOCOS oxide encroachment under the nitride edge that reduces active area.
+  local_evidence_atom_ids:
+  - A-FAB-BIRDSBEAK
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PHYS-LATCHUP
+  type: PhysicalEffect
+  section_path: 2 > 2.5
+  home_package: PKG-LATCHUP
+  payload:
+    name: latch-up
+    description: Parasitic PNPN SCR high-current state; regenerates when beta_NPN beta_PNP >= 1.
+  local_evidence_atom_ids:
+  - A-LATCHUP
+  - A-LATCHUP-COND-6
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PHYS-FLICKER-NOISE
+  type: PhysicalEffect
+  section_path: 2 > 2.5
+  home_package: PKG-NOISE
+  payload:
+    name: flicker (1/f) noise
+    description: Low-frequency noise from carrier traps; i^2 = K_f(I^a/f^b)df.
+  local_evidence_atom_ids:
+  - A-NOISE-FLICKER-20
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PRINCIPLE-CAP-DESIRED
+  type: DesignPrinciple
+  section_path: 2 > 2.4 > Capacitors
+  home_package: PKG-CAP
+  payload:
+    statement: Analog capacitors should have good matching, low voltage coefficient, high desired-to-parasitic ratio, and high capacitance per unit area.
+    applies_to:
+    - analog capacitor selection
+  local_evidence_atom_ids:
+  - A-CAP-DESIRED
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PRINCIPLE-UNIT-MATCHING
+  type: DesignPrinciple
+  section_path: 2 > 2.6 > Matching Concepts
+  home_package: PKG-MATCH
+  payload:
+    statement: Draw matched components as identical units with identical surroundings; build different sizes from integer numbers of identical units.
+    applies_to:
+    - component matching layout
+  local_evidence_atom_ids:
+  - A-MATCH-UNIT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PRINCIPLE-COMMON-CENTROID
+  type: DesignPrinciple
+  section_path: 2 > 2.6
+  home_package: PKG-MATCH
+  payload:
+    statement: Use common-centroid geometry to cancel uniform linear gradients (e.g., oxide thickness) in capacitor ratios.
+    applies_to:
+    - capacitor ratio accuracy
+  local_evidence_atom_ids:
+  - A-MATCH-CENTROID
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-LATCHUP-PREVENT
+  type: DesignPrinciple
+  section_path: 2 > 2.5
+  home_package: PKG-LATCHUP
+  payload:
+    statement: Prevent latch-up with guard rings (n+ to V_DD around p-ch, p+ to V_SS around n-ch) and larger n-ch-to-well spacing.
+    applies_to:
+    - CMOS layout
+    - high-current circuits
+  local_evidence_atom_ids:
+  - A-LATCHUP-PREVENT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PRINCIPLE-SALICIDE-BLOCK
+  type: DesignPrinciple
+  section_path: 2 > 2.1 > Silicide/Salicide
+  home_package: PKG-FAB-NWELL
+  payload:
+    statement: A mixed-signal process should provide a salicide block so high-resistance poly/diffusion resistors remain available for analog.
+    applies_to:
+    - analog resistor design
+  local_evidence_atom_ids:
+  - A-FAB-SALICIDE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: RULE-LAYOUT-T261
+  type: DesignRule
+  section_path: 2 > 2.6 > Layout Rules
+  home_package: PKG-RULES
+  payload:
+    name: Layout design rules (Table 2.6-1)
+    basis: lambda = half minimum geometry
+    examples:
+    - N-well width 6 lambda
+    - active area width 4 lambda
+    - poly gate width 2 lambda
+    - contact 2x2 lambda
+    - via 3x3 lambda
+    - metal-1 spacing 3 lambda
+    - bonding pad 100um x 100um
+  local_evidence_atom_ids:
+  - A-RULES-T261
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: PROB-1
+  type: ProblemStatement
+  section_path: 2 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: List the five basic MOS fabrication steps and the purpose of each.
+  local_evidence_atom_ids:
+  - A-PROB-1
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-4
+  type: ProblemStatement
+  section_path: 2 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Repeat Example 2.2-1 with v_D = -2 V.
+  local_evidence_atom_ids:
+  - A-PROB-4
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-11
+  type: ProblemStatement
+  section_path: 2 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: If V_SB = 2 V, find V_T for the n-channel transistor of Ex. 2.3-1.
+  local_evidence_atom_ids:
+  - A-PROB-11
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TECH-PHOTOLITHOGRAPHY
+  type: TechnologyProcess
+  section_path: 2 > 2.1 > Photolithography
+  home_package: PKG-FAB-PHOTO
+  payload:
+    name: Photolithography
+    purpose: Transfer an image/pattern to selected wafer regions using photoresist and a photomask.
+    steps:
+    - apply photoresist
+    - soft bake
+    - expose to UV
+    - develop
+    - hard bake
+    - etch
+    - strip photoresist
+  local_evidence_atom_ids:
+  - A-FAB-PHOTO
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CONCEPT-PRINTING-SYSTEMS
+  type: Concept
+  section_path: 2 > 2.1 > Photolithography
+  home_package: PKG-FAB-PHOTO
+  payload:
+    term: printing systems
+    definition: 'Three photolithographic printing systems: contact, proximity, and projection printing.'
+  local_evidence_atom_ids:
+  - A-FAB-PRINT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PROB-8
+  type: ProblemStatement
+  section_path: 2 > PROBLEMS
+  home_package: PKG-PROB
+  payload:
+    question: Find the breakdown voltage of a pn junction with N_A = N_D = 1e16/cm3.
+  local_evidence_atom_ids:
+  - A-PROB-8
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PHYS-SHOT-NOISE
+  type: PhysicalEffect
+  section_path: 2 > 2.5
+  home_package: PKG-NOISE
+  payload:
+    name: shot noise
+    description: Noise associated with dc current crossing a pn junction; i^2 = 2 q I_D df.
+  local_evidence_atom_ids:
+  - A-NOISE-SHOT-18
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PHYS-THERMAL-NOISE
+  type: PhysicalEffect
+  section_path: 2 > 2.5
+  home_package: PKG-NOISE
+  payload:
+    name: thermal noise
+    description: Noise from random thermal motion, independent of dc current; v^2 = 4 k T R df.
+  local_evidence_atom_ids:
+  - A-NOISE-THERMAL-19
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-MOBILITY-TEMP
+  type: Formula
+  section_path: 2 > 2.5
+  home_package: PKG-TEMP
+  payload:
+    name: carrier mobility temperature dependence
+    expression: mu = K_mu T^(-1.5)
+  local_evidence_atom_ids:
+  - A-MOB-8
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-VT-TEMP
+  type: Formula
+  section_path: 2 > 2.5
+  home_package: PKG-TEMP
+  payload:
+    name: threshold-voltage temperature dependence
+    expression: V_T(T) = V_T(T0) - alpha (T - T0)
+  local_evidence_atom_ids:
+  - A-VT-TEMP-9
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: FORMULA-REVERSE-DIODE-TCF
+  type: Formula
+  section_path: 2 > 2.5
+  home_package: PKG-TEMP
+  payload:
+    name: reverse-diode-current temperature coefficient
+    expression: (1/I_s)(dI_s/dT) = 3/T + (1/T)(V_Go/V_t)
+  local_evidence_atom_ids:
+  - A-TCF-12
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: TRADEOFF-LATCHUP-AREA
+  type: Tradeoff
+  section_path: 2 > 2.5
+  home_package: PKG-LATCHUP
+  payload:
+    statement: Larger n-channel-to-well spacing helps prevent latch-up but costs die area.
+  local_evidence_atom_ids:
+  - A-LATCHUP-PREVENT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CHECK-CAP-SELECTION
+  type: ChecklistCandidate
+  section_path: 2 > 2.4 > Capacitors
+  home_package: PKG-CAP
+  payload:
+    question: Does the chosen capacitor satisfy matching accuracy, low voltage coefficient, high desired-to-parasitic ratio, and high capacitance per unit area?
+  local_evidence_atom_ids:
+  - A-CAP-DESIRED
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-PEAK-FIELD
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DERIV
+  payload:
+    name: peak electric field at the junction
+    expression: E_o = [2 q N_A N_D/(eps_si (N_A+N_D))]^(1/2) (phi_o - v_D)^(1/2)
+  local_evidence_atom_ids:
+  - A-PN-EO-11
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PHYS-REVERSE-BREAKDOWN
+  type: PhysicalEffect
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DIODE
+  payload:
+    name: reverse breakdown
+    description: Avalanche multiplication (high field) and Zener breakdown (tunneling, generally < 6 V).
+  local_evidence_atom_ids:
+  - A-PN-AVALANCHE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: FORMULA-REVERSE-CURRENT
+  type: Formula
+  section_path: 2 > 2.2
+  home_package: PKG-PN-DIODE
+  payload:
+    name: reverse current with avalanche multiplication
+    expression: i_RA = M i_R = [1/(1-(v_R/BV)^n)] i_R
+  local_evidence_atom_ids:
+  - A-PN-IRA-14
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PHYS-CAP-COEFFICIENTS
+  type: PhysicalEffect
+  section_path: 2 > 2.4 > Capacitors
+  home_package: PKG-CAP
+  payload:
+    name: capacitor voltage/temperature coefficients
+    description: Integrated-cap voltage coefficient 0 to -200 ppm/V, temperature coefficient 20-50 ppm/C; in a ratio the absolute temperature variations cancel.
+  local_evidence_atom_ids:
+  - A-CAP-COEFF
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: PRINCIPLE-ESD-PROTECTION
+  type: DesignPrinciple
+  section_path: 2 > 2.5
+  home_package: PKG-LATCHUP
+  payload:
+    statement: Protect externally-accessible gates with a series resistor plus two reverse-biased pn diodes (to V_DD and V_SS) to limit ESD breakdown current.
+    applies_to:
+    - I/O gate protection
+  local_evidence_atom_ids:
+  - A-ESD
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: formula_derived_from_formula
+  source_object_id: FORMULA-DEPLETION-CAP
+  target_object_id: FORMULA-DEPLETION-CHARGE
+  evidence_atom_ids:
+  - A-PN-QJ-10
+  - A-PN-CJ-12
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: formula_derived_from_formula
+  source_object_id: FORMULA-DEPLETION-WIDTH
+  target_object_id: FORMULA-BARRIER-POTENTIAL
+  evidence_atom_ids:
+  - A-PN-XD-9
+  - A-PN-PHI-6
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-03
+  relation_type: formula_quantifies_effect
+  source_object_id: FORMULA-DEPLETION-CAP
+  target_object_id: PHYS-DEPLETION-CAP
+  evidence_atom_ids:
+  - A-PN-CJ-12
+  - A-PN-CJ0-DEF
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-04
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-DEPLETION-CAP
+  target_object_id: EXAMPLE-2.2-1
+  evidence_atom_ids:
+  - A-EX221-USE
+  - A-EX221-RESULT
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-05
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-DIODE-EQUATION
+  target_object_id: EXAMPLE-2.2-2
+  evidence_atom_ids:
+  - A-EX222-RESULT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-06
+  relation_type: derivation_produces_formula
+  source_object_id: DERIV-PN-CAPACITANCE-CHAIN
+  target_object_id: FORMULA-DEPLETION-CAP
+  evidence_atom_ids:
+  - A-PN-CJ-12
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-07
+  relation_type: formula_uses_parameter_formula
+  source_object_id: FORMULA-THRESHOLD-VOLTAGE
+  target_object_id: FORMULA-BODY-FACTOR
+  evidence_atom_ids:
+  - A-MOS-VT-19
+  - A-MOS-GAMMA-21
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-08
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-THRESHOLD-VOLTAGE
+  target_object_id: EXAMPLE-2.3-1
+  evidence_atom_ids:
+  - A-EX231-USE
+  - A-EX231-RESULT
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-09
+  relation_type: derivation_produces_formula
+  source_object_id: DERIV-THRESHOLD-VOLTAGE
+  target_object_id: FORMULA-THRESHOLD-VOLTAGE
+  evidence_atom_ids:
+  - A-MOS-VT0-20
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-10
+  relation_type: component_has_property
+  source_object_id: CONCEPT-MOS-TRANSISTOR
+  target_object_id: PHYS-BODY-EFFECT
+  evidence_atom_ids:
+  - A-MOS-VT-19
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-11
+  relation_type: concept_defines_term
+  source_object_id: CONCEPT-MOS-TRANSISTOR
+  target_object_id: CONCEPT-STRONG-INVERSION
+  evidence_atom_ids:
+  - A-MOS-STRONGINV
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-12
+  relation_type: formula_uses_parameter_formula
+  source_object_id: FORMULA-SAH-DRAIN-CURRENT
+  target_object_id: FORMULA-KPRIME
+  evidence_atom_ids:
+  - A-MOS-ID-27
+  - A-MOS-KP-29
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-13
+  relation_type: process_flow_has_step
+  source_object_id: PROCESS-NWELL-CMOS
+  target_object_id: TECH-OXIDATION
+  evidence_atom_ids:
+  - A-FAB-NWELL-FLOW
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-14
+  relation_type: process_flow_has_step
+  source_object_id: PROCESS-NWELL-CMOS
+  target_object_id: TECH-IMPLANT
+  evidence_atom_ids:
+  - A-FAB-NWELL-FLOW
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-15
+  relation_type: process_step_has_nonideality
+  source_object_id: PROCESS-NWELL-CMOS
+  target_object_id: PHYS-BIRDSBEAK
+  evidence_atom_ids:
+  - A-FAB-NW-LOCOS
+  - A-FAB-BIRDSBEAK
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-16
+  relation_type: technology_process_defines_formula
+  source_object_id: TECH-ETCHING
+  target_object_id: FORMULA-SELECTIVITY
+  evidence_atom_ids:
+  - A-FAB-SEL-1
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-17
+  relation_type: technology_process_defines_formula
+  source_object_id: TECH-ETCHING
+  target_object_id: FORMULA-ANISOTROPY
+  evidence_atom_ids:
+  - A-FAB-ANI-2
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-18
+  relation_type: component_has_property
+  source_object_id: CONCEPT-PN-JUNCTION
+  target_object_id: PHYS-DEPLETION-CAP
+  evidence_atom_ids:
+  - A-PN-CJ-12
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-19
+  relation_type: component_has_nonideality
+  source_object_id: COMP-SUBSTRATE-BJT
+  target_object_id: PHYS-LATCHUP
+  evidence_atom_ids:
+  - A-BJT-LATERAL
+  - A-LATCHUP
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-20
+  relation_type: design_principle_mitigates_effect
+  source_object_id: PRINCIPLE-LATCHUP-PREVENT
+  target_object_id: PHYS-LATCHUP
+  evidence_atom_ids:
+  - A-LATCHUP-PREVENT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-21
+  relation_type: design_principle_has_tradeoff
+  source_object_id: PRINCIPLE-LATCHUP-PREVENT
+  target_object_id: TRADEOFF-LATCHUP-AREA
+  evidence_atom_ids:
+  - A-LATCHUP-PREVENT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-22
+  relation_type: formula_used_in_example
+  source_object_id: FORMULA-SHEET-RESISTANCE
+  target_object_id: EXAMPLE-2.6-1
+  evidence_atom_ids:
+  - A-EX261-RESULT
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-23
+  relation_type: concept_defines_term
+  source_object_id: CONCEPT-SHEET-RESISTANCE
+  target_object_id: FORMULA-SHEET-RESISTANCE
+  evidence_atom_ids:
+  - A-LAY-RS-13
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-24
+  relation_type: design_principle_applies_to_component
+  source_object_id: PRINCIPLE-COMMON-CENTROID
+  target_object_id: COMP-CAPACITORS
+  evidence_atom_ids:
+  - A-MATCH-CENTROID
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-25
+  relation_type: checklist_candidate_derived_from_principle
+  source_object_id: CHECK-CAP-SELECTION
+  target_object_id: PRINCIPLE-CAP-DESIRED
+  evidence_atom_ids:
+  - A-CAP-DESIRED
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-26
+  relation_type: problem_extends_example
+  source_object_id: PROB-4
+  target_object_id: EXAMPLE-2.2-1
+  evidence_atom_ids:
+  - A-PROB-4
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-27
+  relation_type: problem_extends_example
+  source_object_id: PROB-11
+  target_object_id: EXAMPLE-2.3-1
+  evidence_atom_ids:
+  - A-PROB-11
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-28
+  relation_type: problem_uses_formula
+  source_object_id: PROB-8
+  target_object_id: FORMULA-BREAKDOWN
+  evidence_atom_ids:
+  - A-PROB-8
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: R-29
+  relation_type: component_has_property
+  source_object_id: CONCEPT-PN-JUNCTION
+  target_object_id: PHYS-REVERSE-BREAKDOWN
+  evidence_atom_ids:
+  - A-PN-AVALANCHE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+do_not_extract:
+- pattern: bracket_reference_citation
+  examples:
+  - '[24,25]'
+  - '[12]'
+  - '[1,2,3,4]'
+  - '[7,8]'
+  reason: inline numeric reference citations are not knowledge objects
+  kind: citation_policy
+- pattern: figure_or_equation_cross_reference
+  examples:
+  - Fig. 2.1-5
+  - Fig. 2.2-1
+  - Figure 2.5-3
+  - Eq. (12)
+  reason: cross-references to figures/equations are pointers, not objects to extract
+  kind: reference
+- pattern: figure_internal_label
+  examples:
+  - n-well implant
+  - p- substrate
+  - Photoresist
+  - FOX
+  - Si3N4
+  reason: OCR'd labels inside <details> figure/cross-section blocks are not knowledge objects
+  kind: figure_label
+- pattern: image_markup
+  examples:
+  - '![](images/<hash>.jpg)'
+  reason: image embeds carry no extractable text
+  kind: image_markup
+- pattern: out_of_chapter_cross_reference
+  examples:
+  - Appendix B on device characterization
+  - examined in more detail in the next chapter
+  - Chapter 9 Switched Capacitor Circuits
+  reason: references to other chapters/appendices are not Chapter-2 objects
+  kind: cross_reference

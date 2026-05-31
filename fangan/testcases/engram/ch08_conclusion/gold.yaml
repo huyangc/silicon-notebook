@@ -1,0 +1,591 @@
+# Gold fixture v0.3.3 - Engram paper Chapter 8 Conclusion (profile: article_research)
+# Upgraded from v0.1: SAME atom/chunk/object/relation IDs and meanings, now re-expressed in the
+# v0.3.3 schema with verbatim spans -- dual coordinates (source_span authoritative + viewer_span),
+# raw/normalized discipline, object evidence split into local/supporting + home_package,
+# ONE context_package per conclusion_block with expected_objects, gold_label/difficulty/
+# evidence_strength (no decimal confidence), do_not_extract citation policy, auto source_elements.
+# Quirks: line 343 lacks a terminal period; A-CONC-MECH spans the 347-349 page break; $O(1)$ and
+# curly-quoted "deepen" are kept verbatim in raw_text. Spans computed by build.py; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Chapter 8 (Conclusion) only
+  title: 'Engram: Conditional Memory as a Complementary Sparsity Axis - 8. Conclusion'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 341
+  - 349
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 341-349; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - we introduce
+  - we instantiate
+  - U-shaped scaling law
+  - mechanistic analysis
+  - we envision
+  - 27B parameters
+  extraction_targets:
+  - ArticleClaim
+  - Implication
+  - DerivedRuleCandidate
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file. normalized_text renders EXACTLY that span: it may rephrase, transliterate math (O(1)), use straight quotes, and join the page-break newline, but MUST NOT introduce facts/names/section-refs not inside the span. EXCEPTION: a formula_atom MAY carry a symbolic interpretation supplied by atoms in metadata.supported_by_context_atoms / interpretation_supported_by.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. Chapter 8 is a single chunk/package, so there are no cross-package objects and no expected_local_fields.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: figure atoms separate physical_section_id from semantic_section_ids; forward references set include_in_chapterN_core_chunks:false and are isolated in a cross_reference_block. The Conclusion contains no figures.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    canonicalization_scope: Within-file only. Conclusion claims mirror earlier-chapter result/finding objects (ch03/04/05/06/07); these cross-chapter aliases are recorded in canonicalization notes for downstream merge but are NOT merged here, and no new independent facts are created in this chapter.
+    context_only: an atom not consumed by any object or relation may be flagged metadata.context_only:true; the Conclusion has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - Chapter 8 spans source lines 341-349; '# References' (line 351) is the lower-boundary heading and is excluded.
+  - Source line 343 ends WITHOUT a terminal period ('...constant-time $O(1)$ lookups for static patterns'); A-CONC-ENGRAM raw_text therefore ends at 'static patterns' and the missing period must not be read as an unfinished paragraph.
+  - 'The mechanism claim (A-CONC-MECH) spans a PDF page break: source lines 347-349 are split into ''...attention capacity to focus'' / blank line / ''on global context...''. raw_text keeps the embedded ''\n\n''; normalized_text joins it into one sentence.'
+  - Inside line 343, $O(1)$ is inline math and is normalized to ASCII 'O(1)'.
+  - '''deepen'' appears with curly double quotes (U+201C/U+201D) in the source; raw_text keeps them verbatim and normalized_text uses straight ASCII quotes.'
+  - Conclusion claims restate earlier-chapter results (Sparsity Allocation/U-shaped law -> ch03; 27B result -> ch04; long-context LongPPL/RULER -> ch05; mechanistic effective-depth -> ch06; deterministic addressing -> ch07). These are recorded as cross-chapter aliases in canonicalization; downstream cross-file merge should link them back rather than create parallel facts.
+source_elements:
+- id: SE-8-H
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 341
+  line_end: 341
+- id: SE-8-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 343
+  line_end: 343
+- id: SE-8-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 345
+  line_end: 345
+- id: SE-8-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 347
+  line_end: 349
+  note: 'conclusion text spans a page break: mechanism claim breaks across lines 347-349'
+section_tree:
+- id: SEC-8
+  path: '8'
+  title: Conclusion
+evidence_atoms:
+- id: A-CONC-THESIS
+  section_id: SEC-8
+  atom_type: claim_sentence
+  source_element_id: SE-8-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 343
+    line_end: 343
+    char_start: 62852
+    char_end: 63086
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 6
+    char_start: 314
+    char_end: 548
+    viewer_only: true
+  raw_text: In this work, we introduce conditional memory as a complementary sparsity axis to the prevailing conditional computation paradigm (MoE), aiming to resolve the inefficiency of simulating knowledge retrieval through dynamic computation.
+  normalized_text: In this work, we introduce conditional memory as a complementary sparsity axis to the prevailing conditional computation paradigm (MoE), aiming to resolve the inefficiency of simulating knowledge retrieval through dynamic computation.
+  evidence_strength: direct
+- id: A-CONC-ENGRAM
+  section_id: SEC-8
+  atom_type: claim_sentence
+  source_element_id: SE-8-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 343
+    line_end: 343
+    char_start: 63087
+    char_end: 63246
+  viewer_span:
+    file: source.md
+    line_start: 6
+    line_end: 6
+    char_start: 549
+    char_end: 708
+    viewer_only: true
+  raw_text: We instantiate this concept via Engram, a module that modernizes classic N-gram embeddings to enable scalable, constant-time $O(1)$ lookups for static patterns
+  normalized_text: We instantiate this concept via Engram, a module that modernizes classic N-gram embeddings to enable scalable, constant-time O(1) lookups for static patterns
+  evidence_strength: direct
+- id: A-CONC-USHAPE
+  section_id: SEC-8
+  atom_type: claim_sentence
+  source_element_id: SE-8-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 345
+    line_end: 345
+    char_start: 63248
+    char_end: 63467
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 710
+    char_end: 929
+    viewer_only: true
+  raw_text: By formulating the Sparsity Allocation problem, we uncover a U-shaped scaling law, demonstrating that a hybrid allocation of sparse capacity between MoE experts and Engram memory strictly outperforms pure MoE baselines.
+  normalized_text: By formulating the Sparsity Allocation problem, we uncover a U-shaped scaling law, demonstrating that a hybrid allocation of sparse capacity between MoE experts and Engram memory strictly outperforms pure MoE baselines.
+  evidence_strength: direct
+- id: A-CONC-SCALE27B
+  section_id: SEC-8
+  atom_type: result_sentence
+  source_element_id: SE-8-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 345
+    line_end: 345
+    char_start: 63468
+    char_end: 63722
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 930
+    char_end: 1184
+    viewer_only: true
+  raw_text: Guided by this law, we scale Engram to 27B parameters, achieving superior performance across diverse domains. Notably, while the memory module intuitively aids knowledge retrieval, we observe even larger gains in general reasoning, code, and mathematics.
+  normalized_text: Guided by this law, we scale Engram to 27B parameters, achieving superior performance across diverse domains. Notably, while the memory module intuitively aids knowledge retrieval, we observe even larger gains in general reasoning, code, and mathematics.
+  evidence_strength: direct
+- id: A-CONC-MECH
+  section_id: SEC-8
+  atom_type: mechanism_sentence
+  source_element_id: SE-8-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 347
+    line_end: 349
+    char_start: 63724
+    char_end: 63950
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 12
+    char_start: 1186
+    char_end: 1412
+    viewer_only: true
+  raw_text: 'Our mechanistic analysis reveals that Engram effectively “deepen” the network by relieving early layers from static reconstruction tasks, thereby freeing up attention capacity to focus
+
+
+    on global context and complex reasoning.'
+  normalized_text: Our mechanistic analysis reveals that Engram effectively "deepen" the network by relieving early layers from static reconstruction tasks, thereby freeing up attention capacity to focus on global context and complex reasoning.
+  evidence_strength: direct
+- id: A-CONC-LONGCTX
+  section_id: SEC-8
+  atom_type: result_sentence
+  source_element_id: SE-8-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 349
+    line_end: 349
+    char_start: 63951
+    char_end: 64102
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 1413
+    char_end: 1564
+    viewer_only: true
+  raw_text: This architectural shift translates into substantial improvements in long-context capabilities, as evidenced by performance gains in LongPPL and RULER.
+  normalized_text: This architectural shift translates into substantial improvements in long-context capabilities, as evidenced by performance gains in LongPPL and RULER.
+  evidence_strength: direct
+- id: A-CONC-INFRA
+  section_id: SEC-8
+  atom_type: claim_sentence
+  source_element_id: SE-8-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 349
+    line_end: 349
+    char_start: 64103
+    char_end: 64381
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 1565
+    char_end: 1843
+    viewer_only: true
+  raw_text: Finally, Engram advocates for infrastructure-aware efficiency as a first-class design principle. Its deterministic addressing allows for the decoupling of storage and compute, enabling the offloading of massive parameter tables to host memory with negligible inference overhead.
+  normalized_text: Finally, Engram advocates for infrastructure-aware efficiency as a first-class design principle. Its deterministic addressing allows for the decoupling of storage and compute, enabling the offloading of massive parameter tables to host memory with negligible inference overhead.
+  evidence_strength: direct
+- id: A-CONC-VISION
+  section_id: SEC-8
+  atom_type: claim_sentence
+  source_element_id: SE-8-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 349
+    line_end: 349
+    char_start: 64382
+    char_end: 64496
+  viewer_span:
+    file: source.md
+    line_start: 12
+    line_end: 12
+    char_start: 1844
+    char_end: 1958
+    viewer_only: true
+  raw_text: We envision conditional memory functions as an indispensable modeling primitive for next-generation sparse models.
+  normalized_text: We envision conditional memory functions as an indispensable modeling primitive for next-generation sparse models.
+  evidence_strength: direct
+semantic_chunks:
+- id: C-CONCLUSION
+  profile: article_research
+  chunk_type: conclusion_block
+  section_path: '8'
+  atom_ids:
+  - A-CONC-THESIS
+  - A-CONC-ENGRAM
+  - A-CONC-USHAPE
+  - A-CONC-SCALE27B
+  - A-CONC-MECH
+  - A-CONC-LONGCTX
+  - A-CONC-INFRA
+  - A-CONC-VISION
+  central_atom_ids:
+  - A-CONC-THESIS
+  - A-CONC-VISION
+  boundary_reason: Single conclusion section between the related-work paragraphs and the References heading (source line 351, excluded); all claims summarize the paper and share one rhetorical unit, so they stay in one block. The cut is the heading_change at '# References' (qiefen Section 5.3).
+  extraction_targets:
+  - ArticleClaim
+  - Implication
+  - DerivedRuleCandidate
+  gold_must_cover_atoms:
+  - A-CONC-THESIS
+  - A-CONC-ENGRAM
+  - A-CONC-USHAPE
+  - A-CONC-SCALE27B
+  - A-CONC-MECH
+  - A-CONC-INFRA
+  - A-CONC-VISION
+context_packages:
+- id: PKG-CONCLUSION
+  profile: article_research
+  chunk_id: C-CONCLUSION
+  section_path: Chapter 8 > 8 Conclusion
+  document_title: 'Engram: Conditional Memory as a Complementary Sparsity Axis'
+  atoms:
+  - atom_id: A-CONC-THESIS
+    atom_type: claim_sentence
+  - atom_id: A-CONC-ENGRAM
+    atom_type: claim_sentence
+  - atom_id: A-CONC-USHAPE
+    atom_type: claim_sentence
+  - atom_id: A-CONC-SCALE27B
+    atom_type: result_sentence
+  - atom_id: A-CONC-MECH
+    atom_type: mechanism_sentence
+  - atom_id: A-CONC-LONGCTX
+    atom_type: result_sentence
+  - atom_id: A-CONC-INFRA
+    atom_type: claim_sentence
+  - atom_id: A-CONC-VISION
+    atom_type: claim_sentence
+  linked_context:
+    previous_heading: Mechanisms of Knowledge Storage (Related Work)
+    next_heading: References
+    formula_context: O(1) lookup; Sparsity Allocation ratio rho (defined in ch03)
+  extraction_targets:
+  - ArticleClaim
+  - Implication
+  - DerivedRuleCandidate
+  expected_objects:
+  - CLAIM-CONDITIONAL-MEMORY
+  - CLAIM-ENGRAM-O1
+  - CLAIM-USHAPE-HYBRID
+  - CLAIM-SCALE-27B
+  - CLAIM-INFRA-EFFICIENCY
+  - MECH-EFFECTIVE-DEPTH
+  - IMPL-PRIMITIVE
+  - RULE-HYBRID-ALLOCATION
+mentions:
+- id: M-01
+  text: conditional memory
+  type: ArticleClaim
+  atom_id: A-CONC-THESIS
+  canonical_key: conditional_memory
+- id: M-02
+  text: conditional computation (MoE)
+  type: ArticleClaim
+  atom_id: A-CONC-THESIS
+  canonical_key: moe_conditional_computation
+- id: M-03
+  text: Engram
+  type: ArchitectureComponent
+  atom_id: A-CONC-ENGRAM
+  canonical_key: engram
+- id: M-04
+  text: N-gram embeddings
+  type: ArticleClaim
+  atom_id: A-CONC-ENGRAM
+  canonical_key: ngram_embeddings
+- id: M-05
+  text: Sparsity Allocation
+  type: ArticleClaim
+  atom_id: A-CONC-USHAPE
+  canonical_key: sparsity_allocation
+- id: M-06
+  text: U-shaped scaling law
+  type: ScalingLaw
+  atom_id: A-CONC-USHAPE
+  canonical_key: u_shaped_scaling_law
+- id: M-07
+  text: Engram-27B
+  type: ExperimentResult
+  atom_id: A-CONC-SCALE27B
+  canonical_key: engram_27b_result
+- id: M-08
+  text: mechanistic analysis
+  type: MechanisticExplanation
+  atom_id: A-CONC-MECH
+  canonical_key: effective_depth_analysis
+- id: M-09
+  text: LongPPL
+  type: ExperimentResult
+  atom_id: A-CONC-LONGCTX
+  canonical_key: longppl
+- id: M-10
+  text: RULER
+  type: ExperimentResult
+  atom_id: A-CONC-LONGCTX
+  canonical_key: ruler
+- id: M-11
+  text: deterministic addressing
+  type: SystemDesignClaim
+  atom_id: A-CONC-INFRA
+  canonical_key: deterministic_addressing
+- id: M-12
+  text: host memory offloading
+  type: SystemDesignClaim
+  atom_id: A-CONC-INFRA
+  canonical_key: host_memory_offload
+canonicalization:
+- canonical: u_shaped_scaling_law
+  aliases:
+  - U-shaped scaling law
+  - U-shaped relationship
+  - Sparsity Allocation law
+  note: Mirrors the ch03 (Sparsity Allocation) ScalingLaw object; cross-chapter alias recorded for downstream merge, but canonicalization here stays within-file (no new independent scaling-law fact).
+- canonical: engram_27b_result
+  aliases:
+  - Engram-27B
+  - 27B parameters
+  - superior performance across diverse domains
+  note: Mirrors the ch04 (Large-scale Pre-training) ExperimentResult object (cross-chapter alias).
+- canonical: effective_depth_analysis
+  aliases:
+  - mechanistic analysis
+  - deepen the network
+  - relieving early layers
+  note: Mirrors the ch06 (Analysis / effective depth) MechanisticExplanation object (cross-chapter alias).
+- canonical: longppl
+  aliases:
+  - LongPPL
+  - long-context perplexity
+  note: Mirrors the ch05 (Long Context Training) ExperimentResult object (cross-chapter alias).
+- canonical: ruler
+  aliases:
+  - RULER
+  note: Mirrors the ch05 (Long Context Training) ExperimentResult object (cross-chapter alias).
+- canonical: deterministic_addressing
+  aliases:
+  - deterministic addressing
+  - decoupling of storage and compute
+  - host memory offloading
+  note: Mirrors the ch07 / system-efficiency SystemDesignClaim object (cross-chapter alias).
+objects:
+- id: CLAIM-CONDITIONAL-MEMORY
+  type: ArticleClaim
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    statement: Conditional memory is a complementary sparsity axis to conditional computation (MoE), resolving the inefficiency of simulating knowledge retrieval through dynamic computation.
+    role: core_thesis
+  local_evidence_atom_ids:
+  - A-CONC-THESIS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-ENGRAM-O1
+  type: ArticleClaim
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    statement: Engram modernizes classic N-gram embeddings to provide scalable, constant-time O(1) lookups for static patterns.
+    instantiates: conditional memory
+  local_evidence_atom_ids:
+  - A-CONC-ENGRAM
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-USHAPE-HYBRID
+  type: ArticleClaim
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    statement: A U-shaped scaling law over the Sparsity Allocation problem shows hybrid MoE+Engram allocation strictly outperforms pure MoE.
+    summarizes_chapter: ch03 Sparsity Allocation
+  local_evidence_atom_ids:
+  - A-CONC-USHAPE
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-SCALE-27B
+  type: ArticleClaim
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    statement: Engram scales to 27B parameters with superior performance across diverse domains, with the largest gains in general reasoning, code, and mathematics.
+    summarizes_chapter: ch04 Large-scale Pre-training
+  local_evidence_atom_ids:
+  - A-CONC-SCALE27B
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: CLAIM-INFRA-EFFICIENCY
+  type: ArticleClaim
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    statement: Engram's deterministic addressing decouples storage from compute, allowing massive parameter tables to be offloaded to host memory with negligible inference overhead.
+    role: system_design_claim
+    summarizes_chapter: ch07 System Efficiency
+  local_evidence_atom_ids:
+  - A-CONC-INFRA
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: MECH-EFFECTIVE-DEPTH
+  type: MechanisticExplanation
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    mechanism: Engram relieves early layers from static reconstruction, effectively deepening the network and freeing attention capacity for global context and complex reasoning.
+    observed_effect: improved long-context capability (LongPPL, RULER)
+    summarizes_chapter: ch06 Analysis
+  local_evidence_atom_ids:
+  - A-CONC-MECH
+  - A-CONC-LONGCTX
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: IMPL-PRIMITIVE
+  type: Implication
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    statement: Conditional memory should function as an indispensable modeling primitive for next-generation sparse models.
+    direction: future_architecture
+  local_evidence_atom_ids:
+  - A-CONC-VISION
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: easy
+  evidence_strength: direct
+- id: RULE-HYBRID-ALLOCATION
+  type: DerivedRuleCandidate
+  section_path: '8'
+  home_package: PKG-CONCLUSION
+  payload:
+    candidate_rule: When allocating sparse capacity in a large model, split it between MoE experts and conditional-memory (Engram) rather than committing fully to MoE, following the U-shaped allocation law.
+    derived_from: U-shaped scaling law
+  local_evidence_atom_ids:
+  - A-CONC-USHAPE
+  - A-CONC-THESIS
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+relations:
+- id: R-01
+  relation_type: claim_instantiated_by_method
+  source_object_id: CLAIM-CONDITIONAL-MEMORY
+  target_object_id: CLAIM-ENGRAM-O1
+  evidence_atom_ids:
+  - A-CONC-THESIS
+  - A-CONC-ENGRAM
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: result_supports_claim
+  source_object_id: CLAIM-USHAPE-HYBRID
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-CONC-USHAPE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: result_supports_claim
+  source_object_id: CLAIM-SCALE-27B
+  target_object_id: CLAIM-CONDITIONAL-MEMORY
+  evidence_atom_ids:
+  - A-CONC-SCALE27B
+  gold_label: true
+  difficulty: medium
+  evidence_strength: indirect
+- id: R-04
+  relation_type: mechanism_explains_result
+  source_object_id: MECH-EFFECTIVE-DEPTH
+  target_object_id: CLAIM-SCALE-27B
+  evidence_atom_ids:
+  - A-CONC-MECH
+  - A-CONC-LONGCTX
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-05
+  relation_type: claim_suggests_design_rule
+  source_object_id: CLAIM-USHAPE-HYBRID
+  target_object_id: RULE-HYBRID-ALLOCATION
+  evidence_atom_ids:
+  - A-CONC-USHAPE
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+- id: R-06
+  relation_type: system_design_enables_efficiency
+  source_object_id: CLAIM-ENGRAM-O1
+  target_object_id: CLAIM-INFRA-EFFICIENCY
+  evidence_atom_ids:
+  - A-CONC-ENGRAM
+  - A-CONC-INFRA
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-07
+  relation_type: claim_suggests_implication
+  source_object_id: CLAIM-CONDITIONAL-MEMORY
+  target_object_id: IMPL-PRIMITIVE
+  evidence_atom_ids:
+  - A-CONC-THESIS
+  - A-CONC-VISION
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+do_not_extract:
+- pattern: inline_author_year_citation
+  examples:
+  - (Vaswani et al., 2017)
+  - (Xie et al., 2025)
+  reason: inline author-year citations are not knowledge objects; the Conclusion slice itself contains none, but this policy entry suppresses citation over-extraction consistently with other chapters.
+  kind: citation_policy

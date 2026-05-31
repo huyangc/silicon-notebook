@@ -1,0 +1,938 @@
+# Gold fixture v0.3.3 - Engram paper Section 7 Related Work (profile: article_research)
+# Upgraded from v0.1: same atom/chunk/object/relation IDs and meaning, re-expressed in the
+# v0.3.3 schema. Adds dual coordinates (source_span authoritative + viewer_span viewer_only),
+# verbatim raw_text + within-span normalized_text (dense inline citations kept verbatim in raw,
+# summarized in normalized), object evidence split into local/supporting + home_package, one
+# context_package per related_work_comparison_block chunk with expected_objects, and
+# gold_label/difficulty/evidence_strength (no decimal confidence). do_not_extract covers the
+# Figure 7 cross-section caption and the inline_author_year_citation policy.
+# Spans are computed by build.py against engram_paper_mineru.md; do NOT hand-edit.
+schema_version: 0.3.3
+source_meta:
+  source_id: engram
+  scope: Section 7 (Related Work) only
+  title: 'Engram: Conditional Memory as a Complementary Sparsity Axis - Section 7 Related Work'
+  source_file: engram_paper_mineru.md
+  source_line_range:
+  - 322
+  - 339
+  viewer_file: source.md (human-readable verbatim slice of source_file lines 322-339; NOT the authoritative source)
+  profile: article_research
+  profile_detected_as: article_research
+  profile_cues:
+  - Related Work
+  - (Shannon, 1948)
+  - Mixture-of-Experts
+  - Memory Network
+  - our work diverges fundamentally in two key dimensions
+  extraction_targets:
+  - ArticleClaim
+  - SystemDesignClaim
+  - RelatedWorkComparison
+  - MechanisticExplanation
+  conventions:
+    coordinate_policy: AUTHORITATIVE coordinates are atom.source_span (file=source_file=engram_paper_mineru.md). Evaluators MUST verify source_file[source_span.char_start:char_end] == raw_text. atom.viewer_span (file=source.md) is OPTIONAL/viewer_only and MUST NOT be used as the primary evaluation coordinate.
+    raw_vs_normalized: 'raw_text is a verbatim contiguous span of source_file (Related Work prose, including dense inline (Author, Year) citations kept verbatim). normalized_text renders EXACTLY that span: it may summarize/condense the citations and resolve in-span pronouns, but MUST NOT introduce facts/names/section-refs not inside the span. There are no formula atoms in this section.'
+    object_evidence: Each object lists local_evidence_atom_ids (atoms inside the object's home_package's chunk) and supporting_context_atom_ids (atoms from OTHER chunks needed to fully define it). The object's full evidence is the union. Package object-recall (expected_objects) is scored against local_evidence only; supporting_context atoms are NOT required to be present in the home package's input.
+    expected_local_fields: For a cross-package object, a package may declare expected_local_fields[object_id] = the payload fields derivable from that package's atoms alone. Here OBJ-DIFF-PRIMITIVE (home PKG-RW-NGRAM) references A-MOE-INTRO from the MoE chunk as supporting context.
+    labels: gold objects/relations use gold_label + difficulty + evidence_strength instead of decimal confidence.
+    figures: figure atoms separate physical_section_id from semantic_section_ids; forward/cross references are isolated. Figure 7 (source line 326) physically falls in the Section 7 line range but belongs to Section 6, so it is NOT atomized and is recorded in do_not_extract.
+    external_evidence: atoms whose claim is only asserted here but proven elsewhere set requires_external_evidence:true + external_evidence_ref. Section 7 has none.
+    packages: a context_package.atoms list IS the LLM input and equals its chunk's atom_ids; expected_objects lists the object ids that input should yield.
+    context_only: an atom not consumed by any object or relation may be flagged context_only:true; Section 7 has no such atoms (every atom feeds an object or relation).
+  validation:
+    required: 'for every atom: source_file[source_span.char_start:source_span.char_end] == raw_text'
+    optional_debug: 'for every atom with viewer_span: source.md[viewer_span.char_start:viewer_span.char_end] == raw_text'
+  parsing_notes:
+  - '# 7. Related Work (source line 322); the four topics use run-in bold lead-ins (N-gram Modeling and Embedding Scaling. / Mixture-of-Experts. / Memory Network. / Mechanisms of Knowledge Storage.) rather than separate markdown headings -> SEC-7-NGRAM/MOE/MEM/KNOW.'
+  - No formulas, no tables; citations appear densely as (Author, Year) -> see do_not_extract inline_author_year_citation policy.
+  - Engram's two key differences are a markdown bullet list ('- First, ...' line 330 / '- Second, ...' line 331), the highest-value claims of the section (A-DIFF1-PRIMITIVE / A-DIFF2-COMUDESIGN).
+  - 'The MoE intro (A-MOE-INTRO) is hyphen-split across a page break: ''super-'' ends line 333 and ''linear ...'' resumes on line 335 (blank line 334 in between); the source_span is contiguous across that break.'
+  - Figure 7 caption (source line 326) physically sits between the two N-gram paragraphs but belongs to Section 6 (gating visualization); excluded from atoms and listed in do_not_extract as cross_section_forward_reference.
+source_elements:
+- id: SE-H-7
+  type: heading
+  file: engram_paper_mineru.md
+  line_start: 322
+  line_end: 322
+- id: SE-7-NGRAM-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 324
+  line_end: 324
+- id: SE-7-NGRAM-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 328
+  line_end: 328
+- id: SE-7-NGRAM-DIFF1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 330
+  line_end: 330
+  note: markdown bullet item ('- First,' / '- Second,'); Engram's key difference
+- id: SE-7-NGRAM-DIFF2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 331
+  line_end: 331
+  note: markdown bullet item ('- First,' / '- Second,'); Engram's key difference
+- id: SE-7-MOE-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 333
+  line_end: 335
+  note: MoE intro; 'super-linear' is hyphen-split across a page break (lines 333/335)
+- id: SE-7-MOE-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 335
+  line_end: 335
+- id: SE-7-MEM-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 337
+  line_end: 337
+- id: SE-7-MEM-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 337
+  line_end: 337
+- id: SE-7-KNOW-P1
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 339
+  line_end: 339
+- id: SE-7-KNOW-P2
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 339
+  line_end: 339
+- id: SE-7-KNOW-P3
+  type: paragraph
+  file: engram_paper_mineru.md
+  line_start: 339
+  line_end: 339
+section_tree:
+- id: SEC-7
+  path: '7'
+  title: Related Work
+- id: SEC-7-NGRAM
+  path: 7 > N-gram Modeling and Embedding Scaling
+  title: N-gram Modeling and Embedding Scaling
+  parent: SEC-7
+  kind: run_in_heading
+- id: SEC-7-MOE
+  path: 7 > Mixture-of-Experts
+  title: Mixture-of-Experts
+  parent: SEC-7
+  kind: run_in_heading
+- id: SEC-7-MEM
+  path: 7 > Memory Network
+  title: Memory Network
+  parent: SEC-7
+  kind: run_in_heading
+- id: SEC-7-KNOW
+  path: 7 > Mechanisms of Knowledge Storage
+  title: Mechanisms of Knowledge Storage
+  parent: SEC-7
+  kind: run_in_heading
+evidence_atoms:
+- id: A-NGRAM-ORIGIN
+  section_id: SEC-7-NGRAM
+  atom_type: claim_sentence
+  source_element_id: SE-7-NGRAM-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 324
+    line_end: 324
+    char_start: 56452
+    char_end: 56957
+  viewer_span:
+    file: source.md
+    line_start: 4
+    line_end: 4
+    char_start: 394
+    char_end: 899
+    viewer_only: true
+  raw_text: Originating from Shannon's framework (Shannon, 1948), N-gram models rely on local history to predict tokens, traditionally employing smoothing techniques (Katz, 1987; Kneser and Ney, 1995) to mitigate data sparsity. Despite the paradigm shift toward neural architectures (Bengio et al., 2003) for capturing long-range dependencies, the computational efficiency of N-gram lookups has been preserved in modern representation learning, as exemplified by seminal works like FastText (Bojanowski et al., 2017).
+  normalized_text: N-gram models, originating from Shannon's framework, predict tokens from local history and use smoothing to mitigate data sparsity; despite the shift to neural architectures, the computational efficiency of N-gram lookups persists in modern representation learning, e.g., FastText.
+  evidence_strength: direct
+- id: A-NGRAM-RESURGE
+  section_id: SEC-7-NGRAM
+  atom_type: claim_sentence
+  source_element_id: SE-7-NGRAM-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 328
+    line_end: 328
+    char_start: 57428
+    char_end: 57768
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1370
+    char_end: 1710
+    viewer_only: true
+  raw_text: Recently, this paradigm has resurged as embedding scaling. While architectures such as Per-Layer Embeddings (Team, 2025) and DeepEmbed (RWKV Team, 2025) expand capacity via massive tables, a distinct line of pioneering research—most relevant to our approach—integrates compositional N-gram structures directly into the representation space.
+  normalized_text: 'The N-gram paradigm has resurged as embedding scaling: Per-Layer Embeddings and DeepEmbed expand capacity via massive tables, while a distinct line of research integrates compositional N-gram structures directly into the representation space.'
+  evidence_strength: direct
+- id: A-NGRAM-SUPERBPE-SCONE
+  section_id: SEC-7-NGRAM
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-NGRAM-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 328
+    line_end: 328
+    char_start: 57769
+    char_end: 57985
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1711
+    char_end: 1927
+    viewer_only: true
+  raw_text: 'SuperBPE (Liu et al., 2025) and SCONE (Yu et al., 2025) explicitly target high-frequency patterns: the former by merging multi-word expressions into “superword” tokens, and the latter via an auxiliary encoding model.'
+  normalized_text: 'SuperBPE and SCONE explicitly target high-frequency patterns: SuperBPE merges multi-word expressions into ''superword'' tokens, while SCONE uses an auxiliary encoding model.'
+  evidence_strength: direct
+- id: A-NGRAM-OVERENC-BLT
+  section_id: SEC-7-NGRAM
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-NGRAM-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 328
+    line_end: 328
+    char_start: 57986
+    char_end: 58335
+  viewer_span:
+    file: source.md
+    line_start: 8
+    line_end: 8
+    char_start: 1928
+    char_end: 2277
+    viewer_only: true
+  raw_text: In parallel, OverEncoding (Huang et al., 2025a) and Byte Latent Transformer (BLT) (Pagnoni et al., 2025) adopt hash N-gram embeddings to capture local dependencies at the token and byte levels, respectively. These studies collectively demonstrate the efficacy of scaling parameters through N-gram representations with minimal computational overhead.
+  normalized_text: OverEncoding and Byte Latent Transformer (BLT) adopt hash N-gram embeddings to capture local dependencies at the token and byte levels respectively, demonstrating that parameters can be scaled through N-gram representations with minimal computational overhead.
+  evidence_strength: direct
+- id: A-DIFF1-PRIMITIVE
+  section_id: SEC-7-NGRAM
+  atom_type: claim_sentence
+  source_element_id: SE-7-NGRAM-DIFF1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 330
+    line_end: 330
+    char_start: 58469
+    char_end: 59257
+  viewer_span:
+    file: source.md
+    line_start: 10
+    line_end: 10
+    char_start: 2411
+    char_end: 3199
+    viewer_only: true
+  raw_text: '- First, regarding modeling and evaluation protocols. Prior approaches often treat $N$ -gram embeddings as external augmentations without validating their efficiency under strictly fair comparison protocols. For instance, SCONE (Yu et al., 2025) is inference-focused and relies on auxiliary modules that incur additional training FLOPs. Similarly, OverEncoding (Huang et al., 2025a) fails to yield meaningful improvements on sparse MoE backbones even under a non-isoparametric setting. In contrast, we treat conditional memory as a first-class modeling primitive instantiated via the carefully designed Engram module. By rigorously evaluating this design within our Sparsity Allocation framework, we demonstrate its clear advantage over strictly iso-parameter and iso-FLOPs MoE baselines.'
+  normalized_text: 'First difference (modeling/evaluation): prior approaches treat N-gram embeddings as external augmentations without strictly fair protocols (SCONE is inference-focused with auxiliary modules incurring extra training FLOPs; OverEncoding fails to improve on sparse MoE backbones). In contrast, we treat conditional memory as a first-class modeling primitive via the Engram module, and within the Sparsity Allocation framework demonstrate clear advantage over strictly iso-parameter and iso-FLOPs MoE baselines.'
+  evidence_strength: direct
+- id: A-DIFF2-COMUDESIGN
+  section_id: SEC-7-NGRAM
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-NGRAM-DIFF2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 331
+    line_end: 331
+    char_start: 59258
+    char_end: 59867
+  viewer_span:
+    file: source.md
+    line_start: 11
+    line_end: 11
+    char_start: 3200
+    char_end: 3809
+    viewer_only: true
+  raw_text: '- Second, from a system perspective, we advocate for algorithm-system co-design. Existing approaches place embeddings strictly at the input layer (Layer 0), which inherently serializes memory access and computation (Huang et al., 2025a; Yu et al., 2025). Engram, conversely, strategically injects memory into deeper layers to enable communication-computation overlap. Furthermore, by exploiting the inherent Zipfian distribution of $N$ -grams, we could maximize the utility of the hardware memory hierarchy. This holistic design allows Engram to scale to massive parameters with negligible inference overhead.'
+  normalized_text: 'Second difference (system): existing approaches place embeddings strictly at the input layer (Layer 0), serializing memory access and computation. Engram instead injects memory into deeper layers to enable communication-computation overlap, and exploits the Zipfian distribution of N-grams to maximize use of the hardware memory hierarchy, scaling to massive parameters with negligible inference overhead.'
+  evidence_strength: direct
+- id: A-MOE-INTRO
+  section_id: SEC-7-MOE
+  atom_type: claim_sentence
+  source_element_id: SE-7-MOE-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 333
+    line_end: 335
+    char_start: 59889
+    char_end: 60310
+  viewer_span:
+    file: source.md
+    line_start: 13
+    line_end: 15
+    char_start: 3831
+    char_end: 4252
+    viewer_only: true
+  raw_text: 'MoE architectures decouple model capacity from computational cost by conditionally activating a sparse subset of experts per token, a paradigm introduced by Shazeer et al. (2017). Subsequent innovations such as GShard (Lepikhin et al., 2020), BASE (Lewis et al., 2021), Switch Transformer (Fedus et al., 2022) and GLaM (Du et al., 2022) enabled super-
+
+
+    linear parameter scaling while maintaining constant inference costs.'
+  normalized_text: MoE architectures decouple model capacity from computational cost by conditionally activating a sparse subset of experts per token (introduced by Shazeer et al., 2017); GShard, BASE, Switch Transformer and GLaM enabled super-linear parameter scaling at constant inference cost.
+  evidence_strength: direct
+- id: A-MOE-DEEPSEEK
+  section_id: SEC-7-MOE
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-MOE-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 335
+    line_end: 335
+    char_start: 60311
+    char_end: 60724
+  viewer_span:
+    file: source.md
+    line_start: 15
+    line_end: 15
+    char_start: 4253
+    char_end: 4666
+    viewer_only: true
+  raw_text: More recently, DeepSeek-MoE (Dai et al., 2024) demonstrated superior efficiency, significantly outperforming dense models with equivalent active parameters via fine-grained expert segmentation and shared expert isolation. Adopting this architecture, state-of-the-art models such as DeepSeek-V3 (Liu et al., 2024a) and Kimi-k2 (Team et al., 2025) have further pushed total parameters to hundreds of billions scale.
+  normalized_text: DeepSeek-MoE outperforms dense models with equivalent active parameters via fine-grained expert segmentation and shared expert isolation; adopting this architecture, DeepSeek-V3 and Kimi-k2 push total parameters to the hundreds-of-billions scale.
+  evidence_strength: direct
+- id: A-MEM-PARAMETRIC
+  section_id: SEC-7-MEM
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-MEM-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 337
+    line_end: 337
+    char_start: 60932
+    char_end: 61263
+  viewer_span:
+    file: source.md
+    line_start: 17
+    line_end: 17
+    char_start: 4874
+    char_end: 5205
+    viewer_only: true
+  raw_text: Parametric memory methods, such as PKM (Lample et al., 2019), PEER (He, 2024), Selfmem (Cheng et al., 2023b), Memory+ (Berges et al., 2025) and UltraMem (Huang et al., 2025b,c), integrate large-scale, sparse key-value stores directly into the model layers, thereby significantly increasing capacity with negligible impact on FLOPs.
+  normalized_text: Parametric memory methods (PKM, PEER, Selfmem, Memory+, UltraMem) integrate large-scale sparse key-value stores directly into the model layers, increasing capacity with negligible impact on FLOPs.
+  evidence_strength: direct
+- id: A-MEM-NONPARAMETRIC
+  section_id: SEC-7-MEM
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-MEM-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 337
+    line_end: 337
+    char_start: 61264
+    char_end: 61620
+  viewer_span:
+    file: source.md
+    line_start: 17
+    line_end: 17
+    char_start: 5206
+    char_end: 5562
+    viewer_only: true
+  raw_text: Conversely, non-parametric memory approaches like REALM (Guu et al., 2020), RETRO (Borgeaud et al., 2022; Wang et al., 2023), and PlugLM (Cheng et al., 2023a) decouple knowledge storage from model processing, treating the external memory as an editable and scalable key-value store that allows the model to adapt to evolving information without retraining.
+  normalized_text: Non-parametric memory approaches (REALM, RETRO, PlugLM) decouple knowledge storage from model processing, treating external memory as an editable, scalable key-value store that lets the model adapt to evolving information without retraining.
+  evidence_strength: direct
+- id: A-KNOW-FFN-KV
+  section_id: SEC-7-KNOW
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-KNOW-P1
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 339
+    line_end: 339
+    char_start: 61812
+    char_end: 62229
+  viewer_span:
+    file: source.md
+    line_start: 19
+    line_end: 19
+    char_start: 5754
+    char_end: 6171
+    viewer_only: true
+  raw_text: The Feed-Forward Networks (FFNs) are widely hypothesized to function as Key-Value memories (Geva et al., 2021). Under this framework, the first layer acts as a pattern detector ("keys") while the second layer projects specific information into the residual stream ("values"). This modularity is evidenced by the identification of specific "knowledge neurons" responsible for storing distinct facts (Dai et al., 2022).
+  normalized_text: 'FFNs are hypothesized to function as key-value memories: the first layer acts as a pattern detector (''keys'') and the second projects information into the residual stream (''values''); specific ''knowledge neurons'' are identified as storing distinct facts.'
+  evidence_strength: direct
+- id: A-KNOW-EDITING
+  section_id: SEC-7-KNOW
+  atom_type: mechanism_sentence
+  source_element_id: SE-7-KNOW-P2
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 339
+    line_end: 339
+    char_start: 62230
+    char_end: 62589
+  viewer_span:
+    file: source.md
+    line_start: 19
+    line_end: 19
+    char_start: 6172
+    char_end: 6531
+    viewer_only: true
+  raw_text: Further validation is provided by causal tracing methodologies, which map the information flow of factual recall to specific FFN layers (Meng et al., 2022). These insights have enabled precise model editing algorithms such as ROME (Meng et al., 2022) and MEMIT (Meng et al., 2023), which allow for the direct update of factual associations without retraining.
+  normalized_text: Causal tracing maps the information flow of factual recall to specific FFN layers, enabling precise model-editing algorithms such as ROME and MEMIT that directly update factual associations without retraining.
+  evidence_strength: direct
+- id: A-KNOW-WORLDMODEL
+  section_id: SEC-7-KNOW
+  atom_type: claim_sentence
+  source_element_id: SE-7-KNOW-P3
+  source_span:
+    file: engram_paper_mineru.md
+    line_start: 339
+    line_end: 339
+    char_start: 62590
+    char_end: 62833
+  viewer_span:
+    file: source.md
+    line_start: 19
+    line_end: 19
+    char_start: 6532
+    char_end: 6775
+    viewer_only: true
+  raw_text: Moreover, investigations into internal representations, such as those in Othello-GPT (Li et al., 2023a), suggest that these storage mechanisms may facilitate the emergence of structured "world models" rather than mere statistical memorization.
+  normalized_text: Investigations into internal representations such as Othello-GPT suggest these storage mechanisms may facilitate the emergence of structured 'world models' rather than mere statistical memorization.
+  evidence_strength: direct
+semantic_chunks:
+- id: C-RW-NGRAM
+  profile: article_research
+  chunk_type: related_work_comparison_block
+  section_path: 7 > N-gram Modeling and Embedding Scaling
+  atom_ids:
+  - A-NGRAM-ORIGIN
+  - A-NGRAM-RESURGE
+  - A-NGRAM-SUPERBPE-SCONE
+  - A-NGRAM-OVERENC-BLT
+  - A-DIFF1-PRIMITIVE
+  - A-DIFF2-COMUDESIGN
+  central_atom_ids:
+  - A-DIFF1-PRIMITIVE
+  - A-DIFF2-COMUDESIGN
+  boundary_reason: N-gram/embedding-scaling prior work and Engram's two key differences kept in one block; the diff bullets only make sense alongside the prior work they contrast (SCONE/OverEncoding/Layer-0 placement).
+  extraction_targets:
+  - RelatedWorkComparison
+  - ArticleClaim
+  - SystemDesignClaim
+  gold_must_cover_atoms:
+  - A-NGRAM-SUPERBPE-SCONE
+  - A-NGRAM-OVERENC-BLT
+  - A-DIFF1-PRIMITIVE
+  - A-DIFF2-COMUDESIGN
+- id: C-RW-MOE
+  profile: article_research
+  chunk_type: related_work_comparison_block
+  section_path: 7 > Mixture-of-Experts
+  atom_ids:
+  - A-MOE-INTRO
+  - A-MOE-DEEPSEEK
+  central_atom_ids:
+  - A-MOE-INTRO
+  boundary_reason: MoE lineage (Shazeer -> Switch/GLaM -> DeepSeek-V3/Kimi-k2) as one comparison topic.
+  extraction_targets:
+  - RelatedWorkComparison
+  gold_must_cover_atoms:
+  - A-MOE-INTRO
+  - A-MOE-DEEPSEEK
+- id: C-RW-MEM
+  profile: article_research
+  chunk_type: related_work_comparison_block
+  section_path: 7 > Memory Network
+  atom_ids:
+  - A-MEM-PARAMETRIC
+  - A-MEM-NONPARAMETRIC
+  central_atom_ids:
+  - A-MEM-PARAMETRIC
+  - A-MEM-NONPARAMETRIC
+  boundary_reason: parametric vs non-parametric memory-network taxonomy kept together as one contrast.
+  extraction_targets:
+  - RelatedWorkComparison
+  gold_must_cover_atoms:
+  - A-MEM-PARAMETRIC
+  - A-MEM-NONPARAMETRIC
+- id: C-RW-KNOW
+  profile: article_research
+  chunk_type: related_work_comparison_block
+  section_path: 7 > Mechanisms of Knowledge Storage
+  atom_ids:
+  - A-KNOW-FFN-KV
+  - A-KNOW-EDITING
+  - A-KNOW-WORLDMODEL
+  central_atom_ids:
+  - A-KNOW-FFN-KV
+  boundary_reason: knowledge-storage mechanism literature (FFN-as-KV -> editing -> world models) as one topic.
+  extraction_targets:
+  - RelatedWorkComparison
+  - ArticleClaim
+  gold_must_cover_atoms:
+  - A-KNOW-FFN-KV
+  - A-KNOW-EDITING
+context_packages:
+- id: PKG-RW-NGRAM
+  profile: article_research
+  chunk_id: C-RW-NGRAM
+  section_path: Section 7 Related Work > N-gram Modeling and Embedding Scaling
+  document_title: 'Engram: Conditional Memory as a Complementary Sparsity Axis'
+  atoms:
+  - atom_id: A-NGRAM-ORIGIN
+    atom_type: claim_sentence
+  - atom_id: A-NGRAM-RESURGE
+    atom_type: claim_sentence
+  - atom_id: A-NGRAM-SUPERBPE-SCONE
+    atom_type: mechanism_sentence
+  - atom_id: A-NGRAM-OVERENC-BLT
+    atom_type: mechanism_sentence
+  - atom_id: A-DIFF1-PRIMITIVE
+    atom_type: claim_sentence
+  - atom_id: A-DIFF2-COMUDESIGN
+    atom_type: mechanism_sentence
+  linked_context:
+    previous_heading: 6. Analysis (gating visualization, Figure 7)
+    next_heading: Mixture-of-Experts
+    formula_context: Engram's first difference is grounded in the Sparsity Allocation framework introduced in Section 3 (iso-param/iso-FLOPs comparison).
+  extraction_targets:
+  - RelatedWorkComparison
+  - ArticleClaim
+  - SystemDesignClaim
+  expected_objects:
+  - OBJ-DIFF-PRIMITIVE
+  - OBJ-DIFF-CODESIGN
+  - OBJ-RW-NGRAM
+  expected_local_fields:
+    OBJ-DIFF-PRIMITIVE:
+    - claim_type
+    - statement
+    - contrasted_with
+    - key_dimension
+- id: PKG-RW-MOE
+  profile: article_research
+  chunk_id: C-RW-MOE
+  section_path: Section 7 Related Work > Mixture-of-Experts
+  document_title: 'Engram: Conditional Memory as a Complementary Sparsity Axis'
+  atoms:
+  - atom_id: A-MOE-INTRO
+    atom_type: claim_sentence
+  - atom_id: A-MOE-DEEPSEEK
+    atom_type: mechanism_sentence
+  linked_context:
+    previous_heading: N-gram Modeling and Embedding Scaling
+    next_heading: Memory Network
+  extraction_targets:
+  - RelatedWorkComparison
+  expected_objects:
+  - OBJ-RW-MOE
+- id: PKG-RW-MEM
+  profile: article_research
+  chunk_id: C-RW-MEM
+  section_path: Section 7 Related Work > Memory Network
+  document_title: 'Engram: Conditional Memory as a Complementary Sparsity Axis'
+  atoms:
+  - atom_id: A-MEM-PARAMETRIC
+    atom_type: mechanism_sentence
+  - atom_id: A-MEM-NONPARAMETRIC
+    atom_type: mechanism_sentence
+  linked_context:
+    previous_heading: Mixture-of-Experts
+    next_heading: Mechanisms of Knowledge Storage
+  extraction_targets:
+  - RelatedWorkComparison
+  expected_objects:
+  - OBJ-RW-MEM
+- id: PKG-RW-KNOW
+  profile: article_research
+  chunk_id: C-RW-KNOW
+  section_path: Section 7 Related Work > Mechanisms of Knowledge Storage
+  document_title: 'Engram: Conditional Memory as a Complementary Sparsity Axis'
+  atoms:
+  - atom_id: A-KNOW-FFN-KV
+    atom_type: mechanism_sentence
+  - atom_id: A-KNOW-EDITING
+    atom_type: mechanism_sentence
+  - atom_id: A-KNOW-WORLDMODEL
+    atom_type: claim_sentence
+  linked_context:
+    previous_heading: Memory Network
+    next_heading: 8. Conclusion
+  extraction_targets:
+  - RelatedWorkComparison
+  - ArticleClaim
+  expected_objects:
+  - OBJ-RW-KNOW
+mentions:
+- id: M-01
+  text: FastText
+  type: RelatedWork
+  atom_id: A-NGRAM-ORIGIN
+  canonical_key: fasttext
+- id: M-02
+  text: Per-Layer Embeddings
+  type: RelatedWork
+  atom_id: A-NGRAM-RESURGE
+  canonical_key: per_layer_embeddings
+- id: M-03
+  text: DeepEmbed
+  type: RelatedWork
+  atom_id: A-NGRAM-RESURGE
+  canonical_key: deepembed
+- id: M-04
+  text: SuperBPE
+  type: RelatedWork
+  atom_id: A-NGRAM-SUPERBPE-SCONE
+  canonical_key: superbpe
+- id: M-05
+  text: SCONE
+  type: RelatedWork
+  atom_id: A-NGRAM-SUPERBPE-SCONE
+  canonical_key: scone
+- id: M-06
+  text: OverEncoding
+  type: RelatedWork
+  atom_id: A-NGRAM-OVERENC-BLT
+  canonical_key: overencoding
+- id: M-07
+  text: Byte Latent Transformer
+  type: RelatedWork
+  atom_id: A-NGRAM-OVERENC-BLT
+  canonical_key: blt
+- id: M-08
+  text: conditional memory
+  type: ArchitectureComponent
+  atom_id: A-DIFF1-PRIMITIVE
+  canonical_key: conditional_memory
+- id: M-09
+  text: Sparsity Allocation
+  type: Concept
+  atom_id: A-DIFF1-PRIMITIVE
+  canonical_key: sparsity_allocation
+- id: M-10
+  text: algorithm-system co-design
+  type: SystemDesignClaim
+  atom_id: A-DIFF2-COMUDESIGN
+  canonical_key: algorithm_system_codesign
+- id: M-11
+  text: Zipfian distribution
+  type: Concept
+  atom_id: A-DIFF2-COMUDESIGN
+  canonical_key: zipfian_distribution
+- id: M-12
+  text: Mixture-of-Experts
+  type: RelatedWork
+  atom_id: A-MOE-INTRO
+  canonical_key: mixture_of_experts
+- id: M-13
+  text: DeepSeek-MoE
+  type: RelatedWork
+  atom_id: A-MOE-DEEPSEEK
+  canonical_key: deepseek_moe
+- id: M-14
+  text: DeepSeek-V3
+  type: RelatedWork
+  atom_id: A-MOE-DEEPSEEK
+  canonical_key: deepseek_v3
+- id: M-15
+  text: Kimi-k2
+  type: RelatedWork
+  atom_id: A-MOE-DEEPSEEK
+  canonical_key: kimi_k2
+- id: M-16
+  text: PKM
+  type: RelatedWork
+  atom_id: A-MEM-PARAMETRIC
+  canonical_key: pkm
+- id: M-17
+  text: UltraMem
+  type: RelatedWork
+  atom_id: A-MEM-PARAMETRIC
+  canonical_key: ultramem
+- id: M-18
+  text: REALM
+  type: RelatedWork
+  atom_id: A-MEM-NONPARAMETRIC
+  canonical_key: realm
+- id: M-19
+  text: RETRO
+  type: RelatedWork
+  atom_id: A-MEM-NONPARAMETRIC
+  canonical_key: retro
+- id: M-20
+  text: FFN as key-value memories
+  type: MechanisticExplanation
+  atom_id: A-KNOW-FFN-KV
+  canonical_key: ffn_key_value_memory
+- id: M-21
+  text: knowledge neurons
+  type: MechanisticExplanation
+  atom_id: A-KNOW-FFN-KV
+  canonical_key: knowledge_neurons
+- id: M-22
+  text: ROME
+  type: RelatedWork
+  atom_id: A-KNOW-EDITING
+  canonical_key: rome
+- id: M-23
+  text: MEMIT
+  type: RelatedWork
+  atom_id: A-KNOW-EDITING
+  canonical_key: memit
+- id: M-24
+  text: Othello-GPT
+  type: RelatedWork
+  atom_id: A-KNOW-WORLDMODEL
+  canonical_key: othello_gpt
+canonicalization:
+- canonical: conditional_memory
+  aliases:
+  - conditional memory
+  - first-class modeling primitive
+  - Engram module
+  note: Engram treats conditional memory as a first-class modeling primitive.
+- canonical: parametric_memory
+  aliases:
+  - parametric memory
+  - PKM
+  - PEER
+  - UltraMem
+  - Memory+
+  note: key-value stores embedded directly inside model layers.
+- canonical: non_parametric_memory
+  aliases:
+  - non-parametric memory
+  - REALM
+  - RETRO
+  - PlugLM
+  note: knowledge storage decoupled from model processing.
+- canonical: scone
+  aliases:
+  - SCONE
+  - auxiliary encoding model
+  note: inference-focused, incurs extra training FLOPs.
+objects:
+- id: OBJ-DIFF-PRIMITIVE
+  type: ArticleClaim
+  section_path: 7 > N-gram Modeling and Embedding Scaling
+  home_package: PKG-RW-NGRAM
+  payload:
+    claim_type: comparison
+    statement: Unlike prior N-gram embedding work that treats embeddings as external augmentations without fair protocols, Engram treats conditional memory as a first-class modeling primitive and shows clear advantage under strictly iso-parameter and iso-FLOPs MoE baselines within the Sparsity Allocation framework.
+    contrasted_with:
+    - SCONE (inference-focused, extra training FLOPs)
+    - OverEncoding (fails on sparse MoE backbones)
+    key_dimension: modeling and evaluation protocol
+  local_evidence_atom_ids:
+  - A-DIFF1-PRIMITIVE
+  - A-NGRAM-SUPERBPE-SCONE
+  - A-NGRAM-OVERENC-BLT
+  supporting_context_atom_ids:
+  - A-MOE-INTRO
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: OBJ-DIFF-CODESIGN
+  type: SystemDesignClaim
+  section_path: 7 > N-gram Modeling and Embedding Scaling
+  home_package: PKG-RW-NGRAM
+  payload:
+    claim_type: comparison
+    statement: Unlike prior work placing embeddings strictly at Layer 0 (serializing memory access and computation), Engram injects memory into deeper layers for communication-computation overlap and exploits the Zipfian distribution of N-grams to maximize hardware-memory-hierarchy utility, scaling to massive parameters with negligible inference overhead.
+    contrasted_with:
+    - Layer-0 input-embedding placement (Huang et al., 2025a; Yu et al., 2025)
+    key_dimension: algorithm-system co-design
+  local_evidence_atom_ids:
+  - A-DIFF2-COMUDESIGN
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: OBJ-RW-NGRAM
+  type: RelatedWorkComparison
+  section_path: 7 > N-gram Modeling and Embedding Scaling
+  home_package: PKG-RW-NGRAM
+  payload:
+    topic: N-gram modeling and embedding scaling
+    prior_work:
+    - FastText
+    - Per-Layer Embeddings
+    - DeepEmbed
+    - SuperBPE
+    - SCONE
+    - OverEncoding
+    - BLT
+    summary: N-gram lookups from Shannon onward resurge as embedding scaling; compositional N-gram structures integrated into representation space target high-frequency patterns with minimal compute overhead.
+  local_evidence_atom_ids:
+  - A-NGRAM-ORIGIN
+  - A-NGRAM-RESURGE
+  - A-NGRAM-SUPERBPE-SCONE
+  - A-NGRAM-OVERENC-BLT
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: OBJ-RW-MOE
+  type: RelatedWorkComparison
+  section_path: 7 > Mixture-of-Experts
+  home_package: PKG-RW-MOE
+  payload:
+    topic: Mixture-of-Experts
+    prior_work:
+    - Shazeer et al. 2017
+    - GShard
+    - BASE
+    - Switch Transformer
+    - GLaM
+    - DeepSeek-MoE
+    - DeepSeek-V3
+    - Kimi-k2
+    summary: MoE decouples capacity from compute via sparse expert activation, enabling super-linear parameter scaling at constant inference cost; recent fine-grained/shared-expert designs scale to hundreds of billions of parameters.
+  local_evidence_atom_ids:
+  - A-MOE-INTRO
+  - A-MOE-DEEPSEEK
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: OBJ-RW-MEM
+  type: RelatedWorkComparison
+  section_path: 7 > Memory Network
+  home_package: PKG-RW-MEM
+  payload:
+    topic: Memory networks
+    prior_work:
+    - PKM
+    - PEER
+    - Selfmem
+    - Memory+
+    - UltraMem
+    - REALM
+    - RETRO
+    - PlugLM
+    taxonomy:
+    - parametric (key-value stores inside layers)
+    - non-parametric (external editable key-value store)
+    summary: Memory-augmented networks expand capacity without proportional compute, split into parametric (in-layer KV stores) and non-parametric (decoupled external memory) approaches.
+  local_evidence_atom_ids:
+  - A-MEM-PARAMETRIC
+  - A-MEM-NONPARAMETRIC
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: OBJ-RW-KNOW
+  type: RelatedWorkComparison
+  section_path: 7 > Mechanisms of Knowledge Storage
+  home_package: PKG-RW-KNOW
+  payload:
+    topic: Mechanisms of knowledge storage
+    prior_work:
+    - FFN-as-KV (Geva et al., 2021)
+    - knowledge neurons (Dai et al., 2022)
+    - causal tracing (Meng et al., 2022)
+    - ROME
+    - MEMIT
+    - Othello-GPT
+    summary: FFNs hypothesized as key-value memories with identifiable knowledge neurons; causal tracing enables ROME/MEMIT editing; Othello-GPT suggests emergent structured world models.
+  local_evidence_atom_ids:
+  - A-KNOW-FFN-KV
+  - A-KNOW-EDITING
+  - A-KNOW-WORLDMODEL
+  supporting_context_atom_ids: []
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+relations:
+- id: R-01
+  relation_type: claim_extends_prior_work
+  source_object_id: OBJ-DIFF-PRIMITIVE
+  target_object_id: OBJ-RW-NGRAM
+  evidence_atom_ids:
+  - A-DIFF1-PRIMITIVE
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-02
+  relation_type: claim_contrasts_with_work
+  source_object_id: OBJ-DIFF-PRIMITIVE
+  target_object_id: OBJ-RW-NGRAM
+  evidence_atom_ids:
+  - A-DIFF1-PRIMITIVE
+  - A-NGRAM-SUPERBPE-SCONE
+  - A-NGRAM-OVERENC-BLT
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-03
+  relation_type: claim_contrasts_with_work
+  source_object_id: OBJ-DIFF-CODESIGN
+  target_object_id: OBJ-RW-NGRAM
+  evidence_atom_ids:
+  - A-DIFF2-COMUDESIGN
+  gold_label: true
+  difficulty: medium
+  evidence_strength: direct
+- id: R-04
+  relation_type: claim_contrasts_with_work
+  source_object_id: OBJ-DIFF-PRIMITIVE
+  target_object_id: OBJ-RW-MOE
+  evidence_atom_ids:
+  - A-DIFF1-PRIMITIVE
+  - A-MOE-INTRO
+  gold_label: true
+  difficulty: hard
+  evidence_strength: indirect
+do_not_extract:
+- text: Figure 7 | Visualization of the gating mechanism of Engram.
+  source_lines:
+  - 326
+  - 326
+  reason: Figure 7 caption physically falls inside the Section 7 line range (322-339) but belongs to Section 6 (gating visualization); it is a cross-section element and is NOT a Related Work atom.
+  kind: cross_section_forward_reference
+- text: (Shannon, 1948)
+  atom_id: A-NGRAM-ORIGIN
+  reason: inline author-year citation, not a knowledge object.
+  kind: citation
+- text: (Yu et al., 2025)
+  atom_id: A-NGRAM-SUPERBPE-SCONE
+  reason: inline author-year citation, not a knowledge object.
+  kind: citation
+- text: (Huang et al., 2025a; Yu et al., 2025)
+  atom_id: A-DIFF2-COMUDESIGN
+  reason: inline author-year citations attached to the Layer-0 placement claim; not knowledge objects.
+  kind: citation
+- text: (Geva et al., 2021)
+  atom_id: A-KNOW-FFN-KV
+  reason: inline author-year citation, not a knowledge object.
+  kind: citation
+- pattern: inline_author_year_citation
+  examples:
+  - (Shannon, 1948)
+  - (Katz, 1987; Kneser and Ney, 1995)
+  - (Bengio et al., 2003)
+  - (Bojanowski et al., 2017)
+  - (Team, 2025)
+  - (RWKV Team, 2025)
+  - (Liu et al., 2025)
+  - (Yu et al., 2025)
+  - (Huang et al., 2025a)
+  - (Pagnoni et al., 2025)
+  - Shazeer et al. (2017)
+  - (Lepikhin et al., 2020)
+  - (Dai et al., 2024)
+  - (Liu et al., 2024a)
+  - (Team et al., 2025)
+  - (Lample et al., 2019)
+  - (He, 2024)
+  - (Guu et al., 2020)
+  - (Borgeaud et al., 2022; Wang et al., 2023)
+  - (Geva et al., 2021)
+  - (Dai et al., 2022)
+  - (Meng et al., 2022)
+  - (Meng et al., 2023)
+  - (Li et al., 2023a)
+  reason: Related Work prose is saturated with inline (Author, Year) citations; they anchor prior-work mentions but are NOT themselves knowledge objects. This policy suppresses citation over-extraction across the whole section.
+  kind: citation_policy
