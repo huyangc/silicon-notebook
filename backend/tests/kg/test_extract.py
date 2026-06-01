@@ -1,0 +1,26 @@
+import json
+from app.services.kg.extract import extract_window
+
+SRC = "An analog signal is defined over a continuous range. C_j = C_j0 here."
+
+class Fake:
+    def chat_json(self, prompt):
+        return json.dumps({"nodes": [
+            {"local_id": "a", "type": "Concept", "name": "analog signal",
+             "evidence": "analog signal"},
+            {"local_id": "b", "type": "Formula", "attrs": {"expression": "C_j = C_j0"},
+             "evidence": "C_j = C_j0"},
+            {"local_id": "c", "type": "Claim", "attrs": {"statement": "x"},
+             "evidence": "NOT IN SOURCE"}],          # ungroundable -> dropped
+            "edges": [
+            {"type": "about", "source": "b", "target": "a", "evidence": "C_j = C_j0"},
+            {"type": "about", "source": "b", "target": "zzz", "evidence": ""}]})  # bad endpoint
+
+def test_extract_grounds_evidence_and_drops_ungroundable():
+    nodes, edges = extract_window(Fake(), SRC, 0, len(SRC), "1 > 1.1", "textbook")
+    assert len(nodes) == 2                       # claim 'c' dropped (ungroundable)
+    for n in nodes:
+        e = n.evidence[0]
+        assert SRC[e.char_start:e.char_end] == e.quote   # hard invariant
+    assert len(edges) == 1                        # bad-endpoint edge dropped
+    assert edges[0].type == "about"
