@@ -178,6 +178,7 @@ def test_knowledge_graph_from_kg_tables(repo):
     g = repo.knowledge_graph(nb.id)
     assert {n.object_type for n in g.nodes} == {"concept", "claim"}
     assert any(n.headline == "Engram" for n in g.nodes)
+    assert any(n.headline == "Engram improves perplexity" for n in g.nodes)
     assert len(g.edges) == 1
     e = g.edges[0]
     assert e.from_id == k and e.to_id == c and e.relation == "about"

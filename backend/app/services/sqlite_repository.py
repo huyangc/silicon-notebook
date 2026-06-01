@@ -104,7 +104,6 @@ from app.services.retrieval import (
     keyword_score,
     score_elements,
     score_knowledge,
-    token_overlap,
 )
 
 
