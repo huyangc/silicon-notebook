@@ -1057,9 +1057,9 @@ class SQLiteRepository:
         path = getattr(source, "file_path", "") or ""
         if path and (path.endswith(".md") or path.endswith(".markdown") or path.endswith(".txt")):
             try:
-                from pathlib import Path
-                return Path(path).read_text(encoding="utf-8")
-            except Exception:
+                resolved = self._resolve_path(path)
+                return Path(resolved).read_text(encoding="utf-8", errors="replace")
+            except OSError:
                 pass
         return "\n\n".join(e.text for e in elements)
 
@@ -1800,16 +1800,16 @@ class SQLiteRepository:
         db.execute("DELETE FROM knowledge_relations WHERE source_id = ?", (source_id,))
 
     # test-only helper; later tasks may replace it with a public insert path
-    def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict) -> str:
+    def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
         oid = f"ko-{uuid4().hex[:10]}"
         now = _now()
         with self._connect() as db:
             db.execute(
                 """INSERT INTO knowledge_objects
                    (id, notebook_id, object_type, status, owner, payload, evidence,
-                    source_candidate_id, created_at, updated_at)
-                   VALUES (?, ?, ?, 'approved', '', ?, '[]', NULL, ?, ?)""",
-                (oid, notebook_id, object_type, json.dumps(payload, ensure_ascii=False), now, now),
+                    source_candidate_id, source_id, created_at, updated_at)
+                   VALUES (?, ?, ?, 'approved', '', ?, '[]', NULL, ?, ?, ?)""",
+                (oid, notebook_id, object_type, json.dumps(payload, ensure_ascii=False), source_id, now, now),
             )
         return oid
 
