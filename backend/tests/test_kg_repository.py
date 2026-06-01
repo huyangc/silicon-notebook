@@ -1,7 +1,9 @@
+import json
 import pytest
 from app.models.schemas import NotebookCreate
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.sqlite_repository import SQLiteRepository, _now
 from app.core.config import Settings
+from uuid import uuid4
 
 
 @pytest.fixture
@@ -85,3 +87,83 @@ def test_add_and_read_relations(repo):
     assert rels[0]["target_object_id"] == a
     assert rels[0]["edge_type"] == "about"
     assert rels[0]["evidence"] == [{"quote": "threshold voltage of the MOSFET"}]
+
+
+# ---------------------------------------------------------------------------
+# Helpers + KG extraction path tests
+# ---------------------------------------------------------------------------
+
+def _test_insert_source(repo, notebook_id, title, file_name, doc_type, text):
+    """Insert a minimal source row + one source_elements row. Returns SourceDetail."""
+    source_id = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._connect() as db:
+        db.execute(
+            """INSERT INTO sources
+               (id, notebook_id, title, source_type, status, parse_status,
+                file_name, file_path, file_size, file_hash, summary, doc_type,
+                created_at, updated_at)
+               VALUES (?, ?, ?, 'markdown', 'extracted', 'parsed',
+                       ?, '', 0, '', '', ?, ?, ?)""",
+            (source_id, notebook_id, title, file_name, doc_type, now, now),
+        )
+        elem_id = f"el-{uuid4().hex[:10]}"
+        db.execute(
+            """INSERT INTO source_elements
+               (id, source_id, element_type, location_label, text, metadata, created_at)
+               VALUES (?, ?, 'paragraph', 'p1', ?, '{}', ?)""",
+            (elem_id, source_id, text, now),
+        )
+    return repo.get_source(source_id)
+
+
+class _FakeLLM:
+    configured = True
+
+    def __init__(self, payload):
+        self._p = payload
+
+    def chat_json(self, prompt, retries=4):
+        return self._p
+
+    def embed(self, text):
+        return [0.0, 0.0]
+
+
+def test_run_extraction_kg_path(repo):
+    repo.llm_client = _FakeLLM(json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram is a memory architecture"}],
+        "edges": []}))
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
+                              "Engram is a memory architecture.")
+    repo._run_extraction(src.id)
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT object_type, payload, status FROM knowledge_objects WHERE notebook_id=?",
+            (nb.id,)).fetchall()
+    assert any(
+        r["object_type"] == "concept"
+        and r["status"] == "approved"
+        and json.loads(r["payload"])["name"] == "Engram"
+        for r in rows
+    )
+
+
+def test_reextraction_is_idempotent(repo):
+    repo.llm_client = _FakeLLM(json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram is a memory architecture"}],
+        "edges": []}))
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
+                              "Engram is a memory architecture.")
+    sid = src.id
+    repo._run_extraction(sid)
+    repo._run_extraction(sid)
+    with repo._connect() as db:
+        (count,) = db.execute(
+            "SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?",
+            (nb.id,)).fetchone()
+    assert count == 1   # not doubled

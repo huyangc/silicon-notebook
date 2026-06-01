@@ -65,6 +65,7 @@ from app.models.schemas import (
     UserProfile,
 )
 from app.services.extraction import bind_evidence, run_extraction
+from app.services import kg_ingest
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -263,6 +264,7 @@ class SQLiteRepository:
                   payload TEXT NOT NULL DEFAULT '{}',
                   evidence TEXT NOT NULL DEFAULT '[]',
                   source_candidate_id TEXT,
+                  source_id TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -342,6 +344,10 @@ class SQLiteRepository:
             if "last_reviewed" not in ko_cols:
                 db.execute(
                     "ALTER TABLE knowledge_objects ADD COLUMN last_reviewed TEXT NOT NULL DEFAULT ''"
+                )
+            if "source_id" not in ko_cols:
+                db.execute(
+                    "ALTER TABLE knowledge_objects ADD COLUMN source_id TEXT NOT NULL DEFAULT ''"
                 )
             nb_cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)").fetchall()}
             for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope", "template"):
@@ -1015,113 +1021,47 @@ class SQLiteRepository:
         elements = self.source_elements(source_id)
         now = _now()
         run_id = f"run-{uuid4().hex[:10]}"
-        # Pick the document-type extraction profile from the per-source doc_type
-        # chosen at upload; empty/'auto' falls back to content detection.
-        doc_type = _normalize_doc_type(getattr(source, "doc_type", "") or "")
-        if doc_type:
-            profile = get_profile(doc_type)
-        else:
-            profile = resolve_profile(None, source.title, elements)
-        registry = self.effective_schemas()
+        doc_type_id = _normalize_doc_type(getattr(source, "doc_type", "") or "") or "academic_paper"
+        kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type_id, "academic")
         with self._connect() as db:
-            self._clear_source_extraction_state(
-                db,
-                source_id,
-                source.notebook_id,
-                clear_embeddings=False,
-            )
+            self._clear_source_extraction_state(db, source_id, source.notebook_id, clear_embeddings=False)
+            self._delete_relations_for_source(db, source_id)
+            db.execute("DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,))
             db.execute(
-                """
-                INSERT INTO extraction_runs
-                (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (run_id, source.notebook_id, source_id, "candidate", "running", "", now, now),
-            )
+                """INSERT INTO extraction_runs
+                   (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
+                   VALUES (?, ?, ?, 'kg', 'running', '', ?, ?)""",
+                (run_id, source.notebook_id, source_id, now, now))
         try:
-            records = self._extract_records(source, elements, profile, registry)
-            extraction_mode = (
-                "qiefen"
-                if any(record.extraction_mode == "qiefen" for record in records)
-                else "llm"
-                if any(record.extraction_mode == "llm" for record in records)
-                else "heuristic"
-            )
+            if not getattr(self.llm_client, "configured", False):
+                with self._connect() as db:
+                    db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
+                return
+            raw_text = self._source_raw_text(source, elements)
+            graph = kg_ingest.extract_graph(self.llm_client, raw_text,
+                                            source.file_name or "source.md", kg_doc_type)
+            objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
+            n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
             with self._connect() as db:
-                for index, record in enumerate(records, start=1):
-                    candidate_payload = dict(record.payload)
-                    candidate_payload["_extraction_mode"] = record.extraction_mode
-                    db.execute(
-                        """
-                        INSERT INTO extraction_candidates
-                        (id, extraction_run_id, notebook_id, source_id, candidate_type,
-                         status, payload, evidence, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            f"cand-{run_id}-{index:04d}",
-                            run_id,
-                            source.notebook_id,
-                            source_id,
-                            record.candidate_type,
-                            record.status,
-                            json.dumps(candidate_payload, ensure_ascii=False),
-                            json.dumps(
-                                [item.model_dump() for item in record.evidence],
-                                ensure_ascii=False,
-                            ),
-                            now,
-                            now,
-                        ),
-                    )
-                db.execute(
-                    "UPDATE extraction_runs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
-                    (
-                        "completed",
-                        f"extraction_mode={extraction_mode} profile={profile.id}",
-                        _now(),
-                        run_id,
-                    ),
-                )
+                db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
+                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type}", _now(), run_id))
         except Exception as exc:
             with self._connect() as db:
-                db.execute(
-                    "UPDATE extraction_runs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
-                    ("failed", str(exc), _now(), run_id),
-                )
+                db.execute("UPDATE extraction_runs SET status='failed', error_message=?, updated_at=? WHERE id=?",
+                           (str(exc), _now(), run_id))
             raise
 
-    def _extract_records(self, source, elements, profile, registry):
-        """Paper/textbook sources go through the qiefen pipeline; everything else
-        keeps the legacy extractor. Qiefen needs raw text + char offsets, so we
-        use the raw file for markdown/text and reconstruct it from elements
-        otherwise."""
-        from app.services.qiefen_ingest import (
-            QIEFEN_PROFILE_BY_DOCTYPE, qiefen_doc_to_candidates, reconstruct_markdown,
-        )
-
-        qprofile = QIEFEN_PROFILE_BY_DOCTYPE.get(profile.id)
-        if qprofile and getattr(self.llm_client, "configured", False):
-            from app.services.qiefen.pipeline import run as qiefen_run
-
-            source_text = self._source_text_for_qiefen(source, elements, reconstruct_markdown)
-            doc = qiefen_run(
-                source_text, source_file=(source.file_name or "source.md"),
-                profile=qprofile, source_id=source.id, title=source.title,
-                client=self.llm_client,
-            )
-            return qiefen_doc_to_candidates(doc, source.id, source.title)
-        return run_extraction(self.llm_client, elements, source.title, profile, registry)
-
-    def _source_text_for_qiefen(self, source, elements, reconstruct_markdown):
+    def _source_raw_text(self, source, elements) -> str:
+        """Raw document text for windowing: read the stored .md/.txt file when
+        present, else reconstruct from element texts."""
         path = getattr(source, "file_path", "") or ""
-        name = (source.file_name or "").lower()
-        if path and name.endswith((".md", ".markdown", ".txt")):
+        if path and (path.endswith(".md") or path.endswith(".markdown") or path.endswith(".txt")):
             try:
-                return self._resolve_path(path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                from pathlib import Path
+                return Path(path).read_text(encoding="utf-8")
+            except Exception:
                 pass
-        return reconstruct_markdown(elements)
+        return "\n\n".join(e.text for e in elements)
 
     def _embed_source(self, source_id: str) -> None:
         if not self.settings.embedding_configured:
@@ -1810,11 +1750,12 @@ class SQLiteRepository:
                 db.execute(
                     """INSERT INTO knowledge_objects
                        (id, notebook_id, object_type, status, owner, payload, evidence,
-                        source_candidate_id, created_at, updated_at)
-                       VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?)""",
+                        source_candidate_id, source_id, created_at, updated_at)
+                       VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?, ?)""",
                     (oid, notebook_id, obj["object_type"],
                      json.dumps(obj["payload"], ensure_ascii=False),
-                     json.dumps(obj["evidence"], ensure_ascii=False), now, now),
+                     json.dumps(obj["evidence"], ensure_ascii=False),
+                     source_id or '', now, now),
                 )
             for rel in db_relations:
                 db.execute(
