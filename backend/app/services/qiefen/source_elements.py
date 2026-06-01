@@ -52,10 +52,12 @@ def parse_elements(
     counter = 0
 
     def emit(kind: str, l_start: int, l_end: int) -> None:
+        emit_span(kind, offs[l_start], offs[l_end] + len(lines[l_end - 1]),
+                  l_start, l_end)
+
+    def emit_span(kind: str, char_start: int, char_end: int,
+                  l_start: int, l_end: int) -> None:
         nonlocal counter
-        char_start = offs[l_start]
-        # char_end = end of l_end's text (no trailing newline).
-        char_end = offs[l_end] + len(lines[l_end - 1])
         raw = text[char_start:char_end]
         if not raw.strip():
             return
@@ -65,6 +67,25 @@ def parse_elements(
             line_start=l_start, line_end=l_end,
             char_start=char_start, char_end=char_end, text=raw,
         ))
+
+    def emit_formula(i: int) -> int:
+        """Display formula. MinerU emits `$$` / latex / `$$` (3 lines); gold's
+        formula_atom is the INNER latex (delimiters excluded). Returns next line."""
+        if lines[i - 1].strip() == "$$":
+            k = i + 1
+            while k <= hi and lines[k - 1].strip() != "$$":
+                k += 1
+            if k - 1 >= i + 1:                      # has inner content
+                emit("formula", i + 1, k - 1)       # inner latex line(s)
+            return k + 1                            # skip the closing `$$`
+        # single-line `$$ latex $$`: emit the inner latex span (strip delimiters)
+        line = lines[i - 1]
+        inner = line.strip().strip("$").strip()
+        if inner:
+            local = line.find(inner)
+            if local >= 0:
+                emit_span("formula", offs[i] + local, offs[i] + local + len(inner), i, i)
+        return i + 1
 
     i = lo
     while i <= hi:
@@ -76,7 +97,9 @@ def parse_elements(
         if kind == "heading":
             emit("heading", i, i)
             i += 1
-        elif kind in ("formula", "table", "figure_caption", "list_item"):
+        elif kind == "formula":
+            i = emit_formula(i)
+        elif kind in ("table", "figure_caption", "list_item"):
             # single-line structural element (MinerU emits these on one line)
             emit(kind, i, i)
             i += 1

@@ -29,6 +29,8 @@ MAX_RELATION_OBJECTS = 80
 LLM_MAX_WORKERS = int(os.environ.get("QIEFEN_LLM_WORKERS", "8"))
 # Experiment: LLM atom selection BEFORE chunking (textbook only). Off by default.
 _ATOM_SELECT = os.environ.get("QIEFEN_ATOM_SELECT", "0") != "0"
+# Experiment: let the LLM segment prose into atoms (vs deterministic split). Off by default.
+_LLM_ATOMIZE = os.environ.get("QIEFEN_LLM_ATOMIZE", "0") != "0"
 
 _HIGH_VALUE_ATOM_TYPES = {
     "formula_atom", "table_header_atom", "table_row_atom", "table_caption_atom",
@@ -64,11 +66,18 @@ def run(source_text: str, source_file: str, profile: str,
         sid = _section_for_line(el.line_start, sec_by_line)
         section_of[el.id] = sid or cur_section
 
+    use_llm_atomize = (_LLM_ATOMIZE and client is not None
+                       and getattr(client, "configured", False))
     atoms: List[EvidenceAtom] = []
     for sid in _ordered_sections(elements, section_of, sections):
         sec_elements = [e for e in elements if section_of[e.id] == sid
                         and e.type != "heading"]
-        atoms.extend(atomizer.atomize(source_text, sec_elements, sid, profile))
+        if use_llm_atomize:
+            from app.services.qiefen import llm_atomizer
+            atoms.extend(llm_atomizer.llm_atomize(
+                source_text, sec_elements, sid, profile, client, LLM_MAX_WORKERS))
+        else:
+            atoms.extend(atomizer.atomize(source_text, sec_elements, sid, profile))
 
     # Optional general LLM atom selection BEFORE chunking, so every downstream
     # stage (chunks/packages/objects) is built on the curated atom set — no
