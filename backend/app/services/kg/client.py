@@ -25,18 +25,25 @@ class KGClient:
         return self._client
 
     def chat_json(self, prompt: str, retries: int = 4) -> str:
-        # DeepSeek can intermittently drop the connection on longer requests;
-        # retry with linear backoff so a transient blip doesn't silently yield
-        # empty extractions. Re-raises after the last attempt.
+        # Stream the response: slow/reasoning models (e.g. deepseek-v4-pro) produce
+        # long replies that the server drops on non-streaming requests (~120s cap);
+        # streaming keeps the connection alive chunk-by-chunk. Retry with backoff so
+        # a transient blip doesn't silently yield empty extractions.
         import time
         last = None
         for attempt in range(retries):
             try:
-                resp = self._ensure().chat.completions.create(
+                stream = self._ensure().chat.completions.create(
                     model=self.model, temperature=0,
-                    response_format={"type": "json_object"},
+                    response_format={"type": "json_object"}, stream=True,
                     messages=[{"role": "user", "content": prompt}])
-                return resp.choices[0].message.content or "{}"
+                parts = []
+                for chunk in stream:
+                    if chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if delta and delta.content:
+                            parts.append(delta.content)
+                return "".join(parts) or "{}"
             except Exception as exc:  # APIConnectionError / timeout / transient 5xx
                 last = exc
                 self._client = None  # force a fresh connection next attempt
