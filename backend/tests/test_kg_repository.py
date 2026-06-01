@@ -27,3 +27,4 @@ def test_add_and_read_relations(repo):
     assert rels[0]["source_object_id"] == b
     assert rels[0]["target_object_id"] == a
     assert rels[0]["edge_type"] == "about"
+    assert rels[0]["evidence"] == [{"quote": "threshold voltage of the MOSFET"}]

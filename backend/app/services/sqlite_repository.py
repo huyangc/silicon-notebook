@@ -1785,7 +1785,8 @@ class SQLiteRepository:
             ).fetchall()
         return [
             {
-                "id": r["id"], "source_object_id": r["source_object_id"],
+                "id": r["id"], "source_id": r["source_id"],
+                "source_object_id": r["source_object_id"],
                 "target_object_id": r["target_object_id"], "edge_type": r["edge_type"],
                 "evidence": json.loads(r["evidence"] or "[]"),
             }
@@ -1797,7 +1798,8 @@ class SQLiteRepository:
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict) -> str:
-        oid = f"ko-{uuid4().hex[:10]}"; now = _now()
+        oid = f"ko-{uuid4().hex[:10]}"
+        now = _now()
         with self._connect() as db:
             db.execute(
                 """INSERT INTO knowledge_objects
