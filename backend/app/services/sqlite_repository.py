@@ -1611,89 +1611,30 @@ class SQLiteRepository:
                     existing.add(object_type)
         return [m for m in self.list_object_schemas() if m.status == "proposed"]
 
-    # --- Relation edges (knowledge graph over relation payload fields) ----
-    _RELATION_FIELDS = {
-        "related_rules": "rule",
-        "related_cases": "case",
-        "related_methods": "method",
-        "related_concepts": "concept",
-    }
-    _RELATION_BIND_THRESHOLD = 0.34
-
-    def _relation_edges(self, objs: List[dict]) -> List[KnowledgeEdge]:
-        """Resolve free-text relation fields to concrete edges by fuzzy-matching
-        each referenced phrase against other objects' headlines."""
-        headlines = [
-            (o["id"], self._knowledge_headline(o["object_type"], o["payload"]))
-            for o in objs
-        ]
-        edges: List[KnowledgeEdge] = []
-        seen: set = set()
-        for obj in objs:
-            payload = obj["payload"] or {}
-            for field_name, target_type in self._RELATION_FIELDS.items():
-                value = payload.get(field_name)
-                if not value:
-                    continue
-                phrases = value if isinstance(value, (list, tuple)) else [value]
-                for phrase in phrases:
-                    phrase = str(phrase).strip()
-                    if len(phrase) < 3:
-                        continue
-                    best_id = ""
-                    best_ratio = self._RELATION_BIND_THRESHOLD
-                    for target_id, headline in headlines:
-                        if target_id == obj["id"] or not headline:
-                            continue
-                        ratio = token_overlap(phrase, headline)
-                        if ratio > best_ratio:
-                            best_ratio = ratio
-                            best_id = target_id
-                    if not best_id:
-                        continue
-                    key = (obj["id"], best_id, field_name)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    edges.append(
-                        KnowledgeEdge(
-                            from_id=obj["id"],
-                            to_id=best_id,
-                            relation=field_name,
-                            label=phrase[:80],
-                        )
-                    )
-        return edges
-
     def knowledge_graph(self, notebook_id: str) -> KnowledgeGraph:
-        """Build a curated knowledge graph: nodes = non-deprecated knowledge
-        objects, edges = resolved relation fields (§7.4 Implication Map basis)."""
+        """KG-native graph: nodes = non-deprecated knowledge objects (4 KG types),
+        edges = knowledge_relations rows."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT id, object_type, status, payload FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated'",
-                (notebook_id,),
-            ).fetchall()
-        objs = [
-            {
-                "id": row["id"],
-                "object_type": row["object_type"],
-                "status": row["status"],
-                "payload": json.loads(row["payload"] or "{}"),
-            }
-            for row in rows
-        ]
+                "WHERE notebook_id = ? AND status != 'deprecated'", (notebook_id,)).fetchall()
         nodes = [
-            KnowledgeNode(
-                id=o["id"],
-                object_type=o["object_type"],
-                headline=self._knowledge_headline(o["object_type"], o["payload"]),
-                status=o["status"],
-            )
-            for o in objs
-        ]
-        return KnowledgeGraph(nodes=nodes, edges=self._relation_edges(objs))
+            KnowledgeNode(id=r["id"], object_type=r["object_type"],
+                          headline=self._kg_headline(json.loads(r["payload"] or "{}")),
+                          status=r["status"])
+            for r in rows]
+        valid = {n.id for n in nodes}
+        edges = [
+            KnowledgeEdge(from_id=rel["source_object_id"], to_id=rel["target_object_id"],
+                          relation=rel["edge_type"], label=rel["edge_type"])
+            for rel in self.relations_for_notebook(notebook_id)
+            if rel["source_object_id"] in valid and rel["target_object_id"] in valid]
+        return KnowledgeGraph(nodes=nodes, edges=edges)
+
+    def _kg_headline(self, payload: dict) -> str:
+        name = (payload.get("name") or "").strip()
+        return name[:120] if len(name) > 120 else name
 
     def add_relations(self, notebook_id: str, source_id: str,
                       relations: List[dict]) -> int:

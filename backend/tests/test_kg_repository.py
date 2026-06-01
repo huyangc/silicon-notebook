@@ -167,3 +167,17 @@ def test_reextraction_is_idempotent(repo):
             "SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?",
             (nb.id,)).fetchone()
     assert count == 1   # not doubled
+
+
+def test_knowledge_graph_from_kg_tables(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    c = repo._test_insert_object(nb.id, "concept", {"name": "Engram"})
+    k = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
+    repo.add_relations(nb.id, None, [{"source_object_id": k, "target_object_id": c,
+                                      "edge_type": "about", "evidence": []}])
+    g = repo.knowledge_graph(nb.id)
+    assert {n.object_type for n in g.nodes} == {"concept", "claim"}
+    assert any(n.headline == "Engram" for n in g.nodes)
+    assert len(g.edges) == 1
+    e = g.edges[0]
+    assert e.from_id == k and e.to_id == c and e.relation == "about"
