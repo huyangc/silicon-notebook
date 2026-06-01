@@ -111,10 +111,13 @@ from app.services.retrieval import (
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
 
-# Object types woven into the structured ask answer via bespoke fields; every
-# other (active) type is surfaced generically in AskResponse.related_knowledge.
-_CORE_ASK_TYPES = frozenset({"rule", "case", "checklist", "method", "risk"})
 KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
+
+# KG object types retrieved during ask(), in priority order.
+_KG_TYPES = ("claim", "formula", "procedure", "concept")
+
+# Maximum hits returned per KG object type during scoring in ask().
+_TOP_PER_TYPE: dict = {"claim": 5, "formula": 5, "procedure": 4, "concept": 4}
 
 
 class SQLiteRepository:
@@ -2377,8 +2380,6 @@ class SQLiteRepository:
         ]
         query = " ".join([question, *scenario_tags]).strip()
 
-        _KG_TYPES = ("claim", "formula", "procedure", "concept")
-
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
                 t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
@@ -2392,7 +2393,6 @@ class SQLiteRepository:
         scenario = payload.scenario or {}
 
         # Score each KG type, take top hits per type.
-        _TOP_PER_TYPE = {"claim": 5, "formula": 5, "procedure": 4, "concept": 4}
         top_hits: List[RetrievedKnowledge] = []
         for t in _KG_TYPES:
             objs = kg_objs[t]
@@ -2478,7 +2478,10 @@ class SQLiteRepository:
         citations: List[Citation] = []
         citations.extend(self._citations_from(top_hits, valid_element_ids, "KG evidence"))
 
-        has_knowledge = bool(top_hits or related_knowledge)
+        # related_knowledge is always derived from top_hits (hits + 1-hop
+        # neighbours), so top_hits being non-empty implies related_knowledge is
+        # non-empty; the converse is also true — no need to check both.
+        has_knowledge = bool(top_hits)
         llm_mode = "deterministic"
         conclusion = ""
 

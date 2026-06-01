@@ -118,15 +118,21 @@ def _test_insert_source(repo, notebook_id, title, file_name, doc_type, text):
 
 
 class _FakeLLM:
+    """Faithful stub for OpenAICompatibleClient used in tests.
+
+    Matches the real signature: chat_json(messages, response_schema_hint) -> str.
+    The KG-extraction path passes a list of message dicts + a schema hint string;
+    the ask path does the same.  Both receive the canned payload.
+    """
     configured = True
 
     def __init__(self, payload):
         self._p = payload
 
-    def chat_json(self, prompt, retries=4):
+    def chat_json(self, messages: list, response_schema_hint: str) -> str:
         return self._p
 
-    def embed(self, text):
+    def embed(self, text: str) -> list:
         return [0.0, 0.0]
 
 
@@ -204,3 +210,35 @@ def test_ask_returns_kg_knowledge(repo):
     repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?"))
     assert any("Engram" in r.headline for r in resp.related_knowledge)
+
+
+def test_ask_1hop_expansion(repo):
+    """1-hop graph expansion: a concept linked by 'about' to a matching claim
+    must appear in related_knowledge even though the concept name doesn't match
+    the query at all."""
+    from app.models.schemas import AskRequest
+    repo.llm_client = _FakeLLM("{}")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+
+    # Claim that matches the query by name.
+    claim_id = repo._test_insert_object(
+        nb.id, "claim", {"name": "Engram improves perplexity"}
+    )
+    # Concept whose name does NOT appear in the query; would never surface
+    # through text scoring alone.
+    concept_id = repo._test_insert_object(
+        nb.id, "concept", {"name": "XyZzY_unrelated_concept"}
+    )
+    # Wire them with an 'about' relation: claim -> concept.
+    repo.add_relations(nb.id, None, [
+        {"source_object_id": claim_id, "target_object_id": concept_id,
+         "edge_type": "about", "evidence": [{"quote": "Engram improves perplexity"}]},
+    ])
+
+    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?"))
+
+    headlines = [r.headline for r in resp.related_knowledge]
+    assert any("Engram" in h for h in headlines), "matching claim must be in results"
+    assert any("XyZzY_unrelated_concept" in h for h in headlines), (
+        "concept reachable via 1-hop relation must be pulled in by graph expansion"
+    )

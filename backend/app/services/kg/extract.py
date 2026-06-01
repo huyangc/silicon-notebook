@@ -12,6 +12,12 @@ EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
               "about", "supports", "derived_from", "depends_on", "prerequisite_of",
               "used_in", "precedes"}
 
+_KG_SCHEMA_HINT = (
+    '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure",'
+    '"name":"","evidence":""}],'
+    '"edges":[{"type":"about|supports|...","source":"","target":"","evidence":""}]}'
+)
+
 def _locate(window: str, quote: str) -> Optional[Tuple[int, str]]:
     if not quote or len(quote.strip()) < 3:
         return None
@@ -47,7 +53,12 @@ def extract_window(client: Any, source_text: str, win_start: int, win_end: int,
                    section_path: str, doc_type: str) -> Tuple[List[Node], List[Edge]]:
     window = source_text[win_start:win_end]
     try:
-        data = safe_json(client.chat_json(_prompt(window, section_path, doc_type)))
+        # OpenAICompatibleClient.chat_json takes (messages, response_schema_hint).
+        raw = client.chat_json(
+            [{"role": "user", "content": _prompt(window, section_path, doc_type)}],
+            _KG_SCHEMA_HINT,
+        )
+        data = safe_json(raw)
     except Exception:
         return [], []
     nodes: List[Node] = []

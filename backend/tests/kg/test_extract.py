@@ -4,7 +4,7 @@ from app.services.kg.extract import extract_window
 SRC = "An analog signal is defined over a continuous range. C_j = C_j0 here."
 
 class Fake:
-    def chat_json(self, prompt):
+    def chat_json(self, messages, response_schema_hint):
         return json.dumps({"nodes": [
             {"local_id": "a", "type": "Concept", "name": "analog signal",
              "evidence": "analog signal"},
