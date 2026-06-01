@@ -131,10 +131,7 @@ def schema_induction_prompt(existing_types: list, sample_block: str) -> str:
     )
 
 
-ANSWER_SCHEMA_HINT = (
-    '{"conclusion":"","applicable_scenario":[""],"recommended_methods":[""],'
-    '"potential_risks":[""],"checklist":[""],"missing_information":[""]}'
-)
+ANSWER_SCHEMA_HINT = '{"conclusion":""}'
 
 
 def answer_prompt(question: str, scenario_block: str, context_block: str) -> str:
@@ -142,12 +139,11 @@ def answer_prompt(question: str, scenario_block: str, context_block: str) -> str
         "You are the answer engine for a semiconductor knowhow notebook. "
         "Answer the engineer's question using ONLY the retrieved notebook "
         "knowledge below. Be concrete and engineering-oriented.\n\n"
-        "Output JSON with: conclusion (2-4 sentences), applicable_scenario "
-        "(short tags), recommended_methods, potential_risks, checklist "
-        "(actionable check questions), missing_information (what context is "
-        "missing or what the notebook does not yet cover).\n"
-        "If the retrieved knowledge is insufficient, say so in conclusion and "
-        "list the gaps in missing_information. Return valid JSON only.\n\n"
+        "Write a grounded conclusion (2-4 sentences) that directly answers "
+        "the question, citing evidence from the retrieved knowledge. "
+        "If the retrieved knowledge is insufficient, state that clearly in "
+        "the conclusion. Return valid JSON only with a single 'conclusion' "
+        "string field.\n\n"
         f"Question: {question}\n\n"
         f"Scenario: {scenario_block}\n\n"
         f"Retrieved notebook knowledge:\n{context_block}"
