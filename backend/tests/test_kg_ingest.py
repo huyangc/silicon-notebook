@@ -1,4 +1,33 @@
+from app.models.schemas import SourceElement
 from app.services import kg_ingest
+from app.services.kg.models import Node, Edge, Evidence, KnowledgeGraph
+
+
+def _el(i, text):
+    return SourceElement(id=i, source_id="s1", element_type="paragraph",
+                         location_label=f"p{i}", text=text)
+
+
+def test_build_records_binds_and_drops():
+    g = KnowledgeGraph(doc_id="doc.md", doc_type="academic",
+        nodes=[
+            Node(id="C1", type="Concept", name="Engram",
+                 evidence=[Evidence(file="doc.md", char_start=0, char_end=6,
+                                    line_start=1, line_end=1, quote="Engram")]),
+            Node(id="C2", type="Concept", name="Nowhere",
+                 evidence=[Evidence(file="doc.md", char_start=0, char_end=3,
+                                    line_start=1, line_end=1, quote="zzz")]),
+        ],
+        edges=[Edge(id="E1", type="about", source_id="C1", target_id="C2")])
+    elements = [_el("e1", "Engram is a memory architecture.")]
+    objects, relations = kg_ingest.build_records(
+        g, source_id="s1", source_title="Doc", elements=elements)
+    assert [o["object_type"] for o in objects] == ["concept"]   # C2 dropped (unbound)
+    assert objects[0]["payload"]["name"] == "Engram"
+    assert objects[0]["evidence"][0]["element_id"] == "e1"
+    assert objects[0]["local_id"] == "C1"                        # carried for edge wiring
+    assert relations == []                                       # edge dropped: C2 gone
+
 
 class FakeClient:
     configured = True
