@@ -8,7 +8,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 from app.core.config import Settings
@@ -1776,6 +1776,42 @@ class SQLiteRepository:
                     ),
                 )
         return len(relations)
+
+    def store_kg(self, notebook_id: str, source_id,
+                 objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
+        """Insert KG nodes as approved knowledge_objects and edges as
+        knowledge_relations (remapping local ids to DB ids). Embeds node payload."""
+        now = _now()
+        local_to_id: Dict[str, str] = {}
+        with self._connect() as db:
+            for obj in objects:
+                oid = f"ko-{uuid4().hex[:10]}"
+                local_to_id[obj["local_id"]] = oid
+                db.execute(
+                    """INSERT INTO knowledge_objects
+                       (id, notebook_id, object_type, status, owner, payload, evidence,
+                        source_candidate_id, created_at, updated_at)
+                       VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?)""",
+                    (oid, notebook_id, obj["object_type"],
+                     json.dumps(obj["payload"], ensure_ascii=False),
+                     json.dumps(obj["evidence"], ensure_ascii=False), now, now),
+                )
+        db_relations = []
+        for rel in relations:
+            s = local_to_id.get(rel["source_local_id"])
+            t = local_to_id.get(rel["target_local_id"])
+            if not s or not t:
+                continue
+            db_relations.append({"source_object_id": s, "target_object_id": t,
+                                  "edge_type": rel["edge_type"], "evidence": rel.get("evidence", [])})
+        if db_relations:
+            self.add_relations(notebook_id, source_id, db_relations)
+        for obj in objects:                              # payload-level embeddings (best-effort)
+            try:
+                self._embed_knowledge(local_to_id[obj["local_id"]], notebook_id, obj["payload"])
+            except Exception:
+                pass
+        return len(objects), len(db_relations)
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
         with self._connect() as db:
