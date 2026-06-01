@@ -28,14 +28,14 @@ def _tokens(s: str) -> set:
     return set(re.findall(r"\w+", (s or "").lower()))
 
 
-def _bind_quote(quote: str, elements) -> dict | None:
+def _bind_quote(quote: str, elements, source_id: str, source_title: str) -> dict | None:
     """Return product-Evidence fields for the element that best contains `quote`."""
     q = _norm(quote)
     if len(q) < 3:
         return None
     for el in elements:                       # exact substring on normalized text
-        if q and q in _norm(el.text):
-            return _ev(el, quote)
+        if q in _norm(el.text):
+            return _ev(el, quote, source_id, source_title)
     qt = _tokens(quote)                        # CJK / fuzzy fallback: token overlap >= 0.6
     if qt:
         best, best_ov = None, 0.0
@@ -47,13 +47,13 @@ def _bind_quote(quote: str, elements) -> dict | None:
             if ov > best_ov:
                 best, best_ov = el, ov
         if best is not None and best_ov >= 0.6:
-            return _ev(best, quote)
+            return _ev(best, quote, source_id, source_title)
     return None
 
 
-def _ev(el, quote: str) -> dict:
+def _ev(el, quote: str, source_id: str, source_title: str) -> dict:
     return {
-        "source_id": el.source_id, "source_title": "", "element_id": el.id,
+        "source_id": source_id, "source_title": source_title, "element_id": el.id,
         "element_type": el.element_type, "location_label": el.location_label,
         "quoted_span": (quote or "")[:400], "confidence": 1.0,
     }
@@ -65,18 +65,17 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
     Nodes whose evidence binds to no element are dropped; edges referencing a
     dropped node are dropped. Each object dict carries `local_id` (= KG node id)
     so the caller can remap edges to DB ids after insert."""
-    kept: dict = {}
+    kept: set = set()
     objects: List[dict] = []
     for node in graph.nodes:
         bound = []
         for ev in node.evidence:
-            fields = _bind_quote(ev.quote, elements)
+            fields = _bind_quote(ev.quote, elements, source_id, source_title)
             if fields:
-                fields["source_title"] = source_title
                 bound.append(fields)
         if not bound:
             continue
-        kept[node.id] = True
+        kept.add(node.id)
         objects.append({
             "local_id": node.id,
             "object_type": node.type.lower(),

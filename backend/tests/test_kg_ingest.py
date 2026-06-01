@@ -29,6 +29,32 @@ def test_build_records_binds_and_drops():
     assert relations == []                                       # edge dropped: C2 gone
 
 
+def test_bind_quote_fuzzy_fallback():
+    """Quote that is NOT an exact normalized substring but shares >=60% tokens."""
+    # Element text: "Engram is a memory architecture"
+    # Quote: "Engram memory architecture model"
+    # Exact substring check: "engram memory architecture model" NOT in "engram is a memory architecture" -> fails
+    # Token overlap: qt = {engram, memory, architecture, model} (4 tokens)
+    #                et = {engram, is, a, memory, architecture}
+    #                intersection = {engram, memory, architecture} -> 3/4 = 0.75 >= 0.6 -> binds
+    elements = [_el("e1", "Engram is a memory architecture")]
+    result = kg_ingest._bind_quote(
+        "Engram memory architecture model", elements, "s1", "MyDoc"
+    )
+    assert result is not None, "fuzzy bind should succeed with 0.75 token overlap"
+    assert result["element_id"] == "e1"
+    assert result["source_id"] == "s1"
+    assert result["source_title"] == "MyDoc"
+
+
+def test_bind_quote_fuzzy_not_exact():
+    """Confirm the fuzzy test quote genuinely fails exact-substring matching."""
+    elements = [_el("e1", "Engram is a memory architecture")]
+    q = kg_ingest._norm("Engram memory architecture model")
+    text_norm = kg_ingest._norm("Engram is a memory architecture")
+    assert q not in text_norm, "precondition: quote must NOT be an exact substring"
+
+
 class FakeClient:
     configured = True
     def __init__(self, payload): self._p = payload
