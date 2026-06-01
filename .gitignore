@@ -19,3 +19,4 @@ coverage/
 ~$*
 .claude/settings.local.json
 harness_out/
+fangan/testcases_kg/
