@@ -1777,16 +1777,36 @@ class SQLiteRepository:
                 )
         return len(relations)
 
-    def store_kg(self, notebook_id: str, source_id,
+    def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
         """Insert KG nodes as approved knowledge_objects and edges as
-        knowledge_relations (remapping local ids to DB ids). Embeds node payload."""
+        knowledge_relations (remapping local ids to DB ids). Embeds node payload.
+
+        Objects and relations are written atomically in a single transaction so
+        a mid-write failure cannot leave orphan objects with no edges.
+        Relations whose source_local_id or target_local_id is not present in
+        the given objects are silently skipped.
+        """
         now = _now()
         local_to_id: Dict[str, str] = {}
+        # Pre-assign DB ids and remap relations before opening the connection.
+        for obj in objects:
+            local_to_id[obj["local_id"]] = f"ko-{uuid4().hex[:10]}"
+        db_relations = []
+        for rel in relations:
+            s = local_to_id.get(rel["source_local_id"])
+            t = local_to_id.get(rel["target_local_id"])
+            if not s or not t:
+                continue
+            db_relations.append({
+                "source_object_id": s,
+                "target_object_id": t,
+                "edge_type": rel["edge_type"],
+                "evidence": rel.get("evidence", []),
+            })
         with self._connect() as db:
             for obj in objects:
-                oid = f"ko-{uuid4().hex[:10]}"
-                local_to_id[obj["local_id"]] = oid
+                oid = local_to_id[obj["local_id"]]
                 db.execute(
                     """INSERT INTO knowledge_objects
                        (id, notebook_id, object_type, status, owner, payload, evidence,
@@ -1796,16 +1816,22 @@ class SQLiteRepository:
                      json.dumps(obj["payload"], ensure_ascii=False),
                      json.dumps(obj["evidence"], ensure_ascii=False), now, now),
                 )
-        db_relations = []
-        for rel in relations:
-            s = local_to_id.get(rel["source_local_id"])
-            t = local_to_id.get(rel["target_local_id"])
-            if not s or not t:
-                continue
-            db_relations.append({"source_object_id": s, "target_object_id": t,
-                                  "edge_type": rel["edge_type"], "evidence": rel.get("evidence", [])})
-        if db_relations:
-            self.add_relations(notebook_id, source_id, db_relations)
+            for rel in db_relations:
+                db.execute(
+                    """
+                    INSERT INTO knowledge_relations
+                    (id, notebook_id, source_id, source_object_id, target_object_id,
+                     edge_type, evidence, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
+                        rel["source_object_id"], rel["target_object_id"],
+                        rel["edge_type"],
+                        json.dumps(rel["evidence"], ensure_ascii=False),
+                        now,
+                    ),
+                )
         for obj in objects:                              # payload-level embeddings (best-effort)
             try:
                 self._embed_knowledge(local_to_id[obj["local_id"]], notebook_id, obj["payload"])

@@ -46,6 +46,31 @@ def test_store_kg_writes_objects_and_relations(repo):
     assert rels[0]["source_object_id"] in ids and rels[0]["target_object_id"] in ids
 
 
+def test_store_kg_skips_unresolved_relations(repo):
+    """Relations that reference a local_id not present in the objects list are
+    silently skipped: they are excluded from the returned count and from
+    relations_for_notebook."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    objects = [
+        {"local_id": "A1", "object_type": "concept",
+         "payload": {"name": "Alpha", "section_path": "S1"},
+         "evidence": []},
+    ]
+    relations = [
+        # Valid: both ends exist in objects.
+        # There is only one object so no valid self-referential edge either —
+        # use two objects to ensure at least one valid rel in a different test.
+        # Here: target "MISSING" is not in objects → must be skipped.
+        {"source_local_id": "A1", "target_local_id": "MISSING",
+         "edge_type": "related", "evidence": []},
+    ]
+    n_obj, n_rel = repo.store_kg(nb.id, None, objects, relations)
+    assert n_obj == 1
+    assert n_rel == 0                                  # skipped relation not counted
+    rels = repo.relations_for_notebook(nb.id)
+    assert rels == []                                  # nothing written to DB
+
+
 def test_add_and_read_relations(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     a = repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"})
