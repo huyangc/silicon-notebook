@@ -267,6 +267,17 @@ class SQLiteRepository:
                   updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS knowledge_relations (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,
+                  source_object_id TEXT NOT NULL,
+                  target_object_id TEXT NOT NULL,
+                  edge_type TEXT NOT NULL,
+                  evidence TEXT NOT NULL DEFAULT '[]',
+                  created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS answers (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -1743,6 +1754,59 @@ class SQLiteRepository:
             for o in objs
         ]
         return KnowledgeGraph(nodes=nodes, edges=self._relation_edges(objs))
+
+    def add_relations(self, notebook_id: str, source_id: str,
+                      relations: List[dict]) -> int:
+        now = _now()
+        with self._connect() as db:
+            for rel in relations:
+                db.execute(
+                    """
+                    INSERT INTO knowledge_relations
+                    (id, notebook_id, source_id, source_object_id, target_object_id,
+                     edge_type, evidence, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
+                        rel["source_object_id"], rel["target_object_id"],
+                        rel["edge_type"],
+                        json.dumps(rel.get("evidence", []), ensure_ascii=False),
+                        now,
+                    ),
+                )
+        return len(relations)
+
+    def relations_for_notebook(self, notebook_id: str) -> List[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM knowledge_relations WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"], "source_object_id": r["source_object_id"],
+                "target_object_id": r["target_object_id"], "edge_type": r["edge_type"],
+                "evidence": json.loads(r["evidence"] or "[]"),
+            }
+            for r in rows
+        ]
+
+    def _delete_relations_for_source(self, db, source_id: str) -> None:
+        db.execute("DELETE FROM knowledge_relations WHERE source_id = ?", (source_id,))
+
+    # test-only helper; later tasks may replace it with a public insert path
+    def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict) -> str:
+        oid = f"ko-{uuid4().hex[:10]}"; now = _now()
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO knowledge_objects
+                   (id, notebook_id, object_type, status, owner, payload, evidence,
+                    source_candidate_id, created_at, updated_at)
+                   VALUES (?, ?, ?, 'approved', '', ?, '[]', NULL, ?, ?)""",
+                (oid, notebook_id, object_type, json.dumps(payload, ensure_ascii=False), now, now),
+            )
+        return oid
 
     def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation:
         """Trace a rule back to its origin evidence and surface related
