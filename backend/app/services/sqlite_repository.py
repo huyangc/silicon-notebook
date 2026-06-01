@@ -1989,12 +1989,15 @@ class SQLiteRepository:
             "glossary": ("term", "definition"),
             "case": ("symptom", "context"),
             "checklist": ("question",),
-            "claim": ("statement",),
-            "finding": ("statement", "metric"),
-            "concept": ("term", "definition"),
+            # KG node types: text lives in payload["name"]
+            "claim": ("name", "statement"),
+            "formula": ("name", "statement"),
+            "procedure": ("name", "title"),
+            "concept": ("name", "term", "definition"),
+            "finding": ("name", "statement", "metric"),
             "principle": ("statement", "rationale"),
             "example": ("title", "problem"),
-        }.get(object_type, ("title", "statement", "name", "term", "question"))
+        }.get(object_type, ("name", "title", "statement", "term", "question"))
         for key in keys:
             value = str(payload.get(key, "")).strip()
             if value:
@@ -2362,6 +2365,9 @@ class SQLiteRepository:
         return citations
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """KG-native ask: retrieves over the 4 KG object types (claim/formula/
+        procedure/concept), performs 1-hop relation expansion, and synthesises
+        a conclusion via the LLM (or deterministic fallback)."""
         self.get_notebook(notebook_id)
         question = payload.question.strip()
         scenario_tags = [
@@ -2371,122 +2377,125 @@ class SQLiteRepository:
         ]
         query = " ".join([question, *scenario_tags]).strip()
 
+        _KG_TYPES = ("claim", "formula", "procedure", "concept")
+
         with self._connect() as db:
-            rules = self._knowledge_objects(db, notebook_id, "rule")
-            cases = self._knowledge_objects(db, notebook_id, "case")
-            checklist = self._knowledge_objects(db, notebook_id, "checklist")
-            methods = self._knowledge_objects(db, notebook_id, "method")
-            risks = self._knowledge_objects(db, notebook_id, "risk")
-            # Non-core object types (claim/finding/concept/principle/example +
-            # glossary + any custom/induced) are retrieved generically.
-            registry = self.effective_schemas()
-            extra_types = [t for t in registry if t not in _CORE_ASK_TYPES]
-            extra_objs = {
-                t: self._knowledge_objects(db, notebook_id, t) for t in extra_types
+            kg_objs: Dict[str, List[dict]] = {
+                t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
             }
             elements = self._gather_elements(db, notebook_id)
             query_vector = self._embed_query(query)
-            all_extra = [o for objs in extra_objs.values() for o in objs]
-            knowledge_vectors = self._knowledge_vectors(
-                db, notebook_id, rules + cases + checklist + methods + risks + all_extra
-            )
+            all_kg = [o for objs in kg_objs.values() for o in objs]
+            knowledge_vectors = self._knowledge_vectors(db, notebook_id, all_kg)
 
         element_vectors = self._element_vectors(elements)
         scenario = payload.scenario or {}
-        scored_rules = score_knowledge(query, rules, "rule", query_vector, element_vectors, knowledge_vectors, scenario)[:5]
-        scored_cases = score_knowledge(query, cases, "case", query_vector, element_vectors, knowledge_vectors, scenario)[:4]
-        scored_checklist = score_knowledge(query, checklist, "checklist", query_vector, element_vectors, knowledge_vectors, scenario)[:6]
-        scored_methods = score_knowledge(query, methods, "method", query_vector, element_vectors, knowledge_vectors, scenario)[:4]
-        scored_risks = score_knowledge(query, risks, "risk", query_vector, element_vectors, knowledge_vectors, scenario)[:4]
-        scored_elements = score_elements(query, elements, query_vector)
 
-        # Generic related-knowledge block: top matches per non-core type.
-        related_knowledge: List[KnowledgeRecord] = []
-        for object_type, objs in extra_objs.items():
+        # Score each KG type, take top hits per type.
+        _TOP_PER_TYPE = {"claim": 5, "formula": 5, "procedure": 4, "concept": 4}
+        top_hits: List[RetrievedKnowledge] = []
+        for t in _KG_TYPES:
+            objs = kg_objs[t]
             if not objs:
                 continue
-            schema = registry.get(object_type)
-            top = score_knowledge(
-                query, objs, object_type, query_vector, element_vectors,
-                knowledge_vectors, scenario,
-            )[:2]
-            for item in top:
-                obj = {
-                    "id": item.object_id,
-                    "payload": item.payload,
-                    "status": item.status,
-                    "owner": getattr(item, "owner", ""),
-                    "last_reviewed": getattr(item, "last_reviewed", ""),
-                    "evidence": item.evidence,
-                }
-                related_knowledge.append(
-                    self._knowledge_record(object_type, obj, schema)
+            scored = score_knowledge(
+                query, objs, t, query_vector, element_vectors, knowledge_vectors, scenario
+            )[: _TOP_PER_TYPE.get(t, 4)]
+            top_hits.extend(scored)
+
+        scored_elements = score_elements(query, elements, query_vector)
+
+        # 1-hop expansion: for each top-hit object, pull its graph neighbours.
+        hit_ids = {item.object_id for item in top_hits}
+        relations = self.relations_for_notebook(notebook_id)
+        neighbour_ids: set = set()
+        for rel in relations:
+            src, tgt = rel["source_object_id"], rel["target_object_id"]
+            if src in hit_ids and tgt not in hit_ids:
+                neighbour_ids.add(tgt)
+            elif tgt in hit_ids and src not in hit_ids:
+                neighbour_ids.add(src)
+
+        # Fetch neighbour objects if any.
+        neighbour_objs: List[dict] = []
+        if neighbour_ids:
+            with self._connect() as db:
+                placeholders = ",".join("?" for _ in neighbour_ids)
+                rows = db.execute(
+                    f"SELECT * FROM knowledge_objects WHERE id IN ({placeholders})",
+                    list(neighbour_ids),
+                ).fetchall()
+            for row in rows:
+                keys = row.keys()
+                neighbour_objs.append({
+                    "id": row["id"],
+                    "object_type": row["object_type"],
+                    "payload": json.loads(row["payload"] or "{}"),
+                    "evidence": [
+                        Evidence(**item)
+                        for item in json.loads(row["evidence"] or "[]")
+                    ],
+                    "status": row["status"],
+                    "owner": row["owner"],
+                    "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
+                })
+
+        # Build related_knowledge from hits + neighbours (hits first, no dups).
+        registry = self.effective_schemas()
+        seen_ids: set = set()
+        related_knowledge: List[KnowledgeRecord] = []
+
+        for item in top_hits:
+            if item.object_id in seen_ids:
+                continue
+            seen_ids.add(item.object_id)
+            obj = {
+                "id": item.object_id,
+                "payload": item.payload,
+                "status": item.status,
+                "owner": getattr(item, "owner", ""),
+                "last_reviewed": getattr(item, "last_reviewed", ""),
+                "evidence": item.evidence,
+            }
+            related_knowledge.append(
+                self._knowledge_record(item.object_type, obj, registry.get(item.object_type))
+            )
+
+        for nobj in neighbour_objs:
+            if nobj["id"] in seen_ids:
+                continue
+            seen_ids.add(nobj["id"])
+            related_knowledge.append(
+                self._knowledge_record(
+                    nobj["object_type"], nobj, registry.get(nobj["object_type"])
                 )
-        related_knowledge = related_knowledge[:8]
+            )
 
+        related_knowledge = related_knowledge[:12]
+
+        # Citations from top hits.
         valid_element_ids = {element["element_id"] for element in elements}
-        related_rules = [self._rule_card(item) for item in scored_rules]
-        related_cases = [self._case_card(item) for item in scored_cases]
-
-        recommended_methods = [
-            str(item.payload.get("name", "")).strip()
-            or str(item.payload.get("use_when", "")).strip()
-            for item in scored_methods
-        ]
-        recommended_methods = [text for text in recommended_methods if text]
-        potential_risks = [
-            str(item.payload.get("title", "")).strip()
-            or str(item.payload.get("description", "")).strip()
-            for item in scored_risks
-        ]
-        potential_risks = [text for text in potential_risks if text]
-        checklist_questions = [
-            str(item.payload.get("question", "")).strip() for item in scored_checklist
-        ]
-        checklist_questions = [text for text in checklist_questions if text]
-
         citations: List[Citation] = []
-        citations.extend(self._citations_from(scored_rules, valid_element_ids, "Rule evidence"))
-        citations.extend(self._citations_from(scored_cases, valid_element_ids, "Case evidence"))
-        citations.extend(self._citations_from(scored_checklist, valid_element_ids, "Checklist evidence"))
-        citations.extend(self._citations_from(scored_methods, valid_element_ids, "Method evidence"))
-        citations.extend(self._citations_from(scored_risks, valid_element_ids, "Risk evidence"))
+        citations.extend(self._citations_from(top_hits, valid_element_ids, "KG evidence"))
 
-        has_knowledge = bool(
-            scored_rules or scored_cases or scored_checklist or scored_methods
-            or scored_risks or related_knowledge
-        )
-
+        has_knowledge = bool(top_hits or related_knowledge)
         llm_mode = "deterministic"
         conclusion = ""
-        applicable_scenario = scenario_tags
-        missing_information: List[str] = []
 
         if self.llm_client.configured and (has_knowledge or scored_elements):
             try:
-                conclusion, applicable_scenario, llm_methods, llm_risks, llm_checklist, missing_information = (
-                    self._answer_with_llm(question, scenario_tags, scored_rules, scored_cases,
-                                          scored_checklist, scored_methods, scored_risks, scored_elements)
+                conclusion, llm_mode = self._answer_with_llm_kg(
+                    question, scenario_tags, top_hits, scored_elements
                 )
-                recommended_methods = llm_methods or recommended_methods
-                potential_risks = llm_risks or potential_risks
-                checklist_questions = llm_checklist or checklist_questions
-                llm_mode = "configured"
             except Exception:
                 conclusion = ""
 
         if not conclusion:
             if has_knowledge:
-                parts = []
-                if related_rules:
-                    parts.append(f"{len(related_rules)} approved rule(s) match this scenario")
-                if related_cases:
-                    parts.append(f"{len(related_cases)} related case(s)")
-                if checklist_questions:
-                    parts.append(f"{len(checklist_questions)} checklist item(s)")
+                n = len(top_hits)
                 conclusion = (
-                    "Notebook knowledge found: " + ", ".join(parts) + "."
-                    if parts
+                    f"Found {n} relevant KG knowledge object(s) for this question."
+                    if n
                     else "Relevant notebook knowledge was retrieved for this question."
                 )
             else:
@@ -2494,73 +2503,48 @@ class SQLiteRepository:
                     "The notebook does not yet contain approved knowledge that "
                     "matches this question. Upload and review sources to build coverage."
                 )
-                missing_information = missing_information or [
-                    "No approved rules, cases, or checklist items matched the query.",
-                    "Upload sources, run extraction, and approve candidates to improve answers.",
-                ]
-
-        # §12 governance: flag any retrieved rule marked as conflicting.
-        conflicted = [item for item in scored_rules if item.status == "conflict"]
-        if conflicted:
-            titles = ", ".join(
-                str(item.payload.get("title", "")).strip() or item.object_id for item in conflicted
-            )
-            missing_information = missing_information + [
-                f"Conflicting rule(s) flagged for owner review: {titles}."
-            ]
 
         response = AskResponse(
             answer_id="",
             conclusion=conclusion,
-            applicable_scenario=applicable_scenario,
-            recommended_methods=recommended_methods,
-            related_rules=related_rules,
-            potential_risks=potential_risks,
-            related_cases=related_cases,
-            checklist=checklist_questions,
-            missing_information=missing_information,
+            related_knowledge=related_knowledge,
             citations=citations,
             llm_mode=llm_mode,
-            related_knowledge=related_knowledge,
         )
         response.answer_id = self._save_answer(notebook_id, question, response)
         return response
 
-    def _answer_with_llm(
+    def _answer_with_llm_kg(
         self,
         question: str,
         scenario_tags: List[str],
-        rules: List[RetrievedKnowledge],
-        cases: List[RetrievedKnowledge],
-        checklist: List[RetrievedKnowledge],
-        methods: List[RetrievedKnowledge],
-        risks: List[RetrievedKnowledge],
+        kg_hits: List[RetrievedKnowledge],
         elements: List[RetrievedElement],
-    ):
-        def block(title: str, items: List[RetrievedKnowledge]) -> str:
+    ) -> tuple:
+        """Synthesise a conclusion string from KG hits using the LLM.
+        Returns (conclusion_str, llm_mode_str)."""
+        def kg_block(items: List[RetrievedKnowledge]) -> str:
             lines = []
             for item in items:
-                text = "; ".join(
-                    f"{key}: {value}"
-                    for key, value in item.payload.items()
-                    if not str(key).startswith("_") and str(value).strip()
+                name = str(item.payload.get("name", "")).strip()
+                extra = "; ".join(
+                    f"{k}: {v}"
+                    for k, v in item.payload.items()
+                    if k != "name" and not str(k).startswith("_") and str(v).strip()
                 )
-                lines.append(f"- {text}")
-            return f"{title}:\n" + ("\n".join(lines) if lines else "- (none)")
+                line = f"- [{item.object_type}] {name}"
+                if extra:
+                    line += f" — {extra}"
+                lines.append(line)
+            return "KG knowledge objects:\n" + ("\n".join(lines) if lines else "- (none)")
 
         element_block = "\n".join(
-            f"- [{element.location_label}] {element.text[:300]}" for element in elements[:8]
+            f"- [{el.location_label}] {el.text[:300]}" for el in elements[:8]
         )
-        context_block = "\n\n".join(
-            [
-                block("Approved rules", rules),
-                block("Cases", cases),
-                block("Checklist items", checklist),
-                block("Methods", methods),
-                block("Risks", risks),
-                "Source elements:\n" + (element_block or "- (none)"),
-            ]
-        )
+        context_block = "\n\n".join([
+            kg_block(kg_hits),
+            "Source elements:\n" + (element_block or "- (none)"),
+        ])
         scenario_block = ", ".join(scenario_tags) if scenario_tags else "(not specified)"
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, scenario_block, context_block)}],
@@ -2569,23 +2553,8 @@ class SQLiteRepository:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
-
-        def str_list(key: str) -> List[str]:
-            value = data.get(key) or []
-            if isinstance(value, list):
-                return [str(item).strip() for item in value if str(item).strip()]
-            if isinstance(value, str) and value.strip():
-                return [value.strip()]
-            return []
-
-        return (
-            str(data.get("conclusion", "")).strip(),
-            str_list("applicable_scenario") or scenario_tags,
-            str_list("recommended_methods"),
-            str_list("potential_risks"),
-            str_list("checklist"),
-            str_list("missing_information"),
-        )
+        conclusion = str(data.get("conclusion", "")).strip()
+        return conclusion, "configured"
 
     def _save_answer(self, notebook_id: str, question: str, response: AskResponse) -> str:
         answer_id = f"ans-{uuid4().hex[:10]}"

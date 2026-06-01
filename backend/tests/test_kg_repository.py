@@ -182,3 +182,25 @@ def test_knowledge_graph_from_kg_tables(repo):
     assert len(g.edges) == 1
     e = g.edges[0]
     assert e.from_id == k and e.to_id == c and e.relation == "about"
+
+
+# ---------------------------------------------------------------------------
+# Task 7 tests: KG node-type weights + KG-native ask
+# ---------------------------------------------------------------------------
+
+def test_kg_type_weights():
+    from app.services.retrieval import _TYPE_WEIGHT
+    assert _TYPE_WEIGHT["claim"] == _TYPE_WEIGHT["formula"] == 1.0
+    assert _TYPE_WEIGHT["procedure"] == 0.7
+    assert _TYPE_WEIGHT["concept"] == 0.5
+    for legacy in ("rule", "case", "checklist", "risk", "glossary"):
+        assert legacy not in _TYPE_WEIGHT
+
+
+def test_ask_returns_kg_knowledge(repo):
+    from app.models.schemas import AskRequest
+    repo.llm_client = _FakeLLM("{}")   # _FakeLLM already defined in this file
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
+    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?"))
+    assert any("Engram" in r.headline for r in resp.related_knowledge)

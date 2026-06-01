@@ -73,16 +73,15 @@ class RetrievedElement:
     score: float = 0.0
 
 
-# Knowledge-type authority weights (方案 §11): approved rule > case > checklist >
-# method > risk > glossary. Used for cross-type tie-breaking / grouping only, NOT
-# multiplied into within-type relevance ranking.
+# KG node-type authority weights: claim/formula are primary knowledge carriers;
+# procedure is process-oriented; concept is definitional/supporting.
+# Used for cross-type tie-breaking / grouping only, NOT multiplied into
+# within-type relevance ranking.
 _TYPE_WEIGHT = {
-    "rule": 1.0,
-    "case": 0.9,
-    "checklist": 0.8,
-    "method": 0.7,
-    "risk": 0.6,
-    "glossary": 0.4,
+    "claim": 1.0,
+    "formula": 1.0,
+    "procedure": 0.7,
+    "concept": 0.5,
 }
 
 

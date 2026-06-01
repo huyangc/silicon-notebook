@@ -153,17 +153,9 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer_id: str = ""
     conclusion: str
-    applicable_scenario: List[str]
-    recommended_methods: List[str]
-    related_rules: List[RuleCard]
-    potential_risks: List[str]
-    related_cases: List[CaseCard]
-    checklist: List[str]
-    missing_information: List[str]
-    citations: List[Citation]
-    llm_mode: str
-    # Generic block for non-core object types (claim/finding/concept/... + glossary).
     related_knowledge: List["KnowledgeRecord"] = Field(default_factory=list)
+    citations: List[Citation] = Field(default_factory=list)
+    llm_mode: str = ""
 
 
 class ScenarioQueryRequest(BaseModel):
