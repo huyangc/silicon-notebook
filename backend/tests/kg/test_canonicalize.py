@@ -7,7 +7,7 @@ def _c(nid, name):
 
 def test_merges_concepts_by_normalized_name_and_rewires_edges():
     nodes = [_c("A", "Depletion Region"), _c("B", "depletion  region"),
-             Node(id="F", type="Formula", attrs={"expression": "x=1"},
+             Node(id="F", type="Formula", name="x=1",
                   evidence=[Evidence(file="x", char_start=2, char_end=3, line_start=1, line_end=1, quote="x")])]
     edges = [Edge(id="e1", type="about", source_id="F", target_id="B")]
     g_nodes, g_edges = canonicalize(nodes, edges, doc_id="d")

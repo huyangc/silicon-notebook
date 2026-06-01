@@ -16,8 +16,7 @@ class Evidence(BaseModel):
 class Node(BaseModel):
     id: str
     type: NodeType
-    name: str = ""              # Concept/Procedure name; "" for Claim/Formula
-    attrs: Dict[str, Any] = Field(default_factory=dict)
+    name: str = ""              # node text: Concept/Procedure name, Claim statement, Formula expression
     section_path: str = ""
     evidence: List[Evidence] = Field(default_factory=list)
     mentions: List[Evidence] = Field(default_factory=list)

@@ -8,9 +8,9 @@ class Fake:
         return json.dumps({"nodes": [
             {"local_id": "a", "type": "Concept", "name": "analog signal",
              "evidence": "analog signal"},
-            {"local_id": "b", "type": "Formula", "attrs": {"expression": "C_j = C_j0"},
+            {"local_id": "b", "type": "Formula", "name": "C_j = C_j0",
              "evidence": "C_j = C_j0"},
-            {"local_id": "c", "type": "Claim", "attrs": {"statement": "x"},
+            {"local_id": "c", "type": "Claim", "name": "x",
              "evidence": "NOT IN SOURCE"}],          # ungroundable -> dropped
             "edges": [
             {"type": "about", "source": "b", "target": "a", "evidence": "C_j = C_j0"},

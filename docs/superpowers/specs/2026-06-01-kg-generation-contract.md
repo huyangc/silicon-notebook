@@ -5,16 +5,21 @@ gold generator and human curators apply THESE rules (this is the root fix for th
 old "fine types with no definitions" problem).
 
 ## Node types (exactly 4)
+Each node currently carries only: `id`, `type`, `name` (the node's text),
+`section_path`, `evidence[]`, `mentions[]`. Richer per-type **attributes are
+deferred** — their shape is undecided (see fangan_todo.md "KG 重构"). Until then the
+node's text lives wholly in `name`.
+
 - **Concept** — a named noun-like entity (term, concept, method, component, device,
   system, material). Test: it can be a grammatical subject/object and recurs across
-  sentences. Attributes: name, aliases[], kind (free tag), definition (short).
+  sentences. `name` = the entity name.
 - **Claim** — a truth-evaluable assertion ABOUT one or more Concepts (a claim,
   finding, principle, mechanism, or definitional statement). Test: it has a predicate
-  and asserts one fact. Attributes: statement, quantitative_values{}, polarity.
+  and asserts one fact. `name` = the full assertion statement.
 - **Formula** — an equation/expression. Test: contains `=` or a math operator.
-  Attributes: expression, variables{symbol: meaning}, role (what it computes/states).
+  `name` = the expression.
 - **Procedure** — an ordered process (fabrication flow, worked-example solution,
-  derivation chain). Test: >= 2 ordered steps. Attributes: name, steps[] (ordered).
+  derivation chain). Test: >= 2 ordered steps. `name` = the procedure name.
 
 ## Edge types (source_type -> target_type : trigger)
 - defines: Claim -> Concept : the claim states what the concept IS.

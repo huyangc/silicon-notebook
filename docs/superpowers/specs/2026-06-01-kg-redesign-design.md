@@ -49,12 +49,14 @@ DocumentType:
 ## 2. 知识图谱 schema
 
 ### 2.1 节点类型（4 种，两类文档共享，边界清晰）
-| 节点 | 是什么 | 关键属性 |
+> **属性(attrs)暂不建模**：每个节点当前只有 `id/type/name(节点文本)/section_path/evidence/mentions`，节点文本统一放在 `name`。富属性的形态未定，见 fangan_todo.md「KG 重构」。
+
+| 节点 | 是什么 | name 放什么 |
 | --- | --- | --- |
-| **Concept** | 命名实体：术语/概念/方法/组件/器件/系统/材料（可跨文档合并） | name, aliases, kind(自由标签), definition |
-| **Claim** | 关于 Concept 的可判真伪断言：主张/结论/原理/机制/定义陈述 | statement, quantitative_values, polarity |
-| **Formula** | 公式/方程 | expression, variables{符号→含义}, role |
-| **Procedure** | 有序过程：工艺流程/例题解法/推导链 | name, steps[有序] |
+| **Concept** | 命名实体：术语/概念/方法/组件/器件/系统/材料（可跨文档合并） | 实体名 |
+| **Claim** | 关于 Concept 的可判真伪断言：主张/结论/原理/机制/定义陈述 | 完整断言陈述 |
+| **Formula** | 公式/方程 | 表达式 |
+| **Procedure** | 有序过程：工艺流程/例题解法/推导链 | 过程名 |
 
 ### 2.2 每类文档的抽取侧重
 | | 学术类(engram) | 教材类(cmos) |
@@ -74,8 +76,8 @@ DocumentType:
 
 ### 2.4 证据 + 规范化
 - **每个节点和每条边挂 `evidence:[source_span]`**（字符级，硬不变量）。
-- **Concept 规范化**：同一概念跨小节/文档按 name+aliases+embedding 合并成一个 canonical 节点，`mentions` 记所有出处 → 跨文档 + 概念探索枢纽。
-- 节点 name/statement 做 embedding，供 Q&A 向量召回。
+- **Concept 规范化**：同一概念跨小节/文档按规范化 `name` 合并成一个 canonical 节点，`mentions` 记所有出处 → 跨文档 + 概念探索枢纽。（aliases / embedding 合并待属性建模后再加，见 fangan_todo.md。）
+- 节点 `name` 做 embedding，供 Q&A 向量召回。
 
 ### 2.5 检索用图谱的哪些信息
 1. **Q&A**：query 向量召回 Concept/Claim/Formula 节点 → 沿 `about`/`supports` 扩 1 跳 → 用节点 payload 生成答案 + 引用 evidence span。
@@ -104,10 +106,11 @@ DocumentType:
 ### 3.3 逐窗口 KG 抽取（核心）
 一次 LLM 调用：输入 窗口原文 + 章节路径 + 文档类型；输出图谱片段：
 ```json
-{"nodes":[{"id":"n1","type":"Concept","name":"...","definition":"...","evidence":"<逐字引用>"},
-          {"id":"n2","type":"Formula","expression":"...","role":"...","evidence":"<逐字>"}],
+{"nodes":[{"id":"n1","type":"Concept","name":"<实体名>","evidence":"<逐字引用>"},
+          {"id":"n2","type":"Formula","name":"<表达式>","evidence":"<逐字>"}],
  "edges":[{"type":"about","source":"n2","target":"n1","evidence":"<逐字>"}]}
 ```
+（属性 attrs 暂不抽，节点文本统一进 `name`，见 §2.1 与 fangan_todo.md。）
 - 节点类型 4 选 1（无歧义）；证据**逐字引用 → 定位回原文 span**（exact→空白容错，定位不到丢弃；技术已验证 0 违例）。
 - 节点 id 窗口内局部，第 5 步合并分配全局 id。
 

@@ -10,7 +10,7 @@ def _span_overlap(a, b):
     return inter > 0
 
 def _node_key(n):
-    return _norm(n.name) or _norm(str(n.attrs.get("expression") or n.attrs.get("statement") or ""))
+    return _norm(n.name)
 
 def node_sim(g, p):
     if g.type != p.type:

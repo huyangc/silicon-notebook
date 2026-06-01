@@ -18,8 +18,6 @@ def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[Lis
             if key in canon:
                 c = canon[key]
                 c.mentions.extend(n.evidence + n.mentions)
-                if n.name != c.name and n.name not in (c.attrs.get("aliases") or []):
-                    c.attrs.setdefault("aliases", []).append(n.name)
                 remap[n.id] = c.id
             else:
                 cn += 1

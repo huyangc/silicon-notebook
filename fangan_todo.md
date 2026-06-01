@@ -57,6 +57,19 @@
 
 ---
 
+## KG 重构（知识图谱抽取，进行中）
+> 4 粗节点(Concept/Claim/Formula/Procedure)+ 富边 + 字符级证据的重设计，gold 子系统已落地（`backend/app/services/kg*`、`scripts/kg_goldgen*`、`docs/superpowers/specs/2026-06-01-kg-*`）。
+
+- [ ] **节点属性(attrs)形态未定**——当前已把 `attrs` 从数据模型 / 抽取 / spec / 已生成 gold 全部移除，节点文本统一进 `name`（Concept=实体名、Claim=完整断言、Formula=表达式、Procedure=过程名）。待决定每类节点是否需要细属性、放哪些：
+  - Concept：`aliases[]`、`kind`(自由标签)、`definition`
+  - Claim：`quantitative_values{}`、`polarity`
+  - Formula：`variables{符号→含义}`、`role`(公式作用)
+  - Procedure：`steps[]`(有序步骤)
+  - 决策后牵动：抽取 prompt、`models.Node`、`emit`、`canonicalize`(aliases 合并)、`match._node_key`、评测维度、curation guide、embedding 召回(name vs statement)。决定前不要再往节点上加字段。
+- [ ] **窗口阶段过滤 reference / bibliography**：cmos 等把参考文献条目误抽成 Claim（如 `Reference N: ...`）；在切窗时识别并跳过 references 小节，减少噪声。
+- [ ] **gold 人工策展**：14 章 pro 草稿(`fangan/testcases_kg/`，gitignored)按 curation guide 逐章裁决后，移出 ignore 锁为权威 gold。
+- [ ] **产品抽取流水线落地**：复用 `kg/`（deepseek-v4-flash），把 `Source` 抽取产出从旧 typed objects 切到 KG(nodes/edges/evidence)。
+
 ## 工程/技术债（非方案功能，但影响质量）
 - [ ] 抽取 LLM 让模型回传 `element_id` 做精确证据绑定（当前靠 quoted_span 精确子串 + CJK `token_overlap≥0.6` 模糊回退；已可用，但模型回传 id 会更稳）。
 - [ ] 抽取/问答的 LLM 延迟与成本：`qwen3.7-max` 较慢（单文档可达 ~分钟级，异步不阻塞）；可评估抽取用 `qwen-plus`/`qwen-turbo`。

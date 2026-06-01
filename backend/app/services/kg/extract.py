@@ -32,13 +32,14 @@ part_of/composed_of/contrasts_with/kind_of(Concept->Concept), derived_from(Formu
 Formula), depends_on/prerequisite_of, used_in(Formula->Procedure), precedes.
 
 Every node and edge MUST include "evidence": an EXACT verbatim substring copied from
-the passage. Give each node a "local_id" you reuse in edges. Skip narrative/filler.
+the passage. Give each node a "local_id" you reuse in edges. "name" carries the node's
+text (Concept/Procedure name, Claim statement, Formula expression). Skip narrative/filler.
 
 Passage:
 \"\"\"{window_text}\"\"\"
 
 Return JSON ONLY:
-{{"nodes":[{{"local_id":"..","type":"..","name":"..","attrs":{{}},"evidence":"<verbatim>"}}],
+{{"nodes":[{{"local_id":"..","type":"..","name":"..","evidence":"<verbatim>"}}],
  "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","evidence":"<verbatim>"}}]}}
 """
 
@@ -65,7 +66,7 @@ def extract_window(client: Any, source_text: str, win_start: int, win_end: int,
                       line_start=line, line_end=source_text.count("\n", 0, cstart + len(matched)) + 1,
                       quote=matched)
         nodes.append(Node(id=nid, type=it["type"], name=str(it.get("name", "")),
-                          attrs=it.get("attrs") or {}, section_path=section_path, evidence=[ev]))
+                          section_path=section_path, evidence=[ev]))
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     edges: List[Edge] = []

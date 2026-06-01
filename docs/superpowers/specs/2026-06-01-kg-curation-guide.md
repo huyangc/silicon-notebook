@@ -10,10 +10,12 @@ curated result (the draft dir is gitignored until curated).
 1. **Node types** — confirm each node is one of Concept / Claim / Formula /
    Procedure per the contract's test rules. Re-type or drop misfits.
 2. **Concepts** — merge over-split Concepts that name the same entity (the
-   generator merges by normalized name, but synonyms/abbreviations may remain);
-   add missing aliases. Drop noise Concepts (figure labels, citations, fragments).
-3. **Claims/Formulas/Procedures** — drop narrative/filler that slipped in; ensure
-   each Formula has a meaningful `role`; ensure each Procedure's `steps` are ordered.
+   generator merges by normalized name, but synonyms/abbreviations may remain).
+   Drop noise Concepts (figure labels, citations, fragments).
+3. **Claims/Formulas/Procedures** — drop narrative/filler that slipped in; check
+   each node's `name` holds the right text (Claim statement, Formula expression,
+   Procedure name). Per-type attributes (role, steps, aliases, …) are deferred —
+   see fangan_todo.md "KG 重构"; do not add them yet.
 4. **Edges** — confirm endpoint types match the contract's source->target rule;
    fix/drop wrong-type or dangling edges; add obvious missing edges (defines,
    about, derived_from, depends_on, used_in).
