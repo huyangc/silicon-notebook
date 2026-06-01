@@ -74,8 +74,8 @@
 
 ## 5. KG-native 检索 + 图谱
 - `/graph`：直接出 KG 节点 + 边（§3.2）。
-- `/ask` / `score_knowledge`：query 向量召回节点 → 沿 `knowledge_relations` 扩 1 跳 → 用命中节点 `name` + 邻居 + evidence 生成带引用答案。类型权重改为 KG 节点类型（例如 Claim/Formula 在问答中权重高于裸 Concept；具体权重在计划阶段定，可配置）。
-- `scenario-query` 等仅服务旧结构化字段的端点：若无 KG 语义则删除；保留的改读 KG。
+- `/ask` / `score_knowledge`：query 向量召回节点 → 沿 `knowledge_relations` 扩 1 跳 → 用命中节点 `name` + 邻居 + evidence 生成带引用答案。类型权重改为 KG 节点类型：**Claim ≈ Formula > Procedure > Concept**（裸 Concept 最低；Claim/Formula 承载可判真伪/可计算信息，问答价值高）。权重设为可配置常量，计划阶段给默认值。
+- **删除 `scenario-query` 端点**（仅服务旧结构化字段，无 KG 语义，前后端一并移除）。
 
 ## 6. 测试 + 迁移
 - 单测：KG→knowledge_objects/relations 映射、证据绑定（精确 + 模糊回退）、校验丢弃逻辑、`/graph` 由 KG 构建、`score_knowledge` 走 KG。
