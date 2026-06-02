@@ -227,18 +227,42 @@ type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
 type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
 type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
-type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; element_text?: string; confidence: number };
+type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
-type FgNode = { id: string; name: string; type: string; val: number };
-type FgLink = { source: string; target: string; label: string };
+type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
+type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
 
 const RELATION_LABELS: Record<string, string> = {
   related_concepts: "关联概念",
   related_claims: "关联论断",
   related_formulas: "关联公式",
-  related_procedures: "关联过程"
+  related_procedures: "关联过程",
+  about: "about",
+  defines: "defines",
+  supports: "supports",
+  depends_on: "depends on",
+  composed_of: "composed of",
+  part_of: "part of",
+  precedes: "precedes",
+  contrasts_with: "contrasts"
+};
+
+const KG_TYPE_LABELS: Record<string, string> = {
+  concept: "Concept",
+  claim: "Claim",
+  formula: "Formula",
+  procedure: "Procedure"
+};
+
+const KG_TYPE_ORDER = ["concept", "claim", "formula", "procedure"];
+
+const KG_TYPE_STYLE: Record<string, { color: string; border: string; text: string; glyph: string }> = {
+  concept: { color: "#2f80ed", border: "#1555a8", text: "C", glyph: "circle" },
+  claim: { color: "#16a085", border: "#0f6f5f", text: "CL", glyph: "triangle" },
+  formula: { color: "#a855f7", border: "#6d28d9", text: "F", glyph: "diamond" },
+  procedure: { color: "#f59e0b", border: "#b45309", text: "P", glyph: "square" }
 };
 
 type StudioOutput = {
@@ -325,15 +349,12 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
-type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: { quoted_span: string; source_title: string; element_text: string }[]; definition: string | null; steps: { name: string; element_text: string }[] | null };
-
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
-const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=concept`);
+const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=object`);
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
 const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
 const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
 const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
-const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
 
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
@@ -354,6 +375,151 @@ function sourceTypeLabel(source: SourceSummary): string {
 
 function sourceElementDomId(elementId: string): string {
   return `source-element-${elementId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function kgTypeLabel(type: string): string {
+  return KG_TYPE_LABELS[type] ?? type.replace(/(^|_)([a-z])/g, (_match, separator, char) => `${separator ? " " : ""}${char.toUpperCase()}`);
+}
+
+function kgNodeName(node: UnifiedConceptNode): string {
+  const name = typeof node.payload.name === "string" ? node.payload.name.trim() : "";
+  return name || node.id.replace(/^K-/, "");
+}
+
+function truncateKgLabel(label: string, max = 34): string {
+  return label.length > max ? `${label.slice(0, max - 1)}…` : label;
+}
+
+function kgPayloadValue(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.map(kgPayloadValue).filter(Boolean).join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function KgTypeMark({ type }: { type: string }) {
+  const style = KG_TYPE_STYLE[type] ?? { color: "#64748b", border: "#334155", text: type.slice(0, 2).toUpperCase(), glyph: "circle" };
+  return (
+    <span
+      className={`kg-shape-mark ${style.glyph}`}
+      style={{ background: style.color, borderColor: style.border }}
+      aria-hidden="true"
+    >
+      {style.glyph === "circle" ? style.text : ""}
+    </span>
+  );
+}
+
+function kgTypeBandForce(width: number, height: number, activeType: string) {
+  let nodes: FgNode[] = [];
+  const targets: Record<string, [number, number]> = {
+    concept: [width * 0.34, height * 0.38],
+    claim: [width * 0.66, height * 0.36],
+    formula: [width * 0.34, height * 0.72],
+    procedure: [width * 0.66, height * 0.72]
+  };
+  const force = (alpha: number) => {
+    nodes.forEach((node) => {
+      const target = activeType === "all" ? (targets[node.type] ?? [width / 2, height / 2]) : [width / 2, height / 2];
+      node.vx = (node.vx ?? 0) + (target[0] - (node.x ?? 0)) * 0.035 * alpha;
+      node.vy = (node.vy ?? 0) + (target[1] - (node.y ?? 0)) * 0.035 * alpha;
+    });
+  };
+  force.initialize = (forceNodes: FgNode[]) => {
+    nodes = forceNodes;
+  };
+  return force;
+}
+
+function drawKgNode(node: FgNode, ctx: CanvasRenderingContext2D, globalScale: number, selectedId: string | null, denseView: boolean) {
+  const x = node.x ?? 0;
+  const y = node.y ?? 0;
+  const style = KG_TYPE_STYLE[node.type] ?? { color: "#64748b", border: "#334155", text: node.type.slice(0, 2).toUpperCase(), glyph: "circle" };
+  const selected = node.id === selectedId;
+  const radius = 10 + Math.min(14, Math.sqrt(Math.max(1, node.val)) * 3.2) + (selected ? 2 : 0);
+
+  ctx.save();
+  ctx.beginPath();
+  if (style.glyph === "diamond") {
+    ctx.moveTo(x, y - radius);
+    ctx.lineTo(x + radius, y);
+    ctx.lineTo(x, y + radius);
+    ctx.lineTo(x - radius, y);
+    ctx.closePath();
+  } else if (style.glyph === "square") {
+    ctx.rect(x - radius, y - radius, radius * 2, radius * 2);
+  } else if (style.glyph === "triangle") {
+    ctx.moveTo(x, y - radius);
+    ctx.lineTo(x + radius * 1.08, y + radius * 0.9);
+    ctx.lineTo(x - radius * 1.08, y + radius * 0.9);
+    ctx.closePath();
+  } else {
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+  }
+  ctx.fillStyle = style.color;
+  ctx.fill();
+  ctx.lineWidth = (selected ? 3 : 1.5) / globalScale;
+  ctx.strokeStyle = selected ? "#111827" : style.border;
+  ctx.stroke();
+
+  const innerFont = Math.max(7, 9 / globalScale);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `700 ${innerFont}px Inter, ui-sans-serif, system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(style.text, x, y + (style.glyph === "triangle" ? radius * 0.12 : 0));
+
+  const shouldDrawLabel = selected || !denseView || node.degree >= 2;
+  if (!shouldDrawLabel) {
+    ctx.restore();
+    return;
+  }
+
+  const label = truncateKgLabel(node.name, denseView ? 18 : (node.type === "claim" ? 30 : 24));
+  const labelFont = Math.min(14, Math.max(9, 12 / globalScale));
+  ctx.font = `650 ${labelFont}px Inter, ui-sans-serif, system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const labelX = x;
+  const labelY = y + radius + labelFont * 0.95;
+  const metrics = ctx.measureText(label);
+  ctx.fillStyle = selected ? "rgba(255,255,255,0.96)" : "rgba(255,255,255,0.82)";
+  ctx.fillRect(labelX - metrics.width / 2 - 3 / globalScale, labelY - labelFont * 0.75, metrics.width + 6 / globalScale, labelFont * 1.5);
+  ctx.fillStyle = selected ? "#111827" : "#27303f";
+  ctx.fillText(label, labelX, labelY);
+  ctx.restore();
+}
+
+function paintKgPointerArea(node: FgNode, color: string, ctx: CanvasRenderingContext2D) {
+  const x = node.x ?? 0;
+  const y = node.y ?? 0;
+  const radius = 18 + Math.min(16, Math.sqrt(Math.max(1, node.val)) * 3.2);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawKgLinkLabel(link: FgLink, ctx: CanvasRenderingContext2D, globalScale: number, denseView: boolean) {
+  if (denseView) return;
+  const source = typeof link.source === "object" ? link.source : null;
+  const target = typeof link.target === "object" ? link.target : null;
+  if (!source || !target || source.x == null || source.y == null || target.x == null || target.y == null) return;
+  const x = (source.x + target.x) / 2;
+  const y = (source.y + target.y) / 2;
+  const label = truncateKgLabel(RELATION_LABELS[link.label] ?? link.label, 18);
+  const fontSize = Math.min(12, Math.max(8, 10 / globalScale));
+
+  ctx.save();
+  ctx.font = `600 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const width = ctx.measureText(label).width + 8 / globalScale;
+  ctx.fillStyle = "rgba(255,255,255,0.88)";
+  ctx.fillRect(x - width / 2, y - fontSize * 0.72, width, fontSize * 1.45);
+  ctx.fillStyle = "#475569";
+  ctx.fillText(label, x, y);
+  ctx.restore();
 }
 
 function cardTone(index: number): string {
@@ -423,17 +589,44 @@ export default function Home() {
   const [kgViewOpen, setKgViewOpen] = useState(false);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
-  const [selectedConcept, setSelectedConcept] = useState<string | null>(null);
+  const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
-  const [nodeCtx, setNodeCtx] = useState<NodeContext | null>(null);
   const [kgSearch, setKgSearch] = useState("");
+  const [kgTypeFilter, setKgTypeFilter] = useState("all");
+  const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
+  const kgCanvasRef = useRef<HTMLDivElement | null>(null);
+  const kgDetailRef = useRef<HTMLElement | null>(null);
+  const kgGraphRef = useRef<any>(null);
 
   useEffect(() => {
     loadNotebookCollection().catch(reportError);
   }, []);
+
+  useEffect(() => {
+    if (!kgViewOpen) return;
+    const element = kgCanvasRef.current;
+    if (!element) return;
+
+    const updateSize = () => {
+      const rect = element.getBoundingClientRect();
+      setKgSize({
+        width: Math.max(320, Math.floor(rect.width)),
+        height: Math.max(360, Math.floor(rect.height))
+      });
+    };
+
+    updateSize();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateSize) : null;
+    observer?.observe(element);
+    window.addEventListener("resize", updateSize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateSize);
+    };
+  }, [kgViewOpen]);
 
   useEffect(() => {
     if (!searchQuery.trim()) {
@@ -598,15 +791,123 @@ export default function Home() {
     const deg: Record<string, number> = {};
     uGraph.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
     const q = kgSearch.trim().toLowerCase();
+    const edgeMatchedNodes = new Set<string>();
+    if (q) {
+      uGraph.edges.forEach((edge) => {
+        const label = `${edge.edge_type} ${RELATION_LABELS[edge.edge_type] ?? ""}`.toLowerCase();
+        if (label.includes(q)) {
+          edgeMatchedNodes.add(edge.source_object_id);
+          edgeMatchedNodes.add(edge.target_object_id);
+        }
+      });
+    }
     const nodes: FgNode[] = uGraph.nodes
-      .filter((n) => !q || (n.payload.name ?? "").toLowerCase().includes(q))
-      .map((n) => ({ id: n.id, name: n.payload.name ?? n.id, type: n.object_type, val: 1 + (deg[n.id] ?? 0) }));
+      .filter((n) => {
+        if (kgTypeFilter !== "all" && n.object_type !== kgTypeFilter) return false;
+        if (!q) return true;
+        const searchable = `${kgNodeName(n)} ${n.object_type} ${kgPayloadValue(n.payload.section_path)}`.toLowerCase();
+        return searchable.includes(q) || edgeMatchedNodes.has(n.id);
+      })
+      .map((n) => {
+        const degree = deg[n.id] ?? 0;
+        return { id: n.id, name: kgNodeName(n), type: n.object_type, val: 5 + Math.min(18, degree), degree };
+      });
     const keep = new Set(nodes.map((n) => n.id));
     const links: FgLink[] = uGraph.edges
       .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
       .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type }));
     return { nodes, links };
-  }, [uGraph, kgSearch]);
+  }, [uGraph, kgSearch, kgTypeFilter]);
+
+  const kgDenseView = kgTypeFilter === "all" && !kgSearch.trim() && fgData.nodes.length > 36;
+
+  const kgTypeCounts = useMemo(() => {
+    if (!uGraph) return [] as Array<{ type: string; label: string; count: number }>;
+    const counts = new Map<string, number>();
+    uGraph.nodes.forEach((node) => counts.set(node.object_type, (counts.get(node.object_type) ?? 0) + 1));
+    return Array.from(counts.entries())
+      .map(([type, count]) => ({ type, label: kgTypeLabel(type), count }))
+      .sort((left, right) => {
+        const leftIndex = KG_TYPE_ORDER.indexOf(left.type);
+        const rightIndex = KG_TYPE_ORDER.indexOf(right.type);
+        if (leftIndex !== -1 || rightIndex !== -1) {
+          return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
+        }
+        return left.label.localeCompare(right.label, "en");
+      });
+  }, [uGraph]);
+
+  const selectedKgNode = useMemo(() => {
+    if (!uGraph || !selectedKgNodeId) return null;
+    return uGraph.nodes.find((node) => node.id === selectedKgNodeId) ?? null;
+  }, [selectedKgNodeId, uGraph]);
+
+  const selectedKgEdges = useMemo(() => {
+    if (!uGraph || !selectedKgNodeId) return [];
+    const nodeById = new Map(uGraph.nodes.map((node) => [node.id, node]));
+    return uGraph.edges
+      .filter((edge) => edge.source_object_id === selectedKgNodeId || edge.target_object_id === selectedKgNodeId)
+      .map((edge) => ({
+        ...edge,
+        sourceName: kgNodeName(nodeById.get(edge.source_object_id) ?? { id: edge.source_object_id, object_type: "", payload: { name: edge.source_object_id } }),
+        targetName: kgNodeName(nodeById.get(edge.target_object_id) ?? { id: edge.target_object_id, object_type: "", payload: { name: edge.target_object_id } })
+      }));
+  }, [selectedKgNodeId, uGraph]);
+
+  const kgNodeGroups = useMemo(() => {
+    const byType = new Map<string, FgNode[]>();
+    fgData.nodes.forEach((node) => {
+      byType.set(node.type, [...(byType.get(node.type) ?? []), node]);
+    });
+    return Array.from(byType.entries())
+      .map(([type, nodes]) => ({
+        type,
+        label: kgTypeLabel(type),
+        nodes: nodes.sort((left, right) => left.name.localeCompare(right.name, "zh-Hans-CN"))
+      }))
+      .sort((left, right) => {
+        const leftIndex = KG_TYPE_ORDER.indexOf(left.type);
+        const rightIndex = KG_TYPE_ORDER.indexOf(right.type);
+        if (leftIndex !== -1 || rightIndex !== -1) {
+          return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
+        }
+        return left.label.localeCompare(right.label, "en");
+      });
+  }, [fgData.nodes]);
+
+  function fitKgGraphView(duration = 450) {
+    const graph = kgGraphRef.current;
+    if (!graph) return;
+    const nodes = (graph.graphData?.().nodes ?? fgData.nodes) as FgNode[];
+    if (nodes.length === 0) return;
+
+    if (nodes.length <= 4) {
+      const positioned = nodes.filter((node) => node.x != null && node.y != null);
+      if (positioned.length > 0) {
+        const centerX = positioned.reduce((sum, node) => sum + (node.x ?? 0), 0) / positioned.length;
+        const centerY = positioned.reduce((sum, node) => sum + (node.y ?? 0), 0) / positioned.length;
+        graph.centerAt?.(centerX, centerY, duration);
+      }
+      const sparseZoom = nodes.length === 1 ? 1.12 : nodes.length === 2 ? 1.25 : 1.38;
+      graph.zoom?.(sparseZoom, duration);
+      return;
+    }
+
+    graph.zoomToFit?.(duration, kgDenseView ? 96 : 72);
+  }
+
+  useEffect(() => {
+    if (!kgViewOpen || fgData.nodes.length === 0) return;
+    const graph = kgGraphRef.current;
+    graph?.d3Force?.("link")?.distance?.(kgDenseView ? 128 : 96);
+    graph?.d3Force?.("charge")?.strength?.(kgDenseView ? -310 : -190);
+    graph?.d3Force?.("typeBand", kgTypeBandForce(kgSize.width, kgSize.height, kgTypeFilter));
+    graph?.d3ReheatSimulation?.();
+    const timer = window.setTimeout(() => {
+      fitKgGraphView(450);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [fgData.nodes.length, fgData.links.length, kgDenseView, kgSize.height, kgSize.width, kgTypeFilter, kgViewOpen]);
 
   async function loadNotebookCollection() {
     const healthResponse = await api<Health>("/health");
@@ -1068,7 +1369,9 @@ export default function Home() {
   async function openKgView() {
     if (!currentNotebookId) return;
     setKgViewOpen(true);
-    setSelectedConcept(null); setConceptDetail(null); setNodeCtx(null);
+    setSelectedKgNodeId(null); setConceptDetail(null);
+    setKgSearch("");
+    setKgTypeFilter("all");
     try {
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
@@ -1076,14 +1379,33 @@ export default function Home() {
     } catch (err) { reportError(err); }
   }
 
-  async function selectConcept(canonicalId: string) {
+  function focusKgGraphNode(nodeId: string) {
+    window.setTimeout(() => {
+      const graph = kgGraphRef.current;
+      const nodes = (graph?.graphData?.().nodes ?? fgData.nodes) as FgNode[];
+      const node = nodes.find((item) => item.id === nodeId);
+      if (!graph || node?.x == null || node?.y == null) return;
+      graph.centerAt?.(node.x, node.y, 450);
+      const visibleCount = nodes.length;
+      const focusZoom = visibleCount <= 1 ? 1.18 : visibleCount <= 4 ? 1.45 : visibleCount <= 12 ? 1.85 : 2.2;
+      graph.zoom?.(focusZoom, 450);
+    }, 120);
+  }
+
+  async function selectKgNode(nodeId: string) {
     if (!currentNotebookId) return;
-    setSelectedConcept(canonicalId);
-    setNodeCtx(null);
-    try { setConceptDetail(await fetchConceptDetail(currentNotebookId, canonicalId)); }
-    catch (err) { reportError(err); }
-    try { setNodeCtx(await fetchNodeContext(currentNotebookId, canonicalId)); }
-    catch { /* node context is best-effort */ }
+    setSelectedKgNodeId(nodeId);
+    focusKgGraphNode(nodeId);
+    window.setTimeout(() => {
+      kgDetailRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    }, 0);
+    const node = uGraph?.nodes.find((item) => item.id === nodeId);
+    if (node?.object_type !== "concept") {
+      setConceptDetail(null);
+      return;
+    }
+    try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId)); }
+    catch (err) { setConceptDetail(null); reportError(err); }
   }
 
   async function decideMerge(candidateId: string, confirm: boolean) {
@@ -1094,7 +1416,9 @@ export default function Home() {
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
       setUGraph(g); setPendingMerges(pend);
-      if (selectedConcept) setConceptDetail(await fetchConceptDetail(currentNotebookId, selectedConcept).catch(() => null));
+      const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
+      if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(currentNotebookId, selected.id).catch(() => null));
+      else setConceptDetail(null);
     } catch (err) { reportError(err); }
   }
 
@@ -1475,7 +1799,6 @@ export default function Home() {
                     statusFilter={knowledgeStatusFilter}
                     duplicates={duplicates}
                     conflicts={conflicts}
-                    notebookId={currentNotebookId ?? ""}
                     onKind={switchKnowledgeKind}
                     setStatusFilter={setKnowledgeStatusFilter}
                     onStatus={(id, status) => updateKnowledge(id, { status }).catch(reportError)}
@@ -1942,12 +2265,38 @@ export default function Home() {
       {kgViewOpen && (
         <section className="kg-view" role="dialog" aria-modal="true">
           <div className="kg-view-header">
-            <div><h2>知识图谱</h2><p>跨文档统一概念图（canonical 概念 + 概念间关系）。点击概念查看证据与挂载的断言/公式。</p></div>
+            <div><h2>知识图谱</h2><p>Object 级知识图谱：Concept / Claim / Formula / Procedure 同屏展示。节点名称、类型形状和边标签直接画在主视图中。</p></div>
             <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
           </div>
           <div className="kg-view-body">
             <aside className="kg-rail">
-              <input className="kg-search" placeholder="搜索概念…" value={kgSearch} onChange={(e) => setKgSearch(e.target.value)} />
+              <input className="kg-search" placeholder="搜索节点、类型或关系…" value={kgSearch} onChange={(e) => setKgSearch(e.target.value)} />
+              <div className="kg-rail-section">
+                <h3>当前视图</h3>
+                <div className="tag-row">
+                  <span className="tag">节点 {fgData.nodes.length}{uGraph ? ` / ${uGraph.nodes.length}` : ""}</span>
+                  <span className="tag">边 {fgData.links.length}{uGraph ? ` / ${uGraph.edges.length}` : ""}</span>
+                </div>
+              </div>
+              <div className="kg-rail-section">
+                <h3>类型过滤</h3>
+                <div className="kg-type-filter">
+                  <button className={kgTypeFilter === "all" ? "active" : ""} onClick={() => setKgTypeFilter("all")}>
+                    <span className="kg-shape-stack">
+                      {kgTypeCounts.slice(0, 4).map((item) => <KgTypeMark key={item.type} type={item.type} />)}
+                    </span>
+                    <strong>全部</strong>
+                    <em>{uGraph?.nodes.length ?? 0}</em>
+                  </button>
+                  {kgTypeCounts.map((item) => (
+                    <button className={kgTypeFilter === item.type ? "active" : ""} key={item.type} onClick={() => setKgTypeFilter(item.type)}>
+                      <KgTypeMark type={item.type} />
+                      <strong>{item.label}</strong>
+                      <em>{item.count}</em>
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="kg-rail-section">
                 <h3>待确认合并 ({pendingMerges.length})</h3>
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
@@ -1961,49 +2310,106 @@ export default function Home() {
                 ))}
               </div>
             </aside>
-            <div className="kg-canvas">
-              {uGraph === null ? <p className="tool-hint">加载中…</p> : (
+            <div className="kg-canvas" ref={kgCanvasRef}>
+              {uGraph === null ? <p className="tool-hint kg-canvas-empty">加载中…</p> : fgData.nodes.length === 0 ? (
+                <p className="tool-hint kg-canvas-empty">没有匹配的节点。清空搜索后可查看完整图谱。</p>
+              ) : (
                 <ForceGraph2D
+                  ref={kgGraphRef}
                   graphData={fgData}
                   nodeLabel={(n: any) => `${n.name} (${n.type})`}
                   nodeVal={(n: any) => n.val}
-                  nodeAutoColorBy="type"
-                  linkDirectionalArrowLength={3}
-                  onNodeClick={(n: any) => selectConcept(n.id)}
+                  width={kgSize.width}
+                  height={kgSize.height}
+                  linkDirectionalArrowLength={7}
+                  linkDirectionalArrowRelPos={1}
+                  linkColor={() => "rgba(91, 105, 130, 0.42)"}
+                  linkWidth={1.35}
+                  linkLabel={(link: any) => RELATION_LABELS[link.label] ?? link.label}
+                  linkCanvasObjectMode={() => "after"}
+                  linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgLinkLabel(link, ctx, globalScale, kgDenseView)}
+                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgNode(node, ctx, globalScale, selectedKgNodeId, kgDenseView)}
+                  nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => paintKgPointerArea(node, color, ctx)}
+                  d3VelocityDecay={0.32}
+                  onEngineStop={() => fitKgGraphView(350)}
+                  onNodeClick={(n: any) => selectKgNode(n.id)}
                 />
               )}
+              <div className="kg-legend">
+                {Object.entries(KG_TYPE_STYLE).map(([type]) => (
+                  <span key={type}><KgTypeMark type={type} />{kgTypeLabel(type)}</span>
+                ))}
+              </div>
             </div>
-            <aside className="kg-detail">
-              {!conceptDetail ? <p className="tool-hint">点击左侧/图中概念查看详情</p> : (
-                <div className="stack">
-                  <h3>{conceptDetail.canonical_name}</h3>
-                  <div className="tag-row"><span className="tag">成员 {conceptDetail.members.length}</span><span className="tag">挂载 {conceptDetail.attached.length}</span></div>
-                  <h4>挂载的断言 / 公式 / 过程</h4>
-                  {conceptDetail.attached.length === 0 ? <p className="tool-hint">无</p> : conceptDetail.attached.map((a) => (
-                    <div className="checklist-row" key={a.id}><span className="tag">{a.object_type}</span> {String(a.payload.name ?? "")} <em>({a.edge_type})</em></div>
-                  ))}
-                  {conceptDetail.attached.filter((a) => a.object_type === "procedure").length > 0 && (
-                    <>
-                      <h4>流程</h4>
-                      {conceptDetail.attached.filter((a) => a.object_type === "procedure").map((a) => (
-                        <div className="checklist-row" key={a.id}>
-                          <button className="sort-button" onClick={async () => { try { setNodeCtx(await fetchNodeContext(currentNotebookId!, a.id)); } catch {} }}>{String(a.payload.name ?? "")} 的步骤</button>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                  {nodeCtx?.object_type === "procedure" && nodeCtx.steps && (
-                    <div className="stack"><h4>{nodeCtx.name} — 步骤</h4>
-                      {nodeCtx.steps.map((s, i) => (<div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>))}
-                    </div>
-                  )}
-                  {nodeCtx?.definition && (<><h4>定义</h4><p className="kg-evidence">{nodeCtx.definition}</p></>)}
-                  <h4>证据</h4>
-                  {conceptDetail.evidence.slice(0, 20).map((ev, i) => (
-                    <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.element_text || ev.quoted_span}</span></div>
-                  ))}
+            <aside className="kg-detail" ref={kgDetailRef}>
+              <div className="kg-node-overview">
+                <div className="kg-detail-heading">
+                  <h3>节点总览</h3>
+                  <span>{kgNodeGroups.reduce((sum, group) => sum + group.nodes.length, 0)} 个</span>
                 </div>
-              )}
+                {kgNodeGroups.length === 0 ? <p className="tool-hint">暂无节点。</p> : kgNodeGroups.map((group) => (
+                  <section className="kg-type-group" key={group.type}>
+                    <div className="kg-type-header">
+                      <span><KgTypeMark type={group.type} />{group.label}</span>
+                      <strong>{group.nodes.length}</strong>
+                    </div>
+                    <div className="kg-node-list">
+                      {group.nodes.map((node) => (
+                        <button
+                          className={`kg-node-button ${selectedKgNodeId === node.id ? "active" : ""}`}
+                          key={node.id}
+                          onClick={() => selectKgNode(node.id).catch(reportError)}
+                        >
+                          <span>{truncateKgLabel(node.name, 58)}</span>
+                          <em>{node.degree}</em>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              <div className="kg-selected-detail">
+                {!selectedKgNode ? <p className="tool-hint">点击图中节点或总览列表查看详情。</p> : (
+                  <div className="stack">
+                    <h3>{kgNodeName(selectedKgNode)}</h3>
+                    <div className="tag-row">
+                      <span className="tag">{kgTypeLabel(selectedKgNode.object_type)}</span>
+                      {selectedKgNode.payload.section_path ? <span className="tag">§ {kgPayloadValue(selectedKgNode.payload.section_path)}</span> : null}
+                      <span className="tag">关系 {selectedKgEdges.length}</span>
+                    </div>
+                    {Object.entries(selectedKgNode.payload)
+                      .filter(([key, value]) => key !== "name" && Boolean(kgPayloadValue(value)))
+                      .map(([key, value]) => (
+                        <p key={key}><strong>{FIELD_LABELS[key] ?? key}：</strong>{kgPayloadValue(value)}</p>
+                      ))}
+                    {selectedKgEdges.length > 0 && (
+                      <>
+                        <h4>相邻关系</h4>
+                        {selectedKgEdges.slice(0, 24).map((edge, index) => (
+                          <div className="kg-relation-row" key={`${edge.source_object_id}-${edge.target_object_id}-${index}`}>
+                            <span>{truncateKgLabel(edge.sourceName, 28)}</span>
+                            <strong>{RELATION_LABELS[edge.edge_type] ?? edge.edge_type}</strong>
+                            <span>{truncateKgLabel(edge.targetName, 28)}</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    {conceptDetail && (
+                      <>
+                        <h4>挂载的断言 / 公式 / 过程</h4>
+                        {conceptDetail.attached.length === 0 ? <p className="tool-hint">无</p> : conceptDetail.attached.map((a) => (
+                          <div className="checklist-row" key={a.id}><span className="tag">{kgTypeLabel(a.object_type)}</span> {String(a.payload.name ?? "")} <em>({a.edge_type})</em></div>
+                        ))}
+                        <h4>证据</h4>
+                        {conceptDetail.evidence.slice(0, 20).map((ev, i) => (
+                          <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.quoted_span}</span></div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             </aside>
           </div>
         </section>
@@ -2363,7 +2769,6 @@ function KnowledgeBrowser({
   statusFilter,
   duplicates,
   conflicts,
-  notebookId,
   onKind,
   setStatusFilter,
   onStatus,
@@ -2379,7 +2784,6 @@ function KnowledgeBrowser({
   statusFilter: string;
   duplicates: DuplicateGroup[] | null;
   conflicts: ConflictPair[] | null;
-  notebookId: string;
   onKind: (kind: KnowledgeKind) => void;
   setStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
@@ -2389,7 +2793,6 @@ function KnowledgeBrowser({
   onMerge: (sourceId: string, intoId: string) => void;
   reload: () => void;
 }) {
-  const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
   const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
   // Build tabs purely from the dynamic /knowledge-types response.
@@ -2486,30 +2889,6 @@ function KnowledgeBrowser({
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
               </div>
               <EvidenceLine evidence={item.evidence} />
-              {notebookId && (
-                <button
-                  className="sort-button"
-                  onClick={async () => {
-                    if (ctx[item.id]) { setCtx((m) => { const n = { ...m }; delete n[item.id]; return n; }); return; }
-                    try { const c = await fetchNodeContext(notebookId, item.id); setCtx((m) => ({ ...m, [item.id]: c })); } catch { /* best-effort */ }
-                  }}
-                >{ctx[item.id] ? "收起" : "展开原文"}</button>
-              )}
-              {ctx[item.id] && (
-                <div className="knowledge-context">
-                  {ctx[item.id].definition && (
-                    <p className="tool-hint"><strong>定义：</strong>{ctx[item.id].definition}</p>
-                  )}
-                  {ctx[item.id].occurrences.map((o, i) => (
-                    <p className="tool-hint" key={i}>{o.element_text || o.quoted_span}</p>
-                  ))}
-                  {ctx[item.id].object_type === "procedure" && ctx[item.id].steps && ctx[item.id].steps!.map((s, i) => (
-                    <div className="checklist-row" key={i}>
-                      <span className="tag">{i + 1}</span> <strong>{s.name}</strong>：{s.element_text}
-                    </div>
-                  ))}
-                </div>
-              )}
             </article>
           ))}
         </div>

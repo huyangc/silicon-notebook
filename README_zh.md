@@ -21,6 +21,7 @@
 - 混合检索：关键词 + 可选 embedding 余弦，覆盖来源元素和已批准知识
 - 真实来源驱动回答 + citation 校验：问答、场景查询、案例检索、Checklist 生成、文章研究，以及带可选评论的 👍/👎 反馈
 - 知识治理：规则/方法/风险/术语浏览，状态生命周期（reviewed/approved/deprecated/conflict/project_specific）+ owner/last_reviewed，重复检测与合并，冲突检测（deprecated 知识不参与回答）
+- Object 级知识图谱可视化：Concept / Claim / Formula / Procedure 节点同屏展示，主画布显示节点名称、类型形状/颜色和边关系标签，并提供搜索/类型过滤、合并审核、按类型分组的节点总览与详情面板，选择节点时画布会自动聚焦
 - 外层 notebook 集合页（网格/紧凑/列表视图、编辑/删除）、工作区标题编辑、来源详情预览/删除、文章删除、内部搜索
 - 第一版不使用 Docker
 
@@ -124,6 +125,7 @@ npm run dev    # 仓库根目录：后端(uvicorn --reload) + Next.js 前端
 
 - 左栏：用户导入的来源文件（解析/抽取过程中实时显示 parse-status），支持详情预览和删除，并提供 curator 审核队列。网络检索来源暂不开放。
 - 中栏：以 tab 形式提供来源驱动的 knowhow 工具——问答（自由提问）、场景查询（结构化场景表单）、案例检索、Checklist 生成、规则库浏览。回答包含相关规则/案例/checklist/风险、缺失信息、引用和 👍/👎 反馈。
+- 知识图谱以全屏工作区浮层打开：画布渲染 object 级 KG 节点名称、类型视觉标记和关系边标签；类型过滤用于收敛密集视图；侧栏按类型（Concept、Claim、Formula、Procedure）汇总节点，点击总览节点会聚焦画布并展示选中节点的关系/证据。
 - 右栏：Studio，含思维导图、新建文章、信息图；文章研究驱动思维导图 / 信息图输出，已创建文章可删除。
 
 notebook 工作区会隐藏集合页全局上边栏，并采用更偏工程知识台的视觉风格，避免和 NotebookLM 完全一致。

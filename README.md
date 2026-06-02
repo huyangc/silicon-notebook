@@ -21,6 +21,7 @@ This repository now targets a local real-team beta loop:
 - Hybrid retrieval: keyword + optional embedding cosine over both source elements and approved knowledge
 - Real source-grounded answers with citation validation: Ask, Scenario query, Case search, Checklist generator, Article research, and 👍/👎 feedback
 - Knowledge governance: browse rules/methods/risks/glossary, status lifecycle (reviewed/approved/deprecated/conflict/project_specific) + owner/last_reviewed, duplicate detection & merge, and conflict detection (deprecated knowledge is excluded from answers) with optional comments
+- Object-level knowledge graph visualization: Concept / Claim / Formula / Procedure nodes are shown together with visible node labels, type-specific shapes/colors, relationship labels on edges, search/type filters, merge review, and a type-grouped node overview/detail panel with canvas focus on selection
 - Notebook collection page (grid/compact/list views, edit/delete), workspace title editing, source detail previews/delete, article delete, internal search
 - No Docker in the first version
 
@@ -131,6 +132,7 @@ Inside a notebook:
 
 - Left column: user-imported source files (live parse-status while parsing/extracting) with detail previews and delete actions, plus the curator Review Queue. Network source search is intentionally disabled for now.
 - Center column: source-grounded knowhow tools as tabs — Ask (free question), Scenario query (structured scenario form), Case search, Checklist generator, and Rule browser. Answers carry related rules/cases/checklist/risks, missing-information, citations, and 👍/👎 feedback.
+- Knowledge Graph opens as a full-screen workspace overlay: the canvas renders object-level KG nodes with names, type-specific visual marks, and relationship labels; type filters reduce dense views; the side panel groups nodes by type (Concept, Claim, Formula, Procedure) and selecting an item focuses the canvas while showing selected-node relations/evidence.
 - Right column: Studio with Mind Map, New Article, and Infographic; article research drives the Mind Map / Infographic output, and created articles can be deleted.
 
 The notebook workspace hides the global collection top bar and keeps a more engineering-console visual treatment rather than copying NotebookLM exactly.
