@@ -1801,6 +1801,27 @@ class SQLiteRepository:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
 
+    def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
+        cached = self._unified_cache.get((notebook_id, level))
+        if cached is not None:
+            return cached
+        from app.services.kg_merge import derive_unified_graph
+        with self._connect() as db:
+            nrows = db.execute(
+                "SELECT id, object_type, payload, status FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,),
+            ).fetchall()
+        nodes = [{"id": r["id"], "object_type": r["object_type"], "payload": json.loads(r["payload"] or "{}")} for r in nrows]
+        edges = [{"source_object_id": r["source_object_id"], "target_object_id": r["target_object_id"], "edge_type": r["edge_type"]}
+                 for r in self.relations_for_notebook(notebook_id)]
+        g = derive_unified_graph(nodes, edges, self.cluster_map(notebook_id))
+        if level == "concept":
+            cids = {n["id"] for n in g["nodes"] if n["object_type"] == "concept"}
+            g = {"nodes": [n for n in g["nodes"] if n["object_type"] == "concept"],
+                 "edges": [e for e in g["edges"] if e["source_object_id"] in cids and e["target_object_id"] in cids]}
+        self._unified_cache[(notebook_id, level)] = g
+        return g
+
     def rebuild_unified_kg(self, notebook_id: str) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
         pending candidates (preserving confirmed/rejected). Returns #clusters."""

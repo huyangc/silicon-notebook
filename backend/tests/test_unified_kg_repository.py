@@ -64,3 +64,14 @@ def test_rebuild_is_idempotent(repo):
     repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"X","section_path":""},"evidence":[]}], [])
     repo.rebuild_unified_kg(nb.id); first = repo.cluster_map(nb.id)
     repo.rebuild_unified_kg(nb.id); assert repo.cluster_map(nb.id).keys() == first.keys()
+
+def test_unified_graph_concept_level_cached(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id":"a","object_type":"concept","payload":{"name":"MOSFET","section_path":""},"evidence":[]},
+        {"local_id":"b","object_type":"concept","payload":{"name":"current mirror","section_path":""},"evidence":[]},
+    ], [{"source_local_id":"b","target_local_id":"a","edge_type":"depends_on","evidence":[]}])
+    repo.rebuild_unified_kg(nb.id)
+    g = repo.unified_graph(nb.id, level="concept")
+    assert len(g["nodes"]) == 2 and len(g["edges"]) == 1
+    assert repo.unified_graph(nb.id, level="concept") is repo._unified_cache[(nb.id,"concept")]  # cache hit (same object)

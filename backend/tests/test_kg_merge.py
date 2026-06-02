@@ -32,3 +32,18 @@ def test_perf_2000_reps_under_2s():
     t = time.perf_counter()
     cluster_concepts(concepts, vecs, confirmed=set(), rejected=set(), hi=0.9, lo=0.82)
     assert time.perf_counter() - t < 2.0
+
+from app.services.kg_merge import derive_unified_graph
+
+def test_derive_rewires_and_dedups_edges():
+    cluster_map = {"o1": "K1", "o2": "K1"}
+    nodes = [{"id":"o1","object_type":"concept","payload":{"name":"MOSFET"}},
+             {"id":"o2","object_type":"concept","payload":{"name":"mosfet"}},
+             {"id":"k1","object_type":"claim","payload":{"name":"claim A"}}]
+    edges = [{"source_object_id":"k1","target_object_id":"o1","edge_type":"about"},
+             {"source_object_id":"k1","target_object_id":"o2","edge_type":"about"}]
+    g = derive_unified_graph(nodes, edges, cluster_map)
+    concept_ids = {n["id"] for n in g["nodes"] if n["object_type"]=="concept"}
+    assert concept_ids == {"K1"}                       # two MOSFET nodes -> one canonical
+    about = [e for e in g["edges"] if e["edge_type"]=="about"]
+    assert len(about) == 1 and about[0]["target_object_id"]=="K1"   # rewired + deduped

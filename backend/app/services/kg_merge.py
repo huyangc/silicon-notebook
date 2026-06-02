@@ -93,3 +93,29 @@ def cluster_concepts(concepts: List[dict], vectors: Dict[str, List[float]],
     pend_out = [(canon_id[a], canon_id[b], sim) for a, b, sim in pending if canon_id[a] != canon_id[b]]
     return {"cluster_map": cluster_map, "canonical_names": names, "pending": pend_out,
             "capped": len(seeds) > _MAX_REPS}
+
+
+def derive_unified_graph(nodes: List[dict], edges: List[dict], cluster_map: Dict[str, str]) -> dict:
+    """Rewire member-Concept endpoints to canonical ids; dedup edges. O(V+E)."""
+    def canon(oid): return cluster_map.get(oid, oid)
+    seen_concept, out_nodes = set(), []
+    for n in nodes:
+        if n["object_type"] == "concept":
+            cid = canon(n["id"])
+            if cid in seen_concept:
+                continue
+            seen_concept.add(cid)
+            out_nodes.append({**n, "id": cid})
+        else:
+            out_nodes.append(n)
+    seen_edge, out_edges = set(), []
+    for e in edges:
+        s, t = canon(e["source_object_id"]), canon(e["target_object_id"])
+        if s == t:
+            continue
+        key = (s, t, e["edge_type"])
+        if key in seen_edge:
+            continue
+        seen_edge.add(key)
+        out_edges.append({"source_object_id": s, "target_object_id": t, "edge_type": e["edge_type"]})
+    return {"nodes": out_nodes, "edges": out_edges}
