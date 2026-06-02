@@ -1936,6 +1936,8 @@ class SQLiteRepository:
         ph = ",".join("?" for _ in ids)
         rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
         texts = {r["id"]: r["text"] for r in rows}
+        # NOTE: assumes ids[0]'s element belongs to `notebook_id` (single-tenant;
+        # element ids here always come from objects in the target notebook).
         order_rows = db.execute(
             "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
             "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
@@ -1950,8 +1952,7 @@ class SQLiteRepository:
         for e in evidence:
             out.append({"quoted_span": e.get("quoted_span", ""),
                         "source_title": e.get("source_title", "") or e.get("source_id", ""),
-                        "element_text": texts.get(e.get("element_id", ""), e.get("quoted_span", "")),
-                        "section_path": ""})
+                        "element_text": texts.get(e.get("element_id", ""), e.get("quoted_span", ""))})
         return out
 
     def node_context(self, notebook_id, object_id):
@@ -1960,7 +1961,8 @@ class SQLiteRepository:
             row = db.execute("SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE id=? AND notebook_id=?", (object_id, notebook_id)).fetchone()
             if row is None:
                 raise KeyError(object_id)
-            obj_type = row["object_type"]; payload = json.loads(row["payload"] or "{}")
+            obj_type = row["object_type"]
+            payload = json.loads(row["payload"] or "{}")
             section = payload.get("section_path", "")
             occurrences = self._enrich_evidence(db, json.loads(row["evidence"] or "[]"))
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
@@ -1976,15 +1978,26 @@ class SQLiteRepository:
             if obj_type == "procedure":
                 prows = db.execute(
                     "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
-                steps = []
+                # v1: group steps by exact section_path (precedes edges are sparse).
+                # Two distinct procedures sharing a section heading would merge —
+                # acceptable for inspection.
+                candidate_steps = []
                 for pr in prows:
                     ppay = json.loads(pr["payload"] or "{}")
                     if ppay.get("section_path", "") != section:
                         continue
                     ev = json.loads(pr["evidence"] or "[]")
-                    texts, ordinal = self._element_texts(db, [e.get("element_id") for e in ev])
                     first_eid = ev[0].get("element_id") if ev else ""
-                    steps.append({"name": ppay.get("name", ""), "element_text": texts.get(first_eid, ""),
+                    candidate_steps.append((ppay.get("name", ""), first_eid))
+                # Collect all first evidence element_ids, then call _element_texts once.
+                all_step_first_eids = [eid for _, eid in candidate_steps if eid]
+                if all_step_first_eids:
+                    texts, ordinal = self._element_texts(db, all_step_first_eids)
+                else:
+                    texts, ordinal = {}, {}
+                steps = []
+                for step_name, first_eid in candidate_steps:
+                    steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
                                   "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
                 steps.sort(key=lambda s: s["_ord"])
                 for s in steps:
