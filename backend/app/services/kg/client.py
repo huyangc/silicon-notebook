@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class KGClient:
@@ -24,19 +24,41 @@ class KGClient:
                                   timeout=self.timeout)
         return self._client
 
-    def chat_json(self, prompt: str, retries: int = 4) -> str:
+    def chat_json(
+        self,
+        messages: List[Dict[str, str]],
+        response_schema_hint: str = "",
+        retries: int = 4,
+    ) -> str:
         # Stream the response: slow/reasoning models (e.g. deepseek-v4-pro) produce
         # long replies that the server drops on non-streaming requests (~120s cap);
         # streaming keeps the connection alive chunk-by-chunk. Retry with backoff so
         # a transient blip doesn't silently yield empty extractions.
+        #
+        # If a response_schema_hint is provided, prepend a system message (mirrors
+        # OpenAICompatibleClient) so the model knows to return JSON matching the schema.
         import time
+        if response_schema_hint:
+            full_messages: List[Dict[str, str]] = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the extraction and reasoning engine for "
+                        "silicon-notebook. Return valid JSON only, no markdown fences. "
+                        f"Schema hint: {response_schema_hint}"
+                    ),
+                },
+                *messages,
+            ]
+        else:
+            full_messages = list(messages)
         last = None
         for attempt in range(retries):
             try:
                 stream = self._ensure().chat.completions.create(
                     model=self.model, temperature=0,
                     response_format={"type": "json_object"}, stream=True,
-                    messages=[{"role": "user", "content": prompt}])
+                    messages=full_messages)
                 parts = []
                 for chunk in stream:
                     if chunk.choices:
