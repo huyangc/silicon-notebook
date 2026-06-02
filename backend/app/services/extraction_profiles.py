@@ -1,27 +1,7 @@
-"""Document-type extraction profiles (产品方案 §5 对象模型 + §6.2 模板).
+"""Document-type extraction profiles for the KG pipeline.
 
-Why this exists
----------------
-The original extractor hard-coded one fixed set of six object types
-(rule/method/risk/case/checklist/glossary) for *every* document. That only
-fits design specs and summaries; forcing it onto academic papers or textbooks
-produces noise (a paper has *claims/findings*, not "must/should design rules";
-a textbook has *concepts/principles*, not debug cases).
-
-A **profile** answers, for a given kind of document: *which* typed knowledge
-objects to extract and *which* fields each object carries. Everything still
-lands in the one shared, typed ``knowledge_objects`` store, so cross-type
-retrieval, governance and the relation graph keep working — only the extraction
-*lens* changes per document.
-
-Two axes pick the profile (see ``resolve_profile``):
-  1. the notebook template (§6.2) supplies a sensible default, and
-  2. a per-source heuristic doc-type detector can override it when a document
-     clearly looks like something else (a paper dropped into a rule notebook).
-
-Schema *induction* (proposing brand-new object types/fields from the corpus)
-is intentionally NOT here — that is a later, curator-gated step. This registry
-is the human-defined, closed schema backbone.
+Only two document types are supported: ``academic_paper`` and ``textbook``.
+Both use the same four KG object types: concept, claim, formula, procedure.
 """
 
 from __future__ import annotations
@@ -56,8 +36,8 @@ class ObjectSchema:
     """A single typed knowledge object the extractor can emit."""
 
     type: str  # object_type stored in knowledge_objects
-    plural: str  # JSON key the LLM returns (e.g. "rules")
-    fields: List[str]  # payload keys, in display order (relations included)
+    plural: str  # JSON key the LLM returns (e.g. "concepts")
+    fields: List[str]  # payload keys, in display order
     primary: str  # main text field, used for headline / dedupe
     description: str  # one-line guidance injected into the prompt
     # Extra list-valued fields beyond the global LIST_FIELDS (for custom/induced
@@ -65,171 +45,50 @@ class ObjectSchema:
     list_fields: List[str] = field(default_factory=list)
 
 
-# --- Shared typed knowledge model (产品方案 §5) ----------------------------
-# Existing six core types, now with the §5 fields that were missing — notably
-# the *relation* fields (related_*) plus rule.condition / exception / rule_type.
+# --- KG object type registry -----------------------------------------------
 OBJECT_SCHEMAS: Dict[str, ObjectSchema] = {
-    "rule": ObjectSchema(
-        "rule",
-        "rules",
-        [
-            "title", "statement", "applies_to", "condition", "recommendation",
-            "risk_if_ignored", "exception", "severity", "rule_type",
-            "related_cases", "related_methods",
-        ],
-        primary="title",
-        description="a design rule / constraint (must/should/不得/应当)",
-    ),
-    "method": ObjectSchema(
-        "method",
-        "methods",
-        [
-            "name", "use_when", "benefit", "limitation", "tradeoff",
-            "required_condition", "related_rules", "related_cases",
-        ],
-        primary="name",
-        description="an analysis/verification method or best practice",
-    ),
-    "risk": ObjectSchema(
-        "risk",
-        "risks",
-        ["title", "description", "severity", "mitigation", "related_rules"],
-        primary="title",
-        description="a failure mode / risk and its impact",
-    ),
-    "case": ObjectSchema(
-        "case",
-        "cases",
-        [
-            "symptom", "context", "root_cause", "resolution", "lesson_learned",
-            "related_rules", "related_methods",
-        ],
-        primary="symptom",
-        description="a historical debug / failure case",
-    ),
-    "checklist": ObjectSchema(
-        "checklist",
-        "checklist",
-        [
-            "question", "applies_to", "required_evidence", "severity",
-            "related_rules", "related_cases",
-        ],
-        primary="question",
-        description="an actionable design-review checklist item",
-    ),
-    "glossary": ObjectSchema(
-        "glossary",
-        "glossary",
-        ["term", "definition", "aliases"],
-        primary="term",
-        description="a domain term and its definition",
-    ),
-    # --- academic / textbook extensions ---------------------------------
-    # These map document-native objects that do NOT fit the design-doc model.
-    "claim": ObjectSchema(
-        "claim",
-        "claims",
-        [
-            "statement", "claim_type", "measurement_condition", "limitation",
-            "related_rules",
-        ],
-        primary="statement",
-        description="a technical claim asserted by a paper",
-    ),
-    "finding": ObjectSchema(
-        "finding",
-        "findings",
-        ["statement", "metric", "condition", "dataset"],
-        primary="statement",
-        description="a quantitative experimental result / finding",
-    ),
     "concept": ObjectSchema(
-        "concept",
-        "concepts",
-        ["term", "definition", "why_it_matters", "related_concepts"],
-        primary="term",
-        description="a core concept defined in a textbook",
+        type="concept",
+        plural="concepts",
+        fields=["name", "section_path"],
+        primary="name",
+        description="a named entity (term/method/component/device/material)",
+        list_fields=[],
     ),
-    "principle": ObjectSchema(
-        "principle",
-        "principles",
-        ["statement", "rationale", "applies_to"],
-        primary="statement",
-        description="a governing principle / law / theorem",
+    "claim": ObjectSchema(
+        type="claim",
+        plural="claims",
+        fields=["name", "section_path"],
+        primary="name",
+        description="a truth-evaluable assertion about concepts",
+        list_fields=[],
     ),
-    "example": ObjectSchema(
-        "example",
-        "examples",
-        ["title", "problem", "approach", "result"],
-        primary="title",
-        description="a worked example / illustration",
+    "formula": ObjectSchema(
+        type="formula",
+        plural="formulas",
+        fields=["name", "section_path"],
+        primary="name",
+        description="an equation / expression",
+        list_fields=[],
+    ),
+    "procedure": ObjectSchema(
+        type="procedure",
+        plural="procedures",
+        fields=["name", "section_path"],
+        primary="name",
+        description="an ordered process / derivation / worked example",
+        list_fields=[],
     ),
 }
 
 
-# Display labels (zh) for each object type — used by the generic knowledge
-# browser tabs and type counts.
+# Display labels (zh) for each object type.
 OBJECT_TYPE_LABELS: Dict[str, str] = {
-    "rule": "规则 Rule",
-    "method": "方法 Method",
-    "risk": "风险 Risk",
-    "case": "案例 Case",
-    "checklist": "检查项 Checklist",
-    "glossary": "术语 Glossary",
-    "claim": "论文主张 Claim",
-    "finding": "实验结论 Finding",
     "concept": "概念 Concept",
-    "principle": "原理 Principle",
-    "example": "例题 Example",
+    "claim": "论断 Claim",
+    "formula": "公式 Formula",
+    "procedure": "过程 Procedure",
 }
-
-
-# --- qiefen object types (§ P2 cutover) -----------------------------------
-# Generated from the qiefen pipeline's profile vocabularies so the schema
-# registry / knowledge-browse tabs surface qiefen objects (ArticleClaim,
-# Concept, Formula, ...) with their payload fields, kept in sync in one place.
-_QIEFEN_LIST_FIELDS = {
-    "mechanism", "steps", "variables", "applies_to", "properties",
-    "controls", "contrasts_with",
-}
-_QIEFEN_TYPE_LABELS = {
-    "ArticleClaim": "论文主张 ArticleClaim", "ArticleMethod": "方法 ArticleMethod",
-    "ArchitectureComponent": "架构组件 ArchitectureComponent",
-    "ScalingLaw": "标度律 ScalingLaw", "ExperimentSetup": "实验设置 ExperimentSetup",
-    "ExperimentResult": "实验结果 ExperimentResult",
-    "AblationFinding": "消融发现 AblationFinding",
-    "MechanisticExplanation": "机制解释 MechanisticExplanation",
-    "SystemDesignClaim": "系统设计主张 SystemDesignClaim",
-    "Limitation": "局限 Limitation", "Implication": "推论 Implication",
-    "Concept": "概念 Concept", "Definition": "定义 Definition",
-    "Formula": "公式 Formula", "Variable": "变量 Variable",
-    "Derivation": "推导 Derivation", "ExampleProblem": "例题 ExampleProblem",
-    "ExampleSolution": "解法 ExampleSolution",
-    "TechnologyProcess": "工艺步骤 TechnologyProcess",
-    "ProcessFlow": "工艺流程 ProcessFlow", "ComponentModel": "器件模型 ComponentModel",
-    "PhysicalEffect": "物理效应 PhysicalEffect",
-    "DesignPrinciple": "设计原则 DesignPrinciple", "DesignRule": "设计规则 DesignRule",
-    "ProblemStatement": "习题 ProblemStatement",
-}
-
-
-def _register_qiefen_types() -> None:
-    from app.services.qiefen.profiles import ARTICLE_OBJECTS, TEXTBOOK_OBJECTS
-    for type_name, fields in {**ARTICLE_OBJECTS, **TEXTBOOK_OBJECTS}.items():
-        if type_name in OBJECT_SCHEMAS:
-            continue
-        OBJECT_SCHEMAS[type_name] = ObjectSchema(
-            type=type_name,
-            plural=type_name.lower() + "s",
-            fields=list(fields),
-            primary=fields[0] if fields else "",
-            description=f"a {type_name} extracted by the qiefen pipeline",
-            list_fields=[f for f in fields if f in _QIEFEN_LIST_FIELDS],
-        )
-        OBJECT_TYPE_LABELS.setdefault(type_name, _QIEFEN_TYPE_LABELS.get(type_name, type_name))
-
-
-_register_qiefen_types()
 
 
 @dataclass(frozen=True)
@@ -253,75 +112,30 @@ class ExtractionProfile:
 
 
 PROFILES: Dict[str, ExtractionProfile] = {
-    "design_spec": ExtractionProfile(
-        "design_spec",
-        "设计规范 / 方案文档",
-        ["rule", "checklist", "risk", "method"],
-        "a design specification / guideline — focus on rules and constraints, "
-        "review checks, and the risks of ignoring them",
-    ),
-    "method": ExtractionProfile(
-        "method",
-        "方法 / SOP 文档",
-        ["method", "rule", "checklist"],
-        "a methods / best-practice document — focus on when to use each method, "
-        "its benefit, tradeoff, and limitations",
-    ),
-    "postmortem": ExtractionProfile(
-        "postmortem",
-        "复盘 / 经验总结",
-        ["case", "rule", "method", "risk"],
-        "a debug postmortem / lessons-learned summary — focus on symptom, root "
-        "cause, resolution, and the lesson learned",
-    ),
-    "review": ExtractionProfile(
-        "review",
-        "评审 checklist",
-        ["checklist", "rule", "risk"],
-        "a design-review checklist — focus on actionable check items, the "
-        "evidence each requires, and the scope it applies to",
-    ),
     "academic_paper": ExtractionProfile(
         "academic_paper",
         "学术论文",
-        ["claim", "finding", "method", "glossary"],
-        "an academic paper — focus on its technical claims, quantitative "
-        "findings, and methods; do NOT fabricate design rules the paper does "
-        "not actually state",
+        ["concept", "claim", "formula", "procedure"],
+        "an academic paper",
     ),
     "textbook": ExtractionProfile(
         "textbook",
         "教材 / 课本",
-        ["concept", "principle", "method", "example", "glossary"],
-        "a textbook / course material — focus on core concepts, governing "
-        "principles, methods, and worked examples",
-    ),
-    "general": ExtractionProfile(
-        "general",
-        "通用混合文档",
-        ["rule", "method", "case", "checklist", "risk", "glossary"],
-        "a mixed general document — extract whatever typed knowledge is clearly "
-        "supported by the text",
+        ["concept", "claim", "formula", "procedure"],
+        "a textbook / course material",
     ),
 }
 
-DEFAULT_PROFILE_ID = "general"
+DEFAULT_PROFILE_ID = "academic_paper"
 
 # Notebook template (§6.2) -> default extraction profile.
 TEMPLATE_PROFILE: Dict[str, str] = {
-    "rule": "design_spec",
-    "method": "method",
-    "case": "postmortem",
-    "review": "review",
     "article": "academic_paper",
-    "general": "general",
+    "textbook": "textbook",
 }
 
 
 # --- Heuristic per-source document-type detection -------------------------
-# Offline-safe: scores a document sample against bilingual cue patterns and
-# returns a profile id only when one type clearly wins, so it overrides the
-# notebook default only when confident.
 _DETECTORS: Sequence[tuple[str, re.Pattern[str]]] = (
     (
         "academic_paper",
@@ -336,29 +150,6 @@ _DETECTORS: Sequence[tuple[str, re.Pattern[str]]] = (
         re.compile(
             r"\b(chapter|theorem|lemma|exercise|proof|definition)\b|"
             r"第[一二三四五六七八九十\d]+章|定理|引理|习题|本节|本章",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "postmortem",
-        re.compile(
-            r"\b(root cause|post-?mortem|symptom|lessons? learned|debug)\b|"
-            r"根因|复盘|踩坑|经验教训|故障分析|问题回顾",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "review",
-        re.compile(
-            r"\b(checklist|sign-?off|review item|审查清单)\b|检查项|评审清单|签核|审查项",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "design_spec",
-        re.compile(
-            r"\b(shall|must not|design rule|specification|guideline|design guide)\b|"
-            r"设计规范|设计指南|不得|必须遵守",
             re.IGNORECASE,
         ),
     ),
@@ -424,7 +215,7 @@ def resolve_profile(
     """Pick the extraction profile for one source.
 
     Detection (per-source content) wins when confident; otherwise the notebook
-    template's default applies; otherwise the general profile.
+    template's default applies; otherwise the default profile (academic_paper).
     """
     detected = detect_doc_type(title, elements)
     if detected:

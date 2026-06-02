@@ -242,3 +242,13 @@ def test_ask_1hop_expansion(repo):
     assert any("XyZzY_unrelated_concept" in h for h in headlines), (
         "concept reachable via 1-hop relation must be pulled in by graph expansion"
     )
+
+
+def test_only_kg_profiles_and_schemas():
+    from app.services.extraction_profiles import PROFILES, OBJECT_SCHEMAS
+    assert set(PROFILES) == {"academic_paper", "textbook"}
+    for t in ("concept", "claim", "formula", "procedure"):
+        assert t in OBJECT_SCHEMAS
+    for legacy in ("rule", "method", "risk", "case", "checklist", "glossary",
+                   "finding", "principle", "example"):
+        assert legacy not in OBJECT_SCHEMAS
