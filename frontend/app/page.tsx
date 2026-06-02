@@ -1420,6 +1420,7 @@ export default function Home() {
       const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
       if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(currentNotebookId, selected.id).catch(() => null));
       else setConceptDetail(null);
+      if (!selected) setNodeCtx(null);
     } catch (err) { reportError(err); }
   }
 
@@ -2415,8 +2416,8 @@ export default function Home() {
                         ))}
                       </>
                     )}
-                    {!conceptDetail && nodeCtx && nodeCtx.occurrences.length > 0 && (
-                      <><h4>原文</h4>{nodeCtx.occurrences.slice(0, 10).map((o, i) => (
+                    {!conceptDetail && nodeCtx && (nodeCtx.occurrences ?? []).length > 0 && (
+                      <><h4>原文</h4>{(nodeCtx.occurrences ?? []).slice(0, 10).map((o, i) => (
                         <div className="kg-evidence" key={i}><span className="tag">{o.source_title}</span> <span>{o.element_text || o.quoted_span}</span></div>
                       ))}</>
                     )}
@@ -2809,6 +2810,7 @@ function KnowledgeBrowser({
   reload: () => void;
 }) {
   const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
+  useEffect(() => { setCtx({}); }, [kind]);
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
   const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
   // Build tabs purely from the dynamic /knowledge-types response.
@@ -2907,7 +2909,7 @@ function KnowledgeBrowser({
               <EvidenceLine evidence={item.evidence} />
               {notebookId && !ctx[item.id] && (
                 <button className="sort-button" onClick={() => {
-                  fetchNodeContext(notebookId, item.id).then((result) => setCtx((previous) => ({ ...previous, [item.id]: result }))).catch(() => { /* best-effort */ });
+                  fetchNodeContext(notebookId, item.id).then((result) => setCtx((previous) => ({ ...previous, [item.id]: result }))).catch(() => { setCtx((m) => ({ ...m, [item.id]: { id: item.id, object_type: item.object_type ?? "", name: "", section_path: "", occurrences: [], definition: null, steps: null } })); });
                 }}>展开原文</button>
               )}
               {ctx[item.id] && (
@@ -2917,8 +2919,8 @@ function KnowledgeBrowser({
                       <div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>
                     ))}</>
                   )}
-                  {ctx[item.id].occurrences.length > 0 && (
-                    <><p className="section-title">原文出处</p>{ctx[item.id].occurrences.slice(0, 5).map((o, i) => (
+                  {(ctx[item.id].occurrences ?? []).length > 0 && (
+                    <><p className="section-title">原文出处</p>{(ctx[item.id].occurrences ?? []).slice(0, 5).map((o, i) => (
                       <div className="kg-evidence" key={i}><span className="tag">{o.source_title}</span> <span>{o.element_text || o.quoted_span}</span></div>
                     ))}</>
                   )}
