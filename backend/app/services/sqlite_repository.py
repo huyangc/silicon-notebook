@@ -124,6 +124,8 @@ class SQLiteRepository:
         self.db_path = self._resolve_path(settings.sqlite_path)
         self.storage_dir = self._resolve_path(settings.storage_dir)
         self.llm_client = OpenAICompatibleClient(settings)
+        from app.services.embedding import make_embedder
+        self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
         self.event_log = EventLogger(settings, channel="events")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1119,6 +1121,27 @@ class SQLiteRepository:
                 (object_id, notebook_id, json.dumps(vector), _now()),
             )
 
+    def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
+        """Batch-embed object payload names into knowledge_embeddings (best-effort)."""
+        texts, ids = [], []
+        for it in items:
+            name = (it["payload"].get("name") or "").strip()
+            if not name:
+                continue
+            ids.append(it["_oid"]); texts.append(name[:2000])
+        if not texts:
+            return
+        try:
+            vectors = self.embedder.embed_texts(texts)
+        except Exception:
+            return  # embedding best-effort; never block ingestion
+        now = _now()
+        with self._connect() as db:
+            for oid, vec in zip(ids, vectors):
+                db.execute(
+                    "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+                    (oid, notebook_id, json.dumps(vec), now))
+
     def _knowledge_vectors(
         self,
         db: sqlite3.Connection,
@@ -1663,6 +1686,7 @@ class SQLiteRepository:
         with self._connect() as db:
             for obj in objects:
                 oid = local_to_id[obj["local_id"]]
+                obj["_oid"] = oid
                 db.execute(
                     """INSERT INTO knowledge_objects
                        (id, notebook_id, object_type, status, owner, payload, evidence,
@@ -1689,11 +1713,7 @@ class SQLiteRepository:
                         now,
                     ),
                 )
-        for obj in objects:                              # payload-level embeddings (best-effort)
-            try:
-                self._embed_knowledge(local_to_id[obj["local_id"]], notebook_id, obj["payload"])
-            except Exception:
-                pass
+        self._embed_objects_batch(notebook_id, objects)
         return len(objects), len(db_relations)
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
@@ -2125,10 +2145,8 @@ class SQLiteRepository:
         return NotebookSearchResponse(query=query, hits=hits[:20])
 
     def _embed_query(self, query: str) -> Optional[List[float]]:
-        if not self.settings.embedding_configured:
-            return None
         try:
-            return self.llm_client.embed(query[:2000])
+            return self.embedder.embed_query(query[:2000])
         except Exception:
             return None
 
