@@ -91,29 +91,9 @@ type ArticleSummary = {
 type AskResponse = {
   answer_id: string;
   conclusion: string;
-  related_rules: Array<{
-    id: string;
-    title: string;
-    statement: string;
-    severity: string;
-    status: string;
-  }>;
-  related_cases: Array<{
-    id: string;
-    symptom: string;
-    root_cause: string;
-  }>;
-  checklist: string[];
-  missing_information: string[];
-  potential_risks: string[];
-  citations: Array<{
-    label: string;
-    source_id: string;
-    element_id: string;
-    location_label: string;
-    quoted_span: string;
-  }>;
-  related_knowledge?: KnowledgeRecord[];
+  related_knowledge: KnowledgeRecord[];
+  citations: Citation[];
+  llm_mode: string;
 };
 
 type ArticleResearchBrief = {
@@ -135,93 +115,15 @@ type Citation = {
   quoted_span: string;
 };
 
-type RuleCard = {
-  id: string;
-  title: string;
-  statement: string;
-  applies_to: string[];
-  recommendation: string;
-  risk_if_ignored: string;
-  severity: string;
-  status: string;
-  evidence: Evidence[];
-};
-
-type CaseCard = {
-  id: string;
-  symptom: string;
-  context: string;
-  root_cause: string;
-  resolution: string;
-  lesson_learned: string;
-  evidence: Evidence[];
-};
-
-type ChecklistItem = {
-  question: string;
-  severity: string;
-  required_evidence: string;
-  related_rule_ids: string[];
-  citations: Citation[];
-};
-
-type ScenarioForm = {
-  domain: string;
-  block_type: string;
-  design_stage: string;
-  package_type: string;
-  signal_type: string;
-  concern: string;
-  constraint: string;
-  process_or_node: string;
-  application: string;
-};
-
-type ChatMode = "ask" | "scenario" | "case" | "checklist" | "rules";
-
-const EMPTY_SCENARIO: ScenarioForm = {
-  domain: "",
-  block_type: "",
-  design_stage: "",
-  package_type: "",
-  signal_type: "",
-  concern: "",
-  constraint: "",
-  process_or_node: "",
-  application: ""
-};
-
-const SCENARIO_FIELDS: Array<[keyof ScenarioForm, string, string]> = [
-  ["domain", "领域", "如：模拟前端 / RF / 数字后端"],
-  ["block_type", "电路模块", "如：LNA / ADC / PLL"],
-  ["design_stage", "设计阶段", "如：方案评审 / tapeout"],
-  ["package_type", "封装类型", "如：Wirebond / QFN / Flip-chip"],
-  ["signal_type", "信号类型", "如：小信号 / 高速 / 电源"],
-  ["concern", "关注点", "如：噪声 / ESD / 寄生"],
-  ["constraint", "约束", "如：成本 / 面积 / 进度"],
-  ["process_or_node", "工艺/节点", "如：180nm BCD / 28nm"],
-  ["application", "应用", "如：传感器前端 / 电源管理"]
-];
+type ChatMode = "ask" | "rules";
 
 const CHAT_MODES: Array<[ChatMode, string]> = [
   ["ask", "问答"],
   ["rules", "知识库"]
-  // 场景查询 / 案例检索 / Checklist 暂时下线（保留实现，仅从入口移除）。
 ];
 
-// Any object_type string (the 4 below have bespoke cards; everything else —
-// case/claim/finding/concept/principle/example — is browsed generically).
+// Any object_type string returned by /knowledge-types.
 type KnowledgeKind = string;
-
-// kind -> [label, REST path] for the four types with dedicated card endpoints.
-const KNOWLEDGE_KINDS: Array<[KnowledgeKind, string, string]> = [
-  ["rule", "规则", "rules"],
-  ["method", "方法", "methods"],
-  ["risk", "风险", "risks"],
-  ["glossary", "术语", "glossary"]
-];
-
-const BESPOKE_KINDS = new Set(KNOWLEDGE_KINDS.map(([k]) => k));
 
 type KnowledgeFieldValue = { key: string; value: string };
 type KnowledgeTypeCount = { object_type: string; label: string; count: number };
@@ -314,26 +216,16 @@ type NotebookAnalytics = {
   source_status_counts: Record<string, number>;
 };
 
-type RuleExplanation = {
-  rule: { id: string; title: string; statement: string; status: string; owner?: string };
-  origin: Citation[];
-  applicable_scenario: string[];
-  exception: string;
-  related_cases: Array<{ id: string; symptom: string; root_cause: string }>;
-  related_risks: Array<{ id: string; title: string; description: string }>;
-  related_checklist: string[];
-  related_knowledge: KnowledgeRef[];
-};
 
 type KnowledgeNode = { id: string; object_type: string; headline: string; status: string };
 type KnowledgeEdge = { from_id: string; to_id: string; relation: string; label: string };
 type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 
 const RELATION_LABELS: Record<string, string> = {
-  related_rules: "关联规则",
-  related_cases: "关联案例",
-  related_methods: "关联方法",
-  related_concepts: "关联概念"
+  related_concepts: "关联概念",
+  related_claims: "关联论断",
+  related_formulas: "关联公式",
+  related_procedures: "关联过程"
 };
 
 type StudioOutput = {
@@ -358,13 +250,12 @@ type NotebookMenuPosition = {
 };
 
 // Domain-agnostic fallback prompts. Used when a notebook has no expected
-// questions of its own; phrased around the notebook tools (来源/规则/案例/
-// checklist) rather than any specific demo scenario.
+// questions of its own; phrased around the KG knowledge types.
 const GENERIC_PROMPTS: Array<[string, string]> = [
   ["基于来源回答问题", "请基于当前来源回答我的问题，并给出可追溯的引用。"],
-  ["生成检查清单", "请基于当前来源生成一份场景化 checklist，并标注每项所需证据。"],
-  ["检索相似案例", "请检索与我描述场景相似的历史案例，并说明根因与解决办法。"],
-  ["提炼/解释规则", "请基于当前来源解释相关的关键规则，并说明违反的风险。"]
+  ["解释核心概念", "请解释来源中的核心概念，并说明它们之间的关系。"],
+  ["列举关键论断", "请列举来源中的关键论断，并给出支撑证据。"],
+  ["说明主要过程", "请说明来源中描述的主要过程或步骤。"]
 ];
 
 function chipLabel(question: string): string {
@@ -391,14 +282,6 @@ function askPlaceholder(notebook: NotebookSummary | null): string {
   return domain ? `基于来源提问，例如：${domain} 场景下需要注意什么？` : "基于已导入的来源提问…";
 }
 
-// Scenario form fields with the 领域 placeholder pinned to the notebook domain.
-function scenarioFieldsFor(notebook: NotebookSummary | null): Array<[keyof ScenarioForm, string, string]> {
-  const domain = notebook?.primary_domain?.trim();
-  if (!domain || domain === "Semiconductor") return SCENARIO_FIELDS;
-  return SCENARIO_FIELDS.map((field) =>
-    field[0] === "domain" ? ([field[0], field[1], `如：${domain}`] as [keyof ScenarioForm, string, string]) : field
-  );
-}
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || "GET").toUpperCase();
@@ -455,7 +338,6 @@ function cardTone(index: number): string {
 }
 
 function cardIcon(index: number, notebook: NotebookSummary): string {
-  if ((notebook.counts.article_claims ?? 0) > 0) return "🤖";
   if (notebook.primary_domain.toLowerCase().includes("esd")) return "▣";
   return ["◇", "📒", "📈", "▤", "▧"][index % 5];
 }
@@ -501,18 +383,12 @@ export default function Home() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
-  const [scenarioForm, setScenarioForm] = useState<ScenarioForm>(EMPTY_SCENARIO);
-  const [caseQuery, setCaseQuery] = useState("");
-  const [caseResults, setCaseResults] = useState<CaseCard[] | null>(null);
-  const [checklistScenario, setChecklistScenario] = useState("");
-  const [checklistResults, setChecklistResults] = useState<ChecklistItem[] | null>(null);
-  const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("rule");
+  const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
   const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   const [conflicts, setConflicts] = useState<ConflictPair[] | null>(null);
-  const [ruleExplanation, setRuleExplanation] = useState<RuleExplanation | null>(null);
   const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
   const [derivedOpen, setDerivedOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
@@ -669,10 +545,7 @@ export default function Home() {
       .map((notebook, index) => ({ notebook, index, hits: searchHits[notebook.id] ?? [] }))
       .filter(({ notebook, hits }) => {
         if (filter === "featured") {
-          const featured =
-            (notebook.counts.rules ?? 0) > 0 ||
-            (notebook.counts.cases ?? 0) > 0 ||
-            (notebook.counts.article_claims ?? 0) > 0;
+          const featured = Object.values(notebook.counts ?? {}).some((n) => (n ?? 0) > 0);
           if (!featured) return false;
         }
         return !query || hits.length > 0;
@@ -688,7 +561,6 @@ export default function Home() {
   // Example prompts / placeholders adapt to the open notebook's template-seeded
   // expected questions and domain, so a new notebook never shows demo examples.
   const promptChips = useMemo(() => promptChipsFor(currentNotebook), [currentNotebook]);
-  const scenarioFields = useMemo(() => scenarioFieldsFor(currentNotebook), [currentNotebook]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
 
   async function loadNotebookCollection() {
@@ -740,13 +612,8 @@ export default function Home() {
     setFeedbackSent("");
     setFeedbackComment("");
     setChatMode("ask");
-    setScenarioForm(EMPTY_SCENARIO);
-    setCaseQuery("");
-    setCaseResults(null);
-    setChecklistScenario("");
-    setChecklistResults(null);
     setKnowledge(EMPTY_KNOWLEDGE);
-    setKnowledgeKind("rule");
+    setKnowledgeKind("concept");
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
     setConflicts(null);
@@ -1018,56 +885,22 @@ export default function Home() {
     setQuestion(nextQuestion);
   }
 
-  async function runScenario() {
-    if (!currentNotebookId) return;
-    const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/scenario-query`, {
-      method: "POST",
-      body: JSON.stringify(scenarioForm)
-    });
-    setAnswer(response);
-    setFeedbackSent("");
-    setFeedbackComment("");
-  }
-
-  async function runCaseSearch() {
-    if (!currentNotebookId) return;
-    const response = await api<CaseCard[]>(`/notebooks/${currentNotebookId}/case-search`, {
-      method: "POST",
-      body: JSON.stringify({ query: caseQuery, context: {} })
-    });
-    setCaseResults(response);
-  }
-
-  async function runChecklist() {
-    if (!currentNotebookId) return;
-    const response = await api<ChecklistItem[]>(`/notebooks/${currentNotebookId}/checklist`, {
-      method: "POST",
-      body: JSON.stringify({ scenario: checklistScenario })
-    });
-    setChecklistResults(response);
-  }
 
   async function loadKnowledge(kind: KnowledgeKind) {
     if (!currentNotebookId) return;
-    const bespoke = KNOWLEDGE_KINDS.find(([k]) => k === kind);
-    let response: KnowledgeItem[];
-    if (bespoke) {
-      response = await api<KnowledgeItem[]>(`/notebooks/${currentNotebookId}/${bespoke[2]}`);
-    } else {
-      const records = await api<KnowledgeRecord[]>(
-        `/notebooks/${currentNotebookId}/knowledge?type=${encodeURIComponent(kind)}`
-      );
-      response = records.map((record) => ({
-        id: record.id,
-        status: record.status,
-        owner: record.owner,
-        last_reviewed: record.last_reviewed,
-        evidence: record.evidence,
-        headline: record.headline,
-        object_type: record.object_type,
-        fields: record.fields
-      }));
-    }
+    const records = await api<KnowledgeRecord[]>(
+      `/notebooks/${currentNotebookId}/knowledge?type=${encodeURIComponent(kind)}`
+    );
+    const response: KnowledgeItem[] = records.map((record) => ({
+      id: record.id,
+      status: record.status,
+      owner: record.owner,
+      last_reviewed: record.last_reviewed,
+      evidence: record.evidence,
+      headline: record.headline,
+      object_type: record.object_type,
+      fields: record.fields
+    }));
     setKnowledge((prev) => ({ ...prev, [kind]: response }));
   }
 
@@ -1101,9 +934,8 @@ export default function Home() {
   async function findDuplicates(kind: KnowledgeKind) {
     if (!currentNotebookId) return;
     setConflicts(null);
-    const path = KNOWLEDGE_KINDS.find(([k]) => k === kind)?.[2] ?? kind;
     const response = await api<DuplicateGroup[]>(
-      `/notebooks/${currentNotebookId}/duplicates?type=${encodeURIComponent(path)}`
+      `/notebooks/${currentNotebookId}/duplicates?type=${encodeURIComponent(kind)}`
     );
     setDuplicates(response);
   }
@@ -1127,13 +959,6 @@ export default function Home() {
     setToast("已合并，源条目置为 deprecated");
   }
 
-  async function explainRule(ruleId: string) {
-    if (!currentNotebookId) return;
-    const response = await api<RuleExplanation>(
-      `/notebooks/${currentNotebookId}/rules/${ruleId}/explain`
-    );
-    setRuleExplanation(response);
-  }
 
   async function openAnalytics() {
     if (!currentNotebookId) return;
@@ -1541,7 +1366,7 @@ export default function Home() {
                   <div className="welcome">
                     <div className="wave">👋</div>
                     <h2>Build a source-grounded engineering notebook</h2>
-                    <p>导入来源后，你可以围绕规则、案例、风险、文章 claim 和 checklist 提问。系统会优先展示可追溯的 evidence。</p>
+                    <p>导入来源后，你可以围绕概念、论断、公式和过程提问。系统会优先展示可追溯的 evidence。</p>
                     <div className="prompt-chips">
                       {promptChips.map(([label, prompt]) => (
                         <button key={label} onClick={() => runAsk(prompt).catch(reportError)}>{label}</button>
@@ -1558,66 +1383,6 @@ export default function Home() {
                   />
                 ))}
 
-                {chatMode === "scenario" && (
-                  <div className="tool-view">
-                    <div className="scenario-grid">
-                      {scenarioFields.map(([key, label, placeholder]) => (
-                        <label key={key}>{label}
-                          <input
-                            value={scenarioForm[key]}
-                            placeholder={placeholder}
-                            maxLength={120}
-                            onChange={(event) => setScenarioForm((prev) => ({ ...prev, [key]: event.target.value }))}
-                          />
-                        </label>
-                      ))}
-                    </div>
-                    <div className="modal-actions">
-                      <button className="sort-button" onClick={() => setScenarioForm(EMPTY_SCENARIO)}>清空</button>
-                      <button className="new-pill" onClick={() => runScenario().catch(reportError)}>生成场景化回答</button>
-                    </div>
-                    {answer && (
-                      <AnswerView
-                        answer={answer}
-                        feedbackSent={feedbackSent}
-                        feedbackComment={feedbackComment}
-                        setFeedbackComment={setFeedbackComment}
-                        onFeedback={(rating) => submitFeedback(rating, feedbackComment).catch(reportError)}
-                      />
-                    )}
-                  </div>
-                )}
-
-                {chatMode === "case" && (
-                  <div className="tool-view">
-                    <div className="tool-input-row">
-                      <input
-                        value={caseQuery}
-                        placeholder="描述症状或现象，例如：某测试项结果异常，怀疑和某模块相关"
-                        onChange={(event) => setCaseQuery(event.target.value)}
-                        onKeyDown={(event) => { if (event.key === "Enter") runCaseSearch().catch(reportError); }}
-                      />
-                      <button className="new-pill" onClick={() => runCaseSearch().catch(reportError)}>检索案例</button>
-                    </div>
-                    <CaseList results={caseResults} />
-                  </div>
-                )}
-
-                {chatMode === "checklist" && (
-                  <div className="tool-view">
-                    <div className="tool-input-row">
-                      <input
-                        value={checklistScenario}
-                        placeholder="描述要 review 的场景，例如：某模块的设计方案评审"
-                        onChange={(event) => setChecklistScenario(event.target.value)}
-                        onKeyDown={(event) => { if (event.key === "Enter") runChecklist().catch(reportError); }}
-                      />
-                      <button className="new-pill" onClick={() => runChecklist().catch(reportError)}>生成 checklist</button>
-                    </div>
-                    <ChecklistList results={checklistResults} />
-                  </div>
-                )}
-
                 {chatMode === "rules" && (
                   <KnowledgeBrowser
                     kind={knowledgeKind}
@@ -1633,7 +1398,6 @@ export default function Home() {
                     onFindDuplicates={() => findDuplicates(knowledgeKind).catch(reportError)}
                     onFindConflicts={() => findConflicts().catch(reportError)}
                     onMerge={(sourceId, intoId) => mergeKnowledge(sourceId, intoId).catch(reportError)}
-                    onExplain={(ruleId) => explainRule(ruleId).catch(reportError)}
                     reload={() => loadKnowledge(knowledgeKind).catch(reportError)}
                   />
                 )}
@@ -1953,7 +1717,7 @@ export default function Home() {
               {candidates.length === 0 ? (
                 <article className="item">
                   <h3>暂无候选</h3>
-                  <p>上传并解析来源后，系统会自动抽取规则、方法、风险、案例、checklist 和术语候选。</p>
+                  <p>上传并解析来源后，系统会自动抽取概念、论断、公式、过程候选。</p>
                 </article>
               ) : (
                 <div className="stack">
@@ -2060,7 +1824,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>知识关系图</h2>
-                <p>由各知识对象的关系字段（related_rules / cases / methods / concepts）解析出的边。用于 Implication / 冲突 / Explain 的下游消费。</p>
+                <p>由各知识对象的关系字段（related_concepts / claims / formulas / procedures）解析出的边。用于 Implication / 冲突检测的下游消费。</p>
               </div>
               <button className="icon-button" onClick={() => setGraphOpen(false)} title="Close">×</button>
             </div>
@@ -2121,74 +1885,6 @@ export default function Home() {
                     </article>
                   ))}
                 </div>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
-
-      {ruleExplanation && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setRuleExplanation(null); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
-              <div>
-                <h2>为什么有这条规则</h2>
-                <p>{ruleExplanation.rule.title || ruleExplanation.rule.id}</p>
-              </div>
-              <button className="icon-button" onClick={() => setRuleExplanation(null)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              <p>{ruleExplanation.rule.statement}</p>
-              {ruleExplanation.applicable_scenario.length > 0 && (
-                <div className="tag-row">
-                  {ruleExplanation.applicable_scenario.map((scope) => <span className="tag" key={scope}>{scope}</span>)}
-                </div>
-              )}
-              {ruleExplanation.exception && <p><strong>例外：</strong>{ruleExplanation.exception}</p>}
-              <p className="section-title">来源 / 形成依据</p>
-              {ruleExplanation.origin.length > 0 ? ruleExplanation.origin.map((citation, index) => (
-                <div className="citation" key={`${citation.label}-${index}`}>
-                  <strong>{citation.label}</strong>
-                  <div>{citation.location_label}</div>
-                  <div>{citation.quoted_span}</div>
-                </div>
-              )) : <p className="tool-hint">该规则暂无可追溯的来源证据。</p>}
-              {ruleExplanation.related_cases.length > 0 && (
-                <>
-                  <p className="section-title">相关案例</p>
-                  <div className="stack">
-                    {ruleExplanation.related_cases.map((caseCard) => (
-                      <article className="item" key={caseCard.id}>
-                        <h3>{caseCard.symptom || caseCard.id}</h3>
-                        {caseCard.root_cause && <p><strong>根因：</strong>{caseCard.root_cause}</p>}
-                      </article>
-                    ))}
-                  </div>
-                </>
-              )}
-              {ruleExplanation.related_risks.length > 0 && (
-                <>
-                  <p className="section-title">相关风险</p>
-                  <div className="tag-row">{ruleExplanation.related_risks.map((risk) => <span className="tag" key={risk.id}>{risk.title}</span>)}</div>
-                </>
-              )}
-              {ruleExplanation.related_checklist.length > 0 && (
-                <>
-                  <p className="section-title">相关检查项</p>
-                  <div className="stack">{ruleExplanation.related_checklist.map((q) => <div className="checklist-row" key={q}>{q}</div>)}</div>
-                </>
-              )}
-              {ruleExplanation.related_knowledge.length > 0 && (
-                <>
-                  <p className="section-title">关系字段连出的对象（边）</p>
-                  <div className="stack">
-                    {ruleExplanation.related_knowledge.map((ref) => (
-                      <div className="checklist-row" key={ref.id}>
-                        <span className="tag">{ref.object_type}</span> {ref.headline}
-                      </div>
-                    ))}
-                  </div>
-                </>
               )}
             </div>
           </div>
@@ -2321,64 +2017,10 @@ function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
   );
 }
 
-function CaseList({ results }: { results: CaseCard[] | null }) {
-  if (results === null) {
-    return <p className="tool-hint">输入症状或现象后检索相似历史案例。</p>;
-  }
-  if (results.length === 0) {
-    return <p className="tool-hint">没有匹配的案例。上传并审核 case 候选后可检索。</p>;
-  }
-  return (
-    <div className="stack">
-      {results.map((caseCard) => (
-        <article className="item" key={caseCard.id}>
-          <h3>{caseCard.symptom || caseCard.id}</h3>
-          {caseCard.context && <p><strong>背景：</strong>{caseCard.context}</p>}
-          {caseCard.root_cause && <p><strong>根因：</strong>{caseCard.root_cause}</p>}
-          {caseCard.resolution && <p><strong>解决：</strong>{caseCard.resolution}</p>}
-          {caseCard.lesson_learned && <p><strong>经验：</strong>{caseCard.lesson_learned}</p>}
-          <EvidenceLine evidence={caseCard.evidence} />
-        </article>
-      ))}
-    </div>
-  );
-}
 
-function ChecklistList({ results }: { results: ChecklistItem[] | null }) {
-  if (results === null) {
-    return <p className="tool-hint">描述 review 场景后生成可执行 checklist。</p>;
-  }
-  if (results.length === 0) {
-    return <p className="tool-hint">没有生成 checklist。上传并审核 checklist 或 rule 候选后可生成。</p>;
-  }
-  return (
-    <div className="stack">
-      {results.map((item, index) => (
-        <article className="item" key={`${item.question}-${index}`}>
-          <h3>{item.question}</h3>
-          <div className="tag-row">
-            <span className={`tag severity-${item.severity}`}>{item.severity}</span>
-            {item.related_rule_ids.map((id) => <span className="tag" key={id}>{id}</span>)}
-          </div>
-          {item.required_evidence && <p><strong>需要证据：</strong>{item.required_evidence}</p>}
-          {item.citations.map((citation, citationIndex) => (
-            <div className="citation" key={`${citation.label}-${citationIndex}`}>
-              <strong>{citation.label}</strong>
-              <div>{citation.location_label}</div>
-              <div>{citation.quoted_span}</div>
-            </div>
-          ))}
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function knowledgeHeadline(kind: KnowledgeKind, item: KnowledgeItem): string {
-  if (item.headline) return item.headline; // generic types
-  if (kind === "method") return item.name || item.id;
-  if (kind === "glossary") return item.term || item.id;
-  return item.title || item.id; // rule / risk
+function knowledgeHeadline(_kind: KnowledgeKind, item: KnowledgeItem): string {
+  if (item.headline) return item.headline;
+  return item.title || item.id;
 }
 
 // Field-key labels for the generic (case/claim/finding/concept/...) renderer.
@@ -2389,8 +2031,8 @@ const FIELD_LABELS: Record<string, string> = {
   rationale: "依据", applies_to: "适用范围", problem: "问题", approach: "做法",
   result: "结果", symptom: "症状", context: "背景", root_cause: "根因",
   resolution: "解决", lesson_learned: "经验", required_evidence: "所需证据",
-  question: "检查项", related_rules: "相关规则", related_cases: "相关案例",
-  related_methods: "相关方法"
+  question: "检查项", related_claims: "相关论断",
+  related_formulas: "相关公式", related_procedures: "相关过程"
 };
 
 function genericBody(item: KnowledgeItem) {
@@ -2408,28 +2050,8 @@ function genericBody(item: KnowledgeItem) {
   );
 }
 
-function knowledgeBody(kind: KnowledgeKind, item: KnowledgeItem) {
-  if (!BESPOKE_KINDS.has(kind)) return genericBody(item);
-  if (kind === "rule") {
-    return (
-      <>
-        {item.statement && <p>{item.statement}</p>}
-        {item.recommendation && <p><strong>建议：</strong>{item.recommendation}</p>}
-        {item.risk_if_ignored && <p><strong>忽略风险：</strong>{item.risk_if_ignored}</p>}
-      </>
-    );
-  }
-  if (kind === "method") {
-    return (
-      <>
-        {item.use_when && <p><strong>适用：</strong>{item.use_when}</p>}
-        {item.benefit && <p><strong>收益：</strong>{item.benefit}</p>}
-        {item.limitation && <p><strong>限制：</strong>{item.limitation}</p>}
-      </>
-    );
-  }
-  if (kind === "risk") return item.description ? <p>{item.description}</p> : null;
-  return item.definition ? <p>{item.definition}</p> : null; // glossary
+function knowledgeBody(_kind: KnowledgeKind, item: KnowledgeItem) {
+  return genericBody(item);
 }
 
 function SchemaRow({
@@ -2593,7 +2215,6 @@ function KnowledgeBrowser({
   onFindDuplicates,
   onFindConflicts,
   onMerge,
-  onExplain,
   reload
 }: {
   kind: KnowledgeKind;
@@ -2609,20 +2230,16 @@ function KnowledgeBrowser({
   onFindDuplicates: () => void;
   onFindConflicts: () => void;
   onMerge: (sourceId: string, intoId: string) => void;
-  onExplain: (ruleId: string) => void;
   reload: () => void;
 }) {
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
   const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
-  const countOf = (k: string) => types.find((t) => t.object_type === k)?.count;
-  // Bespoke four tabs always shown; extra types (case/claim/finding/...) appear
-  // only once they actually exist in this notebook.
-  const tabs: Array<{ key: string; label: string; count?: number }> = [
-    ...KNOWLEDGE_KINDS.map(([k, label]) => ({ key: k, label, count: countOf(k) })),
-    ...types
-      .filter((t) => !BESPOKE_KINDS.has(t.object_type))
-      .map((t) => ({ key: t.object_type, label: t.label, count: t.count }))
-  ];
+  // Build tabs purely from the dynamic /knowledge-types response.
+  const tabs: Array<{ key: string; label: string; count?: number }> = types.map((t) => ({
+    key: t.object_type,
+    label: t.label,
+    count: t.count
+  }));
   return (
     <div className="tool-view">
       <div className="knowledge-kind-tabs">
@@ -2640,7 +2257,7 @@ function KnowledgeBrowser({
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
         <button className="sort-button" onClick={onFindDuplicates}>查重</button>
-        {kind === "rule" && <button className="sort-button" onClick={onFindConflicts}>冲突</button>}
+        <button className="sort-button" onClick={onFindConflicts}>冲突</button>
       </div>
       {duplicates !== null && (
         <div className="knowledge-panel">
@@ -2709,9 +2326,6 @@ function KnowledgeBrowser({
                   />
                 </label>
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
-                {kind === "rule" && (
-                  <button className="sort-button" onClick={() => onExplain(item.id)}>解释</button>
-                )}
               </div>
               <EvidenceLine evidence={item.evidence} />
             </article>
@@ -2761,54 +2375,28 @@ function AnswerView({
           {feedbackSent && <span className="tag">已记录反馈</span>}
         </div>
       </div>
-      <div className="chat-answer-grid">
-        <div>
-          <p className="section-title">Related Rules</p>
-          <div className="stack">
-            {answer.related_rules.map((rule) => (
-              <article className="item" key={rule.id}>
-                <h3>{rule.id}: {rule.title}</h3>
-                <p>{rule.statement}</p>
-                <div className="tag-row"><span className={`tag severity-${rule.severity}`}>{rule.severity}</span><span className="tag">{rule.status}</span></div>
-              </article>
-            ))}
+      {answer.related_knowledge.length > 0 && (
+        <div className="chat-answer-grid">
+          <div>
+            <p className="section-title">相关知识</p>
+            <div className="stack">
+              {answer.related_knowledge.map((record) => (
+                <article className="item" key={record.id}>
+                  <div className="tag-row"><span className="tag">{record.object_type}</span><span className="tag">{record.status}</span></div>
+                  <h3>{record.headline}</h3>
+                  {record.evidence.length > 0 && (
+                    <div className="citation">
+                      <strong>Evidence</strong>
+                      <div>{record.evidence[0].location_label}</div>
+                      <div>{record.evidence[0].quoted_span}</div>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
           </div>
-          <p className="section-title">Related Cases</p>
-          <div className="stack">
-            {answer.related_cases.map((caseCard) => (
-              <article className="item" key={caseCard.id}>
-                <h3>{caseCard.id}</h3>
-                <p>{caseCard.symptom}</p>
-                <p><strong>Root cause:</strong> {caseCard.root_cause}</p>
-              </article>
-            ))}
-          </div>
-          <p className="section-title">Checklist</p>
-          <div className="stack">{answer.checklist.map((item) => <div className="checklist-row" key={item}>{item}</div>)}</div>
-          {(answer.related_knowledge ?? []).length > 0 && (
-            <>
-              <p className="section-title">相关知识（其它类型）</p>
-              <div className="stack">
-                {(answer.related_knowledge ?? []).map((record) => (
-                  <article className="item" key={record.id}>
-                    <div className="tag-row"><span className="tag">{record.object_type}</span><span className="tag">{record.status}</span></div>
-                    <h3>{record.headline}</h3>
-                    {record.fields.slice(0, 3).map((field) => (
-                      <p key={field.key}><strong>{field.key}：</strong>{field.value}</p>
-                    ))}
-                  </article>
-                ))}
-              </div>
-            </>
-          )}
         </div>
-        <div>
-          <p className="section-title">Missing Information</p>
-          <div className="tag-row">{answer.missing_information.map((item) => <span className="tag" key={item}>{item}</span>)}</div>
-          <p className="section-title">Risks</p>
-          <div className="tag-row">{answer.potential_risks.map((item) => <span className="tag" key={item}>{item}</span>)}</div>
-        </div>
-      </div>
+      )}
       <div className="chat-citations">
         <p className="section-title">Citations</p>
         <div className="stack">
