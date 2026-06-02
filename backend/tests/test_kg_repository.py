@@ -157,6 +157,46 @@ def test_run_extraction_kg_path(repo):
     )
 
 
+def test_run_extraction_with_surviving_edge(repo):
+    """Full path: extract_graph -> build_records -> store_kg -> relations.
+
+    Two nodes + one edge; evidence quotes are substrings of the inserted source
+    text so both nodes survive evidence-binding.  After _run_extraction the
+    knowledge_relations row must reference real knowledge_objects ids.
+    """
+    repo.llm_client = _FakeLLM(json.dumps({
+        "nodes": [
+            {"local_id": "a", "type": "Concept", "name": "Engram",
+             "evidence": "Engram is a memory architecture"},
+            {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
+             "evidence": "Engram improves perplexity"},
+        ],
+        "edges": [{"type": "about", "source": "b", "target": "a",
+                   "evidence": "Engram improves perplexity"}],
+    }))
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(
+        repo, nb.id, "Doc", "doc.md", "academic_paper",
+        "Engram is a memory architecture. Engram improves perplexity.",
+    )
+    repo._run_extraction(src.id)
+
+    rels = repo.relations_for_notebook(nb.id)
+    assert len(rels) == 1, f"expected 1 relation, got {rels}"
+    rel = rels[0]
+
+    # Both endpoints must be real knowledge_objects ids, not local ids.
+    with repo._connect() as db:
+        obj_ids = {
+            r["id"]
+            for r in db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=?", (nb.id,)
+            ).fetchall()
+        }
+    assert rel["source_object_id"] in obj_ids, "source_object_id not a real object id"
+    assert rel["target_object_id"] in obj_ids, "target_object_id not a real object id"
+
+
 def test_reextraction_is_idempotent(repo):
     repo.llm_client = _FakeLLM(json.dumps({
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",

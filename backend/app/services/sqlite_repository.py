@@ -937,7 +937,7 @@ class SQLiteRepository:
         if self.llm_client.configured:
             block = "\n".join(
                 f"- {r['title']} "
-                f"[{(PROFILES.get(_normalize_doc_type(r['doc_type'])) or get_profile('general')).label}] "
+                f"[{(PROFILES.get(_normalize_doc_type(r['doc_type'])) or get_profile('academic_paper')).label}] "
                 f"{(r['summary'] or '')[:200]}"
                 for r in rows[:20]
             )

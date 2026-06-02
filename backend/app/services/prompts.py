@@ -6,69 +6,6 @@ without touching the repository/extraction code.
 
 from __future__ import annotations
 
-import json
-
-from app.services.extraction_profiles import (
-    ENUM_FIELDS,
-    LIST_FIELDS,
-    ExtractionProfile,
-    get_profile,
-)
-
-
-def build_extraction_schema_hint(profile: ExtractionProfile, registry=None) -> str:
-    """Render the JSON schema hint for exactly the profile's object types."""
-    example: dict = {}
-    for schema in profile.schemas(registry):
-        item: dict = {}
-        for field_name in schema.fields:
-            if field_name in LIST_FIELDS or field_name in schema.list_fields:
-                item[field_name] = [""]
-            elif field_name in ENUM_FIELDS:
-                item[field_name] = ENUM_FIELDS[field_name]
-            else:
-                item[field_name] = ""
-        item["quoted_span"] = "verbatim text copied from a source element"
-        example[schema.plural] = [item]
-    return json.dumps(example, ensure_ascii=False)
-
-
-# Backwards-compatible default (general profile) for callers/tests that do not
-# pass an explicit profile.
-EXTRACTION_SCHEMA_HINT = build_extraction_schema_hint(get_profile("general"))
-
-
-def extraction_prompt(
-    source_title: str,
-    elements_block: str,
-    profile: ExtractionProfile | None = None,
-    registry=None,
-) -> str:
-    profile = profile or get_profile("general")
-    type_lines = "\n".join(
-        f"- {schema.plural}: {schema.description}"
-        for schema in profile.schemas(registry)
-    )
-    return (
-        "You extract structured engineering knowhow from a semiconductor "
-        "document for a knowhow notebook. The document may mix Chinese and "
-        f"English. This document looks like {profile.focus}.\n\n"
-        "Extract ONLY these object types (return an empty list for any that "
-        "have nothing):\n"
-        f"{type_lines}\n\n"
-        "Rules:\n"
-        "- Only extract items that are clearly supported by the text; do not "
-        "invent facts or rules the document does not actually state.\n"
-        "- For every item, copy a short verbatim `quoted_span` (10-200 chars) "
-        "from one source element so the claim can be traced to evidence.\n"
-        "- Fill relation fields (related_rules / related_cases / "
-        "related_methods / related_concepts) only when the text explicitly "
-        "connects items; otherwise leave them empty.\n"
-        "- Return valid JSON only, matching the schema hint.\n\n"
-        f"Source title: {source_title}\n\n"
-        f"Source elements:\n{elements_block}"
-    )
-
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 

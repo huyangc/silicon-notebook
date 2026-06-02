@@ -58,7 +58,7 @@ def test_bind_quote_fuzzy_not_exact():
 class FakeClient:
     configured = True
     def __init__(self, payload): self._p = payload
-    def chat_json(self, prompt: str, retries: int = 4) -> str: return self._p
+    def chat_json(self, messages: list, response_schema_hint: str) -> str: return self._p
 
 ABS = "We propose Engram, a memory architecture. Engram improves perplexity."
 
@@ -81,3 +81,39 @@ def test_extract_graph_grounds_nodes():
     assert "Engram" in names and "Engram improves perplexity" in names
     assert "Ghost" not in names           # ungroundable node dropped (evidence not in text)
     assert len(g.edges) == 1              # edge endpoints survived
+
+
+def test_canonicalize_merges_across_windows():
+    """Two windows both emit the same Concept 'Engram'; canonicalize must collapse
+    to a single node.  The text is long enough (>200 chars in one prose section)
+    to produce >=2 windows with n=200, m=20.
+
+    We embed the evidence quote twice in the text so each window can ground its
+    Engram node independently; then extract_graph's canonicalize step must merge
+    them to exactly one Concept named 'Engram'.
+    """
+    import json
+
+    # Evidence quote placed near position 0 (window 1: 0-200) and repeated
+    # near position ~190 (window 2: 180-380) so both windows contain it.
+    # We pad the text between the two occurrences to keep total length > 200.
+    quote = "Engram is a memory architecture"
+    # 34-char quote at start; padding to push past 200 chars; quote repeated
+    padding = " " * (200 - len(quote))   # 166 spaces
+    long_text = quote + padding + quote   # total ~234 chars in one paragraph
+
+    payload = json.dumps({
+        "nodes": [
+            {"local_id": "a", "type": "Concept", "name": "Engram",
+             "evidence": quote},
+        ],
+        "edges": [],
+    })
+    g = kg_ingest.extract_graph(
+        FakeClient(payload), long_text, "doc.md", "academic", n=200, m=20
+    )
+    engram_nodes = [n for n in g.nodes if n.name == "Engram"]
+    # Both windows ground the same Concept; canonicalize must merge to 1.
+    assert len(engram_nodes) == 1, (
+        f"expected 1 Engram node after canonicalization, got {len(engram_nodes)}"
+    )
