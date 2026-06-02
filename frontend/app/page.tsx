@@ -1475,6 +1475,7 @@ export default function Home() {
                     statusFilter={knowledgeStatusFilter}
                     duplicates={duplicates}
                     conflicts={conflicts}
+                    notebookId={currentNotebookId ?? ""}
                     onKind={switchKnowledgeKind}
                     setStatusFilter={setKnowledgeStatusFilter}
                     onStatus={(id, status) => updateKnowledge(id, { status }).catch(reportError)}
@@ -2362,6 +2363,7 @@ function KnowledgeBrowser({
   statusFilter,
   duplicates,
   conflicts,
+  notebookId,
   onKind,
   setStatusFilter,
   onStatus,
@@ -2377,6 +2379,7 @@ function KnowledgeBrowser({
   statusFilter: string;
   duplicates: DuplicateGroup[] | null;
   conflicts: ConflictPair[] | null;
+  notebookId: string;
   onKind: (kind: KnowledgeKind) => void;
   setStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
@@ -2386,6 +2389,7 @@ function KnowledgeBrowser({
   onMerge: (sourceId: string, intoId: string) => void;
   reload: () => void;
 }) {
+  const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
   const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
   // Build tabs purely from the dynamic /knowledge-types response.
@@ -2482,6 +2486,30 @@ function KnowledgeBrowser({
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
               </div>
               <EvidenceLine evidence={item.evidence} />
+              {notebookId && (
+                <button
+                  className="sort-button"
+                  onClick={async () => {
+                    if (ctx[item.id]) { setCtx((m) => { const n = { ...m }; delete n[item.id]; return n; }); return; }
+                    try { const c = await fetchNodeContext(notebookId, item.id); setCtx((m) => ({ ...m, [item.id]: c })); } catch { /* best-effort */ }
+                  }}
+                >{ctx[item.id] ? "收起" : "展开原文"}</button>
+              )}
+              {ctx[item.id] && (
+                <div className="knowledge-context">
+                  {ctx[item.id].definition && (
+                    <p className="tool-hint"><strong>定义：</strong>{ctx[item.id].definition}</p>
+                  )}
+                  {ctx[item.id].occurrences.map((o, i) => (
+                    <p className="tool-hint" key={i}>{o.element_text || o.quoted_span}</p>
+                  ))}
+                  {ctx[item.id].object_type === "procedure" && ctx[item.id].steps && ctx[item.id].steps!.map((s, i) => (
+                    <div className="checklist-row" key={i}>
+                      <span className="tag">{i + 1}</span> <strong>{s.name}</strong>：{s.element_text}
+                    </div>
+                  ))}
+                </div>
+              )}
             </article>
           ))}
         </div>
