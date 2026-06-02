@@ -73,6 +73,7 @@ Inside a notebook:
   - Show how many sources are in the current notebook.
   - Keep source cards compact and readable for long mixed Chinese/English titles and summaries.
   - Source cards should open a source detail preview with element-level parsed text and expose a delete action.
+  - Source detail element text should wrap within the modal width, including long Markdown paths, LaTeX fragments, and mixed Chinese/English text; keep horizontal scrolling local to tables/formulas rather than the entire detail panel.
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.
 - Center column: source-grounded knowhow tools, exposed as tabs.
   - This is the main interaction area: Ask (free question), Scenario query (structured form), Case search, Checklist generator, and Rule browser.
@@ -87,7 +88,7 @@ Inside a notebook:
 - Right column: Studio.
   - Keep Mind Map, New Article, and Infographic entries.
   - Article research drives the Mind Map / Infographic output; created articles must be listed with delete actions, and the lower Studio output area stays for generated outputs.
-- Left column also hosts the curator Review Queue for extracted candidates.
+- Do not show a standalone curator Review Queue button in the left source column; candidate governance should live in the knowledge/tool surfaces that actually use it.
 
 ## MVP Scope
 
@@ -101,7 +102,7 @@ Confirmed scope:
 - Parser-generated `SourceElement` records with element-level citation granularity.
 - Source summary after parsing. Use the OpenAI-compatible client when configured; otherwise use deterministic fallback.
 - Notebook-internal search over notebook metadata, source metadata, source element text, and article summaries.
-- Automatic extraction (rule/method/risk/case/checklist/glossary candidates) with evidence binding, a curator review queue (approve/reject/edit), and a `knowledge_objects` store for approved knowledge are implemented.
+- Automatic extraction (rule/method/risk/case/checklist/glossary candidates) with evidence binding, candidate governance capabilities (approve/reject/edit), and a `knowledge_objects` store for approved knowledge are implemented.
 - Ask, Scenario query, Case search, Checklist, Rule browser, and Article research are real and data-driven (hybrid keyword + embedding retrieval, citation validation, deterministic fallback offline). They are no longer demo-backed.
 - Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded. Browse via `GET /notebooks/{id}/{rules|methods|risks|glossary}`, edit via `PATCH /knowledge/{id}`, dedupe via `GET .../duplicates` + `POST /knowledge/{id}/merge`, conflicts via `GET .../conflicts`.
 - Article research persists `article_claims` with relation metadata and draft `derived_rule_candidates`; feedback supports `useful` / `not_useful` plus an optional comment.

@@ -71,7 +71,7 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
   - 案例检索 / Checklist：分别走 `/case-search`、`/checklist`，渲染 CaseCard / ChecklistItem。
   - **知识库（多类型浏览）**：规则 / 方法 / 风险 / 术语子切换，分别走 `/rules|/methods|/risks|/glossary`；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
   - 回答含 citation 与 👍/👎 反馈；chat 菜单可清空对话。
-- **Review Queue 面板**：候选知识列表 + evidence 展示 + approve / reject 操作。
+- **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
 - **文章创建入口**：真实文章创建 modal，移除写死的 `ARTICLE_ID`、`DEMO_NOTEBOOK_ID` 常量。
 - **source detail 结构化渲染**：`formula` 元素用 KaTeX 排版（失败回退原始 LaTeX）、`table` 元素用 sanitized `table_html` 渲染、其余文本 + element_type 徽标。
 - Studio 输出区保留思维导图 / 新建文章 / 信息图入口。

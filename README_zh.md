@@ -17,7 +17,7 @@
 - 真实 multipart 文件上传（解析经 FastAPI `BackgroundTasks` 异步执行），支持 PDF、Markdown、DOCX、PPTX
 - PDF 解析在配置 MinerU（GPU 主机）时走 MinerU（公式转 LaTeX、表格、版面）；本机/未启用时回退到 pypdf 纯文本
 - 解析生成 `SourceElement`，包含 `element_type`、`location_label`、`text`、`metadata`
-- 自动知识抽取（rule / method / risk / case / checklist / glossary 候选）并做元素级 evidence 绑定，配 curator 审核队列（批准 / 拒绝 / 编辑）
+- 自动知识抽取（rule / method / risk / case / checklist / glossary 候选）并做元素级 evidence 绑定，保留候选治理能力（批准 / 拒绝 / 编辑）
 - 混合检索：关键词 + 可选 embedding 余弦，覆盖来源元素和已批准知识
 - 真实来源驱动回答 + citation 校验：问答、场景查询、案例检索、Checklist 生成、文章研究，以及带可选评论的 👍/👎 反馈
 - 知识治理：规则/方法/风险/术语浏览，状态生命周期（reviewed/approved/deprecated/conflict/project_specific）+ owner/last_reviewed，重复检测与合并，冲突检测（deprecated 知识不参与回答）
@@ -123,7 +123,7 @@ npm run dev    # 仓库根目录：后端(uvicorn --reload) + Next.js 前端
 
 进入单个 notebook 后：
 
-- 左栏：用户导入的来源文件（解析/抽取过程中实时显示 parse-status），支持详情预览和删除，并提供 curator 审核队列。网络检索来源暂不开放。
+- 左栏：用户导入的来源文件（解析/抽取过程中实时显示 parse-status），支持详情预览和删除。来源详情中的长文本会在弹窗宽度内换行，只有结构化表格/公式在必要时使用局部横向滚动。网络检索来源暂不开放。
 - 中栏：以 tab 形式提供来源驱动的 knowhow 工具——问答（自由提问）、场景查询（结构化场景表单）、案例检索、Checklist 生成、规则库浏览。回答包含相关规则/案例/checklist/风险、缺失信息、引用和 👍/👎 反馈。
 - 知识图谱以全屏工作区浮层打开：画布渲染 object 级 KG 节点名称、类型视觉标记和关系边标签；多选类型过滤用于收敛密集视图；侧栏按类型（Concept、Claim、Formula、Procedure）汇总节点，点击总览节点会聚焦画布并展示选中节点的关系、出处和按类型排布的相关节点。
 - 右栏：Studio，含思维导图、新建文章、信息图；文章研究驱动思维导图 / 信息图输出，已创建文章可删除。

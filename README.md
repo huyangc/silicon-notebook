@@ -17,7 +17,7 @@ This repository now targets a local real-team beta loop:
 - Real multipart source upload (async parsing via FastAPI `BackgroundTasks`) for PDF, Markdown, DOCX, and PPTX
 - PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured on a GPU host; pypdf text fallback locally / when MinerU is off
 - Parsed `SourceElement` records with `element_type`, `location_label`, `text`, and `metadata`
-- Automatic knowledge extraction (rule / method / risk / case / checklist / glossary candidates) with element-level evidence binding, plus a curator review queue (approve / reject / edit)
+- Automatic knowledge extraction (rule / method / risk / case / checklist / glossary candidates) with element-level evidence binding, plus candidate governance capabilities (approve / reject / edit)
 - Hybrid retrieval: keyword + optional embedding cosine over both source elements and approved knowledge
 - Real source-grounded answers with citation validation: Ask, Scenario query, Case search, Checklist generator, Article research, and 👍/👎 feedback
 - Knowledge governance: browse rules/methods/risks/glossary, status lifecycle (reviewed/approved/deprecated/conflict/project_specific) + owner/last_reviewed, duplicate detection & merge, and conflict detection (deprecated knowledge is excluded from answers) with optional comments
@@ -130,7 +130,7 @@ The outer page is a notebook collection/library:
 
 Inside a notebook:
 
-- Left column: user-imported source files (live parse-status while parsing/extracting) with detail previews and delete actions, plus the curator Review Queue. Network source search is intentionally disabled for now.
+- Left column: user-imported source files (live parse-status while parsing/extracting) with detail previews and delete actions. Source detail text wraps within the modal width, with only structured tables/formulas using local horizontal scroll when needed. Network source search is intentionally disabled for now.
 - Center column: source-grounded knowhow tools as tabs — Ask (free question), Scenario query (structured scenario form), Case search, Checklist generator, and Rule browser. Answers carry related rules/cases/checklist/risks, missing-information, citations, and 👍/👎 feedback.
 - Knowledge Graph opens as a full-screen workspace overlay: the canvas renders object-level KG nodes with names, type-specific visual marks, and relationship labels; multi-select type filters reduce dense views; the side panel groups nodes by type (Concept, Claim, Formula, Procedure) and selecting an item focuses the canvas while showing selected-node relations, source excerpts, and related nodes with matching type marks.
 - Right column: Studio with Mind Map, New Article, and Infographic; article research drives the Mind Map / Infographic output, and created articles can be deleted.

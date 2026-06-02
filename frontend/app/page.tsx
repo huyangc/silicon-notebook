@@ -1776,9 +1776,6 @@ export default function Home() {
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
                   <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={stageFiles} />
                 </label>
-                <button className="add-source-button review-queue-button" onClick={() => setReviewOpen(true)}>
-                  ⚖ 审核队列{candidates.length > 0 ? ` · ${candidates.length}` : ""}
-                </button>
                 <div className="future-search">
                   <strong>Network source scout</strong>
                   <p>后续开放从网络环境中检索并添加来源。</p>

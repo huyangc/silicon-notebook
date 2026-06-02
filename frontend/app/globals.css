@@ -1741,8 +1741,14 @@ button {
   display: grid;
   gap: 16px;
   max-height: min(620px, 70vh);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 26px 22px;
+}
+
+.source-detail-body > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .source-detail-title-row {
@@ -1805,6 +1811,8 @@ button {
   margin: 0;
   font-size: 18px;
   line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .source-detail-meta {
@@ -1816,17 +1824,25 @@ button {
 .source-element-stack {
   display: grid;
   gap: 12px;
+  min-width: 0;
+}
+
+.source-element-card {
+  min-width: 0;
 }
 
 .source-element-card h3 {
   font-size: 18px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .source-element-card p {
   color: #2f3540;
   font-size: 16px;
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .element-head {
