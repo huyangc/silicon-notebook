@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
@@ -49,6 +49,10 @@ class OpenAICompatibleClient:
                 api_key=self.settings.openai_compat_api_key,
                 base_url=self.settings.openai_compat_base_url,
                 timeout=self.settings.openai_compat_timeout_seconds,
+                # Don't let the SDK silently retry connection errors 2x: a stalled
+                # connection would otherwise block ~3x the timeout per call. We
+                # fail fast and let the caller (per-window extraction) drop it.
+                max_retries=0,
             )
         return self._client
 
@@ -97,7 +101,14 @@ class OpenAICompatibleClient:
                 response = self.client().chat.completions.create(
                     **kwargs, response_format={"type": "json_object"}
                 )
+            except (APIConnectionError, APITimeoutError):
+                # Network stall/timeout: do NOT retry the whole request without
+                # JSON mode (that would double the wait). Fail fast; the caller
+                # drops this window.
+                raise
             except Exception:
+                # Server rejected response_format (param unsupported): retry once
+                # in plain mode.
                 response = self.client().chat.completions.create(**kwargs)
             content = strip_json_fences(response.choices[0].message.content or "") or "{}"
             record["status"] = "ok"
