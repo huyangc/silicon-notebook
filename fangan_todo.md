@@ -70,7 +70,7 @@
 - [ ] **gold 人工策展**：14 章 pro 草稿(`fangan/testcases_kg/`，gitignored)按 curation guide 逐章裁决后，移出 ignore 锁为权威 gold。
 - [x] **产品抽取流水线落地（后端）**：KG 成为唯一抽取+知识模型，仅支持 academic_paper/textbook；`_run_extraction` 走 `kg_ingest`（deepseek-v4-flash）→ 自动入库 `knowledge_objects(approved)` + 新表 `knowledge_relations`；`/graph`·`/ask` 改 KG-native；qiefen/legacy/其它类型全删。spec `docs/superpowers/specs/2026-06-01-kg-product-integration-design.md`、plan `…/plans/2026-06-01-kg-product-integration-backend.md`。
   - 真机 smoke 基线（`scripts/kg_product_smoke.py`，deepseek-v4-flash）：engram(学术) 458 节点/366 边；cmos 摘录(教材) 180 节点/122 边；类型均 ⊆ {concept,claim,formula,procedure}，空标题=0，抽样证据未落地=0。
-  - [ ] **前端改造（待办，另起 plan）**：去掉 rules/methods/risks/glossary 页与卡片、doc-type picker 收敛到 2 项、浏览/图谱改 KG 类型。当前前端对已删端点的调用会失效。
+  - [x] **前端改造**：`frontend/app/page.tsx` 对齐 KG-only 后端——删除 rules/methods/risks/glossary/scenario-query/case/checklist/explain 的调用与 UI；AskResponse 渲染收敛到 conclusion+related_knowledge+citations；知识浏览改为按 `/knowledge-types` 动态出 tab（不再硬编码旧类型）；featured 过滤与文案改 KG 类型。`tsc --noEmit` 通过。plan `docs/superpowers/plans/2026-06-02-kg-frontend-alignment.md`。
 
 ## 工程/技术债（非方案功能，但影响质量）
 - [ ] 抽取 LLM 让模型回传 `element_id` 做精确证据绑定（当前靠 quoted_span 精确子串 + CJK `token_overlap≥0.6` 模糊回退；已可用，但模型回传 id 会更稳）。
