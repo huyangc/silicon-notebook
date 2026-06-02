@@ -4,6 +4,9 @@ import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, 
 import { ExternalLink, FileText, PanelRightClose, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import dynamic from "next/dynamic";
+// react-force-graph-2d uses canvas/window; load client-side only.
+const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
@@ -221,6 +224,16 @@ type KnowledgeNode = { id: string; object_type: string; headline: string; status
 type KnowledgeEdge = { from_id: string; to_id: string; relation: string; label: string };
 type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 
+type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
+type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
+type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
+type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number };
+type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
+type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
+type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
+type FgNode = { id: string; name: string; type: string; val: number };
+type FgLink = { source: string; target: string; label: string };
+
 const RELATION_LABELS: Record<string, string> = {
   related_concepts: "关联概念",
   related_claims: "关联论断",
@@ -311,6 +324,13 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   return response.json();
 }
+
+const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
+const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=concept`);
+const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
+const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
+const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
+const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
 
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
