@@ -227,9 +227,10 @@ type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
 type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
 type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
-type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number };
+type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number; element_text?: string };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
+type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: { quoted_span: string; source_title: string; element_text: string }[]; definition: string | null; steps: { name: string; element_text: string }[] | null };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
 type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
@@ -352,6 +353,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
 const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=object`);
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
+const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
 const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
 const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
 const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
@@ -591,6 +593,7 @@ export default function Home() {
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
+  const [nodeCtx, setNodeCtx] = useState<NodeContext | null>(null);
   const [kgSearch, setKgSearch] = useState("");
   const [kgTypeFilter, setKgTypeFilter] = useState("all");
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
@@ -1369,7 +1372,7 @@ export default function Home() {
   async function openKgView() {
     if (!currentNotebookId) return;
     setKgViewOpen(true);
-    setSelectedKgNodeId(null); setConceptDetail(null);
+    setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
     setKgSearch("");
     setKgTypeFilter("all");
     try {
@@ -1395,17 +1398,15 @@ export default function Home() {
   async function selectKgNode(nodeId: string) {
     if (!currentNotebookId) return;
     setSelectedKgNodeId(nodeId);
+    setNodeCtx(null);
     focusKgGraphNode(nodeId);
     window.setTimeout(() => {
       kgDetailRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     }, 0);
     const node = uGraph?.nodes.find((item) => item.id === nodeId);
-    if (node?.object_type !== "concept") {
-      setConceptDetail(null);
-      return;
-    }
-    try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId)); }
-    catch (err) { setConceptDetail(null); reportError(err); }
+    if (node?.object_type !== "concept") setConceptDetail(null);
+    else { try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId)); } catch (err) { setConceptDetail(null); reportError(err); } }
+    try { setNodeCtx(await fetchNodeContext(currentNotebookId, nodeId)); } catch { /* node context best-effort */ }
   }
 
   async function decideMerge(candidateId: string, confirm: boolean) {
@@ -1799,6 +1800,7 @@ export default function Home() {
                     statusFilter={knowledgeStatusFilter}
                     duplicates={duplicates}
                     conflicts={conflicts}
+                    notebookId={currentNotebookId ?? ""}
                     onKind={switchKnowledgeKind}
                     setStatusFilter={setKnowledgeStatusFilter}
                     onStatus={(id, status) => updateKnowledge(id, { status }).catch(reportError)}
@@ -2395,6 +2397,12 @@ export default function Home() {
                         ))}
                       </>
                     )}
+                    {nodeCtx?.definition && (<><h4>定义</h4><p className="kg-evidence">{nodeCtx.definition}</p></>)}
+                    {nodeCtx?.object_type === "procedure" && nodeCtx.steps && nodeCtx.steps.length > 0 && (
+                      <><h4>流程步骤</h4>{nodeCtx.steps.map((s, i) => (
+                        <div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>
+                      ))}</>
+                    )}
                     {conceptDetail && (
                       <>
                         <h4>挂载的断言 / 公式 / 过程</h4>
@@ -2403,9 +2411,14 @@ export default function Home() {
                         ))}
                         <h4>证据</h4>
                         {conceptDetail.evidence.slice(0, 20).map((ev, i) => (
-                          <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.quoted_span}</span></div>
+                          <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.element_text || ev.quoted_span}</span></div>
                         ))}
                       </>
+                    )}
+                    {!conceptDetail && nodeCtx && nodeCtx.occurrences.length > 0 && (
+                      <><h4>原文</h4>{nodeCtx.occurrences.slice(0, 10).map((o, i) => (
+                        <div className="kg-evidence" key={i}><span className="tag">{o.source_title}</span> <span>{o.element_text || o.quoted_span}</span></div>
+                      ))}</>
                     )}
                   </div>
                 )}
@@ -2769,6 +2782,7 @@ function KnowledgeBrowser({
   statusFilter,
   duplicates,
   conflicts,
+  notebookId,
   onKind,
   setStatusFilter,
   onStatus,
@@ -2784,6 +2798,7 @@ function KnowledgeBrowser({
   statusFilter: string;
   duplicates: DuplicateGroup[] | null;
   conflicts: ConflictPair[] | null;
+  notebookId: string;
   onKind: (kind: KnowledgeKind) => void;
   setStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
@@ -2793,6 +2808,7 @@ function KnowledgeBrowser({
   onMerge: (sourceId: string, intoId: string) => void;
   reload: () => void;
 }) {
+  const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
   const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
   // Build tabs purely from the dynamic /knowledge-types response.
@@ -2889,6 +2905,25 @@ function KnowledgeBrowser({
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
               </div>
               <EvidenceLine evidence={item.evidence} />
+              {notebookId && !ctx[item.id] && (
+                <button className="sort-button" onClick={() => {
+                  fetchNodeContext(notebookId, item.id).then((result) => setCtx((previous) => ({ ...previous, [item.id]: result }))).catch(() => { /* best-effort */ });
+                }}>展开原文</button>
+              )}
+              {ctx[item.id] && (
+                <>
+                  {ctx[item.id].object_type === "procedure" && ctx[item.id].steps && (ctx[item.id].steps ?? []).length > 0 && (
+                    <><p className="section-title">流程步骤</p>{(ctx[item.id].steps ?? []).map((s, i) => (
+                      <div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>
+                    ))}</>
+                  )}
+                  {ctx[item.id].occurrences.length > 0 && (
+                    <><p className="section-title">原文出处</p>{ctx[item.id].occurrences.slice(0, 5).map((o, i) => (
+                      <div className="kg-evidence" key={i}><span className="tag">{o.source_title}</span> <span>{o.element_text || o.quoted_span}</span></div>
+                    ))}</>
+                  )}
+                </>
+              )}
             </article>
           ))}
         </div>
