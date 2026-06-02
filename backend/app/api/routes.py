@@ -559,6 +559,14 @@ def get_concept_detail(notebook_id: str, canonical_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Concept not found")
 
 
+@router.get("/notebooks/{notebook_id}/objects/{object_id}/context")
+def object_context(notebook_id: str, object_id: str):
+    try:
+        return repository().node_context(notebook_id, object_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+
 @router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/confirm")
 def confirm_merge(notebook_id: str, candidate_id: str) -> dict:
     try:

@@ -39,3 +39,7 @@ def test_merge_confirm_reject_endpoints(client):
 def test_unified_kg_unknown_notebook_404(client):
     assert client.post("/api/notebooks/bogus/unified-kg/rebuild").status_code == 404
     assert client.get("/api/notebooks/bogus/unified-kg").status_code == 404
+
+def test_object_context_endpoint_404_unknown(client):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    assert client.get(f"/api/notebooks/{nb}/objects/nope/context").status_code == 404

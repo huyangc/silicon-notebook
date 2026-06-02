@@ -58,3 +58,13 @@ def test_node_context_procedure_steps_doc_order(repo):
     names = [s["name"] for s in ctx["steps"]]
     assert names == ["extract", "modulate", "refine"]
     assert "suffix N-grams" in ctx["steps"][0]["element_text"]
+
+def test_concept_detail_includes_element_text(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid, eids = _src_with_elements(repo, nb.id, ["As shown, Engram is a conditional memory module."])
+    ev = {"source_id": sid, "source_title": "Doc", "element_id": eids[0], "element_type": "paragraph", "location_label": "p", "quoted_span": "Engram", "confidence": 1.0}
+    repo.store_kg(nb.id, sid, [{"local_id":"c","object_type":"concept","payload":{"name":"Engram","section_path":"1"},"evidence":[ev]}], [])
+    repo.rebuild_unified_kg(nb.id)
+    cid = list(repo.cluster_map(nb.id).values())[0]
+    d = repo.concept_detail(nb.id, cid)
+    assert any("conditional memory module" in (e.get("element_text") or "") for e in d["evidence"])

@@ -1925,6 +1925,8 @@ class SQLiteRepository:
                 seen_attached.add(other)
                 attached.append({**by_id[other], "edge_type": rel["edge_type"]})
         evidence = [ev for oid in members for ev in by_id.get(oid, {}).get("evidence", [])]
+        with self._connect() as db:
+            evidence = self._enrich_evidence(db, evidence)
         return {"canonical_id": canonical_id, "canonical_name": name,
                 "members": [by_id[o] for o in members if o in by_id],
                 "attached": attached, "evidence": evidence}
