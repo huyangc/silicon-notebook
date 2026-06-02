@@ -55,8 +55,6 @@ from app.models.schemas import (
     NotebookUpdate,
     RiskItemCard,
     RuleCard,
-    RuleExplanation,
-    ScenarioQueryRequest,
     SearchHit,
     SourceDetail,
     SourceElement,
@@ -82,7 +80,7 @@ def _normalize_doc_type(doc_type: str) -> str:
     value = (doc_type or "").strip().lower()
     return value if value in PROFILES else ""
 from app.services.mineru_client import MinerUClient
-from app.services.notebook_templates import NOTEBOOK_TEMPLATES, get_template
+from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 from app.services.parsers import parse_source_file
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -1300,30 +1298,6 @@ class SQLiteRepository:
             row = self._candidate_row_by_id(db, candidate_id)
             return self._candidate_from_row(row)
 
-    def list_rules(self, notebook_id: str) -> List[RuleCard]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            objects = self._knowledge_objects(db, notebook_id, "rule", statuses=None)
-        return [self._rule_card(self._as_retrieved(obj, "rule")) for obj in objects]
-
-    def list_methods(self, notebook_id: str) -> List[MethodCard]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            objects = self._knowledge_objects(db, notebook_id, "method", statuses=None)
-        return [self._method_card(self._as_retrieved(obj, "method")) for obj in objects]
-
-    def list_risks(self, notebook_id: str) -> List[RiskItemCard]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            objects = self._knowledge_objects(db, notebook_id, "risk", statuses=None)
-        return [self._risk_card(self._as_retrieved(obj, "risk")) for obj in objects]
-
-    def list_glossary(self, notebook_id: str) -> List[GlossaryTermCard]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            objects = self._knowledge_objects(db, notebook_id, "glossary", statuses=None)
-        return [self._glossary_card(self._as_retrieved(obj, "glossary")) for obj in objects]
-
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         """All object types present in this notebook with non-deprecated counts,
         so the UI can render a tab per type — including academic/textbook types
@@ -1754,84 +1728,6 @@ class SQLiteRepository:
                 (oid, notebook_id, object_type, json.dumps(payload, ensure_ascii=False), source_id, now, now),
             )
         return oid
-
-    def explain_rule(self, notebook_id: str, rule_id: str) -> RuleExplanation:
-        """Trace a rule back to its origin evidence and surface related
-        cases / risks / checklist items (the "why is this rule here?" view, §6.10)."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT * FROM knowledge_objects "
-                "WHERE id = ? AND notebook_id = ? AND object_type = 'rule'",
-                (rule_id, notebook_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(rule_id)
-            rule_obj = {
-                "id": row["id"],
-                "payload": json.loads(row["payload"] or "{}"),
-                "evidence": [Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
-                "status": row["status"],
-                "owner": row["owner"],
-                "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
-            }
-            cases = self._knowledge_objects(db, notebook_id, "case")
-            risks = self._knowledge_objects(db, notebook_id, "risk")
-            checklist = self._knowledge_objects(db, notebook_id, "checklist")
-            valid_ids = {element["element_id"] for element in self._gather_elements(db, notebook_id)}
-
-        rule_card = self._rule_card(self._as_retrieved(rule_obj, "rule"))
-        payload = rule_obj["payload"]
-        query = " ".join(
-            [rule_card.title, rule_card.statement, " ".join(rule_card.applies_to)]
-        ).strip()
-        related_cases = [self._case_card(item) for item in score_knowledge(query, cases, "case")[:3]]
-        related_risks = [self._risk_card(item) for item in score_knowledge(query, risks, "risk")[:3]]
-        related_checklist = [
-            str(item.payload.get("question", "")).strip()
-            for item in score_knowledge(query, checklist, "checklist")[:5]
-            if str(item.payload.get("question", "")).strip()
-        ]
-        origin = [
-            _citation("Rule origin", evidence)
-            for evidence in rule_obj["evidence"]
-            if not evidence.element_id or evidence.element_id in valid_ids
-        ]
-        # Edge-derived neighbors: consume the rule's explicit relation fields.
-        graph = self.knowledge_graph(notebook_id)
-        node_by_id = {node.id: node for node in graph.nodes}
-        related_knowledge: List[KnowledgeRef] = []
-        seen_ids: set = set()
-        for edge in graph.edges:
-            other_id = (
-                edge.to_id if edge.from_id == rule_id
-                else edge.from_id if edge.to_id == rule_id
-                else ""
-            )
-            if not other_id or other_id in seen_ids:
-                continue
-            node = node_by_id.get(other_id)
-            if node is None:
-                continue
-            seen_ids.add(other_id)
-            related_knowledge.append(
-                KnowledgeRef(
-                    id=node.id,
-                    object_type=node.object_type,
-                    headline=node.headline,
-                    status=node.status,
-                )
-            )
-        return RuleExplanation(
-            rule=rule_card,
-            origin=origin,
-            applicable_scenario=rule_card.applies_to,
-            exception=str(payload.get("exception", "")),
-            related_cases=related_cases,
-            related_risks=related_risks,
-            related_checklist=related_checklist,
-            related_knowledge=related_knowledge,
-        )
 
     def _derived_from_row(self, row: sqlite3.Row) -> DerivedRuleCandidate:
         return DerivedRuleCandidate(
@@ -2667,16 +2563,6 @@ class SQLiteRepository:
             knowledge_counts=knowledge_counts,
             source_status_counts=source_status_counts,
         )
-
-    def scenario_query(self, notebook_id: str, payload: ScenarioQueryRequest) -> AskResponse:
-        scenario = {key: value for key, value in payload.model_dump().items() if value}
-        concern = payload.concern or "design review"
-        question = (
-            f"For {payload.domain or 'this domain'} {payload.block_type} "
-            f"at {payload.design_stage or 'this stage'}, what should I check "
-            f"regarding {concern}?"
-        ).strip()
-        return self.ask(notebook_id, AskRequest(question=question, scenario=scenario))
 
     def case_search(self, notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]:
         self.get_notebook(notebook_id)

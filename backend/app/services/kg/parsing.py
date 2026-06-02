@@ -97,13 +97,16 @@ def parse_elements(
         ))
 
     def emit_formula(i: int) -> int:
+        """Display formula. MinerU emits `$$` / latex / `$$` (3 lines); the
+        formula element text is the INNER latex (delimiters excluded). Returns
+        the next line index to process."""
         if lines[i - 1].strip() == "$$":
             k = i + 1
             while k <= hi and lines[k - 1].strip() != "$$":
                 k += 1
-            if k - 1 >= i + 1:
-                emit("formula", i + 1, k - 1)
-            return k + 1
+            if k - 1 >= i + 1:  # has inner content
+                emit("formula", i + 1, k - 1)  # inner latex line(s)
+            return k + 1  # skip the closing $$
         line = lines[i - 1]
         inner = line.strip().strip("$").strip()
         if inner:
