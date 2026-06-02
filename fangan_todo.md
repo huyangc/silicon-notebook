@@ -85,3 +85,13 @@
 - `PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh` 全绿（py_compile + 离线 hermetic smoke + tsc）。
 - 离线（无 LLM/embedding/MinerU）闭环不回退；`smoke_backend.py` 已钉死 `mineru_mode=off` 且不读真实 `.env` 密钥。
 - 前端 `npm run build` 通过。
+
+## 统一 KG（跨文档合并）+ 可视化（后端已落地，2026-06-02）
+> 非破坏性 concept_clusters 跨文档合并 + Embedder 接口 + 检查视图 API。spec `docs/superpowers/specs/2026-06-02-kg-unified-and-viz-design.md`、plan `…/plans/2026-06-02-kg-unified-backend.md`。
+- [x] **Embedder 接口**：local BGE(dev) / dashscope text-embedding-v4(prod) / FakeEmbedder(test)，配置 `EMBED_PROVIDER` 切换；`store_kg` 批量建节点向量（仅 `embedder_configured` 时）。
+- [x] **跨文档 Concept 合并**：`concept_clusters`/`concept_merge_candidates`；分层匹配(名称精匹+向量阈值 0.90/[0.82,0.90) 灰区)；`rebuild_unified_kg`(抽取后自动+可手动)；confirm/reject 持久化、rebuild 强制 union/阻断。
+- [x] **统一图谱派生**：边重指向 canonical + 去重，按 notebook 内存缓存(写时失效)；concept 级 `/unified-kg` + `/concepts/{id}/detail` + 合并审核 API（48 后端测试通过）。
+- 真机集成+性能 smoke(FakeEmbedder 注入, 600 概念/2 文档)：合并正确(480 簇)，rebuild=1654ms(<3s)，unified_graph 冷 4ms/热 0.3ms(<150ms)。
+- [ ] **真模型验证**：配 `EMBED_PROVIDER=local`(bge-m3, 需装 sentence-transformers + 首次下模型) 或 `dashscope`(text-embedding-v4) 后，跑真机 smoke 看语义合并质量 + 灰区候选量(FakeEmbedder 下噪声候选很多，真模型应大幅减少)。
+- [ ] **性能跟进**：`rebuild` 的 pending 候选写入改批量单事务(当前每候选一连接，pending 大时偏慢)；rep-pair 配对在 _MAX_REPS 上限附近是 O(reps²) Python 循环，必要时再优化。
+- [ ] **前端可视化视图**（另起 plan）：全屏三区(过滤/搜索/待审 · react-force-graph-2d 概念画布 · 证据下钻+合并审核)，接 `/unified-kg`·`/concepts/{id}/detail`·pending/confirm/reject。
