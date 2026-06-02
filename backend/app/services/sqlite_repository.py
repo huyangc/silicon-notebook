@@ -1090,20 +1090,20 @@ class SQLiteRepository:
         return "\n\n".join(e.text for e in elements)
 
     def _embed_source(self, source_id: str) -> None:
-        if not self.settings.embedding_configured:
+        if not self.settings.embedder_configured:
             return
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)
+        pending = [(el, el.text.strip()) for el in elements if el.text.strip()]
+        if not pending:
+            return
+        try:
+            vectors = self.embedder.embed_texts([text[:2000] for _, text in pending])
+        except Exception:
+            return  # embedding best-effort; never block ingestion
         now = _now()
-        for element in elements:
-            text = element.text.strip()
-            if not text:
-                continue
-            try:
-                vector = self.llm_client.embed(text[:2000])
-            except Exception:
-                return
-            with self._connect() as db:
+        with self._connect() as db:
+            for (element, _), vector in zip(pending, vectors):
                 db.execute(
                     """
                     INSERT OR REPLACE INTO element_embeddings
@@ -1127,13 +1127,13 @@ class SQLiteRepository:
     ) -> None:
         """Embed a knowledge object's own payload text (WS4: payload-level
         vectors, not just evidence-element vectors). No-op without embeddings."""
-        if not self.settings.embedding_configured:
+        if not self.settings.embedder_configured:
             return
         text = _payload_text(payload).strip()
         if not text:
             return
         try:
-            vector = self.llm_client.embed(text[:2000])
+            vector = self.embedder.embed_query(text[:2000])
         except Exception:
             return
         with self._connect() as db:
@@ -1147,15 +1147,21 @@ class SQLiteRepository:
             )
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
-        """Batch-embed object payload names into knowledge_embeddings (best-effort)."""
+        """Batch-embed object payload text into knowledge_embeddings (best-effort).
+
+        Uses _payload_text (all string fields), matching the lazy backfill in
+        _knowledge_vectors so a node embedded at ingest and one backfilled at
+        search time get identical vectors. Name-only would diverge from the
+        backfill path and silently skip nodes with no `name` (e.g. rule objects
+        keyed on title/statement)."""
         if not self.settings.embedder_configured:
             return
         texts, ids = [], []
         for it in items:
-            name = (it["payload"].get("name") or "").strip()
-            if not name:
+            text = _payload_text(it["payload"]).strip()
+            if not text:
                 continue
-            ids.append(it["_oid"]); texts.append(name[:2000])
+            ids.append(it["_oid"]); texts.append(text[:2000])
         if not texts:
             return
         try:
@@ -1187,9 +1193,9 @@ class SQLiteRepository:
             for row in rows
             if row["vector"]
         }
-        if not self.settings.embedding_configured:
+        if not self.settings.embedder_configured:
             return vectors
-        now = _now()
+        pending_ids, pending_texts = [], []
         for obj in objects:
             object_id = obj["id"]
             if object_id in vectors:
@@ -1197,10 +1203,15 @@ class SQLiteRepository:
             text = _payload_text(obj.get("payload", {})).strip()
             if not text:
                 continue
-            try:
-                vector = self.llm_client.embed(text[:2000])
-            except Exception:
-                continue
+            pending_ids.append(object_id); pending_texts.append(text[:2000])
+        if not pending_texts:
+            return vectors
+        try:
+            new_vectors = self.embedder.embed_texts(pending_texts)
+        except Exception:
+            return vectors  # backfill best-effort; never block search
+        now = _now()
+        for object_id, vector in zip(pending_ids, new_vectors):
             vectors[object_id] = vector
             db.execute(
                 """
