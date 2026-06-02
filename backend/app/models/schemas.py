@@ -45,6 +45,9 @@ class SourceSummary(BaseModel):
     parse_status: str = ""
     created_label: str = ""
     doc_type: str = ""  # "" = auto-detect; else an extraction profile id
+    # Non-empty when the latest KG extraction had network-failed windows that
+    # silently contributed zero nodes (degraded run, not a clean "completed").
+    extraction_warning: Optional[str] = None
 
 
 class SourceImportFile(BaseModel):

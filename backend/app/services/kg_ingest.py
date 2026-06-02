@@ -102,15 +102,23 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
     wins = make_windows(raw_text, source_file, None, n, m)
     nodes: List[Node] = []
     edges: List[Edge] = []
+    failed = 0
     if wins:
         workers = max(1, min(_WORKERS, len(wins)))
+        # pool.submit + per-future .result() (NOT pool.map, which aborts on the
+        # first exception): one window's network failure must not abort the rest.
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            for ns, es in pool.map(
-                lambda w: extract_window(client, raw_text, w.char_start, w.char_end,
-                                         w.section_path, doc_type),
-                wins,
-            ):
-                nodes += ns
-                edges += es
+            futs = [pool.submit(extract_window, client, raw_text, w.char_start,
+                                w.char_end, w.section_path, doc_type)
+                    for w in wins]
+            for fut in futs:
+                try:
+                    ns, es = fut.result()
+                    nodes += ns
+                    edges += es
+                except Exception:
+                    failed += 1
     nodes, edges = canonicalize(nodes, edges, doc_id=source_file)
-    return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes, edges=edges)
+    return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes,
+                          edges=edges, total_windows=len(wins),
+                          failed_windows=failed)

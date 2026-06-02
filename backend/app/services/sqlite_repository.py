@@ -1069,9 +1069,10 @@ class SQLiteRepository:
                                             source.file_name or "source.md", kg_doc_type)
             objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
             n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
+            fw, tw = graph.failed_windows, graph.total_windows
             with self._connect() as db:
                 db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
-                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type}", _now(), run_id))
+                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} windows_failed={fw}/{tw}", _now(), run_id))
         except Exception as exc:
             with self._connect() as db:
                 db.execute("UPDATE extraction_runs SET status='failed', error_message=?, updated_at=? WHERE id=?",
@@ -3421,7 +3422,26 @@ class SQLiteRepository:
             parse_status=row["parse_status"],
             created_label=_created_label(row["created_at"]),
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
+            extraction_warning=self._extraction_warning(db, row["id"]),
         )
+
+    def _extraction_warning(self, db: sqlite3.Connection, source_id: str) -> Optional[str]:
+        """Surface a user-facing warning when the latest KG extraction left
+        network-failed windows (degraded run). Parsed from the run's
+        `windows_failed=N/T` token rather than stored on the source row."""
+        run = db.execute(
+            "SELECT error_message FROM extraction_runs WHERE source_id=? "
+            "ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
+        if run is None:
+            return None
+        m = re.search(r"windows_failed=(\d+)/(\d+)", run["error_message"] or "")
+        if not m:
+            return None
+        fw = int(m.group(1))
+        if fw <= 0:
+            return None
+        tw = int(m.group(2))
+        return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
 
     def _source_type_from_name(self, file_name: str) -> str:
         lower_name = file_name.lower()

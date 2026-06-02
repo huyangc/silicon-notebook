@@ -61,6 +61,9 @@ def _make(monkeypatch, create):
 
 
 def test_connection_error_fails_fast_no_fallback(monkeypatch):
+    # Pin retries off to isolate the no-plain-mode-fallback invariant: a single
+    # connection error must NOT trigger a second (plain-mode) create call.
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "0")
     err = APIConnectionError(request=httpx.Request("POST", "https://x"))
     create = _FakeCreate([err])
     c = _make(monkeypatch, create)
@@ -77,6 +80,43 @@ def test_param_rejection_falls_back_to_plain(monkeypatch):
     assert "response_format" in create.calls[0]
     assert "response_format" not in create.calls[1]
     assert out == '{"ok":1}'
+
+
+def test_connection_error_retries_then_recovers(monkeypatch):
+    """Two transient connection errors then a valid response: chat_json returns
+    the content and create is called 3 times (1 + 2 retries)."""
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    err = APIConnectionError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err, err, _Resp()])
+    c = _make(monkeypatch, create)  # default OPENAI_COMPAT_MAX_RETRIES = 2
+    out = c.chat_json([{"role": "user", "content": "hi"}], "{}")
+    assert out == '{"ok":1}'
+    assert len(create.calls) == 3  # initial + 2 retries
+
+
+def test_connection_error_retries_exhausted(monkeypatch):
+    """Create always raises a connection error: chat_json raises after exactly
+    1 + max_retries attempts."""
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "2")
+    err = APIConnectionError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err])  # repeats last behavior forever
+    c = _make(monkeypatch, create)
+    with pytest.raises(APIConnectionError):
+        c.chat_json([{"role": "user", "content": "hi"}], "{}")
+    assert len(create.calls) == 3  # 1 + 2 retries, no more
+
+
+def test_non_connection_error_does_not_loop(monkeypatch):
+    """A non-connection error on json-mode create triggers exactly ONE plain-mode
+    retry (existing fallback) and does NOT enter the connection-retry loop."""
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "5")
+    create = _FakeCreate([ValueError("response_format unsupported"), _Resp()])
+    c = _make(monkeypatch, create)
+    out = c.chat_json([{"role": "user", "content": "hi"}], "{}")
+    assert out == '{"ok":1}'
+    assert len(create.calls) == 2  # one fallback, NOT 1+max_retries
 
 
 def test_client_built_with_no_sdk_retries(monkeypatch):

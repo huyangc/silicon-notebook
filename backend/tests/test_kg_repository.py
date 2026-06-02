@@ -215,6 +215,68 @@ def test_reextraction_is_idempotent(repo):
     assert count == 1   # not doubled
 
 
+class _FlakyLLM:
+    """Raises APIConnectionError for the first `fail_n` windows it sees, then
+    returns the canned payload. Used to drive failed-window counting."""
+    configured = True
+
+    def __init__(self, payload, fail_n):
+        self._p = payload
+        self._fail_n = fail_n
+        self._seen = 0
+
+    def chat_json(self, messages: list, response_schema_hint: str) -> str:
+        from openai import APIConnectionError
+        import httpx
+        i = self._seen
+        self._seen += 1
+        if i < self._fail_n:
+            raise APIConnectionError(request=httpx.Request("POST", "https://x"))
+        return self._p
+
+    def embed(self, text: str) -> list:
+        return [0.0, 0.0]
+
+
+def test_extraction_warning_surfaced_on_failed_windows(repo, monkeypatch):
+    """A window that fails with a network error yields a non-empty
+    extraction_warning on the source summary; a clean run yields None."""
+    payload = json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram is a memory architecture"}],
+        "edges": []})
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
+                              "Engram is a memory architecture.")
+    # Force a single window, and fail it.
+    repo.llm_client = _FlakyLLM(payload, fail_n=1)
+    repo._run_extraction(src.id)
+
+    detail = repo.get_source(src.id)
+    assert detail.extraction_warning, "expected a warning when a window failed"
+    assert "1/1" in detail.extraction_warning
+    # The success run record carries the windows_failed token.
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT error_message FROM extraction_runs WHERE source_id=? "
+            "ORDER BY created_at DESC LIMIT 1", (src.id,)).fetchone()
+    assert "windows_failed=1/1" in row["error_message"]
+
+
+def test_extraction_warning_empty_on_clean_run(repo):
+    payload = json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram is a memory architecture"}],
+        "edges": []})
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
+                              "Engram is a memory architecture.")
+    repo.llm_client = _FlakyLLM(payload, fail_n=0)
+    repo._run_extraction(src.id)
+    detail = repo.get_source(src.id)
+    assert not detail.extraction_warning
+
+
 def test_knowledge_graph_from_kg_tables(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     c = repo._test_insert_object(nb.id, "concept", {"name": "Engram"})

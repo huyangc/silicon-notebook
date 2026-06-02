@@ -4,6 +4,7 @@ window (drop ungroundable). Node types constrained to the 4; edges to the vocab.
 from __future__ import annotations
 import re
 from typing import Any, List, Optional, Tuple
+from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node
 
@@ -61,8 +62,10 @@ def extract_window(client: Any, source_text: str, win_start: int, win_end: int,
             _KG_SCHEMA_HINT,
         )
         data = safe_json(raw)
+    except (APIConnectionError, APITimeoutError):
+        raise            # hard failure: window never processed — caller counts it
     except Exception:
-        return [], []
+        return [], []    # soft: unparseable/empty — legitimately 0 nodes
     nodes: List[Node] = []
     by_local = {}
     for it in (data.get("nodes") or []):

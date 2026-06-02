@@ -96,20 +96,40 @@ class OpenAICompatibleClient:
         }
         start = time.perf_counter()
         try:
-            # Prefer native JSON mode; fall back if the server rejects the param.
-            try:
-                response = self.client().chat.completions.create(
-                    **kwargs, response_format={"type": "json_object"}
-                )
-            except (APIConnectionError, APITimeoutError):
-                # Network stall/timeout: do NOT retry the whole request without
-                # JSON mode (that would double the wait). Fail fast; the caller
-                # drops this window.
-                raise
-            except Exception:
-                # Server rejected response_format (param unsupported): retry once
-                # in plain mode.
-                response = self.client().chat.completions.create(**kwargs)
+            attempts = 1 + self.settings.openai_compat_max_retries
+            response = None
+            for attempt in range(attempts):
+                try:
+                    # Prefer native JSON mode; fall back if the server rejects
+                    # the param.
+                    try:
+                        response = self.client().chat.completions.create(
+                            **kwargs, response_format={"type": "json_object"}
+                        )
+                    except (APIConnectionError, APITimeoutError):
+                        # Network stall/timeout: do NOT retry the whole request
+                        # without JSON mode (that would double the wait). Re-raise
+                        # so the connection-retry loop below handles it.
+                        raise
+                    except Exception:
+                        # Server rejected response_format (param unsupported):
+                        # retry once in plain mode. NOT a connection error, so it
+                        # never enters the bounded connection-retry loop.
+                        response = self.client().chat.completions.create(**kwargs)
+                    break
+                except (APIConnectionError, APITimeoutError) as exc:
+                    if attempt + 1 >= attempts:
+                        # Exhausted: propagate so the outer handler logs an error.
+                        raise
+                    # Visible retry record so blips show up in llm.jsonl.
+                    logger.log({
+                        **record,
+                        "status": "retry",
+                        "attempt": attempt,
+                        "latency_ms": round((time.perf_counter() - start) * 1000),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    time.sleep(min(2 ** attempt, 4))
             content = strip_json_fences(response.choices[0].message.content or "") or "{}"
             record["status"] = "ok"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)

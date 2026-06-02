@@ -83,6 +83,70 @@ def test_extract_graph_grounds_nodes():
     assert len(g.edges) == 1              # edge endpoints survived
 
 
+class _FlakyClient:
+    """Raises APIConnectionError for the first `n_fail` distinct windows it sees
+    (keyed by prompt text), returns valid JSON for the rest. The KG node evidence
+    is grounded in the shared text so surviving windows contribute a node."""
+    configured = True
+
+    def __init__(self, fail_windows: set, payload: str):
+        self._fail = set(fail_windows)
+        self._payload = payload
+        self._seen: list = []
+
+    def chat_json(self, messages: list, response_schema_hint: str) -> str:
+        from openai import APIConnectionError
+        import httpx
+        content = messages[0]["content"]
+        # Window index = how many distinct windows already seen
+        idx = len(self._seen)
+        self._seen.append(content)
+        if idx in self._fail:
+            raise APIConnectionError(request=httpx.Request("POST", "https://x"))
+        return self._payload
+
+
+def test_extract_graph_counts_failed_windows():
+    """Some windows raise a network error (counted as failed), others return valid
+    JSON and contribute nodes. failed_windows == # raised, total_windows == #windows,
+    surviving windows still produce nodes."""
+    import json
+    from app.services.kg.windowing import make_windows
+
+    # Build a multi-section markdown so make_windows yields >=2 windows.
+    quote = "Engram is a memory architecture"
+    section_a = "# Section A\n\n" + quote + "\n\n"
+    section_b = "# Section B\n\n" + quote + " indeed.\n\n"
+    text = section_a + section_b
+    wins = make_windows(text, "doc.md", None, 40, 5)
+    assert len(wins) >= 2, f"need >=2 windows, got {len(wins)}"
+
+    payload = json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": quote}],
+        "edges": [],
+    })
+    # Fail the first window only.
+    client = _FlakyClient(fail_windows={0}, payload=payload)
+    g = kg_ingest.extract_graph(client, text, "doc.md", "academic", n=40, m=5)
+    assert g.total_windows == len(wins)
+    assert g.failed_windows == 1
+    # Surviving windows still grounded at least one Engram node.
+    assert any(n.name == "Engram" for n in g.nodes)
+
+
+def test_extract_graph_no_failures_zero_count():
+    import json
+    payload = json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram, a memory architecture"}],
+        "edges": [],
+    })
+    g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
+    assert g.failed_windows == 0
+    assert g.total_windows >= 1
+
+
 def test_canonicalize_merges_across_windows():
     """Two windows both emit the same Concept 'Engram'; canonicalize must collapse
     to a single node.  The text is long enough (>200 chars in one prose section)

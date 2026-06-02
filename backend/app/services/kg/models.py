@@ -33,6 +33,8 @@ class KnowledgeGraph(BaseModel):
     doc_type: str
     nodes: List[Node] = Field(default_factory=list)
     edges: List[Edge] = Field(default_factory=list)
+    total_windows: int = 0
+    failed_windows: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         d = self.model_dump(mode="python", exclude_none=True)

@@ -29,6 +29,12 @@ class Settings(BaseSettings):
         60,
         env="OPENAI_COMPAT_TIMEOUT_SECONDS",
     )
+    # Extra attempts on transient connection/timeout errors (total = 1 + this).
+    # We drive retries ourselves with the SDK's max_retries pinned to 0.
+    openai_compat_max_retries: int = Field(
+        2,
+        env="OPENAI_COMPAT_MAX_RETRIES",
+    )
 
     embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""|fake|local|dashscope
     embed_model: str = Field("", env="EMBED_MODEL")
