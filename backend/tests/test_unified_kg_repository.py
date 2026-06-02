@@ -50,3 +50,17 @@ def test_set_merge_decision_rejects_bad_status(repo):
     cid = repo.pending_merges(nb.id)[0]["id"]
     with pytest.raises(ValueError):
         repo.set_merge_decision(nb.id, cid, "maybe")
+
+def test_rebuild_merges_same_concept_across_sources(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"MOSFET","section_path":""},"evidence":[]}], [])
+    repo.store_kg(nb.id, None, [{"local_id":"b","object_type":"concept","payload":{"name":"mosfet","section_path":""},"evidence":[]}], [])
+    repo.rebuild_unified_kg(nb.id)
+    cmap = repo.cluster_map(nb.id)
+    assert len(set(cmap.values())) == 1 and len(cmap) == 2   # both MOSFET nodes one cluster
+
+def test_rebuild_is_idempotent(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"X","section_path":""},"evidence":[]}], [])
+    repo.rebuild_unified_kg(nb.id); first = repo.cluster_map(nb.id)
+    repo.rebuild_unified_kg(nb.id); assert repo.cluster_map(nb.id).keys() == first.keys()

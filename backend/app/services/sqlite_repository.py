@@ -130,6 +130,7 @@ class SQLiteRepository:
         self.event_log = EventLogger(settings, channel="events")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._unified_cache: Dict[Any, Any] = {}
         self._migrate()
         self._seed()
 
@@ -1795,6 +1796,39 @@ class SQLiteRepository:
         with self._connect() as db:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
         return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
+
+    def _invalidate_unified_cache(self, notebook_id: str) -> None:
+        for key in [k for k in self._unified_cache if k[0] == notebook_id]:
+            self._unified_cache.pop(key, None)
+
+    def rebuild_unified_kg(self, notebook_id: str) -> int:
+        """Cluster the notebook's Concepts; persist concept_clusters + refresh
+        pending candidates (preserving confirmed/rejected). Returns #clusters."""
+        from app.services.kg_merge import cluster_concepts
+        with self._connect() as db:
+            crows = db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND object_type='concept' AND status!='deprecated'",
+                (notebook_id,)).fetchall()
+            vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchall()
+        concepts = [{"object_id": r["id"], "name": json.loads(r["payload"] or "{}").get("name", "")} for r in crows]
+        vectors = {r["object_id"]: json.loads(r["vector"]) for r in vrows}
+        # decided_pairs keys are canonical ids of the form "K-<normalized_seed_name>";
+        # cluster_concepts wants confirmed/rejected keyed by normalized seed name -> strip "K-".
+        def _seed(cid: str) -> str:
+            return cid[2:] if cid.startswith("K-") else cid
+        decided = self.decided_pairs(notebook_id)
+        confirmed = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "confirmed"}
+        rejected = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "rejected"}
+        res = cluster_concepts(concepts, vectors, confirmed, rejected)
+        rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
+                 "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
+        self.write_clusters(notebook_id, rows)
+        with self._connect() as db:
+            db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,))
+        for a, b, score in res["pending"]:
+            self.write_merge_candidate(notebook_id, a, b, score)
+        self._invalidate_unified_cache(notebook_id)
+        return len(set(res["cluster_map"].values()))
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
