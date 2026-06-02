@@ -85,3 +85,17 @@ def test_store_kg_invalidates_unified_cache(repo):
     # a new store_kg must evict the cache
     repo.store_kg(nb.id, None, [{"local_id":"b","object_type":"concept","payload":{"name":"B","section_path":""},"evidence":[]}], [])
     assert (nb.id, "concept") not in repo._unified_cache
+
+def test_concept_detail_lists_members_and_attached(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id":"a","object_type":"concept","payload":{"name":"MOSFET","section_path":""},
+         "evidence":[{"source_id":"s","source_title":"D","element_id":"e","element_type":"p","location_label":"1","quoted_span":"MOSFET","confidence":1.0}]},
+        {"local_id":"k","object_type":"claim","payload":{"name":"MOSFET has threshold","section_path":""},"evidence":[]},
+    ], [{"source_local_id":"k","target_local_id":"a","edge_type":"about","evidence":[]}])
+    repo.rebuild_unified_kg(nb.id)
+    cid = list(repo.cluster_map(nb.id).values())[0]
+    detail = repo.concept_detail(nb.id, cid)
+    assert detail["canonical_name"] == "MOSFET"
+    assert any(x["object_type"]=="claim" for x in detail["attached"])
+    assert detail["evidence"]

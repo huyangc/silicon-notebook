@@ -880,6 +880,10 @@ class SQLiteRepository:
             t = time.perf_counter()
             stage("extract", "start", t)
             self._run_extraction(source_id)
+            try:
+                self.rebuild_unified_kg(self.get_source(source_id).notebook_id)
+            except Exception:
+                pass  # rebuild best-effort; never fail ingestion
             stage("extract", "done", t)
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
@@ -1855,6 +1859,37 @@ class SQLiteRepository:
             self.write_merge_candidate(notebook_id, a, b, score)
         self._invalidate_unified_cache(notebook_id)
         return len(set(res["cluster_map"].values()))
+
+    def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
+        cmap = self.cluster_map(notebook_id)
+        members = [oid for oid, cid in cmap.items() if cid == canonical_id]
+        mset = set(members)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,)).fetchall()
+            nrow = db.execute(
+                "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
+                (notebook_id, canonical_id)).fetchone()
+        name = nrow["canonical_name"] if nrow else ""
+        by_id = {r["id"]: {"id": r["id"], "object_type": r["object_type"],
+                           "payload": json.loads(r["payload"] or "{}"),
+                           "evidence": json.loads(r["evidence"] or "[]")} for r in rows}
+        attached = []
+        for rel in self.relations_for_notebook(notebook_id):
+            s, t = rel["source_object_id"], rel["target_object_id"]
+            if s in mset and t not in mset:
+                other = t
+            elif t in mset and s not in mset:
+                other = s
+            else:
+                continue
+            if other in by_id and by_id[other]["object_type"] != "concept":
+                attached.append({**by_id[other], "edge_type": rel["edge_type"]})
+        evidence = [ev for oid in members for ev in by_id.get(oid, {}).get("evidence", [])]
+        return {"canonical_id": canonical_id, "canonical_name": name,
+                "members": [by_id[o] for o in members if o in by_id],
+                "attached": attached, "evidence": evidence}
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
