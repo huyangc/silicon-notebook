@@ -1,18 +1,46 @@
-"""S1: raw MinerU markdown -> SourceElementQ with absolute char spans.
+"""Markdown source element parsing and section-tree construction for KG windowing.
 
-Unlike the legacy parsers.py, raw text is NEVER whitespace-collapsed: each
-element's [char_start, char_end] is a verbatim slice of the source file, so the
-downstream atomizer can compute spans that satisfy source[span]==raw_text.
+Extracted from the former qiefen pipeline as standalone utilities so the KG
+windowing module has no dependency on qiefen.
 """
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from app.services.qiefen.models import SourceElementQ
+from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Data models (minimal subset required by windowing.py)
+# ---------------------------------------------------------------------------
+
+class SourceElementQ(BaseModel):
+    id: str
+    type: str  # heading | paragraph | formula | table | figure_caption | list_item
+    file: str
+    line_start: int
+    line_end: int
+    char_start: int
+    char_end: int
+    text: str  # verbatim slice of source_file[char_start:char_end]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SectionNode(BaseModel):
+    id: str
+    path: str
+    title: str
+    parent: Optional[str] = None
+    kind: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# S1: raw markdown -> SourceElementQ with absolute char spans
+# ---------------------------------------------------------------------------
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
-_FORMULA_BLOCK = re.compile(r"^\s*\$\$")  # $$ ... $$ display formula
+_FORMULA_BLOCK = re.compile(r"^\s*\$\$")
 _TABLE_HTML = re.compile(r"^\s*<(table|details)\b", re.IGNORECASE)
 _FIGURE = re.compile(r"^\s*(Figure\s+\d+|!\[\]\()", re.IGNORECASE)
 _LIST = re.compile(r"^\s*([-*+]|\d+[.)])\s+\S")
@@ -69,16 +97,13 @@ def parse_elements(
         ))
 
     def emit_formula(i: int) -> int:
-        """Display formula. MinerU emits `$$` / latex / `$$` (3 lines); gold's
-        formula_atom is the INNER latex (delimiters excluded). Returns next line."""
         if lines[i - 1].strip() == "$$":
             k = i + 1
             while k <= hi and lines[k - 1].strip() != "$$":
                 k += 1
-            if k - 1 >= i + 1:                      # has inner content
-                emit("formula", i + 1, k - 1)       # inner latex line(s)
-            return k + 1                            # skip the closing `$$`
-        # single-line `$$ latex $$`: emit the inner latex span (strip delimiters)
+            if k - 1 >= i + 1:
+                emit("formula", i + 1, k - 1)
+            return k + 1
         line = lines[i - 1]
         inner = line.strip().strip("$").strip()
         if inner:
@@ -100,11 +125,9 @@ def parse_elements(
         elif kind == "formula":
             i = emit_formula(i)
         elif kind in ("table", "figure_caption", "list_item"):
-            # single-line structural element (MinerU emits these on one line)
             emit(kind, i, i)
             i += 1
         else:
-            # paragraph: consume consecutive non-blank, non-structural lines
             j = i
             while (j < hi and lines[j].strip()
                    and _classify_line(lines[j]) == "paragraph"):
@@ -112,3 +135,44 @@ def parse_elements(
             emit("paragraph", i, j)
             i = j + 1
     return elements
+
+
+# ---------------------------------------------------------------------------
+# S2: heading elements -> SectionNode list with breadcrumb `path`
+# ---------------------------------------------------------------------------
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_NUM = re.compile(r"^(?:chapter|section)?\s*(\d+(?:\.\d+)*)\b", re.IGNORECASE)
+
+
+def _heading_title(el: SourceElementQ) -> str:
+    m = _HEADING_RE.match(el.text)
+    return m.group(2).strip() if m else el.text.strip()
+
+
+def _numeric_label(title: str) -> Optional[str]:
+    m = _NUM.match(title)
+    return m.group(1) if m else None
+
+
+def build_section_tree(elements: List[SourceElementQ]) -> List[SectionNode]:
+    nodes: List[SectionNode] = []
+    counter = 0
+    cur_chain: List[str] = []
+    for el in elements:
+        if el.type != "heading":
+            continue
+        title = _heading_title(el)
+        num = _numeric_label(title)
+        if num:
+            parts = num.split(".")
+            chain = [".".join(parts[: i + 1]) for i in range(len(parts))]
+            path = " > ".join(chain)
+            cur_chain = chain
+        elif cur_chain:
+            path = " > ".join(cur_chain + [title])
+        else:
+            path = title
+        counter += 1
+        nodes.append(SectionNode(id=f"SEC-{counter}", path=path, title=title))
+    return nodes

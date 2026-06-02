@@ -39,7 +39,6 @@ from app.models.schemas import (
     RiskItemCard,
     RuleCard,
     RuleExplanation,
-    ScenarioQueryRequest,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
@@ -151,8 +150,6 @@ class NotebookRepository(Protocol):
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse: ...
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse: ...
-
-    def scenario_query(self, notebook_id: str, payload: ScenarioQueryRequest) -> AskResponse: ...
 
     def case_search(self, notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]: ...
 

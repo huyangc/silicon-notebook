@@ -2,8 +2,7 @@
 from __future__ import annotations
 from typing import List, Optional
 from pydantic import BaseModel
-from app.services.qiefen.source_elements import parse_elements
-from app.services.qiefen.section_tree import build_section_tree
+from app.services.kg.parsing import parse_elements, build_section_tree
 
 class Window(BaseModel):
     char_start: int

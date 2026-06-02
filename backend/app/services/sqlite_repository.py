@@ -64,7 +64,6 @@ from app.models.schemas import (
     SourceSummary,
     UserProfile,
 )
-from app.services.extraction import bind_evidence, run_extraction
 from app.services import kg_ingest
 from app.services.extraction_profiles import (
     LIST_FIELDS,
@@ -3044,10 +3043,25 @@ class SQLiteRepository:
         article_elements: List[SourceElement],
         article_source_title: str,
     ) -> List[Evidence]:
+        """Bind a quoted span to the best matching source element (substring check)."""
         if not quoted_span.strip() or not article_elements:
             return []
-        evidence = bind_evidence(quoted_span, article_elements, article_source_title, 0.65)
-        return [evidence] if evidence else []
+        needle = " ".join((quoted_span or "").split()).lower()
+        if len(needle) < 6:
+            return []
+        for element in article_elements:
+            haystack = " ".join((element.text or "").split()).lower()
+            if needle in haystack or haystack in needle:
+                return [Evidence(
+                    source_id=element.source_id,
+                    source_title=article_source_title,
+                    element_id=element.id,
+                    element_type=element.element_type,
+                    location_label=element.location_label,
+                    quoted_span=quoted_span.strip()[:400],
+                    confidence=0.65,
+                )]
+        return []
 
     def _attach_claim_relationships(self, claims: List[dict], rules: List[dict]) -> List[dict]:
         for claim in claims:
