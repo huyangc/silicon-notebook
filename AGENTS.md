@@ -81,7 +81,8 @@ Inside a notebook:
 - Knowledge Graph opens as a full-screen workspace overlay.
   - Use the object-level unified graph so Concept / Claim / Formula / Procedure nodes can appear together; do not fall back to a concept-only graph when object-level relationships exist.
   - The main canvas should show node names, type-specific node marks, and relationship labels on edges.
-  - Provide type filters for dense graphs. Selecting a node from either the canvas or the overview should focus/highlight that node and update the selected-node relation/evidence details.
+  - Provide multi-select type filters for dense graphs. Selecting a node from either the canvas or the overview should focus/highlight that node and update the selected-node relation/source details.
+  - Keep node type color/shape marks consistent between the canvas, node overview, selected-node detail, and related-node sections. In the detail panel, label evidence/source excerpts as `出处`, hide raw `section_path`, and show concept-mounted objects as `相关节点` grouped by type.
   - The side panel should provide a type-grouped node overview (Concept, Claim, Formula, Procedure, plus future types) and selected-node relation/evidence details.
 - Right column: Studio.
   - Keep Mind Map, New Article, and Infographic entries.

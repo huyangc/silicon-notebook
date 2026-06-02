@@ -2179,6 +2179,18 @@ button {
   box-shadow: 0 0 0 1px #fff;
 }
 
+.kg-selected-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kg-selected-type .kg-shape-mark {
+  width: 13px;
+  height: 13px;
+  font-size: 7px;
+}
+
 .kg-type-filter {
   display: grid;
   gap: 6px;
@@ -2302,7 +2314,26 @@ button {
   font-size: 12px;
 }
 
-.kg-relation-row span {
+.kg-relation-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-relation-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kg-relation-node .kg-shape-mark {
+  width: 13px;
+  height: 13px;
+  font-size: 7px;
+}
+
+.kg-relation-node span:not(.kg-shape-mark) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2324,6 +2355,44 @@ button {
   font-size: 13px;
   display: flex;
   gap: 8px;
+}
+
+.kg-related-group {
+  display: grid;
+  gap: 7px;
+}
+
+.kg-related-list {
+  display: grid;
+  gap: 5px;
+}
+
+.kg-related-node {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid #dbe3ef;
+  border-radius: 7px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.kg-related-node > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-related-node em {
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
 }
 
 @media (max-width: 1120px) {

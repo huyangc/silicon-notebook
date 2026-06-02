@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-05-29
+更新日期：2026-06-03
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）与 `implementation_plan.md`（实现计划）。
 
@@ -234,7 +234,7 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - **可编辑 schema 注册表**：新增 `object_schemas` 表（迁移时从代码默认 seed，`INSERT OR IGNORE` 保留人工编辑）。抽取改为读 **DB 生效 schema**（`effective_schemas()` 叠加在代码默认上），prompt/schema-hint/字段排序全部按生效注册表。端点 `GET/POST/PATCH/DELETE /object-schemas`（内置可停用不可删、自定义可删）。前端「Schema」弹窗：列出/编辑字段·标签·说明、启用/停用、新增自定义类型。
 - **Schema 归纳（建议态，§开放发现）**：`POST /notebooks/{id}/schema-proposals` 用 LLM 从笔记本内容提议新类型（offline 为 no-op），存为 `status='proposed' source='induced'`，绝不自动启用；前端在 Schema 弹窗审核（批准→active / 拒绝→删除）。
 - **关系边消费（§7.4 基础）**：`GET /notebooks/{id}/graph` 把各对象 `related_rules/cases/methods/concepts` 自由文本按 headline 模糊匹配解析成边（nodes+edges）；Explain Rule 增 `related_knowledge`（规则连出的对象）；前端「关系图」弹窗 + Explain 弹窗内关系块。
-- **Object 级知识图谱可视化（§7.4）**：前端「知识图谱」改为读取 `/unified-kg?level=object`，Concept / Claim / Formula / Procedure 同屏展示；主 canvas 直接绘制节点名称、类型形状/颜色、边关系标签，并按容器尺寸响应式布局；密集全量视图用类型分区与标签降噪，左侧提供类型过滤；侧栏提供按类型分组的节点总览，选中节点会聚焦 canvas 并展示 payload、相邻关系，Concept 节点继续拉取证据/挂载对象详情。
+- **Object 级知识图谱可视化（§7.4）**：前端「知识图谱」改为读取 `/unified-kg?level=object`，Concept / Claim / Formula / Procedure 同屏展示；主 canvas 直接绘制节点名称、类型形状/颜色、边关系标签，并按容器尺寸响应式布局；密集全量视图用类型分区与标签降噪，左侧提供可选一种或多种类型的过滤；侧栏提供按类型分组的节点总览，选中节点会聚焦 canvas 并展示 payload、相邻关系和「出处」。Concept 节点继续拉取详情，相关 Claim / Formula / Procedure 以「相关节点」展示在出处下方，并按类型分组且复用 canvas 的类型颜色/形状。
 - **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回非核心类型（claim/finding/concept/principle/example/glossary/自定义）的 top 命中；前端 AnswerView 渲染。
 - **抽取自我修正 + 证据绑定升级**：LLM 路径加一轮自检（drop 幻觉/含糊、回填更忠实 verbatim span，`REFINE_SCHEMA_HINT`/`refine_prompt`，offline no-op）；`bind_evidence` 命中元素后取最佳**逐句 verbatim** 作为引文。
 - **顺带修复**：`routes.py` 缺失的 `NotebookTemplate` import（API 模块导入即 NameError）。
