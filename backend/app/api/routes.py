@@ -519,3 +519,59 @@ def submit_feedback(answer_id: str, payload: FeedbackRequest) -> FeedbackRespons
         raise HTTPException(status_code=404, detail="Answer not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Unified Knowledge Graph endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/notebooks/{notebook_id}/unified-kg/rebuild")
+def rebuild_unified_kg(notebook_id: str) -> dict:
+    try:
+        clusters = repository().rebuild_unified_kg(notebook_id)
+        return {"clusters": clusters}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/unified-kg")
+def get_unified_kg(notebook_id: str, level: str = Query("concept")) -> dict:
+    try:
+        return repository().unified_graph(notebook_id, level=level)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/unified-kg/pending-merges")
+def get_pending_merges(notebook_id: str) -> list:
+    try:
+        return repository().pending_merges(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/concepts/{canonical_id}/detail")
+def get_concept_detail(notebook_id: str, canonical_id: str) -> dict:
+    try:
+        return repository().concept_detail(notebook_id, canonical_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/confirm")
+def confirm_merge(notebook_id: str, candidate_id: str) -> dict:
+    try:
+        repository().confirm_merge(notebook_id, candidate_id)
+        return {"ok": True}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Merge candidate not found")
+
+
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/reject")
+def reject_merge(notebook_id: str, candidate_id: str) -> dict:
+    try:
+        repository().reject_merge(notebook_id, candidate_id)
+        return {"ok": True}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Merge candidate not found")
