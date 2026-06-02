@@ -1041,6 +1041,7 @@ class SQLiteRepository:
             )
             db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         self._delete_file(source.file_path)
+        self._invalidate_unified_cache(source.notebook_id)
 
     def _run_extraction(self, source_id: str) -> None:
         source = self.get_source(source_id)
@@ -1866,6 +1867,11 @@ class SQLiteRepository:
             vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchall()
         concepts = [{"object_id": r["id"], "name": json.loads(r["payload"] or "{}").get("name", "")} for r in crows]
         vectors = {r["object_id"]: json.loads(r["vector"]) for r in vrows}
+        # Defensive: a pre-existing DB may hold vectors of a different dimension
+        # (legacy embedder). Drop mismatched-length vectors so cluster_concepts'
+        # numpy stack can't raise; name-seed merge still applies to those nodes.
+        dim = self.settings.embed_dim
+        vectors = {oid: v for oid, v in vectors.items() if len(v) == dim}
         # decided_pairs keys are canonical ids of the form "K-<normalized_seed_name>";
         # cluster_concepts wants confirmed/rejected keyed by normalized seed name -> strip "K-".
         def _seed(cid: str) -> str:
@@ -1877,10 +1883,15 @@ class SQLiteRepository:
         rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
                  "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
         self.write_clusters(notebook_id, rows)
+        # Refresh pending candidates in ONE transaction (per-candidate inserts
+        # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
+        now = _now()
         with self._connect() as db:
             db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,))
-        for a, b, score in res["pending"]:
-            self.write_merge_candidate(notebook_id, a, b, score)
+            db.executemany(
+                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?, 'pending', ?, ?)",
+                [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in res["pending"]])
         self._invalidate_unified_cache(notebook_id)
         return len(set(res["cluster_map"].values()))
 
@@ -2064,6 +2075,7 @@ class SQLiteRepository:
                 )
             except Exception:
                 pass
+        self._invalidate_unified_cache(row["notebook_id"])
         obj = {
             "id": row["id"],
             "payload": json.loads(row["payload"] or "{}"),
@@ -2198,6 +2210,7 @@ class SQLiteRepository:
                 (now, now, source_id),
             )
             row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (into_id,)).fetchone()
+        self._invalidate_unified_cache(row["notebook_id"])
         obj = {
             "id": row["id"],
             "payload": json.loads(row["payload"] or "{}"),

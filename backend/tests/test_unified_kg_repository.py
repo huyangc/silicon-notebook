@@ -113,3 +113,15 @@ def test_confirm_merge_unions_clusters_on_rebuild(repo):
     repo.confirm_merge(nb.id, cand["id"])
     repo.rebuild_unified_kg(nb.id)
     assert len(set(repo.cluster_map(nb.id).values())) == 1   # forced union held across rebuild
+
+
+def test_rebuild_tolerates_mixed_dim_vectors(repo):
+    import datetime
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"A","section_path":""},"evidence":[]}], [])
+    with repo._connect() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+            ("rogue", nb.id, json.dumps([0.1] * 999), datetime.datetime.now().isoformat()))
+    assert repo.rebuild_unified_kg(nb.id) >= 1   # must NOT raise on mismatched-dim vector
+
