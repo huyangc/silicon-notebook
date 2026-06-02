@@ -417,6 +417,12 @@ export default function Home() {
   const [schemaBusy, setSchemaBusy] = useState(false);
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [kgViewOpen, setKgViewOpen] = useState(false);
+  const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
+  const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
+  const [selectedConcept, setSelectedConcept] = useState<string | null>(null);
+  const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
+  const [kgSearch, setKgSearch] = useState("");
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
@@ -582,6 +588,21 @@ export default function Home() {
   // expected questions and domain, so a new notebook never shows demo examples.
   const promptChips = useMemo(() => promptChipsFor(currentNotebook), [currentNotebook]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
+
+  const fgData = useMemo(() => {
+    if (!uGraph) return { nodes: [] as FgNode[], links: [] as FgLink[] };
+    const deg: Record<string, number> = {};
+    uGraph.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
+    const q = kgSearch.trim().toLowerCase();
+    const nodes: FgNode[] = uGraph.nodes
+      .filter((n) => !q || (n.payload.name ?? "").toLowerCase().includes(q))
+      .map((n) => ({ id: n.id, name: n.payload.name ?? n.id, type: n.object_type, val: 1 + (deg[n.id] ?? 0) }));
+    const keep = new Set(nodes.map((n) => n.id));
+    const links: FgLink[] = uGraph.edges
+      .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
+      .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type }));
+    return { nodes, links };
+  }, [uGraph, kgSearch]);
 
   async function loadNotebookCollection() {
     const healthResponse = await api<Health>("/health");
@@ -1040,6 +1061,36 @@ export default function Home() {
     setGraph(response);
   }
 
+  async function openKgView() {
+    if (!currentNotebookId) return;
+    setKgViewOpen(true);
+    setSelectedConcept(null); setConceptDetail(null);
+    try {
+      await rebuildUnifiedKg(currentNotebookId);
+      const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
+      setUGraph(g); setPendingMerges(pend);
+    } catch (err) { reportError(err); }
+  }
+
+  async function selectConcept(canonicalId: string) {
+    if (!currentNotebookId) return;
+    setSelectedConcept(canonicalId);
+    try { setConceptDetail(await fetchConceptDetail(currentNotebookId, canonicalId)); }
+    catch (err) { reportError(err); }
+  }
+
+  async function decideMerge(candidateId: string, confirm: boolean) {
+    if (!currentNotebookId) return;
+    try {
+      if (confirm) await confirmMergeApi(currentNotebookId, candidateId);
+      else await rejectMergeApi(currentNotebookId, candidateId);
+      await rebuildUnifiedKg(currentNotebookId);
+      const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
+      setUGraph(g); setPendingMerges(pend);
+      if (selectedConcept) setConceptDetail(await fetchConceptDetail(currentNotebookId, selectedConcept).catch(() => null));
+    } catch (err) { reportError(err); }
+  }
+
   async function induceSchemas() {
     if (!currentNotebookId) return;
     setSchemaBusy(true);
@@ -1306,7 +1357,7 @@ export default function Home() {
               })}>分析</button>
               <button className="sort-button" onClick={() => openAnalytics().catch(reportError)}>看板</button>
               <button className="sort-button" onClick={openSchemas}>Schema</button>
-              <button className="sort-button" onClick={() => openGraph().catch(reportError)}>关系图</button>
+              <button className="sort-button" onClick={() => openKgView()}>知识图谱</button>
               <button className="sort-button" onClick={() => setInfoModal({
                 title: "分享",
                 message: "当前是本机单用户 beta，分享会生成本地 notebook 链接；多人权限后续再接入。",
@@ -1876,6 +1927,60 @@ export default function Home() {
                 </div>
               )}
             </div>
+          </div>
+        </section>
+      )}
+
+      {kgViewOpen && (
+        <section className="kg-view" role="dialog" aria-modal="true">
+          <div className="kg-view-header">
+            <div><h2>知识图谱</h2><p>跨文档统一概念图（canonical 概念 + 概念间关系）。点击概念查看证据与挂载的断言/公式。</p></div>
+            <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
+          </div>
+          <div className="kg-view-body">
+            <aside className="kg-rail">
+              <input className="kg-search" placeholder="搜索概念…" value={kgSearch} onChange={(e) => setKgSearch(e.target.value)} />
+              <div className="kg-rail-section">
+                <h3>待确认合并 ({pendingMerges.length})</h3>
+                {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
+                  <div className="kg-merge-row" key={m.id}>
+                    <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
+                    <span className="kg-merge-actions">
+                      <button onClick={() => decideMerge(m.id, true)}>合并</button>
+                      <button onClick={() => decideMerge(m.id, false)}>拒绝</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </aside>
+            <div className="kg-canvas">
+              {uGraph === null ? <p className="tool-hint">加载中…</p> : (
+                <ForceGraph2D
+                  graphData={fgData}
+                  nodeLabel={(n: any) => `${n.name} (${n.type})`}
+                  nodeVal={(n: any) => n.val}
+                  nodeAutoColorBy="type"
+                  linkDirectionalArrowLength={3}
+                  onNodeClick={(n: any) => selectConcept(n.id)}
+                />
+              )}
+            </div>
+            <aside className="kg-detail">
+              {!conceptDetail ? <p className="tool-hint">点击左侧/图中概念查看详情</p> : (
+                <div className="stack">
+                  <h3>{conceptDetail.canonical_name}</h3>
+                  <div className="tag-row"><span className="tag">成员 {conceptDetail.members.length}</span><span className="tag">挂载 {conceptDetail.attached.length}</span></div>
+                  <h4>挂载的断言 / 公式 / 过程</h4>
+                  {conceptDetail.attached.length === 0 ? <p className="tool-hint">无</p> : conceptDetail.attached.map((a) => (
+                    <div className="checklist-row" key={a.id}><span className="tag">{a.object_type}</span> {String(a.payload.name ?? "")} <em>({a.edge_type})</em></div>
+                  ))}
+                  <h4>证据</h4>
+                  {conceptDetail.evidence.slice(0, 20).map((ev, i) => (
+                    <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.quoted_span}</span></div>
+                  ))}
+                </div>
+              )}
+            </aside>
           </div>
         </section>
       )}
