@@ -1327,12 +1327,14 @@ class SQLiteRepository:
             self._embed_knowledge(object_id, notebook_id, json.loads(payload_json or "{}"))
         except Exception:
             pass
+        self._invalidate_unified_cache(notebook_id)
         return candidate
 
     def reject_candidate(self, candidate_id: str) -> Candidate:
         now = _now()
         with self._connect() as db:
-            self._candidate_row_by_id(db, candidate_id)
+            pre_row = self._candidate_row_by_id(db, candidate_id)
+            notebook_id = pre_row["notebook_id"]
             db.execute(
                 "UPDATE extraction_candidates SET status = ?, updated_at = ? WHERE id = ?",
                 ("rejected", now, candidate_id),
@@ -1342,7 +1344,9 @@ class SQLiteRepository:
                 (candidate_id,),
             )
             row = self._candidate_row_by_id(db, candidate_id)
-            return self._candidate_from_row(row)
+            candidate = self._candidate_from_row(row)
+        self._invalidate_unified_cache(notebook_id)
+        return candidate
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         """All object types present in this notebook with non-deprecated counts,
@@ -1737,6 +1741,7 @@ class SQLiteRepository:
                     ),
                 )
         self._embed_objects_batch(notebook_id, objects)
+        self._invalidate_unified_cache(notebook_id)
         return len(objects), len(db_relations)
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:

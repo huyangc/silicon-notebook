@@ -75,3 +75,13 @@ def test_unified_graph_concept_level_cached(repo):
     g = repo.unified_graph(nb.id, level="concept")
     assert len(g["nodes"]) == 2 and len(g["edges"]) == 1
     assert repo.unified_graph(nb.id, level="concept") is repo._unified_cache[(nb.id,"concept")]  # cache hit (same object)
+
+def test_store_kg_invalidates_unified_cache(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"A","section_path":""},"evidence":[]}], [])
+    repo.rebuild_unified_kg(nb.id)
+    g1 = repo.unified_graph(nb.id, level="concept")
+    assert (nb.id, "concept") in repo._unified_cache
+    # a new store_kg must evict the cache
+    repo.store_kg(nb.id, None, [{"local_id":"b","object_type":"concept","payload":{"name":"B","section_path":""},"evidence":[]}], [])
+    assert (nb.id, "concept") not in repo._unified_cache
