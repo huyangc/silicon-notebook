@@ -29,3 +29,17 @@ def test_store_kg_batch_embeds_nodes(repo):
         rows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchall()
     assert len(rows) == 2                      # both nodes embedded
     assert len(json.loads(rows[0]["vector"])) == 16
+
+def test_cluster_and_candidate_crud(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_clusters(nb.id, [
+        {"canonical_id": "K1", "member_object_id": "o1", "canonical_name": "MOSFET"},
+        {"canonical_id": "K1", "member_object_id": "o2", "canonical_name": "MOSFET"},
+    ])
+    assert repo.cluster_map(nb.id) == {"o1": "K1", "o2": "K1"}
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.85)
+    pend = repo.pending_merges(nb.id)
+    assert len(pend) == 1 and pend[0]["status"] == "pending"
+    repo.set_merge_decision(nb.id, pend[0]["id"], "rejected")
+    assert repo.pending_merges(nb.id) == []
+    assert repo.decided_pairs(nb.id) == {("K1", "K2"): "rejected"}

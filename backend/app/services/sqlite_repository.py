@@ -338,6 +338,26 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS concept_clusters (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  canonical_id TEXT NOT NULL,
+                  member_object_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_clusters_nb ON concept_clusters(notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_clusters_member ON concept_clusters(member_object_id);
+
+                CREATE TABLE IF NOT EXISTS concept_merge_candidates (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  canonical_a TEXT NOT NULL, canonical_b TEXT NOT NULL,
+                  score REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
                 """
             )
             # Lightweight column migrations for pre-existing databases.
@@ -1736,6 +1756,43 @@ class SQLiteRepository:
 
     def _delete_relations_for_source(self, db, source_id: str) -> None:
         db.execute("DELETE FROM knowledge_relations WHERE source_id = ?", (source_id,))
+
+    # --- Concept-cluster / merge-candidate CRUD (Task 5) -------------------
+
+    def write_clusters(self, notebook_id: str, rows: List[dict]) -> None:
+        now = _now()
+        with self._connect() as db:
+            db.execute("DELETE FROM concept_clusters WHERE notebook_id=?", (notebook_id,))
+            for r in rows:
+                db.execute(
+                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,created_at) VALUES (?,?,?,?,?,?)",
+                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"], r["canonical_name"], now))
+
+    def cluster_map(self, notebook_id: str) -> Dict[str, str]:
+        with self._connect() as db:
+            rows = db.execute("SELECT member_object_id, canonical_id FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchall()
+        return {r["member_object_id"]: r["canonical_id"] for r in rows}
+
+    def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
+        now = _now()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) VALUES (?,?,?,?,?, 'pending', ?, ?)",
+                (f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now))
+
+    def pending_merges(self, notebook_id: str) -> List[dict]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
+        return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
+
+    def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE concept_merge_candidates SET status=?, updated_at=? WHERE id=? AND notebook_id=?", (status, _now(), candidate_id, notebook_id))
+
+    def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
+        with self._connect() as db:
+            rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
+        return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
