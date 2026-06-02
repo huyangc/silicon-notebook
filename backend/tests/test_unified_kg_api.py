@@ -34,3 +34,8 @@ def test_merge_confirm_reject_endpoints(client):
     assert r.status_code in (200, 404)
     r = client.post(f"/api/notebooks/{nb}/unified-kg/merges/bogus/reject")
     assert r.status_code in (200, 404)
+
+
+def test_unified_kg_unknown_notebook_404(client):
+    assert client.post("/api/notebooks/bogus/unified-kg/rebuild").status_code == 404
+    assert client.get("/api/notebooks/bogus/unified-kg").status_code == 404

@@ -1791,6 +1791,7 @@ class SQLiteRepository:
                 (f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now))
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
+        self.get_notebook(notebook_id)
         with self._connect() as db:
             rows = db.execute("SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
         return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
@@ -1802,10 +1803,12 @@ class SQLiteRepository:
             db.execute("UPDATE concept_merge_candidates SET status=?, updated_at=? WHERE id=? AND notebook_id=?", (status, _now(), candidate_id, notebook_id))
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
+        self.get_notebook(notebook_id)
         self.set_merge_decision(notebook_id, candidate_id, "confirmed")
         self._invalidate_unified_cache(notebook_id)
 
     def reject_merge(self, notebook_id: str, candidate_id: str) -> None:
+        self.get_notebook(notebook_id)
         self.set_merge_decision(notebook_id, candidate_id, "rejected")
         self._invalidate_unified_cache(notebook_id)
 
@@ -1819,6 +1822,7 @@ class SQLiteRepository:
             self._unified_cache.pop(key, None)
 
     def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
+        self.get_notebook(notebook_id)
         cached = self._unified_cache.get((notebook_id, level))
         if cached is not None:
             return cached
@@ -1842,6 +1846,7 @@ class SQLiteRepository:
     def rebuild_unified_kg(self, notebook_id: str) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
         pending candidates (preserving confirmed/rejected). Returns #clusters."""
+        self.get_notebook(notebook_id)
         from app.services.kg_merge import cluster_concepts
         with self._connect() as db:
             crows = db.execute(
@@ -1869,6 +1874,7 @@ class SQLiteRepository:
         return len(set(res["cluster_map"].values()))
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
+        self.get_notebook(notebook_id)
         cmap = self.cluster_map(notebook_id)
         members = [oid for oid, cid in cmap.items() if cid == canonical_id]
         mset = set(members)
