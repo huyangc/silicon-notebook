@@ -38,6 +38,7 @@ type SourceSummary = {
   file_size: number;
   created_label: string;
   error_message?: string;
+  extraction_warning?: string | null;
 };
 
 type SourceElement = {
@@ -1767,6 +1768,7 @@ export default function Home() {
                           <FileText className="source-file-icon" size={20} />
                           <span className="source-title-short">{compactSourceTitle(source)}</span>
                           <span className={`source-status-dot status-${source.parse_status || source.status}`} />
+                          {source.extraction_warning && <span title={source.extraction_warning} style={{cursor:"help",marginLeft:2}}>⚠</span>}
                         </button>
                         <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
                           <Trash2 size={15} />
@@ -2095,6 +2097,9 @@ export default function Home() {
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElements.length} 个元素</span>
               </div>
+              {sourceDetail.extraction_warning && (
+                <p className="tag" style={{color:"var(--color-warning,#b45309)",background:"var(--color-warning-bg,#fef3c7)",border:"1px solid var(--color-warning-border,#fcd34d)",borderRadius:4,padding:"4px 8px",marginTop:4}}>⚠ {sourceDetail.extraction_warning}</p>
+              )}
               <div className="source-element-stack">
                 {sourceElements.length > 0 ? sourceElements.map((element) => (
                   <article className="item source-element-card" key={element.id}>
