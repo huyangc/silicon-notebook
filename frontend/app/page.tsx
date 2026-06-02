@@ -145,7 +145,7 @@ type ObjectSchema = {
 type KnowledgeRecord = {
   id: string;
   object_type: string;
-  headline: string;
+  headline?: string;
   fields: KnowledgeFieldValue[];
   status: string;
   owner?: string;
@@ -910,6 +910,7 @@ export default function Home() {
       `/notebooks/${currentNotebookId}/knowledge-types`
     );
     setKnowledgeTypes(types);
+    return types;
   }
 
   async function updateKnowledge(id: string, patch: { status?: string; owner?: string }) {
@@ -1056,10 +1057,15 @@ export default function Home() {
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
     if (mode === "rules") {
-      loadKnowledgeTypes().catch(reportError);
-      if (knowledge[knowledgeKind] == null) {
-        loadKnowledge(knowledgeKind).catch(reportError);
-      }
+      loadKnowledgeTypes().then((types) => {
+        if (!types || types.length === 0) return;
+        const available = types.map((t) => t.object_type);
+        if (!available.includes(knowledgeKind)) {
+          switchKnowledgeKind(types[0].object_type);
+        } else if (knowledge[knowledgeKind] == null) {
+          loadKnowledge(knowledgeKind).catch(reportError);
+        }
+      }).catch(reportError);
     }
   }
 
@@ -2383,7 +2389,7 @@ function AnswerView({
               {answer.related_knowledge.map((record) => (
                 <article className="item" key={record.id}>
                   <div className="tag-row"><span className="tag">{record.object_type}</span><span className="tag">{record.status}</span></div>
-                  <h3>{record.headline}</h3>
+                  <h3>{record.headline || record.id}</h3>
                   {record.evidence.length > 0 && (
                     <div className="citation">
                       <strong>Evidence</strong>
