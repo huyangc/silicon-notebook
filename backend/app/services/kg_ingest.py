@@ -7,7 +7,7 @@ import concurrent.futures as cf
 import re
 from typing import Any, List, Tuple
 
-from app.services.kg.windowing import make_windows
+from app.services.kg.windowing import windows_with_elements
 from app.services.kg.extract import extract_window
 from app.services.kg.canonicalize import canonicalize
 from app.services.kg.models import Edge, KnowledgeGraph, Node
@@ -97,20 +97,23 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                   n: int = 9000, m: int = 450) -> KnowledgeGraph:
     """Window the text, extract a KG fragment per window concurrently, then
-    canonicalize. Ungroundable nodes/edges are already dropped inside
-    extract_window (evidence located verbatim in the window)."""
-    wins = make_windows(raw_text, source_file, None, n, m)
+    canonicalize. Evidence is anchored by element-id markers: each window's
+    prose elements are numbered and the LLM emits only an int "ev" per node/edge,
+    which extract_window maps back to the element's exact text/offsets.
+    Ungroundable nodes are dropped inside extract_window."""
+    pairs = [(w, els) for w, els in windows_with_elements(raw_text, source_file,
+                                                          None, n, m) if els]
     nodes: List[Node] = []
     edges: List[Edge] = []
     failed = 0
-    if wins:
-        workers = max(1, min(_WORKERS, len(wins)))
+    if pairs:
+        workers = max(1, min(_WORKERS, len(pairs)))
         # pool.submit + per-future .result() (NOT pool.map, which aborts on the
         # first exception): one window's network failure must not abort the rest.
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(extract_window, client, raw_text, w.char_start,
-                                w.char_end, w.section_path, doc_type)
-                    for w in wins]
+            futs = [pool.submit(extract_window, client, els, w.section_path,
+                                doc_type, idx)
+                    for idx, (w, els) in enumerate(pairs)]
             for fut in futs:
                 try:
                     ns, es = fut.result()
@@ -120,5 +123,5 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                     failed += 1
     nodes, edges = canonicalize(nodes, edges, doc_id=source_file)
     return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes,
-                          edges=edges, total_windows=len(wins),
+                          edges=edges, total_windows=len(pairs),
                           failed_windows=failed)

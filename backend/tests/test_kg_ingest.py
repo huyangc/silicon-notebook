@@ -64,22 +64,20 @@ ABS = "We propose Engram, a memory architecture. Engram improves perplexity."
 
 def test_extract_graph_grounds_nodes():
     import json
+    # ABS is a single prose element (one window) -> ev:0 anchors to it.
     payload = json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram",
-             "evidence": "Engram, a memory architecture"},
+            {"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0},
             {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
-             "evidence": "Engram improves perplexity"},
-            {"local_id": "z", "type": "Concept", "name": "Ghost",
-             "evidence": "text that does not appear"},
+             "ev": 0},
+            {"local_id": "z", "type": "Concept", "name": "Ghost", "ev": 99},
         ],
-        "edges": [{"type": "about", "source": "b", "target": "a",
-                   "evidence": "Engram improves perplexity"}],
+        "edges": [{"type": "about", "source": "b", "target": "a", "ev": 0}],
     })
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
     names = {n.name for n in g.nodes}
     assert "Engram" in names and "Engram improves perplexity" in names
-    assert "Ghost" not in names           # ungroundable node dropped (evidence not in text)
+    assert "Ghost" not in names           # bad ev + name not in element -> dropped
     assert len(g.edges) == 1              # edge endpoints survived
 
 
@@ -111,25 +109,26 @@ def test_extract_graph_counts_failed_windows():
     JSON and contribute nodes. failed_windows == # raised, total_windows == #windows,
     surviving windows still produce nodes."""
     import json
-    from app.services.kg.windowing import make_windows
+    from app.services.kg.windowing import windows_with_elements
 
-    # Build a multi-section markdown so make_windows yields >=2 windows.
+    # Build a multi-section markdown so windowing yields >=2 non-empty windows.
     quote = "Engram is a memory architecture"
     section_a = "# Section A\n\n" + quote + "\n\n"
     section_b = "# Section B\n\n" + quote + " indeed.\n\n"
     text = section_a + section_b
-    wins = make_windows(text, "doc.md", None, 40, 5)
-    assert len(wins) >= 2, f"need >=2 windows, got {len(wins)}"
+    pairs = windows_with_elements(text, "doc.md", None, 40, 5)
+    n_windows = len(pairs)
+    assert n_windows >= 2, f"need >=2 windows, got {n_windows}"
 
+    # ev:0 anchors to each window's first prose element (contains the quote).
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
-                   "evidence": quote}],
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
         "edges": [],
     })
     # Fail the first window only.
     client = _FlakyClient(fail_windows={0}, payload=payload)
     g = kg_ingest.extract_graph(client, text, "doc.md", "academic", n=40, m=5)
-    assert g.total_windows == len(wins)
+    assert g.total_windows == n_windows
     assert g.failed_windows == 1
     # Surviving windows still grounded at least one Engram node.
     assert any(n.name == "Engram" for n in g.nodes)
@@ -138,8 +137,7 @@ def test_extract_graph_counts_failed_windows():
 def test_extract_graph_no_failures_zero_count():
     import json
     payload = json.dumps({
-        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
-                   "evidence": "Engram, a memory architecture"}],
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
         "edges": [],
     })
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
@@ -168,8 +166,7 @@ def test_canonicalize_merges_across_windows():
 
     payload = json.dumps({
         "nodes": [
-            {"local_id": "a", "type": "Concept", "name": "Engram",
-             "evidence": quote},
+            {"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0},
         ],
         "edges": [],
     })

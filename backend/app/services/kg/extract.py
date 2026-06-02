@@ -1,12 +1,14 @@
 """Window -> LLM KG fragment -> grounded nodes/edges. Local ids are kept so the
-caller can wire edges; the LLM's evidence quotes are located verbatim in the
-window (drop ungroundable). Node types constrained to the 4; edges to the vocab."""
+caller can wire edges. Evidence is anchored by element-id markers: the LLM emits
+only an integer "ev" label per node/edge, and the backend maps it back to that
+source element's exact text/offsets (drop ungroundable nodes). Node types
+constrained to the 4; edges to the vocab."""
 from __future__ import annotations
-import re
 from typing import Any, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node
+from app.services.kg.parsing import SourceElementQ
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
 EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
@@ -15,21 +17,12 @@ EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
 
 _KG_SCHEMA_HINT = (
     '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure",'
-    '"name":"","evidence":""}],'
-    '"edges":[{"type":"about|supports|...","source":"","target":"","evidence":""}]}'
+    '"name":"","ev":0}],'
+    '"edges":[{"type":"about|supports|...","source":"","target":"","ev":0}]}'
 )
 
-def _locate(window: str, quote: str) -> Optional[Tuple[int, str]]:
-    if not quote or len(quote.strip()) < 3:
-        return None
-    i = window.find(quote)
-    if i >= 0:
-        return i, quote
-    pat = r"\s+".join(re.escape(t) for t in quote.split())
-    m = re.search(pat, window)
-    return (m.start(), m.group(0)) if m else None
 
-def _prompt(window_text: str, section_path: str, doc_type: str) -> str:
+def _prompt(labeled_text: str, section_path: str, doc_type: str) -> str:
     return f"""Extract a knowledge-graph fragment from this {doc_type} passage
 (section: {section_path}). Use EXACTLY these node types: Concept, Claim, Formula,
 Procedure (see definitions: Concept=named entity; Claim=truth-evaluable assertion
@@ -38,27 +31,53 @@ defines(Claim->Concept), about(Claim|Formula->Concept), supports(Claim|Formula->
 part_of/composed_of/contrasts_with/kind_of(Concept->Concept), derived_from(Formula->
 Formula), depends_on/prerequisite_of, used_in(Formula->Procedure), precedes.
 
-Every node and edge MUST include "evidence": the EXACT verbatim FULL SENTENCE from
-the passage that contains the node (not a bare term). Give each node a "local_id"
-you reuse in edges. "name" carries the node's text (Concept/Procedure name, Claim
-statement, Formula expression). For an ordered Procedure, connect its consecutive
-steps with `precedes` edges (step_i -> step_{{i+1}}). Skip narrative/filler.
+The passage is given as numbered elements, one per line, each prefixed with its
+integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
+of the element that best contains it (NOT a quote, NOT text). Give each node a
+"local_id" you reuse in edges. "name" carries the node's text (Concept/Procedure
+name, Claim statement, Formula expression). For an ordered Procedure, connect its
+consecutive steps with `precedes` edges (step_i -> step_{{i+1}}). Skip narrative/filler.
 
 Passage:
-\"\"\"{window_text}\"\"\"
+\"\"\"{labeled_text}\"\"\"
 
 Return JSON ONLY:
-{{"nodes":[{{"local_id":"..","type":"..","name":"..","evidence":"<verbatim>"}}],
- "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","evidence":"<verbatim>"}}]}}
+{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0}}],
+ "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","ev":0}}]}}
 """
 
-def extract_window(client: Any, source_text: str, win_start: int, win_end: int,
-                   section_path: str, doc_type: str) -> Tuple[List[Node], List[Edge]]:
-    window = source_text[win_start:win_end]
+
+def _resolve(elements: List[SourceElementQ], ev: Any,
+             name: str) -> Optional[SourceElementQ]:
+    try:
+        i = int(ev)
+    except Exception:
+        i = -1
+    if 0 <= i < len(elements):
+        return elements[i]
+    # fallback: element whose text contains the node name (normalized substring)
+    nn = " ".join((name or "").split()).lower()
+    if nn:
+        for e in elements:
+            if nn in " ".join(e.text.split()).lower():
+                return e
+    return None
+
+
+def _ev(el: SourceElementQ) -> Evidence:
+    return Evidence(file=el.file, char_start=el.char_start, char_end=el.char_end,
+                    line_start=el.line_start, line_end=el.line_end, quote=el.text)
+
+
+def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
+                   doc_type: str, win_idx: int = 0) -> Tuple[List[Node], List[Edge]]:
+    if not elements:
+        return [], []
+    labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
     try:
         # OpenAICompatibleClient.chat_json takes (messages, response_schema_hint).
         raw = client.chat_json(
-            [{"role": "user", "content": _prompt(window, section_path, doc_type)}],
+            [{"role": "user", "content": _prompt(labeled, section_path, doc_type)}],
             _KG_SCHEMA_HINT,
         )
         data = safe_json(raw)
@@ -71,18 +90,12 @@ def extract_window(client: Any, source_text: str, win_start: int, win_end: int,
     for it in (data.get("nodes") or []):
         if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
             continue
-        loc = _locate(window, str(it.get("evidence", "")))
-        if loc is None:
+        el = _resolve(elements, it.get("ev"), str(it.get("name", "")))
+        if el is None:
             continue
-        local, matched = loc
-        cstart = win_start + local
-        line = source_text.count("\n", 0, cstart) + 1
-        nid = f"L{win_start}-{len(nodes)}"
-        ev = Evidence(file="", char_start=cstart, char_end=cstart + len(matched),
-                      line_start=line, line_end=source_text.count("\n", 0, cstart + len(matched)) + 1,
-                      quote=matched)
+        nid = f"W{win_idx}-{len(nodes)}"
         nodes.append(Node(id=nid, type=it["type"], name=str(it.get("name", "")),
-                          section_path=section_path, evidence=[ev]))
+                          section_path=section_path, evidence=[_ev(el)]))
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     edges: List[Edge] = []
@@ -92,6 +105,8 @@ def extract_window(client: Any, source_text: str, win_start: int, win_end: int,
         s = by_local.get(str(it.get("source"))); t = by_local.get(str(it.get("target")))
         if not s or not t or s == t:
             continue
-        edges.append(Edge(id=f"E{win_start}-{len(edges)}", type=it["type"],
-                          source_id=s, target_id=t))
+        el = _resolve(elements, it.get("ev"), "")
+        ev = [_ev(el)] if el is not None else []
+        edges.append(Edge(id=f"E{win_idx}-{len(edges)}", type=it["type"],
+                          source_id=s, target_id=t, evidence=ev))
     return nodes, edges

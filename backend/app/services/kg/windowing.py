@@ -1,8 +1,10 @@
 """Chapter -> contiguous N-char windows (M overlap) over prose, tagged by section."""
 from __future__ import annotations
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pydantic import BaseModel
-from app.services.kg.parsing import parse_elements, build_section_tree
+from app.services.kg.parsing import parse_elements, build_section_tree, SourceElementQ
+
+_PROSE_TYPES = ("paragraph", "list_item", "formula", "table", "figure_caption")
 
 class Window(BaseModel):
     char_start: int
@@ -25,8 +27,7 @@ def make_windows(text: str, source_file: str, line_range: Optional[List[int]],
     sections = build_section_tree(elements)
     headings = [e for e in elements if e.type == "heading"]
     sec_by_line = sorted((h.line_start, s.path) for h, s in zip(headings, sections))
-    prose = [e for e in elements if e.type in ("paragraph", "list_item", "formula",
-                                               "table", "figure_caption")]
+    prose = [e for e in elements if e.type in _PROSE_TYPES]
     # group prose elements by enclosing section, window each section's span
     windows: List[Window] = []
     by_sec = {}
@@ -46,3 +47,22 @@ def make_windows(text: str, source_file: str, line_range: Optional[List[int]],
             s += step
     windows.sort(key=lambda w: w.char_start)
     return windows
+
+
+def windows_with_elements(
+    text: str, source_file: str, line_range: Optional[List[int]] = None,
+    n: int = 9000, m: int = 450,
+) -> List[Tuple[Window, List[SourceElementQ]]]:
+    """Like make_windows, but pairs each Window with the prose SourceElementQs
+    whose span overlaps it (sorted by char_start). Reuses make_windows so the
+    window boundaries are identical."""
+    wins = make_windows(text, source_file, line_range, n, m)
+    elements = parse_elements(text, source_file, line_range)
+    prose = [e for e in elements if e.type in _PROSE_TYPES]
+    pairs: List[Tuple[Window, List[SourceElementQ]]] = []
+    for w in wins:
+        els = [e for e in prose
+               if e.char_start < w.char_end and e.char_end > w.char_start]
+        els.sort(key=lambda e: e.char_start)
+        pairs.append((w, els))
+    return pairs
