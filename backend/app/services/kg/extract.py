@@ -37,9 +37,11 @@ defines(Claim->Concept), about(Claim|Formula->Concept), supports(Claim|Formula->
 part_of/composed_of/contrasts_with/kind_of(Concept->Concept), derived_from(Formula->
 Formula), depends_on/prerequisite_of, used_in(Formula->Procedure), precedes.
 
-Every node and edge MUST include "evidence": an EXACT verbatim substring copied from
-the passage. Give each node a "local_id" you reuse in edges. "name" carries the node's
-text (Concept/Procedure name, Claim statement, Formula expression). Skip narrative/filler.
+Every node and edge MUST include "evidence": the EXACT verbatim FULL SENTENCE from
+the passage that contains the node (not a bare term). Give each node a "local_id"
+you reuse in edges. "name" carries the node's text (Concept/Procedure name, Claim
+statement, Formula expression). For an ordered Procedure, connect its consecutive
+steps with `precedes` edges (step_i -> step_{{i+1}}). Skip narrative/filler.
 
 Passage:
 \"\"\"{window_text}\"\"\"
