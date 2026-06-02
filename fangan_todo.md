@@ -95,4 +95,4 @@
 - [ ] **真模型验证**：配 `EMBED_PROVIDER=local`(bge-m3, 需装 sentence-transformers + 首次下模型) 或 `dashscope`(text-embedding-v4) 后，跑真机 smoke 看语义合并质量 + 灰区候选量(FakeEmbedder 下噪声候选很多，真模型应大幅减少)。
 - [ ] **性能跟进**：`rebuild` 的 pending 候选写入改批量单事务(当前每候选一连接，pending 大时偏慢)；rep-pair 配对在 _MAX_REPS 上限附近是 O(reps²) Python 循环，必要时再优化。
 - [ ] **前端可视化视图**（另起 plan）：全屏三区(过滤/搜索/待审 · react-force-graph-2d 概念画布 · 证据下钻+合并审核)，接 `/unified-kg`·`/concepts/{id}/detail`·pending/confirm/reject。
-- [x] **前端可视化视图（已落地）**：`frontend/app/page.tsx` 全屏「知识图谱」视图——左栏搜索+待确认合并、中区 react-force-graph-2d 概念力导图(按类型上色/按度数定大小)、右栏概念详情(成员/挂载断言公式/证据)；合并/拒绝即时重算。入口由工作区「关系图」按钮改为「知识图谱」。`tsc --noEmit` + `next build` 通过。plan `docs/superpowers/plans/2026-06-02-kg-viz-frontend.md`。EOF
+- [x] **前端可视化视图（已落地）**：`frontend/app/page.tsx` 全屏「知识图谱」视图——左栏搜索+待确认合并、中区 react-force-graph-2d 概念力导图(按类型上色/按度数定大小)、右栏概念详情(成员/挂载断言公式/证据)；合并/拒绝即时重算。入口由工作区「关系图」按钮改为「知识图谱」。`tsc --noEmit` + `next build` 通过。plan `docs/superpowers/plans/2026-06-02-kg-viz-frontend.md`。
