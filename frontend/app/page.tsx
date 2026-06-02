@@ -227,7 +227,7 @@ type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
 type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
 type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
-type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number };
+type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; element_text?: string; confidence: number };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
@@ -325,12 +325,15 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
+type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: { quoted_span: string; source_title: string; element_text: string }[]; definition: string | null; steps: { name: string; element_text: string }[] | null };
+
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
 const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=concept`);
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
 const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
 const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
 const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
+const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
 
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
@@ -422,6 +425,7 @@ export default function Home() {
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [selectedConcept, setSelectedConcept] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
+  const [nodeCtx, setNodeCtx] = useState<NodeContext | null>(null);
   const [kgSearch, setKgSearch] = useState("");
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
@@ -1064,7 +1068,7 @@ export default function Home() {
   async function openKgView() {
     if (!currentNotebookId) return;
     setKgViewOpen(true);
-    setSelectedConcept(null); setConceptDetail(null);
+    setSelectedConcept(null); setConceptDetail(null); setNodeCtx(null);
     try {
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
@@ -1075,8 +1079,11 @@ export default function Home() {
   async function selectConcept(canonicalId: string) {
     if (!currentNotebookId) return;
     setSelectedConcept(canonicalId);
+    setNodeCtx(null);
     try { setConceptDetail(await fetchConceptDetail(currentNotebookId, canonicalId)); }
     catch (err) { reportError(err); }
+    try { setNodeCtx(await fetchNodeContext(currentNotebookId, canonicalId)); }
+    catch { /* node context is best-effort */ }
   }
 
   async function decideMerge(candidateId: string, confirm: boolean) {
@@ -1974,9 +1981,25 @@ export default function Home() {
                   {conceptDetail.attached.length === 0 ? <p className="tool-hint">无</p> : conceptDetail.attached.map((a) => (
                     <div className="checklist-row" key={a.id}><span className="tag">{a.object_type}</span> {String(a.payload.name ?? "")} <em>({a.edge_type})</em></div>
                   ))}
+                  {conceptDetail.attached.filter((a) => a.object_type === "procedure").length > 0 && (
+                    <>
+                      <h4>流程</h4>
+                      {conceptDetail.attached.filter((a) => a.object_type === "procedure").map((a) => (
+                        <div className="checklist-row" key={a.id}>
+                          <button className="sort-button" onClick={async () => { try { setNodeCtx(await fetchNodeContext(currentNotebookId!, a.id)); } catch {} }}>{String(a.payload.name ?? "")} 的步骤</button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {nodeCtx?.object_type === "procedure" && nodeCtx.steps && (
+                    <div className="stack"><h4>{nodeCtx.name} — 步骤</h4>
+                      {nodeCtx.steps.map((s, i) => (<div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>))}
+                    </div>
+                  )}
+                  {nodeCtx?.definition && (<><h4>定义</h4><p className="kg-evidence">{nodeCtx.definition}</p></>)}
                   <h4>证据</h4>
                   {conceptDetail.evidence.slice(0, 20).map((ev, i) => (
-                    <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.quoted_span}</span></div>
+                    <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.element_text || ev.quoted_span}</span></div>
                   ))}
                 </div>
               )}
