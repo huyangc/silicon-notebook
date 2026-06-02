@@ -10,8 +10,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "local")   # embedder_configured=True
+    monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)   # inject deterministic embedder
+    r.embedder = FakeEmbedder(dim=16)               # inject; no real model loads (lazy)
     return r
 
 def test_store_kg_batch_embeds_nodes(repo):

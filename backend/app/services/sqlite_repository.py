@@ -1123,6 +1123,8 @@ class SQLiteRepository:
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
         """Batch-embed object payload names into knowledge_embeddings (best-effort)."""
+        if not self.settings.embedder_configured:
+            return
         texts, ids = [], []
         for it in items:
             name = (it["payload"].get("name") or "").strip()
@@ -2145,6 +2147,8 @@ class SQLiteRepository:
         return NotebookSearchResponse(query=query, hits=hits[:20])
 
     def _embed_query(self, query: str) -> Optional[List[float]]:
+        if not self.settings.embedder_configured:
+            return None
         try:
             return self.embedder.embed_query(query[:2000])
         except Exception:
