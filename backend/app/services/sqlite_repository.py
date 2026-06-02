@@ -1801,6 +1801,14 @@ class SQLiteRepository:
         with self._connect() as db:
             db.execute("UPDATE concept_merge_candidates SET status=?, updated_at=? WHERE id=? AND notebook_id=?", (status, _now(), candidate_id, notebook_id))
 
+    def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
+        self.set_merge_decision(notebook_id, candidate_id, "confirmed")
+        self._invalidate_unified_cache(notebook_id)
+
+    def reject_merge(self, notebook_id: str, candidate_id: str) -> None:
+        self.set_merge_decision(notebook_id, candidate_id, "rejected")
+        self._invalidate_unified_cache(notebook_id)
+
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self._connect() as db:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()

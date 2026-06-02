@@ -99,3 +99,17 @@ def test_concept_detail_lists_members_and_attached(repo):
     assert detail["canonical_name"] == "MOSFET"
     assert any(x["object_type"]=="claim" for x in detail["attached"])
     assert detail["evidence"]
+
+def test_confirm_merge_unions_clusters_on_rebuild(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id":"a","object_type":"concept","payload":{"name":"current mirror","section_path":""},"evidence":[]}], [])
+    repo.store_kg(nb.id, None, [{"local_id":"b","object_type":"concept","payload":{"name":"current source","section_path":""},"evidence":[]}], [])
+    repo.rebuild_unified_kg(nb.id)
+    cmap = repo.cluster_map(nb.id)
+    a_cid, b_cid = cmap[list(cmap)[0]], cmap[list(cmap)[1]]
+    assert a_cid != b_cid                                # distinct names -> separate clusters
+    repo.write_merge_candidate(nb.id, a_cid, b_cid, 0.84)
+    cand = repo.pending_merges(nb.id)[0]
+    repo.confirm_merge(nb.id, cand["id"])
+    repo.rebuild_unified_kg(nb.id)
+    assert len(set(repo.cluster_map(nb.id).values())) == 1   # forced union held across rebuild
