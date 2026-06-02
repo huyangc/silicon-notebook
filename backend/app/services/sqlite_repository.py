@@ -880,11 +880,11 @@ class SQLiteRepository:
             t = time.perf_counter()
             stage("extract", "start", t)
             self._run_extraction(source_id)
+            stage("extract", "done", t)
             try:
                 self.rebuild_unified_kg(self.get_source(source_id).notebook_id)
             except Exception:
-                pass  # rebuild best-effort; never fail ingestion
-            stage("extract", "done", t)
+                self.event_log.logger.exception("unified-KG rebuild failed for source %s", source_id)
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             empty_hint = ""
@@ -1876,6 +1876,7 @@ class SQLiteRepository:
                            "payload": json.loads(r["payload"] or "{}"),
                            "evidence": json.loads(r["evidence"] or "[]")} for r in rows}
         attached = []
+        seen_attached: set[str] = set()
         for rel in self.relations_for_notebook(notebook_id):
             s, t = rel["source_object_id"], rel["target_object_id"]
             if s in mset and t not in mset:
@@ -1884,7 +1885,8 @@ class SQLiteRepository:
                 other = s
             else:
                 continue
-            if other in by_id and by_id[other]["object_type"] != "concept":
+            if other in by_id and by_id[other]["object_type"] != "concept" and other not in seen_attached:
+                seen_attached.add(other)
                 attached.append({**by_id[other], "edge_type": rel["edge_type"]})
         evidence = [ev for oid in members for ev in by_id.get(oid, {}).get("evidence", [])]
         return {"canonical_id": canonical_id, "canonical_name": name,
