@@ -25,11 +25,19 @@ _KG_SCHEMA_HINT = (
 def _prompt(labeled_text: str, section_path: str, doc_type: str) -> str:
     return f"""Extract a knowledge-graph fragment from this {doc_type} passage
 (section: {section_path}). Use EXACTLY these node types: Concept, Claim, Formula,
-Procedure (see definitions: Concept=named entity; Claim=truth-evaluable assertion
-about concepts; Formula=equation; Procedure=ordered process). Edges (source->target):
-defines(Claim->Concept), about(Claim|Formula->Concept), supports(Claim|Formula->Claim),
-part_of/composed_of/contrasts_with/kind_of(Concept->Concept), derived_from(Formula->
-Formula), depends_on/prerequisite_of, used_in(Formula->Procedure), precedes.
+Procedure (see definitions: Concept=a NAMED, reusable technical entity — a method,
+mechanism, component, named model/structure/distribution; Claim=truth-evaluable
+assertion about concepts; Formula=equation; Procedure=ordered process). Edges
+(source->target): defines(Claim->Concept), about(Claim|Formula->Concept),
+supports(Claim|Formula->Claim), part_of/composed_of/contrasts_with/kind_of(Concept->
+Concept), derived_from(Formula->Formula), depends_on/prerequisite_of,
+used_in(Formula->Procedure), precedes.
+
+Be SELECTIVE with Concepts: emit a Concept only for a distinctive named entity. Do
+NOT emit Concepts for generic/common terms (e.g. training, inference, buffer,
+latency, forward pass, backward pass, hidden state, input sequence, host memory) or
+for trivial sub-parts of another concept. In contrast, capture EVERY Formula
+(equation) and EVERY Procedure (process/phase) present — do not skip those.
 
 The passage is given as numbered elements, one per line, each prefixed with its
 integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
