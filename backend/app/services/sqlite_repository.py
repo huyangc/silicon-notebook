@@ -1929,6 +1929,69 @@ class SQLiteRepository:
                 "members": [by_id[o] for o in members if o in by_id],
                 "attached": attached, "evidence": evidence}
 
+    def _element_texts(self, db, element_ids):
+        ids = [e for e in element_ids if e]
+        if not ids:
+            return {}, {}
+        ph = ",".join("?" for _ in ids)
+        rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
+        texts = {r["id"]: r["text"] for r in rows}
+        order_rows = db.execute(
+            "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
+            "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
+            "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
+            "ORDER BY se.created_at ASC, se.id ASC", (ids[0],)).fetchall()
+        ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
+        return texts, ordinal
+
+    def _enrich_evidence(self, db, evidence):
+        texts, _ = self._element_texts(db, [e.get("element_id") for e in evidence])
+        out = []
+        for e in evidence:
+            out.append({"quoted_span": e.get("quoted_span", ""),
+                        "source_title": e.get("source_title", "") or e.get("source_id", ""),
+                        "element_text": texts.get(e.get("element_id", ""), e.get("quoted_span", "")),
+                        "section_path": ""})
+        return out
+
+    def node_context(self, notebook_id, object_id):
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            row = db.execute("SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE id=? AND notebook_id=?", (object_id, notebook_id)).fetchone()
+            if row is None:
+                raise KeyError(object_id)
+            obj_type = row["object_type"]; payload = json.loads(row["payload"] or "{}")
+            section = payload.get("section_path", "")
+            occurrences = self._enrich_evidence(db, json.loads(row["evidence"] or "[]"))
+            result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
+                      "section_path": section, "occurrences": occurrences, "definition": None, "steps": None}
+            if obj_type == "concept":
+                drow = db.execute(
+                    "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
+                    "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
+                if drow is not None:
+                    dpay = json.loads(drow["payload"] or "{}")
+                    den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
+                    result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
+            if obj_type == "procedure":
+                prows = db.execute(
+                    "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
+                steps = []
+                for pr in prows:
+                    ppay = json.loads(pr["payload"] or "{}")
+                    if ppay.get("section_path", "") != section:
+                        continue
+                    ev = json.loads(pr["evidence"] or "[]")
+                    texts, ordinal = self._element_texts(db, [e.get("element_id") for e in ev])
+                    first_eid = ev[0].get("element_id") if ev else ""
+                    steps.append({"name": ppay.get("name", ""), "element_text": texts.get(first_eid, ""),
+                                  "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
+                steps.sort(key=lambda s: s["_ord"])
+                for s in steps:
+                    s.pop("_ord", None)
+                result["steps"] = steps
+            return result
+
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
         oid = f"ko-{uuid4().hex[:10]}"
