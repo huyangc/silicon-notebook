@@ -79,7 +79,7 @@ def health() -> dict:
         "status": "ok",
         "environment": settings.environment,
         "llm_configured": settings.llm_configured,
-        "embedding_configured": settings.embedding_configured,
+        "embedding_configured": settings.embedder_configured,
     }
 
 

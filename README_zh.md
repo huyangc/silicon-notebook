@@ -154,9 +154,18 @@ LLM 使用 OpenAI-compatible 配置：
 OPENAI_COMPAT_BASE_URL
 OPENAI_COMPAT_API_KEY
 OPENAI_COMPAT_MODEL
-OPENAI_COMPAT_EMBEDDING_MODEL
 OPENAI_COMPAT_TIMEOUT_SECONDS
 SILICON_NOTEBOOK_CORS_ORIGINS
+```
+
+向量检索（语义召回）单独配置：
+
+```text
+EMBED_PROVIDER          # ""=关闭（仅关键词） | local | dashscope
+EMBED_MODEL             # 如 BAAI/bge-m3（local）或 API 模型名
+EMBED_BASE_URL          # dashscope / OpenAI 兼容的 embedding 端点
+EMBED_API_KEY
+EMBED_DIM               # 须与模型输出维度一致（默认 1024）
 ```
 
 日志相关配置：

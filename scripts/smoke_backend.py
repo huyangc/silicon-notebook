@@ -146,7 +146,6 @@ def check_object_schemas() -> None:
                 openai_compat_base_url="",
                 openai_compat_api_key="",
                 openai_compat_model="",
-                openai_compat_embedding_model="",
                 mineru_mode="off",
             )
         )
@@ -231,7 +230,6 @@ def check_knowledge_graph() -> None:
                 openai_compat_base_url="",
                 openai_compat_api_key="",
                 openai_compat_model="",
-                openai_compat_embedding_model="",
                 mineru_mode="off",
             )
         )
@@ -273,7 +271,6 @@ def check_api_layer() -> None:
             "OPENAI_COMPAT_BASE_URL": "",
             "OPENAI_COMPAT_API_KEY": "",
             "OPENAI_COMPAT_MODEL": "",
-            "OPENAI_COMPAT_EMBEDDING_MODEL": "",
             "MINERU_MODE": "off",
             "DATABASE_URL": f"sqlite:///{tmp}/api.db",
             "SILICON_NOTEBOOK_STORAGE_DIR": f"{tmp}/storage",
@@ -639,7 +636,6 @@ def check_pipeline_event_logging() -> None:
                 openai_compat_base_url="",
                 openai_compat_api_key="",
                 openai_compat_model="",
-                openai_compat_embedding_model="",
             )
         )
         notebook = repo.create_notebook(NotebookCreate(name="Pipe", purpose="p", primary_domain="d"))
@@ -706,7 +702,6 @@ def main() -> None:
                 openai_compat_base_url="",
                 openai_compat_api_key="",
                 openai_compat_model="",
-                openai_compat_embedding_model="",
             )
         )
         # A fresh database must be clean for a real team: only the local user is
@@ -1005,7 +1000,6 @@ def main() -> None:
                 openai_compat_base_url="",
                 openai_compat_api_key="",
                 openai_compat_model="",
-                openai_compat_embedding_model="",
             )
         )
         assert restarted.get_notebook(notebook.id).name == "Smoke notebook"

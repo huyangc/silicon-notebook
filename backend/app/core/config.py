@@ -25,10 +25,6 @@ class Settings(BaseSettings):
     openai_compat_base_url: str = Field("", env="OPENAI_COMPAT_BASE_URL")
     openai_compat_api_key: str = Field("", env="OPENAI_COMPAT_API_KEY")
     openai_compat_model: str = Field("", env="OPENAI_COMPAT_MODEL")
-    openai_compat_embedding_model: str = Field(
-        "",
-        env="OPENAI_COMPAT_EMBEDDING_MODEL",
-    )
     openai_compat_timeout_seconds: int = Field(
         60,
         env="OPENAI_COMPAT_TIMEOUT_SECONDS",
@@ -99,14 +95,6 @@ class Settings(BaseSettings):
             self.openai_compat_base_url
             and self.openai_compat_api_key
             and self.openai_compat_model
-        )
-
-    @property
-    def embedding_configured(self) -> bool:
-        return bool(
-            self.openai_compat_base_url
-            and self.openai_compat_api_key
-            and self.openai_compat_embedding_model
         )
 
     @property

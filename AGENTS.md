@@ -203,9 +203,10 @@ LLM access must be OpenAI-compatible and configurable through environment variab
 OPENAI_COMPAT_BASE_URL
 OPENAI_COMPAT_API_KEY
 OPENAI_COMPAT_MODEL
-OPENAI_COMPAT_EMBEDDING_MODEL
 OPENAI_COMPAT_TIMEOUT_SECONDS
 ```
+
+Embeddings are configured separately via the `EMBED_*` vars (`EMBED_PROVIDER` ""=off / local / dashscope, plus `EMBED_MODEL`, `EMBED_BASE_URL`, `EMBED_API_KEY`, `EMBED_DIM`) and accessed through the `Embedder` abstraction (`app/services/embedding.py`), not `LLMClient`.
 
 Business logic should call a provider adapter/client, not hard-code a specific model vendor.
 

@@ -125,38 +125,3 @@ class OpenAICompatibleClient:
             record["error"] = f"{type(exc).__name__}: {exc}"
             logger.log(record)
             raise
-
-    def embed(self, text: str) -> List[float]:
-        if not (
-            self.settings.openai_compat_base_url
-            and self.settings.openai_compat_api_key
-            and self.settings.openai_compat_embedding_model
-        ):
-            raise RuntimeError("Embedding model is not configured")
-        model = self.settings.openai_compat_embedding_model
-        logger = self.interaction_logger
-        record: Dict[str, Any] = {
-            "ts": datetime.now().isoformat(),
-            "id": new_interaction_id(),
-            "kind": "embed",
-            "model": model,
-            "input_chars": len(text or ""),
-        }
-        start = time.perf_counter()
-        try:
-            response = self.client().embeddings.create(model=model, input=text)
-            vector = list(response.data[0].embedding)
-            record["status"] = "ok"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
-            record["dims"] = len(vector)
-            usage = _usage_dict(response)
-            if usage:
-                record["usage"] = usage
-            logger.log(record)
-            return vector
-        except Exception as exc:
-            record["status"] = "error"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
-            record["error"] = f"{type(exc).__name__}: {exc}"
-            logger.log(record)
-            raise
