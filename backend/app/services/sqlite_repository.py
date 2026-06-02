@@ -1786,6 +1786,8 @@ class SQLiteRepository:
         return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
 
     def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
+        if status not in ("confirmed", "rejected"):
+            raise ValueError(f"invalid merge status: {status!r}")
         with self._connect() as db:
             db.execute("UPDATE concept_merge_candidates SET status=?, updated_at=? WHERE id=? AND notebook_id=?", (status, _now(), candidate_id, notebook_id))
 

@@ -43,3 +43,10 @@ def test_cluster_and_candidate_crud(repo):
     repo.set_merge_decision(nb.id, pend[0]["id"], "rejected")
     assert repo.pending_merges(nb.id) == []
     assert repo.decided_pairs(nb.id) == {("K1", "K2"): "rejected"}
+
+def test_set_merge_decision_rejects_bad_status(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.85)
+    cid = repo.pending_merges(nb.id)[0]["id"]
+    with pytest.raises(ValueError):
+        repo.set_merge_decision(nb.id, cid, "maybe")
