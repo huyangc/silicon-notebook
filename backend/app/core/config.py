@@ -34,6 +34,12 @@ class Settings(BaseSettings):
         env="OPENAI_COMPAT_TIMEOUT_SECONDS",
     )
 
+    embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""|fake|local|dashscope
+    embed_model: str = Field("", env="EMBED_MODEL")
+    embed_base_url: str = Field("", env="EMBED_BASE_URL")
+    embed_api_key: str = Field("", env="EMBED_API_KEY")
+    embed_dim: int = Field(1024, env="EMBED_DIM")
+
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief
     # console line. Defaults on; no-op when the LLM is not configured.
@@ -102,6 +108,10 @@ class Settings(BaseSettings):
             and self.openai_compat_api_key
             and self.openai_compat_embedding_model
         )
+
+    @property
+    def embedder_configured(self) -> bool:
+        return self.embed_provider in ("local", "dashscope")
 
     @property
     def mineru_enabled(self) -> bool:
