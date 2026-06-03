@@ -21,17 +21,33 @@
 | `/notebooks/{id}/search` | `search_notebook()` | 关键词/语义搜索 | 否 |
 
 ## 2. `/ask` 的实际流程（主消费路径，逐步）
-入参：`question` + 可选 `scenario`（k→v 标签）。`query = question + scenario tags`。
+入参：`question`（+ 当前还有个 legacy `scenario` k→v 标签，**已决定移除**，见 §4-11）。当前 `query = question + scenario 值`；移除后 `query = question`。
 
 1. **取候选**：`_knowledge_objects(db, nb, t)` 按 4 类各取**全部** `approved` 对象（注意：是**原始逐文档对象**，**不是** unified 簇）。同时 `_gather_elements` 取来源元素。
-2. **向量化** query（`_embed_query`），取节点向量 `_knowledge_vectors` + 元素向量 `_element_vectors`。
-3. **逐类型打分**（`retrieval.score_knowledge`）：
-   - `keyword = keyword_score(query, name + 证据文本)`（CJK 分词重叠）。
-   - `semantic = max cosine(query, 节点payload向量 或 任一证据element向量)`。
-   - `relevance = _fuse(keyword, semantic)`（W_KEYWORD=? / W_SEMANTIC=0.6，按激活信号归一化）；`relevance < RELEVANCE_FLOOR(0.12)` 丢弃。
-   - `final = relevance × (1 + 0.5 × structured_boost(scenario,payload))`（场景软加权）。
-   - 类型权重 `_TYPE_WEIGHT` 参与排序。
-4. **每类型截断 top-K**：`_TOP_PER_TYPE = {claim:5, formula:5, procedure:4, concept:4}` → `top_hits`（≤18）。
+
+2. **向量化（语义信号怎么算）**：所有东西用**同一个 embedder**（text-embedding-v4 / bge）映到**同一向量空间**。涉及三种向量：
+   - `query_vector = _embed_query(question)`；
+   - `knowledge_vectors[obj_id]`：**节点自身文本**（payload，主要是 name）的向量，存 `knowledge_embeddings`（缺失时惰性回填）；
+   - `element_vectors[elem_id]`：**原文句子/段落**的向量，存 `element_embeddings`。节点经其 **evidence 的 `element_id`** 关联到这些元素。
+   - 单个对象的语义分 = **两条路取最大**：
+     `semantic(obj) = max( cosine(q, knowledge_vectors[obj]), max_e cosine(q, element_vectors[obj.evidence[e].element_id]) )`
+   - 为什么两条路：concept 节点常只有裸名（如 "MoE"），向量很薄；它**所在的原文句子**信息量大得多，所以也拿 query 去比证据元素的向量，谁高用谁。无 embedder → `query_vector=None` → `semantic=0`，退化为纯关键词。
+
+3. **逐类型打分**（对**每个类型单独**跑 `score_knowledge`，再各取 top-K）：
+   ```
+   for t in (claim, formula, procedure, concept):
+       scored = score_knowledge(query, 该类型全部对象, t, ...)   # 按 score 降序
+       top_hits += scored[: TOP_PER_TYPE[t]]
+   ```
+   `score_knowledge` 对每个对象：
+   - `keyword = keyword_score(query, name+证据文本)` = query token（CJK 分词）命中比例，0..1。
+   - `semantic` = §2.2 的两路 max-cosine，0..1。
+   - `relevance = _fuse(keyword, semantic)` = 有向量时 `(0.4·kw + 0.6·sem)/(0.4+0.6)`，无向量时就是 `kw`（按激活信号归一化，避免纯关键词被压到 0.4 上限）。
+   - `relevance < RELEVANCE_FLOOR(0.12)` → 丢弃。
+   - `score = relevance × (1 + 0.5 × structured_boost(scenario))`（scenario 软加权，**随 scenario 一起移除**）。
+   - 最终 `scored.sort(key=score, desc)`。**注意：`_TYPE_WEIGHT`(claim1.0/formula1.0/procedure0.7/concept0.5) 没参与这个排序**，且选取是「逐类型 top-K」→ 同类型内权重恒定，**实际不影响任何选择**（见 §4-12）。
+
+4. **每类型截断 top-K**：`_TOP_PER_TYPE = {claim:5, formula:5, procedure:4, concept:4}` → `top_hits`（≤18）。**固定配比**：无论问题是什么，都按这个比例凑（见 §4-11）。
 5. **1-hop 扩展**：对 `top_hits` 的 id，扫 `knowledge_relations`，把**任一端命中**的边的另一端加入 `neighbour_ids`（不分边类型、不分方向、不打分）。取这些邻居对象。
 6. **组装 `related_knowledge`**：hits 优先 + 邻居，去重，截断 12。
 7. **引用**：从 `top_hits` 的 evidence 元素生成 `citations`（element 级）。
@@ -61,6 +77,10 @@
 ### C. 合成 / 证据
 9. **富信息没进答案**：`node_context`（所在句子 / concept 定义 / procedure 有序步骤）**只在可视化用**，`/ask` 的合成只拿到 name+payload+8 条原始元素——procedure 的步骤、concept 的定义**没喂给答题 LLM**。
 10. **结论是单串、引用是 element 级**：没有「每个论断绑定到具体证据」的逐句 citation。
+
+### D. 简化 / 误导项（已确认）
+11. **scenario 入参移除**（用户确认）：`scenario`(k→v) 是旧规则治理产品遗留（字段 domain/block_type/package_type/…）。当前被拼进 query + 驱动 `structured_boost`。KG 问答**直接 `query = question`**，删 scenario 参数与 structured_boost。
+12. **`_TYPE_WEIGHT` 当前无效**：排序只按 `score`，且选取是逐类型 top-K → 同类型内权重恒定，**不影响任何选择**。要么真正用起来（改全局统一排序，把 type 当软先验），要么删掉以免误导。
 
 ## 5. 一句话总结（待你确认）
 现在的「使用」= **混合检索（关键词+向量，逐类型 top-K）+ 一圈无类型邻居 + 把名字丢给 LLM 写一段话**。图谱的**边语义、跨文档合并、节点富信息**这三块在问答路径上基本闲置；可视化路径用了合并和富信息，但和问答各走各的。讨论方向：要不要把 `/ask` 改成「概念锚定→按边类型做有意义的遍历→带富上下文+结构合成→逐句引用」，以及问答是否切到 unified 簇。
