@@ -71,7 +71,13 @@ def schema_induction_prompt(existing_types: list, sample_block: str) -> str:
 ANSWER_SCHEMA_HINT = '{"answer":"","grounded":true}'
 
 
-def answer_prompt(question: str, context_block: str) -> str:
+def answer_prompt(question: str, context_block: str, history_block: str = "") -> str:
+    history_section = (
+        "Prior conversation (for context; the current question may refer to it):\n"
+        f"{history_block}\n\n"
+        if history_block
+        else ""
+    )
     return (
         "You answer an engineer's question using the notebook knowledge below, "
         "and you may reason beyond it.\n"
@@ -84,6 +90,7 @@ def answer_prompt(question: str, context_block: str) -> str:
         "3. If the items don't cover the question, still answer from general "
         "knowledge and set grounded=false; otherwise grounded=true.\n"
         "4. Answer in the question's language. Be concrete.\n\n"
+        f"{history_section}"
         f"Question: {question}\n\n"
         f"Knowledge items (id: [type] name — context):\n{context_block}\n\n"
         'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'
