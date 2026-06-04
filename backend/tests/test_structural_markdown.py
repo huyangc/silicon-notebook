@@ -82,3 +82,26 @@ def test_list_items_split():
     blocks = parse_blocks(SAMPLE)
     items = [b for b in blocks if b.type == "list_item"]
     assert {b.text for b in items} == {"bullet one", "bullet two"}
+
+
+def test_list_items_no_duplicate_blocks():
+    blocks = parse_blocks(SAMPLE)
+    bullet_paras = [b for b in blocks if b.type == "paragraph" and b.text in ("bullet one", "bullet two")]
+    assert bullet_paras == []          # 列表项不应再产出重复 paragraph
+    items = [b for b in blocks if b.type == "list_item"]
+    assert len(items) == 2
+
+
+def test_empty_alt_image_still_emitted():
+    blocks = parse_blocks("![](images/only.png)\n")
+    imgs = [b for b in blocks if b.type == "image"]
+    assert len(imgs) == 1
+    assert imgs[0].metadata.get("src") == "images/only.png"
+    assert imgs[0].text                 # 非空（回退到 src），不静默丢弃
+
+
+def test_orphan_anchor_attached_to_next_block():
+    blocks = parse_blocks('<a id="z"></a>\n\nJust a paragraph.\n')
+    assert all("<a id=" not in b.text for b in blocks)
+    para = [b for b in blocks if b.type == "paragraph"][0]
+    assert para.anchor_id == "z"

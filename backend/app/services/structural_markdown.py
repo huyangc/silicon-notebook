@@ -107,6 +107,13 @@ def parse_blocks(text: str) -> List[Block]:
     def section_path() -> str:
         return " > ".join(title for _, title in heading_stack)
 
+    def emit(blk: Block) -> None:
+        nonlocal pending_anchor
+        if pending_anchor and blk.anchor_id is None:
+            blk.anchor_id = pending_anchor
+        pending_anchor = None
+        blocks.append(blk)
+
     i = 0
     n = len(tokens)
     while i < n:
@@ -120,28 +127,26 @@ def parse_blocks(text: str) -> List[Block]:
             while heading_stack and heading_stack[-1][0] >= level:
                 heading_stack.pop()
             heading_stack.append((level, title))
-            blocks.append(Block(type="heading", text=title, raw=text[cs:ce],
-                                level=level, char_start=cs, char_end=ce,
-                                line_start=ls, line_end=le, section_path=section_path(),
-                                anchor_id=pending_anchor))
-            pending_anchor = None
+            emit(Block(type="heading", text=title, raw=text[cs:ce],
+                       level=level, char_start=cs, char_end=ce,
+                       line_start=ls, line_end=le, section_path=section_path()))
             i += 3
             continue
 
         if t.type == "fence":
             cs, ce, ls, le = _span(text, offs, t.map)
-            blocks.append(Block(type="code_block", text=t.content.rstrip("\n"),
-                                raw=text[cs:ce], lang=(t.info or "").strip(),
-                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
-                                section_path=section_path()))
+            emit(Block(type="code_block", text=t.content.rstrip("\n"),
+                       raw=text[cs:ce], lang=(t.info or "").strip(),
+                       char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                       section_path=section_path()))
             i += 1
             continue
 
         if t.type == "table_open":
             cs, ce, ls, le = _span(text, offs, t.map)
-            blocks.append(Block(type="table", text=_table_text(tokens, i),
-                                raw=text[cs:ce], char_start=cs, char_end=ce,
-                                line_start=ls, line_end=le, section_path=section_path()))
+            emit(Block(type="table", text=_table_text(tokens, i),
+                       raw=text[cs:ce], char_start=cs, char_end=ce,
+                       line_start=ls, line_end=le, section_path=section_path()))
             depth = 0
             while i < n:
                 if tokens[i].type == "table_open":
@@ -156,17 +161,29 @@ def parse_blocks(text: str) -> List[Block]:
 
         if t.type == "list_item_open":
             cs, ce, ls, le = _span(text, offs, t.map)
-            txt = ""
+            parts: List[str] = []
             j = i + 1
-            while j < n and tokens[j].type != "list_item_close":
-                if tokens[j].type == "inline":
-                    txt = _inline_text(tokens[j])
-                    break
+            depth = 1
+            while j < n and depth > 0:
+                tj = tokens[j]
+                if tj.type == "list_item_open":
+                    depth += 1
+                elif tj.type == "list_item_close":
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        break
+                elif tj.type == "inline":
+                    it = _inline_text(tj)
+                    if it:
+                        parts.append(it)
                 j += 1
-            blocks.append(Block(type="list_item", text=txt, raw=text[cs:ce],
-                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
-                                section_path=section_path()))
-            i += 1
+            txt = " ".join(parts)
+            if txt:
+                emit(Block(type="list_item", text=txt, raw=text[cs:ce],
+                           char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                           section_path=section_path()))
+            i = j
             continue
 
         if t.type == "paragraph_open":
@@ -189,17 +206,18 @@ def parse_blocks(text: str) -> List[Block]:
             if img is not None:
                 caption = (img.content or "").strip()
                 src = img.attrs.get("src", "") if hasattr(img, "attrs") else ""
-                if caption:
-                    blocks.append(Block(type="image", text=caption, raw=text[cs:ce],
-                                        char_start=cs, char_end=ce, line_start=ls, line_end=le,
-                                        section_path=section_path(), metadata={"src": src}))
+                text_val = caption or src
+                if text_val:
+                    emit(Block(type="image", text=text_val, raw=text[cs:ce],
+                               char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                               section_path=section_path(), metadata={"src": src}))
                 i += 3
                 continue
             txt = _inline_text(inline)
             if txt:
-                blocks.append(Block(type="paragraph", text=txt, raw=text[cs:ce],
-                                    char_start=cs, char_end=ce, line_start=ls, line_end=le,
-                                    section_path=section_path()))
+                emit(Block(type="paragraph", text=txt, raw=text[cs:ce],
+                           char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                           section_path=section_path()))
             i += 3
             continue
 
