@@ -66,3 +66,42 @@ def test_parse_answer_anchors_keeps_only_cited(repo):
     keys = {a.key for a in anchors}
     assert keys == {"k1"}                    # k2 not cited -> excluded
     assert anchors[0].label == "Engram"
+
+def test_ask_grounded_answer_has_anchors(repo):
+    nb = _seed(repo)   # one concept "Engram"
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
+    assert resp.grounded is True
+    assert resp.answer and "[k1]" in resp.answer
+    assert any(a.object_type == "concept" for a in resp.anchors)
+    assert resp.conclusion and "[k1]" not in resp.conclusion   # conclusion = markers stripped
+
+def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="empty"))
+    repo.llm_client.chat_json = lambda m, s: __import__("json").dumps(
+        {"answer": "（推断）Engram is likely a memory mechanism.", "grounded": False})
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
+    assert resp.llm_mode == "ungrounded"
+    assert "not yet contain approved knowledge" not in resp.conclusion   # no canned dead-end
+    assert resp.answer
+
+def test_concept_dedup_degrades_gracefully_without_clusters(repo):
+    # No concept_clusters rows populated -> _concept_cluster_id returns object_id
+    # (no dedup) and _answer_context must not crash; both concepts kept.
+    nb = repo.create_notebook(NotebookCreate(name="nc"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "C1", "object_type": "concept",
+         "payload": {"name": "Engram", "section_path": "1"}, "evidence": []},
+        {"local_id": "C2", "object_type": "concept",
+         "payload": {"name": "Engram", "section_path": "2"}, "evidence": []},
+    ], [])
+    assert repo.cluster_map(nb.id) == {}   # clustering not populated
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=? AND object_type='concept'",
+            (nb.id,)).fetchall()
+    oids = [r["id"] for r in rows]
+    for oid in oids:
+        assert repo._concept_cluster_id(nb.id, oid) == oid   # falls back to object_id
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
+    # no clusters -> no dedup -> both concept hits remain available as anchors targets
+    assert resp.answer  # did not crash

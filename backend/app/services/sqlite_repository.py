@@ -15,6 +15,7 @@ from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import OpenAICompatibleClient
 from app.models.schemas import (
+    AnswerAnchor,
     ArticleCreate,
     ArticleResearchBrief,
     ArticleSummary,
@@ -94,13 +95,11 @@ from app.services.prompts import (
 )
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
-    RetrievedElement,
     RetrievedKnowledge,
     _TYPE_WEIGHT,
     _payload_text,
     cosine,
     keyword_score,
-    score_elements,
     score_knowledge,
 )
 
@@ -2572,7 +2571,6 @@ class SQLiteRepository:
         question = payload.question.strip()
         # Legacy `scenario` is accepted for frontend back-compat but no longer
         # woven into retrieval or the answer prompt.
-        scenario_tags: List[str] = []
         query = question
 
         with self._connect() as db:
@@ -2604,8 +2602,6 @@ class SQLiteRepository:
             reverse=True,
         )
         top_hits: List[RetrievedKnowledge] = scored_all[:_TOP_N]
-
-        scored_elements = score_elements(query, elements, query_vector)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         hit_ids = {item.object_id for item in top_hits}
@@ -2686,16 +2682,27 @@ class SQLiteRepository:
         has_knowledge = bool(top_hits)
         llm_mode = "deterministic"
         conclusion = ""
+        answer = ""
+        grounded = False
+        anchors: List[AnswerAnchor] = []
 
-        if self.llm_client.configured and (has_knowledge or scored_elements):
+        # When an LLM is configured we always synthesise — grounding on KG hits
+        # where they exist, and reasoning from general knowledge otherwise
+        # (ungrounded). Never dead-ends with the canned refusal.
+        if self.llm_client.configured:
             try:
-                conclusion, llm_mode = self._answer_with_llm_kg(
-                    question, scenario_tags, top_hits, scored_elements
+                answer, grounded, llm_mode, anchors = self._answer_kg(
+                    notebook_id, question, top_hits
                 )
             except Exception:
-                conclusion = ""
+                answer, grounded, anchors, llm_mode = "", False, [], "deterministic"
 
-        if not conclusion:
+        if answer:
+            # Back-compat `conclusion` = answer with provenance markers stripped.
+            conclusion = _MARKER_RE.sub("", answer).strip()
+        else:
+            # No LLM configured (or it failed): deterministic fallback.
+            llm_mode = "deterministic"
             if has_knowledge:
                 n = len(top_hits)
                 conclusion = (
@@ -2712,6 +2719,9 @@ class SQLiteRepository:
         response = AskResponse(
             answer_id="",
             conclusion=conclusion,
+            answer=answer,
+            grounded=grounded,
+            anchors=anchors,
             related_knowledge=related_knowledge,
             citations=citations,
             llm_mode=llm_mode,
@@ -2719,37 +2729,64 @@ class SQLiteRepository:
         response.answer_id = self._save_answer(notebook_id, question, response)
         return response
 
-    def _answer_with_llm_kg(
-        self,
-        question: str,
-        scenario_tags: List[str],
-        kg_hits: List[RetrievedKnowledge],
-        elements: List[RetrievedElement],
-    ) -> tuple:
-        """Synthesise a conclusion string from KG hits using the LLM.
-        Returns (conclusion_str, llm_mode_str)."""
-        def kg_block(items: List[RetrievedKnowledge]) -> str:
-            lines = []
-            for item in items:
-                name = str(item.payload.get("name", "")).strip()
-                extra = "; ".join(
-                    f"{k}: {v}"
-                    for k, v in item.payload.items()
-                    if k != "name" and not str(k).startswith("_") and str(v).strip()
-                )
-                line = f"- [{item.object_type}] {name}"
-                if extra:
-                    line += f" — {extra}"
-                lines.append(line)
-            return "KG knowledge objects:\n" + ("\n".join(lines) if lines else "- (none)")
+    def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
+        """Canonical unified-cluster id for a concept `object_id`, reusing the
+        same `concept_clusters` membership map `concept_detail` relies on
+        (`cluster_map` -> {member_object_id: canonical_id}). When clustering is
+        not populated for the notebook (no cluster row for this object), fall
+        back to `object_id` so dedup degrades gracefully (no merge, no crash)."""
+        return self.cluster_map(notebook_id).get(object_id, object_id)
 
-        element_block = "\n".join(
-            f"- [{el.location_label}] {el.text[:300]}" for el in elements[:8]
-        )
-        context_block = "\n\n".join([
-            kg_block(kg_hits),
-            "Source elements:\n" + (element_block or "- (none)"),
-        ])
+    def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
+        """Build the id-tagged enriched context block + id_map for the answer
+        LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
+        first-occurrence snippet / procedure steps) is pulled via node_context.
+        Concept hits belonging to the same unified cluster (D4) are collapsed —
+        the first (highest-scored) per cluster is kept, later duplicates dropped.
+        Returns (context_block_str, id_map)."""
+        lines, id_map = [], {}
+        seen_concept_clusters: set = set()
+        i = 0
+        for hit in top_hits:
+            if hit.object_type == "concept":
+                cid = self._concept_cluster_id(notebook_id, hit.object_id)
+                if cid in seen_concept_clusters:
+                    continue
+                seen_concept_clusters.add(cid)
+            try:
+                ctx = self.node_context(notebook_id, hit.object_id)
+            except KeyError:
+                continue
+            i += 1
+            key = f"k{i}"
+            name = str(hit.payload.get("name", "")).strip()
+            occ = ctx.get("occurrences") or []
+            snippet = occ[0].get("element_text") if occ else ""
+            definition = ctx.get("definition") or snippet
+            extra = f" — def: {definition[:200]}" if definition else ""
+            if ctx.get("steps"):
+                extra += "; steps: " + " -> ".join(
+                    s.get("name", "") for s in ctx["steps"][:8]
+                )
+            lines.append(f"{key}: [{hit.object_type}] {name}{extra}")
+            id_map[key] = {
+                "object_id": hit.object_id, "object_type": hit.object_type,
+                "name": name, "definition": definition, "snippet": snippet,
+                "source_title": (occ[0].get("source_title", "") if occ else ""),
+                "location_label": (occ[0].get("section_path", "") if occ else ""),
+            }
+        return ("\n".join(lines) if lines else "(none)"), id_map
+
+    def _answer_kg(
+        self,
+        notebook_id: str,
+        question: str,
+        top_hits: List[RetrievedKnowledge],
+    ) -> tuple:
+        """Synthesise a (possibly reasoned) answer from KG hits using the LLM.
+        Returns (answer_text, grounded, llm_mode, anchors). grounded requires
+        both the LLM's self-report and at least one retrieved hit."""
+        context_block, id_map = self._answer_context(notebook_id, top_hits)
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block)}],
             ANSWER_SCHEMA_HINT,
@@ -2757,8 +2794,10 @@ class SQLiteRepository:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
-        conclusion = str(data.get("answer", "")).strip()
-        return conclusion, "configured"
+        answer = str(data.get("answer", "")).strip()
+        grounded = bool(data.get("grounded", False)) and bool(top_hits)
+        anchors = self._parse_answer_anchors(answer, id_map)
+        return answer, grounded, ("grounded" if grounded else "ungrounded"), anchors
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
