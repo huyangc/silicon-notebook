@@ -79,65 +79,40 @@ def parse_xlsx(source_id: str, path: Path) -> List[SourceElement]:
 
 
 def parse_markdown(source_id: str, path: Path) -> List[SourceElement]:
+    from app.services.structural_markdown import parse_blocks
+
     text = path.read_text(encoding="utf-8", errors="replace")
+    blocks = parse_blocks(text)
     elements: List[SourceElement] = []
-    paragraph_lines: List[str] = []
-    paragraph_index = 1
-    heading_index = 1
-    list_index = 1
-
-    def flush_paragraph() -> None:
-        nonlocal paragraph_lines, paragraph_index
-        paragraph = " ".join(line.strip() for line in paragraph_lines if line.strip())
-        if paragraph:
-            elements.append(
-                _element(
-                    source_id,
-                    "paragraph",
-                    f"Markdown paragraph {paragraph_index}",
-                    paragraph,
-                    {"parser": "markdown", "paragraph_index": paragraph_index},
-                )
+    counters: Dict[str, int] = {}
+    for block in blocks:
+        counters[block.type] = counters.get(block.type, 0) + 1
+        ordinal = counters[block.type]
+        metadata: Dict[str, Any] = {
+            "parser": "markdown",
+            "section_path": block.section_path,
+            "char_start": block.char_start,
+            "char_end": block.char_end,
+            "line_start": block.line_start,
+            "line_end": block.line_end,
+        }
+        if block.type == "heading":
+            metadata["heading_level"] = block.level
+            if block.anchor_id:
+                metadata["anchor_id"] = block.anchor_id
+        if block.type == "code_block":
+            metadata["lang"] = block.lang
+        if block.type == "image":
+            metadata.update(block.metadata)
+        elements.append(
+            _element(
+                source_id,
+                block.type,
+                f"Markdown {block.type} {ordinal}",
+                block.text,
+                metadata,
             )
-            paragraph_index += 1
-        paragraph_lines = []
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            flush_paragraph()
-            continue
-        if line.startswith("#"):
-            flush_paragraph()
-            title = line.lstrip("#").strip()
-            if title:
-                elements.append(
-                    _element(
-                        source_id,
-                        "heading",
-                        f"Markdown heading {heading_index}",
-                        title,
-                        {"parser": "markdown", "heading_level": len(line) - len(line.lstrip("#"))},
-                    )
-                )
-                heading_index += 1
-            continue
-        if re.match(r"^([-*+]|\d+[.)])\s+", line):
-            flush_paragraph()
-            elements.append(
-                _element(
-                    source_id,
-                    "list_item",
-                    f"Markdown list item {list_index}",
-                    re.sub(r"^([-*+]|\d+[.)])\s+", "", line),
-                    {"parser": "markdown", "list_index": list_index},
-                )
-            )
-            list_index += 1
-            continue
-        paragraph_lines.append(line)
-
-    flush_paragraph()
+        )
     return elements or parse_plain_text(source_id, path, "markdown")
 
 
@@ -528,7 +503,11 @@ def _element(
     text: str,
     metadata: Dict[str, Any],
 ) -> SourceElement:
-    clean_text = " ".join(text.split())
+    # 代码块/表格保真（保留换行/结构）；其余压平空白。
+    if element_type in ("code_block", "table"):
+        clean_text = text.strip("\n")
+    else:
+        clean_text = " ".join(text.split())
     return SourceElement(
         id="",
         source_id=source_id,
