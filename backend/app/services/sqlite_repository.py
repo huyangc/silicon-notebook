@@ -2563,12 +2563,10 @@ class SQLiteRepository:
         a conclusion via the LLM (or deterministic fallback)."""
         self.get_notebook(notebook_id)
         question = payload.question.strip()
-        scenario_tags = [
-            value
-            for value in payload.scenario.values()
-            if isinstance(value, str) and value.strip()
-        ]
-        query = " ".join([question, *scenario_tags]).strip()
+        # Legacy `scenario` is accepted for frontend back-compat but no longer
+        # woven into retrieval or the answer prompt.
+        scenario_tags: List[str] = []
+        query = question
 
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
@@ -2580,7 +2578,6 @@ class SQLiteRepository:
             knowledge_vectors = self._knowledge_vectors(db, notebook_id, all_kg)
 
         element_vectors = self._element_vectors(elements)
-        scenario = payload.scenario or {}
 
         # Score each KG type, take top hits per type.
         top_hits: List[RetrievedKnowledge] = []
@@ -2589,7 +2586,7 @@ class SQLiteRepository:
             if not objs:
                 continue
             scored = score_knowledge(
-                query, objs, t, query_vector, element_vectors, knowledge_vectors, scenario
+                query, objs, t, query_vector, element_vectors, knowledge_vectors, None
             )[: _TOP_PER_TYPE.get(t, 4)]
             top_hits.extend(scored)
 
