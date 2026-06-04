@@ -1092,8 +1092,19 @@ class SQLiteRepository:
                     db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
                 return
             raw_text = self._source_raw_text(source, elements)
-            graph = kg_ingest.extract_graph(self.llm_client, raw_text,
-                                            source.file_name or "source.md", kg_doc_type)
+            graph = kg_ingest.extract_graph(
+                self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
+                n=self.settings.kg_window_target_chars,
+                m=self.settings.kg_window_overlap_chars,
+                workers=self.settings.kg_extract_workers,
+            )
+            warn = self.settings.kg_window_warn_threshold
+            if graph.total_windows > warn:
+                self.event_log.logger.warning(
+                    "KG windows %s exceed warn threshold %s for source %s (%s) — "
+                    "extracting in full, no truncation",
+                    graph.total_windows, warn, source_id, source.file_name,
+                )
             objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
             n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
             fw, tw = graph.failed_windows, graph.total_windows

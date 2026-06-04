@@ -178,3 +178,12 @@ def test_canonicalize_merges_across_windows():
     assert len(engram_nodes) == 1, (
         f"expected 1 Engram node after canonicalization, got {len(engram_nodes)}"
     )
+
+
+def test_extract_graph_accepts_workers_param():
+    import json
+    payload = json.dumps({"nodes": [{"local_id": "a", "type": "Concept",
+                                      "name": "Engram", "ev": 0}], "edges": []})
+    g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic", workers=4)
+    assert g.total_windows >= 1
+    assert any(n.name == "Engram" for n in g.nodes)

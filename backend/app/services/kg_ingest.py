@@ -95,7 +95,7 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
 
 
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
-                  n: int = 9000, m: int = 450) -> KnowledgeGraph:
+                  n: int = 9000, m: int = 450, workers: int = _WORKERS) -> KnowledgeGraph:
     """Window the text, extract a KG fragment per window concurrently, then
     canonicalize. Evidence is anchored by element-id markers: each window's
     prose elements are numbered and the LLM emits only an int "ev" per node/edge,
@@ -107,7 +107,7 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
     edges: List[Edge] = []
     failed = 0
     if pairs:
-        workers = max(1, min(_WORKERS, len(pairs)))
+        workers = max(1, min(workers, len(pairs)))
         # pool.submit + per-future .result() (NOT pool.map, which aborts on the
         # first exception): one window's network failure must not abort the rest.
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
