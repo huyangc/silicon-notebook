@@ -2630,6 +2630,10 @@ class SQLiteRepository:
 
         element_vectors = self._element_vectors(elements)
 
+        from app.services.retrieval import cosine_sims
+        element_sims = cosine_sims(query_vector, element_vectors) if query_vector else None
+        knowledge_sims = cosine_sims(query_vector, knowledge_vectors) if query_vector else None
+
         # Score each KG type (so the right per-type vectors are used), then pool
         # all hits and rank globally by relevance * type-weight (soft prior).
         # No fixed per-type quota: highly-relevant types can dominate the top-N.
@@ -2640,14 +2644,15 @@ class SQLiteRepository:
                 continue
             scored_all.extend(
                 score_knowledge(
-                    query, objs, t, query_vector, element_vectors, knowledge_vectors, None
+                    query, objs, t, query_vector, element_vectors, knowledge_vectors, None,
+                    element_sims=element_sims, knowledge_sims=knowledge_sims,
                 )
             )
         scored_all.sort(
             key=lambda it: it.score * _TYPE_WEIGHT.get(it.object_type, 0.5),
             reverse=True,
         )
-        top_hits: List[RetrievedKnowledge] = scored_all[:_TOP_N]
+        top_hits: List[RetrievedKnowledge] = scored_all[:self.settings.retrieval_top_n]
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         hit_ids = {item.object_id for item in top_hits}

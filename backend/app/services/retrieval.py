@@ -249,6 +249,8 @@ def score_knowledge(
     element_vectors: Optional[Dict[str, List[float]]] = None,
     knowledge_vectors: Optional[Dict[str, List[float]]] = None,
     scenario: Optional[Dict[str, str]] = None,
+    element_sims: Optional[Dict[str, float]] = None,
+    knowledge_sims: Optional[Dict[str, float]] = None,
 ) -> List[RetrievedKnowledge]:
     """Score knowledge by keyword + optional semantic similarity + optional
     structured-scenario boost.
@@ -271,13 +273,25 @@ def score_knowledge(
         semantic = 0.0
         has_vector = False
         if query_vector:
-            payload_vec = knowledge_vectors.get(object_id) if knowledge_vectors else None
-            if payload_vec:
-                has_vector = True
-                semantic = max(semantic, cosine(query_vector, payload_vec))
-            if element_vectors:
-                for ev in evidence:
-                    vector = element_vectors.get(getattr(ev, "element_id", "") or "")
+            if knowledge_sims is not None:
+                s = knowledge_sims.get(object_id)
+                if s is not None:
+                    has_vector = True
+                    semantic = max(semantic, s)
+            elif knowledge_vectors:
+                payload_vec = knowledge_vectors.get(object_id)
+                if payload_vec:
+                    has_vector = True
+                    semantic = max(semantic, cosine(query_vector, payload_vec))
+            for ev in evidence:
+                eid = getattr(ev, "element_id", "") or ""
+                if element_sims is not None:
+                    s = element_sims.get(eid)
+                    if s is not None:
+                        has_vector = True
+                        semantic = max(semantic, s)
+                elif element_vectors:
+                    vector = element_vectors.get(eid)
                     if vector:
                         has_vector = True
                         semantic = max(semantic, cosine(query_vector, vector))
@@ -322,15 +336,19 @@ def score_elements(
     elements: List[dict],
     query_vector: Optional[List[float]] = None,
     limit: int = 8,
+    element_sims: Optional[Dict[str, float]] = None,
 ) -> List[RetrievedElement]:
     scored: List[RetrievedElement] = []
     for element in elements:
         keyword = keyword_score(query, element["text"])
         semantic = 0.0
         vector = element.get("vector")
-        has_vector = bool(query_vector and vector)
+        has_vector = bool(query_vector and (element_sims is not None or vector))
         if has_vector:
-            semantic = cosine(query_vector, vector)
+            if element_sims is not None:
+                semantic = element_sims.get(element["element_id"], 0.0)
+            else:
+                semantic = cosine(query_vector, vector)
         score = _fuse(keyword, semantic, has_vector)
         if score < RELEVANCE_FLOOR:
             continue
