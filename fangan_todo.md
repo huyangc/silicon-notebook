@@ -98,3 +98,10 @@
 - [x] **前端可视化视图（已落地）**：`frontend/app/page.tsx` 全屏「知识图谱」视图——左栏搜索+待确认合并、中区 react-force-graph-2d 概念力导图(按类型上色/按度数定大小)、右栏概念详情(成员/挂载断言公式/证据)；合并/拒绝即时重算。入口由工作区「关系图」按钮改为「知识图谱」。`tsc --noEmit` + `next build` 通过。plan `docs/superpowers/plans/2026-06-02-kg-viz-frontend.md`。
 - [x] **节点内容丰富化（读取期 + prompt 微调，已落地）**：`node_context`(证据→所在句子 / Concept 定义(defines 边) / Procedure 有序步骤(section+文档序))；`/objects/{id}/context` 端点 + `concept_detail` 带 element_text；前端 KG 详情面板与知识库浏览器都呈现完整句子+定义+流程步骤；抽取 prompt 改为「证据=完整句子」+「procedure 用 precedes 串步」。真机 smoke(deepseek-v4-flash, engram)：证据 span 中位数 ~170 字符(原裸词~5-20)，MoE/Sparsity 等概念已带原文句子，procedure 经 node_context 还原有序步骤。spec/plan `docs/superpowers/specs|plans/2026-06-02-kg-node-enrichment*`。
   - 后续(非阻塞)：网络稳定后重抽看 precedes 是否变多；procedure 步骤的 step-specific 证据可再精化(当前偶尔引用小节概述句)。
+
+## KG 性能（构建质量已验证 OK，2026-06-03，仅性能待优化）
+> 构建侧已收敛：**element-id 锚定**（LLM 只回传 `ev:<int>` 标号，后端映射回该 element 的精确 text/offsets → 确定性 grounding，删掉脆弱的 `_locate`）+ **Concept 选择性 prompt**（丢弃 training/inference/buffer 等泛词，保留全部 formula/procedure）。同一文档 A/B：formula 0→11、procedure 5→19、concept 回到干净的 ~34、节点全部 grounded。已上线 master(`c5294f1`)。**抽取效果用户认可，下列纯性能项后续再优化：**
+- [ ] **抽取超时偏紧**：`.env` `OPENAI_COMPAT_TIMEOUT_SECONDS=60`，但密集窗口单窗输出 10–17k token、生成可 >60s → deepseek 高负载时被 60s 截断 → 重试拖慢(早期甚至丢窗导致少节点)。实测 timeout=240s 时 0 错误全部完成。可评估常设 ~150s。当前靠 bounded-retry(`OPENAI_COMPAT_MAX_RETRIES=2`)兜底但慢。
+- [ ] **并发受「按 section 切窗」约束**：`extract_graph` 并发度 = `min(_WORKERS=16, 窗口数)`，窗口按 section 切，故并发 ≈ section 数（ch02 仅 6 窗，16 worker 闲 10 个）。sweep 实测：N=9000/4500/3000 都只 6 窗、wall 68–78s 持平；N=2000→9 窗也不提速、且 overlap 变大→总输出反增(49k vs 34k token)。结论：**element 级/更小窗不是有效并发杠杆**，还有丢跨元素边风险。若个别 section 远大于其它，可只对超大 section 二次切分。
+- [ ] **吞吐/成本**：每窗仍 ~3–8k 输出 token（selectivity 已削）；真正的延迟杠杆是上面的 timeout，不是并发。如要再降，可评估更快模型或在 A/B 守护下微调窗口。
+- 说明：sweep/A-B 均为一次性脚本已删；细节见 `docs/superpowers/specs/2026-06-02-kg-evidence-id-anchoring.md` 与本轮对话。
