@@ -2586,6 +2586,15 @@ class SQLiteRepository:
         # woven into retrieval or the answer prompt.
         query = question
 
+        # Resolve (create-or-append) the conversation and load prior turns. The
+        # history shapes the answer wording only — retrieval still runs fresh
+        # per question below.
+        with self._connect() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question
+            )
+            history = self._conversation_history(db, conversation_id)
+
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
                 t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
@@ -2705,7 +2714,7 @@ class SQLiteRepository:
         if self.llm_client.configured:
             try:
                 answer, grounded, llm_mode, anchors = self._answer_kg(
-                    notebook_id, question, top_hits
+                    notebook_id, question, top_hits, history
                 )
             except Exception:
                 answer, grounded, anchors, llm_mode = "", False, [], "deterministic"
@@ -2738,8 +2747,11 @@ class SQLiteRepository:
             related_knowledge=related_knowledge,
             citations=citations,
             llm_mode=llm_mode,
+            conversation_id=conversation_id,
         )
-        response.answer_id = self._save_answer(notebook_id, question, response)
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id
+        )
         return response
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
@@ -2795,13 +2807,15 @@ class SQLiteRepository:
         notebook_id: str,
         question: str,
         top_hits: List[RetrievedKnowledge],
+        history: str = "",
     ) -> tuple:
         """Synthesise a (possibly reasoned) answer from KG hits using the LLM.
         Returns (answer_text, grounded, llm_mode, anchors). grounded requires
-        both the LLM's self-report and at least one retrieved hit."""
+        both the LLM's self-report and at least one retrieved hit. `history`
+        (prior conversation turns) shapes the wording but not the retrieval."""
         context_block, id_map = self._answer_context(notebook_id, top_hits)
         raw = self.llm_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, context_block)}],
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
         )
         data = json.loads(raw)
@@ -2833,24 +2847,142 @@ class SQLiteRepository:
             ))
         return cited
 
-    def _save_answer(self, notebook_id: str, question: str, response: AskResponse) -> str:
+    def _save_answer(
+        self,
+        notebook_id: str,
+        question: str,
+        response: AskResponse,
+        conversation_id: Optional[str] = None,
+    ) -> str:
         answer_id = f"ans-{uuid4().hex[:10]}"
         now = _now()
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self._connect() as db:
             db.execute(
-                "INSERT INTO answers (id, notebook_id, question, payload, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     answer_id,
                     notebook_id,
                     question,
                     json.dumps(payload, ensure_ascii=False),
                     now,
+                    conversation_id,
                 ),
             )
         return answer_id
+
+    def _ensure_conversation(
+        self, db, notebook_id: str, conversation_id: Optional[str], question: str
+    ) -> str:
+        """Return the conversation id for this turn: append to an existing
+        conversation in this notebook (touching `updated_at`), or create a new
+        one (id `conv-<hex>`, title from the first question)."""
+        now = _now()
+        if conversation_id:
+            row = db.execute(
+                "SELECT id FROM conversations WHERE id = ? AND notebook_id = ?",
+                (conversation_id, notebook_id),
+            ).fetchone()
+            if row is not None:
+                db.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (now, conversation_id),
+                )
+                return conversation_id
+        new_id = f"conv-{uuid4().hex[:10]}"
+        db.execute(
+            "INSERT INTO conversations (id, notebook_id, title, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (new_id, notebook_id, question[:60], now, now),
+        )
+        return new_id
+
+    def _conversation_history(self, db, conversation_id: str, limit: int = 5) -> str:
+        """Build the prior-turns history block (oldest->newest, last `limit`
+        turns) from stored answer payloads. Uses each turn's `conclusion`
+        (provenance markers already stripped). Returns "" when no prior turns."""
+        rows = db.execute(
+            "SELECT question, payload FROM answers WHERE conversation_id = ? "
+            "ORDER BY created_at ASC",
+            (conversation_id,),
+        ).fetchall()
+        rows = rows[-limit:]
+        lines = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            conclusion = str(payload.get("conclusion", "")).strip()
+            lines.append(f"User: {row['question']}\nAssistant: {conclusion}")
+        return "\n".join(lines)
+
+    def get_conversation(self, conversation_id: str) -> "ConversationDetail":
+        """Rebuild a ConversationDetail from the conversations row + its answer
+        turns. Raises KeyError if the conversation does not exist."""
+        from app.models.schemas import (
+            ConversationDetail,
+            ConversationTurn,
+        )
+        with self._connect() as db:
+            conv = db.execute(
+                "SELECT id, notebook_id, title, updated_at FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if conv is None:
+                raise KeyError(conversation_id)
+            rows = db.execute(
+                "SELECT id, question, payload, created_at FROM answers "
+                "WHERE conversation_id = ? ORDER BY created_at ASC",
+                (conversation_id,),
+            ).fetchall()
+        turns = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            turns.append(
+                ConversationTurn(
+                    answer_id=row["id"],
+                    question=row["question"],
+                    response=AskResponse(**payload),
+                    created_at=row["created_at"],
+                )
+            )
+        return ConversationDetail(
+            id=conv["id"],
+            notebook_id=conv["notebook_id"],
+            title=conv["title"] or "",
+            updated_at=conv["updated_at"] or "",
+            turn_count=len(turns),
+            turns=turns,
+        )
+
+    def list_conversations(self, notebook_id: str) -> "List[ConversationSummary]":
+        """List conversations for a notebook (most-recently-updated first) with
+        a per-conversation turn count. Raises KeyError if the notebook is gone."""
+        from app.models.schemas import ConversationSummary
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
+                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count "
+                "FROM conversations c WHERE c.notebook_id = ? ORDER BY c.updated_at DESC",
+                (notebook_id,),
+            ).fetchall()
+        return [
+            ConversationSummary(
+                id=row["id"],
+                notebook_id=row["notebook_id"],
+                title=row["title"] or "",
+                updated_at=row["updated_at"] or "",
+                turn_count=row["turn_count"],
+            )
+            for row in rows
+        ]
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         if payload.rating not in {"useful", "not_useful"}:
