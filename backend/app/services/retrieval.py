@@ -149,6 +149,27 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def cosine_sims(query_vector, id_to_vec):
+    """一次矩阵运算算出 query 对一批向量的余弦相似度。返回 {id: sim}。
+    等价于对每个 id 调 cosine(query_vector, vec)，但用 numpy 批量计算。"""
+    import numpy as np
+
+    if not query_vector or not id_to_vec:
+        return {}
+    ids = list(id_to_vec.keys())
+    mat = np.asarray([id_to_vec[i] for i in ids], dtype=np.float64)
+    q = np.asarray(query_vector, dtype=np.float64)
+    if mat.ndim != 2 or mat.shape[1] != q.shape[0]:
+        return {i: cosine(query_vector, id_to_vec[i]) for i in ids}
+    qn = float(np.linalg.norm(q))
+    row_norms = np.linalg.norm(mat, axis=1)
+    denom = row_norms * qn
+    dots = mat @ q
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sims = np.where(denom > 0, dots / denom, 0.0)
+    return {i: float(s) for i, s in zip(ids, sims)}
+
+
 _STOPWORDS = {
     # en
     "the","a","an","is","are","was","were","be","of","to","in","on","for","and",
