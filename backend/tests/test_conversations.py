@@ -117,3 +117,20 @@ def test_conversation_routes(tmp_path, monkeypatch):
     detail = client.get(f"/api/conversations/{cid}")
     assert detail.status_code == 200 and detail.json()["turn_count"] == 1
     assert client.get("/api/conversations/bogus").status_code == 404
+
+
+def test_conversation_mutation_routes(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+    client = TestClient(app)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]
+    assert client.patch(f"/api/conversations/{cid}", json={"title": "T"}).status_code == 200
+    assert client.get(f"/api/conversations/{cid}").json()["title"] == "T"
+    assert client.delete(f"/api/conversations/{cid}").status_code == 200
+    assert client.get(f"/api/conversations/{cid}").status_code == 404
+    assert client.patch("/api/conversations/bogus", json={"title": "x"}).status_code == 404
+    assert client.delete("/api/conversations/bogus").status_code == 404

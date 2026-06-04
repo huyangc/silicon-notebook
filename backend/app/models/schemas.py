@@ -178,6 +178,10 @@ class AskResponse(BaseModel):
     conversation_id: str = ""
 
 
+class ConversationRenameRequest(BaseModel):
+    title: str
+
+
 class ConversationSummary(BaseModel):
     id: str
     notebook_id: str

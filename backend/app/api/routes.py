@@ -19,6 +19,7 @@ from app.models.schemas import (
     ChecklistRequest,
     ConflictPair,
     ConversationDetail,
+    ConversationRenameRequest,
     ConversationSummary,
     DerivedRuleCandidate,
     DuplicateGroup,
@@ -451,6 +452,24 @@ def list_conversations(notebook_id: str) -> List[ConversationSummary]:
 def get_conversation(conversation_id: str) -> ConversationDetail:
     try:
         return repository().get_conversation(conversation_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+@router.patch("/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, payload: ConversationRenameRequest):
+    try:
+        repository().rename_conversation(conversation_id, payload.title)
+        return {"ok": True}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+@router.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str):
+    try:
+        repository().delete_conversation(conversation_id)
+        return {"ok": True}
     except KeyError:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
