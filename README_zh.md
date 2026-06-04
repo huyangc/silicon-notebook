@@ -12,15 +12,15 @@
 - 默认使用 SQLite 持久化，数据库路径为 `.local/silicon_notebook.db`
 - `frontend/` 下的 Next.js / React / TypeScript 前端作为主线
 - OpenAI-compatible LLM 配置，用于摘要、抽取、回答和文章研究；embedding 可通过同一兼容 API 端点独立配置
-- 未配置 LLM key 时使用 deterministic fallback，保证本机 beta 可用
+- 未配置 LLM key 时摘要与回答使用 deterministic fallback；KG 抽取在离线时记录完成的 `no-llm` run，不伪造启发式知识
 - 面向真实团队的干净起点：全新数据库只初始化本机用户，不再预置 demo 笔记本或合成来源；新建笔记本的示例提问会根据所选模板/笔记本领域动态生成，而非写死的样例
 - 真实 multipart 文件上传（解析经 FastAPI `BackgroundTasks` 异步执行），支持 PDF、Markdown、DOCX、PPTX
 - PDF 解析在配置 MinerU（GPU 主机）时走 MinerU（公式转 LaTeX、表格、版面）；本机/未启用时回退到 pypdf 纯文本
 - 解析生成 `SourceElement`，包含 `element_type`、`location_label`、`text`、`metadata`
-- 自动知识抽取（rule / method / risk / case / checklist / glossary 候选）并做元素级 evidence 绑定，保留候选治理能力（批准 / 拒绝 / 编辑）
+- 配置 LLM 后进行 KG 抽取，生成 Concept / Claim / Formula / Procedure 对象并做元素级 evidence 绑定；旧候选治理端点保留兼容，但当前离线路径不会合成 rule/method/risk 候选
 - 混合检索：关键词 + 可选 embedding 余弦，覆盖来源元素和已批准知识
 - 真实来源驱动回答 + citation 校验：问答、场景查询、案例检索、Checklist 生成、文章研究，紧凑顺序引用，Markdown/代码/公式/表格渲染，以及轻量 👍/👎/复制操作
-- 知识治理：规则/方法/风险/术语浏览，状态生命周期（reviewed/approved/deprecated/conflict/project_specific）+ owner/last_reviewed，重复检测与合并，冲突检测（deprecated 知识不参与回答）
+- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期（reviewed/approved/deprecated/conflict/project_specific）+ owner/last_reviewed，重复检测与合并，冲突检测。`deprecated` 知识不会进入 Ask 检索，包括 KG 一跳邻居扩展。
 - Object 级知识图谱可视化：Concept / Claim / Formula / Procedure 节点同屏展示，主画布显示节点名称、类型形状/颜色和边关系标签，并提供搜索/多选类型过滤、合并审核、按类型分组的节点总览与详情面板，选择节点时画布会自动聚焦
 - 外层 notebook 集合页（网格/紧凑/列表视图、编辑/删除）、工作区标题编辑、来源详情预览/删除、文章删除、内部搜索
 - 第一版不使用 Docker
@@ -124,7 +124,7 @@ npm run dev    # 仓库根目录：后端(uvicorn --reload) + Next.js 前端
 进入单个 notebook 后：
 
 - 左栏：用户导入的来源文件（解析/抽取过程中实时显示 parse-status），支持详情预览和删除。来源详情中的长文本会在弹窗宽度内换行，只有结构化表格/公式在必要时使用局部横向滚动。网络检索来源暂不开放。
-- 中栏：以 tab 形式提供来源驱动的 knowhow 工具——问答（自由提问）、场景查询（结构化场景表单）、案例检索、Checklist 生成、规则库浏览。Ask 支持多个已保存会话，采用顶部紧凑会话上下文栏 + 可展开会话管理面板，不把主问答区切成更窄的左右两栏。欢迎区 prompt 会根据 notebook 已导入来源的标题/摘要生成。回答支持 Markdown（含代码、公式、表格）渲染，引用以 `[1]`、`[2]` 这类紧凑顺序编号展示，点击引用会在答案面板内展开详情，并提供轻量 👍/👎/复制操作；相关知识不再平铺在答案下方，而是从引用区跳转到知识图谱继续浏览。
+- 中栏：以 tab 形式提供来源驱动的 knowhow 工具——问答（自由提问）、场景查询（结构化场景表单）、案例检索、Checklist 生成、知识库浏览。Ask 支持多个已保存会话，采用顶部紧凑会话上下文栏 + 可展开会话管理面板，不把主问答区切成更窄的左右两栏。欢迎区 prompt 会根据 notebook 已导入来源的标题/摘要生成。回答支持 Markdown（含代码、公式、表格）渲染，引用以 `[1]`、`[2]` 这类紧凑顺序编号展示，点击引用会在答案面板内展开详情，并提供轻量 👍/👎/复制操作；相关知识不再平铺在答案下方，而是从引用区跳转到知识图谱继续浏览。
 - 知识图谱以全屏工作区浮层打开：画布渲染 object 级 KG 节点名称、类型视觉标记和关系边标签；多选类型过滤用于收敛密集视图；侧栏按类型（Concept、Claim、Formula、Procedure）汇总节点，点击总览节点会聚焦画布并展示选中节点的关系、出处和按类型排布的相关节点。
 - 右栏：Studio，含思维导图、新建文章、信息图；文章研究驱动思维导图 / 信息图输出，已创建文章可删除。
 
@@ -141,8 +141,10 @@ notebook 工作区会隐藏集合页全局上边栏，并采用更偏工程知�
 - `POST /api/notebooks/{notebook_id}/sources` multipart 文件上传（异步解析/抽取）
 - `GET /api/sources/{source_id}`、`DELETE /api/sources/{source_id}`、`POST /api/sources/{source_id}/parse`（轮询状态 / 重跑管线）
 - `GET /api/sources/{source_id}/elements`、`POST /api/sources/{source_id}/extract`
-- `GET /api/notebooks/{notebook_id}/candidates[/{type}]`、`PATCH /api/candidates/{id}`、`POST /api/candidates/{id}/approve|reject`
-- `GET /api/notebooks/{notebook_id}/rules`
+- `GET /api/notebooks/{notebook_id}/candidates[/{type}]`、`PATCH /api/candidates/{id}`、`POST /api/candidates/{id}/approve|reject`（旧候选治理兼容）
+- `GET /api/notebooks/{notebook_id}/knowledge-types`、`GET /api/notebooks/{notebook_id}/knowledge?type=claim|concept|formula|procedure|...`
+- `GET /api/notebooks/{notebook_id}/graph`、`GET /api/notebooks/{notebook_id}/unified-kg`
+- `GET /api/notebooks/{notebook_id}/conversations`、`GET|PATCH|DELETE /api/conversations/{conversation_id}`
 - `GET /api/notebooks/{notebook_id}/search?q=`
 - `POST /api/notebooks/{notebook_id}/ask`、`.../scenario-query`、`.../case-search`、`.../checklist`
 - `GET|POST /api/notebooks/{notebook_id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`
@@ -178,7 +180,7 @@ EVENT_LOG_ENABLED / EVENT_LOG_DIR                     # HTTP + 管线事件日�
 SLOW_REQUEST_MS                                       # 超过该毫秒数的请求标记 SLOW
 ```
 
-没有配置 LLM 时，抽取、摘要和回答都会退化为 deterministic 启发式，保证本机 beta 离线也能跑通完整闭环。
+没有配置 LLM 时，摘要和回答会退化为 deterministic 行为；source 解析仍会完成，KG 抽取阶段会记录完成的 `no-llm` run，但不会生成合成知识。
 
 ## 可观测性 / 日志
 
@@ -186,7 +188,7 @@ SLOW_REQUEST_MS                                       # 超过该毫秒数的请
 
 - `requests.jsonl` — 每个 HTTP 请求（方法、路径、状态码、耗时、`request_id`）。超过 `SLOW_REQUEST_MS`（默认 3000ms）标 `SLOW`；响应头带 `X-Request-Id` 关联前后端。
 - `events.jsonl` — 异步来源管线：各阶段（`parse` / `embed` / `extract`）耗时与每次状态机跃迁。卡住时能看到当前阶段及已运行时长；失败记录真实异常（以及来源的 `error_message`）。
-- `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及原本会被启发式回退掩盖的错误。
+- `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及 deterministic fallback 容易让人忽略的错误。
 
 浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时展示来源的 `error_message`。
 
@@ -249,7 +251,7 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 ## 当前限制
 
 - 检索为 SQLite 关键词 + Python 内 embedding 余弦；BM25/FTS5 与 pgvector 后续再做。
-- 规则治理较基础（批准/拒绝）；状态生命周期、重复合并、冲突检测是下一步（Tier 2）。
+- KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG/rule 对象。
 - Article Studio 当前基于标题/摘要文本，并在存在关联 source 时使用其元素；一等文章全文上传与更丰富的关系打分是下一步（Tier 3）。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。
 - `off` 模式 PDF 回退用 pypdf layout 抽取 + 标题/段落切分（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
@@ -263,7 +265,7 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 bash scripts/check.sh
 ```
 
-该脚本会检查后端语法、SQLite/上传/解析/抽取/批准/删除/问答/反馈/文章 smoke 路径（含检索打分与异步上传路径），以及在依赖已安装时检查 Next.js TypeScript。
+该脚本会检查后端语法、SQLite/上传/解析/KG 抽取边界/删除/问答/反馈/文章 smoke 路径（含检索打分、conversation API、旧来源失效清理与异步上传路径），以及在依赖已安装时检查 Next.js TypeScript。
 
 ## 文档维护
 

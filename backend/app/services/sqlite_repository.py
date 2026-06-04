@@ -2649,9 +2649,12 @@ class SQLiteRepository:
         if neighbour_ids:
             with self._connect() as db:
                 placeholders = ",".join("?" for _ in neighbour_ids)
+                status_placeholders = ",".join("?" for _ in USABLE_STATUSES)
                 rows = db.execute(
-                    f"SELECT * FROM knowledge_objects WHERE id IN ({placeholders})",
-                    list(neighbour_ids),
+                    f"SELECT * FROM knowledge_objects "
+                    f"WHERE id IN ({placeholders}) "
+                    f"AND status IN ({status_placeholders})",
+                    [*neighbour_ids, *USABLE_STATUSES],
                 ).fetchall()
             for row in rows:
                 keys = row.keys()

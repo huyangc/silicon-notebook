@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-06-03
+更新日期：2026-06-04
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）与 `implementation_plan.md`（实现计划）。
 
@@ -14,15 +14,15 @@
 -> 保存原始文件
 -> 解析为 source elements（元素级 + location_label）
 -> 生成 source summary
--> 自动抽取 rule / method / risk / case / checklist / glossary 候选（带 evidence 绑定）
--> Curator 审核（approve / reject / edit）-> 落入正式知识表
--> 混合检索（关键词 + 向量余弦，按知识类型加权）
--> 场景化 Ask / Scenario / Case / Checklist 回答（带 citation 校验）
+-> 配置 LLM 时抽取 Concept / Claim / Formula / Procedure KG 对象（带 evidence 绑定与关系边）
+-> 通用知识库浏览 / 状态治理 / 合并 / 冲突检测（旧候选治理端点保留兼容）
+-> 混合检索（关键词 + 向量余弦，含 payload 级向量）
+-> KG-native Ask / Scenario / Case / Checklist 回答（带 citation 校验）
 -> Article Studio 从文章自身内容抽取 claims + 关联规则 + 派生规则候选
 -> 用户反馈 useful / not useful
 ```
 
-LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取、模板组装回答），保证离线也能跑通整个闭环冒烟。
+LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍完整执行，KG 抽取阶段记录 `error_message='no-llm'`，不再离线伪造启发式候选知识。离线 smoke 在需要验证检索/治理时会显式写入 KG/rule 对象。
 
 之前 fangan_done.md 中标记为“demo-backed / 未实现”的抽取、审核、检索、真实问答、文章研究、反馈等，**现已实现并接通真实代码路径**。
 
@@ -69,7 +69,7 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
   - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。
   - 场景查询：9 字段结构化表单走 `/scenario-query`，复用统一 AnswerView。
   - 案例检索 / Checklist：分别走 `/case-search`、`/checklist`，渲染 CaseCard / ChecklistItem。
-  - **知识库（多类型浏览）**：规则 / 方法 / 风险 / 术语子切换，分别走 `/rules|/methods|/risks|/glossary`；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
+  - **知识库（多类型浏览）**：前端从 `/knowledge-types` 动态获取对象类型，再用 `/knowledge?type=...` 浏览任意类型（Concept / Claim / Formula / Procedure 以及 legacy/custom 类型）；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
   - 回答含 citation 与 👍/👎 反馈；引用在前端以 `[1]`、`[2]` 顺序编号展示，点击引用会在答案面板内展开详情（避免浮窗越界），答案正文支持 Markdown/code/formula/table 渲染，并提供复制按钮；chat 菜单可清空对话。
 - **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
 - **文章创建入口**：真实文章创建 modal，移除写死的 `ARTICLE_ID`、`DEMO_NOTEBOOK_ID` 常量。
@@ -116,38 +116,37 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 
 ## 10. 自动抽取 Pipeline
 
-- `backend/app/services/extraction.py`：从 source 元素抽取 rule / method / risk / case / checklist / glossary 候选。
-- **LLM 模式（配置后）**：按 `WINDOW_MAX_CHARS` 分窗覆盖**整篇文档**（不再只取前 9000 字符），逐窗 `chat_json` 抽取后跨窗去重；要求返回 `quoted_span`，**evidence 绑定**先精确子串、再 **CJK 感知 `token_overlap≥0.6` 模糊回退**（避免改写/标点差异导致 needs_review 无引用）；`chat_json` 用 `response_format=json_object`（不支持则回退）+ 去 markdown fence。
-- **deterministic 启发式（离线默认）已重写**：句子级切分，一段可出多条候选；glossary **仅从定义句式**（`术语：定义` / `X is defined as` / `指/是指/定义为`）生成，**不再每个 heading 产空定义噪声**；`heading/table/formula/image_caption/speaker_notes` 不走指令/案例启发式；rule 拆出 recommendation 与 risk_if_ignored（否则/otherwise/to avoid）、轻量 applies_to（领域/封装/信号等范围词）；带 confidence。
-- **候选卫生**：`run_extraction` 对两条路径统一 `_dedupe_records` 去重并按 confidence 排序。
-- 写入 `extraction_runs` / `extraction_candidates`（payload + evidence）。触发：`process_source` parse 成功后自动执行；手动 `POST /api/sources/{source_id}/extract`。
-- 注：本机若未配置 `OPENAI_COMPAT_*` 则走启发式；要获得真正 LLM 抽取质量，可把 `OPENAI_COMPAT_*` 指向本机 OpenAI 兼容服务（ollama / `mlx_lm.server` / llama.cpp）离线运行。
+- 当前主线为 KG-native 抽取：`backend/app/services/kg_ingest.py` 调用 `kg.extract_window`，把 source 分窗后抽取 Concept / Claim / Formula / Procedure 节点与关系边，再由 `build_records()` 绑定到 `SourceElement` evidence。
+- `backend/app/services/extraction_profiles.py` 当前只维护 `academic_paper` / `textbook` 两类 profile，二者对象集均为 `concept / claim / formula / procedure`；`doc_type` 按单个 source 存储。
+- 配置 `OPENAI_COMPAT_*` 时，`_run_extraction()` 走 LLM KG 抽取并把对象直接写入 `knowledge_objects`（status=approved）与 `knowledge_relations`；`extraction_runs.run_type='kg'`。
+- 未配置 LLM 时，`_run_extraction()` 仍写入 completed run，但 `error_message='no-llm'`，不会生成启发式候选或假 KG。离线本机 beta 仍能解析、搜索、摘要和回答；需要知识召回时必须配置 LLM 或由测试/治理显式写入知识对象。
+- 旧 `extraction_candidates` 表与候选 API 仍保留兼容，但不再是当前自动抽取的主产物。
 
 ## 11. Curator 审核、正式知识表与知识治理（方案 v0.2）
 
-- 正式知识统一存于 `knowledge_objects`（object_type = rule/method/risk/case/checklist/glossary，status、owner、`last_reviewed`、payload、evidence 内联 JSON）。
-- 审核 API：
+- 正式知识统一存于 `knowledge_objects`（主线 object_type = concept/claim/formula/procedure；legacy rule/method/risk/case/checklist/glossary 与 custom 类型仍可存在），status、owner、`last_reviewed`、payload、evidence 内联 JSON；KG 关系存于 `knowledge_relations`。
+- Legacy 候选审核 API（兼容保留）：
   - `GET /api/notebooks/{notebook_id}/candidates`（全部）
   - `GET /api/notebooks/{notebook_id}/candidates/{type}`（rules/methods/risks/cases/checklist/glossary）
   - `PATCH /api/candidates/{candidate_id}`（编辑 payload/status）
   - `POST /api/candidates/{candidate_id}/approve`（候选 payload 落入正式表，status=approved，并从队列移除）
   - `POST /api/candidates/{candidate_id}/reject`（status=rejected，删除对应正式记录）
 - **知识治理（Tier 2）**：
-  - **状态生命周期**：`reviewed / approved / deprecated / conflict / project_specific`。仅 USABLE 集合（approved/reviewed/project_specific/conflict）进入答案/检索，`deprecated` 排除。
-  - **浏览**：`GET /api/notebooks/{id}/rules|methods|risks|glossary`（返回各类 Card，含 status；rules 返回全部状态供浏览筛选）。
+  - **状态生命周期**：`reviewed / approved / deprecated / conflict / project_specific`。仅 USABLE 集合（approved/reviewed/project_specific/conflict）进入答案/检索，`deprecated` 排除；本轮修复 Ask 一跳 KG 邻居扩展也必须过滤 `deprecated`。
+  - **浏览**：`GET /api/notebooks/{id}/knowledge-types` + `GET /api/notebooks/{id}/knowledge?type=...`，任意对象类型通用浏览，不再依赖 `/rules|/methods|/risks|/glossary` 旧卡片路由。
   - **审核后编辑**：`PATCH /api/knowledge/{id}` 改 status/owner/payload，并盖章 `last_reviewed`。
   - **重复合并**：`GET /api/notebooks/{id}/duplicates?type=` 同类型相似度（关键词 + 证据向量 cosine ≥0.6）成组；`POST /api/knowledge/{id}/merge`（折叠 evidence、源置 deprecated）。
-  - **冲突检测**：`GET /api/notebooks/{id}/conflicts`（规则同范围、取向相反的对）；`ask()` 命中 conflict 状态规则时在 missing_information 加冲突提示（§12 治理）。
+  - **冲突检测**：`GET /api/notebooks/{id}/conflicts`（legacy rule 同范围、取向相反的对）。
 - notebook counts 改为对正式表做真实统计（rules/cases/checklist_items/methods/risks/glossary，统计 USABLE 状态）。
 
 ## 12. 真实 Ask / Scenario / Case / Checklist
 
 - **`ask()` 删除 demo 分叉**，全部数据驱动：
-  1. 取 approved 知识对象 + 相关 elements，混合检索打分。
-  2. LLM 模式生成结构化 `AskResponse`（conclusion / applicable_scenario / recommended_methods / related_rules / potential_risks / related_cases / checklist / missing_information / citations / llm_mode）；无 LLM 时用模板组装检索结果。
-  3. **Citation 校验**：回答引用必须能回查到有效 element_id，否则丢弃并在 missing_information 标注。
-  4. 证据不足时显式返回缺失信息。
-  5. 保存 answer 并返回 `answer_id`（供反馈关联）。
+  1. 在 `claim/formula/procedure/concept` 四类 KG 对象上做混合检索，按类型权重做跨类型排序。
+  2. 对 top hits 做 1-hop KG 关系扩展，且 hit 与 neighbour 都必须是 USABLE 状态。
+  3. 配置 LLM 时生成带 `[k]` 标记的自然语言答案；未配置时返回 deterministic conclusion 与 `related_knowledge`/citations。
+  4. citation 必须能回查到有效 `element_id`。
+  5. 保存 answer 并返回 `answer_id` 与 `conversation_id`，用于反馈和多 session 会话。
 - `scenario_query()`：`ScenarioQueryRequest` 扩展 signal_type / constraint / process_or_node / application 等字段，构造 scenario 后走 ask。
 - `case_search()`：对 cases 知识对象 + element 相似检索，删除写死案例。
 - `checklist()`：从匹配的 rules / risks 生成 checklist item，删除写死 3 条。
@@ -179,8 +178,8 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - `scripts/dev.sh` 同时启动 FastAPI 后端与 Next.js 前端（要求 `frontend/node_modules`，否则提示先 `npm install`）。
 - 服务地址：前端 `http://localhost:3000`（占用时切 3001），后端 `http://127.0.0.1:8000`，CORS 默认放行 3000/3001。
 - `scripts/check.sh`：
-  - 后端 Python syntax（含 extraction.py / prompts.py / retrieval.py / mineru_client.py）
-  - `scripts/smoke_backend.py`（SQLite 持久化、上传解析、summary、搜索、**抽取→approve→ask→feedback→article 全闭环**、**异步 scheduler 路径**、PPTX 元素级 + speaker notes、research 误导性回归断言、**MinerU content_list→元素映射离线单测**、**检索打分（关键词/向量/None 三态）**、**知识状态机（deprecated 不召回 / reviewed 召回 / 非法状态报错）+ Method/Risk/Glossary 浏览 + 重复合并**、重启后持久化）
+  - 后端 Python syntax（含 KG extraction / profiles / prompts.py / retrieval.py / mineru_client.py）
+  - `scripts/smoke_backend.py`（SQLite 持久化、上传解析、summary、搜索、**KG 抽取 no-LLM 边界**、显式 KG/rule 知识写入、ask→feedback→conversation→article 闭环、**异步 scheduler 路径**、PPTX 元素级 + speaker notes、research 误导性回归断言、**MinerU content_list→元素映射离线单测**、**检索打分（关键词/向量/None 三态）**、**知识状态机（deprecated 不召回 / reviewed 召回 / 非法状态报错）+ 通用 knowledge 浏览 + 重复合并**、重启后持久化、旧 source 重解析时清理 source-derived 知识）
   - 前端 `tsc --noEmit`
 - 全部检查通过；`npm run build` 通过。
 
@@ -189,7 +188,7 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 为解决"网页操作时卡住、不知道发生了什么"的痛点，建立统一结构化日志：JSONL 文件（`.local/logs/`，已 gitignore）+ Python `logging` 控制台简要行，对离线/未配置无副作用，写日志失败绝不影响主流程。
 
 - **通用底座 `backend/app/core/event_logging.py`**：`EventLogger(settings, channel)` 负责 JSONL 追加 + 控制台行 + 永不抛异常；自动补 `ts/channel`，按 `LLM_LOG_MAX_CHARS` 截断；`new_id(prefix)` 生成关联 id。
-- **LLM 交互日志（`llm.jsonl`）**：`LLMInteractionLogger` 基于 `EventLogger`，埋点在唯一钖点 `OpenAICompatibleClient`（`chat_json`/`embed`），覆盖抽取/问答/文章研究/summary 全部路径。chat 记录 prompt/响应/token/latency（截断）；embedding 记摘要（model/耗时/维度/成功失败，不存向量）；**失败记 `status=error` 后 re-raise**，让原本被启发式回退静默吞掉的错误可见。
+- **LLM 交互日志（`llm.jsonl`）**：`LLMInteractionLogger` 基于 `EventLogger`，埋点在唯一钖点 `OpenAICompatibleClient`（`chat_json`/`embed`），覆盖抽取/问答/文章研究/summary 全部路径。chat 记录 prompt/响应/token/latency（截断）；embedding 记摘要（model/耗时/维度/成功失败，不存向量）；**失败记 `status=error` 后 re-raise**，让 deterministic fallback 容易掩盖的错误可见。
 - **HTTP 请求日志（`requests.jsonl`）**：`backend/app/main.py` 新增 middleware，记录每个请求 `method/path/status_code/latency_ms/client/request_id`；超过 `SLOW_REQUEST_MS`（默认 3000ms）标 `SLOW`；响应头带 `X-Request-Id` 供前后端关联。
 - **异步管线阶段日志（`events.jsonl`）**：`process_source` 对 parse/embed/extract/pipeline 各阶段两端计时打点（`kind=pipeline`，含 elements/parser_mode 等），`_set_source_status` 每次状态机跃迁 emit `kind=status`，失败记异常堆栈（`logger.exception`），可精确定位卡在哪一步、各步耗时与失败原因。
 - **修复真实 bug**：`_set_source_status` 原 `params.insert(2, summary)` 误写到 `error_message` 列，导致失败时真实错误从未落库；现已修正，前端 source detail 可显示具体错误（smoke 加回归断言守护）。
@@ -197,9 +196,9 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - **配置**：`config.py` + `.env.example` 新增 `EVENT_LOG_ENABLED` / `EVENT_LOG_DIR` / `SLOW_REQUEST_MS`（沿用既有 `LLM_LOG_*`）。
 - **验证**：`scripts/smoke_backend.py` 新增 `check_event_logging`（JSONL 可解析、禁用不写、写失败不抛）与 `check_pipeline_event_logging`（管线阶段事件产出 + `error_message` bug 回归）；`scripts/check.sh` 纳入 `event_logging.py` 编译。
 
-## 19. 本轮新增（dev 分支，方案 §6/§7/§16）
+## 19. 历史新增（dev 分支，方案 §6/§7/§16，部分已被 KG-native 主线替代）
 
-- **Explain Rule（§6.10）**：`GET /notebooks/{id}/rules/{rule_id}/explain` 把规则反向追溯到来源 evidence，并召回相关 case/risk/checklist；前端规则卡片「解释」按钮 + 弹窗。
+- **规则解释旧方案（§6.10）**：早期实现过 rule card 的 explain 方向；当前主线不再暴露 `/rules/{rule_id}/explain` 旧路由，改由通用 knowledge 详情与全屏 KG 详情展示 `出处`、相关节点和关系。
 - **Derived Rule Candidate 审核队列（§7.5）**：`GET /notebooks/{id}/derived-rules` + `POST /derived-rules/{id}/approve|reject`；approve 携 evidence 落入正式 `knowledge_objects`(rule)；前端 Studio「派生规则候选」弹窗审核。
 - **创建富字段 + 模板（§6.1/§6.2）**：`NotebookCreate/Update/Summary` 增 `target_users/expected_questions/source_types/taxonomy/access_scope`（notebooks 表迁移）；6 套模板 `GET /notebook-templates`，创建按模板预填；前端集合页「从模板…」选择器 + 编辑弹窗富字段。
 - **CSV / Excel 解析（§6.3）**：`parse_csv`(stdlib) + `parse_xlsx`(openpyxl) → `table_row` 元素；上传校验/accept 扩 `.csv/.xlsx/.xlsm`。
@@ -208,46 +207,57 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 
 ## 21. 文档类型抽取 profile 注册表（方案 §5 对象模型 + §6.2 模板）
 
-- **问题**：原抽取对所有文档硬套固定 6 类（rule/method/risk/case/checklist/glossary），只适合方案/总结；论文/课本硬套会产噪声、漏抽。
+- **问题**：早期抽取对所有文档硬套固定 6 类（rule/method/risk/case/checklist/glossary），只适合方案/总结；论文/课本硬套会产噪声、漏抽。当前主线已收敛到 KG-native 类型。
 - **profile 注册表**（`backend/app/services/extraction_profiles.py`）：
-  - `OBJECT_SCHEMAS`——共享 typed 知识模型，按 §5 补齐缺失字段，尤其**关系字段**：rule 增 `condition/exception/rule_type/related_cases/related_methods`；method 增 `tradeoff/required_condition/related_rules/related_cases`；case 增 `related_rules/related_methods`；checklist 增 `applies_to/related_rules/related_cases`；risk 增 `mitigation/related_rules`；glossary 增 `aliases`。新增论文/课本类型：`claim`(claim_type/measurement_condition…)、`finding`、`concept`、`principle`、`example`。
-  - `PROFILES`——文档类型 → 启用对象集 + prompt 框定：`design_spec / method / postmortem / review / academic_paper / textbook / general`。
-  - `TEMPLATE_PROFILE`——notebook 模板(§6.2) → 默认 profile。
+  - `OBJECT_SCHEMAS`——当前内置 KG 类型为 `concept / claim / formula / procedure`，payload 主字段为 `name`，保留 `section_path`。
+  - `PROFILES`——当前文档类型为 `academic_paper / textbook`，二者启用同一组 KG 类型。
+  - `TEMPLATE_PROFILE`——仅保留 article/textbook 到 profile 的轻量映射；实际抽取主要按 source.doc_type。
   - `detect_doc_type` / `resolve_profile`——离线 bilingual 线索打分做 per-source 文档类型判别（明显胜出才覆盖模板默认，阈值：≥2 命中且领先 ≥2）。
-- **接入**：`run_extraction(..., profile)` 按 profile 动态生成 schema hint(`build_extraction_schema_hint`) + prompt(`extraction_prompt`)；启发式路径按 profile 过滤只产出激活类型；`notebooks` 表迁移加 `template` 列并在创建时落库；`_run_extraction` 解析 profile（模板默认 + 内容判别），并把 `profile=<id>` 记入 extraction_runs。
-- **验证**：`scripts/smoke_backend.py::check_extraction_profiles`——论文 doc 在 rule notebook 中仍判为 academic_paper 且不产 rule 候选；模板默认在判别不确定时生效；schema hint/prompt 反映各 profile 对象集与新字段；general 仍覆盖六类。`scripts/check.sh` 全绿、离线。
+- **接入**：`_run_extraction()` 读取 source.doc_type，调用 KG extractor；离线无 LLM 时只记录 `no-llm` run。
+- **验证**：`scripts/smoke_backend.py::check_extraction_profiles` 断言当前两类 profile 与四类 KG schema；`scripts/check.sh` 全绿、离线。
 
 ## 22. 新类型通用浏览闭环 + 全栈对等规则
 
-- **背景**：§21 让论文/课本类型（claim/finding/concept/principle/example）以及一直没有浏览入口的 case/checklist 能被抽取并 approve 入库，但**前端只有 rule/method/risk/glossary 四个 tab** → 「可审批但不可见」。本轮补齐前后端闭环。
+- **背景**：早期 knowledge UI 只覆盖少数定型 tab，会导致新对象类型「可入库但不可见」。当前主线通过动态 knowledge types 解决。
 - **后端**：
   - `GET /notebooks/{id}/knowledge-types` → 该 notebook 现有对象类型 + 非 deprecated 计数 + 中文 label（`KnowledgeTypeCount`）。
   - `GET /notebooks/{id}/knowledge?type=<type>` → 任意对象类型的通用记录（`KnowledgeRecord`：headline + 按 `OBJECT_SCHEMAS` 排序的 `fields[]` + status/owner/last_reviewed/evidence），与既有 PATCH `/knowledge/{id}` 治理通用。
   - `search_notebook` 纳入 knowledge_objects（全类型）→ 新类型可被 notebook 检索命中。
-- **前端**（`frontend/app/page.tsx`）：知识库 tab 改为**动态**——四个定型 tab 始终在，其余类型从 `/knowledge-types` 动态出现（带计数徽标）；非定型类型用通用渲染（headline + 字段表，字段名走中文 label 映射），复用状态/owner 编辑与查重。
+- **前端**（`frontend/app/page.tsx`）：知识库 tab 改为**动态**——类型从 `/knowledge-types` 动态出现（带计数徽标）；非定型类型用通用渲染（headline + 字段表，字段名走中文 label 映射），复用状态/owner 编辑与查重。
 - **同时修复**：`routes.py` 缺失的 `NotebookTemplate` import（此前 API 模块导入即 NameError，但 check.sh 只导 services 未触发）。
 - **新规矩（AGENTS.md「Full-Stack Parity」）**：本系统中**任何面向用户的后端能力必须同变更内附带对应前端界面，不允许只实现一半**；"done" 的判定含后端端点、前端入口、`check.sh` 绿、`npm run build` 通过。
-- **验证**：`smoke_backend.py` 增 knowledge_types/list_knowledge 断言；TestClient 实跑确认 demo notebook 现可浏览 rule/case/checklist/glossary；`check.sh` 全绿、`npm run build` 通过。
+- **验证**：`smoke_backend.py` 增 knowledge_types/list_knowledge 断言；当前 TestClient smoke 确认动态 knowledge API 可用；`check.sh` 全绿。
 
 ## 23. Schema 管理 + 归纳 + 关系图 + ask 织入 + 抽取自我修正
 
 - **可编辑 schema 注册表**：新增 `object_schemas` 表（迁移时从代码默认 seed，`INSERT OR IGNORE` 保留人工编辑）。抽取改为读 **DB 生效 schema**（`effective_schemas()` 叠加在代码默认上），prompt/schema-hint/字段排序全部按生效注册表。端点 `GET/POST/PATCH/DELETE /object-schemas`（内置可停用不可删、自定义可删）。前端「Schema」弹窗：列出/编辑字段·标签·说明、启用/停用、新增自定义类型。
 - **Schema 归纳（建议态，§开放发现）**：`POST /notebooks/{id}/schema-proposals` 用 LLM 从笔记本内容提议新类型（offline 为 no-op），存为 `status='proposed' source='induced'`，绝不自动启用；前端在 Schema 弹窗审核（批准→active / 拒绝→删除）。
-- **关系边消费（§7.4 基础）**：`GET /notebooks/{id}/graph` 把各对象 `related_rules/cases/methods/concepts` 自由文本按 headline 模糊匹配解析成边（nodes+edges）；Explain Rule 增 `related_knowledge`（规则连出的对象）；前端「关系图」弹窗 + Explain 弹窗内关系块。
+- **关系边消费（§7.4 基础）**：当前主线使用 `knowledge_relations` 与 `/unified-kg`，不再依赖各对象 payload 中的 `related_rules/cases/methods/concepts` 自由文本去临时推边。
 - **Object 级知识图谱可视化（§7.4）**：前端「知识图谱」改为读取 `/unified-kg?level=object`，Concept / Claim / Formula / Procedure 同屏展示；主 canvas 直接绘制节点名称、类型形状/颜色、边关系标签，并按容器尺寸响应式布局；密集全量视图用类型分区与标签降噪，左侧提供可选一种或多种类型的过滤；侧栏提供按类型分组的节点总览，选中节点会聚焦 canvas 并展示 payload、相邻关系和「出处」。Concept 节点继续拉取详情，相关 Claim / Formula / Procedure 以「相关节点」展示在出处下方，并按类型分组且复用 canvas 的类型颜色/形状。
-- **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回非核心类型（claim/finding/concept/principle/example/glossary/自定义）的 top 命中；前端 AnswerView 不再把所有相关知识平铺在答案下方，而是用顺序引用承接证据，并在引用区提供知识图谱入口供用户继续浏览相关节点。
-- **抽取自我修正 + 证据绑定升级**：LLM 路径加一轮自检（drop 幻觉/含糊、回填更忠实 verbatim span，`REFINE_SCHEMA_HINT`/`refine_prompt`，offline no-op）；`bind_evidence` 命中元素后取最佳**逐句 verbatim** 作为引文。
+- **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回 KG top 命中 + USABLE 一跳邻居；前端 AnswerView 不再把所有相关知识平铺在答案下方，而是用顺序引用承接证据，并在引用区提供知识图谱入口供用户继续浏览相关节点。
+- **证据绑定升级**：KG `build_records()` 会把 LLM 节点 evidence 绑定到 source elements；离线 smoke 覆盖 exact/fuzzy binding、window grounding 与 ungrounded node drop。
 - **顺带修复**：`routes.py` 缺失的 `NotebookTemplate` import（API 模块导入即 NameError）。
-- **验证**：`smoke_backend.py` 增 `check_object_schemas / check_self_refinement / check_knowledge_graph` + ask `related_knowledge` 断言；TestClient 实跑全部新端点 200；`check.sh` 全绿、`npm run build` 通过。
+- **验证**：当前 `smoke_backend.py` 覆盖 `check_object_schemas / check_kg_record_binding / check_kg_extract_window_grounding / check_kg_store_ask_and_conversations` + API route smoke；`check.sh` 全绿。
 
 ## 24. 类型决策从「建库」移到「上传/单文件」+ 描述自动生成 + API 层冒烟
 
 - **动机**：库类型不应在建库时选；应按**文档内容类型**选 schema，且粒度到**单个文件**（一个库可混论文/方案/复盘）。
 - **建库极简化**：去掉模板/库类型与富字段预填，建库只留**名称 + 描述**。描述留空 → `purpose_auto=1`，在用户添加**首批来源**后由来源内容自动生成（LLM 配置时 1–2 句摘要，否则「N 个来源 + 类型涵盖…」启发式）；用户手改描述后置 `purpose_auto=0`，不再覆盖。
-- **per-file 文档类型**：`sources.doc_type`（迁移）；上传接口增 `doc_types` 表单数组（与 files 按序对齐）；`_run_extraction` profile 解析改为 **source.doc_type 优先 → 空/auto 内容判别 → general**，砍掉 notebook template 线。`GET /doc-types` 暴露选项（自动检测 + 7 profile）。
+- **per-file 文档类型**：`sources.doc_type`（迁移）；上传接口增 `doc_types` 表单数组（与 files 按序对齐）；当前 profile 解析为 **source.doc_type 优先 → 空/auto 内容判别 → 默认 academic_paper**。`GET /doc-types` 暴露自动检测 + academic_paper/textbook。
 - **前端**：建库改「名称+描述」弹窗；上传改**暂存式**——选文件→列清单→每文件文档类型下拉(默认自动检测)+「全部设为…」→确认上传；移除「从模板…」入口。
 - **API 层冒烟（夯实）**：`check_api_layer` 用 TestClient 真起 app 跑遍各路由组 + 错误码契约(404/400/422)，补上「测试从不 import routes」这个盲区（此前 `NotebookTemplate` 漏 import 即因此潜伏）。
 - 备注：`/notebook-templates` 端点与 `notebook_templates.py` 现已无人使用，留作后续清理。
+
+## 25. 冒烟脚本对齐 KG-native 当前架构（2026-06-04）
+
+- **根因**：`scripts/smoke_backend.py` 仍导入已删除的 `app.services.extraction`，并断言旧 rule/method/risk/case/checklist/glossary 启发式候选；当前代码已改为 KG-native 抽取，离线无 LLM 时只记录 `no-llm` run。
+- **脚本迁移**：
+  - 删除旧 extraction.py 依赖，改测 `extraction_profiles.py` 当前 profile（academic_paper/textbook + concept/claim/formula/procedure）。
+  - 增加 KG evidence binding / `extract_window` grounding / KG windowing / `store_kg` / graph / Ask / conversation 的离线 smoke。
+  - API smoke 改为动态知识接口：`/knowledge-types` + `/knowledge?type=...`，不再要求已不存在的 `/rules` 等旧浏览路由。
+  - 主 smoke 明确验证离线上传后 `extraction_runs.run_type='kg'` 且 `error_message='no-llm'`；需要检索/治理断言时由 smoke 显式写入 KG/rule 对象。
+- **真实后端修复**：Ask 主命中已排除 `deprecated`，但 1-hop KG neighbour 查询此前没有按 USABLE 状态过滤，会把 deprecated 邻居重新带回 `related_knowledge`；现已在 `SQLiteRepository.ask()` 的 neighbour SQL 中增加 status 过滤。
+- **验证**：`bash scripts/check.sh` 通过（后端 py_compile + KG-native smoke + 前端 `tsc --noEmit`）。脚本中的缺文件栈是故意触发 parse failure，以验证 pipeline `error_message` 能记录真实异常。
 
 ## 20. 当前边界（后续阶段，未计入已完成）
 

@@ -12,15 +12,15 @@ This repository now targets a local real-team beta loop:
 - SQLite persistence by default at `.local/silicon_notebook.db`
 - Next.js / React / TypeScript frontend under `frontend/`
 - OpenAI-compatible LLM configuration for summaries, extraction, answers, and article research; embeddings can be configured independently with the same compatible API endpoint
-- Deterministic summary and answer fallbacks when no LLM key is configured
+- Deterministic summary and answer fallbacks when no LLM key is configured; KG extraction records a completed `no-llm` run offline instead of fabricating heuristic knowledge
 - Clean start for real teams: a fresh database seeds only the local user — no demo notebook or synthetic sources. New-notebook example prompts adapt to the chosen template / notebook domain instead of hardcoded samples
 - Real multipart source upload (async parsing via FastAPI `BackgroundTasks`) for PDF, Markdown, DOCX, and PPTX
 - PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured on a GPU host; pypdf text fallback locally / when MinerU is off
 - Parsed `SourceElement` records with `element_type`, `location_label`, `text`, and `metadata`
-- Automatic knowledge extraction (rule / method / risk / case / checklist / glossary candidates) with element-level evidence binding, plus candidate governance capabilities (approve / reject / edit)
+- LLM-backed KG extraction for Concept / Claim / Formula / Procedure objects with element-level evidence binding; legacy candidate governance endpoints remain for backward compatibility, but the current offline path does not synthesize rule/method/risk candidates
 - Hybrid retrieval: keyword + optional embedding cosine over both source elements and approved knowledge
 - Real source-grounded answers with citation validation: Ask, Scenario query, Case search, Checklist generator, Article research, compact numbered citations, Markdown/code/formula/table rendering, and lightweight 👍/👎/copy actions
-- Knowledge governance: browse rules/methods/risks/glossary, status lifecycle (reviewed/approved/deprecated/conflict/project_specific) + owner/last_reviewed, duplicate detection & merge, and conflict detection (deprecated knowledge is excluded from answers) with optional comments
+- Knowledge governance: browse any object type through `/knowledge-types` + `/knowledge?type=...`, status lifecycle (reviewed/approved/deprecated/conflict/project_specific) + owner/last_reviewed, duplicate detection & merge, and conflict detection. Deprecated knowledge is excluded from Ask retrieval, including one-hop KG neighbours.
 - Object-level knowledge graph visualization: Concept / Claim / Formula / Procedure nodes are shown together with visible node labels, type-specific shapes/colors, relationship labels on edges, search/multi-select type filters, merge review, and a type-grouped node overview/detail panel with canvas focus on selection
 - Notebook collection page (grid/compact/list views, edit/delete), workspace title editing, source detail previews/delete, article delete, internal search
 - No Docker in the first version
@@ -131,7 +131,7 @@ The outer page is a notebook collection/library:
 Inside a notebook:
 
 - Left column: user-imported source files (live parse-status while parsing/extracting) with detail previews and delete actions. Source detail text wraps within the modal width, with only structured tables/formulas using local horizontal scroll when needed. Network source search is intentionally disabled for now.
-- Center column: source-grounded knowhow tools as tabs — Ask (free question), Scenario query (structured scenario form), Case search, Checklist generator, and Rule browser. Ask supports multiple saved conversations through a compact session context bar plus an expandable session manager, so the main answer area keeps its full width. The welcome prompts are derived from the notebook's imported source titles/summaries. Answers render Markdown (including code, formulas, and tables), use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel, and expose lightweight 👍/👎/copy actions; related knowledge is reached from the citation area through the Knowledge Graph instead of being flattened under every answer.
+- Center column: source-grounded knowhow tools as tabs — Ask (free question), Scenario query (structured scenario form), Case search, Checklist generator, and Knowledge browser. Ask supports multiple saved conversations through a compact session context bar plus an expandable session manager, so the main answer area keeps its full width. The welcome prompts are derived from the notebook's imported source titles/summaries. Answers render Markdown (including code, formulas, and tables), use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel, and expose lightweight 👍/👎/copy actions; related knowledge is reached from the citation area through the Knowledge Graph instead of being flattened under every answer.
 - Knowledge Graph opens as a full-screen workspace overlay: the canvas renders object-level KG nodes with names, type-specific visual marks, and relationship labels; multi-select type filters reduce dense views; the side panel groups nodes by type (Concept, Claim, Formula, Procedure) and selecting an item focuses the canvas while showing selected-node relations, source excerpts, and related nodes with matching type marks.
 - Right column: Studio with Mind Map, New Article, and Infographic; article research drives the Mind Map / Infographic output, and created articles can be deleted.
 
@@ -148,8 +148,10 @@ Key local beta APIs:
 - `POST /api/notebooks/{notebook_id}/sources` for multipart file upload (async parse/extract)
 - `GET /api/sources/{source_id}`, `DELETE /api/sources/{source_id}`, and `POST /api/sources/{source_id}/parse` (poll status / re-run pipeline)
 - `GET /api/sources/{source_id}/elements`, `POST /api/sources/{source_id}/extract`
-- `GET /api/notebooks/{notebook_id}/candidates[/{type}]`, `PATCH /api/candidates/{id}`, `POST /api/candidates/{id}/approve|reject`
-- `GET /api/notebooks/{notebook_id}/rules`
+- `GET /api/notebooks/{notebook_id}/candidates[/{type}]`, `PATCH /api/candidates/{id}`, `POST /api/candidates/{id}/approve|reject` for legacy candidate governance
+- `GET /api/notebooks/{notebook_id}/knowledge-types`, `GET /api/notebooks/{notebook_id}/knowledge?type=claim|concept|formula|procedure|...`
+- `GET /api/notebooks/{notebook_id}/graph`, `GET /api/notebooks/{notebook_id}/unified-kg`
+- `GET /api/notebooks/{notebook_id}/conversations`, `GET|PATCH|DELETE /api/conversations/{conversation_id}`
 - `GET /api/notebooks/{notebook_id}/search?q=`
 - `POST /api/notebooks/{notebook_id}/ask`, `.../scenario-query`, `.../case-search`, `.../checklist`
 - `GET|POST /api/notebooks/{notebook_id}/articles`, `DELETE /api/articles/{id}`, `POST /api/articles/{id}/research`
@@ -185,7 +187,7 @@ EVENT_LOG_ENABLED / EVENT_LOG_DIR                     # HTTP + pipeline event lo
 SLOW_REQUEST_MS                                       # requests slower than this (ms) are flagged SLOW
 ```
 
-When LLM settings are not configured, extraction, summaries, and answers fall back to deterministic heuristics so the local beta remains usable end-to-end (offline).
+When LLM settings are not configured, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and the KG extraction stage records a completed `no-llm` run without generating synthetic knowledge.
 
 ## Observability
 
@@ -193,7 +195,7 @@ The backend emits structured logs through a single `EventLogger` (`app/core/even
 
 - `requests.jsonl` — every HTTP request (method, path, status, latency, `request_id`). Requests slower than `SLOW_REQUEST_MS` (default 3000ms) are flagged `SLOW`. Responses carry an `X-Request-Id` header to correlate browser and server.
 - `events.jsonl` — async source pipeline: per-stage timings (`parse` / `embed` / `extract`) and every status-machine transition. A "stuck" upload shows exactly which stage is running and for how long; failures record the real exception (and the source's `error_message`).
-- `llm.jsonl` — every LLM call: chat (prompt/response/tokens/latency, truncated to `LLM_LOG_MAX_CHARS`), embeddings (summary only, no raw vectors), and errors that the heuristic fallback would otherwise hide.
+- `llm.jsonl` — every LLM call: chat (prompt/response/tokens/latency, truncated to `LLM_LOG_MAX_CHARS`), embeddings (summary only, no raw vectors), and errors that deterministic fallback paths would otherwise make easy to miss.
 
 In the browser, the DevTools console mirrors requests as `[api] METHOD /path -> status Nms (request_id)`; while polling, the UI shows the pending stage / elapsed time and surfaces a source's `error_message` on failure.
 
@@ -256,7 +258,7 @@ MinerU output maps to structured `SourceElement`s: formulas become `formula` ele
 ## Current Limitations
 
 - Retrieval is SQLite keyword + in-Python embedding cosine; BM25/FTS5 and pgvector are deferred.
-- Rule governance is basic (approve/reject); status lifecycle, duplicate merge, and conflict detection are next (Tier 2).
+- LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG/rule objects explicitly when they need retrieval and governance assertions.
 - Article Studio works from title/abstract text and linked source elements when present; first-class article full-text upload and richer relation scoring are next (Tier 3).
 - PostgreSQL + pgvector are not required for the local beta and are deferred.
 - The `off`-mode PDF fallback uses pypdf layout extraction with heading/paragraph segmentation (decent reading order, no new deps) — but formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
@@ -270,7 +272,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This checks backend syntax, a SQLite/upload/parser/extract/approve/delete/ask/feedback/article smoke path (including the retrieval scoring and async-upload paths), and Next.js TypeScript when dependencies are installed.
+This checks backend syntax, a SQLite/upload/parser/KG-extraction-boundary/delete/ask/feedback/article smoke path (including retrieval scoring, conversation APIs, stale-source invalidation, and async-upload paths), and Next.js TypeScript when dependencies are installed.
 
 ## Documentation Maintenance
 

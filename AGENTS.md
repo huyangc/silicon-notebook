@@ -76,7 +76,7 @@ Inside a notebook:
   - Source detail element text should wrap within the modal width, including long Markdown paths, LaTeX fragments, and mixed Chinese/English text; keep horizontal scrolling local to tables/formulas rather than the entire detail panel.
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.
 - Center column: source-grounded knowhow tools, exposed as tabs.
-  - This is the main interaction area: Ask (free question), Scenario query (structured form), Case search, Checklist generator, and Rule browser.
+  - This is the main interaction area: Ask (free question), Scenario query (structured form), Case search, Checklist generator, and Knowledge browser.
   - Ask conversation history should use a compact session context bar and an expandable session manager instead of permanently splitting the already constrained center panel.
   - Answers must stay evidence-grounded, render Markdown/code/formula/table content cleanly, use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel (not in an overflowing floating popover), and support lightweight 👍/👎/copy actions. Do not flatten all related knowledge under each answer; route deeper exploration from the citation area into the Knowledge Graph.
   - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
@@ -103,9 +103,9 @@ Confirmed scope:
 - Parser-generated `SourceElement` records with element-level citation granularity.
 - Source summary after parsing. Use the OpenAI-compatible client when configured; otherwise use deterministic fallback.
 - Notebook-internal search over notebook metadata, source metadata, source element text, and article summaries.
-- Automatic extraction (rule/method/risk/case/checklist/glossary candidates) with evidence binding, candidate governance capabilities (approve/reject/edit), and a `knowledge_objects` store for approved knowledge are implemented.
+- LLM-backed KG extraction for Concept / Claim / Formula / Procedure objects with evidence binding is implemented. Legacy candidate tables/endpoints still exist for governance compatibility, but the current no-LLM offline extraction path records `error_message='no-llm'` and does not synthesize rule/method/risk candidates.
 - Ask, Scenario query, Case search, Checklist, Rule browser, and Article research are real and data-driven (hybrid keyword + embedding retrieval, citation validation, deterministic fallback offline). They are no longer demo-backed.
-- Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded. Browse via `GET /notebooks/{id}/{rules|methods|risks|glossary}`, edit via `PATCH /knowledge/{id}`, dedupe via `GET .../duplicates` + `POST /knowledge/{id}/merge`, conflicts via `GET .../conflicts`.
+- Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded, including during Ask's one-hop KG neighbour expansion. Browse dynamically via `GET /notebooks/{id}/knowledge-types` + `GET /notebooks/{id}/knowledge?type=...`, edit via `PATCH /knowledge/{id}`, dedupe via `GET .../duplicates` + `POST /knowledge/{id}/merge`, conflicts via `GET .../conflicts`.
 - Article research persists `article_claims` with relation metadata and draft `derived_rule_candidates`; feedback supports `useful` / `not_useful` plus an optional comment.
 - User-created notebooks, imported sources, and Studio articles must expose delete actions. Source deletion removes parsed elements, extraction runs/candidates, embeddings, stale source-derived knowledge, and the stored local file; article deletion removes article claims and derived-rule candidates.
 - Single-user mode for now, but keep user/system structure ready for future expansion.
@@ -123,7 +123,7 @@ Confirmed scope:
 - Default CORS origins include local frontend ports `3000` and `3001`; preserve this unless the frontend dev flow changes.
 - Repository access should go through a repository boundary. `SQLiteRepository` is the current implementation; keep the interface clear for a future PostgreSQL repository.
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
-- Extraction runs/candidates, `knowledge_objects`, `element_embeddings`, `answers`, `feedback`, `article_claims`, and `derived_rule_candidates` tables are live. Embedding vectors are stored as JSON and cosine is computed in Python (no pgvector locally).
+- `extraction_runs`, legacy `extraction_candidates`, `knowledge_objects`, `knowledge_relations`, `element_embeddings`, `knowledge_embeddings`, `answers`, `conversations`, `feedback`, `article_claims`, and `derived_rule_candidates` tables are live. Embedding vectors are stored as JSON and cosine is computed in Python (no pgvector locally).
 - Upload runs the parse → embed → extract pipeline asynchronously via FastAPI `BackgroundTasks`; the repository accepts a `scheduler` callback so scripts/tests can run it synchronously.
 - Re-running parse/extraction for a source invalidates stale source-derived candidates and approved knowledge before writing the new extraction result.
 - Deleting a source uses the same stale source-derived cleanup boundary, removes its local file, and clears any article research artifacts that depended on that source. Deleting an article cascades its claims and derived-rule candidates.
@@ -245,7 +245,7 @@ This checks:
 - Backend Python syntax with the shared Miniconda Python.
 - SQLite initialization and persistence smoke path.
 - Markdown, DOCX, PPTX, and PDF upload/parse smoke path (sync and async-scheduler paths).
-- Extraction → approve → delete → ask → feedback (with comment) → article research smoke path, plus retrieval scoring (keyword/vector, CJK tokenization, hybrid fusion, scenario boost, payload-level embeddings), demo-seed knowledge, derived-rule persistence, and stale-knowledge invalidation assertions.
+- KG extraction boundary (`no-llm` offline), explicit KG/rule knowledge storage, delete → ask → feedback (with comment) → conversation APIs → article research smoke path, plus retrieval scoring (keyword/vector, CJK tokenization, hybrid fusion, scenario boost, payload-level embeddings), derived-rule persistence, and stale-source knowledge invalidation assertions. Fresh DB must still have no demo notebook.
 - Logging: LLM interaction log, generic event log (parseable/disable/never-raise), and pipeline stage events + `error_message` regression.
 - Source summary fallback and notebook-internal search.
 - Next.js TypeScript when `frontend/node_modules` exists.
