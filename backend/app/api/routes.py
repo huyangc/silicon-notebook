@@ -18,6 +18,8 @@ from app.models.schemas import (
     ChecklistItem,
     ChecklistRequest,
     ConflictPair,
+    ConversationDetail,
+    ConversationSummary,
     DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
@@ -435,6 +437,22 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         return repository().ask(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary])
+def list_conversations(notebook_id: str) -> List[ConversationSummary]:
+    try:
+        return repository().list_conversations(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
+def get_conversation(conversation_id: str) -> ConversationDetail:
+    try:
+        return repository().get_conversation(conversation_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
 
 @router.post("/notebooks/{notebook_id}/case-search", response_model=List[CaseCard])

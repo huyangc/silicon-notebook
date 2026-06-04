@@ -61,3 +61,29 @@ def test_ask_feeds_prior_turns_into_prompt(repo, monkeypatch):
     r1 = repo.ask(nb.id, AskRequest(question="ZZTOPIC question"))
     repo.ask(nb.id, AskRequest(question="follow up", conversation_id=r1.conversation_id))
     assert "ZZTOPIC question" in captured["p"]      # prior turn present in 2nd prompt
+
+
+def test_list_conversations(repo):
+    nb = _seed(repo)
+    r = repo.ask(nb.id, AskRequest(question="q1"))
+    convs = repo.list_conversations(nb.id)
+    assert len(convs) == 1 and convs[0].id == r.conversation_id and convs[0].turn_count == 1
+
+
+def test_conversation_routes(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+    client = TestClient(app)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    r = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q1"})
+    assert r.status_code == 200
+    cid = r.json()["conversation_id"]
+    assert cid
+    lst = client.get(f"/api/notebooks/{nb}/conversations")
+    assert lst.status_code == 200 and len(lst.json()) == 1 and lst.json()[0]["id"] == cid
+    detail = client.get(f"/api/conversations/{cid}")
+    assert detail.status_code == 200 and detail.json()["turn_count"] == 1
+    assert client.get("/api/conversations/bogus").status_code == 404
