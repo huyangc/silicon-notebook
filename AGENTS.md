@@ -77,8 +77,9 @@ Inside a notebook:
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.
 - Center column: source-grounded knowhow tools, exposed as tabs.
   - This is the main interaction area: Ask (free question), Scenario query (structured form), Case search, Checklist generator, and Rule browser.
-  - Answers must stay evidence-grounded (related rules/cases/checklist/risks, missing-information, citations) and support 👍/👎 feedback.
-  - Prompt chips should run useful first-version questions; the menu should expose a real clear/reset action.
+  - Ask conversation history should use a compact session context bar and an expandable session manager instead of permanently splitting the already constrained center panel.
+  - Answers must stay evidence-grounded, render Markdown/code/formula/table content cleanly, use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel (not in an overflowing floating popover), and support lightweight 👍/👎/copy actions. Do not flatten all related knowledge under each answer; route deeper exploration from the citation area into the Knowledge Graph.
+  - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
 - Knowledge Graph opens as a full-screen workspace overlay.
   - Use the object-level unified graph so Concept / Claim / Formula / Procedure nodes can appear together; do not fall back to a concept-only graph when object-level relationships exist.
   - The main canvas should show node names, type-specific node marks, and relationship labels on edges.

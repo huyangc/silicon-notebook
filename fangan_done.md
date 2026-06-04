@@ -66,11 +66,11 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
 - **中栏 knowhow 工具 tab**：问答 / 场景查询 / 案例检索 / Checklist / 知识库。
-  - 问答：自由提问走 `/ask`（已移除写死 scenario）；prompt chips 触发真实 ask。
+  - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。
   - 场景查询：9 字段结构化表单走 `/scenario-query`，复用统一 AnswerView。
   - 案例检索 / Checklist：分别走 `/case-search`、`/checklist`，渲染 CaseCard / ChecklistItem。
   - **知识库（多类型浏览）**：规则 / 方法 / 风险 / 术语子切换，分别走 `/rules|/methods|/risks|/glossary`；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
-  - 回答含 citation 与 👍/👎 反馈；chat 菜单可清空对话。
+  - 回答含 citation 与 👍/👎 反馈；引用在前端以 `[1]`、`[2]` 顺序编号展示，点击引用会在答案面板内展开详情（避免浮窗越界），答案正文支持 Markdown/code/formula/table 渲染，并提供复制按钮；chat 菜单可清空对话。
 - **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
 - **文章创建入口**：真实文章创建 modal，移除写死的 `ARTICLE_ID`、`DEMO_NOTEBOOK_ID` 常量。
 - **source detail 结构化渲染**：`formula` 元素用 KaTeX 排版（失败回退原始 LaTeX）、`table` 元素用 sanitized `table_html` 渲染、其余文本 + element_type 徽标。
@@ -163,7 +163,7 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 
 - `answers` 表保存每次回答，`feedback` 表关联反馈。
 - `POST /api/answers/{answer_id}/feedback`（rating useful / not_useful + comment）。
-- 前端 AnswerView 增加 👍 / 👎 与评论提交。
+- 前端 AnswerView 提供轻量 👍 / 👎 / 复制操作；后端反馈接口仍支持可选 comment，但当前问答 UI 不再显示评论输入框。
 
 ## 15. 数据模型
 
@@ -235,7 +235,7 @@ LLM 未配置时，全链路退化为 deterministic fallback（启发式抽取�
 - **Schema 归纳（建议态，§开放发现）**：`POST /notebooks/{id}/schema-proposals` 用 LLM 从笔记本内容提议新类型（offline 为 no-op），存为 `status='proposed' source='induced'`，绝不自动启用；前端在 Schema 弹窗审核（批准→active / 拒绝→删除）。
 - **关系边消费（§7.4 基础）**：`GET /notebooks/{id}/graph` 把各对象 `related_rules/cases/methods/concepts` 自由文本按 headline 模糊匹配解析成边（nodes+edges）；Explain Rule 增 `related_knowledge`（规则连出的对象）；前端「关系图」弹窗 + Explain 弹窗内关系块。
 - **Object 级知识图谱可视化（§7.4）**：前端「知识图谱」改为读取 `/unified-kg?level=object`，Concept / Claim / Formula / Procedure 同屏展示；主 canvas 直接绘制节点名称、类型形状/颜色、边关系标签，并按容器尺寸响应式布局；密集全量视图用类型分区与标签降噪，左侧提供可选一种或多种类型的过滤；侧栏提供按类型分组的节点总览，选中节点会聚焦 canvas 并展示 payload、相邻关系和「出处」。Concept 节点继续拉取详情，相关 Claim / Formula / Procedure 以「相关节点」展示在出处下方，并按类型分组且复用 canvas 的类型颜色/形状。
-- **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回非核心类型（claim/finding/concept/principle/example/glossary/自定义）的 top 命中；前端 AnswerView 渲染。
+- **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回非核心类型（claim/finding/concept/principle/example/glossary/自定义）的 top 命中；前端 AnswerView 不再把所有相关知识平铺在答案下方，而是用顺序引用承接证据，并在引用区提供知识图谱入口供用户继续浏览相关节点。
 - **抽取自我修正 + 证据绑定升级**：LLM 路径加一轮自检（drop 幻觉/含糊、回填更忠实 verbatim span，`REFINE_SCHEMA_HINT`/`refine_prompt`，offline no-op）；`bind_evidence` 命中元素后取最佳**逐句 verbatim** 作为引文。
 - **顺带修复**：`routes.py` 缺失的 `NotebookTemplate` import（API 模块导入即 NameError）。
 - **验证**：`smoke_backend.py` 增 `check_object_schemas / check_self_refinement / check_knowledge_graph` + ask `related_knowledge` 断言；TestClient 实跑全部新端点 200；`check.sh` 全绿、`npm run build` 通过。

@@ -1,10 +1,18 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, FileText, PanelRightClose, Plus, Search, Sparkles, Trash2 } from "lucide-react";
+import { Check, Copy, Edit3, ExternalLink, FileText, MessageSquareText, PanelRightClose, Plus, Search, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
+import {
+  buildAnswerReferences,
+  parseMarkdownBlocks,
+  referenceByAnchorKey,
+  renderTextWithReferenceNumbers,
+  type AnswerReference,
+  type MarkdownBlock,
+} from "./answer-formatting";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -329,14 +337,100 @@ function chipLabel(question: string): string {
   return text.length > 16 ? `${text.slice(0, 16)}…` : text;
 }
 
+type WelcomeCopy = {
+  title: string;
+  description: string;
+  prompts: Array<[string, string]>;
+};
+
+function sourceTopicCandidates(notebook: NotebookSummary | null, sources: SourceSummary[]): string[] {
+  const stop = new Set([
+    "source", "untitled", "notebook", "markdown", "paper", "abstract", "section",
+    "figure", "table", "results", "method", "methods", "model", "models",
+    "current", "evidence", "engineering", "semiconductor", "optional",
+    "debug", "viewer", "only", "verbatim", "slice", "original",
+    "lines", "authoritative", "gold", "coordinates", "live", "yaml", "atom",
+    "atoms", "span", "file", "mineru", "parsed", "text", "element", "elements",
+    "under", "each", "may", "drift",
+  ]);
+  const counts = new Map<string, { label: string; count: number }>();
+  const add = (text: string, weight: number) => {
+    const normalized = text
+      .replace(/\.(pdf|md|markdown|docx|pptx|csv|xlsx)\b/gi, " ")
+      .replace(/[_/\\.:-]+/g, " ");
+    for (const match of normalized.matchAll(/\b[A-Za-z][A-Za-z0-9+-]{2,}\b/g)) {
+      const raw = match[0];
+      const key = raw.toLowerCase();
+      if (stop.has(key) || /^\d+$/.test(key)) continue;
+      const label = raw === raw.toUpperCase() ? raw : raw.charAt(0).toUpperCase() + raw.slice(1);
+      const previous = counts.get(key);
+      counts.set(key, { label: previous?.label ?? label, count: (previous?.count ?? 0) + weight });
+    }
+  };
+  for (const source of sources) {
+    add(source.title || source.file_name || "", 4);
+    add(source.file_name || "", 4);
+    add(source.summary || "", 2);
+  }
+  if (counts.size === 0) {
+    add(notebook?.primary_domain ?? "", 1);
+    add(notebook?.name ?? "", 0.5);
+  }
+  return [...counts.values()]
+    .sort((a, b) => b.count - a.count || b.label.length - a.label.length)
+    .slice(0, 4)
+    .map((item) => item.label);
+}
+
+function sourceTopicLabel(notebook: NotebookSummary | null, sources: SourceSummary[]): string {
+  const [topic] = sourceTopicCandidates(notebook, sources);
+  if (topic) return topic;
+  const domain = notebook?.primary_domain?.trim();
+  if (domain) return domain;
+  const firstSource = sources.find((source) => compactSourceTitle(source).toLowerCase() !== "source");
+  if (firstSource) return compactSourceTitle(firstSource);
+  return "当前来源";
+}
+
+function sourceAwarePrompts(notebook: NotebookSummary | null, sources: SourceSummary[]): Array<[string, string]> {
+  const topic = sourceTopicLabel(notebook, sources);
+  const related = sourceTopicCandidates(notebook, sources).filter((item) => item !== topic).slice(0, 2);
+  const compare = related.length > 0
+    ? `请比较 ${topic} 与 ${related.join("、")} 的关系，并给出证据。`
+    : `请解释 ${topic} 的关键概念，并说明它们之间的关系。`;
+  return [
+    [`解释 ${chipLabel(topic)}`, `请基于当前来源解释 ${topic} 是什么，并给出可追溯引用。`],
+    ["核心论断", `请列出来源中关于 ${topic} 的核心论断，并说明每条论断的证据。`],
+    ["表格总结", `请用 Markdown 表格总结 ${topic} 的结构、作用、限制和证据。`],
+    ["关系与过程", compare],
+  ];
+}
+
 // Quick-prompt chips for a notebook: prefer its own expected questions
-// (set at creation from the template/user input), else neutral fallbacks.
-function promptChipsFor(notebook: NotebookSummary | null): Array<[string, string]> {
+// (set at creation from the template/user input), else derive from sources.
+function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary[] = []): Array<[string, string]> {
   const expected = (notebook?.expected_questions ?? []).map((q) => q.trim()).filter(Boolean);
   if (expected.length > 0) {
     return expected.slice(0, 4).map((q) => [chipLabel(q), q] as [string, string]);
   }
+  if (sources.length > 0) return sourceAwarePrompts(notebook, sources);
   return GENERIC_PROMPTS;
+}
+
+function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[]): WelcomeCopy {
+  if (sources.length === 0) {
+    return {
+      title: "导入来源后开始提问",
+      description: "添加 PDF、Markdown、DOCX 或 PPTX 后，这里会根据来源内容生成可追溯的问题建议。",
+      prompts: promptChipsFor(notebook, sources),
+    };
+  }
+  const topic = sourceTopicLabel(notebook, sources);
+  return {
+    title: `围绕 ${topic} 提问`,
+    description: `已导入 ${sources.length} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
+    prompts: promptChipsFor(notebook, sources),
+  };
 }
 
 // Placeholder for the Ask box: a real expected question if the notebook has
@@ -613,7 +707,9 @@ export default function Home() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
-  const [feedbackComment, setFeedbackComment] = useState<Record<string, string>>({});
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [articleModalOpen, setArticleModalOpen] = useState(false);
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState("");
@@ -636,6 +732,7 @@ export default function Home() {
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
+  const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
   const [nodeCtx, setNodeCtx] = useState<NodeContext | null>(null);
   const [kgSearch, setKgSearch] = useState("");
@@ -835,10 +932,14 @@ export default function Home() {
     return enriched;
   }, [filter, notebooks, searchHits, searchQuery, sortMode]);
 
-  // Example prompts / placeholders adapt to the open notebook's template-seeded
-  // expected questions and domain, so a new notebook never shows demo examples.
-  const promptChips = useMemo(() => promptChipsFor(currentNotebook), [currentNotebook]);
+  // Example prompts / placeholders adapt to the open notebook's imported sources,
+  // so a new notebook never shows demo examples.
+  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources), [currentNotebook, sources]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
+  const currentSession = useMemo(
+    () => sessions.find((session) => session.id === conversationId) ?? null,
+    [conversationId, sessions],
+  );
 
   const fgData = useMemo(() => {
     if (!uGraph) return { nodes: [] as FgNode[], links: [] as FgLink[] };
@@ -998,6 +1099,14 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [fgData.nodes.length, fgData.links.length, kgDenseView, kgSelectedTypes, kgSize.height, kgSize.width, kgViewOpen]);
 
+  useEffect(() => {
+    if (!kgViewOpen || !pendingKgFocusId || !fgData.nodes.some((node) => node.id === pendingKgFocusId)) return;
+    const nodeId = pendingKgFocusId;
+    setPendingKgFocusId(null);
+    selectKgNode(nodeId).catch(reportError);
+    window.setTimeout(() => focusKgGraphNode(nodeId), 900);
+  }, [fgData.nodes, kgViewOpen, pendingKgFocusId]);
+
   async function loadNotebookCollection() {
     const healthResponse = await api<Health>("/health");
     const notebookResponse = await api<NotebookSummary[]>("/notebooks");
@@ -1048,7 +1157,9 @@ export default function Home() {
     setPendingQuestion("");
     setStudioOutput(null);
     setFeedbackSent({});
-    setFeedbackComment({});
+    setSessionPanelOpen(false);
+    setRenamingSessionId(null);
+    setSessionTitleDraft("");
     setChatMode("ask");
     setKnowledge(EMPTY_KNOWLEDGE);
     setKnowledgeKind("concept");
@@ -1353,6 +1464,8 @@ export default function Home() {
     setConversationId(id);
     setPendingQuestion("");
     setChatMode("ask");
+    setSessionPanelOpen(false);
+    setRenamingSessionId(null);
   }
 
   function startNewSession() {
@@ -1360,6 +1473,8 @@ export default function Home() {
     setConversationId(null);
     setPendingQuestion("");
     setChatMode("ask");
+    setSessionPanelOpen(false);
+    setRenamingSessionId(null);
   }
 
   async function deleteSession(id: string) {
@@ -1373,11 +1488,33 @@ export default function Home() {
     setToast("会话已删除");
   }
 
-  async function renameSession(session: ConversationSummary) {
-    const next = window.prompt("重命名会话", session.title)?.trim();
-    if (next == null || next === "" || next === session.title) return;
-    await api(`/conversations/${session.id}`, { method: "PATCH", body: JSON.stringify({ title: next }) });
+  function requestDeleteSession(session: ConversationSummary) {
+    setInfoModal({
+      title: "删除会话",
+      message: `确定删除“${session.title || "未命名会话"}”吗？对应的历史问答会一起移除。`,
+      actions: [
+        { label: "取消", action: () => undefined },
+        { label: "删除", danger: true, action: () => { deleteSession(session.id).catch(reportError); } },
+      ],
+    });
+  }
+
+  function beginRenameSession(session: ConversationSummary) {
+    setRenamingSessionId(session.id);
+    setSessionTitleDraft(session.title || "未命名会话");
+    setSessionPanelOpen(true);
+  }
+
+  async function commitRenameSession(sessionId: string) {
+    const next = sessionTitleDraft.trim();
+    const current = sessions.find((session) => session.id === sessionId);
+    if (!next || next === current?.title) {
+      setRenamingSessionId(null);
+      return;
+    }
+    await api(`/conversations/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title: next }) });
     await loadSessions(currentNotebookId);
+    setRenamingSessionId(null);
     setToast("会话已重命名");
   }
 
@@ -1516,12 +1653,13 @@ export default function Home() {
     setGraph(response);
   }
 
-  async function openKgView() {
+  async function openKgView(targetNodeId?: string) {
     if (!currentNotebookId) return;
     setKgViewOpen(true);
     setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
     setKgSearch("");
     setKgSelectedTypes([]);
+    setPendingKgFocusId(targetNodeId ?? null);
     try {
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
@@ -1910,50 +2048,108 @@ export default function Home() {
                     >{label}</button>
                   ))}
                 </div>
-                <button className="icon-button compact" title="Clear" onClick={() => setInfoModal({
-                  title: "对话",
-                  message: "开始新对话将清空当前多轮上下文，回到欢迎状态。",
-                  actions: [{ label: "新对话", primary: true, action: () => { setTurns([]); setConversationId(null); setPendingQuestion(""); } }]
-                })}>⋮</button>
+                <div className="chat-header-actions">
+                  {chatMode === "ask" && (
+                    <button
+                      className={`chat-session-toggle ${sessionPanelOpen ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setSessionPanelOpen((open) => !open)}
+                    >
+                      <MessageSquareText size={15} />
+                      会话
+                    </button>
+                  )}
+                  <button className="icon-button compact" title="Clear" onClick={() => setInfoModal({
+                    title: "对话",
+                    message: "开始新对话将清空当前多轮上下文，回到欢迎状态。",
+                    actions: [{ label: "新对话", primary: true, action: startNewSession }]
+                  })}>⋮</button>
+                </div>
               </div>
               {chatMode === "ask" && (
-                <div className="chat-sessions">
+                <div className="chat-session-context">
                   <button
-                    className={`chat-session-new ${conversationId == null ? "active" : ""}`}
-                    onClick={startNewSession}
-                    title="开始新对话"
-                  >＋ 新会话</button>
-                  {sessions.map((session) => (
-                    <div
-                      key={session.id}
-                      className={`chat-session ${session.id === conversationId ? "active" : ""}`}
-                      onClick={() => openSession(session.id).catch(reportError)}
-                      title={session.title}
-                    >
-                      <span className="chat-session-title">{session.title || "未命名会话"}</span>
-                      <span className="chat-session-meta">{formatRelativeTime(session.updated_at)} · {session.turn_count} 轮</span>
-                      <button
-                        className="chat-session-action"
-                        title="重命名"
-                        onClick={(event) => { event.stopPropagation(); renameSession(session).catch(reportError); }}
-                      >✎</button>
-                      <button
-                        className="chat-session-action"
-                        title="删除"
-                        onClick={(event) => { event.stopPropagation(); deleteSession(session.id).catch(reportError); }}
-                      >✕</button>
+                    className="chat-current-session"
+                    type="button"
+                    onClick={() => setSessionPanelOpen((open) => !open)}
+                    title={currentSession?.title || "新会话"}
+                  >
+                    <MessageSquareText size={16} />
+                    <span>{currentSession?.title || "新会话"}</span>
+                    <small>{currentSession ? `${formatRelativeTime(currentSession.updated_at)} · ${currentSession.turn_count} 轮` : "下一次提问会创建会话"}</small>
+                  </button>
+                  <button className="chat-session-new" type="button" onClick={startNewSession}>
+                    <Plus size={14} /> 新会话
+                  </button>
+                  <button
+                    className={`chat-session-toggle slim ${sessionPanelOpen ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setSessionPanelOpen((open) => !open)}
+                  >
+                    历史 {sessions.length}
+                  </button>
+                </div>
+              )}
+              {chatMode === "ask" && sessionPanelOpen && (
+                <div className="chat-session-popover" role="dialog" aria-label="会话管理">
+                  <div className="chat-session-popover-head">
+                    <div>
+                      <strong>会话</strong>
+                      <small>切换历史问答，不压缩当前回答区域。</small>
                     </div>
-                  ))}
+                    <button className="icon-button compact" type="button" onClick={() => setSessionPanelOpen(false)} title="关闭">
+                      <X size={15} />
+                    </button>
+                  </div>
+                  <div className="chat-session-list">
+                    <button className={`chat-session-card new ${conversationId == null ? "active" : ""}`} type="button" onClick={startNewSession}>
+                      <Plus size={16} />
+                      <span>新会话</span>
+                      <small>从一个新的问题开始</small>
+                    </button>
+                    {sessions.length === 0 ? (
+                      <div className="chat-session-empty">还没有历史会话。</div>
+                    ) : sessions.map((session) => (
+                      <article className={`chat-session-card ${session.id === conversationId ? "active" : ""}`} key={session.id}>
+                        {renamingSessionId === session.id ? (
+                          <div className="chat-session-rename">
+                            <input
+                              autoFocus
+                              value={sessionTitleDraft}
+                              onChange={(event) => setSessionTitleDraft(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") commitRenameSession(session.id).catch(reportError);
+                                if (event.key === "Escape") setRenamingSessionId(null);
+                              }}
+                            />
+                            <button type="button" title="保存" onClick={() => commitRenameSession(session.id).catch(reportError)}><Check size={15} /></button>
+                            <button type="button" title="取消" onClick={() => setRenamingSessionId(null)}><X size={15} /></button>
+                          </div>
+                        ) : (
+                          <>
+                            <button className="chat-session-card-main" type="button" onClick={() => openSession(session.id).catch(reportError)}>
+                              <span>{session.title || "未命名会话"}</span>
+                              <small>{formatRelativeTime(session.updated_at)} · {session.turn_count} 轮</small>
+                            </button>
+                            <div className="chat-session-card-actions">
+                              <button type="button" title="重命名" onClick={() => beginRenameSession(session)}><Edit3 size={14} /></button>
+                              <button type="button" title="删除" onClick={() => requestDeleteSession(session)}><Trash2 size={14} /></button>
+                            </div>
+                          </>
+                        )}
+                      </article>
+                    ))}
+                  </div>
                 </div>
               )}
               <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || asking ? "answer-mode" : ""}`}>
                 {chatMode === "ask" && (turns.length === 0 && !asking ? (
                   <div className="welcome">
                     <div className="wave">👋</div>
-                    <h2>Build a source-grounded engineering notebook</h2>
-                    <p>导入来源后，你可以围绕概念、论断、公式和过程提问。系统会优先展示可追溯的 evidence。</p>
+                    <h2>{welcomeCopy.title}</h2>
+                    <p>{welcomeCopy.description}</p>
                     <div className="prompt-chips">
-                      {promptChips.map(([label, prompt]) => (
+                      {welcomeCopy.prompts.map(([label, prompt]) => (
                         <button key={label} onClick={() => runAsk(prompt).catch(reportError)}>{label}</button>
                       ))}
                     </div>
@@ -1967,9 +2163,8 @@ export default function Home() {
                           <AnswerView
                             answer={turn.response}
                             feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
-                            feedbackComment={feedbackComment[turn.response.answer_id] ?? ""}
-                            setFeedbackComment={(value) => setFeedbackComment((prev) => ({ ...prev, [turn.response.answer_id]: value }))}
-                            onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, feedbackComment[turn.response.answer_id] ?? "").catch(reportError)}
+                            onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
+                            onOpenKnowledgeGraph={(objectId) => openKgView(objectId)}
                           />
                         </div>
                       </div>
@@ -3096,7 +3291,11 @@ function KnowledgeBrowser({
         <div className="stack">
           {filtered.map((item) => (
             <article className={`item ${item.status === "deprecated" ? "knowledge-deprecated" : ""}`} key={item.id}>
-              <h3>{knowledgeHeadline(kind, item)}</h3>
+              <div className="knowledge-item-title">
+                <KgTypeMark type={item.object_type ?? kind} />
+                <span>{kgTypeLabel(item.object_type ?? kind)}</span>
+                <h3>{knowledgeHeadline(kind, item)}</h3>
+              </div>
               {knowledgeBody(kind, item)}
               <div className="tag-row">
                 {item.severity && <span className={`tag severity-${item.severity}`}>{item.severity}</span>}
@@ -3148,124 +3347,278 @@ function KnowledgeBrowser({
   );
 }
 
-function CiteChip({ anchor }: { anchor: AnswerAnchor }) {
-  const [open, setOpen] = useState(false);
+function InlineFormula({ latex }: { latex: string }) {
+  let html = "";
+  try {
+    html = katex.renderToString(latex, { throwOnError: false, displayMode: false });
+  } catch {
+    html = "";
+  }
+  if (!html) return <code className="answer-inline-code">{latex}</code>;
+  return <span className="answer-inline-formula" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function referenceTitle(reference: AnswerReference): string {
+  if (reference.anchor) return reference.anchor.name || reference.anchor.label || reference.anchor.key;
+  return reference.citation?.label || reference.displayLabel;
+}
+
+function referenceSnippet(reference: AnswerReference): string {
+  if (reference.anchor) return reference.anchor.definition || reference.anchor.snippet || "";
+  return reference.citation?.quoted_span || "";
+}
+
+function referenceSource(reference: AnswerReference): string {
+  if (reference.anchor) return reference.anchor.source_title || "";
+  return reference.citation?.source_id || "";
+}
+
+function referenceLocation(reference: AnswerReference): string {
+  if (reference.anchor) return reference.anchor.location_label || "";
+  return reference.citation?.location_label || "";
+}
+
+function CiteChip({
+  reference,
+  selected,
+  onSelect
+}: {
+  reference: AnswerReference;
+  selected: boolean;
+  onSelect: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void;
+}) {
   return (
     <span className="cite-chip-wrap">
       <button
         type="button"
-        className="cite-chip"
-        onClick={() => setOpen((value) => !value)}
-      >{anchor.label}</button>
-      {open && (
-        <span className="cite-popover">
-          <strong>{anchor.name}</strong>
-          {anchor.definition && <span className="cite-popover-line">{anchor.definition}</span>}
-          {anchor.snippet && <span className="cite-popover-line">{anchor.snippet}</span>}
-          <span className="cite-popover-source">{anchor.source_title} · {anchor.location_label}</span>
-        </span>
-      )}
+        aria-expanded={selected}
+        className={`cite-chip ${selected ? "active" : ""}`}
+        onClick={(event) => onSelect(reference, event)}
+      >{reference.displayLabel}</button>
     </span>
   );
 }
 
-function renderAnswer(answer: AskResponse) {
-  const text = answer.answer || answer.conclusion || "";
-  if (!answer.answer) {
-    return (
-      <p>
-        {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
-        {text}
-      </p>
-    );
+function renderInlineAnswerText(
+  text: string,
+  refsByKey: Record<string, AnswerReference>,
+  selectedReferenceId: string | null,
+  onSelectReference: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void
+) {
+  const nodes = [];
+  const tokenPattern = /(`[^`]+`|\$[^$\n]+\$|\[(k\d+)\])/g;
+  let lastIndex = 0;
+  for (const match of text.matchAll(tokenPattern)) {
+    if (match.index == null) continue;
+    if (match.index > lastIndex) nodes.push(<span key={`text-${lastIndex}`}>{text.slice(lastIndex, match.index)}</span>);
+    const token = match[0];
+    const marker = token.match(/^\[(k\d+)\]$/);
+    const inlineCode = token.match(/^`([^`]+)`$/);
+    const inlineFormula = token.match(/^\$([^$\n]+)\$$/);
+    if (marker) {
+      const reference = refsByKey[marker[1]];
+      nodes.push(reference ? (
+        <CiteChip
+          key={`cite-${match.index}`}
+          reference={reference}
+          selected={selectedReferenceId === reference.id}
+          onSelect={onSelectReference}
+        />
+      ) : <span key={`unknown-cite-${match.index}`}>{token}</span>);
+    } else if (inlineCode) {
+      nodes.push(<code className="answer-inline-code" key={`code-${match.index}`}>{inlineCode[1]}</code>);
+    } else if (inlineFormula) {
+      nodes.push(<InlineFormula latex={inlineFormula[1]} key={`formula-${match.index}`} />);
+    } else {
+      nodes.push(<span key={`token-${match.index}`}>{token}</span>);
+    }
+    lastIndex = match.index + token.length;
   }
-  const byKey = Object.fromEntries(answer.anchors.map((item) => [item.key, item]));
-  const parts = text.split(/(\[k\d+\])/g);
+  if (lastIndex < text.length) nodes.push(<span key={`text-${lastIndex}`}>{text.slice(lastIndex)}</span>);
+  return nodes;
+}
+
+function AnswerMarkdown({
+  text,
+  references,
+  selectedReferenceId,
+  onSelectReference
+}: {
+  text: string;
+  references: AnswerReference[];
+  selectedReferenceId: string | null;
+  onSelectReference: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const refsByKey = referenceByAnchorKey(references);
+  const blocks = parseMarkdownBlocks(text);
+  if (blocks.length === 0) return null;
   return (
-    <p>
-      {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
-      {parts.map((seg, index) => {
-        const match = seg.match(/^\[(k\d+)\]$/);
-        const anchor = match ? byKey[match[1]] : undefined;
-        if (!anchor) return <span key={index}>{seg}</span>;
-        return <CiteChip key={index} anchor={anchor} />;
+    <div className="answer-markdown">
+      {blocks.map((block: MarkdownBlock, index: number) => {
+        if (block.type === "code") {
+          return (
+            <pre className="answer-code" data-language={block.language || undefined} key={index}>
+              <code>{block.code}</code>
+            </pre>
+          );
+        }
+        if (block.type === "formula") return <FormulaView latex={block.latex} key={index} />;
+        if (block.type === "table") {
+          return (
+            <div className="answer-table-wrap" key={index}>
+              <table className="answer-table">
+                <thead>
+                  <tr>{block.headers.map((header, cellIndex) => <th key={cellIndex}>{renderInlineAnswerText(header, refsByKey, selectedReferenceId, onSelectReference)}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{renderInlineAnswerText(cell, refsByKey, selectedReferenceId, onSelectReference)}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+        if (block.type === "unordered-list") {
+          return <ul key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineAnswerText(item, refsByKey, selectedReferenceId, onSelectReference)}</li>)}</ul>;
+        }
+        if (block.type === "ordered-list") {
+          return <ol key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineAnswerText(item, refsByKey, selectedReferenceId, onSelectReference)}</li>)}</ol>;
+        }
+        return <p key={index}>{renderInlineAnswerText(block.text, refsByKey, selectedReferenceId, onSelectReference)}</p>;
       })}
-    </p>
+    </div>
+  );
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+function SelectedReferenceDetail({
+  reference,
+  onOpenKnowledgeGraph
+}: {
+  reference: AnswerReference;
+  onOpenKnowledgeGraph: (objectId?: string) => void;
+}) {
+  const objectType = reference.anchor?.object_type || "";
+  const title = referenceTitle(reference);
+  const snippet = referenceSnippet(reference);
+  const source = referenceSource(reference);
+  const location = referenceLocation(reference);
+  return (
+    <aside className="cite-detail-card" aria-live="polite">
+      <div className="cite-detail-head">
+        <strong>{reference.displayLabel}</strong>
+        {objectType && <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>}
+        <button
+          type="button"
+          onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
+          disabled={!reference.anchor?.object_id}
+          title={reference.anchor?.object_id ? "在知识图谱中定位" : "该引用没有绑定知识节点"}
+        >
+          <ExternalLink size={14} />
+          知识图谱
+        </button>
+      </div>
+      <h4>{title}</h4>
+      {snippet && <p>{snippet}</p>}
+      {(source || location) && <small>{[source, location].filter(Boolean).join(" · ")}</small>}
+    </aside>
   );
 }
 
 function AnswerView({
   answer,
   feedbackSent,
-  feedbackComment,
-  setFeedbackComment,
-  onFeedback
+  onFeedback,
+  onOpenKnowledgeGraph
 }: {
   answer: AskResponse;
   feedbackSent: string;
-  feedbackComment: string;
-  setFeedbackComment: (value: string) => void;
   onFeedback: (rating: "useful" | "not_useful") => void;
+  onOpenKnowledgeGraph: (objectId?: string) => void;
 }) {
+  const [copied, setCopied] = useState(false);
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
+  const selectedReferenceRef = useRef<HTMLDivElement | null>(null);
+  const answerText = answer.answer || answer.conclusion || "";
+  const references = useMemo(
+    () => buildAnswerReferences(answerText, answer.anchors, answer.citations),
+    [answerText, answer.anchors, answer.citations]
+  );
+  const selectedReference = references.find((reference) => reference.id === selectedReferenceId);
+  useEffect(() => {
+    setSelectedReferenceId(null);
+  }, [answer.answer_id]);
+  useEffect(() => {
+    if (!selectedReferenceId) return;
+    window.setTimeout(() => {
+      selectedReferenceRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, 0);
+  }, [selectedReferenceId]);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  async function copyAnswer() {
+    await copyTextToClipboard(renderTextWithReferenceNumbers(answerText, references));
+    setCopied(true);
+  }
+
   return (
     <div className="chat-answer">
-      {renderAnswer(answer)}
-      <div className="answer-feedback">
-        <textarea
-          value={feedbackComment}
-          disabled={Boolean(feedbackSent)}
-          rows={2}
-          maxLength={500}
-          placeholder="补充反馈（可选）"
-          onChange={(event) => setFeedbackComment(event.target.value)}
-        />
-        <div className="tag-row">
-          <button
-            className={`sort-button ${feedbackSent === "useful" ? "active" : ""}`}
-            disabled={Boolean(feedbackSent)}
-            onClick={() => onFeedback("useful")}
-          >👍 有用</button>
-          <button
-            className={`sort-button ${feedbackSent === "not_useful" ? "active" : ""}`}
-            disabled={Boolean(feedbackSent)}
-            onClick={() => onFeedback("not_useful")}
-          >👎 需改进</button>
-          {feedbackSent && <span className="tag">已记录反馈</span>}
-        </div>
-      </div>
-      {answer.related_knowledge.length > 0 && (
-        <div className="chat-answer-grid">
-          <div>
-            <p className="section-title">相关知识</p>
-            <div className="stack">
-              {answer.related_knowledge.map((record) => (
-                <article className="item" key={record.id}>
-                  <div className="tag-row"><span className="tag">{record.object_type}</span><span className="tag">{record.status}</span></div>
-                  <h3>{record.headline || record.id}</h3>
-                  {record.evidence.length > 0 && (
-                    <div className="citation">
-                      <strong>Evidence</strong>
-                      <div>{record.evidence[0].location_label}</div>
-                      <div>{record.evidence[0].quoted_span}</div>
-                    </div>
-                  )}
-                </article>
-              ))}
-            </div>
-          </div>
+      {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
+      <AnswerMarkdown
+        text={answerText}
+        references={references}
+        selectedReferenceId={selectedReferenceId}
+        onSelectReference={(reference) => setSelectedReferenceId((current) => current === reference.id ? null : reference.id)}
+      />
+      {selectedReference && (
+        <div ref={selectedReferenceRef}>
+          <SelectedReferenceDetail reference={selectedReference} onOpenKnowledgeGraph={onOpenKnowledgeGraph} />
         </div>
       )}
-      <div className="chat-citations">
-        <p className="section-title">Citations</p>
-        <div className="stack">
-          {answer.citations.map((citation, index) => (
-            <div className="citation" key={`${citation.label}-${index}`}>
-              <strong>{citation.label}</strong>
-              <div>{citation.location_label}</div>
-              <div>{citation.quoted_span}</div>
-            </div>
-          ))}
-        </div>
+      <div className="answer-feedback">
+        <button
+          aria-label="有用"
+          className={`answer-action ${feedbackSent === "useful" ? "selected" : ""}`}
+          disabled={Boolean(feedbackSent)}
+          onClick={() => onFeedback("useful")}
+          title="有用"
+          type="button"
+        ><ThumbsUp size={16} /></button>
+        <button
+          aria-label="需改进"
+          className={`answer-action ${feedbackSent === "not_useful" ? "selected" : ""}`}
+          disabled={Boolean(feedbackSent)}
+          onClick={() => onFeedback("not_useful")}
+          title="需改进"
+          type="button"
+        ><ThumbsDown size={16} /></button>
+        <button
+          aria-label={copied ? "已复制" : "复制回答"}
+          className={`answer-action ${copied ? "selected" : ""}`}
+          onClick={() => copyAnswer().catch(() => undefined)}
+          title={copied ? "已复制" : "复制回答"}
+          type="button"
+        >{copied ? <Check size={16} /> : <Copy size={16} />}</button>
       </div>
     </div>
   );
