@@ -620,34 +620,10 @@ export default function Home() {
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
   const kgGraphRef = useRef<any>(null);
-  const restoredRef = useRef(false);
 
   useEffect(() => {
     loadNotebookCollection().catch(reportError);
   }, []);
-
-  // Persist the selected notebook to localStorage so a page refresh can restore it.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (currentNotebookId) window.localStorage.setItem("snb.currentNotebookId", currentNotebookId);
-    else window.localStorage.removeItem("snb.currentNotebookId");
-  }, [currentNotebookId]);
-
-  // Once the notebook list is available, restore the previously-selected notebook
-  // (if any) so an in-progress analysis is visible again after a page refresh.
-  // The restoredRef guard ensures this runs only once; if the user manually
-  // returns to the list, currentNotebookId becomes null and the localStorage key
-  // is cleared by the persist effect above, so we never accidentally re-open.
-  useEffect(() => {
-    if (restoredRef.current) return;
-    if (typeof window === "undefined") return;
-    if (notebooks.length === 0) return;
-    restoredRef.current = true;
-    const saved = window.localStorage.getItem("snb.currentNotebookId");
-    if (saved && !currentNotebookId && notebooks.some((n) => n.id === saved)) {
-      openNotebook(saved).catch(reportError);
-    }
-  }, [notebooks]);
 
   useEffect(() => {
     if (!kgViewOpen) return;
