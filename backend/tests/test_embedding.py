@@ -12,7 +12,7 @@ def test_fake_embedder_is_deterministic_and_batched():
 def test_factory_defaults_to_fake_when_unconfigured(monkeypatch):
     monkeypatch.delenv("EMBED_PROVIDER", raising=False)
     e = make_embedder(Settings())
-    assert e.__class__.__name__ in ("FakeEmbedder", "LocalBGEEmbedder", "DashscopeEmbedder")
+    assert e.__class__.__name__ in ("FakeEmbedder", "DashscopeEmbedder")
     monkeypatch.setenv("EMBED_PROVIDER", "")
     assert make_embedder(Settings()).__class__.__name__ == "FakeEmbedder"
 
@@ -38,23 +38,6 @@ def test_dashscope_embedder_batches_and_no_retries(monkeypatch):
     out = e.embed_texts(["a", "b", "c"])
     assert len(out) == 3 and captured["input"] == ["a", "b", "c"]   # ONE batched call
     assert captured["kwargs"].get("max_retries") == 0               # fail-fast
-
-def test_local_bge_lazy_loads_once(monkeypatch):
-    import app.services.embedding_local as mod
-    loads = {"n": 0}
-    class _Model:
-        def encode(self, texts, **kw):
-            return [[0.0] * 4 for _ in texts]
-    def fake_loader(name):
-        loads["n"] += 1
-        return _Model()
-    monkeypatch.setattr(mod, "_load_model", fake_loader)
-    monkeypatch.setattr(mod.LocalBGEEmbedder, "_model", None)  # reset singleton across tests
-    monkeypatch.setenv("EMBED_MODEL", "BAAI/bge-m3"); monkeypatch.setenv("EMBED_DIM", "4")
-    from app.core.config import Settings
-    e = mod.LocalBGEEmbedder(Settings())
-    e.embed_query("a"); e.embed_texts(["b", "c"])
-    assert loads["n"] == 1  # model loaded once, reused
 
 
 def test_dashscope_chunks_at_most_10(monkeypatch):

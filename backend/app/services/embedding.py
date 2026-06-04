@@ -44,7 +44,4 @@ def make_embedder(settings: Settings) -> Embedder:
     if provider == "dashscope":
         from app.services.embedding_dashscope import DashscopeEmbedder
         return DashscopeEmbedder(settings)
-    if provider == "local":
-        from app.services.embedding_local import LocalBGEEmbedder
-        return LocalBGEEmbedder(settings)
     return FakeEmbedder(dim=settings.embed_dim)

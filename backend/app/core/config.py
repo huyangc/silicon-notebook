@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         env="OPENAI_COMPAT_MAX_RETRIES",
     )
 
-    embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""|fake|local|dashscope
+    embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""(off) | dashscope
     embed_model: str = Field("", env="EMBED_MODEL")
     embed_base_url: str = Field("", env="EMBED_BASE_URL")
     embed_api_key: str = Field("", env="EMBED_API_KEY")
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
 
     @property
     def embedder_configured(self) -> bool:
-        return self.embed_provider in ("local", "dashscope")
+        return self.embed_provider == "dashscope"
 
     @property
     def mineru_enabled(self) -> bool:
