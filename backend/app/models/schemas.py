@@ -153,9 +153,24 @@ class AskRequest(BaseModel):
     scenario: Dict[str, str] = Field(default_factory=dict)
 
 
+class AnswerAnchor(BaseModel):
+    key: str                 # "k1" — matches [k1] marker in answer text
+    object_id: str
+    object_type: str
+    label: str               # short display token (KG name, clipped)
+    name: str = ""
+    definition: Optional[str] = None
+    snippet: Optional[str] = None      # element_text of the grounding sentence
+    source_title: str = ""
+    location_label: str = ""
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     conclusion: str
+    answer: str = ""
+    grounded: bool = False
+    anchors: List[AnswerAnchor] = Field(default_factory=list)
     related_knowledge: List["KnowledgeRecord"] = Field(default_factory=list)
     citations: List[Citation] = Field(default_factory=list)
     llm_mode: str = ""

@@ -46,3 +46,9 @@ def test_ask_global_topn_not_fixed_quota(repo, monkeypatch):
     resp = repo.ask(nb.id, AskRequest(question="engram claim", scenario={}))
     claim_hits = [r for r in resp.related_knowledge if r.object_type == "claim"]
     assert len(claim_hits) > 5   # old code capped claims at _TOP_PER_TYPE=5
+
+def test_askresponse_has_answer_and_anchors():
+    from app.models.schemas import AskResponse, AnswerAnchor
+    a = AnswerAnchor(key="k1", object_id="o1", object_type="concept", label="Engram", name="Engram")
+    r = AskResponse(conclusion="x", answer="Engram [k1].", grounded=True, anchors=[a])
+    assert r.answer == "Engram [k1]." and r.grounded and r.anchors[0].key == "k1"
