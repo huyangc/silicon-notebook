@@ -1134,30 +1134,35 @@ class SQLiteRepository:
             return
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)
-        pending = [(el, el.text.strip()) for el in elements if el.text.strip()]
+        pending = [el for el in elements if el.text.strip()]
         if not pending:
             return
-        try:
-            vectors = self.embedder.embed_texts([text[:2000] for _, text in pending])
-        except Exception:
-            return  # embedding best-effort; never block ingestion
+        from app.services.embedding import embed_in_chunks
+        trunc = self.settings.embed_truncate_chars
+        texts = [el.text[:trunc] for el in pending]
+        vectors = embed_in_chunks(
+            self.embedder.embed_texts, texts,
+            chunk_size=self.settings.embed_persist_chunk,
+            logger=self.event_log.logger,
+        )
         now = _now()
+        stored = 0
         with self._connect() as db:
-            for (element, _), vector in zip(pending, vectors):
+            for element, vector in zip(pending, vectors):
+                if vector is None:
+                    continue
+                stored += 1
                 db.execute(
                     """
                     INSERT OR REPLACE INTO element_embeddings
                     (element_id, source_id, notebook_id, vector, created_at)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (
-                        element.id,
-                        source_id,
-                        source.notebook_id,
-                        json.dumps(vector),
-                        now,
-                    ),
+                    (element.id, source_id, source.notebook_id, json.dumps(vector), now),
                 )
+        self.event_log.logger.info(
+            "embedded %s/%s elements for source %s", stored, len(pending), source_id
+        )
 
     def _embed_knowledge(
         self,

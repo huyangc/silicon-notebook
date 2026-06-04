@@ -25,9 +25,11 @@ class DashscopeEmbedder:
         return self._client
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        batch = max(1, min(getattr(self.settings, "embed_batch_size", 10), 10))
+        trunc = getattr(self.settings, "embed_truncate_chars", 2000)
         out: List[List[float]] = []
-        for i in range(0, len(texts), _BATCH):
-            chunk = [t[:2000] for t in texts[i:i + _BATCH]]
+        for i in range(0, len(texts), batch):
+            chunk = [t[:trunc] for t in texts[i:i + batch]]
             resp = self._ensure().embeddings.create(model=self.model, input=chunk)
             out.extend(list(d.embedding) for d in resp.data)
         return out
