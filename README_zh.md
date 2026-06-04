@@ -163,8 +163,8 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 向量检索（语义召回）单独配置：
 
 ```text
-EMBED_PROVIDER          # ""=关闭（仅关键词） | local | dashscope
-EMBED_MODEL             # 如 BAAI/bge-m3（local）或 API 模型名
+EMBED_PROVIDER          # ""=关闭（仅关键词） | dashscope
+EMBED_MODEL             # 嵌入 API 模型名，如 text-embedding-v4
 EMBED_BASE_URL          # dashscope / OpenAI 兼容的 embedding 端点
 EMBED_API_KEY
 EMBED_DIM               # 须与模型输出维度一致（默认 1024）

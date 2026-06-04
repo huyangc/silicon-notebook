@@ -170,8 +170,8 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 Embeddings (semantic recall) are configured separately:
 
 ```text
-EMBED_PROVIDER          # ""=off (keyword only) | local | dashscope
-EMBED_MODEL             # e.g. BAAI/bge-m3 (local) or the API model name
+EMBED_PROVIDER          # ""=off (keyword only) | dashscope
+EMBED_MODEL             # the embedding API model name, e.g. text-embedding-v4
 EMBED_BASE_URL          # dashscope / OpenAI-compatible embedding endpoint
 EMBED_API_KEY
 EMBED_DIM               # must match the model's output dimension (default 1024)
