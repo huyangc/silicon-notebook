@@ -4,7 +4,7 @@ from typing import List
 from openai import OpenAI
 from app.core.config import Settings
 
-_BATCH = 25  # dashscope text-embedding caps batch size; keep requests small
+_BATCH = 10  # dashscope text-embedding-v3/v4 hard-cap: batch input <= 10 items
 
 
 class DashscopeEmbedder:

@@ -55,3 +55,26 @@ def test_local_bge_lazy_loads_once(monkeypatch):
     e = mod.LocalBGEEmbedder(Settings())
     e.embed_query("a"); e.embed_texts(["b", "c"])
     assert loads["n"] == 1  # model loaded once, reused
+
+
+def test_dashscope_chunks_at_most_10(monkeypatch):
+    """Regression: text-embedding-v3/v4 reject batches > 10 items with a 400.
+    embed_texts must sub-chunk so no single request exceeds the cap."""
+    import app.services.embedding_dashscope as mod
+    sizes = []
+    class _Emb:
+        def create(self, model, input):
+            sizes.append(len(input))
+            data = [type("D", (), {"embedding": [0.1, 0.2]})() for _ in input]
+            return type("R", (), {"data": data})()
+    class _Client:
+        embeddings = _Emb()
+    monkeypatch.setattr(mod, "OpenAI", lambda **kw: _Client())
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "https://x"); monkeypatch.setenv("EMBED_API_KEY", "k")
+    monkeypatch.setenv("EMBED_MODEL", "text-embedding-v4")
+    from app.core.config import Settings
+    e = mod.DashscopeEmbedder(Settings())
+    out = e.embed_texts([f"t{i}" for i in range(25)])
+    assert len(out) == 25                # all embedded
+    assert sizes and max(sizes) <= 10    # every request within dashscope's cap
