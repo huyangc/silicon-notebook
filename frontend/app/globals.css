@@ -824,6 +824,46 @@ button {
   color: #20242a;
 }
 
+.chat-thread {
+  align-self: start;
+  width: 100%;
+  display: grid;
+  gap: 26px;
+}
+
+.chat-turn {
+  display: grid;
+  gap: 14px;
+}
+
+.chat-user {
+  justify-self: end;
+  max-width: 78%;
+  background: var(--blue);
+  color: #fff;
+  border-radius: 14px 14px 4px 14px;
+  padding: 10px 16px;
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-assistant {
+  justify-self: start;
+  max-width: 100%;
+  width: 100%;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 14px 14px 14px 4px;
+  padding: 16px 18px;
+}
+
+.chat-thinking {
+  color: var(--muted);
+  font-size: 15px;
+}
+
 .chat-answer {
   align-self: start;
   display: grid;

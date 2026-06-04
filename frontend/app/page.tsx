@@ -106,6 +106,7 @@ type AnswerAnchor = {
 
 type AskResponse = {
   answer_id: string;
+  conversation_id: string;
   conclusion: string;
   answer: string;
   grounded: boolean;
@@ -114,6 +115,8 @@ type AskResponse = {
   citations: Citation[];
   llm_mode: string;
 };
+
+type ChatTurn = { question: string; response: AskResponse };
 
 type ArticleResearchBrief = {
   article: ArticleSummary;
@@ -558,7 +561,10 @@ export default function Home() {
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState<AskResponse | null>(null);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [pendingQuestion, setPendingQuestion] = useState("");
   const [studioOutput, setStudioOutput] = useState<StudioOutput | null>(null);
   const [filter, setFilter] = useState("mine");
   const [viewMode, setViewMode] = useState("grid");
@@ -585,8 +591,8 @@ export default function Home() {
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [feedbackSent, setFeedbackSent] = useState("");
-  const [feedbackComment, setFeedbackComment] = useState("");
+  const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
+  const [feedbackComment, setFeedbackComment] = useState<Record<string, string>>({});
   const [articleModalOpen, setArticleModalOpen] = useState(false);
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState("");
@@ -616,6 +622,7 @@ export default function Home() {
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
+  const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
@@ -624,6 +631,12 @@ export default function Home() {
   useEffect(() => {
     loadNotebookCollection().catch(reportError);
   }, []);
+
+  useEffect(() => {
+    const element = chatBodyRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [turns.length, asking]);
 
   useEffect(() => {
     if (!kgViewOpen) return;
@@ -1008,10 +1021,13 @@ export default function Home() {
     setSources(notebookSources);
     setArticles(notebookArticles);
     setSelectedArticleId(notebookArticles[0]?.id ?? "");
-    setAnswer(null);
+    setTurns([]);
+    setConversationId(null);
+    setAsking(false);
+    setPendingQuestion("");
     setStudioOutput(null);
-    setFeedbackSent("");
-    setFeedbackComment("");
+    setFeedbackSent({});
+    setFeedbackComment({});
     setChatMode("ask");
     setKnowledge(EMPTY_KNOWLEDGE);
     setKnowledgeKind("concept");
@@ -1078,13 +1094,13 @@ export default function Home() {
     setToast("文章已添加，可在 Studio 生成研究简报");
   }
 
-  async function submitFeedback(rating: "useful" | "not_useful", comment: string) {
-    if (!answer?.answer_id) return;
-    await api(`/answers/${answer.answer_id}/feedback`, {
+  async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
+    if (!answerId) return;
+    await api(`/answers/${answerId}/feedback`, {
       method: "POST",
       body: JSON.stringify({ rating, comment })
     });
-    setFeedbackSent(rating);
+    setFeedbackSent((prev) => ({ ...prev, [answerId]: rating }));
     setToast("感谢反馈");
   }
 
@@ -1094,6 +1110,10 @@ export default function Home() {
     setSources([]);
     setArticles([]);
     setTitleDraft("");
+    setTurns([]);
+    setConversationId(null);
+    setAsking(false);
+    setPendingQuestion("");
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     window.scrollTo(0, 0);
   }
@@ -1274,16 +1294,26 @@ export default function Home() {
 
   async function runAsk(nextQuestion = question) {
     if (!currentNotebookId) return;
-    if (!nextQuestion.trim()) return;
+    const q = nextQuestion.trim();
+    if (!q) return;
     setChatMode("ask");
-    const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
-      method: "POST",
-      body: JSON.stringify({ question: nextQuestion, scenario: {} })
-    });
-    setAnswer(response);
-    setFeedbackSent("");
-    setFeedbackComment("");
-    setQuestion(nextQuestion);
+    setQuestion("");
+    setPendingQuestion(q);
+    setAsking(true);
+    try {
+      const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
+        method: "POST",
+        body: JSON.stringify({ question: q, conversation_id: conversationId ?? undefined, scenario: {} })
+      });
+      setTurns((prev) => [...prev, { question: q, response }]);
+      setConversationId(response.conversation_id);
+    } catch (error) {
+      setQuestion(q);
+      reportError(error);
+    } finally {
+      setPendingQuestion("");
+      setAsking(false);
+    }
   }
 
 
@@ -1817,12 +1847,12 @@ export default function Home() {
                 </div>
                 <button className="icon-button compact" title="Clear" onClick={() => setInfoModal({
                   title: "对话",
-                  message: "当前对话可以清空回到欢迎状态；历史记录和多轮上下文将在后续版本接入。",
-                  actions: [{ label: "清空对话", primary: true, action: () => setAnswer(null) }]
+                  message: "开始新对话将清空当前多轮上下文，回到欢迎状态。",
+                  actions: [{ label: "新对话", primary: true, action: () => { setTurns([]); setConversationId(null); setPendingQuestion(""); } }]
                 })}>⋮</button>
               </div>
-              <div className={`chat-body ${chatMode !== "ask" || answer ? "answer-mode" : ""}`}>
-                {chatMode === "ask" && (!answer ? (
+              <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || asking ? "answer-mode" : ""}`}>
+                {chatMode === "ask" && (turns.length === 0 && !asking ? (
                   <div className="welcome">
                     <div className="wave">👋</div>
                     <h2>Build a source-grounded engineering notebook</h2>
@@ -1834,13 +1864,28 @@ export default function Home() {
                     </div>
                   </div>
                 ) : (
-                  <AnswerView
-                    answer={answer}
-                    feedbackSent={feedbackSent}
-                    feedbackComment={feedbackComment}
-                    setFeedbackComment={setFeedbackComment}
-                    onFeedback={(rating) => submitFeedback(rating, feedbackComment).catch(reportError)}
-                  />
+                  <div className="chat-thread">
+                    {turns.map((turn, index) => (
+                      <div className="chat-turn" key={turn.response.answer_id || index}>
+                        <div className="chat-user">{turn.question}</div>
+                        <div className="chat-assistant">
+                          <AnswerView
+                            answer={turn.response}
+                            feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
+                            feedbackComment={feedbackComment[turn.response.answer_id] ?? ""}
+                            setFeedbackComment={(value) => setFeedbackComment((prev) => ({ ...prev, [turn.response.answer_id]: value }))}
+                            onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, feedbackComment[turn.response.answer_id] ?? "").catch(reportError)}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    {asking && (
+                      <div className="chat-turn">
+                        {pendingQuestion && <div className="chat-user">{pendingQuestion}</div>}
+                        <div className="chat-assistant chat-thinking">思考中…</div>
+                      </div>
+                    )}
+                  </div>
                 ))}
 
                 {chatMode === "rules" && (
