@@ -105,3 +105,10 @@
 - [ ] **并发受「按 section 切窗」约束**：`extract_graph` 并发度 = `min(_WORKERS=16, 窗口数)`，窗口按 section 切，故并发 ≈ section 数（ch02 仅 6 窗，16 worker 闲 10 个）。sweep 实测：N=9000/4500/3000 都只 6 窗、wall 68–78s 持平；N=2000→9 窗也不提速、且 overlap 变大→总输出反增(49k vs 34k token)。结论：**element 级/更小窗不是有效并发杠杆**，还有丢跨元素边风险。若个别 section 远大于其它，可只对超大 section 二次切分。
 - [ ] **吞吐/成本**：每窗仍 ~3–8k 输出 token（selectivity 已削）；真正的延迟杠杆是上面的 timeout，不是并发。如要再降，可评估更快模型或在 A/B 守护下微调窗口。
 - 说明：sweep/A-B 均为一次性脚本已删；细节见 `docs/superpowers/specs/2026-06-02-kg-evidence-id-anchoring.md` 与本轮对话。
+
+## 多用户系统（用户身份 + 分享 + 近实时协作，2026-06-04，spec+plan 已就绪，暂缓执行）
+> 用户决定：先搁置、记录待办。**Phase A（聊天会话管理）已落地上线 master**（会话 `created_by` 归属 + 列表/切换/新建/删除/重命名，前后端，真机验证过）。下列 B/C/D 暂缓。
+> spec：`docs/superpowers/specs/2026-06-04-users-sharing-cowork-design.md`（决策 D1 协作=轮询+presence、D2 用户名 `^[A-Za-z]00[0-9]{6}$`、D3 仅用户名无密码经 `X-User-Id`、D4 存量数据归首登用户）。建设顺序 B→C→D，每个已有独立 plan。
+- [ ] **Phase B —用户身份 + 数据隔离**：用户名校验 + `POST /login`(upsert) + `X-User-Id` 中间件(ContextVar 解析 current_user) + `list_notebooks` 按 owner 隔离 + 存量迁移给首登用户 + 前端登录闸/退出。含「单用户回退」兼容（系统仅 user-local 时无头放行）。plan `docs/superpowers/plans/2026-06-04-phase-b-user-identity.md`。
+- [ ] **Phase C —分享 + 权限(view/edit)**：`notebook_shares` + `_access_tier`/`_require_access`(读≥view 写≥edit，前后端双拦) + `list_notebooks` 并入「分享给我的」+`access_tier` + 前端分享 UI/列表分区/view 隐写入口。`ask` 归 view。plan `docs/superpowers/plans/2026-06-04-phase-c-sharing-permissions.md`。
+- [ ] **Phase D —近实时协作**：`notebook_presence` 心跳 + `notebooks.revision` + `notebook_activity` + `GET /notebooks/{id}/state?since=` + 前端 ~4s 轮询(presence + revision 变了刷新来源/KG/文章；聊天保持个人态)。无 websocket/CRDT/锁。plan `docs/superpowers/plans/2026-06-04-phase-d-cowork.md`。
