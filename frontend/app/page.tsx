@@ -92,9 +92,24 @@ type ArticleSummary = {
   summary: string;
 };
 
+type AnswerAnchor = {
+  key: string;
+  object_id: string;
+  object_type: string;
+  label: string;
+  name: string;
+  definition?: string | null;
+  snippet?: string | null;
+  source_title: string;
+  location_label: string;
+};
+
 type AskResponse = {
   answer_id: string;
   conclusion: string;
+  answer: string;
+  grounded: boolean;
+  anchors: AnswerAnchor[];
   related_knowledge: KnowledgeRecord[];
   citations: Citation[];
   llm_mode: string;
@@ -3017,6 +3032,52 @@ function KnowledgeBrowser({
   );
 }
 
+function CiteChip({ anchor }: { anchor: AnswerAnchor }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="cite-chip-wrap">
+      <button
+        type="button"
+        className="cite-chip"
+        onClick={() => setOpen((value) => !value)}
+      >{anchor.label}</button>
+      {open && (
+        <span className="cite-popover">
+          <strong>{anchor.name}</strong>
+          {anchor.definition && <span className="cite-popover-line">{anchor.definition}</span>}
+          {anchor.snippet && <span className="cite-popover-line">{anchor.snippet}</span>}
+          <span className="cite-popover-source">{anchor.source_title} · {anchor.location_label}</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+function renderAnswer(answer: AskResponse) {
+  const text = answer.answer || answer.conclusion || "";
+  if (!answer.answer) {
+    return (
+      <p>
+        {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
+        {text}
+      </p>
+    );
+  }
+  const byKey = Object.fromEntries(answer.anchors.map((item) => [item.key, item]));
+  const parts = text.split(/(\[k\d+\])/g);
+  return (
+    <p>
+      {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
+      {parts.map((seg, index) => {
+        const match = seg.match(/^\[(k\d+)\]$/);
+        const anchor = match ? byKey[match[1]] : undefined;
+        if (!anchor) return <span key={index}>{seg}</span>;
+        return <CiteChip key={index} anchor={anchor} />;
+      })}
+    </p>
+  );
+}
+
 function AnswerView({
   answer,
   feedbackSent,
@@ -3032,7 +3093,7 @@ function AnswerView({
 }) {
   return (
     <div className="chat-answer">
-      <p>{answer.conclusion}</p>
+      {renderAnswer(answer)}
       <div className="answer-feedback">
         <textarea
           value={feedbackComment}

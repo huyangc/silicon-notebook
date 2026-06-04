@@ -1502,6 +1502,61 @@ button {
   font-size: 12px;
 }
 
+.answer-ungrounded {
+  margin-right: 6px;
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.cite-chip-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.cite-chip {
+  display: inline;
+  border: 1px solid var(--blue);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin: 0 2px;
+  color: var(--blue);
+  background: #f7faff;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.cite-popover {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: calc(100% + 4px);
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  max-width: 320px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 6px 18px rgba(20, 30, 50, 0.14);
+  font-size: 13px;
+  line-height: 1.45;
+  color: #20242a;
+  white-space: normal;
+  text-align: left;
+}
+
+.cite-popover-line {
+  color: #344255;
+}
+
+.cite-popover-source {
+  color: #6b7686;
+  font-size: 12px;
+}
+
 .severity-high {
   color: var(--red);
 }
