@@ -70,6 +70,23 @@ def test_list_conversations(repo):
     assert len(convs) == 1 and convs[0].id == r.conversation_id and convs[0].turn_count == 1
 
 
+def test_conversations_scoped_by_current_user(repo):
+    nb = _seed(repo)  # 复用本文件已有的 _seed
+    r = repo.ask(nb.id, AskRequest(question="q1"))
+    # 当前用户能看到自己的会话
+    convs = repo.list_conversations(nb.id)
+    assert [c.id for c in convs] == [r.conversation_id]
+    # 归属字段已写入
+    with repo._connect() as db:
+        owner = db.execute("SELECT created_by FROM conversations WHERE id=?", (r.conversation_id,)).fetchone()[0]
+    assert owner == repo.current_user().id
+    # 另一个用户的会话不出现在列表里
+    with repo._connect() as db:
+        db.execute("INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
+                   "VALUES ('conv-other','%s','x','someone-else','t','t')" % nb.id)
+    assert all(c.id != "conv-other" for c in repo.list_conversations(nb.id))
+
+
 def test_conversation_routes(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

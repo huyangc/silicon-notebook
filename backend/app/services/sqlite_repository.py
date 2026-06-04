@@ -300,6 +300,7 @@ class SQLiteRepository:
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL,
                   title TEXT DEFAULT '',
+                  created_by TEXT DEFAULT '',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -381,6 +382,13 @@ class SQLiteRepository:
             answer_cols = {r["name"] for r in db.execute("PRAGMA table_info(answers)").fetchall()}
             if "conversation_id" not in answer_cols:
                 db.execute("ALTER TABLE answers ADD COLUMN conversation_id TEXT")
+            ccols = {r["name"] for r in db.execute("PRAGMA table_info(conversations)").fetchall()}
+            if "created_by" not in ccols:
+                db.execute("ALTER TABLE conversations ADD COLUMN created_by TEXT DEFAULT ''")
+            db.execute(
+                "UPDATE conversations SET created_by='user-local' "
+                "WHERE created_by IS NULL OR created_by=''"
+            )
             ko_cols = {r["name"] for r in db.execute("PRAGMA table_info(knowledge_objects)").fetchall()}
             if "last_reviewed" not in ko_cols:
                 db.execute(
@@ -2893,9 +2901,9 @@ class SQLiteRepository:
                 return conversation_id
         new_id = f"conv-{uuid4().hex[:10]}"
         db.execute(
-            "INSERT INTO conversations (id, notebook_id, title, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (new_id, notebook_id, question[:60], now, now),
+            "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (new_id, notebook_id, question[:60], self.current_user().id, now, now),
         )
         return new_id
 
@@ -2970,8 +2978,9 @@ class SQLiteRepository:
             rows = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count "
-                "FROM conversations c WHERE c.notebook_id = ? ORDER BY c.updated_at DESC",
-                (notebook_id,),
+                "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
+                "ORDER BY c.updated_at DESC",
+                (notebook_id, self.current_user().id),
             ).fetchall()
         return [
             ConversationSummary(
