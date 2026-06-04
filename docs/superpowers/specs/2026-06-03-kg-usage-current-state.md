@@ -84,3 +84,23 @@
 
 ## 5. 一句话总结（待你确认）
 现在的「使用」= **混合检索（关键词+向量，逐类型 top-K）+ 一圈无类型邻居 + 把名字丢给 LLM 写一段话**。图谱的**边语义、跨文档合并、节点富信息**这三块在问答路径上基本闲置；可视化路径用了合并和富信息，但和问答各走各的。讨论方向：要不要把 `/ask` 改成「概念锚定→按边类型做有意义的遍历→带富上下文+结构合成→逐句引用」，以及问答是否切到 unified 簇。
+
+## 6. 复杂问题为何回「无相关知识」（实测根因）
+问 "engram是什么，它有什么缺点，有什么改进建议" → 返回 canned「The notebook does not yet contain approved knowledge…」。**不是知识缺失（engram 就在库里），是检索把全部命中都拒了 + 无命中时是死路**：
+- **A1 embedder 未配置**：`.env` 无 `EMBED_*` → `embedder_configured=False` → `query_vector=None` → 所有 `semantic=0`。**线上检索目前是纯关键词**（向量机制全程休眠）。
+- **A2 关键词指标惩罚长/多部分/跨语种问题**：`keyword = |query∩text| / |query|`，分母是**整条问题**。该问句 CJK 分词 ~10–14 token，`Engram` 节点文本只含 "engram" 一个 → `1/12≈0.08 < RELEVANCE_FLOOR(0.12)` → **连 Engram 节点本身都被丢**。问题越长分越低（与意图相关性无关），中文 token 永不匹配英文 KG → 全部 < floor → `top_hits` 与 `scored_elements` 皆空。
+- **B 无命中即死路（设计如此）**：LLM 被 `if configured and (has_knowledge or scored_elements)` 门控，两者皆空 → **模型根本没被调用** → 返回 canned 串。且 `answer_prompt` 明确「ONLY retrieved knowledge / if insufficient state that」→ 天生只会拒答，不会用模型自有知识兜底。
+
+## 7. 期望的使用形态（产品需求，讨论中）
+- **推演能力（核心）**：场景 = 引入文档后问「接下来能做什么 / 怎么改进」。答案**不能只复述原文**，要在 grounded 基础上**向前推理**（next steps / 改进 / 蕴含）。即 **RAG + reasoning**，不是 RAG-only。前轮例子里「改进建议」正是推演。
+- **逐句 provenance（让推演安全的机制，= 前端需求1）**：同一条答案里 grounded 与 inferred 混排——
+  - grounded 句尾带短 `[anchor]`（KG 名 / 原文短 token，可点→弹完整证据）；
+  - inferred / 推演句**不带 anchor**（一眼可见是模型推理）。
+  - 这样把上一版的「grounded / partial / ungrounded 三态」收敛为**同一答案内逐句标注的连续谱**：有出处就标、没出处就坦白是模型理解。
+- **无命中兜底**：检索空/低置信时，仍用模型自有知识回答并**明确标注「非笔记本来源」**，不再 canned 拒答。
+- 实现范式：复用「回传 id 标记」——给答题 LLM 每个检索项一个稳定短 id，指示它 grounding 处产出 `[id]`、推演处不带 id；后端把 `[id]` 解析成弹窗 payload。
+
+## 8. 前端 / 配置需求（用户提出，待排期）
+1. **内联引用**：答案正文用短 `[anchor]`（少量字便于显示），鼠标点击弹出完整信息（证据原文 / 节点详情）。机制见 §7。
+2. **多轮对话**：中间问答区改成多轮对话框，持久化每轮「用户问 + 模型/系统答」，发送后以聊天线程呈现。**现状是无状态单轮**（`_save_answer` 存单条、无 thread；`AskRequest` 无 history）→ 需会话/线程模型 + 历史喂进 prompt + 前端聊天 UI；追问需带历史 + 上轮检索锚点。
+3. **embedding 独立配置**：**配置项已存在**——`EMBED_PROVIDER / EMBED_BASE_URL / EMBED_API_KEY / EMBED_MODEL / EMBED_DIM`，与 chat 的 `OPENAI_COMPAT_*` 完全独立。当前 `.env` 未设值 → embedder 关闭（§6-A1）。设上（如 `EMBED_PROVIDER=dashscope` + v4 端点）即启用语义+跨语种检索，是上面一切的前置。
