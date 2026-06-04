@@ -87,6 +87,19 @@ def test_conversations_scoped_by_current_user(repo):
     assert all(c.id != "conv-other" for c in repo.list_conversations(nb.id))
 
 
+def test_delete_and_rename_conversation(repo):
+    nb = _seed(repo)
+    r = repo.ask(nb.id, AskRequest(question="q1"))
+    repo.rename_conversation(r.conversation_id, "新标题")
+    assert repo.get_conversation(r.conversation_id).title == "新标题"
+    repo.delete_conversation(r.conversation_id)
+    with pytest.raises(KeyError):
+        repo.get_conversation(r.conversation_id)         # 会话已删
+    with repo._connect() as db:
+        n = db.execute("SELECT count(*) FROM answers WHERE conversation_id=?", (r.conversation_id,)).fetchone()[0]
+    assert n == 0                                          # 其下 answers 一并删除
+
+
 def test_conversation_routes(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

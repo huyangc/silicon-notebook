@@ -2993,6 +2993,22 @@ class SQLiteRepository:
             for row in rows
         ]
 
+    def rename_conversation(self, conversation_id: str, title: str) -> None:
+        with self._connect() as db:
+            cur = db.execute(
+                "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
+                (title, _now(), conversation_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(conversation_id)
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        with self._connect() as db:
+            cur = db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+            if cur.rowcount == 0:
+                raise KeyError(conversation_id)
+            db.execute("DELETE FROM answers WHERE conversation_id=?", (conversation_id,))
+
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         if payload.rating not in {"useful", "not_useful"}:
             raise ValueError("rating must be useful or not_useful")
