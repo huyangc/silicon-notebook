@@ -151,6 +151,7 @@ class Citation(BaseModel):
 class AskRequest(BaseModel):
     question: str
     scenario: Dict[str, str] = Field(default_factory=dict)
+    conversation_id: Optional[str] = None
 
 
 class AnswerAnchor(BaseModel):
@@ -174,6 +175,26 @@ class AskResponse(BaseModel):
     related_knowledge: List["KnowledgeRecord"] = Field(default_factory=list)
     citations: List[Citation] = Field(default_factory=list)
     llm_mode: str = ""
+    conversation_id: str = ""
+
+
+class ConversationSummary(BaseModel):
+    id: str
+    notebook_id: str
+    title: str = ""
+    updated_at: str = ""
+    turn_count: int = 0
+
+
+class ConversationTurn(BaseModel):
+    answer_id: str
+    question: str
+    response: AskResponse
+    created_at: str = ""
+
+
+class ConversationDetail(ConversationSummary):
+    turns: List[ConversationTurn] = Field(default_factory=list)
 
 
 class ScenarioQueryRequest(BaseModel):

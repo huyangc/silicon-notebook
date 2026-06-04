@@ -24,3 +24,13 @@ def test_schema_has_conversations_and_fk(repo):
         assert "conversation_id" in cols
         tbls = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "conversations" in tbls
+
+
+def test_conversation_schemas_exist():
+    from app.models.schemas import AskRequest, AskResponse, ConversationSummary, ConversationDetail
+    req = AskRequest(question="q", conversation_id="c1")
+    assert req.conversation_id == "c1"
+    resp = AskResponse(conclusion="x", conversation_id="c1")
+    assert resp.conversation_id == "c1"
+    s = ConversationSummary(id="c1", notebook_id="n", title="t", updated_at="now", turn_count=2)
+    assert s.turn_count == 2
