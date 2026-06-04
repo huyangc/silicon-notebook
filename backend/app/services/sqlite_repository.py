@@ -2745,15 +2745,14 @@ class SQLiteRepository:
             kg_block(kg_hits),
             "Source elements:\n" + (element_block or "- (none)"),
         ])
-        scenario_block = ", ".join(scenario_tags) if scenario_tags else "(not specified)"
         raw = self.llm_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, scenario_block, context_block)}],
+            [{"role": "user", "content": answer_prompt(question, context_block)}],
             ANSWER_SCHEMA_HINT,
         )
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
-        conclusion = str(data.get("conclusion", "")).strip()
+        conclusion = str(data.get("answer", "")).strip()
         return conclusion, "configured"
 
     def _save_answer(self, notebook_id: str, question: str, response: AskResponse) -> str:

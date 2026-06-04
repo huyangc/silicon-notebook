@@ -68,22 +68,25 @@ def schema_induction_prompt(existing_types: list, sample_block: str) -> str:
     )
 
 
-ANSWER_SCHEMA_HINT = '{"conclusion":""}'
+ANSWER_SCHEMA_HINT = '{"answer":"","grounded":true}'
 
 
-def answer_prompt(question: str, scenario_block: str, context_block: str) -> str:
+def answer_prompt(question: str, context_block: str) -> str:
     return (
-        "You are the answer engine for a semiconductor knowhow notebook. "
-        "Answer the engineer's question using ONLY the retrieved notebook "
-        "knowledge below. Be concrete and engineering-oriented.\n\n"
-        "Write a grounded conclusion (2-4 sentences) that directly answers "
-        "the question, citing evidence from the retrieved knowledge. "
-        "If the retrieved knowledge is insufficient, state that clearly in "
-        "the conclusion. Return valid JSON only with a single 'conclusion' "
-        "string field.\n\n"
+        "You answer an engineer's question using the notebook knowledge below, "
+        "and you may reason beyond it.\n"
+        "Rules:\n"
+        "1. When a sentence uses a knowledge item, append its id marker like [k1] "
+        "(multiple allowed: [k1][k3]) at the end of that sentence.\n"
+        "2. When a sentence is your own inference (not supported by the items), do "
+        "NOT add any [k] marker, and make clear it is your reasoning (e.g. prefix "
+        "with '（推断）' / 'Likely,'). Never attach a marker to an unsupported claim.\n"
+        "3. If the items don't cover the question, still answer from general "
+        "knowledge and set grounded=false; otherwise grounded=true.\n"
+        "4. Answer in the question's language. Be concrete.\n\n"
         f"Question: {question}\n\n"
-        f"Scenario: {scenario_block}\n\n"
-        f"Retrieved notebook knowledge:\n{context_block}"
+        f"Knowledge items (id: [type] name — context):\n{context_block}\n\n"
+        'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'
     )
 
 
