@@ -64,6 +64,7 @@ from app.models.schemas import (
     UserProfile,
 )
 from app.services import kg_ingest
+from app.services.vector_cache import VectorCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -137,6 +138,7 @@ class SQLiteRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
+        self._vector_cache = VectorCache()
         self._migrate()
         self._seed()
 
@@ -2626,7 +2628,16 @@ class SQLiteRepository:
             elements = self._gather_elements(db, notebook_id)
             query_vector = self._embed_query(query)
             all_kg = [o for objs in kg_objs.values() for o in objs]
-            knowledge_vectors = self._knowledge_vectors(db, notebook_id, all_kg)
+            kver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                "FROM knowledge_embeddings WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+            kg_version = (kver["c"], kver["ts"], len(all_kg))
+            knowledge_vectors = self._vector_cache.get(
+                f"{notebook_id}:knowledge", kg_version,
+                lambda: self._knowledge_vectors(db, notebook_id, all_kg),
+            )
 
         element_vectors = self._element_vectors(elements)
 
