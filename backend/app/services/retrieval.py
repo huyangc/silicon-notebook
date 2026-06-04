@@ -149,9 +149,24 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_STOPWORDS = {
+    # en
+    "the","a","an","is","are","was","were","be","of","to","in","on","for","and",
+    "or","what","which","how","why","its","it","this","that","these","those","do",
+    "does","with","as","by","at","from","has","have","can","you","your","i","we",
+    # zh (function words)
+    "的","了","是","有","和","与","它","这","那","什么","怎么","哪些","以及","并",
+    "吗","呢","在","对","把","及","或",
+}
+
+
 def keyword_score(query: str, text: str) -> float:
-    """Fraction of query tokens present in the text (0..1)."""
-    query_tokens = set(_tokens(query))
+    """Fraction of (content) query tokens present in the text (0..1).
+
+    Stopwords are dropped from the query basis so verbose phrasings ("what is
+    X and what are its problems") aren't diluted relative to concise ones.
+    """
+    query_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
     if not query_tokens:
         return 0.0
     haystack = set(_tokens(text))
