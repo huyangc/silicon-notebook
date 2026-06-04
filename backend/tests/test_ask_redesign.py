@@ -52,3 +52,17 @@ def test_askresponse_has_answer_and_anchors():
     a = AnswerAnchor(key="k1", object_id="o1", object_type="concept", label="Engram", name="Engram")
     r = AskResponse(conclusion="x", answer="Engram [k1].", grounded=True, anchors=[a])
     assert r.answer == "Engram [k1]." and r.grounded and r.anchors[0].key == "k1"
+
+def test_parse_answer_anchors_keeps_only_cited(repo):
+    # id_map: k1->ctx dict; only markers present in text become anchors
+    id_map = {
+        "k1": {"object_id": "o1", "object_type": "concept", "name": "Engram",
+               "definition": "a memory module", "snippet": "Engram is ...",
+               "source_title": "paper", "location_label": "2.1"},
+        "k2": {"object_id": "o2", "object_type": "claim", "name": "unused",
+               "definition": None, "snippet": None, "source_title": "", "location_label": ""},
+    }
+    anchors = repo._parse_answer_anchors("Engram is a module [k1]. Improving it is open.", id_map)
+    keys = {a.key for a in anchors}
+    assert keys == {"k1"}                    # k2 not cited -> excluded
+    assert anchors[0].label == "Engram"

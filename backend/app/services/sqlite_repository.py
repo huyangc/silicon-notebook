@@ -118,6 +118,11 @@ _KG_TYPES = ("claim", "formula", "procedure", "concept")
 # ranked by relevance * type-weight (soft prior); the top _TOP_N are kept.
 _TOP_N = 12
 
+# Matches the `[k1]` provenance markers the answer LLM appends to grounded
+# sentences; used to resolve markers -> citation anchors and to strip them when
+# deriving the back-compat `conclusion` string.
+_MARKER_RE = re.compile(r"\[(k\d+)\]")
+
 
 class SQLiteRepository:
     def __init__(self, settings: Settings):
@@ -2754,6 +2759,27 @@ class SQLiteRepository:
             raise ValueError("answer did not return a JSON object")
         conclusion = str(data.get("answer", "")).strip()
         return conclusion, "configured"
+
+    def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
+        """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
+        objects (deduped, in first-seen order). Markers not in `id_map` and
+        items never cited are dropped."""
+        from app.models.schemas import AnswerAnchor
+        cited = []
+        seen = set()
+        for key in _MARKER_RE.findall(answer or ""):
+            if key in seen or key not in id_map:
+                continue
+            seen.add(key)
+            ctx = id_map[key]
+            name = str(ctx.get("name", ""))
+            cited.append(AnswerAnchor(
+                key=key, object_id=ctx["object_id"], object_type=ctx["object_type"],
+                label=(name[:40] or key), name=name,
+                definition=ctx.get("definition"), snippet=ctx.get("snippet"),
+                source_title=ctx.get("source_title", ""), location_label=ctx.get("location_label", ""),
+            ))
+        return cited
 
     def _save_answer(self, notebook_id: str, question: str, response: AskResponse) -> str:
         answer_id = f"ans-{uuid4().hex[:10]}"
