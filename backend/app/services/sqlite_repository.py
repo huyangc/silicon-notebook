@@ -296,6 +296,14 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS conversations (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL,
+                  title TEXT DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS feedback (
                   id TEXT PRIMARY KEY,
                   answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
@@ -368,6 +376,11 @@ class SQLiteRepository:
                 """
             )
             # Lightweight column migrations for pre-existing databases.
+            # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard via PRAGMA so this
+            # runs idempotently on every init.
+            answer_cols = {r["name"] for r in db.execute("PRAGMA table_info(answers)").fetchall()}
+            if "conversation_id" not in answer_cols:
+                db.execute("ALTER TABLE answers ADD COLUMN conversation_id TEXT")
             ko_cols = {r["name"] for r in db.execute("PRAGMA table_info(knowledge_objects)").fetchall()}
             if "last_reviewed" not in ko_cols:
                 db.execute(
