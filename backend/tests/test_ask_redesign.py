@@ -36,3 +36,13 @@ def test_ask_query_excludes_scenario(repo):
     repo.ask(nb.id, AskRequest(question="what is engram", scenario={"domain": "ZZZUNIQUE"}))
     # scenario value must NOT leak into the retrieval/answer prompt
     assert "ZZZUNIQUE" not in (repo.llm_client.last_prompt or "")
+
+def test_ask_global_topn_not_fixed_quota(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    objs = [{"local_id": f"M{i}", "object_type": "claim",
+             "payload": {"name": f"engram claim number {i}", "section_path": "1"}, "evidence": []}
+            for i in range(8)]
+    repo.store_kg(nb.id, None, objs, [])
+    resp = repo.ask(nb.id, AskRequest(question="engram claim", scenario={}))
+    claim_hits = [r for r in resp.related_knowledge if r.object_type == "claim"]
+    assert len(claim_hits) > 5   # old code capped claims at _TOP_PER_TYPE=5

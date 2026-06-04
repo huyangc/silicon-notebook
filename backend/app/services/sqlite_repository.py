@@ -96,6 +96,7 @@ from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedElement,
     RetrievedKnowledge,
+    _TYPE_WEIGHT,
     _payload_text,
     cosine,
     keyword_score,
@@ -113,8 +114,9 @@ KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project
 # KG object types retrieved during ask(), in priority order.
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
-# Maximum hits returned per KG object type during scoring in ask().
-_TOP_PER_TYPE: dict = {"claim": 5, "formula": 5, "procedure": 4, "concept": 4}
+# Global cap on KG hits returned by ask(): all types are scored, pooled, and
+# ranked by relevance * type-weight (soft prior); the top _TOP_N are kept.
+_TOP_N = 12
 
 
 class SQLiteRepository:
@@ -2579,16 +2581,24 @@ class SQLiteRepository:
 
         element_vectors = self._element_vectors(elements)
 
-        # Score each KG type, take top hits per type.
-        top_hits: List[RetrievedKnowledge] = []
+        # Score each KG type (so the right per-type vectors are used), then pool
+        # all hits and rank globally by relevance * type-weight (soft prior).
+        # No fixed per-type quota: highly-relevant types can dominate the top-N.
+        scored_all: List[RetrievedKnowledge] = []
         for t in _KG_TYPES:
             objs = kg_objs[t]
             if not objs:
                 continue
-            scored = score_knowledge(
-                query, objs, t, query_vector, element_vectors, knowledge_vectors, None
-            )[: _TOP_PER_TYPE.get(t, 4)]
-            top_hits.extend(scored)
+            scored_all.extend(
+                score_knowledge(
+                    query, objs, t, query_vector, element_vectors, knowledge_vectors, None
+                )
+            )
+        scored_all.sort(
+            key=lambda it: it.score * _TYPE_WEIGHT.get(it.object_type, 0.5),
+            reverse=True,
+        )
+        top_hits: List[RetrievedKnowledge] = scored_all[:_TOP_N]
 
         scored_elements = score_elements(query, elements, query_vector)
 
