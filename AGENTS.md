@@ -215,6 +215,8 @@ OPENAI_COMPAT_TIMEOUT_SECONDS
 
 Embeddings are configured separately via the `EMBED_*` vars (`EMBED_PROVIDER` ""=off / dashscope, plus `EMBED_MODEL`, `EMBED_BASE_URL`, `EMBED_API_KEY`, `EMBED_DIM`) and accessed through the `Embedder` abstraction (`app/services/embedding.py`), not `LLMClient`.
 
+**Principle — model services are URL-based only.** Every model the product depends on (chat LLM, embeddings, and any future reranker/parser model) is reached over an HTTP/OpenAI-compatible **URL endpoint** (`*_BASE_URL` + `*_API_KEY` + `*_MODEL`). This project does **not** start or host local model servers (no in-process model loading like sentence-transformers, no spawning a local inference server) to perform tasks. Prefer adding a configurable endpoint over bundling a model. (The former `LocalBGEEmbedder` was removed for this reason; re-add behind this same URL principle only if explicitly requested.)
+
 Business logic should call a provider adapter/client, not hard-code a specific model vendor.
 
 When no LLM key is configured, endpoints may return deterministic fallback data so the local beta remains usable.
