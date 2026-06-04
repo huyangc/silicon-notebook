@@ -23,28 +23,50 @@ def _section_of_line(line: int, sec_by_line):
 
 def make_windows(text: str, source_file: str, line_range: Optional[List[int]],
                  n: int = 9000, m: int = 450) -> List[Window]:
+    """按文档顺序把 prose 元素贪心打包到 ~n 字符的窗口（吸收碎小相邻小节）。
+    单个超 n 的元素在其跨度内按 step=n-m 切并保留 overlap。窗口 section_path
+    取打包起点元素所在小节。相邻窗口重叠 ~m 字符。"""
     elements = parse_elements(text, source_file, line_range)
     sections = build_section_tree(elements)
     headings = [e for e in elements if e.type == "heading"]
     sec_by_line = sorted((h.line_start, s.path) for h, s in zip(headings, sections))
     prose = [e for e in elements if e.type in _PROSE_TYPES]
-    # group prose elements by enclosing section, window each section's span
+    prose.sort(key=lambda e: e.char_start)
+
     windows: List[Window] = []
-    by_sec = {}
-    for e in prose:
-        path = _section_of_line(e.line_start, sec_by_line)
-        by_sec.setdefault(path, []).append(e)
     step = max(1, n - m)
-    for path, els in by_sec.items():
-        start = min(e.char_start for e in els)
-        end = max(e.char_end for e in els)
-        s = start
-        while s < end:
-            windows.append(Window(char_start=s, char_end=min(s + n, end),
-                                  section_path=path, file=source_file))
-            if s + n >= end:
-                break
-            s += step
+    i = 0
+    while i < len(prose):
+        w_start = prose[i].char_start
+        sec = _section_of_line(prose[i].line_start, sec_by_line)
+        j = i
+        while j < len(prose) and (prose[j].char_end - w_start) <= n:
+            j += 1
+        if j == i:
+            e = prose[i]
+            s = e.char_start
+            while s < e.char_end:
+                windows.append(Window(char_start=s, char_end=min(s + n, e.char_end),
+                                      section_path=sec, file=source_file))
+                if s + n >= e.char_end:
+                    break
+                s += step
+            i += 1
+            continue
+        w_end = prose[j - 1].char_end
+        windows.append(Window(char_start=w_start, char_end=w_end,
+                              section_path=sec, file=source_file))
+        if j >= len(prose):
+            # All remaining elements fit in this window — done.
+            i = j
+        else:
+            # Find the overlap re-entry point among the elements we just packed.
+            nxt = j
+            for k in range(i + 1, j):
+                if prose[k].char_start >= w_end - m:
+                    nxt = k
+                    break
+            i = max(i + 1, nxt)
     windows.sort(key=lambda w: w.char_start)
     return windows
 
