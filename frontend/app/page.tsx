@@ -117,6 +117,15 @@ type AskResponse = {
 };
 
 type ChatTurn = { question: string; response: AskResponse };
+type ConversationSummary = { id: string; title: string; updated_at: string; turn_count: number };
+type ConversationDetail = {
+  id: string;
+  notebook_id: string;
+  title: string;
+  updated_at: string;
+  turn_count: number;
+  turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
+};
 
 type ArticleResearchBrief = {
   article: ArticleSummary;
@@ -370,6 +379,17 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
+
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "";
+  const diffSec = Math.round((Date.now() - then) / 1000);
+  if (diffSec < 60) return "刚刚";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
+  return new Date(then).toLocaleDateString();
+}
 const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=object`);
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
 const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
@@ -563,6 +583,7 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [asking, setAsking] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
   const [studioOutput, setStudioOutput] = useState<StudioOutput | null>(null);
@@ -1034,8 +1055,10 @@ export default function Home() {
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
     setConflicts(null);
+    setSessions([]);
     pollCountRef.current = 0;
     await loadCandidates(notebookId);
+    await loadSessions(notebookId);
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
     window.scrollTo(0, 0);
   }
@@ -1112,6 +1135,7 @@ export default function Home() {
     setTitleDraft("");
     setTurns([]);
     setConversationId(null);
+    setSessions([]);
     setAsking(false);
     setPendingQuestion("");
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -1314,6 +1338,47 @@ export default function Home() {
       setPendingQuestion("");
       setAsking(false);
     }
+    await loadSessions(currentNotebookId);
+  }
+
+  async function loadSessions(notebookId: string | null = currentNotebookId) {
+    if (!notebookId) return;
+    const list = await api<ConversationSummary[]>(`/notebooks/${notebookId}/conversations`);
+    setSessions(list);
+  }
+
+  async function openSession(id: string) {
+    const detail = await api<ConversationDetail>(`/conversations/${id}`);
+    setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
+    setConversationId(id);
+    setPendingQuestion("");
+    setChatMode("ask");
+  }
+
+  function startNewSession() {
+    setTurns([]);
+    setConversationId(null);
+    setPendingQuestion("");
+    setChatMode("ask");
+  }
+
+  async function deleteSession(id: string) {
+    await api(`/conversations/${id}`, { method: "DELETE" });
+    if (id === conversationId) {
+      setTurns([]);
+      setConversationId(null);
+      setPendingQuestion("");
+    }
+    await loadSessions(currentNotebookId);
+    setToast("会话已删除");
+  }
+
+  async function renameSession(session: ConversationSummary) {
+    const next = window.prompt("重命名会话", session.title)?.trim();
+    if (next == null || next === "" || next === session.title) return;
+    await api(`/conversations/${session.id}`, { method: "PATCH", body: JSON.stringify({ title: next }) });
+    await loadSessions(currentNotebookId);
+    setToast("会话已重命名");
   }
 
 
@@ -1851,6 +1916,36 @@ export default function Home() {
                   actions: [{ label: "新对话", primary: true, action: () => { setTurns([]); setConversationId(null); setPendingQuestion(""); } }]
                 })}>⋮</button>
               </div>
+              {chatMode === "ask" && (
+                <div className="chat-sessions">
+                  <button
+                    className={`chat-session-new ${conversationId == null ? "active" : ""}`}
+                    onClick={startNewSession}
+                    title="开始新对话"
+                  >＋ 新会话</button>
+                  {sessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className={`chat-session ${session.id === conversationId ? "active" : ""}`}
+                      onClick={() => openSession(session.id).catch(reportError)}
+                      title={session.title}
+                    >
+                      <span className="chat-session-title">{session.title || "未命名会话"}</span>
+                      <span className="chat-session-meta">{formatRelativeTime(session.updated_at)} · {session.turn_count} 轮</span>
+                      <button
+                        className="chat-session-action"
+                        title="重命名"
+                        onClick={(event) => { event.stopPropagation(); renameSession(session).catch(reportError); }}
+                      >✎</button>
+                      <button
+                        className="chat-session-action"
+                        title="删除"
+                        onClick={(event) => { event.stopPropagation(); deleteSession(session.id).catch(reportError); }}
+                      >✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || asking ? "answer-mode" : ""}`}>
                 {chatMode === "ask" && (turns.length === 0 && !asking ? (
                   <div className="welcome">
