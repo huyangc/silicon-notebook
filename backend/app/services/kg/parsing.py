@@ -70,73 +70,42 @@ def _classify_line(line: str) -> str:
     return "paragraph"
 
 
+# 结构化块类型 -> SourceElementQ.type（保证 code 进 prose 被窗口化）
+_QTYPE_MAP = {
+    "heading": "heading",
+    "paragraph": "paragraph",
+    "list_item": "list_item",
+    "code_block": "paragraph",
+    "table": "table",
+    "image": "figure_caption",
+    "blockquote": "paragraph",
+}
+
+
 def parse_elements(
     text: str, source_file: str, line_range: Optional[List[int]] = None
 ) -> List[SourceElementQ]:
-    lines = text.split("\n")
-    offs = line_offsets(text)
-    lo, hi = (line_range or [1, len(lines)])
+    from app.services.structural_markdown import parse_blocks
+
+    blocks = parse_blocks(text)
+    lo, hi = (line_range or [1, len(text.split("\n"))])
     elements: List[SourceElementQ] = []
     counter = 0
-
-    def emit(kind: str, l_start: int, l_end: int) -> None:
-        emit_span(kind, offs[l_start], offs[l_end] + len(lines[l_end - 1]),
-                  l_start, l_end)
-
-    def emit_span(kind: str, char_start: int, char_end: int,
-                  l_start: int, l_end: int) -> None:
-        nonlocal counter
-        raw = text[char_start:char_end]
+    for b in blocks:
+        if not (lo <= b.line_start <= hi):
+            continue
+        raw = text[b.char_start:b.char_end]
         if not raw.strip():
-            return
+            continue
         counter += 1
         elements.append(SourceElementQ(
-            id=f"SE-{l_start}-{counter}", type=kind, file=source_file,
-            line_start=l_start, line_end=l_end,
-            char_start=char_start, char_end=char_end, text=raw,
+            id=f"SE-{b.line_start}-{counter}",
+            type=_QTYPE_MAP.get(b.type, "paragraph"),
+            file=source_file,
+            line_start=b.line_start, line_end=b.line_end,
+            char_start=b.char_start, char_end=b.char_end,
+            text=raw,
         ))
-
-    def emit_formula(i: int) -> int:
-        """Display formula. MinerU emits `$$` / latex / `$$` (3 lines); the
-        formula element text is the INNER latex (delimiters excluded). Returns
-        the next line index to process."""
-        if lines[i - 1].strip() == "$$":
-            k = i + 1
-            while k <= hi and lines[k - 1].strip() != "$$":
-                k += 1
-            if k - 1 >= i + 1:  # has inner content
-                emit("formula", i + 1, k - 1)  # inner latex line(s)
-            return k + 1  # skip the closing $$
-        line = lines[i - 1]
-        inner = line.strip().strip("$").strip()
-        if inner:
-            local = line.find(inner)
-            if local >= 0:
-                emit_span("formula", offs[i] + local, offs[i] + local + len(inner), i, i)
-        return i + 1
-
-    i = lo
-    while i <= hi:
-        line = lines[i - 1]
-        if not line.strip():
-            i += 1
-            continue
-        kind = _classify_line(line)
-        if kind == "heading":
-            emit("heading", i, i)
-            i += 1
-        elif kind == "formula":
-            i = emit_formula(i)
-        elif kind in ("table", "figure_caption", "list_item"):
-            emit(kind, i, i)
-            i += 1
-        else:
-            j = i
-            while (j < hi and lines[j].strip()
-                   and _classify_line(lines[j]) == "paragraph"):
-                j += 1
-            emit("paragraph", i, j)
-            i = j + 1
     return elements
 
 
