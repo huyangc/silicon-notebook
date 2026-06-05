@@ -161,11 +161,16 @@ class AskResponse(BaseModel):
     conclusion: str
     answer: str = ""
     grounded: bool = False
+    # 相关度感知证据分档：grounded(有据) | overview(概述) | inferred(推断)
+    evidence_level: str = "inferred"
     anchors: List[AnswerAnchor] = Field(default_factory=list)
     related_knowledge: List["KnowledgeRecord"] = Field(default_factory=list)
     citations: List[Citation] = Field(default_factory=list)
     llm_mode: str = ""
     conversation_id: str = ""
+    # 实际用于检索的 query（原问或改写后）+ 最高命中相关度，供排错/二期标定。
+    retrieval_query: str = ""
+    top_relevance: float = 0.0
 
 
 class ConversationRenameRequest(BaseModel):

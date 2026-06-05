@@ -69,6 +69,80 @@ _TYPE_WEIGHT = {
     "concept": 0.5,
 }
 
+# Process/flow-intent overrides: a "what are the steps / 展开流程" question wants
+# procedures surfaced, not buried. Used INSTEAD of _TYPE_WEIGHT for such queries.
+_PROCESS_TYPE_WEIGHT = {
+    "procedure": 1.0,
+    "claim": 0.9,
+    "formula": 0.9,
+    "concept": 0.6,
+}
+
+# Substring markers signalling the user wants a process/flow/steps answer.
+_PROCESS_MARKERS = (
+    "流程", "步骤", "怎么", "如何", "展开", "阶段", "画成", "过程", "顺序", "先后",
+    "flow", "step", "procedure", "process", "pipeline", "stage", "walkthrough",
+)
+
+
+def is_process_query(text: str) -> bool:
+    """True when the question is about a process/flow/steps (intent signal)."""
+    t = (text or "").lower()
+    return any(m in t for m in _PROCESS_MARKERS)
+
+
+def type_weight(object_type: str, process_intent: bool) -> float:
+    """Cross-type authority weight; process-intent questions stop penalising
+    procedures (and slightly favour them)."""
+    table = _PROCESS_TYPE_WEIGHT if process_intent else _TYPE_WEIGHT
+    return table.get(object_type, 0.5)
+
+
+def ensure_procedure_quota(scored_all, top_n, min_proc, key):
+    """Take the top_n of an already-sorted `scored_all`, but guarantee at least
+    `min_proc` procedures when the pool has them — back-fill from the remainder
+    and evict the weakest non-procedure items. Never evicts a procedure; result
+    is re-sorted by `key` descending and hard-capped at top_n (so a misconfigured
+    min_proc > top_n can't grow the result past top_n)."""
+    top = scored_all[:top_n]
+    procs = [h for h in top if h.object_type == "procedure"]
+    if len(procs) >= min_proc:
+        return top
+    have_ids = {h.object_id for h in top}
+    extra = [h for h in scored_all[top_n:]
+             if h.object_type == "procedure" and h.object_id not in have_ids]
+    extra = extra[: min_proc - len(procs)]
+    if not extra:
+        return top
+    non_proc = [h for h in top if h.object_type != "procedure"]
+    drop_ids = {h.object_id for h in non_proc[len(non_proc) - len(extra):]}
+    kept = [h for h in top if h.object_id not in drop_ids]
+    return sorted(kept + extra, key=key, reverse=True)[:top_n]
+
+
+def classify_evidence(top_hits, anchors, llm_grounded, tau_low, tau_high):
+    """Relevance-aware grounding. Returns (evidence_level, top_relevance).
+
+    - grounded : an answer-CITED hit is strongly relevant (>= tau_high) AND the
+                 LLM self-reported grounded. (Can't fake grounding on junk.)
+    - overview : some relevant hit exists (top relevance >= tau_low) but the
+                 answer is largely extrapolated from thin evidence.
+    - inferred : no relevant hit / nothing cited — general-knowledge answer.
+    """
+    top_rel = max((h.relevance for h in top_hits), default=0.0)
+    if anchors:
+        ids = {a.object_id for a in anchors}
+        anchored_rel = max((h.relevance for h in top_hits if h.object_id in ids), default=0.0)
+    else:
+        anchored_rel = 0.0
+    if top_hits and llm_grounded and anchors and anchored_rel >= tau_high:
+        level = "grounded"
+    elif top_hits and anchors and top_rel >= tau_low:
+        level = "overview"
+    else:
+        level = "inferred"
+    return level, top_rel
+
 
 def _normalize(text: str) -> str:
     return " ".join((text or "").split()).lower()

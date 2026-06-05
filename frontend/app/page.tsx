@@ -111,6 +111,9 @@ type AskResponse = {
   related_knowledge: KnowledgeRecord[];
   citations: Citation[];
   llm_mode: string;
+  evidence_level?: "grounded" | "overview" | "inferred";
+  retrieval_query?: string;
+  top_relevance?: number;
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -1105,19 +1108,21 @@ export default function Home() {
   }
 
   async function openCreate() {
-    // 点击「新建」直接创建一个未命名笔记本并进入(不再弹窗要求填名字/描述)。
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: "未命名笔记本", purpose: "" })
+      body: JSON.stringify({ name: "Untitled notebook", purpose: "" })
     });
     await loadNotebookCollection();
     await openNotebook(notebook.id);
+    setStagedFiles([]);
+    setStagedDocTypes([]);
+    setSourceModalOpen(true);
   }
 
   async function submitCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: createName.trim() || "未命名笔记本", purpose: createDesc.trim() })
+      body: JSON.stringify({ name: createName.trim() || "Untitled notebook", purpose: createDesc.trim() })
     });
     setCreateOpen(false);
     await loadNotebookCollection();
@@ -1506,7 +1511,7 @@ export default function Home() {
 
   async function updateKnowledge(id: string, patch: { status?: string; owner?: string }) {
     if (!currentNotebookId) return;
-    await api(`/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    await api(`/notebooks/${currentNotebookId}/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
     await loadKnowledge(knowledgeKind);
     await loadKnowledgeTypes();
     await loadNotebookCollection();
@@ -1532,7 +1537,7 @@ export default function Home() {
 
   async function mergeKnowledge(sourceId: string, intoId: string) {
     if (!currentNotebookId) return;
-    await api(`/knowledge/${sourceId}/merge`, {
+    await api(`/notebooks/${currentNotebookId}/knowledge/${sourceId}/merge`, {
       method: "POST",
       body: JSON.stringify({ into_id: intoId })
     });
@@ -1681,7 +1686,8 @@ export default function Home() {
   }
 
   async function decideDerivedRule(candidateId: string, decision: "approve" | "reject") {
-    await api(`/derived-rules/${candidateId}/${decision}`, { method: "POST" });
+    if (!currentNotebookId) return;
+    await api(`/notebooks/${currentNotebookId}/derived-rules/${candidateId}/${decision}`, { method: "POST" });
     await openDerivedRules();
     if (decision === "approve") {
       if (knowledge.rule !== null) await loadKnowledge("rule");
@@ -3441,7 +3447,16 @@ function AnswerView({
 
   return (
     <div className="chat-answer">
-      {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
+      {(() => {
+        const lvl = answer.evidence_level ?? (answer.grounded ? "grounded" : "inferred");
+        const meta =
+          lvl === "grounded"
+            ? { cls: "answer-grounded", label: "有据" }
+            : lvl === "overview"
+            ? { cls: "answer-overview", label: "概述（仅薄证据，余为推断）" }
+            : { cls: "answer-ungrounded", label: "推断（未命中笔记本依据）" };
+        return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
+      })()}
       <AnswerMarkdown
         text={answerText}
         references={references}

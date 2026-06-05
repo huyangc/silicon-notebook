@@ -1905,6 +1905,16 @@ button.chat-session-card {
   border-color: #d1d5db;
   background: #fff;
 }
+.answer-grounded {
+  justify-self: start;
+  background: #e6f4ea;
+  color: #1e7e34;
+}
+.answer-overview {
+  justify-self: start;
+  background: #fff4e5;
+  color: #b26a00;
+}
 
 .cite-chip-wrap {
   display: inline;

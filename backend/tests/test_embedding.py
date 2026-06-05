@@ -16,6 +16,15 @@ def test_factory_defaults_to_fake_when_unconfigured(monkeypatch):
     monkeypatch.setenv("EMBED_PROVIDER", "")
     assert make_embedder(Settings()).__class__.__name__ == "FakeEmbedder"
 
+def test_dashscope_provider_without_credentials_is_unconfigured(monkeypatch):
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "")
+    monkeypatch.setenv("EMBED_API_KEY", "")
+    monkeypatch.setenv("EMBED_MODEL", "")
+    settings = Settings()
+    assert settings.embedder_configured is False
+    assert make_embedder(settings).__class__.__name__ == "FakeEmbedder"
+
 def test_dashscope_embedder_batches_and_no_retries(monkeypatch):
     import app.services.embedding_dashscope as mod
     captured = {}

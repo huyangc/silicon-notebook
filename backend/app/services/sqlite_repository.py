@@ -78,26 +78,38 @@ from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
     DESCRIPTION_SCHEMA_HINT,
+    FOLLOWUP_REWRITE_SCHEMA_HINT,
+    NOTEBOOK_META_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
+    followup_rewrite_prompt,
     notebook_description_prompt,
+    notebook_meta_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedKnowledge,
-    _TYPE_WEIGHT,
     _payload_text,
     cosine,
     keyword_score,
     score_knowledge,
+    type_weight,
+    is_process_query,
+    ensure_procedure_quota,
+    classify_evidence,
 )
+from app.services.followup import looks_like_followup
 
 
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
+
+# Default notebook-name placeholders the frontend creates; name auto-fill only
+# overwrites these (never a user-chosen name).
+_DEFAULT_NOTEBOOK_NAMES = {"", "未命名笔记本", "Untitled notebook"}
 
 KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
 
@@ -488,6 +500,10 @@ class SQLiteRepository:
 
         if stale_knowledge_ids:
             placeholders = ",".join("?" for _ in stale_knowledge_ids)
+            db.execute(
+                f"DELETE FROM knowledge_embeddings WHERE object_id IN ({placeholders})",
+                stale_knowledge_ids,
+            )
             db.execute(
                 f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
                 stale_knowledge_ids,
@@ -921,14 +937,23 @@ class SQLiteRepository:
                 )
                 if mineru_error:
                     fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
+            # Auto-fill notebook name/description from sources (only while name is a
+            # default placeholder / purpose is still auto). Persist BEFORE marking the
+            # source 'extracted' so the frontend's extracted-triggered refetch shows
+            # the fresh name/description live. Best-effort: never fail the pipeline.
+            try:
+                self._augment_notebook_meta(source.notebook_id, pending_source_id=source_id)
+            except Exception:
+                self.event_log.logger.exception(
+                    "notebook meta augmentation failed for %s", source_id
+                )
             self._set_source_status(
                 source_id,
                 "extracted",
                 error_message=empty_hint or fallback_hint,
             )
-            # 不再导入后自动生成/覆盖笔记本名字或描述(用户要求);保留用户所填。
-            # KG ('extracted'/green) is already set above; wait for the background
-            # element embedding to finish before declaring the whole pipeline done.
+            # KG ('extracted'/green) set above; wait for the background element
+            # embedding to finish before declaring the whole pipeline done.
             embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
@@ -946,20 +971,28 @@ class SQLiteRepository:
         # Manual (re)parse is always synchronous so the response reflects the result.
         return self.process_source(source_id)
 
-    def _augment_notebook_description(self, notebook_id: str) -> None:
-        """Derive the notebook description from its sources, while it is still
-        auto (purpose_auto=1). Regenerates as the first batch's sources finish so
-        the final description reflects all of them. No-op once user-edited."""
+    def _augment_notebook_meta(self, notebook_id: str, pending_source_id: str = "") -> None:
+        """Auto-fill the notebook name (while it is still a default placeholder)
+        and/or description (while purpose_auto=1) from its processed sources.
+        No-op for fields the user has set. `pending_source_id` is the source whose
+        pipeline is finishing (still 'extracting'); it is counted so the FIRST
+        source already produces a name/description."""
         with self._connect() as db:
             nb = db.execute(
-                "SELECT purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
+                "SELECT name, purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
             ).fetchone()
-            if nb is None or ("purpose_auto" in nb.keys() and nb["purpose_auto"] != 1):
+            if nb is None:
+                return
+            cur_name = (nb["name"] or "").strip()
+            need_name = cur_name in _DEFAULT_NOTEBOOK_NAMES
+            need_desc = ("purpose_auto" in nb.keys() and nb["purpose_auto"] == 1)
+            if not (need_name or need_desc):
                 return
             rows = db.execute(
                 "SELECT title, doc_type, summary FROM sources "
-                "WHERE notebook_id = ? AND status = 'extracted' ORDER BY created_at ASC",
-                (notebook_id,),
+                "WHERE notebook_id = ? AND (status = 'extracted' OR id = ?) "
+                "ORDER BY created_at ASC",
+                (notebook_id, pending_source_id),
             ).fetchall()
         if not rows:
             return
@@ -971,7 +1004,7 @@ class SQLiteRepository:
             if label not in labels:
                 labels.append(label)
 
-        description = ""
+        name_val, desc_val = "", ""
         if self.llm_client.configured:
             block = "\n".join(
                 f"- {r['title']} "
@@ -981,26 +1014,39 @@ class SQLiteRepository:
             )
             try:
                 raw = self.llm_client.chat_json(
-                    [{"role": "user", "content": notebook_description_prompt(block)}],
-                    DESCRIPTION_SCHEMA_HINT,
+                    [{"role": "user", "content": notebook_meta_prompt(block)}],
+                    NOTEBOOK_META_SCHEMA_HINT,
                 )
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
-                    description = str(parsed.get("description", "")).strip()
+                    name_val = str(parsed.get("name", "")).strip()
+                    desc_val = str(parsed.get("description", "")).strip()
             except Exception:
-                description = ""
-        if not description:
+                name_val, desc_val = "", ""
+
+        # Deterministic fallbacks (LLM off or failed).
+        if need_desc and not desc_val:
             shown = "、".join(titles[:5]) + ("等" if len(titles) > 5 else "")
-            description = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
+            desc_val = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
             if labels:
-                description += f"文档类型涵盖 {'、'.join(labels)}。"
+                desc_val += f"文档类型涵盖 {'、'.join(labels)}。"
+        if need_name and not name_val:
+            name_val = (titles[0] or "").strip()[:40]
 
         with self._connect() as db:
-            db.execute(
-                "UPDATE notebooks SET purpose = ?, updated_at = ? "
-                "WHERE id = ? AND purpose_auto = 1",
-                (description[:1000], _now(), notebook_id),
-            )
+            if need_name and name_val:
+                # Optimistic guard: only overwrite if the name is still the
+                # placeholder we read (no clobber of a concurrent rename).
+                db.execute(
+                    "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
+                    (name_val[:120], _now(), notebook_id, nb["name"]),
+                )
+            if need_desc and desc_val:
+                db.execute(
+                    "UPDATE notebooks SET purpose = ?, updated_at = ? "
+                    "WHERE id = ? AND purpose_auto = 1",
+                    (desc_val[:1000], _now(), notebook_id),
+                )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
         self.get_source(source_id)
@@ -1064,6 +1110,11 @@ class SQLiteRepository:
         with self._connect() as db:
             self._clear_source_extraction_state(db, source_id, source.notebook_id, clear_embeddings=False)
             self._delete_relations_for_source(db, source_id)
+            db.execute(
+                "DELETE FROM knowledge_embeddings WHERE object_id IN "
+                "(SELECT id FROM knowledge_objects WHERE source_id = ?)",
+                (source_id,),
+            )
             db.execute("DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,))
             db.execute(
                 """INSERT INTO extraction_runs
@@ -1076,9 +1127,14 @@ class SQLiteRepository:
                     db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
                 return
             raw_text = self._source_raw_text(source, elements)
+            n_chars = kg_ingest.plan_window_size(
+                len(raw_text), self.settings.kg_extract_workers,
+                self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
+                override=self.settings.kg_window_target_chars,
+            )
             graph = kg_ingest.extract_graph(
                 self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
-                n=self.settings.kg_window_target_chars,
+                n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
                 workers=self.settings.kg_extract_workers,
             )
@@ -1930,33 +1986,44 @@ class SQLiteRepository:
                     den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
                     result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
             if obj_type == "procedure":
-                prows = db.execute(
-                    "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
-                # v1: group steps by exact section_path (precedes edges are sparse).
-                # Two distinct procedures sharing a section heading would merge —
-                # acceptable for inspection.
-                candidate_steps = []
-                for pr in prows:
-                    ppay = json.loads(pr["payload"] or "{}")
-                    if ppay.get("section_path", "") != section:
-                        continue
-                    ev = json.loads(pr["evidence"] or "[]")
-                    first_eid = ev[0].get("element_id") if ev else ""
-                    candidate_steps.append((ppay.get("name", ""), first_eid))
-                # Collect all first evidence element_ids, then call _element_texts once.
-                all_step_first_eids = [eid for _, eid in candidate_steps if eid]
-                if all_step_first_eids:
-                    texts, ordinal = self._element_texts(db, all_step_first_eids)
+                steps_payload = payload.get("steps")
+                if isinstance(steps_payload, list) and steps_payload:
+                    # New self-contained shape: ordered steps live in the object's payload.
+                    eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
+                    texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
+                    result["steps"] = [
+                        {"name": s.get("name", ""),
+                         "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
+                         "section_path": section}
+                        for s in steps_payload
+                    ]
                 else:
-                    texts, ordinal = {}, {}
-                steps = []
-                for step_name, first_eid in candidate_steps:
-                    steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
-                                  "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
-                steps.sort(key=lambda s: s["_ord"])
-                for s in steps:
-                    s.pop("_ord", None)
-                result["steps"] = steps
+                    # Legacy fallback: group sibling procedure nodes by exact section_path
+                    # (precedes edges are sparse). Two distinct procedures sharing a heading
+                    # would merge — acceptable for inspection.
+                    prows = db.execute(
+                        "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
+                    candidate_steps = []
+                    for pr in prows:
+                        ppay = json.loads(pr["payload"] or "{}")
+                        if ppay.get("section_path", "") != section:
+                            continue
+                        ev = json.loads(pr["evidence"] or "[]")
+                        first_eid = ev[0].get("element_id") if ev else ""
+                        candidate_steps.append((ppay.get("name", ""), first_eid))
+                    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
+                    if all_step_first_eids:
+                        texts, ordinal = self._element_texts(db, all_step_first_eids)
+                    else:
+                        texts, ordinal = {}, {}
+                    steps = []
+                    for step_name, first_eid in candidate_steps:
+                        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
+                                      "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
+                    steps.sort(key=lambda s: s["_ord"])
+                    for s in steps:
+                        s.pop("_ord", None)
+                    result["steps"] = steps
             return result
 
     # test-only helper; later tasks may replace it with a public insert path
@@ -2000,15 +2067,46 @@ class SQLiteRepository:
             rows = db.execute(query, params).fetchall()
         return [self._derived_from_row(row) for row in rows]
 
-    def approve_derived_rule(self, candidate_id: str) -> RuleCard:
+    def _rule_card_from_row(self, row: sqlite3.Row) -> RuleCard:
+        obj = {
+            "id": row["id"],
+            "payload": json.loads(row["payload"] or "{}"),
+            "evidence": [Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+            "status": row["status"],
+            "owner": row["owner"],
+            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
+        }
+        return self._rule_card(self._as_retrieved(obj, row["object_type"]))
+
+    def approve_derived_rule(self, notebook_id: str, candidate_id: str) -> RuleCard:
         """Promote a derived rule candidate into the formal rule library (§7.5)."""
         now = _now()
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+                "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
+                (candidate_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(candidate_id)
+            existing = db.execute(
+                """
+                SELECT * FROM knowledge_objects
+                WHERE notebook_id = ? AND object_type = 'rule'
+                  AND source_candidate_id = ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+                """,
+                (notebook_id, candidate_id),
+            ).fetchone()
+            if existing is not None:
+                if row["status"] != "approved":
+                    db.execute(
+                        "UPDATE derived_rule_candidates SET status = 'approved' WHERE id = ?",
+                        (candidate_id,),
+                    )
+                return self._rule_card_from_row(existing)
+            if row["status"] == "rejected":
+                raise ValueError("cannot approve a rejected derived rule candidate")
             payload = {
                 "title": row["title"] or _first_sentence(row["proposed_rule"], 90),
                 "statement": row["proposed_rule"],
@@ -2027,7 +2125,7 @@ class SQLiteRepository:
                 """,
                 (
                     ko_id,
-                    row["notebook_id"],
+                    notebook_id,
                     json.dumps(payload, ensure_ascii=False),
                     row["evidence"] or "[]",
                     candidate_id,
@@ -2040,23 +2138,18 @@ class SQLiteRepository:
                 (candidate_id,),
             )
             ko_row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (ko_id,)).fetchone()
-        obj = {
-            "id": ko_row["id"],
-            "payload": json.loads(ko_row["payload"] or "{}"),
-            "evidence": [Evidence(**e) for e in json.loads(ko_row["evidence"] or "[]")],
-            "status": ko_row["status"],
-            "owner": ko_row["owner"],
-            "last_reviewed": ko_row["last_reviewed"] if "last_reviewed" in ko_row.keys() else "",
-        }
-        return self._rule_card(self._as_retrieved(obj, "rule"))
+        return self._rule_card_from_row(ko_row)
 
-    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate:
+    def reject_derived_rule(self, notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+                "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
+                (candidate_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(candidate_id)
+            if row["status"] == "approved":
+                raise ValueError("cannot reject an approved derived rule candidate")
             db.execute(
                 "UPDATE derived_rule_candidates SET status = 'rejected' WHERE id = ?",
                 (candidate_id,),
@@ -2067,12 +2160,13 @@ class SQLiteRepository:
         return self._derived_from_row(row)
 
     def update_knowledge(
-        self, knowledge_id: str, payload: KnowledgeUpdate
+        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
     ) -> RuleCard:
         now = _now()
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ?", (knowledge_id,)
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (knowledge_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(knowledge_id)
@@ -2091,11 +2185,12 @@ class SQLiteRepository:
             )
             db.execute(
                 "UPDATE knowledge_objects SET payload = ?, status = ?, owner = ?, "
-                "last_reviewed = ?, updated_at = ? WHERE id = ?",
-                (new_payload, new_status, new_owner, last_reviewed, now, knowledge_id),
+                "last_reviewed = ?, updated_at = ? WHERE id = ? AND notebook_id = ?",
+                (new_payload, new_status, new_owner, last_reviewed, now, knowledge_id, notebook_id),
             )
             row = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ?", (knowledge_id,)
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (knowledge_id, notebook_id),
             ).fetchone()
         # WS4: re-embed payload-level vector when the payload was edited.
         if payload.payload is not None:
@@ -2206,14 +2301,20 @@ class SQLiteRepository:
                 )
         return groups
 
-    def merge_knowledge(self, source_id: str, payload: MergeRequest) -> RuleCard:
+    def merge_knowledge(self, notebook_id: str, source_id: str, payload: MergeRequest) -> RuleCard:
         into_id = payload.into_id
         if into_id == source_id:
             raise ValueError("cannot merge a knowledge object into itself")
         now = _now()
         with self._connect() as db:
-            src = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (source_id,)).fetchone()
-            tgt = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (into_id,)).fetchone()
+            src = db.execute(
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (source_id, notebook_id),
+            ).fetchone()
+            tgt = db.execute(
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (into_id, notebook_id),
+            ).fetchone()
             if src is None or tgt is None:
                 raise KeyError(source_id if src is None else into_id)
             if src["object_type"] != tgt["object_type"]:
@@ -2460,28 +2561,29 @@ class SQLiteRepository:
         question = payload.question.strip()
         # Legacy `scenario` is accepted for frontend back-compat but no longer
         # woven into retrieval or the answer prompt.
-        query = question
 
-        # Resolve (create-or-append) the conversation and load prior turns. The
-        # history shapes the answer wording only — retrieval still runs fresh
-        # per question below.
+        # Resolve (create-or-append) the conversation and load prior turns FIRST,
+        # so an elliptical follow-up can be rewritten against it before retrieval.
         with self._connect() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question
             )
             history = self._conversation_history(db, conversation_id)
 
+        # Coreference-resolve follow-ups into a standalone retrieval query
+        # (gated; falls back to the raw question). Retrieval uses this; the
+        # answer prompt still gets the user's original wording.
+        retrieval_query = self._rewrite_followup_query(history, question)
+        query = retrieval_query
+        process_intent = is_process_query(question)
+
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
                 t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
             }
-            # Elements WITHOUT vectors (vectors come from the cached float32 matrix
-            # below) — avoids materializing thousands of JSON vectors as Python lists.
             elements = self._gather_elements(db, notebook_id, with_vectors=False)
             query_vector = self._embed_query(query)
             all_kg = [o for objs in kg_objs.values() for o in objs]
-            # Backfill any missing knowledge-object vectors (concurrent), then build
-            # the per-notebook normalized float32 matrices once (cached, low memory).
             self._backfill_knowledge_embeddings(db, notebook_id, all_kg)
             elem_ids, elem_mat = self._vector_matrix(
                 db, notebook_id, "element_embeddings", "element_id")
@@ -2492,9 +2594,8 @@ class SQLiteRepository:
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
         knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
 
-        # Score each KG type (so the right per-type vectors are used), then pool
-        # all hits and rank globally by relevance * type-weight (soft prior).
-        # No fixed per-type quota: highly-relevant types can dominate the top-N.
+        # Score each KG type, pool, then rank by relevance * intent-aware type
+        # weight (process/flow questions stop burying procedures).
         scored_all: List[RetrievedKnowledge] = []
         for t in _KG_TYPES:
             objs = kg_objs[t]
@@ -2506,11 +2607,14 @@ class SQLiteRepository:
                     element_sims=element_sims, knowledge_sims=knowledge_sims,
                 )
             )
-        scored_all.sort(
-            key=lambda it: it.score * _TYPE_WEIGHT.get(it.object_type, 0.5),
-            reverse=True,
-        )
-        top_hits: List[RetrievedKnowledge] = scored_all[:self.settings.retrieval_top_n]
+        rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
+        scored_all.sort(key=rank_key, reverse=True)
+        top_n = self.settings.retrieval_top_n
+        if process_intent:
+            top_hits: List[RetrievedKnowledge] = ensure_procedure_quota(
+                scored_all, top_n, self.settings.proc_min, rank_key)
+        else:
+            top_hits = scored_all[:top_n]
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         hit_ids = {item.object_id for item in top_hits}
@@ -2595,25 +2699,28 @@ class SQLiteRepository:
         llm_mode = "deterministic"
         conclusion = ""
         answer = ""
-        grounded = False
+        llm_grounded = False
         anchors: List[AnswerAnchor] = []
 
-        # When an LLM is configured we always synthesise — grounding on KG hits
-        # where they exist, and reasoning from general knowledge otherwise
-        # (ungrounded). Never dead-ends with the canned refusal.
         if self.llm_client.configured:
             try:
-                answer, grounded, llm_mode, anchors = self._answer_kg(
+                answer, llm_grounded, anchors = self._answer_kg(
                     notebook_id, question, top_hits, history
                 )
             except Exception:
-                answer, grounded, anchors, llm_mode = "", False, [], "deterministic"
+                answer, llm_grounded, anchors = "", False, []
+
+        # Relevance-aware grounding (no longer LLM self-report alone).
+        evidence_level, top_relevance = classify_evidence(
+            top_hits, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high,
+        )
+        grounded = evidence_level == "grounded"
 
         if answer:
-            # Back-compat `conclusion` = answer with provenance markers stripped.
             conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
         else:
-            # No LLM configured (or it failed): deterministic fallback.
             llm_mode = "deterministic"
             if has_knowledge:
                 n = len(top_hits)
@@ -2633,11 +2740,14 @@ class SQLiteRepository:
             conclusion=conclusion,
             answer=answer,
             grounded=grounded,
+            evidence_level=evidence_level,
             anchors=anchors,
             related_knowledge=related_knowledge,
             citations=citations,
             llm_mode=llm_mode,
             conversation_id=conversation_id,
+            retrieval_query=retrieval_query,
+            top_relevance=top_relevance,
         )
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id
@@ -2692,6 +2802,29 @@ class SQLiteRepository:
             }
         return ("\n".join(lines) if lines else "(none)"), id_map
 
+    def _rewrite_followup_query(self, history: str, question: str) -> str:
+        """Resolve an elliptical follow-up into a standalone retrieval query
+        using prior turns. Gated (only when it looks like a follow-up and we
+        have history + a configured LLM); always falls back to the raw question."""
+        if not history.strip():
+            return question
+        if not looks_like_followup(question, self.settings.followup_max_len):
+            return question
+        if not self.llm_client.configured:
+            return question
+        try:
+            raw = self.llm_client.chat_json(
+                [{"role": "user", "content": followup_rewrite_prompt(history, question)}],
+                FOLLOWUP_REWRITE_SCHEMA_HINT,
+            )
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return question
+            rewritten = str(data.get("query", "")).strip()
+            return rewritten or question
+        except Exception:
+            return question
+
     def _answer_kg(
         self,
         notebook_id: str,
@@ -2700,8 +2833,9 @@ class SQLiteRepository:
         history: str = "",
     ) -> tuple:
         """Synthesise a (possibly reasoned) answer from KG hits using the LLM.
-        Returns (answer_text, grounded, llm_mode, anchors). grounded requires
-        both the LLM's self-report and at least one retrieved hit. `history`
+        Returns (answer_text, llm_grounded, anchors). Returns the LLM's raw
+        self-report; the relevance-aware grounding is decided by the caller via
+        classify_evidence. `history`
         (prior conversation turns) shapes the wording but not the retrieval."""
         context_block, id_map = self._answer_context(notebook_id, top_hits)
         raw = self.llm_client.chat_json(
@@ -2712,9 +2846,9 @@ class SQLiteRepository:
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
-        grounded = bool(data.get("grounded", False)) and bool(top_hits)
+        llm_grounded = bool(data.get("grounded", False))
         anchors = self._parse_answer_anchors(answer, id_map)
-        return answer, grounded, ("grounded" if grounded else "ungrounded"), anchors
+        return answer, llm_grounded, anchors
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor

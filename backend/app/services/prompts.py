@@ -20,6 +20,20 @@ def notebook_description_prompt(sources_block: str) -> str:
     )
 
 
+NOTEBOOK_META_SCHEMA_HINT = '{"name":"","description":""}'
+
+
+def notebook_meta_prompt(sources_block: str) -> str:
+    return (
+        "Based on the sources a curator added to this semiconductor knowhow "
+        "notebook, propose a concise notebook NAME (<= 20 characters, no quotes) "
+        "and a 1-2 sentence DESCRIPTION (Chinese ok) of what it covers. Describe "
+        "the actual subject matter and document types; do not invent scope beyond "
+        "the sources. Return valid JSON only with 'name' and 'description'.\n\n"
+        f"Sources:\n{sources_block}"
+    )
+
+
 REFINE_SCHEMA_HINT = (
     '{"items":[{"index":0,"keep":true,"quoted_span":"","reason":""}]}'
 )
@@ -65,6 +79,26 @@ def schema_induction_prompt(existing_types: list, sample_block: str) -> str:
         "new_types list if nothing new is warranted.\n\n"
         f"Existing object types: {', '.join(existing_types)}\n\n"
         f"Document sample:\n{sample_block}"
+    )
+
+
+FOLLOWUP_REWRITE_SCHEMA_HINT = '{"query":""}'
+
+
+def followup_rewrite_prompt(history_block: str, question: str) -> str:
+    return (
+        "You rewrite a possibly-elliptical follow-up question into ONE standalone "
+        "search query for a knowledge base, using the prior conversation to "
+        "resolve pronouns and omissions (e.g. '这个流程' -> the concrete flow named "
+        "earlier).\n"
+        "Rules:\n"
+        "- Output ONE concise query in the SAME language as the question.\n"
+        "- Resolve references to concrete entities mentioned in the conversation.\n"
+        "- Keep it search-friendly (keywords + the resolved entity); do NOT answer.\n"
+        "- If the question is already standalone, return it essentially unchanged.\n\n"
+        f"Prior conversation:\n{history_block}\n\n"
+        f"Follow-up question: {question}\n\n"
+        'Return JSON only: {"query":"<standalone search query>"}'
     )
 
 

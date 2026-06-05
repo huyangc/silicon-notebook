@@ -110,12 +110,13 @@ below for details.
 ### Fast Path (dev iteration only)
 
 ```bash
-npm run dev    # backend (uvicorn --reload) + Next.js frontend from repo root
+npm run dev    # backend (no --reload) + Next.js frontend from repo root
 ```
 
-Backend on `http://localhost:8000`, UI on `http://localhost:3000`. This path uses
-`--reload`, so **only use it for UI/code iteration, not while processing uploads** (see
-the warning above). If `frontend/node_modules` is missing, run `npm install` in `frontend/` first.
+Backend on `http://127.0.0.1:8000`, UI on `http://localhost:3000`. If you need
+backend auto-reload for code-only iteration, run `npm run dev:backend:reload` in a
+separate terminal and avoid it while processing uploads. If `frontend/node_modules`
+is missing, run `npm install` in `frontend/` first.
 
 ## Product Flow
 
@@ -146,7 +147,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/analytics`
 - `POST /api/notebooks/{id}/sources` — multipart file upload (async parse/extract)
 - `GET /api/sources/{id}`, `DELETE /api/sources/{id}`, `POST /api/sources/{id}/parse`, `GET /api/sources/{id}/elements`
-- `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/knowledge/{id}`
+- `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — KG-native grounded Q&A with `[k_i]` citations
@@ -156,7 +157,7 @@ Key local beta APIs:
 - Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
-- `GET /api/notebooks/{id}/duplicates`, `POST /api/knowledge/{id}/merge`
+- `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - `GET /api/notebooks/{id}/derived-rules`, `POST /api/derived-rules/{id}/approve|reject`
 
 ## Configuration
@@ -177,8 +178,8 @@ OPENAI_COMPAT_MAX_RETRIES       # default 2
 
 ```text
 EMBED_PROVIDER          # ""=off (keyword-only) | dashscope
-EMBED_MODEL             # embedding model name, e.g. text-embedding-v4
-EMBED_BASE_URL          # embedding endpoint URL
+EMBED_MODEL             # required with EMBED_PROVIDER=dashscope, e.g. text-embedding-v4
+EMBED_BASE_URL          # required embedding endpoint URL
 EMBED_API_KEY
 EMBED_DIM               # must match model output dimension (default 1024)
 EMBED_TRUNCATE_CHARS    # max chars fed to embedder per text (default 2000)
@@ -239,6 +240,11 @@ When LLM settings are not configured, summaries and answers fall back to determi
 ## Observability
 
 The backend emits structured logs through a single `EventLogger` (`app/core/event_logging.py`): one JSONL line per event under `.local/logs/` plus a brief console line. Logging is best-effort — it never breaks the request or pipeline it observes — and is a no-op for the LLM channel when no model is configured.
+
+The browser/API debug log viewer (`/dev/logs` and `/api/debug/logs/...`) is opt-in:
+set `DEBUG_LOGS_ENABLED=true` for local inspection. Full LLM records can include
+prompt/response text from private source material, so the viewer is disabled by
+default.
 
 - `requests.jsonl` — every HTTP request (method, path, status, latency, `request_id`). Requests slower than `SLOW_REQUEST_MS` (default 3000ms) are flagged `SLOW`. Responses carry an `X-Request-Id` header to correlate browser and server.
 - `events.jsonl` — async source pipeline: per-stage timings (`parse` / `embed` / `extract`) and every status-machine transition. A "stuck" upload shows exactly which stage is running and for how long; failures record the real exception (and the source's `error_message`).

@@ -44,7 +44,11 @@ class Settings(BaseSettings):
 
     # --- 大文档摄取/检索旋钮（2026-06-04 大文档加固）---
     # KG 窗口化：相邻 prose 贪心打包到 target 字符、相邻窗口 overlap。
-    kg_window_target_chars: int = Field(9000, env="KG_WINDOW_TARGET_CHARS")
+    # 抽取窗口：0=按文档大小+并发自适应（见 plan_window_size）；>0=固定字符数（覆盖/调试）。
+    kg_window_target_chars: int = Field(0, env="KG_WINDOW_TARGET_CHARS")
+    # 自适应窗口的下/上限：level = clamp(内容字符/并发, min, max)。
+    kg_window_min_chars: int = Field(4000, env="KG_WINDOW_MIN_CHARS")
+    kg_window_max_chars: int = Field(8000, env="KG_WINDOW_MAX_CHARS")
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
@@ -60,6 +64,14 @@ class Settings(BaseSettings):
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+    # 追问改写：问题长度 ≤ 此值（或含指代标记）才触发轻量 LLM 改写。
+    followup_max_len: int = Field(12, env="FOLLOWUP_MAX_LEN")
+    # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
+    # 注意：现有 grounded 测试要求 tau_high ≤ 0.4（纯关键词命中融合分=0.4）。
+    evidence_tau_low: float = Field(0.18, env="EVIDENCE_TAU_LOW")
+    evidence_tau_high: float = Field(0.35, env="EVIDENCE_TAU_HIGH")
+    # 流程类问题 top-N 至少保底召回的 procedure 条数。
+    proc_min: int = Field(2, env="PROC_MIN")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief
@@ -74,6 +86,11 @@ class Settings(BaseSettings):
     event_log_dir: str = Field(".local/logs", env="EVENT_LOG_DIR")
     # Requests slower than this (ms) are flagged SLOW so "stuck" calls stand out.
     slow_request_ms: int = Field(3000, env="SLOW_REQUEST_MS")
+
+    # Read-only debug log viewer endpoints (/api/debug/logs/...). Local dev tool;
+    # opt in with DEBUG_LOGS_ENABLED=true because full records may contain
+    # prompt/response text from private source material.
+    debug_logs_enabled: bool = Field(False, env="DEBUG_LOGS_ENABLED")
 
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use the built-in pypdf text fallback (default; no GPU, offline)
@@ -124,7 +141,12 @@ class Settings(BaseSettings):
 
     @property
     def embedder_configured(self) -> bool:
-        return self.embed_provider == "dashscope"
+        return bool(
+            (self.embed_provider or "").strip() == "dashscope"
+            and (self.embed_base_url or "").strip()
+            and (self.embed_api_key or "").strip()
+            and (self.embed_model or "").strip()
+        )
 
     @property
     def mineru_enabled(self) -> bool:

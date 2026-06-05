@@ -105,7 +105,7 @@ Confirmed scope:
 - Notebook-internal search over notebook metadata, source metadata, source element text, and article summaries.
 - LLM-backed KG extraction for Concept / Claim / Formula / Procedure objects with evidence binding is implemented. Legacy candidate tables/endpoints still exist for governance compatibility, but the current no-LLM offline extraction path records `error_message='no-llm'` and does not synthesize rule/method/risk candidates.
 - Ask, Scenario query, Case search, Checklist, Rule browser, and Article research are real and data-driven (hybrid keyword + embedding retrieval, citation validation, deterministic fallback offline). They are no longer demo-backed.
-- Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded, including during Ask's one-hop KG neighbour expansion. Browse dynamically via `GET /notebooks/{id}/knowledge-types` + `GET /notebooks/{id}/knowledge?type=...`, edit via `PATCH /knowledge/{id}`, dedupe via `GET .../duplicates` + `POST /knowledge/{id}/merge`.
+- Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded, including during Ask's one-hop KG neighbour expansion. Browse dynamically via `GET /notebooks/{id}/knowledge-types` + `GET /notebooks/{id}/knowledge?type=...`, edit via `PATCH /notebooks/{id}/knowledge/{knowledge_id}`, dedupe via `GET .../duplicates` + `POST /notebooks/{id}/knowledge/{knowledge_id}/merge`.
 - Article research persists `article_claims` with relation metadata and draft `derived_rule_candidates`; feedback supports `useful` / `not_useful` plus an optional comment.
 - User-created notebooks, imported sources, and Studio articles must expose delete actions. Source deletion removes parsed elements, extraction runs, embeddings, stale source-derived knowledge, and the stored local file; article deletion removes article claims and derived-rule candidates.
 - Single-user mode for now, but keep user/system structure ready for future expansion.
@@ -146,7 +146,7 @@ Run backend commands with the shared Python interpreter:
 
 ```bash
 cd backend
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --reload --port 8000
+/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 For dependency checks or installs, use the same interpreter:
@@ -217,7 +217,7 @@ OPENAI_COMPAT_MODEL
 OPENAI_COMPAT_TIMEOUT_SECONDS
 ```
 
-Embeddings are configured separately via the `EMBED_*` vars (`EMBED_PROVIDER` ""=off / dashscope, plus `EMBED_MODEL`, `EMBED_BASE_URL`, `EMBED_API_KEY`, `EMBED_DIM`) and accessed through the `Embedder` abstraction (`app/services/embedding.py`), not `LLMClient`.
+Embeddings are configured separately via the `EMBED_*` vars (`EMBED_PROVIDER` ""=off / dashscope, plus required `EMBED_MODEL`, `EMBED_BASE_URL`, `EMBED_API_KEY`, and matching `EMBED_DIM`) and accessed through the `Embedder` abstraction (`app/services/embedding.py`), not `LLMClient`.
 
 **Principle — model services are URL-based only.** Every model the product depends on (chat LLM, embeddings, and any future reranker/parser model) is reached over an HTTP/OpenAI-compatible **URL endpoint** (`*_BASE_URL` + `*_API_KEY` + `*_MODEL`). This project does **not** start or host local model servers (no in-process model loading like sentence-transformers, no spawning a local inference server) to perform tasks. Prefer adding a configurable endpoint over bundling a model. (The former `LocalBGEEmbedder` was removed for this reason; re-add behind this same URL principle only if explicitly requested.)
 
@@ -233,7 +233,7 @@ Structured logs go to `.local/logs/*.jsonl` (gitignored) plus brief console line
 - `events.jsonl` — source pipeline in `SQLiteRepository.process_source` / `_set_source_status` (per-stage timings + status transitions + failure stack).
 - `llm.jsonl` — `LLMInteractionLogger` wrapping `OpenAICompatibleClient` (`app/core/llm.py`); chat detailed, embeddings summarized, errors recorded.
 
-Rules: reuse `EventLogger` for any new structured log (it handles JSONL append + console + never raising); never log raw embedding vectors; chat prompt/response are truncated to `LLM_LOG_MAX_CHARS`. Config env vars: `LLM_LOG_ENABLED`, `LLM_LOG_PATH`, `LLM_LOG_MAX_CHARS`, `EVENT_LOG_ENABLED`, `EVENT_LOG_DIR`, `SLOW_REQUEST_MS` — keep `.env.example` aligned.
+Rules: reuse `EventLogger` for any new structured log (it handles JSONL append + console + never raising); never log raw embedding vectors; chat prompt/response are truncated to `LLM_LOG_MAX_CHARS`. The browser/API debug log viewer (`/dev/logs`, `/api/debug/logs/...`) is opt-in because full LLM records may contain prompt/response text from private sources; enable only with `DEBUG_LOGS_ENABLED=true`. Config env vars: `LLM_LOG_ENABLED`, `LLM_LOG_PATH`, `LLM_LOG_MAX_CHARS`, `EVENT_LOG_ENABLED`, `EVENT_LOG_DIR`, `SLOW_REQUEST_MS`, `DEBUG_LOGS_ENABLED` — keep `.env.example` aligned.
 
 ## Verification
 

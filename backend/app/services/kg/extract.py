@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
-from app.services.kg.models import Edge, Evidence, Node
+from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
@@ -17,7 +17,7 @@ EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
 
 _KG_SCHEMA_HINT = (
     '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure",'
-    '"name":"","ev":0}],'
+    '"name":"","ev":0,"steps":[{"name":"","ev":0}]}],'
     '"edges":[{"type":"about|supports|...","source":"","target":"","ev":0}]}'
 )
 
@@ -43,14 +43,13 @@ The passage is given as numbered elements, one per line, each prefixed with its
 integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
 of the element that best contains it (NOT a quote, NOT text). Give each node a
 "local_id" you reuse in edges. "name" carries the node's text (Concept/Procedure
-name, Claim statement, Formula expression). For an ordered Procedure, connect its
-consecutive steps with `precedes` edges (step_i -> step_{{i+1}}). Skip narrative/filler.
+name, Claim statement, Formula expression). For a Procedure that is an ordered multi-step process/flow, emit it as ONE Procedure node (named after the flow — use the section heading if it names the flow) and list its ordered steps in a `steps` array, each {{"name":..,"ev":..}} where ev is the element label containing that step; prefer this over many separate Procedure nodes. `steps` is the source of truth for order (you may still add `precedes` edges). Skip narrative/filler.
 
 Passage:
 \"\"\"{labeled_text}\"\"\"
 
 Return JSON ONLY:
-{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0}}],
+{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0,"steps":[{{"name":"..","ev":0}}]}}],
  "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","ev":0}}]}}
 """
 
@@ -75,6 +74,24 @@ def _resolve(elements: List[SourceElementQ], ev: Any,
 def _ev(el: SourceElementQ) -> Evidence:
     return Evidence(file=el.file, char_start=el.char_start, char_end=el.char_end,
                     line_start=el.line_start, line_end=el.line_end, quote=el.text)
+
+
+def _parse_steps(elements: List[SourceElementQ], raw_steps: Any) -> List[Step]:
+    """Resolve an LLM `steps` array into grounded Step objects (drop unbindable)."""
+    steps: List[Step] = []
+    if not isinstance(raw_steps, list):
+        return steps
+    for st in raw_steps:
+        if not isinstance(st, dict):
+            continue
+        nm = str(st.get("name", "")).strip()
+        if not nm:
+            continue
+        el = _resolve(elements, st.get("ev"), nm)
+        if el is None:
+            continue
+        steps.append(Step(name=nm, evidence=[_ev(el)]))
+    return steps
 
 
 def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
@@ -102,8 +119,11 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if el is None:
             continue
         nid = f"W{win_idx}-{len(nodes)}"
-        nodes.append(Node(id=nid, type=it["type"], name=str(it.get("name", "")),
-                          section_path=section_path, evidence=[_ev(el)]))
+        node = Node(id=nid, type=it["type"], name=str(it.get("name", "")),
+                    section_path=section_path, evidence=[_ev(el)])
+        if it["type"] == "Procedure":
+            node.steps = _parse_steps(elements, it.get("steps"))
+        nodes.append(node)
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     edges: List[Edge] = []
