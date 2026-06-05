@@ -20,6 +20,10 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/models/schemas.py" \
   "$ROOT_DIR/backend/app/services/extraction_profiles.py" \
   "$ROOT_DIR/backend/app/services/kg/extract.py" \
+  "$ROOT_DIR/backend/app/services/kg/models.py" \
+  "$ROOT_DIR/backend/app/services/kg/canonicalize.py" \
+  "$ROOT_DIR/backend/app/services/kg_ingest.py" \
+  "$ROOT_DIR/backend/app/services/reextract.py" \
   "$ROOT_DIR/backend/app/services/mineru_client.py" \
   "$ROOT_DIR/backend/app/services/notebook_templates.py" \
   "$ROOT_DIR/backend/app/services/parsers.py" \
