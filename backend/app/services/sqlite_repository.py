@@ -97,7 +97,6 @@ from app.services.prompts import (
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedKnowledge,
-    _TYPE_WEIGHT,
     _payload_text,
     cosine,
     keyword_score,
@@ -2980,6 +2979,8 @@ class SQLiteRepository:
                 FOLLOWUP_REWRITE_SCHEMA_HINT,
             )
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                return question
             rewritten = str(data.get("query", "")).strip()
             return rewritten or question
         except Exception:
