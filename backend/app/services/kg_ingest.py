@@ -76,10 +76,24 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
         if not bound:
             continue
         kept.add(node.id)
+        payload = {"name": node.name, "section_path": node.section_path}
+        if node.steps:
+            bound_steps = []
+            for st in node.steps:
+                quote = st.evidence[0].quote if st.evidence else ""
+                fields = _bind_quote(quote, elements, source_id, source_title)
+                if fields:
+                    bound_steps.append({
+                        "name": st.name,
+                        "element_id": fields["element_id"],
+                        "quote": fields["quoted_span"],
+                    })
+            if bound_steps:
+                payload["steps"] = bound_steps
         objects.append({
             "local_id": node.id,
             "object_type": node.type.lower(),
-            "payload": {"name": node.name, "section_path": node.section_path},
+            "payload": payload,
             "evidence": bound,
         })
     relations: List[dict] = []

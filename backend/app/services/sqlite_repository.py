@@ -81,21 +81,27 @@ from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
     DESCRIPTION_SCHEMA_HINT,
+    FOLLOWUP_REWRITE_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
+    followup_rewrite_prompt,
     notebook_description_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedKnowledge,
-    _TYPE_WEIGHT,
     _payload_text,
     cosine,
     keyword_score,
     score_knowledge,
+    type_weight,
+    is_process_query,
+    ensure_procedure_quota,
+    classify_evidence,
 )
+from app.services.followup import looks_like_followup
 
 
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
@@ -2090,33 +2096,44 @@ class SQLiteRepository:
                     den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
                     result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
             if obj_type == "procedure":
-                prows = db.execute(
-                    "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
-                # v1: group steps by exact section_path (precedes edges are sparse).
-                # Two distinct procedures sharing a section heading would merge —
-                # acceptable for inspection.
-                candidate_steps = []
-                for pr in prows:
-                    ppay = json.loads(pr["payload"] or "{}")
-                    if ppay.get("section_path", "") != section:
-                        continue
-                    ev = json.loads(pr["evidence"] or "[]")
-                    first_eid = ev[0].get("element_id") if ev else ""
-                    candidate_steps.append((ppay.get("name", ""), first_eid))
-                # Collect all first evidence element_ids, then call _element_texts once.
-                all_step_first_eids = [eid for _, eid in candidate_steps if eid]
-                if all_step_first_eids:
-                    texts, ordinal = self._element_texts(db, all_step_first_eids)
+                steps_payload = payload.get("steps")
+                if isinstance(steps_payload, list) and steps_payload:
+                    # New self-contained shape: ordered steps live in the object's payload.
+                    eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
+                    texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
+                    result["steps"] = [
+                        {"name": s.get("name", ""),
+                         "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
+                         "section_path": section}
+                        for s in steps_payload
+                    ]
                 else:
-                    texts, ordinal = {}, {}
-                steps = []
-                for step_name, first_eid in candidate_steps:
-                    steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
-                                  "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
-                steps.sort(key=lambda s: s["_ord"])
-                for s in steps:
-                    s.pop("_ord", None)
-                result["steps"] = steps
+                    # Legacy fallback: group sibling procedure nodes by exact section_path
+                    # (precedes edges are sparse). Two distinct procedures sharing a heading
+                    # would merge — acceptable for inspection.
+                    prows = db.execute(
+                        "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
+                    candidate_steps = []
+                    for pr in prows:
+                        ppay = json.loads(pr["payload"] or "{}")
+                        if ppay.get("section_path", "") != section:
+                            continue
+                        ev = json.loads(pr["evidence"] or "[]")
+                        first_eid = ev[0].get("element_id") if ev else ""
+                        candidate_steps.append((ppay.get("name", ""), first_eid))
+                    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
+                    if all_step_first_eids:
+                        texts, ordinal = self._element_texts(db, all_step_first_eids)
+                    else:
+                        texts, ordinal = {}, {}
+                    steps = []
+                    for step_name, first_eid in candidate_steps:
+                        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
+                                      "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
+                    steps.sort(key=lambda s: s["_ord"])
+                    for s in steps:
+                        s.pop("_ord", None)
+                    result["steps"] = steps
             return result
 
     # test-only helper; later tasks may replace it with a public insert path
@@ -2648,28 +2665,29 @@ class SQLiteRepository:
         question = payload.question.strip()
         # Legacy `scenario` is accepted for frontend back-compat but no longer
         # woven into retrieval or the answer prompt.
-        query = question
 
-        # Resolve (create-or-append) the conversation and load prior turns. The
-        # history shapes the answer wording only — retrieval still runs fresh
-        # per question below.
+        # Resolve (create-or-append) the conversation and load prior turns FIRST,
+        # so an elliptical follow-up can be rewritten against it before retrieval.
         with self._connect() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question
             )
             history = self._conversation_history(db, conversation_id)
 
+        # Coreference-resolve follow-ups into a standalone retrieval query
+        # (gated; falls back to the raw question). Retrieval uses this; the
+        # answer prompt still gets the user's original wording.
+        retrieval_query = self._rewrite_followup_query(history, question)
+        query = retrieval_query
+        process_intent = is_process_query(question)
+
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
                 t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
             }
-            # Elements WITHOUT vectors (vectors come from the cached float32 matrix
-            # below) — avoids materializing thousands of JSON vectors as Python lists.
             elements = self._gather_elements(db, notebook_id, with_vectors=False)
             query_vector = self._embed_query(query)
             all_kg = [o for objs in kg_objs.values() for o in objs]
-            # Backfill any missing knowledge-object vectors (concurrent), then build
-            # the per-notebook normalized float32 matrices once (cached, low memory).
             self._backfill_knowledge_embeddings(db, notebook_id, all_kg)
             elem_ids, elem_mat = self._vector_matrix(
                 db, notebook_id, "element_embeddings", "element_id")
@@ -2680,9 +2698,8 @@ class SQLiteRepository:
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
         knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
 
-        # Score each KG type (so the right per-type vectors are used), then pool
-        # all hits and rank globally by relevance * type-weight (soft prior).
-        # No fixed per-type quota: highly-relevant types can dominate the top-N.
+        # Score each KG type, pool, then rank by relevance * intent-aware type
+        # weight (process/flow questions stop burying procedures).
         scored_all: List[RetrievedKnowledge] = []
         for t in _KG_TYPES:
             objs = kg_objs[t]
@@ -2694,11 +2711,14 @@ class SQLiteRepository:
                     element_sims=element_sims, knowledge_sims=knowledge_sims,
                 )
             )
-        scored_all.sort(
-            key=lambda it: it.score * _TYPE_WEIGHT.get(it.object_type, 0.5),
-            reverse=True,
-        )
-        top_hits: List[RetrievedKnowledge] = scored_all[:self.settings.retrieval_top_n]
+        rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
+        scored_all.sort(key=rank_key, reverse=True)
+        top_n = self.settings.retrieval_top_n
+        if process_intent:
+            top_hits: List[RetrievedKnowledge] = ensure_procedure_quota(
+                scored_all, top_n, self.settings.proc_min, rank_key)
+        else:
+            top_hits = scored_all[:top_n]
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         hit_ids = {item.object_id for item in top_hits}
@@ -2783,25 +2803,28 @@ class SQLiteRepository:
         llm_mode = "deterministic"
         conclusion = ""
         answer = ""
-        grounded = False
+        llm_grounded = False
         anchors: List[AnswerAnchor] = []
 
-        # When an LLM is configured we always synthesise — grounding on KG hits
-        # where they exist, and reasoning from general knowledge otherwise
-        # (ungrounded). Never dead-ends with the canned refusal.
         if self.llm_client.configured:
             try:
-                answer, grounded, llm_mode, anchors = self._answer_kg(
+                answer, llm_grounded, anchors = self._answer_kg(
                     notebook_id, question, top_hits, history
                 )
             except Exception:
-                answer, grounded, anchors, llm_mode = "", False, [], "deterministic"
+                answer, llm_grounded, anchors = "", False, []
+
+        # Relevance-aware grounding (no longer LLM self-report alone).
+        evidence_level, top_relevance = classify_evidence(
+            top_hits, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high,
+        )
+        grounded = evidence_level == "grounded"
 
         if answer:
-            # Back-compat `conclusion` = answer with provenance markers stripped.
             conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
         else:
-            # No LLM configured (or it failed): deterministic fallback.
             llm_mode = "deterministic"
             if has_knowledge:
                 n = len(top_hits)
@@ -2821,11 +2844,14 @@ class SQLiteRepository:
             conclusion=conclusion,
             answer=answer,
             grounded=grounded,
+            evidence_level=evidence_level,
             anchors=anchors,
             related_knowledge=related_knowledge,
             citations=citations,
             llm_mode=llm_mode,
             conversation_id=conversation_id,
+            retrieval_query=retrieval_query,
+            top_relevance=top_relevance,
         )
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id
@@ -2880,6 +2906,29 @@ class SQLiteRepository:
             }
         return ("\n".join(lines) if lines else "(none)"), id_map
 
+    def _rewrite_followup_query(self, history: str, question: str) -> str:
+        """Resolve an elliptical follow-up into a standalone retrieval query
+        using prior turns. Gated (only when it looks like a follow-up and we
+        have history + a configured LLM); always falls back to the raw question."""
+        if not history.strip():
+            return question
+        if not looks_like_followup(question, self.settings.followup_max_len):
+            return question
+        if not self.llm_client.configured:
+            return question
+        try:
+            raw = self.llm_client.chat_json(
+                [{"role": "user", "content": followup_rewrite_prompt(history, question)}],
+                FOLLOWUP_REWRITE_SCHEMA_HINT,
+            )
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return question
+            rewritten = str(data.get("query", "")).strip()
+            return rewritten or question
+        except Exception:
+            return question
+
     def _answer_kg(
         self,
         notebook_id: str,
@@ -2888,8 +2937,9 @@ class SQLiteRepository:
         history: str = "",
     ) -> tuple:
         """Synthesise a (possibly reasoned) answer from KG hits using the LLM.
-        Returns (answer_text, grounded, llm_mode, anchors). grounded requires
-        both the LLM's self-report and at least one retrieved hit. `history`
+        Returns (answer_text, llm_grounded, anchors). Returns the LLM's raw
+        self-report; the relevance-aware grounding is decided by the caller via
+        classify_evidence. `history`
         (prior conversation turns) shapes the wording but not the retrieval."""
         context_block, id_map = self._answer_context(notebook_id, top_hits)
         raw = self.llm_client.chat_json(
@@ -2900,9 +2950,9 @@ class SQLiteRepository:
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
-        grounded = bool(data.get("grounded", False)) and bool(top_hits)
+        llm_grounded = bool(data.get("grounded", False))
         anchors = self._parse_answer_anchors(answer, id_map)
-        return answer, grounded, ("grounded" if grounded else "ungrounded"), anchors
+        return answer, llm_grounded, anchors
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor

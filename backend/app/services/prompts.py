@@ -68,6 +68,26 @@ def schema_induction_prompt(existing_types: list, sample_block: str) -> str:
     )
 
 
+FOLLOWUP_REWRITE_SCHEMA_HINT = '{"query":""}'
+
+
+def followup_rewrite_prompt(history_block: str, question: str) -> str:
+    return (
+        "You rewrite a possibly-elliptical follow-up question into ONE standalone "
+        "search query for a knowledge base, using the prior conversation to "
+        "resolve pronouns and omissions (e.g. '这个流程' -> the concrete flow named "
+        "earlier).\n"
+        "Rules:\n"
+        "- Output ONE concise query in the SAME language as the question.\n"
+        "- Resolve references to concrete entities mentioned in the conversation.\n"
+        "- Keep it search-friendly (keywords + the resolved entity); do NOT answer.\n"
+        "- If the question is already standalone, return it essentially unchanged.\n\n"
+        f"Prior conversation:\n{history_block}\n\n"
+        f"Follow-up question: {question}\n\n"
+        'Return JSON only: {"query":"<standalone search query>"}'
+    )
+
+
 ANSWER_SCHEMA_HINT = '{"answer":"","grounded":true}'
 
 

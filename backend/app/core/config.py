@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+    # 追问改写：问题长度 ≤ 此值（或含指代标记）才触发轻量 LLM 改写。
+    followup_max_len: int = Field(12, env="FOLLOWUP_MAX_LEN")
+    # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
+    # 注意：现有 grounded 测试要求 tau_high ≤ 0.4（纯关键词命中融合分=0.4）。
+    evidence_tau_low: float = Field(0.18, env="EVIDENCE_TAU_LOW")
+    evidence_tau_high: float = Field(0.35, env="EVIDENCE_TAU_HIGH")
+    # 流程类问题 top-N 至少保底召回的 procedure 条数。
+    proc_min: int = Field(2, env="PROC_MIN")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

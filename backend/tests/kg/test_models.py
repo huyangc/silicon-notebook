@@ -2,6 +2,14 @@ from app.services.kg.models import Evidence, Node, Edge, KnowledgeGraph
 from app.services.kg.emit import to_yaml
 import yaml
 
+def test_node_carries_ordered_steps():
+    from app.services.kg.models import Node, Step, Evidence
+    ev = Evidence(file="d.md", char_start=0, char_end=5, line_start=1, line_end=1, quote="hello")
+    n = Node(id="p1", type="Procedure", name="Foundation Flow",
+             steps=[Step(name="import", evidence=[ev]), Step(name="floorplan", evidence=[ev])])
+    assert [s.name for s in n.steps] == ["import", "floorplan"]
+    assert n.steps[0].evidence[0].quote == "hello"
+
 def test_kg_roundtrips_and_emits_ordered():
     n1 = Node(id="C1", type="Concept", name="depletion region",
               evidence=[Evidence(file="x.md", char_start=0, char_end=16,

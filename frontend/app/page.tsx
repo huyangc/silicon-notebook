@@ -122,6 +122,9 @@ type AskResponse = {
   related_knowledge: KnowledgeRecord[];
   citations: Citation[];
   llm_mode: string;
+  evidence_level?: "grounded" | "overview" | "inferred";
+  retrieval_query?: string;
+  top_relevance?: number;
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -3587,7 +3590,16 @@ function AnswerView({
 
   return (
     <div className="chat-answer">
-      {!answer.grounded && <span className="tag answer-ungrounded">未基于笔记本来源</span>}
+      {(() => {
+        const lvl = answer.evidence_level ?? (answer.grounded ? "grounded" : "inferred");
+        const meta =
+          lvl === "grounded"
+            ? { cls: "answer-grounded", label: "有据" }
+            : lvl === "overview"
+            ? { cls: "answer-overview", label: "概述（仅薄证据，余为推断）" }
+            : { cls: "answer-ungrounded", label: "推断（未命中笔记本依据）" };
+        return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
+      })()}
       <AnswerMarkdown
         text={answerText}
         references={references}
