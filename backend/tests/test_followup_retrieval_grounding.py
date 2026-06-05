@@ -93,3 +93,13 @@ def test_followup_rewrite_prompt():
     assert "展开讲讲这个流程" in p
     assert "RTL到GDSII" in p
     assert "query" in FOLLOWUP_REWRITE_SCHEMA_HINT
+
+
+def test_askresponse_new_fields_default_and_dump():
+    from app.models.schemas import AskResponse
+    r = AskResponse(conclusion="x")
+    assert r.evidence_level == "inferred"
+    assert r.retrieval_query == ""
+    assert r.top_relevance == 0.0
+    d = r.model_dump()
+    assert {"evidence_level", "retrieval_query", "top_relevance"} <= set(d)
