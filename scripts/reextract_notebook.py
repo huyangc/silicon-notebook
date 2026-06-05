@@ -2,8 +2,7 @@
 """CLI: re-extract all sources of a notebook.
 
 Usage (from repo root):
-  PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python \
-      scripts/reextract_notebook.py <notebook_id>
+  PYTHONPATH=backend python scripts/reextract_notebook.py <notebook_id>
 """
 import sys
 

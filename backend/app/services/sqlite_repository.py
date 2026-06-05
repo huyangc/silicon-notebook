@@ -2115,7 +2115,7 @@ class SQLiteRepository:
                     texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
                     result["steps"] = [
                         {"name": s.get("name", ""),
-                         "element_text": texts.get(s.get("element_id", ""), s.get("quote", "")),
+                         "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
                          "section_path": section}
                         for s in steps_payload
                     ]
