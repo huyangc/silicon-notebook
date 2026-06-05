@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     embed_truncate_chars: int = Field(2000, env="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, env="EMBED_BATCH_SIZE")
     embed_persist_chunk: int = Field(200, env="EMBED_PERSIST_CHUNK")
+    # 元素向量化并发度（并行发出的 batch 请求数；dashscope 单请求 batch≤10）。
+    embed_concurrency: int = Field(50, env="EMBED_CONCURRENCY")
+    # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
+    db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
 
