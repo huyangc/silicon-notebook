@@ -12,8 +12,6 @@ from app.core.config import Settings
 from app.models.schemas import (
     ArticleCreate,
     AskRequest,
-    CaseSearchRequest,
-    ChecklistRequest,
     Evidence,
     FeedbackRequest,
     KnowledgeUpdate,
@@ -420,7 +418,6 @@ def check_kg_store_ask_and_conversations() -> None:
             ],
         )
         source_id = uploaded[0].id
-        assert repo.list_candidates(nb.id) == []
         run = _latest_extraction_run(repo, source_id)
         assert run["run_type"] == "kg"
         assert run["status"] == "completed"
@@ -506,14 +503,14 @@ def check_kg_store_ask_and_conversations() -> None:
         assert repo.list_conversations(nb.id) == []
 
         claim_id = next(item.id for item in repo.list_knowledge(nb.id, "claim"))
-        repo.update_knowledge(claim_id, KnowledgeUpdate(status="deprecated", owner="curator"))
+        repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator"))
         assert all(node.id != claim_id for node in repo.knowledge_graph(nb.id).nodes)
         dep_answer = repo.ask(
             nb.id,
             AskRequest(question="What is Engram conditional memory module?"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
-        repo.update_knowledge(claim_id, KnowledgeUpdate(status="reviewed"))
+        repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="reviewed"))
         reviewed = next(item for item in repo.list_knowledge(nb.id, "claim") if item.id == claim_id)
         assert reviewed.status == "reviewed" and reviewed.last_reviewed
 
@@ -573,16 +570,9 @@ def check_api_layer() -> None:
         ok("GET", f"/api/notebooks/{nid}")
         assert ok("GET", f"/api/notebooks/{nid}/sources") == []
 
-        ok("GET", f"/api/notebooks/{nid}/candidates")
-        for candidate_type in ("claims", "concepts", "formulas", "procedures"):
-            # Unknown legacy candidate types should fail loudly, while the
-            # current KG types are browsed through /knowledge below.
-            response = client.get(f"/api/notebooks/{nid}/candidates/{candidate_type}")
-            assert response.status_code == 400
         ok("GET", f"/api/notebooks/{nid}/knowledge-types")
         ok("GET", f"/api/notebooks/{nid}/knowledge", params={"type": "claim"})
         ok("GET", f"/api/notebooks/{nid}/duplicates", params={"type": "claim"})
-        ok("GET", f"/api/notebooks/{nid}/conflicts")
         ok("GET", f"/api/notebooks/{nid}/graph")
         ok("GET", f"/api/notebooks/{nid}/analytics")
         ok("GET", f"/api/notebooks/{nid}/derived-rules")
@@ -779,29 +769,6 @@ def check_payload_embedding_retrieval() -> None:
     print("[smoke] payload-level embedding retrieval ok")
 
 
-def check_structured_scenario_boost() -> None:
-    """Legacy structured scenario boost remains available for rule retrieval helpers."""
-    objects = [
-        {
-            "id": "tagged",
-            "payload": {"title": "return path coupling", "applies_to": ["wirebond"]},
-            "evidence": [],
-            "status": "approved",
-        },
-        {
-            "id": "untagged",
-            "payload": {"title": "return path coupling"},
-            "evidence": [],
-            "status": "approved",
-        },
-    ]
-    scenario = {"package_type": "Wirebond"}
-    scored = score_knowledge("return path coupling", objects, "rule", None, None, None, scenario)
-    order = [item.object_id for item in scored]
-    assert order and order[0] == "tagged", order
-    print("[smoke] structured scenario boost ok")
-
-
 def check_json_fences() -> None:
     """chat_json strips ```json fences some models wrap responses in."""
     from app.core.llm import strip_json_fences
@@ -928,7 +895,6 @@ def main() -> None:
     check_cjk_keyword_recall()
     check_hybrid_floor_and_weight()
     check_payload_embedding_retrieval()
-    check_structured_scenario_boost()
     check_api_layer()
 
     with tempfile.TemporaryDirectory(prefix="silicon-notebook-smoke-") as temp_dir:
@@ -963,8 +929,9 @@ def main() -> None:
         )
         assert typed[0].doc_type == "academic_paper"
         assert _latest_extraction_run(repository, typed[0].id)["error_message"] == "no-llm"
-        # L4: 导入后不再自动生成/覆盖描述 — auto 笔记本的描述保持为空。
-        assert repository.get_notebook(auto_nb.id).purpose == ""
+        # L4: 导入后从来源自动生成描述(purpose_auto=1 时)；smoke 无 LLM，走确定性兜底。
+        auto_purpose = repository.get_notebook(auto_nb.id).purpose
+        assert auto_purpose and "本笔记本收录了" in auto_purpose
         edited = repository.update_notebook(auto_nb.id, NotebookUpdate(purpose="pinned"))
         assert edited.purpose == "pinned"
         repository.upload_sources(
@@ -1013,7 +980,6 @@ def main() -> None:
         assert len(uploaded) == 4
         assert all(source.parse_status == "extracted" for source in uploaded)
         assert all(_latest_extraction_run(repository, source.id)["run_type"] == "kg" for source in uploaded)
-        assert repository.list_candidates(notebook.id) == []
 
         markdown = next(source for source in uploaded if source.file_name.endswith(".md"))
         assert len(repository.source_elements(markdown.id)) >= 3
@@ -1080,17 +1046,17 @@ def main() -> None:
         assert feedback.comment == "grounded and actionable"
 
         claim_id = generic_claims[0].id
-        repository.update_knowledge(claim_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
+        repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
         dep_answer = repository.ask(
             notebook.id,
             AskRequest(question="What is Engram conditional memory module?"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
-        repository.update_knowledge(claim_id, KnowledgeUpdate(status="reviewed"))
+        repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="reviewed"))
         reviewed = next(item for item in repository.list_knowledge(notebook.id, "claim") if item.id == claim_id)
         assert reviewed.status == "reviewed" and reviewed.last_reviewed
         try:
-            repository.update_knowledge(claim_id, KnowledgeUpdate(status="bogus"))
+            repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="bogus"))
             raise AssertionError("invalid status should raise ValueError")
         except ValueError:
             pass
@@ -1120,22 +1086,13 @@ def main() -> None:
         assert isinstance(repository.list_knowledge(notebook.id, "risk"), list)
         assert isinstance(repository.list_knowledge(notebook.id, "glossary"), list)
         assert isinstance(repository.find_duplicates(notebook.id, "rule"), list)
-        assert isinstance(repository.find_conflicts(notebook.id), list)
 
-        merged = repository.merge_knowledge(rule_id_2, MergeRequest(into_id=rule_id))
+        merged = repository.merge_knowledge(notebook.id, rule_id_2, MergeRequest(into_id=rule_id))
         assert merged.id == rule_id
         assert any(
             rule.id == rule_id_2 and rule.status == "deprecated"
             for rule in repository.list_knowledge(notebook.id, "rule")
         )
-
-        cases = repository.case_search(notebook.id, CaseSearchRequest(query="noise"))
-        assert isinstance(cases, list)
-        checklist_items = repository.checklist(
-            notebook.id,
-            ChecklistRequest(scenario="ESD path near sensitive analog input"),
-        )
-        assert checklist_items and all(item.question for item in checklist_items)
 
         analytics = repository.notebook_analytics(notebook.id)
         assert analytics.feedback_useful >= 1
@@ -1173,7 +1130,7 @@ def main() -> None:
         draft = next((item for item in derived if item.status == "draft"), None)
         if draft is not None:
             rules_before = len(repository.list_knowledge(notebook.id, "rule"))
-            approved_rule = repository.approve_derived_rule(draft.id)
+            approved_rule = repository.approve_derived_rule(notebook.id, draft.id)
             assert approved_rule.status == "approved"
             assert len(repository.list_knowledge(notebook.id, "rule")) == rules_before + 1
             assert any(item.status == "approved" for item in repository.list_derived_rules(notebook.id))

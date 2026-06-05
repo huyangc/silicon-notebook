@@ -41,7 +41,7 @@ class FakeEmbedder:
 
 def make_embedder(settings: Settings) -> Embedder:
     provider = (settings.embed_provider or "").strip()
-    if provider == "dashscope":
+    if provider == "dashscope" and settings.embedder_configured:
         from app.services.embedding_dashscope import DashscopeEmbedder
         return DashscopeEmbedder(settings)
     return FakeEmbedder(dim=settings.embed_dim)

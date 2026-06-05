@@ -11,13 +11,6 @@ from app.models.schemas import (
     ArticleSummary,
     AskRequest,
     AskResponse,
-    Candidate,
-    CandidateUpdate,
-    CaseCard,
-    CaseSearchRequest,
-    ChecklistItem,
-    ChecklistRequest,
-    ConflictPair,
     ConversationDetail,
     ConversationRenameRequest,
     ConversationSummary,
@@ -235,66 +228,6 @@ def delete_source(source_id: str) -> None:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
-_CANDIDATE_TYPE_MAP = {
-    "rules": "rule",
-    "methods": "method",
-    "risks": "risk",
-    "cases": "case",
-    "checklist": "checklist",
-    "glossary": "glossary",
-}
-
-
-@router.post("/sources/{source_id}/extract", response_model=List[Candidate])
-def extract_source(source_id: str) -> List[Candidate]:
-    try:
-        return repository().extract_source(source_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-
-@router.get("/notebooks/{notebook_id}/candidates", response_model=List[Candidate])
-def list_candidates(notebook_id: str) -> List[Candidate]:
-    try:
-        return repository().list_candidates(notebook_id, None)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/notebooks/{notebook_id}/candidates/{candidate_type}", response_model=List[Candidate])
-def list_candidates_by_type(notebook_id: str, candidate_type: str) -> List[Candidate]:
-    mapped = _CANDIDATE_TYPE_MAP.get(candidate_type)
-    if mapped is None:
-        raise HTTPException(status_code=400, detail="Unknown candidate type")
-    try:
-        return repository().list_candidates(notebook_id, mapped)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.patch("/candidates/{candidate_id}", response_model=Candidate)
-def update_candidate(candidate_id: str, payload: CandidateUpdate) -> Candidate:
-    try:
-        return repository().update_candidate(candidate_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-
-@router.post("/candidates/{candidate_id}/approve", response_model=Candidate)
-def approve_candidate(candidate_id: str) -> Candidate:
-    try:
-        return repository().approve_candidate(candidate_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-
-@router.post("/candidates/{candidate_id}/reject", response_model=Candidate)
-def reject_candidate(candidate_id: str) -> Candidate:
-    try:
-        return repository().reject_candidate(candidate_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
 
 @router.get(
     "/notebooks/{notebook_id}/knowledge-types",
@@ -366,10 +299,10 @@ def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.patch("/knowledge/{knowledge_id}")
-def update_knowledge(knowledge_id: str, payload: KnowledgeUpdate):
+@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}")
+def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate):
     try:
-        return repository().update_knowledge(knowledge_id, payload)
+        return repository().update_knowledge(notebook_id, knowledge_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
     except ValueError as exc:
@@ -395,13 +328,6 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/conflicts", response_model=List[ConflictPair])
-def find_conflicts(notebook_id: str) -> List[ConflictPair]:
-    try:
-        return repository().find_conflicts(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
 
 @router.get("/notebooks/{notebook_id}/graph", response_model=KnowledgeGraph)
 def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
@@ -411,10 +337,10 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/knowledge/{knowledge_id}/merge")
-def merge_knowledge(knowledge_id: str, payload: MergeRequest):
+@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge")
+def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
     try:
-        return repository().merge_knowledge(knowledge_id, payload)
+        return repository().merge_knowledge(notebook_id, knowledge_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
     except ValueError as exc:
@@ -474,21 +400,6 @@ def delete_conversation(conversation_id: str):
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
-@router.post("/notebooks/{notebook_id}/case-search", response_model=List[CaseCard])
-def case_search(notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]:
-    try:
-        return repository().case_search(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/checklist", response_model=List[ChecklistItem])
-def checklist(notebook_id: str, payload: ChecklistRequest) -> List[ChecklistItem]:
-    try:
-        return repository().checklist(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
 
 @router.get("/notebooks/{notebook_id}/articles", response_model=List[ArticleSummary])
 def list_articles(notebook_id: str) -> List[ArticleSummary]:
@@ -532,20 +443,24 @@ def list_derived_rules(notebook_id: str) -> List[DerivedRuleCandidate]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/derived-rules/{candidate_id}/approve", response_model=RuleCard)
-def approve_derived_rule(candidate_id: str) -> RuleCard:
+@router.post("/notebooks/{notebook_id}/derived-rules/{candidate_id}/approve", response_model=RuleCard)
+def approve_derived_rule(notebook_id: str, candidate_id: str) -> RuleCard:
     try:
-        return repository().approve_derived_rule(candidate_id)
+        return repository().approve_derived_rule(notebook_id, candidate_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate)
-def reject_derived_rule(candidate_id: str) -> DerivedRuleCandidate:
+@router.post("/notebooks/{notebook_id}/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate)
+def reject_derived_rule(notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
     try:
-        return repository().reject_derived_rule(candidate_id)
+        return repository().reject_derived_rule(notebook_id, candidate_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)

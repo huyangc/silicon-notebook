@@ -9,18 +9,10 @@ from app.models.schemas import (
     ArticleSummary,
     AskRequest,
     AskResponse,
-    Candidate,
-    CandidateUpdate,
-    CaseCard,
-    CaseSearchRequest,
-    ChecklistItem,
-    ChecklistRequest,
-    ConflictPair,
     DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
-    GlossaryTermCard,
     KnowledgeGraph,
     KnowledgeRecord,
     KnowledgeTypeCount,
@@ -29,14 +21,12 @@ from app.models.schemas import (
     ObjectSchemaModel,
     ObjectSchemaUpdate,
     MergeRequest,
-    MethodCard,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
-    RiskItemCard,
     RuleCard,
     SourceDetail,
     SourceElement,
@@ -92,16 +82,6 @@ class NotebookRepository(Protocol):
 
     def delete_source(self, source_id: str) -> None: ...
 
-    def extract_source(self, source_id: str) -> List[Candidate]: ...
-
-    def list_candidates(self, notebook_id: str, candidate_type: str | None = None) -> List[Candidate]: ...
-
-    def update_candidate(self, candidate_id: str, payload: CandidateUpdate) -> Candidate: ...
-
-    def approve_candidate(self, candidate_id: str) -> Candidate: ...
-
-    def reject_candidate(self, candidate_id: str) -> Candidate: ...
-
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]: ...
 
     def list_knowledge(
@@ -125,24 +105,18 @@ class NotebookRepository(Protocol):
     def knowledge_graph(self, notebook_id: str) -> KnowledgeGraph: ...
 
     def update_knowledge(
-        self, knowledge_id: str, payload: KnowledgeUpdate
-    ) -> RuleCard | MethodCard | RiskItemCard | GlossaryTermCard: ...
+        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
+    ) -> RuleCard: ...
 
     def find_duplicates(self, notebook_id: str, object_type: str) -> List[DuplicateGroup]: ...
 
-    def find_conflicts(self, notebook_id: str) -> List[ConflictPair]: ...
-
     def merge_knowledge(
-        self, source_id: str, payload: MergeRequest
-    ) -> RuleCard | MethodCard | RiskItemCard | GlossaryTermCard: ...
+        self, notebook_id: str, source_id: str, payload: MergeRequest
+    ) -> RuleCard: ...
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse: ...
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse: ...
-
-    def case_search(self, notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]: ...
-
-    def checklist(self, notebook_id: str, payload: ChecklistRequest) -> List[ChecklistItem]: ...
 
     def list_articles(self, notebook_id: str) -> List[ArticleSummary]: ...
 
@@ -156,8 +130,8 @@ class NotebookRepository(Protocol):
         self, notebook_id: str, status: str | None = None
     ) -> List[DerivedRuleCandidate]: ...
 
-    def approve_derived_rule(self, candidate_id: str) -> RuleCard: ...
+    def approve_derived_rule(self, notebook_id: str, candidate_id: str) -> RuleCard: ...
 
-    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate: ...
+    def reject_derived_rule(self, notebook_id: str, candidate_id: str) -> DerivedRuleCandidate: ...
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...

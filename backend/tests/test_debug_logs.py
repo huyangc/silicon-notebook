@@ -9,7 +9,8 @@ def _make_client(tmp_path, monkeypatch, *, enabled=True, lines=None, channel="ll
     if lines is not None:
         (logs / f"{channel}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setenv("EVENT_LOG_DIR", str(logs))  # absolute -> used as-is
-    monkeypatch.setenv("DEBUG_LOGS_ENABLED", "true" if enabled else "false")
+    if enabled is not None:
+        monkeypatch.setenv("DEBUG_LOGS_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     from app.core.config import get_settings
 
@@ -42,6 +43,12 @@ def test_disabled_returns_404(tmp_path, monkeypatch):
     c = _make_client(tmp_path, monkeypatch, enabled=False, lines=[CHAT])
     assert c.get("/api/debug/logs").status_code == 404
     assert c.get("/api/debug/logs/llm").status_code == 404
+
+
+def test_debug_logs_are_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEBUG_LOGS_ENABLED", raising=False)
+    c = _make_client(tmp_path, monkeypatch, enabled=None, lines=[CHAT])
+    assert c.get("/api/debug/logs").status_code == 404
 
 
 def test_unknown_channel_404(tmp_path, monkeypatch):

@@ -76,7 +76,7 @@ Inside a notebook:
   - Source detail element text should wrap within the modal width, including long Markdown paths, LaTeX fragments, and mixed Chinese/English text; keep horizontal scrolling local to tables/formulas rather than the entire detail panel.
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.
 - Center column: source-grounded knowhow tools, exposed as tabs.
-  - This is the main interaction area: Ask (free question), Scenario query (structured form), Case search, Checklist generator, and Knowledge browser.
+  - This is the main interaction area, exposed as two tabs: **Ask** (free, KG-grounded Q&A with per-sentence `[k_i]` citations + multi-turn conversation) and the **Knowledge browser** (browse/govern the extracted objects by type). The earlier Scenario query / Case search / Checklist tools were removed when the KG-native model (concept/claim/formula/procedure) replaced the rule/case/checklist types.
   - Ask conversation history should use a compact session context bar and an expandable session manager instead of permanently splitting the already constrained center panel.
   - Answers must stay evidence-grounded, render Markdown/code/formula/table content cleanly, use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel (not in an overflowing floating popover), and support lightweight 👍/👎/copy actions. Do not flatten all related knowledge under each answer; route deeper exploration from the citation area into the Knowledge Graph.
   - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
@@ -89,7 +89,7 @@ Inside a notebook:
 - Right column: Studio.
   - Keep Mind Map, New Article, and Infographic entries.
   - Article research drives the Mind Map / Infographic output; created articles must be listed with delete actions, and the lower Studio output area stays for generated outputs.
-- Do not show a standalone curator Review Queue button in the left source column; candidate governance should live in the knowledge/tool surfaces that actually use it.
+- The candidate Review Queue was removed: the KG extractor writes approved knowledge objects directly (no candidate staging). Knowledge governance is dedupe/merge over the objects in the Knowledge browser.
 
 ## MVP Scope
 
@@ -105,9 +105,9 @@ Confirmed scope:
 - Notebook-internal search over notebook metadata, source metadata, source element text, and article summaries.
 - LLM-backed KG extraction for Concept / Claim / Formula / Procedure objects with evidence binding is implemented. Legacy candidate tables/endpoints still exist for governance compatibility, but the current no-LLM offline extraction path records `error_message='no-llm'` and does not synthesize rule/method/risk candidates.
 - Ask, Scenario query, Case search, Checklist, Rule browser, and Article research are real and data-driven (hybrid keyword + embedding retrieval, citation validation, deterministic fallback offline). They are no longer demo-backed.
-- Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded, including during Ask's one-hop KG neighbour expansion. Browse dynamically via `GET /notebooks/{id}/knowledge-types` + `GET /notebooks/{id}/knowledge?type=...`, edit via `PATCH /knowledge/{id}`, dedupe via `GET .../duplicates` + `POST /knowledge/{id}/merge`, conflicts via `GET .../conflicts`.
+- Knowledge governance: `knowledge_objects` has a status lifecycle (`reviewed/approved/deprecated/conflict/project_specific`) plus `owner`/`last_reviewed`. Only USABLE statuses (approved/reviewed/project_specific/conflict) feed answers; `deprecated` is excluded, including during Ask's one-hop KG neighbour expansion. Browse dynamically via `GET /notebooks/{id}/knowledge-types` + `GET /notebooks/{id}/knowledge?type=...`, edit via `PATCH /notebooks/{id}/knowledge/{knowledge_id}`, dedupe via `GET .../duplicates` + `POST /notebooks/{id}/knowledge/{knowledge_id}/merge`.
 - Article research persists `article_claims` with relation metadata and draft `derived_rule_candidates`; feedback supports `useful` / `not_useful` plus an optional comment.
-- User-created notebooks, imported sources, and Studio articles must expose delete actions. Source deletion removes parsed elements, extraction runs/candidates, embeddings, stale source-derived knowledge, and the stored local file; article deletion removes article claims and derived-rule candidates.
+- User-created notebooks, imported sources, and Studio articles must expose delete actions. Source deletion removes parsed elements, extraction runs, embeddings, stale source-derived knowledge, and the stored local file; article deletion removes article claims and derived-rule candidates.
 - Single-user mode for now, but keep user/system structure ready for future expansion.
 - User memory must be manual opt-in. Do not add automatic memory behavior.
 - No demo/seed notebook is created. A fresh database seeds only the local user; the notebook collection starts empty and is populated entirely by real imported sources. Do not reintroduce synthetic seed notebooks/sources/articles. New-notebook example prompts/placeholders must derive from the chosen template / the notebook's domain, never from a hardcoded demo scenario.
@@ -123,8 +123,8 @@ Confirmed scope:
 - Default CORS origins include local frontend ports `3000` and `3001`; preserve this unless the frontend dev flow changes.
 - Repository access should go through a repository boundary. `SQLiteRepository` is the current implementation; keep the interface clear for a future PostgreSQL repository.
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
-- `extraction_runs`, legacy `extraction_candidates`, `knowledge_objects`, `knowledge_relations`, `element_embeddings`, `knowledge_embeddings`, `answers`, `conversations`, `feedback`, `article_claims`, and `derived_rule_candidates` tables are live. Embedding vectors are stored as JSON and cosine is computed in Python (no pgvector locally).
-- Upload runs the parse → embed → extract pipeline asynchronously via FastAPI `BackgroundTasks`; the repository accepts a `scheduler` callback so scripts/tests can run it synchronously.
+- KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, `knowledge_embeddings`, `element_embeddings`, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`; plus still-live legacy `article_claims`/`derived_rule_candidates`. Embedding vectors are stored as JSON; at query time `ask()` streams them into per-notebook L2-normalized **float32 numpy matrices** (`vector_index`) cached by `vector_cache` (version-keyed) — similarity is one matmul with bounded memory (no pgvector locally; sqlite-vec is the future scale path).
+- Upload runs `process_source` asynchronously via FastAPI `BackgroundTasks` (status `queued→parsing→parsed→extracting→extracted`). After parsing, **element embedding runs in a background daemon thread concurrently with foreground KG extraction**; `extracted` (UI green) is gated on extraction completion only. SQLite uses WAL + `busy_timeout` so the concurrent writers do not lock. The repository accepts a `scheduler` callback so scripts/tests can run it synchronously.
 - Re-running parse/extraction for a source invalidates stale source-derived candidates and approved knowledge before writing the new extraction result.
 - Deleting a source uses the same stale source-derived cleanup boundary, removes its local file, and clears any article research artifacts that depended on that source. Deleting an article cascades its claims and derived-rule candidates.
 
@@ -146,7 +146,7 @@ Run backend commands with the shared Python interpreter:
 
 ```bash
 cd backend
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --reload --port 8000
+/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 For dependency checks or installs, use the same interpreter:
@@ -199,6 +199,9 @@ openai
 python-multipart
 python-docx
 pypdf
+markdown-it-py   # 结构化 Markdown 解析
+numpy            # float32 向量矩阵检索
+openpyxl         # XLSX 解析
 ```
 
 If any dependency is missing, install `backend/requirements.txt` into the shared Miniconda environment.
@@ -214,7 +217,7 @@ OPENAI_COMPAT_MODEL
 OPENAI_COMPAT_TIMEOUT_SECONDS
 ```
 
-Embeddings are configured separately via the `EMBED_*` vars (`EMBED_PROVIDER` ""=off / dashscope, plus `EMBED_MODEL`, `EMBED_BASE_URL`, `EMBED_API_KEY`, `EMBED_DIM`) and accessed through the `Embedder` abstraction (`app/services/embedding.py`), not `LLMClient`.
+Embeddings are configured separately via the `EMBED_*` vars (`EMBED_PROVIDER` ""=off / dashscope, plus required `EMBED_MODEL`, `EMBED_BASE_URL`, `EMBED_API_KEY`, and matching `EMBED_DIM`) and accessed through the `Embedder` abstraction (`app/services/embedding.py`), not `LLMClient`.
 
 **Principle — model services are URL-based only.** Every model the product depends on (chat LLM, embeddings, and any future reranker/parser model) is reached over an HTTP/OpenAI-compatible **URL endpoint** (`*_BASE_URL` + `*_API_KEY` + `*_MODEL`). This project does **not** start or host local model servers (no in-process model loading like sentence-transformers, no spawning a local inference server) to perform tasks. Prefer adding a configurable endpoint over bundling a model. (The former `LocalBGEEmbedder` was removed for this reason; re-add behind this same URL principle only if explicitly requested.)
 
@@ -230,7 +233,7 @@ Structured logs go to `.local/logs/*.jsonl` (gitignored) plus brief console line
 - `events.jsonl` — source pipeline in `SQLiteRepository.process_source` / `_set_source_status` (per-stage timings + status transitions + failure stack).
 - `llm.jsonl` — `LLMInteractionLogger` wrapping `OpenAICompatibleClient` (`app/core/llm.py`); chat detailed, embeddings summarized, errors recorded.
 
-Rules: reuse `EventLogger` for any new structured log (it handles JSONL append + console + never raising); never log raw embedding vectors; chat prompt/response are truncated to `LLM_LOG_MAX_CHARS`. Config env vars: `LLM_LOG_ENABLED`, `LLM_LOG_PATH`, `LLM_LOG_MAX_CHARS`, `EVENT_LOG_ENABLED`, `EVENT_LOG_DIR`, `SLOW_REQUEST_MS` — keep `.env.example` aligned.
+Rules: reuse `EventLogger` for any new structured log (it handles JSONL append + console + never raising); never log raw embedding vectors; chat prompt/response are truncated to `LLM_LOG_MAX_CHARS`. The browser/API debug log viewer (`/dev/logs`, `/api/debug/logs/...`) is opt-in because full LLM records may contain prompt/response text from private sources; enable only with `DEBUG_LOGS_ENABLED=true`. Config env vars: `LLM_LOG_ENABLED`, `LLM_LOG_PATH`, `LLM_LOG_MAX_CHARS`, `EVENT_LOG_ENABLED`, `EVENT_LOG_DIR`, `SLOW_REQUEST_MS`, `DEBUG_LOGS_ENABLED` — keep `.env.example` aligned.
 
 ## Verification
 
