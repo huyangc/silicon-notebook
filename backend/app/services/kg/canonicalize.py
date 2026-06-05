@@ -9,6 +9,7 @@ def _norm(name: str) -> str:
 
 def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[List[Node], List[Edge]]:
     canon: dict = {}          # normalized name -> canonical Concept node
+    proc_canon: dict = {}     # (normalized name, section_path) -> canonical Procedure node
     remap: dict = {}          # every original node id -> final id
     out: List[Node] = []
     cn = 0
@@ -27,9 +28,31 @@ def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[Lis
                 n.mentions = list(n.evidence)
                 canon[key] = n
                 out.append(n)
+        elif n.type == "Procedure" and _norm(n.name):
+            key = (_norm(n.name), n.section_path)
+            if key in proc_canon:
+                c = proc_canon[key]
+                c.steps.extend(n.steps)        # concatenate; ordered + deduped below
+                remap[n.id] = c.id
+            else:
+                proc_canon[key] = n
+                remap[n.id] = n.id
+                out.append(n)
         else:
             remap[n.id] = n.id
             out.append(n)
+    # order each merged flow's steps by evidence position and drop name-duplicates
+    for n in out:
+        if n.type == "Procedure" and n.steps:
+            n.steps.sort(key=lambda s: (s.evidence[0].char_start if s.evidence else 1_000_000))
+            seen, deduped = set(), []
+            for s in n.steps:
+                k = _norm(s.name)
+                if k in seen:
+                    continue
+                seen.add(k)
+                deduped.append(s)
+            n.steps = deduped
     final_edges: List[Edge] = []
     seen = set()
     for e in edges:
