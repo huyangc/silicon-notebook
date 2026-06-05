@@ -45,6 +45,8 @@ def test_filter_by_kind_status_model(tmp_path):
     assert {r["id"] for r in log_reader.filter_records(records, kind="chat")} == {"llm-a", "llm-c"}
     assert {r["id"] for r in log_reader.filter_records(records, status="error")} == {"llm-c"}
     assert {r["id"] for r in log_reader.filter_records(records, model="e1")} == {"llm-b"}
+    # combined filters AND together
+    assert {r["id"] for r in log_reader.filter_records(records, kind="chat", status="ok")} == {"llm-a"}
 
 
 def test_search_matches_messages_and_error(tmp_path):
@@ -86,3 +88,9 @@ def test_paginate_before_since_limit(tmp_path):
     assert [r["seq"] for r in older] == [2, 1, 0]
     newer, _ = log_reader.paginate(desc, before=None, since=2, limit=10)
     assert [r["seq"] for r in newer] == [4, 3]
+    # boundary: seq=0 must not leak through `before=0` (regression for falsy-0 bug)
+    bottom, has_more_bottom = log_reader.paginate(desc, before=0, since=None, limit=10)
+    assert bottom == [] and has_more_bottom is False
+    # boundary: since=0 returns strictly-newer records (excludes seq=0)
+    newest, _ = log_reader.paginate(desc, before=None, since=0, limit=10)
+    assert [r["seq"] for r in newest] == [4, 3, 2, 1]

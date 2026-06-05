@@ -167,8 +167,8 @@ def paginate(
     返回 (page, has_more);has_more 表示截断前还有更多旧记录。"""
     out = records_desc
     if since is not None:
-        out = [r for r in out if (r.get("seq") or -1) > since]
+        out = [r for r in out if r.get("seq", -1) > since]
     if before is not None:
-        out = [r for r in out if (r.get("seq") or -1) < before]
+        out = [r for r in out if r.get("seq", -1) < before]
     has_more = len(out) > limit
     return out[:limit], has_more
