@@ -84,6 +84,34 @@ _TYPE_WEIGHT = {
     "concept": 0.5,
 }
 
+# Process/flow-intent overrides: a "what are the steps / 展开流程" question wants
+# procedures surfaced, not buried. Used INSTEAD of _TYPE_WEIGHT for such queries.
+_PROCESS_TYPE_WEIGHT = {
+    "procedure": 1.0,
+    "claim": 0.9,
+    "formula": 0.9,
+    "concept": 0.6,
+}
+
+# Substring markers signalling the user wants a process/flow/steps answer.
+_PROCESS_MARKERS = (
+    "流程", "步骤", "怎么", "如何", "展开", "阶段", "画成", "过程", "顺序", "先后",
+    "flow", "step", "procedure", "process", "pipeline", "stage", "walkthrough",
+)
+
+
+def is_process_query(text: str) -> bool:
+    """True when the question is about a process/flow/steps (intent signal)."""
+    t = (text or "").lower()
+    return any(m in t for m in _PROCESS_MARKERS)
+
+
+def type_weight(object_type: str, process_intent: bool) -> float:
+    """Cross-type authority weight; process-intent questions stop penalising
+    procedures (and slightly favour them)."""
+    table = _PROCESS_TYPE_WEIGHT if process_intent else _TYPE_WEIGHT
+    return table.get(object_type, 0.5)
+
 
 def _normalize(text: str) -> str:
     return " ".join((text or "").split()).lower()
