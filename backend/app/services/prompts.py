@@ -20,6 +20,20 @@ def notebook_description_prompt(sources_block: str) -> str:
     )
 
 
+NOTEBOOK_META_SCHEMA_HINT = '{"name":"","description":""}'
+
+
+def notebook_meta_prompt(sources_block: str) -> str:
+    return (
+        "Based on the sources a curator added to this semiconductor knowhow "
+        "notebook, propose a concise notebook NAME (<= 20 characters, no quotes) "
+        "and a 1-2 sentence DESCRIPTION (Chinese ok) of what it covers. Describe "
+        "the actual subject matter and document types; do not invent scope beyond "
+        "the sources. Return valid JSON only with 'name' and 'description'.\n\n"
+        f"Sources:\n{sources_block}"
+    )
+
+
 REFINE_SCHEMA_HINT = (
     '{"items":[{"index":0,"keep":true,"quoted_span":"","reason":""}]}'
 )

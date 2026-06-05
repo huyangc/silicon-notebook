@@ -82,11 +82,13 @@ from app.services.prompts import (
     ARTICLE_SCHEMA_HINT,
     DESCRIPTION_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
+    NOTEBOOK_META_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
     followup_rewrite_prompt,
     notebook_description_prompt,
+    notebook_meta_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
@@ -107,6 +109,10 @@ from app.services.followup import looks_like_followup
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
+
+# Default notebook-name placeholders the frontend creates; name auto-fill only
+# overwrites these (never a user-chosen name).
+_DEFAULT_NOTEBOOK_NAMES = {"", "未命名笔记本", "Untitled notebook"}
 
 KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
 
@@ -952,14 +958,23 @@ class SQLiteRepository:
                 )
                 if mineru_error:
                     fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
+            # Auto-fill notebook name/description from sources (only while name is a
+            # default placeholder / purpose is still auto). Persist BEFORE marking the
+            # source 'extracted' so the frontend's extracted-triggered refetch shows
+            # the fresh name/description live. Best-effort: never fail the pipeline.
+            try:
+                self._augment_notebook_meta(source.notebook_id, pending_source_id=source_id)
+            except Exception:
+                self.event_log.logger.exception(
+                    "notebook meta augmentation failed for %s", source_id
+                )
             self._set_source_status(
                 source_id,
                 "extracted",
                 error_message=empty_hint or fallback_hint,
             )
-            # 不再导入后自动生成/覆盖笔记本名字或描述(用户要求);保留用户所填。
-            # KG ('extracted'/green) is already set above; wait for the background
-            # element embedding to finish before declaring the whole pipeline done.
+            # KG ('extracted'/green) set above; wait for the background element
+            # embedding to finish before declaring the whole pipeline done.
             embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
@@ -977,20 +992,28 @@ class SQLiteRepository:
         # Manual (re)parse is always synchronous so the response reflects the result.
         return self.process_source(source_id)
 
-    def _augment_notebook_description(self, notebook_id: str) -> None:
-        """Derive the notebook description from its sources, while it is still
-        auto (purpose_auto=1). Regenerates as the first batch's sources finish so
-        the final description reflects all of them. No-op once user-edited."""
+    def _augment_notebook_meta(self, notebook_id: str, pending_source_id: str = "") -> None:
+        """Auto-fill the notebook name (while it is still a default placeholder)
+        and/or description (while purpose_auto=1) from its processed sources.
+        No-op for fields the user has set. `pending_source_id` is the source whose
+        pipeline is finishing (still 'extracting'); it is counted so the FIRST
+        source already produces a name/description."""
         with self._connect() as db:
             nb = db.execute(
-                "SELECT purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
+                "SELECT name, purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
             ).fetchone()
-            if nb is None or ("purpose_auto" in nb.keys() and nb["purpose_auto"] != 1):
+            if nb is None:
+                return
+            cur_name = (nb["name"] or "").strip()
+            need_name = cur_name in _DEFAULT_NOTEBOOK_NAMES
+            need_desc = ("purpose_auto" in nb.keys() and nb["purpose_auto"] == 1)
+            if not (need_name or need_desc):
                 return
             rows = db.execute(
                 "SELECT title, doc_type, summary FROM sources "
-                "WHERE notebook_id = ? AND status = 'extracted' ORDER BY created_at ASC",
-                (notebook_id,),
+                "WHERE notebook_id = ? AND (status = 'extracted' OR id = ?) "
+                "ORDER BY created_at ASC",
+                (notebook_id, pending_source_id),
             ).fetchall()
         if not rows:
             return
@@ -1002,7 +1025,7 @@ class SQLiteRepository:
             if label not in labels:
                 labels.append(label)
 
-        description = ""
+        name_val, desc_val = "", ""
         if self.llm_client.configured:
             block = "\n".join(
                 f"- {r['title']} "
@@ -1012,26 +1035,39 @@ class SQLiteRepository:
             )
             try:
                 raw = self.llm_client.chat_json(
-                    [{"role": "user", "content": notebook_description_prompt(block)}],
-                    DESCRIPTION_SCHEMA_HINT,
+                    [{"role": "user", "content": notebook_meta_prompt(block)}],
+                    NOTEBOOK_META_SCHEMA_HINT,
                 )
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
-                    description = str(parsed.get("description", "")).strip()
+                    name_val = str(parsed.get("name", "")).strip()
+                    desc_val = str(parsed.get("description", "")).strip()
             except Exception:
-                description = ""
-        if not description:
+                name_val, desc_val = "", ""
+
+        # Deterministic fallbacks (LLM off or failed).
+        if need_desc and not desc_val:
             shown = "、".join(titles[:5]) + ("等" if len(titles) > 5 else "")
-            description = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
+            desc_val = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
             if labels:
-                description += f"文档类型涵盖 {'、'.join(labels)}。"
+                desc_val += f"文档类型涵盖 {'、'.join(labels)}。"
+        if need_name and not name_val:
+            name_val = (titles[0] or "").strip()[:40]
 
         with self._connect() as db:
-            db.execute(
-                "UPDATE notebooks SET purpose = ?, updated_at = ? "
-                "WHERE id = ? AND purpose_auto = 1",
-                (description[:1000], _now(), notebook_id),
-            )
+            if need_name and name_val:
+                # Optimistic guard: only overwrite if the name is still the
+                # placeholder we read (no clobber of a concurrent rename).
+                db.execute(
+                    "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
+                    (name_val[:120], _now(), notebook_id, nb["name"]),
+                )
+            if need_desc and desc_val:
+                db.execute(
+                    "UPDATE notebooks SET purpose = ?, updated_at = ? "
+                    "WHERE id = ? AND purpose_auto = 1",
+                    (desc_val[:1000], _now(), notebook_id),
+                )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
         self.get_source(source_id)
