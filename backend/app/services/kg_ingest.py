@@ -4,6 +4,7 @@ the product LLM (deepseek-v4-flash via OPENAI_COMPAT_*)."""
 from __future__ import annotations
 
 import concurrent.futures as cf
+import math
 import re
 from typing import Any, List, Tuple
 
@@ -106,6 +107,24 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
                 "evidence": [{"quote": ev.quote} for ev in edge.evidence],
             })
     return objects, relations
+
+
+def plan_window_size(content_chars: int, workers: int, w_min: int, w_max: int,
+                     override: int = 0) -> int:
+    """Balanced extraction window size (chars).
+
+    override>0 forces a fixed size (back-compat / manual). Otherwise pick
+    level = clamp(content_chars / workers, w_min, w_max), split into
+    N = ceil(content_chars / level) windows, and return the BALANCED size
+    ceil(content_chars / N) so windows are near-equal (no long-tail runt).
+    """
+    if override and override > 0:
+        return override
+    if content_chars <= w_min:
+        return max(1, content_chars)
+    level = min(w_max, max(w_min, content_chars // max(1, workers)))
+    n_windows = max(1, math.ceil(content_chars / level))
+    return math.ceil(content_chars / n_windows)
 
 
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
