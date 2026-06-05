@@ -134,6 +134,30 @@ def ensure_procedure_quota(scored_all, top_n, min_proc, key):
     return sorted(kept + extra, key=key, reverse=True)
 
 
+def classify_evidence(top_hits, anchors, llm_grounded, tau_low, tau_high):
+    """Relevance-aware grounding. Returns (evidence_level, top_relevance).
+
+    - grounded : an answer-CITED hit is strongly relevant (>= tau_high) AND the
+                 LLM self-reported grounded. (Can't fake grounding on junk.)
+    - overview : some relevant hit exists (top relevance >= tau_low) but the
+                 answer is largely extrapolated from thin evidence.
+    - inferred : no relevant hit / nothing cited — general-knowledge answer.
+    """
+    top_rel = max((h.relevance for h in top_hits), default=0.0)
+    if anchors:
+        ids = {a.object_id for a in anchors}
+        anchored_rel = max((h.relevance for h in top_hits if h.object_id in ids), default=0.0)
+    else:
+        anchored_rel = 0.0
+    if top_hits and llm_grounded and anchors and anchored_rel >= tau_high:
+        level = "grounded"
+    elif top_hits and anchors and top_rel >= tau_low:
+        level = "overview"
+    else:
+        level = "inferred"
+    return level, top_rel
+
+
 def _normalize(text: str) -> str:
     return " ".join((text or "").split()).lower()
 

@@ -63,3 +63,24 @@ def test_ensure_procedure_quota_noop_when_enough():
     scored = [_rk("p1", "procedure", 0.9), _rk("p2", "procedure", 0.8), _rk("c1", "claim", 0.7)]
     out = ensure_procedure_quota(scored, top_n=3, min_proc=2, key=key)
     assert [h.object_id for h in out] == ["p1", "p2", "c1"]
+
+
+def _anchor(oid):
+    from app.models.schemas import AnswerAnchor
+    return AnswerAnchor(key="k1", object_id=oid, object_type="claim", label="x")
+
+
+def test_classify_evidence_three_levels():
+    from app.services.retrieval import classify_evidence
+    strong = [_rk("a", "claim", 0.6), _rk("b", "claim", 0.2)]
+    lvl, top = classify_evidence(strong, [_anchor("a")], True, 0.18, 0.35)
+    assert lvl == "grounded" and top == 0.6
+    weak = [_rk("a", "claim", 0.25)]
+    lvl, _ = classify_evidence(weak, [_anchor("a")], True, 0.18, 0.35)
+    assert lvl == "overview"
+    lvl, _ = classify_evidence(weak, [_anchor("a")], True, 0.18, 0.35)
+    assert lvl != "grounded"
+    lvl, _ = classify_evidence(strong, [], True, 0.18, 0.35)
+    assert lvl == "inferred"
+    lvl, top = classify_evidence([], [], False, 0.18, 0.35)
+    assert lvl == "inferred" and top == 0.0
