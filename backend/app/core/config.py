@@ -88,8 +88,9 @@ class Settings(BaseSettings):
     slow_request_ms: int = Field(3000, env="SLOW_REQUEST_MS")
 
     # Read-only debug log viewer endpoints (/api/debug/logs/...). Local dev tool;
-    # set DEBUG_LOGS_ENABLED=false to hide them (every debug endpoint then 404s).
-    debug_logs_enabled: bool = Field(True, env="DEBUG_LOGS_ENABLED")
+    # opt in with DEBUG_LOGS_ENABLED=true because full records may contain
+    # prompt/response text from private source material.
+    debug_logs_enabled: bool = Field(False, env="DEBUG_LOGS_ENABLED")
 
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use the built-in pypdf text fallback (default; no GPU, offline)
@@ -140,7 +141,12 @@ class Settings(BaseSettings):
 
     @property
     def embedder_configured(self) -> bool:
-        return self.embed_provider == "dashscope"
+        return bool(
+            (self.embed_provider or "").strip() == "dashscope"
+            and (self.embed_base_url or "").strip()
+            and (self.embed_api_key or "").strip()
+            and (self.embed_model or "").strip()
+        )
 
     @property
     def mineru_enabled(self) -> bool:

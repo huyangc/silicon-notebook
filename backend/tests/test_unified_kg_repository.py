@@ -11,6 +11,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_PROVIDER", "dashscope")  # embedder_configured=True
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
     r.embedder = FakeEmbedder(dim=16)               # inject; no real model loads (lazy)
@@ -124,4 +127,3 @@ def test_rebuild_tolerates_mixed_dim_vectors(repo):
             "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
             ("rogue", nb.id, json.dumps([0.1] * 999), datetime.datetime.now().isoformat()))
     assert repo.rebuild_unified_kg(nb.id) >= 1   # must NOT raise on mismatched-dim vector
-

@@ -504,14 +504,14 @@ def check_kg_store_ask_and_conversations() -> None:
         assert repo.list_conversations(nb.id) == []
 
         claim_id = next(item.id for item in repo.list_knowledge(nb.id, "claim"))
-        repo.update_knowledge(claim_id, KnowledgeUpdate(status="deprecated", owner="curator"))
+        repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator"))
         assert all(node.id != claim_id for node in repo.knowledge_graph(nb.id).nodes)
         dep_answer = repo.ask(
             nb.id,
             AskRequest(question="What is Engram conditional memory module?"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
-        repo.update_knowledge(claim_id, KnowledgeUpdate(status="reviewed"))
+        repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="reviewed"))
         reviewed = next(item for item in repo.list_knowledge(nb.id, "claim") if item.id == claim_id)
         assert reviewed.status == "reviewed" and reviewed.last_reviewed
 
@@ -1050,17 +1050,17 @@ def main() -> None:
         assert feedback.comment == "grounded and actionable"
 
         claim_id = generic_claims[0].id
-        repository.update_knowledge(claim_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
+        repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
         dep_answer = repository.ask(
             notebook.id,
             AskRequest(question="What is Engram conditional memory module?"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
-        repository.update_knowledge(claim_id, KnowledgeUpdate(status="reviewed"))
+        repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="reviewed"))
         reviewed = next(item for item in repository.list_knowledge(notebook.id, "claim") if item.id == claim_id)
         assert reviewed.status == "reviewed" and reviewed.last_reviewed
         try:
-            repository.update_knowledge(claim_id, KnowledgeUpdate(status="bogus"))
+            repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="bogus"))
             raise AssertionError("invalid status should raise ValueError")
         except ValueError:
             pass
@@ -1092,7 +1092,7 @@ def main() -> None:
         assert isinstance(repository.find_duplicates(notebook.id, "rule"), list)
         assert isinstance(repository.find_conflicts(notebook.id), list)
 
-        merged = repository.merge_knowledge(rule_id_2, MergeRequest(into_id=rule_id))
+        merged = repository.merge_knowledge(notebook.id, rule_id_2, MergeRequest(into_id=rule_id))
         assert merged.id == rule_id
         assert any(
             rule.id == rule_id_2 and rule.status == "deprecated"
@@ -1135,7 +1135,7 @@ def main() -> None:
         draft = next((item for item in derived if item.status == "draft"), None)
         if draft is not None:
             rules_before = len(repository.list_knowledge(notebook.id, "rule"))
-            approved_rule = repository.approve_derived_rule(draft.id)
+            approved_rule = repository.approve_derived_rule(notebook.id, draft.id)
             assert approved_rule.status == "approved"
             assert len(repository.list_knowledge(notebook.id, "rule")) == rules_before + 1
             assert any(item.status == "approved" for item in repository.list_derived_rules(notebook.id))

@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$ROOT_DIR/backend"
-"$PYTHON_BIN" -m uvicorn app.main:app --reload --port 8000 &
+"$PYTHON_BIN" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
 BACKEND_PID=$!
 
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
