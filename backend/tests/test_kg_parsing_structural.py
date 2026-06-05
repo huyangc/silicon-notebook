@@ -17,10 +17,12 @@ set_db x y
 """
 
 
-def test_code_block_is_prose_element_for_windowing():
+def test_code_block_typed_as_code_block_not_prose():
+    # code_block was previously mapped to "paragraph" (a bug); it should be "code_block"
+    # so it is excluded from KG extraction windows while still stored as a SourceElementQ.
     els = parse_elements(MD, "doc.md", None)
     code = [e for e in els if "set_db x y" in e.text]
-    assert code and code[0].type == "paragraph"
+    assert code and code[0].type == "code_block"
 
 
 def test_no_anchor_prose_elements():

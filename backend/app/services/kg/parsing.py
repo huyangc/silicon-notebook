@@ -48,7 +48,7 @@ _QTYPE_MAP = {
     "heading": "heading",
     "paragraph": "paragraph",
     "list_item": "list_item",
-    "code_block": "paragraph",
+    "code_block": "code_block",   # 不进 KG 抽取窗口(仍存为元素供检索/引用)
     "table": "table",
     "image": "figure_caption",
     "blockquote": "paragraph",
