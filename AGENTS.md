@@ -76,7 +76,7 @@ Inside a notebook:
   - Source detail element text should wrap within the modal width, including long Markdown paths, LaTeX fragments, and mixed Chinese/English text; keep horizontal scrolling local to tables/formulas rather than the entire detail panel.
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.
 - Center column: source-grounded knowhow tools, exposed as tabs.
-  - This is the main interaction area: Ask (free question), Scenario query (structured form), Case search, Checklist generator, and Knowledge browser.
+  - This is the main interaction area, exposed as two tabs: **Ask** (free, KG-grounded Q&A with per-sentence `[k_i]` citations + multi-turn conversation) and the **Knowledge browser** (browse/govern the extracted objects by type). The earlier Scenario query / Case search / Checklist tools were removed when the KG-native model (concept/claim/formula/procedure) replaced the rule/case/checklist types.
   - Ask conversation history should use a compact session context bar and an expandable session manager instead of permanently splitting the already constrained center panel.
   - Answers must stay evidence-grounded, render Markdown/code/formula/table content cleanly, use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel (not in an overflowing floating popover), and support lightweight 👍/👎/copy actions. Do not flatten all related knowledge under each answer; route deeper exploration from the citation area into the Knowledge Graph.
   - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
@@ -89,7 +89,7 @@ Inside a notebook:
 - Right column: Studio.
   - Keep Mind Map, New Article, and Infographic entries.
   - Article research drives the Mind Map / Infographic output; created articles must be listed with delete actions, and the lower Studio output area stays for generated outputs.
-- Do not show a standalone curator Review Queue button in the left source column; candidate governance should live in the knowledge/tool surfaces that actually use it.
+- The candidate Review Queue was removed: the KG extractor writes approved knowledge objects directly (no candidate staging). Knowledge governance is dedupe/merge over the objects in the Knowledge browser.
 
 ## MVP Scope
 
