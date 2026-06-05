@@ -13,6 +13,10 @@ class Evidence(BaseModel):
     line_end: int
     quote: str
 
+class Step(BaseModel):
+    name: str = ""
+    evidence: List[Evidence] = Field(default_factory=list)
+
 class Node(BaseModel):
     id: str
     type: NodeType
@@ -20,6 +24,7 @@ class Node(BaseModel):
     section_path: str = ""
     evidence: List[Evidence] = Field(default_factory=list)
     mentions: List[Evidence] = Field(default_factory=list)
+    steps: List[Step] = Field(default_factory=list)   # ordered steps for a flow Procedure
 
 class Edge(BaseModel):
     id: str
