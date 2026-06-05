@@ -958,14 +958,7 @@ class SQLiteRepository:
                 "extracted",
                 error_message=empty_hint or fallback_hint,
             )
-            # Derive the notebook description from its sources while it is still
-            # auto (the user hasn't written one). Best-effort; never fails the pipeline.
-            try:
-                self._augment_notebook_description(source.notebook_id)
-            except Exception:
-                self.event_log.logger.exception(
-                    "description augment failed for %s", source.notebook_id
-                )
+            # 不再导入后自动生成/覆盖笔记本名字或描述(用户要求);保留用户所填。
             # KG ('extracted'/green) is already set above; wait for the background
             # element embedding to finish before declaring the whole pipeline done.
             embed_thread.join()
