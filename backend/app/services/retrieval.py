@@ -113,6 +113,27 @@ def type_weight(object_type: str, process_intent: bool) -> float:
     return table.get(object_type, 0.5)
 
 
+def ensure_procedure_quota(scored_all, top_n, min_proc, key):
+    """Take the top_n of an already-sorted `scored_all`, but guarantee at least
+    `min_proc` procedures when the pool has them — back-fill from the remainder
+    and evict the weakest non-procedure items. Never evicts a procedure; result
+    is re-sorted by `key` descending and capped at top_n."""
+    top = scored_all[:top_n]
+    procs = [h for h in top if h.object_type == "procedure"]
+    if len(procs) >= min_proc:
+        return top
+    have_ids = {h.object_id for h in top}
+    extra = [h for h in scored_all[top_n:]
+             if h.object_type == "procedure" and h.object_id not in have_ids]
+    extra = extra[: min_proc - len(procs)]
+    if not extra:
+        return top
+    non_proc = [h for h in top if h.object_type != "procedure"]
+    drop_ids = {h.object_id for h in non_proc[len(non_proc) - len(extra):]}
+    kept = [h for h in top if h.object_id not in drop_ids]
+    return sorted(kept + extra, key=key, reverse=True)
+
+
 def _normalize(text: str) -> str:
     return " ".join((text or "").split()).lower()
 

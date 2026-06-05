@@ -35,3 +35,31 @@ def test_is_process_query_and_type_weight():
     assert type_weight("procedure", True) == 1.0
     assert type_weight("claim", True) == 0.9
     assert type_weight("concept", True) == 0.6
+
+
+def _rk(oid, otype, score):
+    from app.services.retrieval import RetrievedKnowledge
+    return RetrievedKnowledge(object_id=oid, object_type=otype, payload={},
+                              score=score, relevance=score)
+
+
+def test_ensure_procedure_quota_backfills_and_preserves_order():
+    from app.services.retrieval import ensure_procedure_quota, type_weight
+    key = lambda it: it.score * type_weight(it.object_type, True)
+    scored = [
+        _rk("c1", "claim", 0.9), _rk("c2", "claim", 0.8), _rk("c3", "claim", 0.7),
+        _rk("p1", "procedure", 0.6), _rk("p2", "procedure", 0.5), _rk("c4", "claim", 0.1),
+    ]
+    out = ensure_procedure_quota(scored, top_n=3, min_proc=2, key=key)
+    types = [h.object_type for h in out]
+    assert types.count("procedure") == 2
+    assert len(out) == 3
+    assert out[0].object_id == "c1"
+    assert [key(h) for h in out] == sorted((key(h) for h in out), reverse=True)
+
+def test_ensure_procedure_quota_noop_when_enough():
+    from app.services.retrieval import ensure_procedure_quota, type_weight
+    key = lambda it: it.score * type_weight(it.object_type, True)
+    scored = [_rk("p1", "procedure", 0.9), _rk("p2", "procedure", 0.8), _rk("c1", "claim", 0.7)]
+    out = ensure_procedure_quota(scored, top_n=3, min_proc=2, key=key)
+    assert [h.object_id for h in out] == ["p1", "p2", "c1"]
