@@ -84,3 +84,12 @@ def test_classify_evidence_three_levels():
     assert lvl == "inferred"
     lvl, top = classify_evidence([], [], False, 0.18, 0.35)
     assert lvl == "inferred" and top == 0.0
+
+
+def test_followup_rewrite_prompt():
+    from app.services.prompts import followup_rewrite_prompt, FOLLOWUP_REWRITE_SCHEMA_HINT
+    p = followup_rewrite_prompt("User: innovus中有哪些常见flow\nAssistant: ...RTL到GDSII...",
+                                "展开讲讲这个流程")
+    assert "展开讲讲这个流程" in p
+    assert "RTL到GDSII" in p
+    assert "query" in FOLLOWUP_REWRITE_SCHEMA_HINT
