@@ -102,3 +102,10 @@ def test_malformed_line_skipped(tmp_path, monkeypatch):
     body = c.get("/api/debug/logs/llm").json()
     assert body["stats"]["malformed_lines"] == 1
     assert len(body["records"]) == 2
+
+
+def test_list_channels_count_excludes_malformed(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=[CHAT, "NOT JSON", EMB])
+    chans = {ch["name"]: ch for ch in c.get("/api/debug/logs").json()["channels"]}
+    assert chans["llm"]["count"] == 2  # parsed records only; matches stats.total
+    assert c.get("/api/debug/logs/llm").json()["stats"]["total"] == 2

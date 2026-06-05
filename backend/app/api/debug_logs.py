@@ -39,12 +39,12 @@ def list_channels(settings: Settings = Depends(require_enabled)):
     out = []
     for name, filename in log_reader.CHANNELS.items():
         path = _channel_path(settings, name)
-        exists = path.exists()
-        count = 0
-        if exists:
-            with path.open("r", encoding="utf-8") as fh:
-                count = sum(1 for line in fh if line.strip())
-        out.append({"name": name, "file": filename, "exists": exists, "count": count})
+        # Count parsed records (matches `total` on the records endpoint) so a
+        # channel's tab count never disagrees with its listing.
+        records, _ = log_reader.load_records(path)
+        out.append(
+            {"name": name, "file": filename, "exists": path.exists(), "count": len(records)}
+        )
     return {"channels": out}
 
 
@@ -53,8 +53,8 @@ def list_records(
     channel: str,
     settings: Settings = Depends(require_enabled),
     limit: int = Query(200, ge=1, le=2000),
-    before: Optional[int] = None,
-    since: Optional[int] = None,
+    before: Optional[int] = Query(None, description="Return records with seq < before (older page)"),
+    since: Optional[int] = Query(None, description="Return records with seq > since (newer; for polling)"),
     kind: Optional[str] = None,
     status: Optional[str] = None,
     model: Optional[str] = None,
