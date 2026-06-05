@@ -1236,33 +1236,51 @@ class SQLiteRepository:
             )
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
-        """Batch-embed object payload text into knowledge_embeddings (best-effort).
-
-        Uses _payload_text (all string fields), matching the lazy backfill in
-        _knowledge_vectors so a node embedded at ingest and one backfilled at
-        search time get identical vectors. Name-only would diverge from the
-        backfill path and silently skip nodes with no `name` (e.g. rule objects
-        keyed on title/statement)."""
+        """Concurrently embed object payload text into knowledge_embeddings
+        (best-effort, per-batch isolated). Mirrors _embed_source: batches of
+        embed_batch_size run on an embed_concurrency thread pool, each batch
+        persists with its own connection (WAL+busy_timeout). A failed batch is
+        logged and skipped without losing the others."""
         if not self.settings.embedder_configured:
             return
-        texts, ids = [], []
+        pending = []
         for it in items:
             text = _payload_text(it["payload"]).strip()
-            if not text:
-                continue
-            ids.append(it["_oid"]); texts.append(text[:2000])
-        if not texts:
+            if text:
+                pending.append((it["_oid"], text[:2000]))
+        if not pending:
             return
-        try:
-            vectors = self.embedder.embed_texts(texts)
-        except Exception:
-            return  # embedding best-effort; never block ingestion
-        now = _now()
-        with self._connect() as db:
-            for oid, vec in zip(ids, vectors):
-                db.execute(
-                    "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                    (oid, notebook_id, json.dumps(vec), now))
+        import concurrent.futures as _cf
+
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+        ensure = getattr(self.embedder, "_ensure", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # noqa: BLE001 — warm-up only
+                pass
+
+        def _embed_and_store(batch) -> None:
+            texts = [t for _, t in batch]
+            try:
+                vectors = self.embedder.embed_texts(texts)
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
+                self.event_log.logger.warning(
+                    "embed kg-objects batch failed (%d) for %s: %s",
+                    len(batch), notebook_id, exc,
+                )
+                return
+            now = _now()
+            with self._connect() as db:
+                for (oid, _), vec in zip(batch, vectors):
+                    db.execute(
+                        "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+                        (oid, notebook_id, json.dumps(vec), now))
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-kg") as pool:
+            list(pool.map(_embed_and_store, batches))
 
     def _knowledge_vectors(
         self,
