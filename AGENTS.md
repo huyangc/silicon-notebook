@@ -123,8 +123,8 @@ Confirmed scope:
 - Default CORS origins include local frontend ports `3000` and `3001`; preserve this unless the frontend dev flow changes.
 - Repository access should go through a repository boundary. `SQLiteRepository` is the current implementation; keep the interface clear for a future PostgreSQL repository.
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
-- `extraction_runs`, legacy `extraction_candidates`, `knowledge_objects`, `knowledge_relations`, `element_embeddings`, `knowledge_embeddings`, `answers`, `conversations`, `feedback`, `article_claims`, and `derived_rule_candidates` tables are live. Embedding vectors are stored as JSON and cosine is computed in Python (no pgvector locally).
-- Upload runs the parse → embed → extract pipeline asynchronously via FastAPI `BackgroundTasks`; the repository accepts a `scheduler` callback so scripts/tests can run it synchronously.
+- KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, `knowledge_embeddings`, `element_embeddings`, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`; plus still-live legacy `extraction_candidates`/`article_claims`/`derived_rule_candidates`. Embedding vectors are stored as JSON; at query time `ask()` streams them into per-notebook L2-normalized **float32 numpy matrices** (`vector_index`) cached by `vector_cache` (version-keyed) — similarity is one matmul with bounded memory (no pgvector locally; sqlite-vec is the future scale path).
+- Upload runs `process_source` asynchronously via FastAPI `BackgroundTasks` (status `queued→parsing→parsed→extracting→extracted`). After parsing, **element embedding runs in a background daemon thread concurrently with foreground KG extraction**; `extracted` (UI green) is gated on extraction completion only. SQLite uses WAL + `busy_timeout` so the concurrent writers do not lock. The repository accepts a `scheduler` callback so scripts/tests can run it synchronously.
 - Re-running parse/extraction for a source invalidates stale source-derived candidates and approved knowledge before writing the new extraction result.
 - Deleting a source uses the same stale source-derived cleanup boundary, removes its local file, and clears any article research artifacts that depended on that source. Deleting an article cascades its claims and derived-rule candidates.
 
@@ -199,6 +199,9 @@ openai
 python-multipart
 python-docx
 pypdf
+markdown-it-py   # 结构化 Markdown 解析
+numpy            # float32 向量矩阵检索
+openpyxl         # XLSX 解析
 ```
 
 If any dependency is missing, install `backend/requirements.txt` into the shared Miniconda environment.

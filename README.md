@@ -2,30 +2,29 @@
 
 [中文说明](./README_zh.md)
 
-`silicon-notebook` is a knowhow notebook platform for semiconductor engineering teams. It turns historical rules, debug cases, checklists, and technical articles into scenario-aware knowledge with element-level evidence citations.
+`silicon-notebook` is a knowhow notebook platform for semiconductor engineering teams. It turns uploaded technical documents into a queryable knowledge graph of Concept / Claim / Formula / Procedure objects, with element-level evidence citations and grounded multi-turn Q&A.
 
 ## Current Scope
 
-This repository now targets a local real-team beta loop:
+This repository targets a local real-team beta loop built around a KG-native pipeline:
 
-- Python FastAPI backend
-- SQLite persistence by default at `.local/silicon_notebook.db`
+- Python FastAPI backend; SQLite persistence at `.local/silicon_notebook.db`
 - Next.js / React / TypeScript frontend under `frontend/`
-- OpenAI-compatible LLM configuration for summaries, extraction, answers, and article research; embeddings can be configured independently with the same compatible API endpoint
-- Deterministic summary and answer fallbacks when no LLM key is configured; KG extraction records a completed `no-llm` run offline instead of fabricating heuristic knowledge
-- Clean start for real teams: a fresh database seeds only the local user — no demo notebook or synthetic sources. New-notebook example prompts adapt to the chosen template / notebook domain instead of hardcoded samples
-- Real multipart source upload (async parsing via FastAPI `BackgroundTasks`) for PDF, Markdown, DOCX, and PPTX
-- PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured on a GPU host; pypdf text fallback locally / when MinerU is off
-- Parsed `SourceElement` records with `element_type`, `location_label`, `text`, and `metadata`
-- LLM-backed KG extraction for Concept / Claim / Formula / Procedure objects with element-level evidence binding; legacy candidate governance endpoints remain for backward compatibility, but the current offline path does not synthesize rule/method/risk candidates
-- Hybrid retrieval: keyword + optional embedding cosine over both source elements and approved knowledge
-- Real source-grounded answers with citation validation: Ask, Scenario query, Case search, Checklist generator, Article research, compact numbered citations, Markdown/code/formula/table rendering, and lightweight 👍/👎/copy actions
-- Knowledge governance: browse any object type through `/knowledge-types` + `/knowledge?type=...`, status lifecycle (reviewed/approved/deprecated/conflict/project_specific) + owner/last_reviewed, duplicate detection & merge, and conflict detection. Deprecated knowledge is excluded from Ask retrieval, including one-hop KG neighbours.
-- Object-level knowledge graph visualization: Concept / Claim / Formula / Procedure nodes are shown together with visible node labels, type-specific shapes/colors, relationship labels on edges, search/multi-select type filters, merge review, and a type-grouped node overview/detail panel with canvas focus on selection
-- Notebook collection page (grid/compact/list views, edit/delete), workspace title editing, source detail previews/delete, article delete, internal search
+- OpenAI-compatible LLM endpoint for extraction, answers, and article research; embeddings configured independently via `EMBED_*` variables
+- Deterministic fallbacks when no LLM/embedder is configured — the whole pipeline runs offline
+- Clean start: a fresh database seeds only the local user; no demo notebook or synthetic sources
+- Multipart source upload for PDF, Markdown, DOCX, PPTX, CSV, and XLSX (async via FastAPI `BackgroundTasks`)
+- **KG-native ingestion**: structured Markdown parse → greedy-window KG extraction (Concept / Claim / Formula / Procedure) with concurrent embedding → extraction-first status (`extracted` = KG ready, does not wait for embedding)
+- PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured; pypdf text fallback locally or when MinerU is off
+- Hybrid retrieval: CJK-aware bi-gram keyword + float32 matrix semantic search with per-notebook cache
+- KG-native grounded Q&A: sentence-level `[k_i]` citations, multi-turn conversations, 1-hop KG neighbour expansion
+- Knowledge governance: browse by type via `/knowledge-types` + `/knowledge?type=...`, status lifecycle, duplicate detection & merge, conflict detection; `deprecated` objects excluded from retrieval and 1-hop expansion
+- Unified KG: cross-document concept clustering (`concept_clusters`), pending-merges review
+- Object-level KG visualization: Concept / Claim / Formula / Procedure nodes with type-specific shapes, edge labels, multi-select filters, and a type-grouped side panel
+- Notebook collection (grid/compact/list, edit/delete); clicking `＋ 新建` creates an `Untitled notebook` and enters it immediately — no dialog
 - No Docker in the first version
 
-PostgreSQL + pgvector remain the target production/team-beta direction, with schema notes kept under `database/`, but local development does not require PostgreSQL.
+PostgreSQL + pgvector remain the future production/team-beta direction; local development does not require them.
 
 ## Local Setup
 
@@ -120,74 +119,123 @@ the warning above). If `frontend/node_modules` is missing, run `npm install` in 
 
 ## Product Flow
 
-The outer page is a notebook collection/library:
+The outer page is a notebook collection/library (KG-native pipeline):
 
-1. Click `＋ 新建` or the `新建笔记本` card.
-2. The app creates an `Untitled notebook` immediately.
-3. The notebook opens directly to source selection.
-4. Import PDF, Markdown, DOCX, or PPTX files.
-5. The backend stores the original file, parses source elements, creates a summary, and makes the source searchable.
+1. Click `＋ 新建` — the app creates an `Untitled notebook` and enters it immediately (no dialog).
+2. Upload PDF, Markdown, DOCX, PPTX, CSV, or XLSX sources (multipart).
+3. Backend: structured Markdown parse → KG extraction (Concept / Claim / Formula / Procedure objects, 16-worker concurrent windows) running in the foreground, while element embedding runs concurrently in a background daemon thread.
+4. Source turns green (`extracted`) as soon as KG extraction completes — no need to wait for embedding.
+5. Knowledge objects are stored in `knowledge_objects` + `knowledge_relations` with element-level evidence bindings.
+6. Hybrid retrieval (bi-gram keyword + float32 matrix semantic) feeds KG-native Q&A: answers contain sentence-level `[k_i]` citations, support multi-turn conversations, and expand via 1-hop KG neighbours.
+7. Unified KG aggregates concepts across documents; pending cross-document merges can be confirmed or rejected.
 
 Inside a notebook:
 
-- Left column: user-imported source files (live parse-status while parsing/extracting) with detail previews and delete actions. Source detail text wraps within the modal width, with only structured tables/formulas using local horizontal scroll when needed. Network source search is intentionally disabled for now.
-- Center column: source-grounded knowhow tools as tabs — Ask (free question), Scenario query (structured scenario form), Case search, Checklist generator, and Knowledge browser. Ask supports multiple saved conversations through a compact session context bar plus an expandable session manager, so the main answer area keeps its full width. The welcome prompts are derived from the notebook's imported source titles/summaries. Answers render Markdown (including code, formulas, and tables), use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel, and expose lightweight 👍/👎/copy actions; related knowledge is reached from the citation area through the Knowledge Graph instead of being flattened under every answer.
-- Knowledge Graph opens as a full-screen workspace overlay: the canvas renders object-level KG nodes with names, type-specific visual marks, and relationship labels; multi-select type filters reduce dense views; the side panel groups nodes by type (Concept, Claim, Formula, Procedure) and selecting an item focuses the canvas while showing selected-node relations, source excerpts, and related nodes with matching type marks.
-- Right column: Studio with Mind Map, New Article, and Infographic; article research drives the Mind Map / Infographic output, and created articles can be deleted.
+- Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
+- Center column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection).
+- Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection.
+- Right column: Studio with articles, derived-rule candidates, and Knowledge Graph entry.
 
-The notebook workspace hides the global collection top bar and keeps a more engineering-console visual treatment rather than copying NotebookLM exactly.
+The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
 
 ## APIs
 
 Key local beta APIs:
 
-- `GET /api/notebooks`
-- `POST /api/notebooks`
-- `PATCH /api/notebooks/{notebook_id}`
-- `DELETE /api/notebooks/{notebook_id}`
-- `POST /api/notebooks/{notebook_id}/sources` for multipart file upload (async parse/extract)
-- `GET /api/sources/{source_id}`, `DELETE /api/sources/{source_id}`, and `POST /api/sources/{source_id}/parse` (poll status / re-run pipeline)
-- `GET /api/sources/{source_id}/elements`, `POST /api/sources/{source_id}/extract`
-- `GET /api/notebooks/{notebook_id}/candidates[/{type}]`, `PATCH /api/candidates/{id}`, `POST /api/candidates/{id}/approve|reject` for legacy candidate governance
-- `GET /api/notebooks/{notebook_id}/knowledge-types`, `GET /api/notebooks/{notebook_id}/knowledge?type=claim|concept|formula|procedure|...`
-- `GET /api/notebooks/{notebook_id}/graph`, `GET /api/notebooks/{notebook_id}/unified-kg`
-- `GET /api/notebooks/{notebook_id}/conversations`, `GET|PATCH|DELETE /api/conversations/{conversation_id}`
-- `GET /api/notebooks/{notebook_id}/search?q=`
-- `POST /api/notebooks/{notebook_id}/ask`, `.../scenario-query`, `.../case-search`, `.../checklist`
-- `GET|POST /api/notebooks/{notebook_id}/articles`, `DELETE /api/articles/{id}`, `POST /api/articles/{id}/research`
+- `GET /api/notebooks`, `POST /api/notebooks`, `PATCH /api/notebooks/{id}`, `DELETE /api/notebooks/{id}`
+- `GET /api/notebooks/{id}/analytics`
+- `POST /api/notebooks/{id}/sources` — multipart file upload (async parse/extract)
+- `GET /api/sources/{id}`, `DELETE /api/sources/{id}`, `POST /api/sources/{id}/parse`, `GET /api/sources/{id}/elements`
+- `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/knowledge/{id}`
+- `GET /api/notebooks/{id}/graph`
+- `GET /api/notebooks/{id}/search?q=`
+- `POST /api/notebooks/{id}/ask` — KG-native grounded Q&A with `[k_i]` citations
+- `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
+- `GET|POST /api/notebooks/{id}/articles`, `DELETE /api/articles/{id}`, `POST /api/articles/{id}/research`
+- Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
+- `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
+- `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
+- `GET /api/notebooks/{id}/candidates`, `PATCH /api/candidates/{id}`, `POST /api/candidates/{id}/approve|reject` (legacy governance, retained for compatibility)
+- `GET /api/notebooks/{id}/duplicates`, `GET /api/notebooks/{id}/conflicts`, `POST /api/knowledge/{id}/merge`
+- `GET /api/notebooks/{id}/derived-rules`, `POST /api/derived-rules/{id}/approve|reject`
 
 ## Configuration
 
-LLM access uses OpenAI-compatible settings:
+All model services are reached over URL endpoints — no local model servers are started.
+
+**LLM (OpenAI-compatible):**
 
 ```text
 OPENAI_COMPAT_BASE_URL
 OPENAI_COMPAT_API_KEY
 OPENAI_COMPAT_MODEL
-OPENAI_COMPAT_TIMEOUT_SECONDS
+OPENAI_COMPAT_TIMEOUT_SECONDS   # default 60
+OPENAI_COMPAT_MAX_RETRIES       # default 2
+```
+
+**Embeddings:**
+
+```text
+EMBED_PROVIDER          # ""=off (keyword-only) | dashscope
+EMBED_MODEL             # embedding model name, e.g. text-embedding-v4
+EMBED_BASE_URL          # embedding endpoint URL
+EMBED_API_KEY
+EMBED_DIM               # must match model output dimension (default 1024)
+EMBED_TRUNCATE_CHARS    # max chars fed to embedder per text (default 2000)
+EMBED_BATCH_SIZE        # elements per embedding call (default 10)
+EMBED_PERSIST_CHUNK     # rows written to DB per batch (default 200)
+EMBED_CONCURRENCY       # concurrent embedding threads (default 50)
+```
+
+**KG extraction windowing:**
+
+```text
+KG_WINDOW_TARGET_CHARS      # greedy-pack target window size (default 9000)
+KG_WINDOW_OVERLAP_CHARS     # overlap between adjacent windows (default 450)
+KG_EXTRACT_WORKERS          # ThreadPoolExecutor size for window extraction (default 16)
+KG_WINDOW_WARN_THRESHOLD    # log WARNING when window count exceeds this (default 1200)
+```
+
+**Database:**
+
+```text
+DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
+DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
+STORAGE_DIR             # uploaded file storage directory
+```
+
+**Retrieval:**
+
+```text
+RETRIEVAL_TOP_N         # top-N hits before 1-hop expansion (default 12)
+```
+
+**MinerU (PDF parsing):**
+
+```text
+MINERU_MODE             # off (default) | http | cli
+MINERU_API_URL          # remote mineru-api endpoint (http mode)
+MINERU_BACKEND          # pipeline | vlm-auto-engine | vlm-http-client | vlm-sglang-client
+MINERU_VLM_SERVER_URL   # standalone VLM inference server URL
+MINERU_PARSE_METHOD     # auto | txt | ocr
+MINERU_LANG             # e.g. en, ch
+MINERU_MODEL_SOURCE     # huggingface | modelscope
+MINERU_TIMEOUT_SECONDS  # MinerU call timeout
+MINERU_FORMULA_ENABLE   # true/false
+MINERU_TABLE_ENABLE     # true/false
+```
+
+**Logging:**
+
+```text
+LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
+EVENT_LOG_ENABLED / EVENT_LOG_DIR
+SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (default 3000)
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-Embeddings (semantic recall) are configured separately:
-
-```text
-EMBED_PROVIDER          # ""=off (keyword only) | dashscope
-EMBED_MODEL             # the embedding API model name, e.g. text-embedding-v4
-EMBED_BASE_URL          # dashscope / OpenAI-compatible embedding endpoint
-EMBED_API_KEY
-EMBED_DIM               # must match the model's output dimension (default 1024)
-```
-
-Logging is configured via:
-
-```text
-LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS   # LLM interaction log (chat truncated to MAX_CHARS)
-EVENT_LOG_ENABLED / EVENT_LOG_DIR                     # HTTP + pipeline event logs
-SLOW_REQUEST_MS                                       # requests slower than this (ms) are flagged SLOW
-```
-
-When LLM settings are not configured, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and the KG extraction stage records a completed `no-llm` run without generating synthetic knowledge.
+When LLM settings are not configured, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.
 
 ## Observability
 
@@ -257,11 +305,12 @@ MinerU output maps to structured `SourceElement`s: formulas become `formula` ele
 
 ## Current Limitations
 
-- Retrieval is SQLite keyword + in-Python embedding cosine; BM25/FTS5 and pgvector are deferred.
-- LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG/rule objects explicitly when they need retrieval and governance assertions.
-- Article Studio works from title/abstract text and linked source elements when present; first-class article full-text upload and richer relation scoring are next (Tier 3).
+- Retrieval uses SQLite keyword (CJK bi-gram) + float32 matrix semantic search with per-notebook cache. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach). BM25/FTS5 and pgvector are deferred for larger scale.
+- Large-document ingestion is hardened: greedy-window KG extraction (cost scales linearly with document size), concurrent embedding with per-batch DB writes, and extraction-first pipeline. For very large corpora, adding `sqlite-vec` is a natural next step.
+- LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
+- Article Studio works from title/abstract text and linked source elements; first-class article full-text upload and richer relation scoring are next (Tier 3).
 - PostgreSQL + pgvector are not required for the local beta and are deferred.
-- The `off`-mode PDF fallback uses pypdf layout extraction with heading/paragraph segmentation (decent reading order, no new deps) — but formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
+- The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
 - User memory remains manual opt-in only; no automatic memory behavior has been added.
 
 ## Verification
@@ -272,7 +321,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This checks backend syntax, a SQLite/upload/parser/KG-extraction-boundary/delete/ask/feedback/article smoke path (including retrieval scoring, conversation APIs, stale-source invalidation, and async-upload paths), and Next.js TypeScript when dependencies are installed.
+This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — `mineru_mode=off`, no real LLM/embedding keys) covering upload/parse, structural Markdown parsing, KG windowing, concurrent embedding with per-batch DB writes, float32 vector matrix build and cache, hybrid retrieval (keyword/vector/None modes), multi-turn `ask`, status machine (`extracted` = green), article research, feedback, JSON fence cleanup, and restart persistence. Also runs Next.js `tsc --noEmit` when `frontend/node_modules` is present.
 
 ## Documentation Maintenance
 

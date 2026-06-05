@@ -2,30 +2,29 @@
 
 [English README](./README.md)
 
-`silicon-notebook` 是一个面向半导体研发团队的 knowhow notebook 平台。它的目标是把历史规则、debug 案例、review checklist、技术文章等资料转化成可查询、可引用、可审核、可推演的工程知识系统。
+`silicon-notebook` 是一个面向半导体研发团队的 knowhow notebook 平台。它把上传的技术文档转化成可查询的知识图谱（Concept / Claim / Formula / Procedure 对象），并提供元素级 evidence 引用与接地多轮问答。
 
 ## 当前范围
 
-当前仓库已经进入本机真实 beta 闭环：
+当前仓库已进入以 KG-native 管线为核心的本机真实 beta 闭环：
 
-- Python FastAPI 后端
-- 默认使用 SQLite 持久化，数据库路径为 `.local/silicon_notebook.db`
-- `frontend/` 下的 Next.js / React / TypeScript 前端作为主线
-- OpenAI-compatible LLM 配置，用于摘要、抽取、回答和文章研究；embedding 可通过同一兼容 API 端点独立配置
-- 未配置 LLM key 时摘要与回答使用 deterministic fallback；KG 抽取在离线时记录完成的 `no-llm` run，不伪造启发式知识
-- 面向真实团队的干净起点：全新数据库只初始化本机用户，不再预置 demo 笔记本或合成来源；新建笔记本的示例提问会根据所选模板/笔记本领域动态生成，而非写死的样例
-- 真实 multipart 文件上传（解析经 FastAPI `BackgroundTasks` 异步执行），支持 PDF、Markdown、DOCX、PPTX
-- PDF 解析在配置 MinerU（GPU 主机）时走 MinerU（公式转 LaTeX、表格、版面）；本机/未启用时回退到 pypdf 纯文本
-- 解析生成 `SourceElement`，包含 `element_type`、`location_label`、`text`、`metadata`
-- 配置 LLM 后进行 KG 抽取，生成 Concept / Claim / Formula / Procedure 对象并做元素级 evidence 绑定；旧候选治理端点保留兼容，但当前离线路径不会合成 rule/method/risk 候选
-- 混合检索：关键词 + 可选 embedding 余弦，覆盖来源元素和已批准知识
-- 真实来源驱动回答 + citation 校验：问答、场景查询、案例检索、Checklist 生成、文章研究，紧凑顺序引用，Markdown/代码/公式/表格渲染，以及轻量 👍/👎/复制操作
-- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期（reviewed/approved/deprecated/conflict/project_specific）+ owner/last_reviewed，重复检测与合并，冲突检测。`deprecated` 知识不会进入 Ask 检索，包括 KG 一跳邻居扩展。
-- Object 级知识图谱可视化：Concept / Claim / Formula / Procedure 节点同屏展示，主画布显示节点名称、类型形状/颜色和边关系标签，并提供搜索/多选类型过滤、合并审核、按类型分组的节点总览与详情面板，选择节点时画布会自动聚焦
-- 外层 notebook 集合页（网格/紧凑/列表视图、编辑/删除）、工作区标题编辑、来源详情预览/删除、文章删除、内部搜索
+- Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
+- `frontend/` 下的 Next.js / React / TypeScript 前端
+- OpenAI-compatible LLM 端点，用于抽取、回答和文章研究；embedding 通过 `EMBED_*` 独立配置
+- 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
+- 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
+- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（异步 BackgroundTasks）
+- **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
+- PDF 走 MinerU（公式/表格/版面）；本机或未配置时回退 pypdf
+- 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
+- KG-native 接地问答：逐句 `[k_i]` 引用、多轮会话、1-hop KG 邻居扩展
+- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并，冲突检测；`deprecated` 对象从检索和 1-hop 扩展中排除
+- 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
+- Object 级 KG 可视化：Concept / Claim / Formula / Procedure 节点，类型形状、边标签、多选过滤、按类型分组侧栏
+- Notebook 集合页（网格/紧凑/列表、编辑/删除）；点击「＋ 新建」直接创建 `Untitled notebook` 并进入，无弹窗
 - 第一版不使用 Docker
 
-PostgreSQL + pgvector 仍然是后续生产/团队 beta 的目标方向，相关 schema 文档保留在 `database/` 下，但当前本机开发不依赖 PostgreSQL。
+PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发不需要。
 
 ## 本机设置
 
@@ -113,74 +112,123 @@ npm run dev    # 仓库根目录：后端(uvicorn --reload) + Next.js 前端
 
 ## 产品流程
 
-外层页面是 notebook 集合页，类似 notebook library：
+外层页面为 notebook 集合页（KG-native 管线）：
 
-1. 点击 `＋ 新建` 或 `新建笔记本` 卡片。
-2. 系统立即创建 `Untitled notebook`。
-3. 创建后直接进入来源选择界面。
-4. 用户导入 PDF、Markdown、DOCX 或 PPTX 文件。
-5. 后端保存原始文件、解析来源元素、生成来源摘要，并让内容可被搜索。
+1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
+2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。
+3. 后端：结构化 Markdown 解析 → KG 抽取（Concept / Claim / Formula / Procedure，16 线程并发窗口化）在前台运行，元素向量化同时在后台 daemon 线程并发执行。
+4. 来源在 KG 抽取完成后立即变绿（`extracted`）——无需等待向量化完成。
+5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
+6. 混合检索（bi-gram 关键词 + float32 矩阵语义）驱动 KG-native 问答：答案含逐句 `[k_i]` 引用，支持多轮会话，并沿 KG 关系做 1-hop 邻居扩展。
+7. 统一 KG 跨文档聚合概念；待合并的跨文档概念对可逐一确认或拒绝。
 
 进入单个 notebook 后：
 
-- 左栏：用户导入的来源文件（解析/抽取过程中实时显示 parse-status），支持详情预览和删除。来源详情中的长文本会在弹窗宽度内换行，只有结构化表格/公式在必要时使用局部横向滚动。网络检索来源暂不开放。
-- 中栏：以 tab 形式提供来源驱动的 knowhow 工具——问答（自由提问）、场景查询（结构化场景表单）、案例检索、Checklist 生成、知识库浏览。Ask 支持多个已保存会话，采用顶部紧凑会话上下文栏 + 可展开会话管理面板，不把主问答区切成更窄的左右两栏。欢迎区 prompt 会根据 notebook 已导入来源的标题/摘要生成。回答支持 Markdown（含代码、公式、表格）渲染，引用以 `[1]`、`[2]` 这类紧凑顺序编号展示，点击引用会在答案面板内展开详情，并提供轻量 👍/👎/复制操作；相关知识不再平铺在答案下方，而是从引用区跳转到知识图谱继续浏览。
-- 知识图谱以全屏工作区浮层打开：画布渲染 object 级 KG 节点名称、类型视觉标记和关系边标签；多选类型过滤用于收敛密集视图；侧栏按类型（Concept、Claim、Formula、Procedure）汇总节点，点击总览节点会聚焦画布并展示选中节点的关系、出处和按类型排布的相关节点。
-- 右栏：Studio，含思维导图、新建文章、信息图；文章研究驱动思维导图 / 信息图输出，已创建文章可删除。
+- 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
+- 中栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表，👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测、冲突检测）。
+- 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。
+- 右栏：Studio，含文章、派生规则候选和知识图谱入口。
 
-notebook 工作区会隐藏集合页全局上边栏，并采用更偏工程知识台的视觉风格，避免和 NotebookLM 完全一致。
+notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
 
 ## API
 
 当前 beta 的关键 API：
 
-- `GET /api/notebooks`
-- `POST /api/notebooks`
-- `PATCH /api/notebooks/{notebook_id}`
-- `DELETE /api/notebooks/{notebook_id}`
-- `POST /api/notebooks/{notebook_id}/sources` multipart 文件上传（异步解析/抽取）
-- `GET /api/sources/{source_id}`、`DELETE /api/sources/{source_id}`、`POST /api/sources/{source_id}/parse`（轮询状态 / 重跑管线）
-- `GET /api/sources/{source_id}/elements`、`POST /api/sources/{source_id}/extract`
-- `GET /api/notebooks/{notebook_id}/candidates[/{type}]`、`PATCH /api/candidates/{id}`、`POST /api/candidates/{id}/approve|reject`（旧候选治理兼容）
-- `GET /api/notebooks/{notebook_id}/knowledge-types`、`GET /api/notebooks/{notebook_id}/knowledge?type=claim|concept|formula|procedure|...`
-- `GET /api/notebooks/{notebook_id}/graph`、`GET /api/notebooks/{notebook_id}/unified-kg`
-- `GET /api/notebooks/{notebook_id}/conversations`、`GET|PATCH|DELETE /api/conversations/{conversation_id}`
-- `GET /api/notebooks/{notebook_id}/search?q=`
-- `POST /api/notebooks/{notebook_id}/ask`、`.../scenario-query`、`.../case-search`、`.../checklist`
-- `GET|POST /api/notebooks/{notebook_id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`
+- `GET /api/notebooks`、`POST /api/notebooks`、`PATCH /api/notebooks/{id}`、`DELETE /api/notebooks/{id}`
+- `GET /api/notebooks/{id}/analytics`
+- `POST /api/notebooks/{id}/sources` — multipart 文件上传（异步解析/抽取）
+- `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`
+- `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/knowledge/{id}`
+- `GET /api/notebooks/{id}/graph`
+- `GET /api/notebooks/{id}/search?q=`
+- `POST /api/notebooks/{id}/ask` — KG-native 接地问答（逐句 `[k_i]` 引用）
+- `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
+- `GET|POST /api/notebooks/{id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`
+- 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
+- `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
+- `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
+- `GET /api/notebooks/{id}/candidates`、`PATCH /api/candidates/{id}`、`POST /api/candidates/{id}/approve|reject`（旧治理兼容）
+- `GET /api/notebooks/{id}/duplicates`、`GET /api/notebooks/{id}/conflicts`、`POST /api/knowledge/{id}/merge`
+- `GET /api/notebooks/{id}/derived-rules`、`POST /api/derived-rules/{id}/approve|reject`
 
 ## 配置
 
-LLM 使用 OpenAI-compatible 配置：
+所有模型服务均通过 URL 端点接入，不启动本地模型服务。
+
+**LLM（OpenAI-compatible）：**
 
 ```text
 OPENAI_COMPAT_BASE_URL
 OPENAI_COMPAT_API_KEY
 OPENAI_COMPAT_MODEL
-OPENAI_COMPAT_TIMEOUT_SECONDS
-SILICON_NOTEBOOK_CORS_ORIGINS
+OPENAI_COMPAT_TIMEOUT_SECONDS   # 默认 60
+OPENAI_COMPAT_MAX_RETRIES       # 默认 2
 ```
 
-向量检索（语义召回）单独配置：
+**嵌入（向量检索）：**
 
 ```text
 EMBED_PROVIDER          # ""=关闭（仅关键词） | dashscope
-EMBED_MODEL             # 嵌入 API 模型名，如 text-embedding-v4
-EMBED_BASE_URL          # dashscope / OpenAI 兼容的 embedding 端点
+EMBED_MODEL             # 嵌入模型名，如 text-embedding-v4
+EMBED_BASE_URL          # 嵌入端点 URL
 EMBED_API_KEY
 EMBED_DIM               # 须与模型输出维度一致（默认 1024）
+EMBED_TRUNCATE_CHARS    # 每段文本喂给 embedder 的最大字符数（默认 2000）
+EMBED_BATCH_SIZE        # 每次嵌入调用的元素数（默认 10）
+EMBED_PERSIST_CHUNK     # 每批落库行数（默认 200）
+EMBED_CONCURRENCY       # 并发嵌入线程数（默认 50）
 ```
 
-日志相关配置：
+**KG 抽取窗口化：**
 
 ```text
-LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS   # LLM 交互日志（chat 按 MAX_CHARS 截断）
-EVENT_LOG_ENABLED / EVENT_LOG_DIR                     # HTTP + 管线事件日志
-SLOW_REQUEST_MS                                       # 超过该毫秒数的请求标记 SLOW
+KG_WINDOW_TARGET_CHARS      # 贪心打包目标窗口字符数（默认 9000）
+KG_WINDOW_OVERLAP_CHARS     # 相邻窗口重叠字符数（默认 450）
+KG_EXTRACT_WORKERS          # 窗口抽取线程池大小（默认 16）
+KG_WINDOW_WARN_THRESHOLD    # 窗口数超此值记 WARNING（默认 1200）
 ```
 
-没有配置 LLM 时，摘要和回答会退化为 deterministic 行为；source 解析仍会完成，KG 抽取阶段会记录完成的 `no-llm` run，但不会生成合成知识。
+**数据库：**
+
+```text
+DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
+DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
+STORAGE_DIR             # 上传文件存储目录
+```
+
+**检索：**
+
+```text
+RETRIEVAL_TOP_N         # 1-hop 扩展前的 top-N 命中数（默认 12）
+```
+
+**MinerU（PDF 解析）：**
+
+```text
+MINERU_MODE             # off（默认） | http | cli
+MINERU_API_URL          # 远端 mineru-api 端点（http 模式）
+MINERU_BACKEND          # pipeline | vlm-auto-engine | vlm-http-client | vlm-sglang-client
+MINERU_VLM_SERVER_URL   # 独立 VLM 推理服务器 URL
+MINERU_PARSE_METHOD     # auto | txt | ocr
+MINERU_LANG             # 如 en、ch
+MINERU_MODEL_SOURCE     # huggingface | modelscope
+MINERU_TIMEOUT_SECONDS  # MinerU 调用超时
+MINERU_FORMULA_ENABLE   # true/false
+MINERU_TABLE_ENABLE     # true/false
+```
+
+**日志：**
+
+```text
+LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
+EVENT_LOG_ENABLED / EVENT_LOG_DIR
+SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000）
+SILICON_NOTEBOOK_CORS_ORIGINS
+```
+
+没有配置 LLM 时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
 
 ## 可观测性 / 日志
 
@@ -250,11 +298,12 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 
 ## 当前限制
 
-- 检索为 SQLite 关键词 + Python 内 embedding 余弦；BM25/FTS5 与 pgvector 后续再做。
-- KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG/rule 对象。
+- 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
+- 大文档摄取已加固：贪心窗口化 KG 抽取（成本线性），并发 embedding 逐批落库。极大规模下可再接入 `sqlite-vec`。
+- KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - Article Studio 当前基于标题/摘要文本，并在存在关联 source 时使用其元素；一等文章全文上传与更丰富的关系打分是下一步（Tier 3）。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。
-- `off` 模式 PDF 回退用 pypdf layout 抽取 + 标题/段落切分（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
+- `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
 
 ## 验证
@@ -265,7 +314,7 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 bash scripts/check.sh
 ```
 
-该脚本会检查后端语法、SQLite/上传/解析/KG 抽取边界/删除/问答/反馈/文章 smoke 路径（含检索打分、conversation API、旧来源失效清理与异步上传路径），以及在依赖已安装时检查 Next.js TypeScript。
+该脚本进行后端语法检查（`py_compile`）和离线 hermetic smoke（`smoke_backend.py`——钉死 `mineru_mode=off`，不读真实 LLM/embedding 密钥），覆盖：上传/解析、结构化 Markdown 解析、KG 窗口化、并发 embedding 逐批落库、float32 向量矩阵构建与缓存、混合检索（关键词/向量/None 三态）、多轮 ask、状态机（`extracted` = 绿）、文章研究、反馈、JSON fence 清理、重启持久化。依赖已安装时同步运行前端 `tsc --noEmit`。
 
 ## 文档维护
 

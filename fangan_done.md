@@ -259,6 +259,20 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **真实后端修复**：Ask 主命中已排除 `deprecated`，但 1-hop KG neighbour 查询此前没有按 USABLE 状态过滤，会把 deprecated 邻居重新带回 `related_knowledge`；现已在 `SQLiteRepository.ask()` 的 neighbour SQL 中增加 status 过滤。
 - **验证**：`bash scripts/check.sh` 通过（后端 py_compile + KG-native smoke + 前端 `tsc --noEmit`）。脚本中的缺文件栈是故意触发 parse failure，以验证 pipeline `error_message` 能记录真实异常。
 
+## 26. 大型文档摄取与检索加固 + 死代码清理（2026-06-05）
+
+针对上传大型结构化技术手册（如 2.6MB Cadence Innovus UG）暴露的解析/成本/内存问题做的系统加固：
+
+- **统一结构化解析**：新增 `structural_markdown.py`（markdown-it-py）——代码块整块保真、表格结构化、`<a id>` 锚点丢弃、section 面包屑；`parsers.parse_markdown` 与 `kg/parsing.parse_elements` 复用同一实现。**代码块不进 KG 抽取窗口**（代码内容不再被抽成实体），仍存为元素供检索/引用。
+- **KG 窗口化贪心打包**：`make_windows` 把相邻 prose 合并到目标字符、吸收碎小节，成本随文档线性而非按小节爆炸（实测 Innovus 4330→329 窗口）；窗口数超 `kg_window_warn_threshold` 记 WARN 不截断。
+- **嵌入并发化**：元素向量（`_embed_source`/emb-el）与知识对象向量（`_embed_objects_batch`/emb-kg）都改线程池并发（`embed_concurrency=50`）+ 逐 batch 独立连接落库 + 失败隔离。
+- **抽取优先管线**：`process_source` 前台跑 KG 抽取，元素向量化在后台 daemon 线程并发；`extracted`（前端绿）只看抽取完成。`_connect` 开 WAL + `busy_timeout` 支撑并发写。
+- **检索内存/性能**：`ask()` 把向量流式读成每-notebook L2 归一化 **float32 numpy 矩阵**（`vector_index`）+ `vector_cache` 版本键缓存，`query_sims` 单次 matmul。峰值内存大幅下降（实测大 KG 1.3G→约 500M），重复查询亚秒，消除大 KG 下的 OOM/卡死。`_TYPE_WEIGHT`=claim/formula/procedure/concept=1.0/1.0/0.7/0.5。
+- **产品行为**：导入后不再自动生成/覆盖笔记本名字/描述；前端「＋新建」直接创建未命名笔记本并进入（去弹窗）；状态点绿色只给 `extracted`、中间态橙。
+- **配置旋钮**：新增 `kg_window_target_chars/overlap`、`kg_extract_workers`、`kg_window_warn_threshold`、`embed_concurrency/batch_size/truncate_chars/persist_chunk`、`db_busy_timeout_ms`、`retrieval_top_n`。
+- **死代码清理**：移除已休眠 legacy（`/case-search`·`/checklist`·`/sources/{id}/extract` 路由与方法、`structured_boost`/scenario 软加权、旧卡片模型 `MethodCard`/`RiskItemCard`/`GlossaryTermCard`/`CaseCard`/`ChecklistItem`/`RuleExplanation`/`ScenarioQueryRequest`/`ArticleClaimCard`）；保留前端在用的 articles/derived-rules/candidates/duplicates/merge/conflicts。
+- **验证**：`bash scripts/check.sh` 通过（py_compile + KG-native smoke + 前端 `tsc --noEmit`）。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
 
 - **Article 深度可视化**：typed 关系下游动作（suggests_checklist/creates_risk）、Implication Map（§7.4）、Inference 分层（§7.3）+ Hypothesis（§5.9）、研究简报字段补齐（§7.1）。
