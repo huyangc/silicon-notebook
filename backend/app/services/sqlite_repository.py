@@ -1134,33 +1134,54 @@ class SQLiteRepository:
         if not self.settings.embedder_configured:
             return
         source = self.get_source(source_id)
+        notebook_id = source.notebook_id
         elements = self.source_elements(source_id)
         pending = [el for el in elements if el.text.strip()]
         if not pending:
             return
-        from app.services.embedding import embed_in_chunks
+        import concurrent.futures as _cf
+
         trunc = self.settings.embed_truncate_chars
-        texts = [el.text[:trunc] for el in pending]
-        vectors = embed_in_chunks(
-            self.embedder.embed_texts, texts,
-            chunk_size=self.settings.embed_persist_chunk,
-            logger=self.event_log.logger,
-        )
-        now = _now()
-        stored = 0
-        with self._connect() as db:
-            for element, vector in zip(pending, vectors):
-                if vector is None:
-                    continue
-                stored += 1
-                db.execute(
-                    """
-                    INSERT OR REPLACE INTO element_embeddings
-                    (element_id, source_id, notebook_id, vector, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (element.id, source_id, source.notebook_id, json.dumps(vector), now),
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+
+        # Pre-create the embedder's HTTP client single-threaded to avoid a lazy-init
+        # race when many worker threads first touch it (no-op for fakes).
+        ensure = getattr(self.embedder, "_ensure", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # noqa: BLE001 — warm-up only
+                pass
+
+        def _embed_and_store(els: list) -> int:
+            texts = [el.text[:trunc] for el in els]
+            try:
+                vectors = self.embedder.embed_texts(texts)
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
+                self.event_log.logger.warning(
+                    "embed batch failed (%d elements) for source %s: %s",
+                    len(els), source_id, exc,
                 )
+                return 0
+            now = _now()
+            with self._connect() as db:  # own connection per thread (WAL + busy_timeout)
+                for el, vector in zip(els, vectors):
+                    db.execute(
+                        """
+                        INSERT OR REPLACE INTO element_embeddings
+                        (element_id, source_id, notebook_id, vector, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (el.id, source_id, notebook_id, json.dumps(vector), now),
+                    )
+            return len(els)
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        stored = 0
+        with _cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            for n in pool.map(_embed_and_store, batches):
+                stored += n
         self.event_log.logger.info(
             "embedded %s/%s elements for source %s", stored, len(pending), source_id
         )
