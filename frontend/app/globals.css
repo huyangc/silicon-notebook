@@ -1868,8 +1868,7 @@ button.chat-session-card {
   background: #a7b0bf;
 }
 
-.status-extracted,
-.status-parsed {
+.status-extracted {
   background: #177a55;
 }
 
@@ -1877,8 +1876,10 @@ button.chat-session-card {
   background: #ba2d2d;
 }
 
+/* 中间态（已解析但 KG 抽取未完成等）显示处理中橙，绿色只留给真正 extracted。 */
 .status-queued,
 .status-parsing,
+.status-parsed,
 .status-extracting {
   background: #9a5b00;
 }

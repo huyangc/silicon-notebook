@@ -146,9 +146,11 @@ class SQLiteRepository:
         return path
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=self.settings.db_busy_timeout_ms / 1000)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute(f"PRAGMA busy_timeout = {int(self.settings.db_busy_timeout_ms)}")
         return connection
 
     def _migrate(self) -> None:
@@ -897,10 +899,29 @@ class SQLiteRepository:
                     )
             self._set_source_status(source_id, "parsed", summary=summary)
 
-            t = time.perf_counter()
-            stage("embed", "start", t)
-            self._embed_source(source_id)
-            stage("embed", "done", t)
+            # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
+            # concurrent with KG extraction, so a large doc's slow embed never blocks
+            # the KG result. 'extracted'/green below is gated on EXTRACTION only.
+            import threading
+
+            embed_started = time.perf_counter()
+            stage("embed", "start", embed_started)
+
+            def _embed_bg() -> None:
+                try:
+                    self._embed_source(source_id)
+                    stage("embed", "done", embed_started)
+                except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
+                    stage("embed", "error", embed_started,
+                          error=f"{type(exc).__name__}: {exc}")
+                    self.event_log.logger.exception(
+                        "background embed failed for %s", source_id
+                    )
+
+            embed_thread = threading.Thread(
+                target=_embed_bg, name=f"embed-{source_id}", daemon=True
+            )
+            embed_thread.start()
 
             self._set_source_status(source_id, "extracting")
             t = time.perf_counter()
@@ -945,6 +966,9 @@ class SQLiteRepository:
                 self.event_log.logger.exception(
                     "description augment failed for %s", source.notebook_id
                 )
+            # KG ('extracted'/green) is already set above; wait for the background
+            # element embedding to finish before declaring the whole pipeline done.
+            embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
@@ -1132,33 +1156,54 @@ class SQLiteRepository:
         if not self.settings.embedder_configured:
             return
         source = self.get_source(source_id)
+        notebook_id = source.notebook_id
         elements = self.source_elements(source_id)
         pending = [el for el in elements if el.text.strip()]
         if not pending:
             return
-        from app.services.embedding import embed_in_chunks
+        import concurrent.futures as _cf
+
         trunc = self.settings.embed_truncate_chars
-        texts = [el.text[:trunc] for el in pending]
-        vectors = embed_in_chunks(
-            self.embedder.embed_texts, texts,
-            chunk_size=self.settings.embed_persist_chunk,
-            logger=self.event_log.logger,
-        )
-        now = _now()
-        stored = 0
-        with self._connect() as db:
-            for element, vector in zip(pending, vectors):
-                if vector is None:
-                    continue
-                stored += 1
-                db.execute(
-                    """
-                    INSERT OR REPLACE INTO element_embeddings
-                    (element_id, source_id, notebook_id, vector, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (element.id, source_id, source.notebook_id, json.dumps(vector), now),
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+
+        # Pre-create the embedder's HTTP client single-threaded to avoid a lazy-init
+        # race when many worker threads first touch it (no-op for fakes).
+        ensure = getattr(self.embedder, "_ensure", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # noqa: BLE001 — warm-up only
+                pass
+
+        def _embed_and_store(els: list) -> int:
+            texts = [el.text[:trunc] for el in els]
+            try:
+                vectors = self.embedder.embed_texts(texts)
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
+                self.event_log.logger.warning(
+                    "embed batch failed (%d elements) for source %s: %s",
+                    len(els), source_id, exc,
                 )
+                return 0
+            now = _now()
+            with self._connect() as db:  # own connection per thread (WAL + busy_timeout)
+                for el, vector in zip(els, vectors):
+                    db.execute(
+                        """
+                        INSERT OR REPLACE INTO element_embeddings
+                        (element_id, source_id, notebook_id, vector, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (el.id, source_id, notebook_id, json.dumps(vector), now),
+                    )
+            return len(els)
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        stored = 0
+        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-el") as pool:
+            for n in pool.map(_embed_and_store, batches):
+                stored += n
         self.event_log.logger.info(
             "embedded %s/%s elements for source %s", stored, len(pending), source_id
         )
