@@ -1120,10 +1120,14 @@ export default function Home() {
     }
   }
 
-  function openCreate() {
-    setCreateName("");
-    setCreateDesc("");
-    setCreateOpen(true);
+  async function openCreate() {
+    // 点击「新建」直接创建一个未命名笔记本并进入(不再弹窗要求填名字/描述)。
+    const notebook = await api<NotebookSummary>("/notebooks", {
+      method: "POST",
+      body: JSON.stringify({ name: "未命名笔记本", purpose: "" })
+    });
+    await loadNotebookCollection();
+    await openNotebook(notebook.id);
   }
 
   async function submitCreate() {
@@ -1885,7 +1889,7 @@ export default function Home() {
                   ))}
                 </div>
               </div>
-              <button className="new-pill" onClick={openCreate}>＋ 新建</button>
+              <button className="new-pill" onClick={() => openCreate().catch(reportError)}>＋ 新建</button>
             </div>
           </section>
 
@@ -1904,7 +1908,7 @@ export default function Home() {
             ) : (
               <>
                 {!searchQuery && filter !== "featured" && (
-                  <button className="notebook-card create-card" onClick={openCreate}>
+                  <button className="notebook-card create-card" onClick={() => openCreate().catch(reportError)}>
                     <div className="create-circle">＋</div>
                     <h2>新建笔记本</h2>
                   </button>
@@ -1963,7 +1967,7 @@ export default function Home() {
               </div>
             </div>
             <div className="workspace-actions">
-              <button className="new-pill" onClick={openCreate}>＋ 创建笔记本</button>
+              <button className="new-pill" onClick={() => openCreate().catch(reportError)}>＋ 创建笔记本</button>
               <button className="sort-button" onClick={() => setInfoModal({
                 title: "分析",
                 message: "第一版提供本机 beta 的分析入口：可以从当前来源生成 Studio 输出，或直接跑一次 evidence-grounded 回答。",
