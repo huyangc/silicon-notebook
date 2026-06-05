@@ -932,8 +932,9 @@ def main() -> None:
         )
         assert typed[0].doc_type == "academic_paper"
         assert _latest_extraction_run(repository, typed[0].id)["error_message"] == "no-llm"
-        # L4: 导入后不再自动生成/覆盖描述 — auto 笔记本的描述保持为空。
-        assert repository.get_notebook(auto_nb.id).purpose == ""
+        # L4: 导入后从来源自动生成描述(purpose_auto=1 时)；smoke 无 LLM，走确定性兜底。
+        auto_purpose = repository.get_notebook(auto_nb.id).purpose
+        assert auto_purpose and "本笔记本收录了" in auto_purpose
         edited = repository.update_notebook(auto_nb.id, NotebookUpdate(purpose="pinned"))
         assert edited.purpose == "pinned"
         repository.upload_sources(
