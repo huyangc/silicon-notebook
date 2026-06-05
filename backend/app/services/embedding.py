@@ -45,3 +45,20 @@ def make_embedder(settings: Settings) -> Embedder:
         from app.services.embedding_dashscope import DashscopeEmbedder
         return DashscopeEmbedder(settings)
     return FakeEmbedder(dim=settings.embed_dim)
+
+
+def embed_in_chunks(embed_fn, texts, chunk_size=200, logger=None):
+    """逐块调用 embed_fn，单块异常则该块全记 None 并继续（不影响其余块）。
+    返回与 texts 对齐的列表，元素为向量或 None。embed_fn(list[str]) -> list[vector]。"""
+    out = [None] * len(texts)
+    for start in range(0, len(texts), chunk_size):
+        chunk = texts[start:start + chunk_size]
+        try:
+            vectors = embed_fn(chunk)
+        except Exception as exc:  # noqa: BLE001 — best-effort，单块失败不阻塞全篇
+            if logger is not None:
+                logger.warning("embed chunk [%s:%s] failed: %s", start, start + len(chunk), exc)
+            continue
+        for offset, vec in enumerate(vectors):
+            out[start + offset] = list(vec)
+    return out

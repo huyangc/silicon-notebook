@@ -22,7 +22,9 @@ def test_windows_with_elements_pairs_prose_within_window():
                                   n=9000, m=450)
     assert pairs, "expected window/element pairs"
     sections = {w.section_path for w, _ in pairs}
-    assert len(sections) >= 2, "expected >=1 window per section"
+    # 贪心打包后，足够小的相邻小节会合并进同一窗口（Task 2.1 的目的）；
+    # 本测试的主旨是「窗口与其内 prose 元素的配对」，见下方断言。
+    assert len(sections) >= 1, "expected at least one window"
     for w, els in pairs:
         assert els, "each window should carry non-empty prose elements"
         # every element overlaps the window span and is sorted by char_start

@@ -64,6 +64,7 @@ from app.models.schemas import (
     UserProfile,
 )
 from app.services import kg_ingest
+from app.services.vector_cache import VectorCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -113,9 +114,6 @@ KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project
 # KG object types retrieved during ask(), in priority order.
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
-# Global cap on KG hits returned by ask(): all types are scored, pooled, and
-# ranked by relevance * type-weight (soft prior); the top _TOP_N are kept.
-_TOP_N = 12
 
 # Matches the `[k1]` provenance markers the answer LLM appends to grounded
 # sentences; used to resolve markers -> citation anchors and to strip them when
@@ -137,6 +135,7 @@ class SQLiteRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
+        self._vector_cache = VectorCache()
         self._migrate()
         self._seed()
 
@@ -1092,8 +1091,19 @@ class SQLiteRepository:
                     db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
                 return
             raw_text = self._source_raw_text(source, elements)
-            graph = kg_ingest.extract_graph(self.llm_client, raw_text,
-                                            source.file_name or "source.md", kg_doc_type)
+            graph = kg_ingest.extract_graph(
+                self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
+                n=self.settings.kg_window_target_chars,
+                m=self.settings.kg_window_overlap_chars,
+                workers=self.settings.kg_extract_workers,
+            )
+            warn = self.settings.kg_window_warn_threshold
+            if graph.total_windows > warn:
+                self.event_log.logger.warning(
+                    "KG windows %s exceed warn threshold %s for source %s (%s) — "
+                    "extracting in full, no truncation",
+                    graph.total_windows, warn, source_id, source.file_name,
+                )
             objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
             n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
             fw, tw = graph.failed_windows, graph.total_windows
@@ -1123,30 +1133,35 @@ class SQLiteRepository:
             return
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)
-        pending = [(el, el.text.strip()) for el in elements if el.text.strip()]
+        pending = [el for el in elements if el.text.strip()]
         if not pending:
             return
-        try:
-            vectors = self.embedder.embed_texts([text[:2000] for _, text in pending])
-        except Exception:
-            return  # embedding best-effort; never block ingestion
+        from app.services.embedding import embed_in_chunks
+        trunc = self.settings.embed_truncate_chars
+        texts = [el.text[:trunc] for el in pending]
+        vectors = embed_in_chunks(
+            self.embedder.embed_texts, texts,
+            chunk_size=self.settings.embed_persist_chunk,
+            logger=self.event_log.logger,
+        )
         now = _now()
+        stored = 0
         with self._connect() as db:
-            for (element, _), vector in zip(pending, vectors):
+            for element, vector in zip(pending, vectors):
+                if vector is None:
+                    continue
+                stored += 1
                 db.execute(
                     """
                     INSERT OR REPLACE INTO element_embeddings
                     (element_id, source_id, notebook_id, vector, created_at)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (
-                        element.id,
-                        source_id,
-                        source.notebook_id,
-                        json.dumps(vector),
-                        now,
-                    ),
+                    (element.id, source_id, source.notebook_id, json.dumps(vector), now),
                 )
+        self.event_log.logger.info(
+            "embedded %s/%s elements for source %s", stored, len(pending), source_id
+        )
 
     def _embed_knowledge(
         self,
@@ -1860,6 +1875,7 @@ class SQLiteRepository:
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
+        self._vector_cache.invalidate(f"{notebook_id}:knowledge")
 
     def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
         self.get_notebook(notebook_id)
@@ -2610,9 +2626,22 @@ class SQLiteRepository:
             elements = self._gather_elements(db, notebook_id)
             query_vector = self._embed_query(query)
             all_kg = [o for objs in kg_objs.values() for o in objs]
-            knowledge_vectors = self._knowledge_vectors(db, notebook_id, all_kg)
+            kver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                "FROM knowledge_embeddings WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+            kg_version = (kver["c"], kver["ts"], len(all_kg))
+            knowledge_vectors = self._vector_cache.get(
+                f"{notebook_id}:knowledge", kg_version,
+                lambda: self._knowledge_vectors(db, notebook_id, all_kg),
+            )
 
         element_vectors = self._element_vectors(elements)
+
+        from app.services.retrieval import cosine_sims
+        element_sims = cosine_sims(query_vector, element_vectors) if query_vector else None
+        knowledge_sims = cosine_sims(query_vector, knowledge_vectors) if query_vector else None
 
         # Score each KG type (so the right per-type vectors are used), then pool
         # all hits and rank globally by relevance * type-weight (soft prior).
@@ -2624,14 +2653,15 @@ class SQLiteRepository:
                 continue
             scored_all.extend(
                 score_knowledge(
-                    query, objs, t, query_vector, element_vectors, knowledge_vectors, None
+                    query, objs, t, query_vector, element_vectors, knowledge_vectors, None,
+                    element_sims=element_sims, knowledge_sims=knowledge_sims,
                 )
             )
         scored_all.sort(
             key=lambda it: it.score * _TYPE_WEIGHT.get(it.object_type, 0.5),
             reverse=True,
         )
-        top_hits: List[RetrievedKnowledge] = scored_all[:_TOP_N]
+        top_hits: List[RetrievedKnowledge] = scored_all[:self.settings.retrieval_top_n]
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         hit_ids = {item.object_id for item in top_hits}

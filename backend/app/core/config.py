@@ -42,6 +42,21 @@ class Settings(BaseSettings):
     embed_api_key: str = Field("", env="EMBED_API_KEY")
     embed_dim: int = Field(1024, env="EMBED_DIM")
 
+    # --- 大文档摄取/检索旋钮（2026-06-04 大文档加固）---
+    # KG 窗口化：相邻 prose 贪心打包到 target 字符、相邻窗口 overlap。
+    kg_window_target_chars: int = Field(9000, env="KG_WINDOW_TARGET_CHARS")
+    kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
+    # KG 抽取并发线程数。
+    kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
+    # 单文档窗口数超过此值 → 记 WARN（不截断、不丢弃，仍全量抽取）。
+    kg_window_warn_threshold: int = Field(1200, env="KG_WINDOW_WARN_THRESHOLD")
+    # embedding：每条截断长度、每条 API 批大小、落库分块大小。
+    embed_truncate_chars: int = Field(2000, env="EMBED_TRUNCATE_CHARS")
+    embed_batch_size: int = Field(10, env="EMBED_BATCH_SIZE")
+    embed_persist_chunk: int = Field(200, env="EMBED_PERSIST_CHUNK")
+    # 检索：top-N 知识对象。
+    retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief
     # console line. Defaults on; no-op when the LLM is not configured.
