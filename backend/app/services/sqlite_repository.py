@@ -23,10 +23,6 @@ from app.models.schemas import (
     AskResponse,
     Candidate,
     CandidateUpdate,
-    CaseCard,
-    CaseSearchRequest,
-    ChecklistItem,
-    ChecklistRequest,
     Citation,
     ConflictPair,
     DerivedRuleCandidate,
@@ -34,7 +30,6 @@ from app.models.schemas import (
     Evidence,
     FeedbackRequest,
     FeedbackResponse,
-    GlossaryTermCard,
     KnowledgeEdge,
     KnowledgeFieldValue,
     KnowledgeGraph,
@@ -47,14 +42,12 @@ from app.models.schemas import (
     ObjectSchemaModel,
     ObjectSchemaUpdate,
     MergeRequest,
-    MethodCard,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
-    RiskItemCard,
     RuleCard,
     SearchHit,
     SourceDetail,
@@ -1347,11 +1340,6 @@ class SQLiteRepository:
         if missing:
             self._embed_objects_batch(notebook_id, missing)
 
-    def extract_source(self, source_id: str) -> List[Candidate]:
-        source = self.get_source(source_id)
-        self._run_extraction(source_id)
-        return self.list_candidates(source.notebook_id, None)
-
     def list_candidates(
         self,
         notebook_id: str,
@@ -2240,7 +2228,7 @@ class SQLiteRepository:
 
     def update_knowledge(
         self, knowledge_id: str, payload: KnowledgeUpdate
-    ) -> RuleCard | MethodCard | RiskItemCard | GlossaryTermCard:
+    ) -> RuleCard:
         now = _now()
         with self._connect() as db:
             row = db.execute(
@@ -2287,13 +2275,7 @@ class SQLiteRepository:
             "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
         }
         item = self._as_retrieved(obj, row["object_type"])
-        mapper = {
-            "rule": self._rule_card,
-            "method": self._method_card,
-            "risk": self._risk_card,
-            "glossary": self._glossary_card,
-        }.get(row["object_type"], self._rule_card)
-        return mapper(item)
+        return self._rule_card(item)
 
     @staticmethod
     def _knowledge_headline(object_type: str, payload: dict) -> str:
@@ -2384,7 +2366,7 @@ class SQLiteRepository:
                 )
         return groups
 
-    def merge_knowledge(self, source_id: str, payload: MergeRequest) -> RuleCard | MethodCard | RiskItemCard | GlossaryTermCard:
+    def merge_knowledge(self, source_id: str, payload: MergeRequest) -> RuleCard:
         into_id = payload.into_id
         if into_id == source_id:
             raise ValueError("cannot merge a knowledge object into itself")
@@ -2422,13 +2404,7 @@ class SQLiteRepository:
             "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
         }
         item = self._as_retrieved(obj, row["object_type"])
-        mapper = {
-            "rule": self._rule_card,
-            "method": self._method_card,
-            "risk": self._risk_card,
-            "glossary": self._glossary_card,
-        }.get(row["object_type"], self._rule_card)
-        return mapper(item)
+        return self._rule_card(item)
 
     def find_conflicts(self, notebook_id: str) -> List[ConflictPair]:
         self.get_notebook(notebook_id)
@@ -2638,39 +2614,6 @@ class SQLiteRepository:
             evidence=item.evidence,
         )
 
-    def _method_card(self, item: RetrievedKnowledge) -> MethodCard:
-        payload = item.payload
-        return MethodCard(
-            id=item.object_id,
-            name=str(payload.get("name", "")),
-            use_when=str(payload.get("use_when", "")),
-            benefit=str(payload.get("benefit", "")),
-            limitation=str(payload.get("limitation", "")),
-            status=item.status or "approved",
-            evidence=item.evidence,
-        )
-
-    def _risk_card(self, item: RetrievedKnowledge) -> RiskItemCard:
-        payload = item.payload
-        return RiskItemCard(
-            id=item.object_id,
-            title=str(payload.get("title", "")),
-            description=str(payload.get("description", "")),
-            severity=str(payload.get("severity", "medium")),
-            status=item.status or "approved",
-            evidence=item.evidence,
-        )
-
-    def _glossary_card(self, item: RetrievedKnowledge) -> GlossaryTermCard:
-        payload = item.payload
-        return GlossaryTermCard(
-            id=item.object_id,
-            term=str(payload.get("term", "")),
-            definition=str(payload.get("definition", "")),
-            status=item.status or "approved",
-            evidence=item.evidence,
-        )
-
     @staticmethod
     def _as_retrieved(obj: dict, object_type: str) -> RetrievedKnowledge:
         return RetrievedKnowledge(
@@ -2681,18 +2624,6 @@ class SQLiteRepository:
             status=obj.get("status", "approved"),
             owner=obj.get("owner", ""),
             last_reviewed=obj.get("last_reviewed", ""),
-        )
-
-    def _case_card(self, item: RetrievedKnowledge) -> CaseCard:
-        payload = item.payload
-        return CaseCard(
-            id=item.object_id,
-            symptom=str(payload.get("symptom", "")),
-            context=str(payload.get("context", "")),
-            root_cause=str(payload.get("root_cause", "")),
-            resolution=str(payload.get("resolution", "")),
-            lesson_learned=str(payload.get("lesson_learned", "")),
-            evidence=item.evidence,
         )
 
     def _citations_from(
@@ -2759,7 +2690,7 @@ class SQLiteRepository:
                 continue
             scored_all.extend(
                 score_knowledge(
-                    query, objs, t, query_vector, None, None, None,
+                    query, objs, t, query_vector, None, None,
                     element_sims=element_sims, knowledge_sims=knowledge_sims,
                 )
             )
@@ -3238,112 +3169,6 @@ class SQLiteRepository:
             knowledge_counts=knowledge_counts,
             source_status_counts=source_status_counts,
         )
-
-    def case_search(self, notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]:
-        self.get_notebook(notebook_id)
-        query_parts = [payload.query] + [
-            value for value in payload.context.values() if value
-        ]
-        query = " ".join(query_parts).strip()
-        with self._connect() as db:
-            cases = self._knowledge_objects(db, notebook_id, "case")
-            elements = self._gather_elements(db, notebook_id)
-            query_vector = self._embed_query(query)
-            knowledge_vectors = self._knowledge_vectors(db, notebook_id, cases)
-        element_vectors = self._element_vectors(elements)
-        scenario = payload.context or {}
-        scored = (
-            score_knowledge(query, cases, "case", query_vector, element_vectors, knowledge_vectors, scenario)
-            if query
-            else []
-        )
-        if not scored:
-            scored = [
-                RetrievedKnowledge(
-                    object_id=case["id"],
-                    object_type="case",
-                    payload=case["payload"],
-                    evidence=case["evidence"],
-                )
-                for case in cases
-            ]
-        return [self._case_card(item) for item in scored[:10]]
-
-    def checklist(self, notebook_id: str, payload: ChecklistRequest) -> List[ChecklistItem]:
-        self.get_notebook(notebook_id)
-        query = payload.scenario.strip()
-        with self._connect() as db:
-            checklist_objs = self._knowledge_objects(db, notebook_id, "checklist")
-            rules = self._knowledge_objects(db, notebook_id, "rule")
-            elements = self._gather_elements(db, notebook_id)
-            query_vector = self._embed_query(query)
-            knowledge_vectors = self._knowledge_vectors(db, notebook_id, checklist_objs + rules)
-        valid_element_ids = {element["element_id"] for element in elements}
-        element_vectors = self._element_vectors(elements)
-
-        scored = (
-            score_knowledge(query, checklist_objs, "checklist", query_vector, element_vectors, knowledge_vectors)
-            if query
-            else []
-        )
-        if not scored:
-            scored = [
-                RetrievedKnowledge(
-                    object_id=obj["id"],
-                    object_type="checklist",
-                    payload=obj["payload"],
-                    evidence=obj["evidence"],
-                )
-                for obj in checklist_objs
-            ]
-
-        items: List[ChecklistItem] = []
-        for item in scored[:12]:
-            payload_obj = item.payload
-            question = str(payload_obj.get("question", "")).strip()
-            if not question:
-                continue
-            citations = [
-                _citation("Checklist evidence", evidence)
-                for evidence in item.evidence
-                if not evidence.element_id or evidence.element_id in valid_element_ids
-            ]
-            items.append(
-                ChecklistItem(
-                    question=question,
-                    severity=str(payload_obj.get("severity", "medium")),
-                    required_evidence=str(payload_obj.get("required_evidence", "")),
-                    related_rule_ids=[],
-                    citations=citations,
-                )
-            )
-
-        if not items:
-            scored_rules = (
-                score_knowledge(query, rules, "rule", query_vector, element_vectors, knowledge_vectors)
-                if query
-                else []
-            )
-            for item in scored_rules[:6]:
-                statement = str(item.payload.get("statement", "")).strip()
-                title = str(item.payload.get("title", "")).strip()
-                if not (statement or title):
-                    continue
-                citations = [
-                    _citation("Rule evidence", evidence)
-                    for evidence in item.evidence
-                    if not evidence.element_id or evidence.element_id in valid_element_ids
-                ]
-                items.append(
-                    ChecklistItem(
-                        question=f"Have you verified: {title or statement}?",
-                        severity=str(item.payload.get("severity", "medium")),
-                        required_evidence=str(item.payload.get("risk_if_ignored", "")),
-                        related_rule_ids=[item.object_id],
-                        citations=citations,
-                    )
-                )
-        return items
 
     def list_articles(self, notebook_id: str) -> List[ArticleSummary]:
         self.get_notebook(notebook_id)

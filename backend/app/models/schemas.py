@@ -130,16 +130,6 @@ class RuleCard(BaseModel):
     evidence: List[Evidence]
 
 
-class CaseCard(BaseModel):
-    id: str
-    symptom: str
-    context: str
-    root_cause: str
-    resolution: str
-    lesson_learned: str
-    evidence: List[Evidence]
-
-
 class Citation(BaseModel):
     label: str
     source_id: str
@@ -199,35 +189,6 @@ class ConversationTurn(BaseModel):
 
 class ConversationDetail(ConversationSummary):
     turns: List[ConversationTurn] = Field(default_factory=list)
-
-
-class ScenarioQueryRequest(BaseModel):
-    domain: str = ""
-    block_type: str = ""
-    design_stage: str = ""
-    package_type: str = ""
-    signal_type: str = ""
-    concern: str = ""
-    constraint: str = ""
-    process_or_node: str = ""
-    application: str = ""
-
-
-class ChecklistRequest(BaseModel):
-    scenario: str
-
-
-class ChecklistItem(BaseModel):
-    question: str
-    severity: str
-    required_evidence: str
-    related_rule_ids: List[str]
-    citations: List[Citation]
-
-
-class CaseSearchRequest(BaseModel):
-    query: str
-    context: Dict[str, str] = Field(default_factory=dict)
 
 
 class ArticleCreate(BaseModel):
@@ -409,44 +370,6 @@ class MergeRequest(BaseModel):
     into_id: str
 
 
-class MethodCard(BaseModel):
-    id: str
-    name: str
-    use_when: str
-    benefit: str
-    limitation: str
-    status: str
-    evidence: List[Evidence] = Field(default_factory=list)
-
-
-class RiskItemCard(BaseModel):
-    id: str
-    title: str
-    description: str
-    severity: str
-    status: str
-    evidence: List[Evidence] = Field(default_factory=list)
-
-
-class GlossaryTermCard(BaseModel):
-    id: str
-    term: str
-    definition: str
-    status: str
-    evidence: List[Evidence] = Field(default_factory=list)
-
-
-class ArticleClaimCard(BaseModel):
-    id: str
-    article_id: str
-    statement: str
-    claim_type: str
-    relation_type: str = ""
-    related_rule_id: str = ""
-    implication: str = ""
-    evidence: List[Evidence] = Field(default_factory=list)
-
-
 class DerivedRuleCandidate(BaseModel):
     id: str
     notebook_id: str
@@ -457,18 +380,6 @@ class DerivedRuleCandidate(BaseModel):
     status: str
     evidence: List[Evidence] = Field(default_factory=list)
     created_label: str = ""
-
-
-class RuleExplanation(BaseModel):
-    rule: RuleCard
-    origin: List[Citation] = Field(default_factory=list)
-    applicable_scenario: List[str] = Field(default_factory=list)
-    exception: str = ""
-    related_cases: List[CaseCard] = Field(default_factory=list)
-    related_risks: List[RiskItemCard] = Field(default_factory=list)
-    related_checklist: List[str] = Field(default_factory=list)
-    # Neighbors derived from the rule's explicit relation fields (edges layer).
-    related_knowledge: List[KnowledgeRef] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):

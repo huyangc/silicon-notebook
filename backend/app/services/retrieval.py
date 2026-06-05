@@ -28,21 +28,6 @@ W_KEYWORD = 0.4
 W_SEMANTIC = 0.6
 # Candidates below this fused relevance are dropped as noise.
 RELEVANCE_FLOOR = 0.12
-# Structured-scenario boost strength: final = relevance * (1 + ALPHA * boost).
-SCENARIO_BOOST_ALPHA = 0.5
-
-# Scenario fields used for structured matching against rule applies_to/condition.
-SCENARIO_FIELDS = (
-    "domain",
-    "block_type",
-    "package_type",
-    "design_stage",
-    "signal_type",
-    "concern",
-    "constraint",
-    "process_or_node",
-    "application",
-)
 
 
 @dataclass
@@ -214,33 +199,6 @@ def _fuse(keyword: float, semantic: float, has_vector: bool) -> float:
     return (W_KEYWORD * keyword + (W_SEMANTIC * semantic if has_vector else 0.0)) / denom
 
 
-def structured_boost(scenario: Optional[Dict[str, str]], payload: Dict[str, object]) -> float:
-    """Fraction of provided scenario fields whose tokens overlap the rule's
-    applies_to / condition / title (0..1). 0 when no scenario or no targets."""
-    if not scenario:
-        return 0.0
-    targets: List[str] = []
-    for key in ("applies_to", "condition", "title", "use_when"):
-        value = payload.get(key)
-        if isinstance(value, (list, tuple)):
-            targets.extend(str(v) for v in value)
-        elif value:
-            targets.append(str(value))
-    target_tokens = set(_tokens(" ".join(targets)))
-    if not target_tokens:
-        return 0.0
-    provided = 0
-    hits = 0
-    for key in SCENARIO_FIELDS:
-        value = scenario.get(key)
-        if not (isinstance(value, str) and value.strip()):
-            continue
-        provided += 1
-        if set(_tokens(value)) & target_tokens:
-            hits += 1
-    return hits / provided if provided else 0.0
-
-
 def score_knowledge(
     query: str,
     objects: List[dict],
@@ -248,12 +206,10 @@ def score_knowledge(
     query_vector: Optional[List[float]] = None,
     element_vectors: Optional[Dict[str, List[float]]] = None,
     knowledge_vectors: Optional[Dict[str, List[float]]] = None,
-    scenario: Optional[Dict[str, str]] = None,
     element_sims: Optional[Dict[str, float]] = None,
     knowledge_sims: Optional[Dict[str, float]] = None,
 ) -> List[RetrievedKnowledge]:
-    """Score knowledge by keyword + optional semantic similarity + optional
-    structured-scenario boost.
+    """Score knowledge by keyword + optional semantic similarity.
 
     Semantic signal is the best cosine between the query and either the object's
     own payload embedding (`knowledge_vectors[object_id]`) or any of its evidence
@@ -299,8 +255,7 @@ def score_knowledge(
         relevance = _fuse(keyword, semantic, has_vector)
         if relevance < RELEVANCE_FLOOR:
             continue
-        boost = structured_boost(scenario, payload)
-        final = relevance * (1.0 + SCENARIO_BOOST_ALPHA * boost)
+        final = relevance
         scored.append(
             RetrievedKnowledge(
                 object_id=object_id,

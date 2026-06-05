@@ -12,8 +12,6 @@ from app.core.config import Settings
 from app.models.schemas import (
     ArticleCreate,
     AskRequest,
-    CaseSearchRequest,
-    ChecklistRequest,
     Evidence,
     FeedbackRequest,
     KnowledgeUpdate,
@@ -574,11 +572,6 @@ def check_api_layer() -> None:
         assert ok("GET", f"/api/notebooks/{nid}/sources") == []
 
         ok("GET", f"/api/notebooks/{nid}/candidates")
-        for candidate_type in ("claims", "concepts", "formulas", "procedures"):
-            # Unknown legacy candidate types should fail loudly, while the
-            # current KG types are browsed through /knowledge below.
-            response = client.get(f"/api/notebooks/{nid}/candidates/{candidate_type}")
-            assert response.status_code == 400
         ok("GET", f"/api/notebooks/{nid}/knowledge-types")
         ok("GET", f"/api/notebooks/{nid}/knowledge", params={"type": "claim"})
         ok("GET", f"/api/notebooks/{nid}/duplicates", params={"type": "claim"})
@@ -779,29 +772,6 @@ def check_payload_embedding_retrieval() -> None:
     print("[smoke] payload-level embedding retrieval ok")
 
 
-def check_structured_scenario_boost() -> None:
-    """Legacy structured scenario boost remains available for rule retrieval helpers."""
-    objects = [
-        {
-            "id": "tagged",
-            "payload": {"title": "return path coupling", "applies_to": ["wirebond"]},
-            "evidence": [],
-            "status": "approved",
-        },
-        {
-            "id": "untagged",
-            "payload": {"title": "return path coupling"},
-            "evidence": [],
-            "status": "approved",
-        },
-    ]
-    scenario = {"package_type": "Wirebond"}
-    scored = score_knowledge("return path coupling", objects, "rule", None, None, None, scenario)
-    order = [item.object_id for item in scored]
-    assert order and order[0] == "tagged", order
-    print("[smoke] structured scenario boost ok")
-
-
 def check_json_fences() -> None:
     """chat_json strips ```json fences some models wrap responses in."""
     from app.core.llm import strip_json_fences
@@ -928,7 +898,6 @@ def main() -> None:
     check_cjk_keyword_recall()
     check_hybrid_floor_and_weight()
     check_payload_embedding_retrieval()
-    check_structured_scenario_boost()
     check_api_layer()
 
     with tempfile.TemporaryDirectory(prefix="silicon-notebook-smoke-") as temp_dir:
@@ -1128,14 +1097,6 @@ def main() -> None:
             rule.id == rule_id_2 and rule.status == "deprecated"
             for rule in repository.list_knowledge(notebook.id, "rule")
         )
-
-        cases = repository.case_search(notebook.id, CaseSearchRequest(query="noise"))
-        assert isinstance(cases, list)
-        checklist_items = repository.checklist(
-            notebook.id,
-            ChecklistRequest(scenario="ESD path near sensitive analog input"),
-        )
-        assert checklist_items and all(item.question for item in checklist_items)
 
         analytics = repository.notebook_analytics(notebook.id)
         assert analytics.feedback_useful >= 1

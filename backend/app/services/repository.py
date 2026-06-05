@@ -11,16 +11,11 @@ from app.models.schemas import (
     AskResponse,
     Candidate,
     CandidateUpdate,
-    CaseCard,
-    CaseSearchRequest,
-    ChecklistItem,
-    ChecklistRequest,
     ConflictPair,
     DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
-    GlossaryTermCard,
     KnowledgeGraph,
     KnowledgeRecord,
     KnowledgeTypeCount,
@@ -29,14 +24,12 @@ from app.models.schemas import (
     ObjectSchemaModel,
     ObjectSchemaUpdate,
     MergeRequest,
-    MethodCard,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
-    RiskItemCard,
     RuleCard,
     SourceDetail,
     SourceElement,
@@ -92,8 +85,6 @@ class NotebookRepository(Protocol):
 
     def delete_source(self, source_id: str) -> None: ...
 
-    def extract_source(self, source_id: str) -> List[Candidate]: ...
-
     def list_candidates(self, notebook_id: str, candidate_type: str | None = None) -> List[Candidate]: ...
 
     def update_candidate(self, candidate_id: str, payload: CandidateUpdate) -> Candidate: ...
@@ -126,7 +117,7 @@ class NotebookRepository(Protocol):
 
     def update_knowledge(
         self, knowledge_id: str, payload: KnowledgeUpdate
-    ) -> RuleCard | MethodCard | RiskItemCard | GlossaryTermCard: ...
+    ) -> RuleCard: ...
 
     def find_duplicates(self, notebook_id: str, object_type: str) -> List[DuplicateGroup]: ...
 
@@ -134,15 +125,11 @@ class NotebookRepository(Protocol):
 
     def merge_knowledge(
         self, source_id: str, payload: MergeRequest
-    ) -> RuleCard | MethodCard | RiskItemCard | GlossaryTermCard: ...
+    ) -> RuleCard: ...
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse: ...
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse: ...
-
-    def case_search(self, notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]: ...
-
-    def checklist(self, notebook_id: str, payload: ChecklistRequest) -> List[ChecklistItem]: ...
 
     def list_articles(self, notebook_id: str) -> List[ArticleSummary]: ...
 

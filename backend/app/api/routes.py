@@ -13,10 +13,6 @@ from app.models.schemas import (
     AskResponse,
     Candidate,
     CandidateUpdate,
-    CaseCard,
-    CaseSearchRequest,
-    ChecklistItem,
-    ChecklistRequest,
     ConflictPair,
     ConversationDetail,
     ConversationRenameRequest,
@@ -235,39 +231,10 @@ def delete_source(source_id: str) -> None:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
-_CANDIDATE_TYPE_MAP = {
-    "rules": "rule",
-    "methods": "method",
-    "risks": "risk",
-    "cases": "case",
-    "checklist": "checklist",
-    "glossary": "glossary",
-}
-
-
-@router.post("/sources/{source_id}/extract", response_model=List[Candidate])
-def extract_source(source_id: str) -> List[Candidate]:
-    try:
-        return repository().extract_source(source_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-
 @router.get("/notebooks/{notebook_id}/candidates", response_model=List[Candidate])
 def list_candidates(notebook_id: str) -> List[Candidate]:
     try:
         return repository().list_candidates(notebook_id, None)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/notebooks/{notebook_id}/candidates/{candidate_type}", response_model=List[Candidate])
-def list_candidates_by_type(notebook_id: str, candidate_type: str) -> List[Candidate]:
-    mapped = _CANDIDATE_TYPE_MAP.get(candidate_type)
-    if mapped is None:
-        raise HTTPException(status_code=400, detail="Unknown candidate type")
-    try:
-        return repository().list_candidates(notebook_id, mapped)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -473,21 +440,6 @@ def delete_conversation(conversation_id: str):
     except KeyError:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-
-@router.post("/notebooks/{notebook_id}/case-search", response_model=List[CaseCard])
-def case_search(notebook_id: str, payload: CaseSearchRequest) -> List[CaseCard]:
-    try:
-        return repository().case_search(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/checklist", response_model=List[ChecklistItem])
-def checklist(notebook_id: str, payload: ChecklistRequest) -> List[ChecklistItem]:
-    try:
-        return repository().checklist(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get("/notebooks/{notebook_id}/articles", response_model=List[ArticleSummary])
