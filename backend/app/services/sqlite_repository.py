@@ -2108,33 +2108,44 @@ class SQLiteRepository:
                     den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
                     result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
             if obj_type == "procedure":
-                prows = db.execute(
-                    "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
-                # v1: group steps by exact section_path (precedes edges are sparse).
-                # Two distinct procedures sharing a section heading would merge —
-                # acceptable for inspection.
-                candidate_steps = []
-                for pr in prows:
-                    ppay = json.loads(pr["payload"] or "{}")
-                    if ppay.get("section_path", "") != section:
-                        continue
-                    ev = json.loads(pr["evidence"] or "[]")
-                    first_eid = ev[0].get("element_id") if ev else ""
-                    candidate_steps.append((ppay.get("name", ""), first_eid))
-                # Collect all first evidence element_ids, then call _element_texts once.
-                all_step_first_eids = [eid for _, eid in candidate_steps if eid]
-                if all_step_first_eids:
-                    texts, ordinal = self._element_texts(db, all_step_first_eids)
+                steps_payload = payload.get("steps")
+                if isinstance(steps_payload, list) and steps_payload:
+                    # New self-contained shape: ordered steps live in the object's payload.
+                    eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
+                    texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
+                    result["steps"] = [
+                        {"name": s.get("name", ""),
+                         "element_text": texts.get(s.get("element_id", ""), s.get("quote", "")),
+                         "section_path": section}
+                        for s in steps_payload
+                    ]
                 else:
-                    texts, ordinal = {}, {}
-                steps = []
-                for step_name, first_eid in candidate_steps:
-                    steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
-                                  "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
-                steps.sort(key=lambda s: s["_ord"])
-                for s in steps:
-                    s.pop("_ord", None)
-                result["steps"] = steps
+                    # Legacy fallback: group sibling procedure nodes by exact section_path
+                    # (precedes edges are sparse). Two distinct procedures sharing a heading
+                    # would merge — acceptable for inspection.
+                    prows = db.execute(
+                        "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
+                    candidate_steps = []
+                    for pr in prows:
+                        ppay = json.loads(pr["payload"] or "{}")
+                        if ppay.get("section_path", "") != section:
+                            continue
+                        ev = json.loads(pr["evidence"] or "[]")
+                        first_eid = ev[0].get("element_id") if ev else ""
+                        candidate_steps.append((ppay.get("name", ""), first_eid))
+                    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
+                    if all_step_first_eids:
+                        texts, ordinal = self._element_texts(db, all_step_first_eids)
+                    else:
+                        texts, ordinal = {}, {}
+                    steps = []
+                    for step_name, first_eid in candidate_steps:
+                        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
+                                      "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
+                    steps.sort(key=lambda s: s["_ord"])
+                    for s in steps:
+                        s.pop("_ord", None)
+                    result["steps"] = steps
             return result
 
     # test-only helper; later tasks may replace it with a public insert path
