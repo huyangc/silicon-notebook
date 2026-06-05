@@ -49,7 +49,7 @@ Passage:
 \"\"\"{labeled_text}\"\"\"
 
 Return JSON ONLY:
-{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0}}],
+{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0,"steps":[{{"name":"..","ev":0}}]}}],
  "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","ev":0}}]}}
 """
 

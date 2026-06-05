@@ -29,7 +29,7 @@ def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[Lis
                 canon[key] = n
                 out.append(n)
         elif n.type == "Procedure" and _norm(n.name):
-            key = (_norm(n.name), n.section_path)
+            key = (_norm(n.name), " ".join((n.section_path or "").split()))
             if key in proc_canon:
                 c = proc_canon[key]
                 c.steps.extend(n.steps)        # concatenate; ordered + deduped below

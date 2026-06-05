@@ -24,7 +24,20 @@ def test_build_records_binds_procedure_steps():
     steps = proc["payload"]["steps"]
     assert [s["name"] for s in steps] == ["import", "floorplan"]
     assert steps[0]["element_id"] == "E0" and steps[1]["element_id"] == "E1"
-    assert steps[0]["quote"]
+    assert steps[0]["quote"] == "import the design netlist"
+
+
+def test_build_records_drops_steps_when_none_bind():
+    # All step quotes match no element -> no payload["steps"] key (procedure still kept
+    # because its own node evidence binds to el0).
+    el0 = _el("E0", "the procedure node itself binds here")
+    node = Node(id="p1", type="Procedure", name="Foundation Flow", section_path="1 > Flow",
+                evidence=[_kev("the procedure node itself binds here")],
+                steps=[Step(name="ghost", evidence=[_kev("this quote is nowhere in the elements")])])
+    g = KnowledgeGraph(doc_id="d", doc_type="manual", nodes=[node], edges=[])
+    objects, _ = build_records(g, "src-1", "Doc", [el0])
+    proc = [o for o in objects if o["object_type"] == "procedure"][0]
+    assert "steps" not in proc["payload"]
 
 
 def test_build_records_procedure_without_steps_unchanged():
