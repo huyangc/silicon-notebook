@@ -117,8 +117,12 @@ def plan_window_size(content_chars: int, workers: int, w_min: int, w_max: int,
     level = clamp(content_chars / workers, w_min, w_max), split into
     N = ceil(content_chars / level) windows, and return the BALANCED size
     ceil(content_chars / N) so windows are near-equal (no long-tail runt).
+
+    NOTE: w_min/w_max bound the LEVEL (which sets the window count), not the
+    returned size — the balanced result can be below w_min (e.g. 9000 chars
+    -> level 4000 -> 3 windows -> 3000 each). That is intended.
     """
-    if override and override > 0:
+    if override > 0:
         return override
     if content_chars <= w_min:
         return max(1, content_chars)

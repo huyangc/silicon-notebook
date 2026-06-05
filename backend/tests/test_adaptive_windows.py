@@ -18,3 +18,6 @@ def test_plan_window_size():
     N = math.ceil(129206 / n)
     assert N == 33 and n <= 8000 and N * n >= 129206
     assert plan_window_size(129206, 100, 4000, 8000, override=9000) == 9000
+    # edge cases: empty doc -> 1 (never 0); workers=0 guarded (no ZeroDivision)
+    assert plan_window_size(0, 16, 4000, 8000) == 1
+    assert plan_window_size(100000, 0, 4000, 8000) >= 4000
