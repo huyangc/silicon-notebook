@@ -418,7 +418,6 @@ def check_kg_store_ask_and_conversations() -> None:
             ],
         )
         source_id = uploaded[0].id
-        assert repo.list_candidates(nb.id) == []
         run = _latest_extraction_run(repo, source_id)
         assert run["run_type"] == "kg"
         assert run["status"] == "completed"
@@ -571,11 +570,9 @@ def check_api_layer() -> None:
         ok("GET", f"/api/notebooks/{nid}")
         assert ok("GET", f"/api/notebooks/{nid}/sources") == []
 
-        ok("GET", f"/api/notebooks/{nid}/candidates")
         ok("GET", f"/api/notebooks/{nid}/knowledge-types")
         ok("GET", f"/api/notebooks/{nid}/knowledge", params={"type": "claim"})
         ok("GET", f"/api/notebooks/{nid}/duplicates", params={"type": "claim"})
-        ok("GET", f"/api/notebooks/{nid}/conflicts")
         ok("GET", f"/api/notebooks/{nid}/graph")
         ok("GET", f"/api/notebooks/{nid}/analytics")
         ok("GET", f"/api/notebooks/{nid}/derived-rules")
@@ -982,7 +979,6 @@ def main() -> None:
         assert len(uploaded) == 4
         assert all(source.parse_status == "extracted" for source in uploaded)
         assert all(_latest_extraction_run(repository, source.id)["run_type"] == "kg" for source in uploaded)
-        assert repository.list_candidates(notebook.id) == []
 
         markdown = next(source for source in uploaded if source.file_name.endswith(".md"))
         assert len(repository.source_elements(markdown.id)) >= 3
@@ -1089,7 +1085,6 @@ def main() -> None:
         assert isinstance(repository.list_knowledge(notebook.id, "risk"), list)
         assert isinstance(repository.list_knowledge(notebook.id, "glossary"), list)
         assert isinstance(repository.find_duplicates(notebook.id, "rule"), list)
-        assert isinstance(repository.find_conflicts(notebook.id), list)
 
         merged = repository.merge_knowledge(rule_id_2, MergeRequest(into_id=rule_id))
         assert merged.id == rule_id

@@ -11,9 +11,6 @@ from app.models.schemas import (
     ArticleSummary,
     AskRequest,
     AskResponse,
-    Candidate,
-    CandidateUpdate,
-    ConflictPair,
     ConversationDetail,
     ConversationRenameRequest,
     ConversationSummary,
@@ -231,37 +228,6 @@ def delete_source(source_id: str) -> None:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
-@router.get("/notebooks/{notebook_id}/candidates", response_model=List[Candidate])
-def list_candidates(notebook_id: str) -> List[Candidate]:
-    try:
-        return repository().list_candidates(notebook_id, None)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.patch("/candidates/{candidate_id}", response_model=Candidate)
-def update_candidate(candidate_id: str, payload: CandidateUpdate) -> Candidate:
-    try:
-        return repository().update_candidate(candidate_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-
-@router.post("/candidates/{candidate_id}/approve", response_model=Candidate)
-def approve_candidate(candidate_id: str) -> Candidate:
-    try:
-        return repository().approve_candidate(candidate_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-
-@router.post("/candidates/{candidate_id}/reject", response_model=Candidate)
-def reject_candidate(candidate_id: str) -> Candidate:
-    try:
-        return repository().reject_candidate(candidate_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
 
 @router.get(
     "/notebooks/{notebook_id}/knowledge-types",
@@ -361,13 +327,6 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
-
-@router.get("/notebooks/{notebook_id}/conflicts", response_model=List[ConflictPair])
-def find_conflicts(notebook_id: str) -> List[ConflictPair]:
-    try:
-        return repository().find_conflicts(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get("/notebooks/{notebook_id}/graph", response_model=KnowledgeGraph)
