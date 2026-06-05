@@ -84,3 +84,20 @@ def test_prompt_and_schema_mention_steps():
     assert '"steps"' in _KG_SCHEMA_HINT
     p = _prompt("[0] x", "1 > Flow", "manual")
     assert "steps" in p
+
+
+def test_extract_window_parses_procedure_steps():
+    import json
+    class FakeProc:
+        def chat_json(self, messages, hint):
+            return json.dumps({"nodes": [
+                {"local_id": "p", "type": "Procedure", "name": "Foundation Flow", "ev": 0,
+                 "steps": [{"name": "import design", "ev": 0},
+                           {"name": "floorplan", "ev": 1},
+                           {"name": "unbindable step", "ev": 99}]}],
+                "edges": []})
+    nodes, _ = extract_window(FakeProc(), ELEMENTS, "1 > Flow", "manual", win_idx=0)
+    proc = [n for n in nodes if n.type == "Procedure"][0]
+    assert [s.name for s in proc.steps] == ["import design", "floorplan"]
+    assert proc.steps[0].evidence[0].quote == ELEMENTS[0].text
+    assert proc.steps[1].evidence[0].quote == ELEMENTS[1].text

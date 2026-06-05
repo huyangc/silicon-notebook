@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
-from app.services.kg.models import Edge, Evidence, Node
+from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
@@ -76,6 +76,24 @@ def _ev(el: SourceElementQ) -> Evidence:
                     line_start=el.line_start, line_end=el.line_end, quote=el.text)
 
 
+def _parse_steps(elements: List[SourceElementQ], raw_steps: Any) -> List[Step]:
+    """Resolve an LLM `steps` array into grounded Step objects (drop unbindable)."""
+    steps: List[Step] = []
+    if not isinstance(raw_steps, list):
+        return steps
+    for st in raw_steps:
+        if not isinstance(st, dict):
+            continue
+        nm = str(st.get("name", "")).strip()
+        if not nm:
+            continue
+        el = _resolve(elements, st.get("ev"), nm)
+        if el is None:
+            continue
+        steps.append(Step(name=nm, evidence=[_ev(el)]))
+    return steps
+
+
 def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
                    doc_type: str, win_idx: int = 0) -> Tuple[List[Node], List[Edge]]:
     if not elements:
@@ -101,8 +119,11 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if el is None:
             continue
         nid = f"W{win_idx}-{len(nodes)}"
-        nodes.append(Node(id=nid, type=it["type"], name=str(it.get("name", "")),
-                          section_path=section_path, evidence=[_ev(el)]))
+        node = Node(id=nid, type=it["type"], name=str(it.get("name", "")),
+                    section_path=section_path, evidence=[_ev(el)])
+        if it["type"] == "Procedure":
+            node.steps = _parse_steps(elements, it.get("steps"))
+        nodes.append(node)
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     edges: List[Edge] = []
