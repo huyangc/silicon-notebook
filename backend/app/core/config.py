@@ -54,9 +54,8 @@ class Settings(BaseSettings):
     embed_truncate_chars: int = Field(2000, env="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, env="EMBED_BATCH_SIZE")
     embed_persist_chunk: int = Field(200, env="EMBED_PERSIST_CHUNK")
-    # 检索：top-N 知识对象、top-K 元素。
+    # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
-    retrieval_element_limit: int = Field(8, env="RETRIEVAL_ELEMENT_LIMIT")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

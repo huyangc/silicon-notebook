@@ -92,12 +92,18 @@ def test_list_items_no_duplicate_blocks():
     assert len(items) == 2
 
 
-def test_empty_alt_image_still_emitted():
+def test_empty_alt_image_dropped():
+    # spec D4：无 caption 的裸 ![](path) 是噪声，应丢弃（不入元素/不被检索）
     blocks = parse_blocks("![](images/only.png)\n")
-    imgs = [b for b in blocks if b.type == "image"]
-    assert len(imgs) == 1
-    assert imgs[0].metadata.get("src") == "images/only.png"
-    assert imgs[0].text                 # 非空（回退到 src），不静默丢弃
+    assert [b for b in blocks if b.type == "image"] == []
+
+
+def test_html_table_block_not_dropped():
+    md = "<table><tr><th>Opt</th><th>Desc</th></tr><tr><td>-x</td><td>do x</td></tr></table>\n"
+    blocks = parse_blocks(md)
+    tables = [b for b in blocks if b.type == "table"]
+    assert len(tables) == 1
+    assert "Opt" in tables[0].text and "-x" in tables[0].text and "do x" in tables[0].text
 
 
 def test_orphan_anchor_attached_to_next_block():

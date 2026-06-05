@@ -39,35 +39,8 @@ class SectionNode(BaseModel):
 # S1: raw markdown -> SourceElementQ with absolute char spans
 # ---------------------------------------------------------------------------
 
-_HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
-_FORMULA_BLOCK = re.compile(r"^\s*\$\$")
-_TABLE_HTML = re.compile(r"^\s*<(table|details)\b", re.IGNORECASE)
-_FIGURE = re.compile(r"^\s*(Figure\s+\d+|!\[\]\()", re.IGNORECASE)
-_LIST = re.compile(r"^\s*([-*+]|\d+[.)])\s+\S")
-
-
-def line_offsets(text: str) -> Dict[int, int]:
-    """1-based line number -> absolute char offset where that line begins."""
-    offsets: Dict[int, int] = {}
-    off = 0
-    for i, line in enumerate(text.split("\n"), start=1):
-        offsets[i] = off
-        off += len(line) + 1  # +1 for the '\n'
-    return offsets
-
-
-def _classify_line(line: str) -> str:
-    if _HEADING.match(line):
-        return "heading"
-    if _FORMULA_BLOCK.match(line):
-        return "formula"
-    if _TABLE_HTML.match(line):
-        return "table"
-    if _FIGURE.match(line):
-        return "figure_caption"
-    if _LIST.match(line):
-        return "list_item"
-    return "paragraph"
+# (旧的行级正则分类器/line_offsets 已移除：parse_elements 现委托
+#  structural_markdown.parse_blocks，不再逐行分类。)
 
 
 # 结构化块类型 -> SourceElementQ.type（保证 code 进 prose 被窗口化）

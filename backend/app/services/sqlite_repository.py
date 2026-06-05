@@ -114,9 +114,6 @@ KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project
 # KG object types retrieved during ask(), in priority order.
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
-# Global cap on KG hits returned by ask(): all types are scored, pooled, and
-# ranked by relevance * type-weight (soft prior); the top _TOP_N are kept.
-_TOP_N = 12
 
 # Matches the `[k1]` provenance markers the answer LLM appends to grounded
 # sentences; used to resolve markers -> citation anchors and to strip them when
@@ -1878,6 +1875,7 @@ class SQLiteRepository:
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
+        self._vector_cache.invalidate(f"{notebook_id}:knowledge")
 
     def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
         self.get_notebook(notebook_id)

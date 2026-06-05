@@ -95,6 +95,14 @@ def _table_text(tokens, i: int) -> str:
     return " ; ".join(r for r in rows if r.strip())
 
 
+def _html_to_text(html: str) -> str:
+    """HTML 片段 -> 可读文本：单元格用 ' | ' 连接、行用 ' ; ' 连接、去标签。"""
+    s = re.sub(r"(?i)</t[dh]>", " | ", html)
+    s = re.sub(r"(?i)</tr>", " ; ", s)
+    s = re.sub(r"<[^>]+>", " ", s)
+    return " ".join(s.split()).strip(" |;")
+
+
 def parse_blocks(text: str) -> List[Block]:
     md = _make_md()
     tokens = md.parse(text)
@@ -159,6 +167,23 @@ def parse_blocks(text: str) -> List[Block]:
             i += 1
             continue
 
+        if t.type == "html_block":
+            cs, ce, ls, le = _span(text, offs, t.map)
+            content = (t.content or "").strip()
+            low = content.lower()
+            if low.startswith("<table") or low.startswith("<details"):
+                emit(Block(type="table", text=_html_to_text(content), raw=text[cs:ce],
+                           char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                           section_path=section_path()))
+            else:
+                stripped = _html_to_text(content)
+                if stripped:
+                    emit(Block(type="paragraph", text=stripped, raw=text[cs:ce],
+                               char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                               section_path=section_path()))
+            i += 1
+            continue
+
         if t.type == "list_item_open":
             cs, ce, ls, le = _span(text, offs, t.map)
             parts: List[str] = []
@@ -206,9 +231,8 @@ def parse_blocks(text: str) -> List[Block]:
             if img is not None:
                 caption = (img.content or "").strip()
                 src = img.attrs.get("src", "") if hasattr(img, "attrs") else ""
-                text_val = caption or src
-                if text_val:
-                    emit(Block(type="image", text=text_val, raw=text[cs:ce],
+                if caption:
+                    emit(Block(type="image", text=caption, raw=text[cs:ce],
                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
                                section_path=section_path(), metadata={"src": src}))
                 i += 3
