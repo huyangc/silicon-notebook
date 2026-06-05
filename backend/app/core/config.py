@@ -44,7 +44,11 @@ class Settings(BaseSettings):
 
     # --- 大文档摄取/检索旋钮（2026-06-04 大文档加固）---
     # KG 窗口化：相邻 prose 贪心打包到 target 字符、相邻窗口 overlap。
-    kg_window_target_chars: int = Field(9000, env="KG_WINDOW_TARGET_CHARS")
+    # 抽取窗口：0=按文档大小+并发自适应（见 plan_window_size）；>0=固定字符数（覆盖/调试）。
+    kg_window_target_chars: int = Field(0, env="KG_WINDOW_TARGET_CHARS")
+    # 自适应窗口的下/上限：level = clamp(内容字符/并发, min, max)。
+    kg_window_min_chars: int = Field(4000, env="KG_WINDOW_MIN_CHARS")
+    kg_window_max_chars: int = Field(8000, env="KG_WINDOW_MAX_CHARS")
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
