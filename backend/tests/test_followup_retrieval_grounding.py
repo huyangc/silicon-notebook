@@ -1,6 +1,3 @@
-import json, re, pytest
-
-
 def test_settings_have_followup_and_evidence_knobs(monkeypatch):
     from app.core.config import Settings
     s = Settings()
@@ -18,7 +15,9 @@ def test_looks_like_followup():
     assert looks_like_followup("把这个流程按阶段画成流程图", 12) is True
     assert looks_like_followup("展开讲讲这个流程", 12) is True
     assert looks_like_followup("draw that flow as stages please now", 12) is True
-    assert looks_like_followup("那 ECO 呢", 12) is True
+    assert looks_like_followup("那 ECO 呢", 12) is True  # length-triggered (len<12)
+    # marker path: long enough that the length shortcut can't fire (上面/那个)
+    assert looks_like_followup("请把上面那个完整流程再展开讲讲细节谢谢", 12) is True
     assert looks_like_followup("innovus中有哪些常见flow", 12) is False
     assert looks_like_followup("innovus是什么工具", 12) is False
     assert looks_like_followup("", 12) is False
@@ -64,6 +63,16 @@ def test_ensure_procedure_quota_noop_when_enough():
     out = ensure_procedure_quota(scored, top_n=3, min_proc=2, key=key)
     assert [h.object_id for h in out] == ["p1", "p2", "c1"]
 
+def test_ensure_procedure_quota_edge_cases():
+    from app.services.retrieval import ensure_procedure_quota, type_weight
+    key = lambda it: it.score * type_weight(it.object_type, True)
+    # empty pool → empty result, no crash
+    assert ensure_procedure_quota([], top_n=3, min_proc=2, key=key) == []
+    # fewer procedures than min_proc → returns what exists, never exceeds top_n
+    scored = [_rk("c1", "claim", 0.9), _rk("c2", "claim", 0.8), _rk("p1", "procedure", 0.3)]
+    out = ensure_procedure_quota(scored, top_n=3, min_proc=2, key=key)
+    assert len(out) == 3 and sum(h.object_type == "procedure" for h in out) == 1
+
 
 def _anchor(oid):
     from app.models.schemas import AnswerAnchor
@@ -78,8 +87,7 @@ def test_classify_evidence_three_levels():
     weak = [_rk("a", "claim", 0.25)]
     lvl, _ = classify_evidence(weak, [_anchor("a")], True, 0.18, 0.35)
     assert lvl == "overview"
-    lvl, _ = classify_evidence(weak, [_anchor("a")], True, 0.18, 0.35)
-    assert lvl != "grounded"
+    # LLM self-reports grounded but the cited hit is weak → must NOT be grounded
     lvl, _ = classify_evidence(strong, [], True, 0.18, 0.35)
     assert lvl == "inferred"
     lvl, top = classify_evidence([], [], False, 0.18, 0.35)

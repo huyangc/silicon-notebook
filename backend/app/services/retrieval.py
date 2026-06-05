@@ -117,7 +117,8 @@ def ensure_procedure_quota(scored_all, top_n, min_proc, key):
     """Take the top_n of an already-sorted `scored_all`, but guarantee at least
     `min_proc` procedures when the pool has them — back-fill from the remainder
     and evict the weakest non-procedure items. Never evicts a procedure; result
-    is re-sorted by `key` descending and capped at top_n."""
+    is re-sorted by `key` descending and hard-capped at top_n (so a misconfigured
+    min_proc > top_n can't grow the result past top_n)."""
     top = scored_all[:top_n]
     procs = [h for h in top if h.object_type == "procedure"]
     if len(procs) >= min_proc:
@@ -131,7 +132,7 @@ def ensure_procedure_quota(scored_all, top_n, min_proc, key):
     non_proc = [h for h in top if h.object_type != "procedure"]
     drop_ids = {h.object_id for h in non_proc[len(non_proc) - len(extra):]}
     kept = [h for h in top if h.object_id not in drop_ids]
-    return sorted(kept + extra, key=key, reverse=True)
+    return sorted(kept + extra, key=key, reverse=True)[:top_n]
 
 
 def classify_evidence(top_hits, anchors, llm_grounded, tau_low, tau_high):
