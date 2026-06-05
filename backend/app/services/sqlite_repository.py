@@ -1330,6 +1330,30 @@ class SQLiteRepository:
             )
         return vectors
 
+    def _backfill_knowledge_embeddings(self, db: sqlite3.Connection,
+                                       notebook_id: str, objects: List[dict]) -> None:
+        """Embed + persist any knowledge objects missing a vector, concurrently
+        (reuses the concurrent _embed_objects_batch). No-op when all are embedded
+        or no embedder. Lets ask() build a complete knowledge matrix without
+        materializing a Python-list dict of every vector."""
+        if not self.settings.embedder_configured:
+            return
+        have = {
+            r["object_id"]
+            for r in db.execute(
+                "SELECT object_id FROM knowledge_embeddings "
+                "WHERE notebook_id = ? AND vector IS NOT NULL",
+                (notebook_id,),
+            ).fetchall()
+        }
+        missing = [
+            {"_oid": o["id"], "payload": o.get("payload", {})}
+            for o in objects
+            if o["id"] not in have and _payload_text(o.get("payload", {})).strip()
+        ]
+        if missing:
+            self._embed_objects_batch(notebook_id, missing)
+
     def extract_source(self, source_id: str) -> List[Candidate]:
         source = self.get_source(source_id)
         self._run_extraction(source_id)
@@ -2533,7 +2557,8 @@ class SQLiteRepository:
         except Exception:
             return None
 
-    def _gather_elements(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+    def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
+                         with_vectors: bool = True) -> List[dict]:
         rows = db.execute(
             """
             SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
@@ -2555,7 +2580,8 @@ class SQLiteRepository:
                     "location_label": row["location_label"],
                     "element_type": row["element_type"],
                     "text": row["text"],
-                    "vector": json.loads(row["vector"]) if row["vector"] else None,
+                    "vector": (json.loads(row["vector"]) if row["vector"] else None)
+                    if with_vectors else None,
                 }
             )
         return elements
@@ -2568,6 +2594,33 @@ class SQLiteRepository:
             for element in elements
             if element.get("vector")
         }
+
+    def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
+                       table: str, id_col: str):
+        """Cached (ids, normalized float32 matrix) for a notebook's embeddings.
+
+        Streams JSON vectors straight into one float32 matrix (vector_index.
+        build_matrix) so retrieval is a single matmul with bounded memory — vs
+        materializing thousands of vectors as Python float lists (~1.3 GB on a
+        large KG). Version-keyed on (count, max created_at) so it self-invalidates
+        after (re)ingest. `table`/`id_col` are internal constants (not user input)."""
+        from app.services.vector_index import build_matrix
+
+        ver = db.execute(
+            f"SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+            f"FROM {table} WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchone()
+        version = (table, ver["c"], ver["ts"])
+
+        def _load():
+            rows = db.execute(
+                f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchall()
+            return build_matrix((r["vid"], r["vector"]) for r in rows)
+
+        return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
@@ -2686,25 +2739,22 @@ class SQLiteRepository:
             kg_objs: Dict[str, List[dict]] = {
                 t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
             }
-            elements = self._gather_elements(db, notebook_id)
+            # Elements WITHOUT vectors (vectors come from the cached float32 matrix
+            # below) — avoids materializing thousands of JSON vectors as Python lists.
+            elements = self._gather_elements(db, notebook_id, with_vectors=False)
             query_vector = self._embed_query(query)
             all_kg = [o for objs in kg_objs.values() for o in objs]
-            kver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
-                "FROM knowledge_embeddings WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchone()
-            kg_version = (kver["c"], kver["ts"], len(all_kg))
-            knowledge_vectors = self._vector_cache.get(
-                f"{notebook_id}:knowledge", kg_version,
-                lambda: self._knowledge_vectors(db, notebook_id, all_kg),
-            )
+            # Backfill any missing knowledge-object vectors (concurrent), then build
+            # the per-notebook normalized float32 matrices once (cached, low memory).
+            self._backfill_knowledge_embeddings(db, notebook_id, all_kg)
+            elem_ids, elem_mat = self._vector_matrix(
+                db, notebook_id, "element_embeddings", "element_id")
+            kn_ids, kn_mat = self._vector_matrix(
+                db, notebook_id, "knowledge_embeddings", "object_id")
 
-        element_vectors = self._element_vectors(elements)
-
-        from app.services.retrieval import cosine_sims
-        element_sims = cosine_sims(query_vector, element_vectors) if query_vector else None
-        knowledge_sims = cosine_sims(query_vector, knowledge_vectors) if query_vector else None
+        from app.services.vector_index import query_sims
+        element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
+        knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
 
         # Score each KG type (so the right per-type vectors are used), then pool
         # all hits and rank globally by relevance * type-weight (soft prior).
@@ -2716,7 +2766,7 @@ class SQLiteRepository:
                 continue
             scored_all.extend(
                 score_knowledge(
-                    query, objs, t, query_vector, element_vectors, knowledge_vectors, None,
+                    query, objs, t, query_vector, None, None, None,
                     element_sims=element_sims, knowledge_sims=knowledge_sims,
                 )
             )
