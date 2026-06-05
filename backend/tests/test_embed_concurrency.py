@@ -16,6 +16,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_PROVIDER", "dashscope")   # embedder_configured == True
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "10")
     monkeypatch.setenv("EMBED_CONCURRENCY", "8")
     return SQLiteRepository(Settings())

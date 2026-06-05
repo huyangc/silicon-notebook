@@ -32,6 +32,11 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/services/retrieval.py" \
   "$ROOT_DIR/backend/app/services/sqlite_repository.py"
 
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" - <<'PY'
+import markdown_it  # noqa: F401
+import numpy  # noqa: F401
+PY
+
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_backend.py"
 
 if [[ -d "$ROOT_DIR/frontend/node_modules" ]]; then

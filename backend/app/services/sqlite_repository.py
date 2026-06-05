@@ -525,6 +525,10 @@ class SQLiteRepository:
         if stale_knowledge_ids:
             placeholders = ",".join("?" for _ in stale_knowledge_ids)
             db.execute(
+                f"DELETE FROM knowledge_embeddings WHERE object_id IN ({placeholders})",
+                stale_knowledge_ids,
+            )
+            db.execute(
                 f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
                 stale_knowledge_ids,
             )
@@ -1131,6 +1135,11 @@ class SQLiteRepository:
         with self._connect() as db:
             self._clear_source_extraction_state(db, source_id, source.notebook_id, clear_embeddings=False)
             self._delete_relations_for_source(db, source_id)
+            db.execute(
+                "DELETE FROM knowledge_embeddings WHERE object_id IN "
+                "(SELECT id FROM knowledge_objects WHERE source_id = ?)",
+                (source_id,),
+            )
             db.execute("DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,))
             db.execute(
                 """INSERT INTO extraction_runs
@@ -2218,15 +2227,46 @@ class SQLiteRepository:
             rows = db.execute(query, params).fetchall()
         return [self._derived_from_row(row) for row in rows]
 
-    def approve_derived_rule(self, candidate_id: str) -> RuleCard:
+    def _rule_card_from_row(self, row: sqlite3.Row) -> RuleCard:
+        obj = {
+            "id": row["id"],
+            "payload": json.loads(row["payload"] or "{}"),
+            "evidence": [Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+            "status": row["status"],
+            "owner": row["owner"],
+            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
+        }
+        return self._rule_card(self._as_retrieved(obj, row["object_type"]))
+
+    def approve_derived_rule(self, notebook_id: str, candidate_id: str) -> RuleCard:
         """Promote a derived rule candidate into the formal rule library (§7.5)."""
         now = _now()
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+                "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
+                (candidate_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(candidate_id)
+            existing = db.execute(
+                """
+                SELECT * FROM knowledge_objects
+                WHERE notebook_id = ? AND object_type = 'rule'
+                  AND source_candidate_id = ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+                """,
+                (notebook_id, candidate_id),
+            ).fetchone()
+            if existing is not None:
+                if row["status"] != "approved":
+                    db.execute(
+                        "UPDATE derived_rule_candidates SET status = 'approved' WHERE id = ?",
+                        (candidate_id,),
+                    )
+                return self._rule_card_from_row(existing)
+            if row["status"] == "rejected":
+                raise ValueError("cannot approve a rejected derived rule candidate")
             payload = {
                 "title": row["title"] or _first_sentence(row["proposed_rule"], 90),
                 "statement": row["proposed_rule"],
@@ -2245,7 +2285,7 @@ class SQLiteRepository:
                 """,
                 (
                     ko_id,
-                    row["notebook_id"],
+                    notebook_id,
                     json.dumps(payload, ensure_ascii=False),
                     row["evidence"] or "[]",
                     candidate_id,
@@ -2258,23 +2298,18 @@ class SQLiteRepository:
                 (candidate_id,),
             )
             ko_row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (ko_id,)).fetchone()
-        obj = {
-            "id": ko_row["id"],
-            "payload": json.loads(ko_row["payload"] or "{}"),
-            "evidence": [Evidence(**e) for e in json.loads(ko_row["evidence"] or "[]")],
-            "status": ko_row["status"],
-            "owner": ko_row["owner"],
-            "last_reviewed": ko_row["last_reviewed"] if "last_reviewed" in ko_row.keys() else "",
-        }
-        return self._rule_card(self._as_retrieved(obj, "rule"))
+        return self._rule_card_from_row(ko_row)
 
-    def reject_derived_rule(self, candidate_id: str) -> DerivedRuleCandidate:
+    def reject_derived_rule(self, notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
+                "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
+                (candidate_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(candidate_id)
+            if row["status"] == "approved":
+                raise ValueError("cannot reject an approved derived rule candidate")
             db.execute(
                 "UPDATE derived_rule_candidates SET status = 'rejected' WHERE id = ?",
                 (candidate_id,),
@@ -2285,12 +2320,13 @@ class SQLiteRepository:
         return self._derived_from_row(row)
 
     def update_knowledge(
-        self, knowledge_id: str, payload: KnowledgeUpdate
+        self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
     ) -> RuleCard:
         now = _now()
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ?", (knowledge_id,)
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (knowledge_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(knowledge_id)
@@ -2309,11 +2345,12 @@ class SQLiteRepository:
             )
             db.execute(
                 "UPDATE knowledge_objects SET payload = ?, status = ?, owner = ?, "
-                "last_reviewed = ?, updated_at = ? WHERE id = ?",
-                (new_payload, new_status, new_owner, last_reviewed, now, knowledge_id),
+                "last_reviewed = ?, updated_at = ? WHERE id = ? AND notebook_id = ?",
+                (new_payload, new_status, new_owner, last_reviewed, now, knowledge_id, notebook_id),
             )
             row = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ?", (knowledge_id,)
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (knowledge_id, notebook_id),
             ).fetchone()
         # WS4: re-embed payload-level vector when the payload was edited.
         if payload.payload is not None:
@@ -2424,14 +2461,20 @@ class SQLiteRepository:
                 )
         return groups
 
-    def merge_knowledge(self, source_id: str, payload: MergeRequest) -> RuleCard:
+    def merge_knowledge(self, notebook_id: str, source_id: str, payload: MergeRequest) -> RuleCard:
         into_id = payload.into_id
         if into_id == source_id:
             raise ValueError("cannot merge a knowledge object into itself")
         now = _now()
         with self._connect() as db:
-            src = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (source_id,)).fetchone()
-            tgt = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (into_id,)).fetchone()
+            src = db.execute(
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (source_id, notebook_id),
+            ).fetchone()
+            tgt = db.execute(
+                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
+                (into_id, notebook_id),
+            ).fetchone()
             if src is None or tgt is None:
                 raise KeyError(source_id if src is None else into_id)
             if src["object_type"] != tgt["object_type"]:

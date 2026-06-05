@@ -333,10 +333,10 @@ def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.patch("/knowledge/{knowledge_id}")
-def update_knowledge(knowledge_id: str, payload: KnowledgeUpdate):
+@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}")
+def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate):
     try:
-        return repository().update_knowledge(knowledge_id, payload)
+        return repository().update_knowledge(notebook_id, knowledge_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
     except ValueError as exc:
@@ -378,10 +378,10 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/knowledge/{knowledge_id}/merge")
-def merge_knowledge(knowledge_id: str, payload: MergeRequest):
+@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge")
+def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
     try:
-        return repository().merge_knowledge(knowledge_id, payload)
+        return repository().merge_knowledge(notebook_id, knowledge_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Knowledge object not found")
     except ValueError as exc:
@@ -484,20 +484,24 @@ def list_derived_rules(notebook_id: str) -> List[DerivedRuleCandidate]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/derived-rules/{candidate_id}/approve", response_model=RuleCard)
-def approve_derived_rule(candidate_id: str) -> RuleCard:
+@router.post("/notebooks/{notebook_id}/derived-rules/{candidate_id}/approve", response_model=RuleCard)
+def approve_derived_rule(notebook_id: str, candidate_id: str) -> RuleCard:
     try:
-        return repository().approve_derived_rule(candidate_id)
+        return repository().approve_derived_rule(notebook_id, candidate_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate)
-def reject_derived_rule(candidate_id: str) -> DerivedRuleCandidate:
+@router.post("/notebooks/{notebook_id}/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate)
+def reject_derived_rule(notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
     try:
-        return repository().reject_derived_rule(candidate_id)
+        return repository().reject_derived_rule(notebook_id, candidate_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)

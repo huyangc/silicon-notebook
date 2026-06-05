@@ -105,10 +105,10 @@ tail -f .local/logs/llm.jsonl        # 大模型调用：chat（prompt/响应/to
 ### 快速启动（仅用于开发迭代）
 
 ```bash
-npm run dev    # 仓库根目录：后端(uvicorn --reload) + Next.js 前端
+npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 ```
 
-后端 `http://localhost:8000`，UI `http://localhost:3000`。此路径用了 `--reload`，**只适合改 UI/代码时用，处理上传时不要用**（见上方警告）。若 `frontend/node_modules` 不存在，请先在 `frontend/` 下 `npm install`。
+后端 `http://127.0.0.1:8000`，UI `http://localhost:3000`。如果需要后端代码自动 reload，可另开终端运行 `npm run dev:backend:reload`，但处理上传时不要使用 reload。若 `frontend/node_modules` 不存在，请先在 `frontend/` 下 `npm install`。
 
 ## 产品流程
 
@@ -139,7 +139,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/analytics`
 - `POST /api/notebooks/{id}/sources` — multipart 文件上传（异步解析/抽取）
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`
-- `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/knowledge/{id}`
+- `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — KG-native 接地问答（逐句 `[k_i]` 引用）
@@ -150,7 +150,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/candidates`、`PATCH /api/candidates/{id}`、`POST /api/candidates/{id}/approve|reject`（旧治理兼容）
-- `GET /api/notebooks/{id}/duplicates`、`GET /api/notebooks/{id}/conflicts`、`POST /api/knowledge/{id}/merge`
+- `GET /api/notebooks/{id}/duplicates`、`GET /api/notebooks/{id}/conflicts`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - `GET /api/notebooks/{id}/derived-rules`、`POST /api/derived-rules/{id}/approve|reject`
 
 ## 配置
@@ -171,8 +171,8 @@ OPENAI_COMPAT_MAX_RETRIES       # 默认 2
 
 ```text
 EMBED_PROVIDER          # ""=关闭（仅关键词） | dashscope
-EMBED_MODEL             # 嵌入模型名，如 text-embedding-v4
-EMBED_BASE_URL          # 嵌入端点 URL
+EMBED_MODEL             # EMBED_PROVIDER=dashscope 时必填，如 text-embedding-v4
+EMBED_BASE_URL          # 必填的嵌入端点 URL
 EMBED_API_KEY
 EMBED_DIM               # 须与模型输出维度一致（默认 1024）
 EMBED_TRUNCATE_CHARS    # 每段文本喂给 embedder 的最大字符数（默认 2000）
@@ -239,6 +239,8 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 - `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及 deterministic fallback 容易让人忽略的错误。
 
 浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时展示来源的 `error_message`。
+
+浏览器/API 日志查看器（`/dev/logs` 与 `/api/debug/logs/...`）需要显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启。完整 LLM 记录可能包含私有来源材料进入 prompt/response 的文本，因此默认关闭。
 
 ## 用 MinerU 解析 PDF
 
