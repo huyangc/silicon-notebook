@@ -43,7 +43,8 @@ class SectionNode(BaseModel):
 #  structural_markdown.parse_blocks，不再逐行分类。)
 
 
-# 结构化块类型 -> SourceElementQ.type（保证 code 进 prose 被窗口化）
+# 结构化块类型 -> SourceElementQ.type。code_block 映射成非 _PROSE_TYPES 的
+# "code_block"，故不进 KG 抽取窗口(代码不被抽成实体);仍存为元素供检索/引用。
 _QTYPE_MAP = {
     "heading": "heading",
     "paragraph": "paragraph",
