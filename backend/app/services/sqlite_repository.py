@@ -1114,9 +1114,14 @@ class SQLiteRepository:
                     db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
                 return
             raw_text = self._source_raw_text(source, elements)
+            n_chars = kg_ingest.plan_window_size(
+                len(raw_text), self.settings.kg_extract_workers,
+                self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
+                override=self.settings.kg_window_target_chars,
+            )
             graph = kg_ingest.extract_graph(
                 self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
-                n=self.settings.kg_window_target_chars,
+                n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
                 workers=self.settings.kg_extract_workers,
             )
