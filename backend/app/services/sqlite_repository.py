@@ -899,10 +899,29 @@ class SQLiteRepository:
                     )
             self._set_source_status(source_id, "parsed", summary=summary)
 
-            t = time.perf_counter()
-            stage("embed", "start", t)
-            self._embed_source(source_id)
-            stage("embed", "done", t)
+            # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
+            # concurrent with KG extraction, so a large doc's slow embed never blocks
+            # the KG result. 'extracted'/green below is gated on EXTRACTION only.
+            import threading
+
+            embed_started = time.perf_counter()
+            stage("embed", "start", embed_started)
+
+            def _embed_bg() -> None:
+                try:
+                    self._embed_source(source_id)
+                    stage("embed", "done", embed_started)
+                except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
+                    stage("embed", "error", embed_started,
+                          error=f"{type(exc).__name__}: {exc}")
+                    self.event_log.logger.exception(
+                        "background embed failed for %s", source_id
+                    )
+
+            embed_thread = threading.Thread(
+                target=_embed_bg, name=f"embed-{source_id}", daemon=True
+            )
+            embed_thread.start()
 
             self._set_source_status(source_id, "extracting")
             t = time.perf_counter()
@@ -947,6 +966,9 @@ class SQLiteRepository:
                 self.event_log.logger.exception(
                     "description augment failed for %s", source.notebook_id
                 )
+            # KG ('extracted'/green) is already set above; wait for the background
+            # element embedding to finish before declaring the whole pipeline done.
+            embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
@@ -1179,7 +1201,7 @@ class SQLiteRepository:
 
         workers = max(1, min(self.settings.embed_concurrency, len(batches)))
         stored = 0
-        with _cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-el") as pool:
             for n in pool.map(_embed_and_store, batches):
                 stored += n
         self.event_log.logger.info(
