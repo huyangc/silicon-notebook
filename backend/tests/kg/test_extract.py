@@ -77,3 +77,10 @@ def test_prompt_template_valid():
     assert isinstance(p, str)
     assert "[0] foo" in p
     assert "ev" in p
+
+
+def test_prompt_and_schema_mention_steps():
+    from app.services.kg.extract import _prompt, _KG_SCHEMA_HINT
+    assert '"steps"' in _KG_SCHEMA_HINT
+    p = _prompt("[0] x", "1 > Flow", "manual")
+    assert "steps" in p

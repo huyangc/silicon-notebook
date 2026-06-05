@@ -17,7 +17,7 @@ EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
 
 _KG_SCHEMA_HINT = (
     '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure",'
-    '"name":"","ev":0}],'
+    '"name":"","ev":0,"steps":[{"name":"","ev":0}]}],'
     '"edges":[{"type":"about|supports|...","source":"","target":"","ev":0}]}'
 )
 
@@ -43,8 +43,7 @@ The passage is given as numbered elements, one per line, each prefixed with its
 integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
 of the element that best contains it (NOT a quote, NOT text). Give each node a
 "local_id" you reuse in edges. "name" carries the node's text (Concept/Procedure
-name, Claim statement, Formula expression). For an ordered Procedure, connect its
-consecutive steps with `precedes` edges (step_i -> step_{{i+1}}). Skip narrative/filler.
+name, Claim statement, Formula expression). For a Procedure that is an ordered multi-step process/flow, emit it as ONE Procedure node (named after the flow — use the section heading if it names the flow) and list its ordered steps in a `steps` array, each {{"name":..,"ev":..}} where ev is the element label containing that step; prefer this over many separate Procedure nodes. `steps` is the source of truth for order (you may still add `precedes` edges). Skip narrative/filler.
 
 Passage:
 \"\"\"{labeled_text}\"\"\"
