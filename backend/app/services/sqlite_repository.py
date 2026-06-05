@@ -21,10 +21,7 @@ from app.models.schemas import (
     ArticleSummary,
     AskRequest,
     AskResponse,
-    Candidate,
-    CandidateUpdate,
     Citation,
-    ConflictPair,
     DerivedRuleCandidate,
     DuplicateGroup,
     Evidence,
@@ -241,18 +238,6 @@ class SQLiteRepository:
                   updated_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS extraction_candidates (
-                  id TEXT PRIMARY KEY,
-                  extraction_run_id TEXT NOT NULL REFERENCES extraction_runs(id) ON DELETE CASCADE,
-                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-                  source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,
-                  candidate_type TEXT NOT NULL,
-                  status TEXT NOT NULL DEFAULT 'candidate',
-                  payload TEXT NOT NULL DEFAULT '{}',
-                  evidence TEXT NOT NULL DEFAULT '[]',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
 
                 CREATE TABLE IF NOT EXISTS element_embeddings (
                   element_id TEXT PRIMARY KEY REFERENCES source_elements(id) ON DELETE CASCADE,
@@ -499,22 +484,13 @@ class SQLiteRepository:
         *,
         clear_embeddings: bool,
     ) -> None:
-        candidate_rows = db.execute(
-            "SELECT id FROM extraction_candidates WHERE source_id = ?",
-            (source_id,),
-        ).fetchall()
-        candidate_ids = [row["id"] for row in candidate_rows]
-
+        # KG writes directly to knowledge_objects; find stale objects by evidence source_id.
         stale_knowledge_ids: List[str] = []
         knowledge_rows = db.execute(
-            "SELECT id, source_candidate_id, evidence FROM knowledge_objects WHERE notebook_id = ?",
+            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id = ?",
             (notebook_id,),
         ).fetchall()
-        candidate_id_set = set(candidate_ids)
         for row in knowledge_rows:
-            if row["source_candidate_id"] in candidate_id_set:
-                stale_knowledge_ids.append(row["id"])
-                continue
             try:
                 evidence_items = json.loads(row["evidence"] or "[]")
             except json.JSONDecodeError:
@@ -532,7 +508,6 @@ class SQLiteRepository:
                 f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
                 stale_knowledge_ids,
             )
-        db.execute("DELETE FROM extraction_candidates WHERE source_id = ?", (source_id,))
         db.execute("DELETE FROM extraction_runs WHERE source_id = ?", (source_id,))
         if clear_embeddings:
             db.execute("DELETE FROM element_embeddings WHERE source_id = ?", (source_id,))
@@ -1395,141 +1370,6 @@ class SQLiteRepository:
         ]
         if missing:
             self._embed_objects_batch(notebook_id, missing)
-
-    def list_candidates(
-        self,
-        notebook_id: str,
-        candidate_type: Optional[str] = None,
-    ) -> List[Candidate]:
-        self.get_notebook(notebook_id)
-        query = (
-            "SELECT c.*, s.title AS source_title "
-            "FROM extraction_candidates c "
-            "LEFT JOIN sources s ON s.id = c.source_id "
-            "WHERE c.notebook_id = ? AND c.status != 'rejected' AND c.status != 'approved'"
-        )
-        params: List[str] = [notebook_id]
-        if candidate_type:
-            query += " AND c.candidate_type = ?"
-            params.append(candidate_type)
-        query += " ORDER BY c.created_at ASC, c.id ASC"
-        with self._connect() as db:
-            rows = db.execute(query, params).fetchall()
-        return [self._candidate_from_row(row) for row in rows]
-
-    def _candidate_from_row(self, row: sqlite3.Row) -> Candidate:
-        evidence = [Evidence(**item) for item in json.loads(row["evidence"] or "[]")]
-        return Candidate(
-            id=row["id"],
-            notebook_id=row["notebook_id"],
-            source_id=row["source_id"] or "",
-            source_title=row["source_title"] or "",
-            candidate_type=row["candidate_type"],
-            status=row["status"],
-            payload=json.loads(row["payload"] or "{}"),
-            evidence=evidence,
-            created_label=_created_label(row["created_at"]),
-        )
-
-    def _candidate_row_by_id(self, db: sqlite3.Connection, candidate_id: str) -> sqlite3.Row:
-        row = db.execute(
-            """
-            SELECT c.*, s.title AS source_title
-            FROM extraction_candidates c
-            LEFT JOIN sources s ON s.id = c.source_id
-            WHERE c.id = ?
-            """,
-            (candidate_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(candidate_id)
-        return row
-
-    def update_candidate(self, candidate_id: str, payload: CandidateUpdate) -> Candidate:
-        with self._connect() as db:
-            row = self._candidate_row_by_id(db, candidate_id)
-            new_payload = (
-                json.dumps(payload.payload, ensure_ascii=False)
-                if payload.payload is not None
-                else row["payload"]
-            )
-            new_status = payload.status if payload.status is not None else row["status"]
-            db.execute(
-                "UPDATE extraction_candidates SET payload = ?, status = ?, updated_at = ? WHERE id = ?",
-                (new_payload, new_status, _now(), candidate_id),
-            )
-            row = self._candidate_row_by_id(db, candidate_id)
-            return self._candidate_from_row(row)
-
-    def approve_candidate(self, candidate_id: str) -> Candidate:
-        now = _now()
-        with self._connect() as db:
-            row = self._candidate_row_by_id(db, candidate_id)
-            notebook_id = row["notebook_id"]
-            payload_json = row["payload"]
-            existing = db.execute(
-                "SELECT id FROM knowledge_objects WHERE source_candidate_id = ?",
-                (candidate_id,),
-            ).fetchone()
-            if existing is None:
-                object_id = f"ko-{uuid4().hex[:10]}"
-                db.execute(
-                    """
-                    INSERT INTO knowledge_objects
-                    (id, notebook_id, object_type, status, owner, payload, evidence,
-                     source_candidate_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        object_id,
-                        notebook_id,
-                        row["candidate_type"],
-                        "approved",
-                        "",
-                        payload_json,
-                        row["evidence"],
-                        candidate_id,
-                        now,
-                        now,
-                    ),
-                )
-            else:
-                object_id = existing["id"]
-                db.execute(
-                    "UPDATE knowledge_objects SET payload = ?, evidence = ?, status = ?, updated_at = ? WHERE source_candidate_id = ?",
-                    (payload_json, row["evidence"], "approved", now, candidate_id),
-                )
-            db.execute(
-                "UPDATE extraction_candidates SET status = ?, updated_at = ? WHERE id = ?",
-                ("approved", now, candidate_id),
-            )
-            result_row = self._candidate_row_by_id(db, candidate_id)
-            candidate = self._candidate_from_row(result_row)
-        # WS4: build the payload-level vector for the newly approved object.
-        try:
-            self._embed_knowledge(object_id, notebook_id, json.loads(payload_json or "{}"))
-        except Exception:
-            pass
-        self._invalidate_unified_cache(notebook_id)
-        return candidate
-
-    def reject_candidate(self, candidate_id: str) -> Candidate:
-        now = _now()
-        with self._connect() as db:
-            pre_row = self._candidate_row_by_id(db, candidate_id)
-            notebook_id = pre_row["notebook_id"]
-            db.execute(
-                "UPDATE extraction_candidates SET status = ?, updated_at = ? WHERE id = ?",
-                ("rejected", now, candidate_id),
-            )
-            db.execute(
-                "DELETE FROM knowledge_objects WHERE source_candidate_id = ?",
-                (candidate_id,),
-            )
-            row = self._candidate_row_by_id(db, candidate_id)
-            candidate = self._candidate_from_row(row)
-        self._invalidate_unified_cache(notebook_id)
-        return candidate
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         """All object types present in this notebook with non-deprecated counts,
@@ -2507,34 +2347,6 @@ class SQLiteRepository:
         item = self._as_retrieved(obj, row["object_type"])
         return self._rule_card(item)
 
-    def find_conflicts(self, notebook_id: str) -> List[ConflictPair]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            rules = self._knowledge_objects(db, notebook_id, "rule")
-        conflicts: List[ConflictPair] = []
-        for i, a in enumerate(rules):
-            pa = a["payload"]
-            scope_a = f"{pa.get('title', '')} {' '.join(_as_str_list(pa.get('applies_to')))}"
-            rec_a = str(pa.get("recommendation", "")).strip() or str(pa.get("statement", "")).strip()
-            for b in rules[i + 1:]:
-                pb = b["payload"]
-                scope_b = f"{pb.get('title', '')} {' '.join(_as_str_list(pb.get('applies_to')))}"
-                rec_b = str(pb.get("recommendation", "")).strip() or str(pb.get("statement", "")).strip()
-                if not (rec_a and rec_b):
-                    continue
-                scope_sim = max(keyword_score(scope_a, scope_b), keyword_score(scope_b, scope_a))
-                rec_sim = max(keyword_score(rec_a, rec_b), keyword_score(rec_b, rec_a))
-                if scope_sim >= 0.5 and rec_sim < 0.2:
-                    conflicts.append(
-                        ConflictPair(
-                            object_type="rule",
-                            reason="Overlapping scope but divergent recommendation — needs owner review.",
-                            a=self._knowledge_ref(a, "rule"),
-                            b=self._knowledge_ref(b, "rule"),
-                        )
-                    )
-        return conflicts
-
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:
         self.get_notebook(notebook_id)
         needle = query.strip().lower()
@@ -3268,14 +3080,6 @@ class SQLiteRepository:
                     (notebook_id,),
                 ).fetchall()
             ]
-            candidate_counts = {
-                row["status"]: int(row["c"])
-                for row in db.execute(
-                    "SELECT status, COUNT(*) AS c FROM extraction_candidates "
-                    "WHERE notebook_id = ? GROUP BY status",
-                    (notebook_id,),
-                ).fetchall()
-            }
             knowledge_counts = {
                 row["object_type"]: int(row["c"])
                 for row in db.execute(
@@ -3299,7 +3103,6 @@ class SQLiteRepository:
             feedback_not_useful=not_useful,
             usefulness_rate=round(useful / rated, 3) if rated else 0.0,
             low_rated_questions=low_rated,
-            candidate_counts=candidate_counts,
             knowledge_counts=knowledge_counts,
             source_status_counts=source_status_counts,
         )

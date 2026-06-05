@@ -80,17 +80,6 @@ type Evidence = {
   element_id: string;
 };
 
-type Candidate = {
-  id: string;
-  notebook_id: string;
-  source_title: string;
-  candidate_type: string;
-  status: string;
-  payload: Record<string, unknown>;
-  evidence: Evidence[];
-  created_label: string;
-};
-
 type ArticleSummary = {
   id: string;
   notebook_id: string;
@@ -233,7 +222,6 @@ const EMPTY_KNOWLEDGE: Record<string, KnowledgeItem[] | null> = {};
 
 type KnowledgeRef = { id: string; object_type: string; headline: string; status: string };
 type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
-type ConflictPair = { object_type: string; reason: string; a: KnowledgeRef; b: KnowledgeRef };
 
 type DerivedRuleCandidate = {
   id: string;
@@ -707,8 +695,6 @@ export default function Home() {
   const [statusText, setStatusText] = useState("connecting");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [reviewOpen, setReviewOpen] = useState(false);
   const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
   const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
@@ -722,7 +708,6 @@ export default function Home() {
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
   const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
-  const [conflicts, setConflicts] = useState<ConflictPair[] | null>(null);
   const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
   const [derivedOpen, setDerivedOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
@@ -901,7 +886,6 @@ export default function Home() {
           setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${justFailed.error_message ? ` — ${justFailed.error_message}` : ""}`);
         }
         if (reachedExtracted && currentNotebookId) {
-          await loadCandidates(currentNotebookId);
           await loadNotebookCollection();
           const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
           if (!cancelled) setCurrentNotebook(refreshed);
@@ -1174,18 +1158,11 @@ export default function Home() {
     setKnowledgeKind("concept");
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
-    setConflicts(null);
     setSessions([]);
     pollCountRef.current = 0;
-    await loadCandidates(notebookId);
     await loadSessions(notebookId);
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
     window.scrollTo(0, 0);
-  }
-
-  async function loadCandidates(notebookId: string) {
-    const list = await api<Candidate[]>(`/notebooks/${notebookId}/candidates`);
-    setCandidates(list);
   }
 
   async function loadArticles(notebookId: string) {
@@ -1195,25 +1172,6 @@ export default function Home() {
       list.some((article) => article.id === previous) ? previous : list[0]?.id ?? ""
     );
     return list;
-  }
-
-  async function approveCandidate(candidateId: string) {
-    if (!currentNotebookId) return;
-    await api<Candidate>(`/candidates/${candidateId}/approve`, { method: "POST" });
-    await loadCandidates(currentNotebookId);
-    await loadNotebookCollection();
-    const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
-    setCurrentNotebook(refreshed);
-    if (knowledge[knowledgeKind] != null) await loadKnowledge(knowledgeKind);
-    await loadKnowledgeTypes();
-    setToast("候选已批准并加入知识库");
-  }
-
-  async function rejectCandidate(candidateId: string) {
-    if (!currentNotebookId) return;
-    await api<Candidate>(`/candidates/${candidateId}/reject`, { method: "POST" });
-    await loadCandidates(currentNotebookId);
-    setToast("候选已拒绝");
   }
 
   async function createArticle(event: FormEvent<HTMLFormElement>) {
@@ -1359,7 +1317,6 @@ export default function Home() {
     });
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
     await loadNotebookCollection();
-    await loadCandidates(currentNotebookId);
     setStagedFiles([]);
     setStagedDocTypes([]);
     setSourceModalOpen(false);
@@ -1381,7 +1338,6 @@ export default function Home() {
     setSources((previous) => previous.map((source) => source.id === updated.id ? updated : source));
     await openSourceDetail(updated);
     await loadNotebookCollection();
-    if (currentNotebookId) await loadCandidates(currentNotebookId);
     setToast("Source 已重新解析");
   }
 
@@ -1404,13 +1360,11 @@ export default function Home() {
       setSourceDetail(null);
       setSourceElements([]);
     }
-    await loadCandidates(notebookId);
     await loadNotebookCollection();
     const refreshed = await api<NotebookSummary>(`/notebooks/${notebookId}`);
     setCurrentNotebook(refreshed);
     setKnowledge(EMPTY_KNOWLEDGE);
     setDuplicates(null);
-    setConflicts(null);
     setToast("来源已删除");
   }
 
@@ -1447,7 +1401,7 @@ export default function Home() {
     try {
       const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
         method: "POST",
-        body: JSON.stringify({ question: q, conversation_id: conversationId ?? undefined, scenario: {} })
+        body: JSON.stringify({ question: q, conversation_id: conversationId ?? undefined })
       });
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
@@ -1570,24 +1524,15 @@ export default function Home() {
     setKnowledgeKind(kind);
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
-    setConflicts(null);
     if (knowledge[kind] == null) loadKnowledge(kind).catch(reportError);
   }
 
   async function findDuplicates(kind: KnowledgeKind) {
     if (!currentNotebookId) return;
-    setConflicts(null);
     const response = await api<DuplicateGroup[]>(
       `/notebooks/${currentNotebookId}/duplicates?type=${encodeURIComponent(kind)}`
     );
     setDuplicates(response);
-  }
-
-  async function findConflicts() {
-    if (!currentNotebookId) return;
-    setDuplicates(null);
-    const response = await api<ConflictPair[]>(`/notebooks/${currentNotebookId}/conflicts`);
-    setConflicts(response);
   }
 
   async function mergeKnowledge(sourceId: string, intoId: string) {
@@ -2195,14 +2140,12 @@ export default function Home() {
                     types={knowledgeTypes}
                     statusFilter={knowledgeStatusFilter}
                     duplicates={duplicates}
-                    conflicts={conflicts}
                     notebookId={currentNotebookId ?? ""}
                     onKind={switchKnowledgeKind}
                     setStatusFilter={setKnowledgeStatusFilter}
                     onStatus={(id, status) => updateKnowledge(id, { status }).catch(reportError)}
                     onOwner={(id, owner) => updateKnowledge(id, { owner }).catch(reportError)}
                     onFindDuplicates={() => findDuplicates(knowledgeKind).catch(reportError)}
-                    onFindConflicts={() => findConflicts().catch(reportError)}
                     onMerge={(sourceId, intoId) => mergeKnowledge(sourceId, intoId).catch(reportError)}
                     reload={() => loadKnowledge(knowledgeKind).catch(reportError)}
                   />
@@ -2512,53 +2455,6 @@ export default function Home() {
         </section>
       )}
 
-      {reviewOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setReviewOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
-              <div>
-                <h2>审核队列</h2>
-                <p>抽取的候选知识需要 curator 审核。批准后会进入知识库，并可在问答中被检索和引用。</p>
-              </div>
-              <button className="icon-button" onClick={() => setReviewOpen(false)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              {candidates.length === 0 ? (
-                <article className="item">
-                  <h3>暂无候选</h3>
-                  <p>上传并解析来源后，系统会自动抽取概念、论断、公式、过程候选。</p>
-                </article>
-              ) : (
-                <div className="stack">
-                  {candidates.map((candidate) => (
-                    <article className="item" key={candidate.id}>
-                      <div className="tag-row">
-                        <span className="tag">{candidate.candidate_type}</span>
-                        <span className={`tag severity-${candidate.status === "needs_review" ? "medium" : "low"}`}>{candidate.status}</span>
-                        {candidate.source_title && <span className="tag">{candidate.source_title}</span>}
-                      </div>
-                      <h3>{candidateHeadline(candidate)}</h3>
-                      {candidateDetail(candidate) && <p>{candidateDetail(candidate)}</p>}
-                      {candidate.evidence.length > 0 && (
-                        <div className="citation">
-                          <strong>Evidence</strong>
-                          <div>{candidate.evidence[0].location_label}</div>
-                          <div>{candidate.evidence[0].quoted_span}</div>
-                        </div>
-                      )}
-                      <div className="modal-actions">
-                        <button className="sort-button" onClick={() => rejectCandidate(candidate.id).catch(reportError)}>拒绝</button>
-                        <button className="new-pill" onClick={() => approveCandidate(candidate.id).catch(reportError)}>批准</button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
-
       {analytics && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setAnalytics(null); }}>
           <div className="utility-modal-card">
@@ -2587,11 +2483,6 @@ export default function Home() {
               <div className="tag-row">
                 {Object.entries(analytics.knowledge_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
                 {Object.keys(analytics.knowledge_counts).length === 0 && <span className="tool-hint">暂无已批准知识</span>}
-              </div>
-              <p className="section-title">审核队列</p>
-              <div className="tag-row">
-                {Object.entries(analytics.candidate_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
-                {Object.keys(analytics.candidate_counts).length === 0 && <span className="tool-hint">暂无候选</span>}
               </div>
               <p className="section-title">来源状态</p>
               <div className="tag-row">
@@ -2890,24 +2781,6 @@ export default function Home() {
   );
 }
 
-function candidateHeadline(candidate: Candidate): string {
-  const payload = candidate.payload;
-  const key = ["title", "name", "term", "symptom", "question"].find(
-    (field) => typeof payload[field] === "string" && (payload[field] as string).trim()
-  );
-  if (key) return String(payload[key]);
-  const first = Object.values(payload).find((value) => typeof value === "string" && value.trim());
-  return first ? String(first) : candidate.candidate_type;
-}
-
-function candidateDetail(candidate: Candidate): string {
-  const payload = candidate.payload;
-  const key = ["statement", "definition", "description", "benefit", "root_cause", "required_evidence"].find(
-    (field) => typeof payload[field] === "string" && (payload[field] as string).trim()
-  );
-  return key ? String(payload[key]) : "";
-}
-
 function NotebookList({
   entries,
   openNotebook,
@@ -3201,14 +3074,12 @@ function KnowledgeBrowser({
   types,
   statusFilter,
   duplicates,
-  conflicts,
   notebookId,
   onKind,
   setStatusFilter,
   onStatus,
   onOwner,
   onFindDuplicates,
-  onFindConflicts,
   onMerge,
   reload
 }: {
@@ -3217,14 +3088,12 @@ function KnowledgeBrowser({
   types: KnowledgeTypeCount[];
   statusFilter: string;
   duplicates: DuplicateGroup[] | null;
-  conflicts: ConflictPair[] | null;
   notebookId: string;
   onKind: (kind: KnowledgeKind) => void;
   setStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
   onOwner: (id: string, owner: string) => void;
   onFindDuplicates: () => void;
-  onFindConflicts: () => void;
   onMerge: (sourceId: string, intoId: string) => void;
   reload: () => void;
 }) {
@@ -3255,7 +3124,6 @@ function KnowledgeBrowser({
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
         <button className="sort-button" onClick={onFindDuplicates}>查重</button>
-        <button className="sort-button" onClick={onFindConflicts}>冲突</button>
       </div>
       {duplicates !== null && (
         <div className="knowledge-panel">
@@ -3275,20 +3143,6 @@ function KnowledgeBrowser({
                   )}
                 </div>
               ))}
-            </article>
-          ))}
-        </div>
-      )}
-      {conflicts !== null && (
-        <div className="knowledge-panel">
-          <p className="section-title">冲突（同范围、取向相反）</p>
-          {conflicts.length === 0 ? (
-            <p className="tool-hint">未发现冲突。</p>
-          ) : conflicts.map((pair, index) => (
-            <article className="item" key={`conf-${index}`}>
-              <p>{pair.reason}</p>
-              <div className="dup-member"><span>{pair.a.headline} <span className="tag">{pair.a.status}</span></span></div>
-              <div className="dup-member"><span>{pair.b.headline} <span className="tag">{pair.b.status}</span></span></div>
             </article>
           ))}
         </div>

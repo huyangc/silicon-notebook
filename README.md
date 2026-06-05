@@ -157,8 +157,7 @@ Key local beta APIs:
 - Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
-- `GET /api/notebooks/{id}/candidates`, `PATCH /api/candidates/{id}`, `POST /api/candidates/{id}/approve|reject` (legacy governance, retained for compatibility)
-- `GET /api/notebooks/{id}/duplicates`, `GET /api/notebooks/{id}/conflicts`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
+- `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - `GET /api/notebooks/{id}/derived-rules`, `POST /api/derived-rules/{id}/approve|reject`
 
 ## Configuration

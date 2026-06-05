@@ -18,7 +18,7 @@
 - PDF 走 MinerU（公式/表格/版面）；本机或未配置时回退 pypdf
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
 - KG-native 接地问答：逐句 `[k_i]` 引用、多轮会话、1-hop KG 邻居扩展
-- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并，冲突检测；`deprecated` 对象从检索和 1-hop 扩展中排除
+- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除
 - 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
 - Object 级 KG 可视化：Concept / Claim / Formula / Procedure 节点，类型形状、边标签、多选过滤、按类型分组侧栏
 - Notebook 集合页（网格/紧凑/列表、编辑/删除）；点击「＋ 新建」直接创建 `Untitled notebook` 并进入，无弹窗
@@ -125,7 +125,7 @@ npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 进入单个 notebook 后：
 
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
-- 中栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表，👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测、冲突检测）。
+- 中栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表，👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。
 - 右栏：Studio，含文章、派生规则候选和知识图谱入口。
 
@@ -149,8 +149,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
-- `GET /api/notebooks/{id}/candidates`、`PATCH /api/candidates/{id}`、`POST /api/candidates/{id}/approve|reject`（旧治理兼容）
-- `GET /api/notebooks/{id}/duplicates`、`GET /api/notebooks/{id}/conflicts`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
+- `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - `GET /api/notebooks/{id}/derived-rules`、`POST /api/derived-rules/{id}/approve|reject`
 
 ## 配置

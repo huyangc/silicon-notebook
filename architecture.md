@@ -157,17 +157,16 @@ OpenAI 兼容；`chat_json`（`response_format=json_object` + `strip_json_fences
 
 **统一 KG**：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`、`POST .../unified-kg/merges/{candidate_id}/confirm|reject`
 
-**仍在但作用于当前对象**：candidates(GET/PATCH/approve/reject)、duplicates、conflicts、merge、articles(CRUD + research)、derived-rules(GET/approve/reject)
+**仍在但作用于当前对象**：duplicates、merge、articles(CRUD + research)、derived-rules(GET/approve/reject)
 
-### 3.2 SQLite 表（20）
+### 3.2 SQLite 表（19）
 
-`users` · `user_profiles` · `notebooks` · `sources` · `source_elements` · `articles` · `extraction_runs` · `extraction_candidates` · `element_embeddings` · `knowledge_embeddings` · `knowledge_objects` · `knowledge_relations` · `answers` · `conversations` · `feedback` · `article_claims` · `derived_rule_candidates` · `object_schemas` · `concept_clusters` · `concept_merge_candidates`
+`users` · `user_profiles` · `notebooks` · `sources` · `source_elements` · `articles` · `extraction_runs` · `element_embeddings` · `knowledge_embeddings` · `knowledge_objects` · `knowledge_relations` · `answers` · `conversations` · `feedback` · `article_claims` · `derived_rule_candidates` · `object_schemas` · `concept_clusters` · `concept_merge_candidates`
 
 ### 3.3 知识对象类型与状态
 
 - **对象类型**（4 种，统一存 `knowledge_objects`）：`concept / claim / formula / procedure`
 - **知识状态**：`approved / reviewed / deprecated / conflict / project_specific`；仅 `USABLE_STATUSES`（approved/reviewed/project_specific/conflict）进入检索/回答，`deprecated` 排除。
-- **候选状态**：`candidate / needs_review / approved / rejected`
 
 ### 3.4 `source.parse_status` 状态机
 

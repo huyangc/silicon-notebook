@@ -9,9 +9,6 @@ from app.models.schemas import (
     ArticleSummary,
     AskRequest,
     AskResponse,
-    Candidate,
-    CandidateUpdate,
-    ConflictPair,
     DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
@@ -85,14 +82,6 @@ class NotebookRepository(Protocol):
 
     def delete_source(self, source_id: str) -> None: ...
 
-    def list_candidates(self, notebook_id: str, candidate_type: str | None = None) -> List[Candidate]: ...
-
-    def update_candidate(self, candidate_id: str, payload: CandidateUpdate) -> Candidate: ...
-
-    def approve_candidate(self, candidate_id: str) -> Candidate: ...
-
-    def reject_candidate(self, candidate_id: str) -> Candidate: ...
-
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]: ...
 
     def list_knowledge(
@@ -120,8 +109,6 @@ class NotebookRepository(Protocol):
     ) -> RuleCard: ...
 
     def find_duplicates(self, notebook_id: str, object_type: str) -> List[DuplicateGroup]: ...
-
-    def find_conflicts(self, notebook_id: str) -> List[ConflictPair]: ...
 
     def merge_knowledge(
         self, notebook_id: str, source_id: str, payload: MergeRequest

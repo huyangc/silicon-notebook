@@ -236,33 +236,6 @@ class NotebookSearchResponse(BaseModel):
     hits: List[SearchHit]
 
 
-class ExtractionCandidate(BaseModel):
-    id: str
-    extraction_run_id: str
-    notebook_id: str
-    source_id: str = ""
-    candidate_type: str
-    status: str
-    payload: Dict[str, Any] = Field(default_factory=dict)
-    evidence: List[Evidence] = Field(default_factory=list)
-
-
-class Candidate(BaseModel):
-    id: str
-    notebook_id: str
-    source_id: str = ""
-    source_title: str = ""
-    candidate_type: str
-    status: str
-    payload: Dict[str, Any] = Field(default_factory=dict)
-    evidence: List[Evidence] = Field(default_factory=list)
-    created_label: str = ""
-
-
-class CandidateUpdate(BaseModel):
-    payload: Optional[Dict[str, Any]] = None
-    status: Optional[str] = None
-
 
 class KnowledgeUpdate(BaseModel):
     payload: Optional[Dict[str, Any]] = None
@@ -364,12 +337,6 @@ class DuplicateGroup(BaseModel):
     members: List[KnowledgeRef]
 
 
-class ConflictPair(BaseModel):
-    object_type: str
-    reason: str
-    a: KnowledgeRef
-    b: KnowledgeRef
-
 
 class MergeRequest(BaseModel):
     into_id: str
@@ -405,6 +372,5 @@ class NotebookAnalytics(BaseModel):
     feedback_not_useful: int = 0
     usefulness_rate: float = 0.0
     low_rated_questions: List[str] = Field(default_factory=list)
-    candidate_counts: Dict[str, int] = Field(default_factory=dict)
     knowledge_counts: Dict[str, int] = Field(default_factory=dict)
     source_status_counts: Dict[str, int] = Field(default_factory=dict)
