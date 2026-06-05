@@ -88,9 +88,11 @@ from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
     DESCRIPTION_SCHEMA_HINT,
+    FOLLOWUP_REWRITE_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
+    followup_rewrite_prompt,
     notebook_description_prompt,
     schema_induction_prompt,
 )
@@ -106,7 +108,6 @@ from app.services.retrieval import (
     ensure_procedure_quota,
     classify_evidence,
 )
-from app.services.prompts import followup_rewrite_prompt, FOLLOWUP_REWRITE_SCHEMA_HINT
 from app.services.followup import looks_like_followup
 
 
