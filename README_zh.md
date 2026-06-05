@@ -239,7 +239,7 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 
 浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时展示来源的 `error_message`。
 
-浏览器/API 日志查看器（`/dev/logs` 与 `/api/debug/logs/...`）需要显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启。完整 LLM 记录可能包含私有来源材料进入 prompt/response 的文本，因此默认关闭。
+**日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 
 ## 用 MinerU 解析 PDF
 
