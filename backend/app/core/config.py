@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # Requests slower than this (ms) are flagged SLOW so "stuck" calls stand out.
     slow_request_ms: int = Field(3000, env="SLOW_REQUEST_MS")
 
+    # Read-only debug log viewer endpoints (/api/debug/logs/...). Local dev tool;
+    # set DEBUG_LOGS_ENABLED=false to hide them (every debug endpoint then 404s).
+    debug_logs_enabled: bool = Field(True, env="DEBUG_LOGS_ENABLED")
+
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use the built-in pypdf text fallback (default; no GPU, offline)
     #   "http" -> call a remote MinerU service (mineru-api) at mineru_api_url
