@@ -1165,6 +1165,13 @@ class SQLiteRepository:
         self._invalidate_unified_cache(source.notebook_id)
         self._mark_unified_kg_dirty(source.notebook_id)
 
+    def extract_source(self, source_id: str) -> None:
+        """Public entry to (re-)extract a single source's KG in place. Delegates to
+        _run_extraction, which deletes the source's prior KG objects/relations/
+        embeddings and re-runs extraction (idempotent per source). Used by
+        reextract_notebook and maintenance scripts."""
+        self._run_extraction(source_id)
+
     def _run_extraction(self, source_id: str) -> None:
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)

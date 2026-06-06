@@ -372,6 +372,13 @@ def test_whitelist_add_list_remove(repo):
     assert "gm cell" not in repo.concept_whitelist_terms()
 
 
+def test_extract_source_delegates_to_run_extraction(repo, monkeypatch):
+    called = []
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: called.append(sid))
+    repo.extract_source("src-z")
+    assert called == ["src-z"]
+
+
 def test_delete_notebook_kg_clears_kg_but_keeps_elements(repo):
     from app.services.sqlite_repository import _now
     nb = repo.create_notebook(NotebookCreate(name="nb"))
