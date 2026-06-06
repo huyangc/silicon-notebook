@@ -1,4 +1,4 @@
-from app.eval.report import render_quality_report
+from app.eval.report import render_quality_report, render_speed_report
 
 
 def test_render_quality_report_has_sections():
@@ -19,3 +19,21 @@ def test_render_quality_report_has_sections():
     assert "疑似非原子" in md
     assert "Vb1" in md          # 样例出现
     assert "Level 1 Model" in md
+
+
+def test_render_speed_report():
+    measured = [
+        {"chars": 5000, "n_windows": 1, "wall_s": 6.0,
+         "latency_p50_s": 3.0, "latency_p95_s": 5.0, "total_tokens": 1500,
+         "retries": 0, "effective_concurrency": 1},
+        {"chars": 100000, "n_windows": 13, "wall_s": 9.0,
+         "latency_p50_s": 4.0, "latency_p95_s": 8.0, "total_tokens": 30000,
+         "retries": 2, "effective_concurrency": 13},
+    ]
+    extrapolated = [{"chars": 500000, "n_windows": 63, "est_s": 21.0}]
+    md = render_speed_report(measured, extrapolated, recommended_max_chars=250000,
+                             target_seconds=120)
+    assert "# KG 抽取速度报告" in md
+    assert "100000" in md or "100,000" in md
+    assert "推荐文档上限" in md
+    assert "250" in md
