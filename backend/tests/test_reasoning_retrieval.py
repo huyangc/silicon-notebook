@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_trace_step_model_shape():
     from app.models.schemas import TraceStep
     t = TraceStep(step_type="plan", summary="规划了 2 个子查询", detail={"n": 2})
@@ -44,3 +47,51 @@ def test_reflect_prompt_contains_summary_and_schema():
     assert "next_action" in REFLECT_SCHEMA_HINT
     for a in ("answer", "expand_graph", "add_subquery", "search_elements"):
         assert a in REFLECT_SCHEMA_HINT
+
+
+from app.core.config import Settings
+from app.services.sqlite_repository import SQLiteRepository
+from app.services.embedding import FakeEmbedder
+from app.models.schemas import NotebookCreate
+
+
+@pytest.fixture
+def rrepo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)
+    return r
+
+
+def _seed_two_nodes(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "C1", "object_type": "claim",
+         "payload": {"name": "RTL到GDSII流程概述", "section_path": "1"}, "evidence": []},
+        {"local_id": "P1", "object_type": "procedure",
+         "payload": {"name": "布局布线步骤", "section_path": "2"}, "evidence": []},
+    ], [
+        {"source_local_id": "C1", "target_local_id": "P1",
+         "edge_type": "relates", "evidence": []},
+    ])
+    return nb
+
+
+def test_retrieve_scored_returns_sorted_hits(rrepo):
+    nb = _seed_two_nodes(rrepo)
+    hits = rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+    assert hits and hits[0].score >= (hits[-1].score if len(hits) > 1 else 0)
+    assert any(h.object_type == "claim" for h in hits)
+
+
+def test_retrieve_scored_filters_types(rrepo):
+    nb = _seed_two_nodes(rrepo)
+    hits = rrepo._retrieve_scored(nb.id, "布局布线", types=["procedure"])
+    assert all(h.object_type == "procedure" for h in hits)

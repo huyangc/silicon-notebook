@@ -91,6 +91,8 @@ from app.services.prompts import (
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedKnowledge,
+    W_KEYWORD,
+    W_SEMANTIC,
     _payload_text,
     cosine,
     keyword_score,
@@ -2814,6 +2816,36 @@ class SQLiteRepository:
                     continue
                 citations.append(_citation(label, evidence))
         return citations
+
+    def _retrieve_scored(self, notebook_id: str, query: str,
+                         types: Optional[Iterable[str]] = None,
+                         w_keyword: float = W_KEYWORD,
+                         w_semantic: float = W_SEMANTIC) -> List[RetrievedKnowledge]:
+        """Score KG objects of `types` (default all 4 _KG_TYPES) for `query`,
+        returning RetrievedKnowledge sorted by fused relevance desc. Shared by
+        the reasoning retriever's tools; `w_keyword`/`w_semantic` carry the
+        per-sub-query `prefer` bias."""
+        type_list = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
+        with self._connect() as db:
+            kg_objs = {t: self._knowledge_objects(db, notebook_id, t) for t in type_list}
+            query_vector = self._embed_query(query)
+            elem_ids, elem_mat = self._vector_matrix(db, notebook_id, "element_embeddings", "element_id")
+            kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+        from app.services.vector_index import query_sims
+        element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
+        knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+        scored: List[RetrievedKnowledge] = []
+        for t in type_list:
+            objs = kg_objs.get(t) or []
+            if not objs:
+                continue
+            scored.extend(score_knowledge(
+                query, objs, t, query_vector, None, None,
+                element_sims=element_sims, knowledge_sims=knowledge_sims,
+                w_keyword=w_keyword, w_semantic=w_semantic,
+            ))
+        scored.sort(key=lambda it: it.score, reverse=True)
+        return scored
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
