@@ -53,6 +53,12 @@ def test_claim_degraded():
     assert not claim_degraded("The cascode connection increases output resistance.")
     assert claim_degraded("cascode")                  # 太短/无动词
     assert claim_degraded("output resistance of the")  # 截断结尾
+    # 校准:真 claim 含扩充动词不再误判退化
+    assert not claim_degraded("FinFETs exhibit nearly square-law characteristics")
+    assert not claim_degraded("Designer must understand CMOS technology")
+    # 校准:元叙述/前言/纯标题仍判退化
+    assert claim_degraded("This chapter forms the foundation for synthesizers")
+    assert claim_degraded("Effect of Negative Feedback on Distortion")
 
 
 def test_formula_degraded():

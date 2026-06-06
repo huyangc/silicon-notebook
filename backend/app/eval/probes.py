@@ -63,15 +63,28 @@ def near_duplicate_groups(names: List[str]) -> Dict[str, List[str]]:
 
 
 _VERB_RE = re.compile(
-    r"\b(is|are|was|were|be|has|have|had|can|cannot|will|provides?|requires?|"
+    r"\b(is|are|was|were|be|been|has|have|had|can|cannot|will|provides?|requires?|"
     r"causes?|increases?|reduces?|decreases?|achieves?|applies|operates?|"
-    r"depends?|uses?|results?|produces?|equals?|yields?|improves?|limits?)\b", re.I)
+    r"depends?|uses?|results?|produces?|equals?|yields?|improves?|limits?|"
+    r"exhibits?|understands?|exists?|comprises?|presents?|deals?|serves?|draws?|"
+    r"forms?|employs?|includes?|defines?|addresses|combines?|enhances?|consumes?|"
+    r"involves?|remains?|holds?|corrects?|opposes?|impacts?|integrates?|works?|"
+    r"organizes?|distinguishes?|compensates?|attenuates?|distorts?|exceeds?|"
+    r"affects?|enables?|allows?|generates?|introduces?|represents?|behaves?|"
+    r"flows?|drives?|sets?|makes?|takes?|gives?|shows?|needs?|means?|occurs?|"
+    r"consists?|contains?|maintains?|determines?|describes?)\b", re.I)
+
+_META_RE = re.compile(
+    r"\b(this (chapter|book|text|section|paper)|next chapter|chapter \d|section \d|"
+    r"i wanted|we will|in this (chapter|book|text|section))\b", re.I)
 
 
 def claim_degraded(name: str) -> bool:
     n = (name or "").strip()
     words = n.split()
     if len(words) < 4:
+        return True
+    if _META_RE.search(n):     # 元叙述/章节导航/前言,非 truth-evaluable 技术断言
         return True
     if not _VERB_RE.search(n):
         return True
