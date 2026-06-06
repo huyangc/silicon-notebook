@@ -16,3 +16,14 @@ def test_answer_prompt_includes_history_when_present():
     assert "prev q" in p and "prev a" in p
     p2 = answer_prompt("q?", "k1: [concept] X")   # default no history
     assert "prev q" not in p2
+
+
+def test_extract_prompt_excludes_enumerated_values_and_meta_claims():
+    from app.services.kg.extract import _prompt
+    p = _prompt("[1] sample text", "Section 1", "textbook")
+    # concept:取值枚举不独立成节点
+    assert "numeric levels" in p and "NOT separate Concepts" in p
+    # claim:不抽标题/前言/元叙述
+    assert "emit a Claim ONLY for a complete, truth-evaluable" in p
+    assert "section headings or titles" in p
+    assert "narrative/meta sentences about the document itself" in p
