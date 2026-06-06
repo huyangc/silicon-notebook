@@ -40,8 +40,17 @@ for trivial sub-parts of another concept. Also do NOT emit Concepts for: bare
 symbols/variables (e.g. V_DD, g_m1, i_b68, R_E26, (W/L)_1, A_v^+); instance labels
 of a specific device/node/pole (e.g. Q1, M5, Pole p8); figure/table/equation/section
 references (e.g. Fig. 5.38, Table 2.1, Eq. 9.4); or section headings/numbers (e.g.
-"8.4.1 Series-Shunt Feedback"). In contrast, capture EVERY Formula (equation) and
-EVERY Procedure (process/phase) present — do not skip those.
+"8.4.1 Series-Shunt Feedback"); or numeric levels / enumerated values that are
+settings of a parent concept (e.g. "Level 1/2/3 Model", "Type I/II PLL", "Case I/II",
+op-amp part-number series like "702/709/741 op amp") — treat these as attributes or
+instances of the parent concept, NOT separate Concepts. In contrast, capture EVERY
+Formula (equation) and EVERY Procedure (process/phase) present — do not skip those.
+
+For Claims: emit a Claim ONLY for a complete, truth-evaluable technical assertion
+(a subject plus a predicate stating a fact or relationship). Do NOT emit Claims for:
+section headings or titles (e.g. "Effect of Negative Feedback on Distortion");
+narrative/meta sentences about the document itself (e.g. "This chapter covers…",
+"This book deals with…", "I wanted to teach…"); or chapter/section navigation.
 
 The passage is given as numbered elements, one per line, each prefixed with its
 integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
