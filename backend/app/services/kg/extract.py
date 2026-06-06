@@ -33,11 +33,15 @@ supports(Claim|Formula->Claim), part_of/composed_of/contrasts_with/kind_of(Conce
 Concept), derived_from(Formula->Formula), depends_on/prerequisite_of,
 used_in(Formula->Procedure), precedes.
 
-Be SELECTIVE with Concepts: emit a Concept only for a distinctive named entity. Do
-NOT emit Concepts for generic/common terms (e.g. training, inference, buffer,
+Be SELECTIVE with Concepts: emit a Concept only for a distinctive named entity.
+Do NOT emit Concepts for generic/common terms (e.g. training, inference, buffer,
 latency, forward pass, backward pass, hidden state, input sequence, host memory) or
-for trivial sub-parts of another concept. In contrast, capture EVERY Formula
-(equation) and EVERY Procedure (process/phase) present — do not skip those.
+for trivial sub-parts of another concept. Also do NOT emit Concepts for: bare
+symbols/variables (e.g. V_DD, g_m1, i_b68, R_E26, (W/L)_1, A_v^+); instance labels
+of a specific device/node/pole (e.g. Q1, M5, Pole p8); figure/table/equation/section
+references (e.g. Fig. 5.38, Table 2.1, Eq. 9.4); or section headings/numbers (e.g.
+"8.4.1 Series-Shunt Feedback"). In contrast, capture EVERY Formula (equation) and
+EVERY Procedure (process/phase) present — do not skip those.
 
 The passage is given as numbered elements, one per line, each prefixed with its
 integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
