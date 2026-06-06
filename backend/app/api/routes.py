@@ -37,6 +37,7 @@ from app.models.schemas import (
     SourceElement,
     SourceImportRequest,
     SourceSummary,
+    UnifiedKgStatus,
     UserProfile,
 )
 from app.services.repository import NotebookRepository, UploadedSourceFile
@@ -483,6 +484,14 @@ def rebuild_unified_kg(notebook_id: str) -> dict:
     try:
         clusters = repository().rebuild_unified_kg(notebook_id)
         return {"clusters": clusters}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/unified-kg/status")
+def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
+    try:
+        return UnifiedKgStatus(**repository().unified_kg_status(notebook_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

@@ -127,3 +127,21 @@ def test_rebuild_tolerates_mixed_dim_vectors(repo):
             "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
             ("rogue", nb.id, json.dumps([0.1] * 999), datetime.datetime.now().isoformat()))
     assert repo.rebuild_unified_kg(nb.id) >= 1   # must NOT raise on mismatched-dim vector
+
+
+def test_unified_kg_dirty_status_lifecycle(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    status = repo.unified_kg_status(nb.id)
+    assert status["dirty"] is False
+    assert status["clusters"] == 0
+
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []}
+    ], [])
+    status = repo.unified_kg_status(nb.id)
+    assert status["dirty"] is True
+
+    repo.rebuild_unified_kg(nb.id)
+    status = repo.unified_kg_status(nb.id)
+    assert status["dirty"] is False
+    assert status["clusters"] == 1

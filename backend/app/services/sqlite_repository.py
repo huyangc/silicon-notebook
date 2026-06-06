@@ -366,6 +366,16 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
 
+                CREATE TABLE IF NOT EXISTS unified_kg_state (
+                  notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
+                  dirty INTEGER NOT NULL DEFAULT 0,
+                  last_rebuild_at TEXT NOT NULL DEFAULT '',
+                  object_count INTEGER NOT NULL DEFAULT 0,
+                  relation_count INTEGER NOT NULL DEFAULT 0,
+                  cluster_count INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_source_elements_source ON source_elements(source_id);
@@ -926,9 +936,9 @@ class SQLiteRepository:
             self._run_extraction(source_id)
             stage("extract", "done", t)
             try:
-                self.rebuild_unified_kg(self.get_source(source_id).notebook_id)
+                self._mark_unified_kg_dirty(source.notebook_id)
             except Exception:
-                self.event_log.logger.exception("unified-KG rebuild failed for source %s", source_id)
+                self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             empty_hint = ""
@@ -1112,6 +1122,7 @@ class SQLiteRepository:
             db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         self._delete_file(source.file_path)
         self._invalidate_unified_cache(source.notebook_id)
+        self._mark_unified_kg_dirty(source.notebook_id)
 
     def _run_extraction(self, source_id: str) -> None:
         source = self.get_source(source_id)
@@ -1778,6 +1789,7 @@ class SQLiteRepository:
                 )
         self._embed_objects_batch(notebook_id, objects)
         self._invalidate_unified_cache(notebook_id)
+        self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
@@ -1838,11 +1850,13 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         self.set_merge_decision(notebook_id, candidate_id, "confirmed")
         self._invalidate_unified_cache(notebook_id)
+        self._mark_unified_kg_dirty(notebook_id)
 
     def reject_merge(self, notebook_id: str, candidate_id: str) -> None:
         self.get_notebook(notebook_id)
         self.set_merge_decision(notebook_id, candidate_id, "rejected")
         self._invalidate_unified_cache(notebook_id)
+        self._mark_unified_kg_dirty(notebook_id)
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self._connect() as db:
@@ -1853,6 +1867,36 @@ class SQLiteRepository:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
         self._vector_cache.invalidate(f"{notebook_id}:knowledge")
+
+    def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
+        now = _now()
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO unified_kg_state (notebook_id, dirty, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(notebook_id) DO UPDATE SET dirty=1, updated_at=excluded.updated_at
+                """,
+                (notebook_id, now),
+            )
+
+    def unified_kg_status(self, notebook_id: str) -> dict:
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM unified_kg_state WHERE notebook_id=?", (notebook_id,)).fetchone()
+            clusters = db.execute(
+                "SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()["c"]
+        if row is None:
+            return {"dirty": False, "last_rebuild_at": "", "objects": 0, "relations": 0, "clusters": int(clusters)}
+        return {
+            "dirty": bool(row["dirty"]),
+            "last_rebuild_at": row["last_rebuild_at"],
+            "objects": int(row["object_count"]),
+            "relations": int(row["relation_count"]),
+            "clusters": int(row["cluster_count"] or clusters),
+        }
 
     def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
         self.get_notebook(notebook_id)
@@ -1914,7 +1958,32 @@ class SQLiteRepository:
                 "VALUES (?,?,?,?,?, 'pending', ?, ?)",
                 [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in res["pending"]])
         self._invalidate_unified_cache(notebook_id)
-        return len(set(res["cluster_map"].values()))
+        cluster_count = len(set(res["cluster_map"].values()))
+        with self._connect() as db:
+            object_count = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,),
+            ).fetchone()["c"]
+            relation_count = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()["c"]
+            db.execute(
+                """
+                INSERT INTO unified_kg_state
+                (notebook_id, dirty, last_rebuild_at, object_count, relation_count, cluster_count, updated_at)
+                VALUES (?, 0, ?, ?, ?, ?, ?)
+                ON CONFLICT(notebook_id) DO UPDATE SET
+                  dirty=0,
+                  last_rebuild_at=excluded.last_rebuild_at,
+                  object_count=excluded.object_count,
+                  relation_count=excluded.relation_count,
+                  cluster_count=excluded.cluster_count,
+                  updated_at=excluded.updated_at
+                """,
+                (notebook_id, now, object_count, relation_count, cluster_count, now),
+            )
+        return cluster_count
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)

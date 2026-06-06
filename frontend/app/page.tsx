@@ -259,6 +259,7 @@ type KgObject = { id: string; object_type: string; payload: { name?: string; sec
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
 type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: { quoted_span: string; source_title: string; element_text: string }[]; definition: string | null; steps: { name: string; element_text: string }[] | null };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
+type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
 type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
 
@@ -479,6 +480,7 @@ const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
 const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
 const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
+const fetchUnifiedKgStatus = (nb: string) => api<UnifiedKgStatus>(`/notebooks/${nb}/unified-kg/status`);
 const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
 const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
 
@@ -719,6 +721,8 @@ export default function Home() {
   const [kgViewOpen, setKgViewOpen] = useState(false);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
+  const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
+  const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
@@ -1615,10 +1619,28 @@ export default function Home() {
     setKgSelectedTypes([]);
     setPendingKgFocusId(targetNodeId ?? null);
     try {
-      await rebuildUnifiedKg(currentNotebookId);
-      const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
-      setUGraph(g); setPendingMerges(pend);
+      const [g, pend, status] = await Promise.all([
+        fetchUnifiedGraph(currentNotebookId),
+        fetchPendingMerges(currentNotebookId),
+        fetchUnifiedKgStatus(currentNotebookId),
+      ]);
+      setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
+  }
+
+  async function refreshUnifiedKg() {
+    if (!currentNotebookId) return;
+    setKgRefreshBusy(true);
+    try {
+      await rebuildUnifiedKg(currentNotebookId);
+      const [g, pend, status] = await Promise.all([
+        fetchUnifiedGraph(currentNotebookId),
+        fetchPendingMerges(currentNotebookId),
+        fetchUnifiedKgStatus(currentNotebookId),
+      ]);
+      setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
+    } catch (err) { reportError(err); }
+    finally { setKgRefreshBusy(false); }
   }
 
   function focusKgGraphNode(nodeId: string) {
@@ -2569,6 +2591,24 @@ export default function Home() {
                   <span className="tag">节点 {fgData.nodes.length}{uGraph ? ` / ${uGraph.nodes.length}` : ""}</span>
                   <span className="tag">边 {fgData.links.length}{uGraph ? ` / ${uGraph.edges.length}` : ""}</span>
                 </div>
+                {unifiedKgStatus && (
+                  <div className="tag-row" style={{ marginTop: 4 }}>
+                    <span className="tag" style={{ color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined }}>
+                      {unifiedKgStatus.dirty ? "待重建" : "已同步"}
+                    </span>
+                    {unifiedKgStatus.last_rebuild_at && (
+                      <span className="tag">{formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
+                    )}
+                  </div>
+                )}
+                <button
+                  className="sort-button"
+                  style={{ marginTop: 6, width: "100%" }}
+                  onClick={refreshUnifiedKg}
+                  disabled={kgRefreshBusy}
+                >
+                  {kgRefreshBusy ? "重建中…" : "刷新图谱"}
+                </button>
               </div>
               <div className="kg-rail-section">
                 <h3>类型过滤</h3>

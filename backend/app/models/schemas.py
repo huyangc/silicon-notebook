@@ -374,3 +374,11 @@ class NotebookAnalytics(BaseModel):
     low_rated_questions: List[str] = Field(default_factory=list)
     knowledge_counts: Dict[str, int] = Field(default_factory=dict)
     source_status_counts: Dict[str, int] = Field(default_factory=dict)
+
+
+class UnifiedKgStatus(BaseModel):
+    dirty: bool
+    last_rebuild_at: str = ""
+    objects: int = 0
+    relations: int = 0
+    clusters: int = 0
