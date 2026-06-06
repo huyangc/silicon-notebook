@@ -31,3 +31,23 @@ def test_llm_client_connection_pool_sized(monkeypatch):
         assert pool._max_connections == 116
         assert pool._max_keepalive_connections == 16
     assert client.max_retries == 0
+
+
+def test_upload_dispatches_via_submit_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.services.kg import scheduler
+
+    calls = []
+    monkeypatch.setattr(scheduler, "submit_job",
+                        lambda fn, /, *a, **k: calls.append((fn, a)) or None)
+    client = TestClient(app)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    r = client.post(f"/api/notebooks/{nb}/sources",
+                    files=[("files", ("a.md", b"# Title\n\nsome text", "text/markdown"))])
+    assert r.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][1][0].startswith("src-")
