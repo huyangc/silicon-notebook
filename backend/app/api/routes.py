@@ -11,6 +11,8 @@ from app.models.schemas import (
     ArticleSummary,
     AskRequest,
     AskResponse,
+    ConceptWhitelistAdd,
+    ConceptWhitelistEntry,
     ConversationDetail,
     ConversationRenameRequest,
     ConversationSummary,
@@ -546,6 +548,24 @@ def reject_merge(notebook_id: str, candidate_id: str) -> dict:
         return {"ok": True}
     except KeyError:
         raise HTTPException(status_code=404, detail="Merge candidate not found")
+
+
+@router.get("/kg/concept-whitelist", response_model=List[ConceptWhitelistEntry])
+def list_concept_whitelist() -> List[ConceptWhitelistEntry]:
+    return [ConceptWhitelistEntry(**e) for e in repository().concept_whitelist_list()]
+
+
+@router.post("/kg/concept-whitelist", response_model=ConceptWhitelistEntry)
+def add_concept_whitelist(payload: ConceptWhitelistAdd) -> ConceptWhitelistEntry:
+    try:
+        return ConceptWhitelistEntry(**repository().concept_whitelist_add(payload.term, payload.note))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="term must be non-empty")
+
+
+@router.delete("/kg/concept-whitelist/{term}", status_code=204)
+def delete_concept_whitelist(term: str) -> None:
+    repository().concept_whitelist_remove(term)
 
 
 @router.post("/notebooks/{notebook_id}/unified-kg/merges/review")
