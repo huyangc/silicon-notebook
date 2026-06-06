@@ -360,6 +360,7 @@ def test_builtin_whitelist_seeded(repo):
     terms = repo.concept_whitelist_terms()
     assert "vco" in terms
     assert "mosfet" in terms
+    assert "ic" in terms  # 2-char EE acronym protected from the too_short rule
 
 
 def test_whitelist_add_list_remove(repo):

@@ -501,6 +501,7 @@ class SQLiteRepository:
                 "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",
                 "NMOS", "PMOS", "BiCMOS", "JFET", "op amp", "ADC", "DAC",
                 "CMRR", "PSRR", "ESD", "PVT",
+                "AC", "DC", "IC", "RF", "IF", "LO",
             ]
             for term in builtin_whitelist:
                 db.execute(

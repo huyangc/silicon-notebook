@@ -74,3 +74,12 @@ def test_real_concepts_kept():
 def test_whitelist_overrides_symbol_rule():
     assert is_noise_concept("VCO", frozenset({"vco"}))[0] is False
     assert is_noise_concept("gm", frozenset({"gm"}))[0] is False
+
+
+def test_backmatter_matches_segment_not_substring():
+    # standalone backmatter segments -> skip
+    assert should_extract_window("Index", [_el("frequency response, 495")], "textbook")[0] is False
+    assert should_extract_window("8 > References", [_el("[1] Razavi, 2001.")], "textbook")[0] is False
+    # content sections that merely contain 'index' as a word/substring -> keep
+    assert should_extract_window("2 > Indexed Addressing", [_el("Indexed addressing adds a base and offset.")], "textbook")[0] is True
+    assert should_extract_window("3 > Index Register Theory", [_el("The index register holds an address.")], "textbook")[0] is True

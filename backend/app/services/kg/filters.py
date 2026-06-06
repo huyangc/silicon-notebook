@@ -22,7 +22,8 @@ def _norm(name: str) -> str:
 
 # --- window filter ---
 _PROBLEM_RE = re.compile(r"(^|[>\s])problems?$|(^|[>\s])exercises?$|习题|练习", re.IGNORECASE)
-_BACKMATTER_RE = re.compile(r"index|glossary|references|bibliography|索引|参考文献|术语表", re.IGNORECASE)
+_BACKMATTER_SEGMENTS = {"index", "glossary", "references", "bibliography"}
+_BACKMATTER_CJK = ("索引", "参考文献", "术语表")
 _INDEX_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 /\-(),]+,\s*\d+([,–\-\s\d]+)?$")
 
 
@@ -34,12 +35,22 @@ def _index_like_ratio(elements: Sequence[SourceElementQ]) -> float:
     return hits / len(texts)
 
 
+def _is_backmatter(section_path: str) -> bool:
+    """True if a breadcrumb SEGMENT is exactly a backmatter section name
+    (index/glossary/references/bibliography) — avoids substring false positives
+    like 'Indexed Addressing' / 'Index Register Theory'. CJK terms match as substring."""
+    for seg in (section_path or "").split(">"):
+        if seg.strip().lower() in _BACKMATTER_SEGMENTS:
+            return True
+    return any(t in (section_path or "") for t in _BACKMATTER_CJK)
+
+
 def should_extract_window(section_path: str, elements: Sequence[SourceElementQ],
                           doc_type: str) -> Tuple[bool, str]:
     path = section_path or ""
     if (doc_type or "").lower() == "textbook" and _PROBLEM_RE.search(path):
         return False, "textbook_problem_section"
-    if _BACKMATTER_RE.search(path):
+    if _is_backmatter(path):
         return False, "backmatter_section"
     if _index_like_ratio(elements) >= 0.6:
         return False, "index_like_window"
