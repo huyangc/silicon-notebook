@@ -2899,6 +2899,8 @@ class SQLiteRepository:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
         procedure/concept), performs 1-hop relation expansion, and synthesises
         a conclusion via the LLM (or deterministic fallback)."""
+        if getattr(payload, "mode", "fast") == "reasoning":
+            return self.ask_reasoning(notebook_id, payload)
         import time
         ask_started = time.perf_counter()
 
@@ -3212,6 +3214,104 @@ class SQLiteRepository:
         llm_grounded = bool(data.get("grounded", False))
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
+
+    def _answer_reasoning(self, notebook_id, question, top_hits, elements, history=""):
+        """Synthesise the reasoning-mode answer: reuse _answer_context for KG
+        hits (so [k] anchors/citations stay identical to fast mode), then append
+        fallback document passages as reference-only context (no [k] id, so they
+        never become anchors). Returns (answer, llm_grounded, anchors)."""
+        context_block, id_map = self._answer_context(notebook_id, top_hits)
+        if elements:
+            extra = "\n".join(
+                f"(原文 {i+1}) {el.source_title} · {el.location_label}: {el.text[:200]}"
+                for i, el in enumerate(elements[:6])
+            )
+            context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
+        raw = self.llm_client.chat_json(
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            ANSWER_SCHEMA_HINT,
+        )
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("answer did not return a JSON object")
+        answer = str(data.get("answer", "")).strip()
+        llm_grounded = bool(data.get("grounded", False))
+        anchors = self._parse_answer_anchors(answer, id_map)
+        return answer, llm_grounded, anchors
+
+    def ask_reasoning(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """Reasoning-mode ask: agentic plan→retrieve→reflect(自由深挖)→answer。
+        检索委托 ReasoningRetriever;答案/证据分档复用 fast 路径口径;响应携带
+        reasoning_trace。任何阶段异常不向用户抛出(逐层容错 + 兜底空候选)。"""
+        from app.services.reasoning_retrieval import ReasoningRetriever
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        with self._connect() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+            history = self._conversation_history(db, conversation_id)
+
+        try:
+            result = ReasoningRetriever(self, self.settings).run(notebook_id, question, history)
+            top_hits, elements, trace = result.top_hits, result.elements, result.trace
+        except Exception:
+            top_hits, elements, trace = [], [], []
+
+        registry = self.effective_schemas()
+        seen_ids: set = set()
+        related_knowledge: List[KnowledgeRecord] = []
+        for item in top_hits:
+            if item.object_id in seen_ids:
+                continue
+            seen_ids.add(item.object_id)
+            related_knowledge.append(self._knowledge_record(
+                item.object_type,
+                {"id": item.object_id, "payload": item.payload, "status": item.status,
+                 "owner": getattr(item, "owner", ""),
+                 "last_reviewed": getattr(item, "last_reviewed", ""),
+                 "evidence": item.evidence},
+                registry.get(item.object_type)))
+        related_knowledge = related_knowledge[:12]
+
+        cited_element_ids = {ev.element_id for item in top_hits
+                             for ev in item.evidence if ev.element_id}
+        citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
+
+        answer, llm_grounded, anchors = "", False, []
+        if self.llm_client.configured and (top_hits or elements):
+            try:
+                answer, llm_grounded, anchors = self._answer_reasoning(
+                    notebook_id, question, top_hits, elements, history)
+            except Exception:
+                answer, llm_grounded, anchors = "", False, []
+
+        evidence_level, top_relevance = classify_evidence(
+            top_hits, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        grounded = evidence_level == "grounded"
+
+        if answer:
+            conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        else:
+            llm_mode = "deterministic"
+            conclusion = (
+                f"Found {len(top_hits)} relevant KG object(s) for this question."
+                if top_hits else
+                "The notebook does not yet contain approved knowledge that matches "
+                "this question. Upload and review sources to build coverage.")
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors,
+            related_knowledge=related_knowledge, citations=citations,
+            llm_mode=llm_mode, conversation_id=conversation_id,
+            retrieval_query=question, top_relevance=top_relevance,
+            reasoning_trace=trace or None,
+        )
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        return response
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
