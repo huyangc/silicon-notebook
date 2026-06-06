@@ -235,3 +235,11 @@ backend/eval/                 # 新建评测包(PYTHONPATH=backend,可 import ap
 3. 评测脚本目录:`backend/eval/` vs `scripts/eval/`?
 4. 问题集 §6.1 30 题:逐条审定(删/改/增),尤其 L3 多跳题是否贴合你真实关心的推断场景。
 5. 质量探针阈值/泛化词表是否要补充你领域里的特定噪声模式。
+
+## 12. 如何运行
+- 质量(0 token):`PYTHONPATH=backend python -m app.eval.run_all --only quality`
+- 速度(少量 token):`PYTHONPATH=backend python -m app.eval.run_all --only speed`
+- 推断(低 token):`PYTHONPATH=backend python -m app.eval.run_all --only inference`
+- 全部:`PYTHONPATH=backend python -m app.eval.run_all`
+- 产物:`.local/eval_runs/<时间戳>/{quality,speed,inference}_report.md`
+- 注:代码均在 `backend/app/eval/`;speed 源文件默认用 glob 在 notebook storage 下按文件名匹配(不依赖 source_id)。
