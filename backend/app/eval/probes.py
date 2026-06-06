@@ -60,3 +60,68 @@ def near_duplicate_groups(names: List[str]) -> Dict[str, List[str]]:
     for nm in names:
         buckets[_norm(nm)].append(nm)
     return {k: v for k, v in buckets.items() if len(v) >= 2 and k}
+
+
+_VERB_RE = re.compile(
+    r"\b(is|are|was|were|be|has|have|had|can|cannot|will|provides?|requires?|"
+    r"causes?|increases?|reduces?|decreases?|achieves?|applies|operates?|"
+    r"depends?|uses?|results?|produces?|equals?|yields?|improves?|limits?)\b", re.I)
+
+
+def claim_degraded(name: str) -> bool:
+    n = (name or "").strip()
+    words = n.split()
+    if len(words) < 4:
+        return True
+    if not _VERB_RE.search(n):
+        return True
+    if re.search(r"\b(the|a|an|of|to|for|and|or|with|by|in|on)$", n, re.I):
+        return True
+    return False
+
+
+def formula_degraded(name: str) -> bool:
+    n = (name or "").strip()
+    if not n:
+        return True
+    return not re.search(r"[=+\-*/^$\\<>]", n)
+
+
+def procedure_degraded(payload: dict) -> bool:
+    steps = (payload or {}).get("steps") or []
+    return len(steps) == 0
+
+
+_NON_ATOMIC = ("symbol", "reference", "quantity", "code", "short")
+
+
+def aggregate_quality(concepts: List[dict], degree: Dict[str, int]) -> dict:
+    counts: Dict[str, int] = defaultdict(int)
+    samples: Dict[str, List[str]] = defaultdict(list)
+    suspect_ids: Set[str] = set()
+    orphans = 0
+    for c in concepts:
+        tags = classify_concept(c["name"])
+        for t in tags:
+            counts[t] += 1
+            if len(samples[t]) < 20:
+                samples[t].append(c["name"])
+        if tags & set(_NON_ATOMIC):
+            suspect_ids.add(c["id"])
+        if c.get("evidence_count", 1) <= 1 and degree.get(c["id"], 0) == 0:
+            orphans += 1
+    names = [c["name"] for c in concepts]
+    enum = enumerated_groups(names)
+    dups = near_duplicate_groups(names)
+    total = len(concepts) or 1
+    return {
+        "total": len(concepts),
+        "probe_counts": dict(counts),
+        "orphans": orphans,
+        "enumerated_groups": len(enum),
+        "enumerated_samples": dict(list(enum.items())[:20]),
+        "near_duplicate_groups": len(dups),
+        "suspect_non_atomic": len(suspect_ids),
+        "suspect_non_atomic_rate": round(len(suspect_ids) / total, 4),
+        "samples": {k: v for k, v in samples.items()},
+    }
