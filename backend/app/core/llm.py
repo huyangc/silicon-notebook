@@ -1,4 +1,5 @@
 import httpx
+import random
 import re
 import time
 from datetime import datetime
@@ -143,7 +144,11 @@ class OpenAICompatibleClient:
                         "latency_ms": round((time.perf_counter() - start) * 1000),
                         "error": f"{type(exc).__name__}: {exc}",
                     })
-                    time.sleep(min(2 ** attempt, 4))
+                    # Jittered exponential backoff (cap 30s): a synchronized burst
+                    # of rejected calls must NOT retry in lockstep, or it re-storms
+                    # the endpoint and gets mass-rejected again.
+                    backoff = min(2 ** attempt, 30)
+                    time.sleep(backoff + random.uniform(0, backoff))
             content = strip_json_fences(response.choices[0].message.content or "") or "{}"
             record["status"] = "ok"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)
