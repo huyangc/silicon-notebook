@@ -17,7 +17,7 @@
 - **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
 - PDF 走 MinerU（公式/表格/版面）；本机或未配置时回退 pypdf
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
-- KG-native 接地问答：逐句 `[k_i]` 引用、多轮会话、1-hop KG 邻居扩展
+- KG-native 接地问答：逐句 `[k_i]` 引用、多轮会话、1-hop KG 邻居扩展，推理模式实时显示 agent 进度
 - 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除
 - 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
 - Object 级 KG 可视化：Concept / Claim / Formula / Procedure 节点，类型形状、边标签、多选过滤、按类型分组侧栏
@@ -125,7 +125,7 @@ npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 进入单个 notebook 后：
 
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
-- 中栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表，👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。
+- 中栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表、实时推理轨迹、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。
 - 右栏：Studio，含文章、派生规则候选和知识图谱入口。
 
@@ -143,6 +143,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — KG-native 接地问答（逐句 `[k_i]` 引用）
+- `POST /api/notebooks/{id}/ask/stream` — 推理模式问答进度的 NDJSON stream（先发 `progress` 轨迹事件，最后发完整 `AskResponse`）
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - `GET|POST /api/notebooks/{id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`

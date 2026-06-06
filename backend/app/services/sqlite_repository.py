@@ -3271,20 +3271,21 @@ class SQLiteRepository:
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
-    def ask_reasoning(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+    def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace=None) -> AskResponse:
         """Reasoning-mode ask: agentic plan→retrieve→reflect(自由深挖)→answer。
         检索委托 ReasoningRetriever;答案/证据分档复用 fast 路径口径;响应携带
         reasoning_trace。任何阶段异常不向用户抛出(逐层容错 + 兜底空候选)。"""
         from app.services.reasoning_retrieval import ReasoningRetriever
         self.get_notebook(notebook_id)
         question = payload.question.strip()
-        with self._connect() as db:
+        with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
 
         try:
-            result = ReasoningRetriever(self, self.settings).run(notebook_id, question, history)
+            result = ReasoningRetriever(self, self.settings).run(
+                notebook_id, question, history, on_step=on_trace)
             top_hits, elements, trace = result.top_hits, result.elements, result.trace
         except Exception:
             top_hits, elements, trace = [], [], []

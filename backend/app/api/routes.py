@@ -1,8 +1,12 @@
+import json
+import queue
+import threading
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.core.config import get_settings
 from app.models.schemas import (
@@ -369,6 +373,54 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         return repository().ask(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+def _ndjson_line(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+@router.post("/notebooks/{notebook_id}/ask/stream")
+def ask_stream(notebook_id: str, payload: AskRequest) -> StreamingResponse:
+    repo = repository()
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+    def stream_events():
+        events: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        events.put({
+            "event": "progress",
+            "step": {
+                "step_type": "start",
+                "summary": "启动推理 agent",
+                "detail": {"mode": getattr(payload, "mode", "fast")},
+            },
+        })
+
+        def on_trace(step) -> None:
+            events.put({"event": "progress", "step": step.model_dump()})
+
+        def worker() -> None:
+            try:
+                if getattr(payload, "mode", "fast") == "reasoning" and hasattr(repo, "ask_reasoning"):
+                    response = repo.ask_reasoning(notebook_id, payload, on_trace=on_trace)
+                else:
+                    response = repo.ask(notebook_id, payload)
+                events.put({"event": "final", "response": response.model_dump()})
+            except Exception as exc:
+                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                events.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            event = events.get()
+            if event is None:
+                break
+            yield _ndjson_line(event)
+
+    return StreamingResponse(stream_events(), media_type="application/x-ndjson")
 
 
 @router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary])

@@ -17,7 +17,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - **KG-native ingestion**: structured Markdown parse → greedy-window KG extraction (Concept / Claim / Formula / Procedure) with concurrent embedding → extraction-first status (`extracted` = KG ready, does not wait for embedding)
 - PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured; pypdf text fallback locally or when MinerU is off
 - Hybrid retrieval: CJK-aware bi-gram keyword + float32 matrix semantic search with per-notebook cache
-- KG-native grounded Q&A: sentence-level `[k_i]` citations, multi-turn conversations, 1-hop KG neighbour expansion
+- KG-native grounded Q&A: sentence-level `[k_i]` citations, multi-turn conversations, 1-hop KG neighbour expansion, and live agent progress for reasoning mode
 - Knowledge governance: browse by type via `/knowledge-types` + `/knowledge?type=...`, status lifecycle, duplicate detection & merge, conflict detection; `deprecated` objects excluded from retrieval and 1-hop expansion
 - Unified KG: cross-document concept clustering (`concept_clusters`), pending-merges review
 - Object-level KG visualization: Concept / Claim / Formula / Procedure nodes with type-specific shapes, edge labels, multi-select filters, and a type-grouped side panel
@@ -133,7 +133,7 @@ The outer page is a notebook collection/library (KG-native pipeline):
 Inside a notebook:
 
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
-- Center column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection).
+- Center column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, live reasoning trace, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection).
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection.
 - Right column: Studio with articles, derived-rule candidates, and Knowledge Graph entry.
 
@@ -151,6 +151,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — KG-native grounded Q&A with `[k_i]` citations
+- `POST /api/notebooks/{id}/ask/stream` — NDJSON stream for reasoning-mode Ask progress (`progress` trace events, then final `AskResponse`)
 - `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - `GET|POST /api/notebooks/{id}/articles`, `DELETE /api/articles/{id}`, `POST /api/articles/{id}/research`
