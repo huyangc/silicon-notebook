@@ -95,3 +95,26 @@ def test_retrieve_scored_filters_types(rrepo):
     nb = _seed_two_nodes(rrepo)
     hits = rrepo._retrieve_scored(nb.id, "布局布线", types=["procedure"])
     assert all(h.object_type == "procedure" for h in hits)
+
+
+def test_retrieve_neighbors_follows_edges(rrepo):
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    neigh = rrepo._retrieve_neighbors(nb.id, claim.object_id)
+    assert any(n.object_type == "procedure" for n in neigh)
+    # 邻居 relevance/score 为占位 0,最终由 run() 用原问题统一重打分(见 Task 8)
+    assert all(n.relevance == 0.0 and n.score == 0.0 for n in neigh)
+
+
+def test_retrieve_neighbors_edge_type_filter(rrepo):
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    assert rrepo._retrieve_neighbors(nb.id, claim.object_id, edge_type="nonexistent") == []
+
+
+def test_retrieve_elements_degrades_gracefully(rrepo):
+    nb = _seed_two_nodes(rrepo)
+    # 无 source_elements 时返回空列表,不报错
+    assert rrepo._retrieve_elements(nb.id, "任意查询") == []

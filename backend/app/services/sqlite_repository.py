@@ -91,12 +91,14 @@ from app.services.prompts import (
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedKnowledge,
+    RetrievedElement,
     W_KEYWORD,
     W_SEMANTIC,
     _payload_text,
     cosine,
     keyword_score,
     score_knowledge,
+    score_elements,
     type_weight,
     is_process_query,
     ensure_procedure_quota,
@@ -2846,6 +2848,52 @@ class SQLiteRepository:
             ))
         scored.sort(key=lambda it: it.score, reverse=True)
         return scored
+
+    def _retrieve_neighbors(self, notebook_id: str, object_id: str,
+                            edge_type: Optional[str] = None,
+                            direction: str = "both") -> List[RetrievedKnowledge]:
+        """1-hop graph neighbours of `object_id` as RetrievedKnowledge with
+        placeholder relevance=0 (final relevance unified by run() via the
+        original question). Honours edge_type filter; direction out=object as
+        source, in=as target, both=either."""
+        neighbour_ids: set = set()
+        for rel in self.relations_for_notebook(notebook_id):
+            if edge_type and rel["edge_type"] != edge_type:
+                continue
+            src, tgt = rel["source_object_id"], rel["target_object_id"]
+            if object_id == src and direction in ("out", "both"):
+                neighbour_ids.add(tgt)
+            elif object_id == tgt and direction in ("in", "both"):
+                neighbour_ids.add(src)
+        if not neighbour_ids:
+            return []
+        with self._connect() as db:
+            placeholders = ",".join("?" for _ in neighbour_ids)
+            status_ph = ",".join("?" for _ in USABLE_STATUSES)
+            rows = db.execute(
+                f"SELECT * FROM knowledge_objects WHERE id IN ({placeholders}) "
+                f"AND status IN ({status_ph})",
+                [*neighbour_ids, *USABLE_STATUSES],
+            ).fetchall()
+        out: List[RetrievedKnowledge] = []
+        for row in rows:
+            keys = row.keys()
+            out.append(RetrievedKnowledge(
+                object_id=row["id"], object_type=row["object_type"],
+                payload=json.loads(row["payload"] or "{}"),
+                evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+                score=0.0, relevance=0.0, status=row["status"], owner=row["owner"],
+                last_reviewed=row["last_reviewed"] if "last_reviewed" in keys else "",
+            ))
+        return out
+
+    def _retrieve_elements(self, notebook_id: str, query: str,
+                           limit: int = 8) -> List[RetrievedElement]:
+        """Keyword+semantic search over raw source_elements (fallback layer 2)."""
+        query_vector = self._embed_query(query)
+        with self._connect() as db:
+            elements = self._gather_elements(db, notebook_id, with_vectors=True)
+        return score_elements(query, elements, query_vector, limit=limit)
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
