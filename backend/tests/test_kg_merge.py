@@ -99,3 +99,32 @@ def test_discriminative_conflict_keeps_subtypes_and_aliases():
     assert not _discriminative_conflict("current mirror", "cascode current mirror")
     assert not _discriminative_conflict("VCO", "voltage controlled oscillator")
     assert not _discriminative_conflict("low pass filter", "low pass filter")
+
+
+def test_ann_candidates_recall_vs_bruteforce():
+    import numpy as np
+    from app.services.kg_merge import _ann_candidates
+    rng = np.random.default_rng(0)
+    seeds = [f"s{i}" for i in range(200)]
+    reps = {s: rng.standard_normal(32).astype("float32") for s in seeds}
+    got = {(a, b) for a, b, _ in _ann_candidates(seeds, reps, k=5, lo=0.5)}
+    M = np.asarray([reps[s] for s in seeds], dtype="float32")
+    M /= (np.linalg.norm(M, axis=1, keepdims=True) + 1e-8)
+    sims = M @ M.T
+    brute = set()
+    for i in range(len(seeds)):
+        order = np.argsort(-sims[i])
+        cnt = 0
+        for j in order:
+            if j == i:
+                continue
+            if sims[i, j] < 0.5:
+                break
+            a, b = (i, j) if i < j else (j, i)
+            brute.add((seeds[a], seeds[b]))
+            cnt += 1
+            if cnt >= 5:
+                break
+    if brute:
+        recall = len(got & brute) / len(brute)
+        assert recall >= 0.9, recall

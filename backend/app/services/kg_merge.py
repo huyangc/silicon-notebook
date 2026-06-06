@@ -59,6 +59,42 @@ def _discriminative_conflict(name_a: str, name_b: str) -> bool:
     return False
 
 
+def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
+                    k: int = 5, lo: float = 0.82) -> List[tuple]:
+    """hnswlib 余弦 top-k 近邻候选(sim≥lo), 去重无序对。O(N log N)。
+    reps: seed -> 代表向量(未归一化亦可, cosine 空间内部归一)。"""
+    import hnswlib
+    idx_seeds = [s for s in seeds if s in reps]
+    n = len(idx_seeds)
+    if n < 2:
+        return []
+    M = np.asarray([reps[s] for s in idx_seeds], dtype=np.float32)
+    dim = int(M.shape[1])
+    index = hnswlib.Index(space="cosine", dim=dim)
+    index.init_index(max_elements=n, ef_construction=200, M=16, random_seed=42)
+    index.set_num_threads(1)
+    index.add_items(M, np.arange(n))
+    index.set_ef(max(64, k + 32))
+    kk = min(k + 1, n)
+    labels, distances = index.knn_query(M, k=kk)
+    out: List[tuple] = []
+    seen: set = set()
+    for i in range(n):
+        for lab, dist in zip(labels[i], distances[i]):
+            j = int(lab)
+            if j == i:
+                continue
+            sim = 1.0 - float(dist)
+            if sim < lo:
+                continue
+            a, b = (i, j) if i < j else (j, i)
+            if (a, b) in seen:
+                continue
+            seen.add((a, b))
+            out.append((idx_seeds[a], idx_seeds[b], sim))
+    return out
+
+
 class _UF:
     def __init__(self, items): self.p = {x: x for x in items}
     def find(self, x):
