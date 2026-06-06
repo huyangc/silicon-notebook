@@ -394,3 +394,14 @@ class MergeReviewSummary(BaseModel):
     confirmed: int = 0
     rejected: int = 0
     unsure: int = 0
+
+
+class ConceptWhitelistEntry(BaseModel):
+    term: str
+    note: str = ""
+    created_at: str = ""
+
+
+class ConceptWhitelistAdd(BaseModel):
+    term: str
+    note: str = ""

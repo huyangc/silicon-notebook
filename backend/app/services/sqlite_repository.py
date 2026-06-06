@@ -5,7 +5,9 @@ import json
 import re
 import shutil
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -138,6 +140,7 @@ class SQLiteRepository:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
         self._vector_cache = VectorCache()
+        self._write_lock = threading.RLock()
         self._migrate()
         self._seed()
 
@@ -153,7 +156,20 @@ class SQLiteRepository:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(f"PRAGMA busy_timeout = {int(self.settings.db_busy_timeout_ms)}")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA cache_size = -65536")
+        connection.execute("PRAGMA temp_store = MEMORY")
+        connection.execute("PRAGMA mmap_size = 268435456")
         return connection
+
+    @contextmanager
+    def _write(self):
+        """串行化写事务：进程内同一时刻只有一个写者进 SQLite，并发写线程在
+        Python 层排队而非裸抢 SQLite 写锁（后者即 `database is locked` 的根因）。
+        纯读保持用 _connect()，不受影响（WAL 支持并发读）。"""
+        with self._write_lock:
+            with self._connect() as db:
+                yield db
 
     def _migrate(self) -> None:
         with self._connect() as db:
@@ -375,6 +391,11 @@ class SQLiteRepository:
                   cluster_count INTEGER NOT NULL DEFAULT 0,
                   updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS concept_whitelist (
+                  term TEXT PRIMARY KEY,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                );
 
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
@@ -491,6 +512,18 @@ class SQLiteRepository:
                     now,
                 ),
             )
+            from app.services.kg.filters import _norm as _wl_norm
+            builtin_whitelist = [
+                "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",
+                "NMOS", "PMOS", "BiCMOS", "JFET", "op amp", "ADC", "DAC",
+                "CMRR", "PSRR", "ESD", "PVT",
+                "AC", "DC", "IC", "RF", "IF", "LO",
+            ]
+            for term in builtin_whitelist:
+                db.execute(
+                    "INSERT OR IGNORE INTO concept_whitelist (term, note, created_at) VALUES (?, 'builtin', ?)",
+                    (_wl_norm(term), now),
+                )
     def _count(self, db: sqlite3.Connection, table: str, column: str, value: str) -> int:
         row = db.execute(
             f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?",
@@ -614,7 +647,7 @@ class SQLiteRepository:
         purpose = (payload.purpose or "").strip()
         purpose_auto = 0 if purpose else 1
 
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 """
                 INSERT INTO notebooks
@@ -678,7 +711,7 @@ class SQLiteRepository:
             updates.append("updated_at = ?")
             values.append(_now())
             values.append(notebook_id)
-            with self._connect() as db:
+            with self._write() as db:
                 db.execute(
                     f"UPDATE notebooks SET {', '.join(updates)} WHERE id = ?",
                     values,
@@ -687,7 +720,7 @@ class SQLiteRepository:
 
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)
-        with self._connect() as db:
+        with self._write() as db:
             source_rows = db.execute(
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
                 (notebook_id,),
@@ -695,6 +728,22 @@ class SQLiteRepository:
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
         for row in source_rows:
             self._delete_file(row["file_path"])
+
+    def delete_notebook_kg(self, notebook_id: str) -> dict:
+        """Delete all KG artifacts for a notebook (objects, relations, clusters,
+        merge candidates, embeddings, extraction runs, unified state) while KEEPING
+        sources and source_elements so it can be re-extracted from already-parsed
+        elements. Returns {table: rows_deleted}."""
+        self.get_notebook(notebook_id)
+        counts: dict = {}
+        with self._write() as db:
+            for table in ("knowledge_objects", "knowledge_relations", "concept_clusters",
+                          "concept_merge_candidates", "knowledge_embeddings",
+                          "extraction_runs", "unified_kg_state"):
+                cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
+                counts[table] = cur.rowcount
+        self._invalidate_unified_cache(notebook_id)
+        return counts
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         self.get_notebook(notebook_id)
@@ -721,7 +770,7 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         source_ids: List[str] = []
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             for file in payload.files:
                 source_id = f"src-{uuid4().hex[:10]}"
                 db.execute(
@@ -773,7 +822,7 @@ class SQLiteRepository:
             stored_path = source_dir / f"{source_id}_{file_name}"
             stored_path.write_bytes(file.content)
             now = _now()
-            with self._connect() as db:
+            with self._write() as db:
                 db.execute(
                     """
                     INSERT INTO sources
@@ -818,7 +867,7 @@ class SQLiteRepository:
         if summary is not None:
             fields.insert(2, "summary = ?")
             params.insert(2, summary)
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 f"UPDATE sources SET {', '.join(fields)} WHERE id = ?",
                 (*params, source_id),
@@ -886,7 +935,7 @@ class SQLiteRepository:
                 mineru_error=mineru_error[:500],
             )
             summary = self._summarize_source(source.title, elements)
-            with self._connect() as db:
+            with self._write() as db:
                 self._clear_source_extraction_state(
                     db,
                     source_id,
@@ -1064,7 +1113,7 @@ class SQLiteRepository:
         if need_name and not name_val:
             name_val = (titles[0] or "").strip()[:40]
 
-        with self._connect() as db:
+        with self._write() as db:
             if need_name and name_val:
                 # Optimistic guard: only overwrite if the name is still the
                 # placeholder we read (no clobber of a concurrent rename).
@@ -1101,7 +1150,7 @@ class SQLiteRepository:
     def delete_source(self, source_id: str) -> None:
         source = self.get_source(source_id)
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             article_rows = db.execute(
                 "SELECT id FROM articles WHERE source_id = ?",
                 (source_id,),
@@ -1132,6 +1181,13 @@ class SQLiteRepository:
         self._invalidate_unified_cache(source.notebook_id)
         self._mark_unified_kg_dirty(source.notebook_id)
 
+    def extract_source(self, source_id: str) -> None:
+        """Public entry to (re-)extract a single source's KG in place. Delegates to
+        _run_extraction, which deletes the source's prior KG objects/relations/
+        embeddings and re-runs extraction (idempotent per source). Used by
+        reextract_notebook and maintenance scripts."""
+        self._run_extraction(source_id)
+
     def _run_extraction(self, source_id: str) -> None:
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)
@@ -1139,7 +1195,7 @@ class SQLiteRepository:
         run_id = f"run-{uuid4().hex[:10]}"
         doc_type_id = _normalize_doc_type(getattr(source, "doc_type", "") or "") or "academic_paper"
         kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type_id, "academic")
-        with self._connect() as db:
+        with self._write() as db:
             self._clear_source_extraction_state(db, source_id, source.notebook_id, clear_embeddings=False)
             self._delete_relations_for_source(db, source_id)
             db.execute(
@@ -1155,7 +1211,7 @@ class SQLiteRepository:
                 (run_id, source.notebook_id, source_id, now, now))
         try:
             if not getattr(self.llm_client, "configured", False):
-                with self._connect() as db:
+                with self._write() as db:
                     db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
                 return
             raw_text = self._source_raw_text(source, elements)
@@ -1164,10 +1220,12 @@ class SQLiteRepository:
                 self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
                 override=self.settings.kg_window_target_chars,
             )
+            whitelist = self.concept_whitelist_terms()
             graph = kg_ingest.extract_graph(
                 self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
                 n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
+                whitelist=whitelist,
             )
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
@@ -1179,11 +1237,13 @@ class SQLiteRepository:
             objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
             n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
             fw, tw = graph.failed_windows, graph.total_windows
-            with self._connect() as db:
+            with self._write() as db:
                 db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
-                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} windows_failed={fw}/{tw}", _now(), run_id))
+                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} "
+                            f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
+                            f"concepts_dropped={graph.concepts_dropped}", _now(), run_id))
         except Exception as exc:
-            with self._connect() as db:
+            with self._write() as db:
                 db.execute("UPDATE extraction_runs SET status='failed', error_message=?, updated_at=? WHERE id=?",
                            (str(exc), _now(), run_id))
             raise
@@ -1224,7 +1284,7 @@ class SQLiteRepository:
             except Exception:  # noqa: BLE001 — warm-up only
                 pass
 
-        def _embed_and_store(els: list) -> int:
+        def _embed_only(els: list) -> list:
             texts = [el.text[:trunc] for el in els]
             try:
                 vectors = self.embedder.embed_texts(texts)
@@ -1233,27 +1293,24 @@ class SQLiteRepository:
                     "embed batch failed (%d elements) for source %s: %s",
                     len(els), source_id, exc,
                 )
-                return 0
-            now = _now()
-            with self._connect() as db:  # own connection per thread (WAL + busy_timeout)
-                for el, vector in zip(els, vectors):
-                    db.execute(
-                        """
-                        INSERT OR REPLACE INTO element_embeddings
-                        (element_id, source_id, notebook_id, vector, created_at)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (el.id, source_id, notebook_id, json.dumps(vector), now),
-                    )
-            return len(els)
+                return []
+            return [(el.id, vector) for el, vector in zip(els, vectors)]
 
         workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        stored = 0
+        rows = []
         with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-el") as pool:
-            for n in pool.map(_embed_and_store, batches):
-                stored += n
+            for part in pool.map(_embed_only, batches):
+                rows.extend(part)
+        now = _now()
+        if rows:
+            with self._write() as db:
+                db.executemany(
+                    "INSERT OR REPLACE INTO element_embeddings "
+                    "(element_id, source_id, notebook_id, vector, created_at) VALUES (?,?,?,?,?)",
+                    [(eid, source_id, notebook_id, json.dumps(vec), now) for eid, vec in rows],
+                )
         self.event_log.logger.info(
-            "embedded %s/%s elements for source %s", stored, len(pending), source_id
+            "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
         )
 
     def _embed_knowledge(
@@ -1273,7 +1330,7 @@ class SQLiteRepository:
             vector = self.embedder.embed_query(text[:2000])
         except Exception:
             return
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 """
                 INSERT OR REPLACE INTO knowledge_embeddings
@@ -1284,11 +1341,8 @@ class SQLiteRepository:
             )
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
-        """Concurrently embed object payload text into knowledge_embeddings
-        (best-effort, per-batch isolated). Mirrors _embed_source: batches of
-        embed_batch_size run on an embed_concurrency thread pool, each batch
-        persists with its own connection (WAL+busy_timeout). A failed batch is
-        logged and skipped without losing the others."""
+        """并发 COMPUTE payload 向量, 再用一次写事务持久化到 knowledge_embeddings。
+        每批计算失败照旧 log + 跳过(best-effort)。"""
         if not self.settings.embedder_configured:
             return
         pending = []
@@ -1309,7 +1363,7 @@ class SQLiteRepository:
             except Exception:  # noqa: BLE001 — warm-up only
                 pass
 
-        def _embed_and_store(batch) -> None:
+        def _embed_only(batch) -> list:
             texts = [t for _, t in batch]
             try:
                 vectors = self.embedder.embed_texts(texts)
@@ -1318,17 +1372,22 @@ class SQLiteRepository:
                     "embed kg-objects batch failed (%d) for %s: %s",
                     len(batch), notebook_id, exc,
                 )
-                return
-            now = _now()
-            with self._connect() as db:
-                for (oid, _), vec in zip(batch, vectors):
-                    db.execute(
-                        "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                        (oid, notebook_id, json.dumps(vec), now))
+                return []
+            return [(oid, vec) for (oid, _), vec in zip(batch, vectors)]
 
         workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        rows = []
         with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-kg") as pool:
-            list(pool.map(_embed_and_store, batches))
+            for part in pool.map(_embed_only, batches):
+                rows.extend(part)
+        if not rows:
+            return
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+                [(oid, notebook_id, json.dumps(vec), now) for oid, vec in rows],
+            )
 
     def _knowledge_vectors(
         self,
@@ -1523,7 +1582,7 @@ class SQLiteRepository:
         if not object_type:
             raise ValueError("object_type is required")
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             exists = db.execute(
                 "SELECT 1 FROM object_schemas WHERE object_type = ?", (object_type,)
             ).fetchone()
@@ -1582,7 +1641,7 @@ class SQLiteRepository:
                 raise ValueError(f"invalid schema status: {status}")
             updates.append("status = ?")
             values.append(status)
-        with self._connect() as db:
+        with self._write() as db:
             row = db.execute(
                 "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
             ).fetchone()
@@ -1602,7 +1661,7 @@ class SQLiteRepository:
         return self._object_schema_from_row(row)
 
     def delete_object_schema(self, object_type: str) -> None:
-        with self._connect() as db:
+        with self._write() as db:
             row = db.execute(
                 "SELECT source FROM object_schemas WHERE object_type = ?",
                 (object_type,),
@@ -1652,7 +1711,7 @@ class SQLiteRepository:
             except Exception:
                 data = {}
             now = _now()
-            with self._connect() as db:
+            with self._write() as db:
                 for item in data.get("new_types") or []:
                     if not isinstance(item, dict):
                         continue
@@ -1718,7 +1777,7 @@ class SQLiteRepository:
     def add_relations(self, notebook_id: str, source_id: str,
                       relations: List[dict]) -> int:
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             for rel in relations:
                 db.execute(
                     """
@@ -1739,19 +1798,18 @@ class SQLiteRepository:
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
-        """Insert KG nodes as approved knowledge_objects and edges as
-        knowledge_relations (remapping local ids to DB ids). Embeds node payload.
+        """Insert KG nodes/edges (remapping local ids to DB ids), embeds payload.
 
-        Objects and relations are written atomically in a single transaction so
-        a mid-write failure cannot leave orphan objects with no edges.
-        Relations whose source_local_id or target_local_id is not present in
-        the given objects are silently skipped.
-        """
+        分块写入(每块 CHUNK 行, 各自一个 _write() 事务), 避免单源 2.6万行塞一个
+        事务长时间持锁。本地 id->DB id 在分块前一次性预分配, 跨块关系仍能正确
+        remap。代价: 失整源原子性(崩溃可能留半本); _run_extraction 逐源自清 +
+        可重跑兜底。Relations 引用不到的 local id 静默跳过。"""
+        CHUNK = 1000
         now = _now()
         local_to_id: Dict[str, str] = {}
-        # Pre-assign DB ids and remap relations before opening the connection.
         for obj in objects:
             local_to_id[obj["local_id"]] = f"ko-{uuid4().hex[:10]}"
+            obj["_oid"] = local_to_id[obj["local_id"]]   # _embed_objects_batch 依赖
         db_relations = []
         for rel in relations:
             s = local_to_id.get(rel["source_local_id"])
@@ -1759,40 +1817,33 @@ class SQLiteRepository:
             if not s or not t:
                 continue
             db_relations.append({
-                "source_object_id": s,
-                "target_object_id": t,
-                "edge_type": rel["edge_type"],
-                "evidence": rel.get("evidence", []),
+                "source_object_id": s, "target_object_id": t,
+                "edge_type": rel["edge_type"], "evidence": rel.get("evidence", []),
             })
-        with self._connect() as db:
-            for obj in objects:
-                oid = local_to_id[obj["local_id"]]
-                obj["_oid"] = oid
-                db.execute(
-                    """INSERT INTO knowledge_objects
-                       (id, notebook_id, object_type, status, owner, payload, evidence,
-                        source_candidate_id, source_id, created_at, updated_at)
-                       VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?, ?)""",
-                    (oid, notebook_id, obj["object_type"],
-                     json.dumps(obj["payload"], ensure_ascii=False),
-                     json.dumps(obj["evidence"], ensure_ascii=False),
-                     source_id or '', now, now),
+
+        for i in range(0, len(objects), CHUNK):
+            chunk = objects[i:i + CHUNK]
+            with self._write() as db:
+                db.executemany(
+                    "INSERT INTO knowledge_objects "
+                    "(id, notebook_id, object_type, status, owner, payload, evidence, "
+                    "source_candidate_id, source_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?, ?)",
+                    [(o["_oid"], notebook_id, o["object_type"],
+                      json.dumps(o["payload"], ensure_ascii=False),
+                      json.dumps(o["evidence"], ensure_ascii=False),
+                      source_id or '', now, now) for o in chunk],
                 )
-            for rel in db_relations:
-                db.execute(
-                    """
-                    INSERT INTO knowledge_relations
-                    (id, notebook_id, source_id, source_object_id, target_object_id,
-                     edge_type, evidence, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
-                        rel["source_object_id"], rel["target_object_id"],
-                        rel["edge_type"],
-                        json.dumps(rel["evidence"], ensure_ascii=False),
-                        now,
-                    ),
+        for i in range(0, len(db_relations), CHUNK):
+            chunk = db_relations[i:i + CHUNK]
+            with self._write() as db:
+                db.executemany(
+                    "INSERT INTO knowledge_relations "
+                    "(id, notebook_id, source_id, source_object_id, target_object_id, "
+                    "edge_type, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [(f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
+                      r["source_object_id"], r["target_object_id"], r["edge_type"],
+                      json.dumps(r["evidence"], ensure_ascii=False), now) for r in chunk],
                 )
         self._embed_objects_batch(notebook_id, objects)
         self._invalidate_unified_cache(notebook_id)
@@ -1822,7 +1873,7 @@ class SQLiteRepository:
 
     def write_clusters(self, notebook_id: str, rows: List[dict]) -> None:
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             db.execute("DELETE FROM concept_clusters WHERE notebook_id=?", (notebook_id,))
             for r in rows:
                 db.execute(
@@ -1836,7 +1887,7 @@ class SQLiteRepository:
 
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) VALUES (?,?,?,?,?, 'pending', ?, ?)",
                 (f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now))
@@ -1850,7 +1901,7 @@ class SQLiteRepository:
     def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
         if status not in ("confirmed", "rejected"):
             raise ValueError(f"invalid merge status: {status!r}")
-        with self._connect() as db:
+        with self._write() as db:
             db.execute("UPDATE concept_merge_candidates SET status=?, updated_at=? WHERE id=? AND notebook_id=?", (status, _now(), candidate_id, notebook_id))
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
@@ -1872,7 +1923,7 @@ class SQLiteRepository:
         decisions = review_merge_candidates(self.llm_client, pending)
         confirmed = rejected = unsure = 0
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             for decision in decisions:
                 candidate_id = decision["candidate_id"]
                 confidence = decision["confidence"]
@@ -1903,6 +1954,33 @@ class SQLiteRepository:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
         return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
 
+    def concept_whitelist_terms(self) -> set:
+        with self._connect() as db:
+            return {r["term"] for r in db.execute("SELECT term FROM concept_whitelist").fetchall()}
+
+    def concept_whitelist_list(self) -> List[dict]:
+        with self._connect() as db:
+            rows = db.execute("SELECT term, note, created_at FROM concept_whitelist ORDER BY term").fetchall()
+        return [{"term": r["term"], "note": r["note"], "created_at": r["created_at"]} for r in rows]
+
+    def concept_whitelist_add(self, term: str, note: str = "") -> dict:
+        from app.services.kg.filters import _norm
+        t = _norm(term)
+        if not t:
+            raise ValueError("empty term")
+        now = _now()
+        with self._write() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO concept_whitelist (term, note, created_at) VALUES (?, ?, ?)",
+                (t, note, now),
+            )
+        return {"term": t, "note": note, "created_at": now}
+
+    def concept_whitelist_remove(self, term: str) -> None:
+        from app.services.kg.filters import _norm
+        with self._write() as db:
+            db.execute("DELETE FROM concept_whitelist WHERE term = ?", (_norm(term),))
+
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
@@ -1910,7 +1988,7 @@ class SQLiteRepository:
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 """
                 INSERT INTO unified_kg_state (notebook_id, dirty, updated_at)
@@ -1991,7 +2069,7 @@ class SQLiteRepository:
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,))
             db.executemany(
                 "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
@@ -1999,7 +2077,7 @@ class SQLiteRepository:
                 [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in res["pending"]])
         self._invalidate_unified_cache(notebook_id)
         cluster_count = len(set(res["cluster_map"].values()))
-        with self._connect() as db:
+        with self._write() as db:
             object_count = db.execute(
                 "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
                 (notebook_id,),
@@ -2221,7 +2299,7 @@ class SQLiteRepository:
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
         oid = f"ko-{uuid4().hex[:10]}"
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 """INSERT INTO knowledge_objects
                    (id, notebook_id, object_type, status, owner, payload, evidence,
@@ -2272,7 +2350,7 @@ class SQLiteRepository:
     def approve_derived_rule(self, notebook_id: str, candidate_id: str) -> RuleCard:
         """Promote a derived rule candidate into the formal rule library (§7.5)."""
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             row = db.execute(
                 "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
                 (candidate_id, notebook_id),
@@ -2332,7 +2410,7 @@ class SQLiteRepository:
         return self._rule_card_from_row(ko_row)
 
     def reject_derived_rule(self, notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
-        with self._connect() as db:
+        with self._write() as db:
             row = db.execute(
                 "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
                 (candidate_id, notebook_id),
@@ -2354,7 +2432,7 @@ class SQLiteRepository:
         self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
     ) -> RuleCard:
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             row = db.execute(
                 "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
                 (knowledge_id, notebook_id),
@@ -2497,7 +2575,7 @@ class SQLiteRepository:
         if into_id == source_id:
             raise ValueError("cannot merge a knowledge object into itself")
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             src = db.execute(
                 "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
                 (source_id, notebook_id),
@@ -2764,7 +2842,7 @@ class SQLiteRepository:
 
         # Resolve (create-or-append) the conversation and load prior turns FIRST,
         # so an elliptical follow-up can be rewritten against it before retrieval.
-        with self._connect() as db:
+        with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question
             )
@@ -3094,7 +3172,7 @@ class SQLiteRepository:
         now = _now()
         payload = response.model_dump()
         payload["answer_id"] = answer_id
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -3222,7 +3300,7 @@ class SQLiteRepository:
         ]
 
     def rename_conversation(self, conversation_id: str, title: str) -> None:
-        with self._connect() as db:
+        with self._write() as db:
             cur = db.execute(
                 "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
                 (title, _now(), conversation_id),
@@ -3231,7 +3309,7 @@ class SQLiteRepository:
                 raise KeyError(conversation_id)
 
     def delete_conversation(self, conversation_id: str) -> None:
-        with self._connect() as db:
+        with self._write() as db:
             cur = db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
             if cur.rowcount == 0:
                 raise KeyError(conversation_id)
@@ -3242,7 +3320,7 @@ class SQLiteRepository:
             raise ValueError("rating must be useful or not_useful")
         now = _now()
         feedback_id = f"fb-{uuid4().hex[:10]}"
-        with self._connect() as db:
+        with self._write() as db:
             answer = db.execute(
                 "SELECT notebook_id FROM answers WHERE id = ?",
                 (answer_id,),
@@ -3351,7 +3429,7 @@ class SQLiteRepository:
                 ).fetchone()
             if source_row is None:
                 raise ValueError("Article source must belong to the current notebook")
-        with self._connect() as db:
+        with self._write() as db:
             db.execute(
                 """
                 INSERT INTO articles
@@ -3372,7 +3450,7 @@ class SQLiteRepository:
         return self.list_articles(notebook_id)[-1]
 
     def delete_article(self, article_id: str) -> None:
-        with self._connect() as db:
+        with self._write() as db:
             row = db.execute("SELECT id FROM articles WHERE id = ?", (article_id,)).fetchone()
             if row is None:
                 raise KeyError(article_id)
@@ -3668,7 +3746,7 @@ class SQLiteRepository:
         self, article_id: str, notebook_id: str, brief_data: dict
     ) -> None:
         now = _now()
-        with self._connect() as db:
+        with self._write() as db:
             db.execute("DELETE FROM article_claims WHERE article_id = ?", (article_id,))
             db.execute("DELETE FROM derived_rule_candidates WHERE article_id = ?", (article_id,))
             for index, claim in enumerate(brief_data["claims"], start=1):

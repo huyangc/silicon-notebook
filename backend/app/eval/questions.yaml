@@ -1,0 +1,32 @@
+# 分层问答评测集。level: L1 直接 / L2 单跳 / L3 多跳综合 / L4 应拒答。
+# expected_behavior: grounded | use_neighbor | synthesize | refuse_or_infer
+- {id: q01, level: L1, question: "什么是 cascode connection?它的主要作用是什么?", expected_points: ["级联/串叠晶体管", "提高输出电阻"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q02, level: L1, question: "MOSFET 的 square-law characteristic 指什么?", expected_points: ["漏电流与过驱动电压平方成正比"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q03, level: L1, question: "什么是 current mirror?", expected_points: ["复制/镜像电流"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q04, level: L1, question: "bandgap reference 的目标是什么?", expected_points: ["与温度无关的基准电压"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q05, level: L1, question: "flicker noise(1/f noise)是什么?", expected_points: ["低频噪声", "与频率成反比"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q06, level: L1, question: "什么是 switched-capacitor circuit?", expected_points: ["开关电容", "等效电阻"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q07, level: L1, question: "differential amplifier 的基本概念是什么?", expected_points: ["放大差分输入", "抑制共模"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q08, level: L1, question: "MOS 晶体管进入 saturation 的条件是什么?", expected_points: ["v_DS >= v_GS - v_TH"], expected_evidence_level: grounded, expected_behavior: grounded}
+- {id: q09, level: L2, question: "current mirror 有哪些典型实现/变体?", expected_points: ["简单镜像", "cascode/regulated/Wilson 等变体"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q10, level: L2, question: "cascode 技术能把输出电阻提高多少(给出量级/因子)?", expected_points: ["约 g_m·r_ds 倍"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q11, level: L2, question: "哪些电路用到了 cascode connection?", expected_points: ["cascode 电流源/镜像", "folded-cascode 运放"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q12, level: L2, question: "与 bandgap reference 相关的关键公式有哪些?", expected_points: ["PTAT/CTAT 组合", "温度系数抵消"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q13, level: L2, question: "regulated cascode 的输出电阻能达到什么量级?", expected_points: ["g_m^2·r^3 量级"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q14, level: L2, question: "CMFB(共模反馈)用在什么放大器里?", expected_points: ["全差分运放", "folded-cascode"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q15, level: L2, question: "影响 current mirror 精度(ratio error)的因素有哪些?", expected_points: ["输出/输入电压差", "失配", "沟道长度调制"], expected_evidence_level: grounded, expected_behavior: use_neighbor}
+- {id: q16, level: L3, question: "为什么 cascode 既能提高输出阻抗、又会限制输出摆幅?", expected_points: ["输出电阻 ↑ 约 g_m·r_ds", "堆叠增加阈值+过驱动电压需求,吃掉 headroom"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q17, level: L3, question: "为什么 regulated cascode 比 standard cascode 输出电阻更高,代价是什么?", expected_points: ["增益级提升 g_m·r 因子", "更复杂/更多电压裕度或稳定性代价"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q18, level: L3, question: "高增益与输出摆幅在 cascode 结构里如何权衡?", expected_points: ["级数↑增益↑", "可用摆幅↓"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q19, level: L3, question: "mismatch 如何影响 current mirror 与 differential pair,机理上有何共性?", expected_points: ["阈值/尺寸失配", "电流不对称/失调电压", "共性=器件参数失配"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q20, level: L3, question: "为什么 CMOS 适合做模拟/混合信号 VLSI,但模拟设计仍需 hands-on?", expected_points: ["密度/功耗优势", "good mix of components", "模拟仍需经验/手工设计"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q21, level: L3, question: "增大 cascode 级数对增益和电压裕度分别有什么影响?", expected_points: ["增益随级数提升", "每级多吃一个阈值+过驱动"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q22, level: L3, question: "反馈如何同时影响放大器的带宽与稳定性?", expected_points: ["带宽扩展", "相位裕度/稳定性约束"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q23, level: L3, question: "从器件 square-law 出发,如何解释 current mirror 的电流复制原理?", expected_points: ["相同 v_GS", "相同尺寸 -> 相同电流"], expected_evidence_level: grounded, expected_behavior: synthesize}
+- {id: q24, level: L4, question: "用 3nm FinFET 工艺实现这个 bandgap,失调会有什么具体变化?", expected_points: ["书未覆盖先进工艺节点"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}
+- {id: q25, level: L4, question: "在 Innovus 里用什么命令做 place_opt_design?", expected_points: ["EDA 工具命令,本 notebook 无"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}
+- {id: q26, level: L4, question: "这个 op amp 在 -40C 到 125C 车规下的具体失调电压是多少 mV?", expected_points: ["无具体数值"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}
+- {id: q27, level: L4, question: "台积电 N5 工艺的具体 SPICE 模型参数是多少?", expected_points: ["无厂商工艺参数"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}
+- {id: q28, level: L4, question: "把这套电路改成 GaN 工艺需要改哪些版图规则?", expected_points: ["跨工艺,书未覆盖"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}
+- {id: q29, level: L4, question: "这本书第 20 章讲了什么?", expected_points: ["超出实际章节,不应臆造"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}
+- {id: q30, level: L4, question: "ChatGPT 的注意力机制和这里的 feedback 有关系吗?", expected_points: ["完全跨域,不应强行关联"], expected_evidence_level: inferred, expected_behavior: refuse_or_infer}

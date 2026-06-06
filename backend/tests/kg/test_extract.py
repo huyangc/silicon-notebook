@@ -101,3 +101,11 @@ def test_extract_window_parses_procedure_steps():
     assert [s.name for s in proc.steps] == ["import design", "floorplan"]
     assert proc.steps[0].evidence[0].quote == ELEMENTS[0].text
     assert proc.steps[1].evidence[0].quote == ELEMENTS[1].text
+
+
+def test_prompt_forbids_symbol_and_label_concepts():
+    from app.services.kg.extract import _prompt
+    p = _prompt("[0] sample", "1 > intro", "textbook")
+    assert "Do NOT emit Concepts" in p
+    assert "symbol" in p.lower()
+    assert "figure" in p.lower()

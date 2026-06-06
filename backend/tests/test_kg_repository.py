@@ -354,3 +354,60 @@ def test_only_kg_profiles_and_schemas():
     for legacy in ("rule", "method", "risk", "case", "checklist", "glossary",
                    "finding", "principle", "example"):
         assert legacy not in OBJECT_SCHEMAS
+
+
+def test_builtin_whitelist_seeded(repo):
+    terms = repo.concept_whitelist_terms()
+    assert "vco" in terms
+    assert "mosfet" in terms
+    assert "ic" in terms  # 2-char EE acronym protected from the too_short rule
+
+
+def test_whitelist_add_list_remove(repo):
+    repo.concept_whitelist_add("Gm Cell", note="custom")
+    assert "gm cell" in repo.concept_whitelist_terms()
+    listed = repo.concept_whitelist_list()
+    assert any(e["term"] == "gm cell" and e["note"] == "custom" for e in listed)
+    repo.concept_whitelist_remove("gm cell")
+    assert "gm cell" not in repo.concept_whitelist_terms()
+
+
+def test_extract_source_delegates_to_run_extraction(repo, monkeypatch):
+    called = []
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: called.append(sid))
+    repo.extract_source("src-z")
+    assert called == ["src-z"]
+
+
+def test_delete_notebook_kg_clears_kg_but_keeps_elements(repo):
+    from app.services.sqlite_repository import _now
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    now = _now()
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO sources (id, notebook_id, title, source_type, status, parse_status, "
+            "file_name, file_path, file_size, file_hash, summary, doc_type, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-x", nb.id, "t", "markdown", "extracted", "parsed", "f", "", 0, "", "", "", now, now),
+        )
+        db.execute(
+            "INSERT INTO source_elements (id, source_id, element_type, location_label, text, metadata, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("el-x", "src-x", "paragraph", "p1", "hello", "{}", now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects (id, notebook_id, object_type, status, owner, payload, evidence, "
+            "source_candidate_id, source_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("ko-x", nb.id, "concept", "approved", "", "{}", "[]", None, "src-x", now, now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_relations (id, notebook_id, source_id, source_object_id, target_object_id, "
+            "edge_type, evidence, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("rel-x", nb.id, "src-x", "ko-x", "ko-x", "about", "[]", now),
+        )
+    counts = repo.delete_notebook_kg(nb.id)
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchone()["c"] == 0
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)).fetchone()["c"] == 0
+        assert db.execute("SELECT COUNT(*) c FROM source_elements WHERE source_id='src-x'").fetchone()["c"] == 1
+    assert counts["knowledge_objects"] == 1
