@@ -712,6 +712,22 @@ class SQLiteRepository:
         for row in source_rows:
             self._delete_file(row["file_path"])
 
+    def delete_notebook_kg(self, notebook_id: str) -> dict:
+        """Delete all KG artifacts for a notebook (objects, relations, clusters,
+        merge candidates, embeddings, extraction runs, unified state) while KEEPING
+        sources and source_elements so it can be re-extracted from already-parsed
+        elements. Returns {table: rows_deleted}."""
+        self.get_notebook(notebook_id)
+        counts: dict = {}
+        with self._connect() as db:
+            for table in ("knowledge_objects", "knowledge_relations", "concept_clusters",
+                          "concept_merge_candidates", "knowledge_embeddings",
+                          "extraction_runs", "unified_kg_state"):
+                cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
+                counts[table] = cur.rowcount
+        self._invalidate_unified_cache(notebook_id)
+        return counts
+
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         self.get_notebook(notebook_id)
         with self._connect() as db:
