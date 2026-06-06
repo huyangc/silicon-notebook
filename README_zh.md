@@ -301,6 +301,9 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 
 - 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
 - 大文档摄取已加固：贪心窗口化 KG 抽取（成本线性），并发 embedding 逐批落库。极大规模下可再接入 `sqlite-vec`。
+- Ask 不再在请求路径里同步补齐 embedding 或全量扫描 source elements；使用已有的关键词/向量索引，在维护任务运行时仍保持响应；并输出每阶段计时（`ask_stage` 事件）。
+- 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
+- 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - Article Studio 当前基于标题/摘要文本，并在存在关联 source 时使用其元素；一等文章全文上传与更丰富的关系打分是下一步（Tier 3）。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。

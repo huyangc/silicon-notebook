@@ -282,3 +282,5 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 扫描件 OCR、DOCX/PPTX 公式（OMML）解析；MinerU 已覆盖 PDF 的公式/表格/版面（本机 MLX 或 GPU 主机）。
 
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
+
+- 已完成（2026-06-06）：大笔记本 KG 性能与合并治理——Ask 去同步 backfill/全量扫描 + notebook 级索引 + 阶段计时；node_context/concept_detail 收窄查询；unified-KG 改显式 rebuild + dirty status（摄取不再同步重建、打开图谱不自动重建）；跨文档概念合并改有界 top-k 向量候选 + 别名归一化；可选 LLM 概念合并预审。已通过 `scripts/check.sh` 与前端 build。

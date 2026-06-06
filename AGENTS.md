@@ -81,6 +81,7 @@ Inside a notebook:
   - Answers must stay evidence-grounded, render Markdown/code/formula/table content cleanly, use compact numbered citations (`[1]`, `[2]`, ...), expand citation details inside the answer panel (not in an overflowing floating popover), and support lightweight 👍/👎/copy actions. Do not flatten all related knowledge under each answer; route deeper exploration from the citation area into the Knowledge Graph.
   - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
 - Knowledge Graph opens as a full-screen workspace overlay.
+  - On open: fetch the current graph data and `GET /unified-kg/status`; show a refresh button when the graph is dirty. Do not trigger an automatic rebuild on open.
   - Use the object-level unified graph so Concept / Claim / Formula / Procedure nodes can appear together; do not fall back to a concept-only graph when object-level relationships exist.
   - The main canvas should show node names, type-specific node marks, and relationship labels on edges.
   - Provide multi-select type filters for dense graphs. Selecting a node from either the canvas or the overview should focus/highlight that node and update the selected-node relation/source details.
@@ -125,6 +126,9 @@ Confirmed scope:
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
 - KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, `knowledge_embeddings`, `element_embeddings`, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`; plus still-live legacy `article_claims`/`derived_rule_candidates`. Embedding vectors are stored as JSON; at query time `ask()` streams them into per-notebook L2-normalized **float32 numpy matrices** (`vector_index`) cached by `vector_cache` (version-keyed) — similarity is one matmul with bounded memory (no pgvector locally; sqlite-vec is the future scale path).
 - Upload runs `process_source` asynchronously via FastAPI `BackgroundTasks` (status `queued→parsing→parsed→extracting→extracted`). After parsing, **element embedding runs in a background daemon thread concurrently with foreground KG extraction**; `extracted` (UI green) is gated on extraction completion only. SQLite uses WAL + `busy_timeout` so the concurrent writers do not lock. The repository accepts a `scheduler` callback so scripts/tests can run it synchronously.
+- Ask must stay off heavy maintenance work: no synchronous whole-notebook embedding backfill, no synchronous unified-KG rebuild, and no full source-element scan for citation validation.
+- Unified-KG rebuild is explicit/observable. Opening the Knowledge Graph overlay fetches the current graph + `/unified-kg/status` and offers refresh when dirty; it must not block on rebuild.
+- Cross-document concept-merge candidates must be bounded and reviewable. LLM merge review operates on small pending candidate batches, never the entire concept set at once.
 - Re-running parse/extraction for a source invalidates stale source-derived candidates and approved knowledge before writing the new extraction result.
 - Deleting a source uses the same stale source-derived cleanup boundary, removes its local file, and clears any article research artifacts that depended on that source. Deleting an article cascades its claims and derived-rule candidates.
 
