@@ -365,6 +365,29 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
+
+                CREATE TABLE IF NOT EXISTS unified_kg_state (
+                  notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
+                  dirty INTEGER NOT NULL DEFAULT 0,
+                  last_rebuild_at TEXT NOT NULL DEFAULT '',
+                  object_count INTEGER NOT NULL DEFAULT 0,
+                  relation_count INTEGER NOT NULL DEFAULT 0,
+                  cluster_count INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
+                CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_source_elements_source ON source_elements(source_id);
+                CREATE INDEX IF NOT EXISTS idx_source_elements_source_created ON source_elements(source_id, created_at, id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_type_status ON knowledge_objects(notebook_id, object_type, status);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_status ON knowledge_objects(notebook_id, status);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_objects_source ON knowledge_objects(source_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_source ON knowledge_relations(notebook_id, source_object_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_target ON knowledge_relations(notebook_id, target_object_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_source ON knowledge_relations(source_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb ON knowledge_embeddings(notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_element_embeddings_nb ON element_embeddings(notebook_id);
                 """
             )
             # Lightweight column migrations for pre-existing databases.
@@ -401,6 +424,14 @@ class SQLiteRepository:
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
                 db.execute("ALTER TABLE sources ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
+            # LLM review metadata columns for concept_merge_candidates.
+            cm_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_merge_candidates)").fetchall()}
+            if "confidence" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN confidence REAL NOT NULL DEFAULT 0")
+            if "rationale" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''")
+            if "reviewed_by" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -913,9 +944,9 @@ class SQLiteRepository:
             self._run_extraction(source_id)
             stage("extract", "done", t)
             try:
-                self.rebuild_unified_kg(self.get_source(source_id).notebook_id)
+                self._mark_unified_kg_dirty(source.notebook_id)
             except Exception:
-                self.event_log.logger.exception("unified-KG rebuild failed for source %s", source_id)
+                self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             empty_hint = ""
@@ -1099,6 +1130,7 @@ class SQLiteRepository:
             db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         self._delete_file(source.file_path)
         self._invalidate_unified_cache(source.notebook_id)
+        self._mark_unified_kg_dirty(source.notebook_id)
 
     def _run_extraction(self, source_id: str) -> None:
         source = self.get_source(source_id)
@@ -1764,6 +1796,7 @@ class SQLiteRepository:
                 )
         self._embed_objects_batch(notebook_id, objects)
         self._invalidate_unified_cache(notebook_id)
+        self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
@@ -1824,11 +1857,46 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         self.set_merge_decision(notebook_id, candidate_id, "confirmed")
         self._invalidate_unified_cache(notebook_id)
+        self._mark_unified_kg_dirty(notebook_id)
 
     def reject_merge(self, notebook_id: str, candidate_id: str) -> None:
         self.get_notebook(notebook_id)
         self.set_merge_decision(notebook_id, candidate_id, "rejected")
         self._invalidate_unified_cache(notebook_id)
+        self._mark_unified_kg_dirty(notebook_id)
+
+    def review_pending_merges(self, notebook_id: str, limit: int = 50, auto_confirm_threshold: float = 0.95) -> dict:
+        self.get_notebook(notebook_id)
+        pending = self.pending_merges(notebook_id)[: max(1, min(limit, 200))]
+        from app.services.concept_merge_review import review_merge_candidates
+        decisions = review_merge_candidates(self.llm_client, pending)
+        confirmed = rejected = unsure = 0
+        now = _now()
+        with self._connect() as db:
+            for decision in decisions:
+                candidate_id = decision["candidate_id"]
+                confidence = decision["confidence"]
+                status = "pending"
+                if decision["decision"] == "merge" and confidence >= auto_confirm_threshold:
+                    status = "confirmed"
+                    confirmed += 1
+                elif decision["decision"] == "keep_separate" and confidence >= auto_confirm_threshold:
+                    status = "rejected"
+                    rejected += 1
+                else:
+                    unsure += 1
+                db.execute(
+                    """
+                    UPDATE concept_merge_candidates
+                    SET status=?, confidence=?, rationale=?, reviewed_by='llm', updated_at=?
+                    WHERE id=? AND notebook_id=?
+                    """,
+                    (status, confidence, decision["rationale"], now, candidate_id, notebook_id),
+                )
+        if confirmed or rejected:
+            self._mark_unified_kg_dirty(notebook_id)
+            self._invalidate_unified_cache(notebook_id)
+        return {"reviewed": len(decisions), "confirmed": confirmed, "rejected": rejected, "unsure": unsure}
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self._connect() as db:
@@ -1839,6 +1907,36 @@ class SQLiteRepository:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
         self._vector_cache.invalidate(f"{notebook_id}:knowledge")
+
+    def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
+        now = _now()
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO unified_kg_state (notebook_id, dirty, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(notebook_id) DO UPDATE SET dirty=1, updated_at=excluded.updated_at
+                """,
+                (notebook_id, now),
+            )
+
+    def unified_kg_status(self, notebook_id: str) -> dict:
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM unified_kg_state WHERE notebook_id=?", (notebook_id,)).fetchone()
+            clusters = db.execute(
+                "SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()["c"]
+        if row is None:
+            return {"dirty": False, "last_rebuild_at": "", "objects": 0, "relations": 0, "clusters": int(clusters)}
+        return {
+            "dirty": bool(row["dirty"]),
+            "last_rebuild_at": row["last_rebuild_at"],
+            "objects": int(row["object_count"]),
+            "relations": int(row["relation_count"]),
+            "clusters": int(row["cluster_count"] or clusters),
+        }
 
     def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
         self.get_notebook(notebook_id)
@@ -1900,58 +1998,152 @@ class SQLiteRepository:
                 "VALUES (?,?,?,?,?, 'pending', ?, ?)",
                 [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in res["pending"]])
         self._invalidate_unified_cache(notebook_id)
-        return len(set(res["cluster_map"].values()))
+        cluster_count = len(set(res["cluster_map"].values()))
+        with self._connect() as db:
+            object_count = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,),
+            ).fetchone()["c"]
+            relation_count = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()["c"]
+            db.execute(
+                """
+                INSERT INTO unified_kg_state
+                (notebook_id, dirty, last_rebuild_at, object_count, relation_count, cluster_count, updated_at)
+                VALUES (?, 0, ?, ?, ?, ?, ?)
+                ON CONFLICT(notebook_id) DO UPDATE SET
+                  dirty=0,
+                  last_rebuild_at=excluded.last_rebuild_at,
+                  object_count=excluded.object_count,
+                  relation_count=excluded.relation_count,
+                  cluster_count=excluded.cluster_count,
+                  updated_at=excluded.updated_at
+                """,
+                (notebook_id, now, object_count, relation_count, cluster_count, now),
+            )
+        return cluster_count
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
-        cmap = self.cluster_map(notebook_id)
-        members = [oid for oid, cid in cmap.items() if cid == canonical_id]
-        mset = set(members)
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,)).fetchall()
-            nrow = db.execute(
+            # Get cluster members and canonical name in one query
+            cluster_rows = db.execute(
+                "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
+                "FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
+                (notebook_id, canonical_id),
+            ).fetchall()
+            # canonical_name comes from the cluster table (same for all rows)
+            name_row = db.execute(
                 "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
-                (notebook_id, canonical_id)).fetchone()
-        name = nrow["canonical_name"] if nrow else ""
-        by_id = {r["id"]: {"id": r["id"], "object_type": r["object_type"],
-                           "payload": json.loads(r["payload"] or "{}"),
-                           "evidence": json.loads(r["evidence"] or "[]")} for r in rows}
+                (notebook_id, canonical_id),
+            ).fetchone()
+            name = name_row["canonical_name"] if name_row else ""
+
+        members = []
+        member_ids = []
+        for r in cluster_rows:
+            obj = {
+                "id": r["member_object_id"],
+                "object_type": r["object_type"],
+                "payload": json.loads(r["payload"] or "{}"),
+                "evidence": json.loads(r["evidence"] or "[]"),
+            }
+            members.append(obj)
+            member_ids.append(r["member_object_id"])
+
+        mset = set(member_ids)
+
+        if not mset:
+            # No members found; still return valid shape
+            return {"canonical_id": canonical_id, "canonical_name": name,
+                    "members": [], "attached": [], "evidence": []}
+
+        ph = ",".join("?" for _ in mset)
+        mlist = list(mset)
+
+        with self._connect() as db:
+            # Targeted relation queries using member placeholders
+            rels_out = db.execute(
+                f"SELECT source_object_id, target_object_id, edge_type "
+                f"FROM knowledge_relations WHERE notebook_id=? AND source_object_id IN ({ph})",
+                [notebook_id] + mlist,
+            ).fetchall()
+            rels_in = db.execute(
+                f"SELECT source_object_id, target_object_id, edge_type "
+                f"FROM knowledge_relations WHERE notebook_id=? AND target_object_id IN ({ph})",
+                [notebook_id] + mlist,
+            ).fetchall()
+
+            # Collect attached object ids (non-member side of relations)
+            attached_ids: set[str] = set()
+            rel_edges: list[dict] = []
+            for rel in rels_out:
+                other = rel["target_object_id"]
+                if other not in mset:
+                    attached_ids.add(other)
+                    rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+            for rel in rels_in:
+                other = rel["source_object_id"]
+                if other not in mset:
+                    attached_ids.add(other)
+                    rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+
+            # Batch-read attached objects
+            by_other: dict[str, dict] = {}
+            if attached_ids:
+                aph = ",".join("?" for _ in attached_ids)
+                arows = db.execute(
+                    f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
+                    f"WHERE id IN ({aph}) AND status!='deprecated'",
+                    list(attached_ids),
+                ).fetchall()
+                by_other = {
+                    r["id"]: {
+                        "id": r["id"],
+                        "object_type": r["object_type"],
+                        "payload": json.loads(r["payload"] or "{}"),
+                        "evidence": json.loads(r["evidence"] or "[]"),
+                    }
+                    for r in arows
+                }
+
         attached = []
         seen_attached: set[str] = set()
-        for rel in self.relations_for_notebook(notebook_id):
-            s, t = rel["source_object_id"], rel["target_object_id"]
-            if s in mset and t not in mset:
-                other = t
-            elif t in mset and s not in mset:
-                other = s
-            else:
-                continue
-            if other in by_id and by_id[other]["object_type"] != "concept" and other not in seen_attached:
+        for edge in rel_edges:
+            other = edge["other"]
+            if other in by_other and by_other[other]["object_type"] != "concept" and other not in seen_attached:
                 seen_attached.add(other)
-                attached.append({**by_id[other], "edge_type": rel["edge_type"]})
-        evidence = [ev for oid in members for ev in by_id.get(oid, {}).get("evidence", [])]
+                attached.append({**by_other[other], "edge_type": edge["edge_type"]})
+
+        member_by_id = {m["id"]: m for m in members}
+        evidence = [ev for oid in member_ids for ev in member_by_id.get(oid, {}).get("evidence", [])]
         with self._connect() as db:
             evidence = self._enrich_evidence(db, evidence)
+
         return {"canonical_id": canonical_id, "canonical_name": name,
-                "members": [by_id[o] for o in members if o in by_id],
+                "members": [member_by_id[o] for o in member_ids if o in member_by_id],
                 "attached": attached, "evidence": evidence}
 
-    def _element_texts(self, db, element_ids):
+    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
         ids = [e for e in element_ids if e]
         if not ids:
             return {}, {}
         ph = ",".join("?" for _ in ids)
         rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
         texts = {r["id"]: r["text"] for r in rows}
-        # NOTE: assumes ids[0]'s element belongs to `notebook_id` (single-tenant;
-        # element ids here always come from objects in the target notebook).
+        if not with_ordinal:
+            return texts, {}
         order_rows = db.execute(
             "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
             "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
             "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
-            "ORDER BY se.created_at ASC, se.id ASC", (ids[0],)).fetchall()
+            "ORDER BY se.created_at ASC, se.id ASC",
+            (ids[0],),
+        ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
 
@@ -2012,7 +2204,7 @@ class SQLiteRepository:
                         candidate_steps.append((ppay.get("name", ""), first_eid))
                     all_step_first_eids = [eid for _, eid in candidate_steps if eid]
                     if all_step_first_eids:
-                        texts, ordinal = self._element_texts(db, all_step_first_eids)
+                        texts, ordinal = self._element_texts(db, all_step_first_eids, with_ordinal=True)
                     else:
                         texts, ordinal = {}, {}
                     steps = []
@@ -2556,6 +2748,15 @@ class SQLiteRepository:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
         procedure/concept), performs 1-hop relation expansion, and synthesises
         a conclusion via the LLM (or deterministic fallback)."""
+        import time
+        ask_started = time.perf_counter()
+
+        def ask_stage(name: str, started: float, **extra) -> None:
+            self.event_log.emit({
+                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
+                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
+            })
+
         self.get_notebook(notebook_id)
         question = payload.question.strip()
         # Legacy `scenario` is accepted for frontend back-compat but no longer
@@ -2576,18 +2777,17 @@ class SQLiteRepository:
         query = retrieval_query
         process_intent = is_process_query(question)
 
+        _t = time.perf_counter()
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
-                t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
+                kgt: self._knowledge_objects(db, notebook_id, kgt) for kgt in _KG_TYPES
             }
-            elements = self._gather_elements(db, notebook_id, with_vectors=False)
             query_vector = self._embed_query(query)
-            all_kg = [o for objs in kg_objs.values() for o in objs]
-            self._backfill_knowledge_embeddings(db, notebook_id, all_kg)
             elem_ids, elem_mat = self._vector_matrix(
                 db, notebook_id, "element_embeddings", "element_id")
             kn_ids, kn_mat = self._vector_matrix(
                 db, notebook_id, "knowledge_embeddings", "object_id")
+        ask_stage("load_indexes", _t)
 
         from app.services.vector_index import query_sims
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
@@ -2595,6 +2795,7 @@ class SQLiteRepository:
 
         # Score each KG type, pool, then rank by relevance * intent-aware type
         # weight (process/flow questions stop burying procedures).
+        _t = time.perf_counter()
         scored_all: List[RetrievedKnowledge] = []
         for t in _KG_TYPES:
             objs = kg_objs[t]
@@ -2614,8 +2815,10 @@ class SQLiteRepository:
                 scored_all, top_n, self.settings.proc_min, rank_key)
         else:
             top_hits = scored_all[:top_n]
+        ask_stage("score", _t)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
+        _t = time.perf_counter()
         hit_ids = {item.object_id for item in top_hits}
         relations = self.relations_for_notebook(notebook_id)
         neighbour_ids: set = set()
@@ -2652,6 +2855,7 @@ class SQLiteRepository:
                     "owner": row["owner"],
                     "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
                 })
+        ask_stage("expand", _t)
 
         # Build related_knowledge from hits + neighbours (hits first, no dups).
         registry = self.effective_schemas()
@@ -2686,10 +2890,16 @@ class SQLiteRepository:
 
         related_knowledge = related_knowledge[:12]
 
-        # Citations from top hits.
-        valid_element_ids = {element["element_id"] for element in elements}
+        # Citations from top hits — use only the element ids already referenced
+        # by the retrieved evidence (no full-table scan required).
+        cited_element_ids = {
+            evidence.element_id
+            for item in top_hits
+            for evidence in item.evidence
+            if evidence.element_id
+        }
         citations: List[Citation] = []
-        citations.extend(self._citations_from(top_hits, valid_element_ids, "KG evidence"))
+        citations.extend(self._citations_from(top_hits, cited_element_ids, "KG evidence"))
 
         # related_knowledge is always derived from top_hits (hits + 1-hop
         # neighbours), so top_hits being non-empty implies related_knowledge is
@@ -2701,6 +2911,7 @@ class SQLiteRepository:
         llm_grounded = False
         anchors: List[AnswerAnchor] = []
 
+        _t = time.perf_counter()
         if self.llm_client.configured:
             try:
                 answer, llm_grounded, anchors = self._answer_kg(
@@ -2708,6 +2919,7 @@ class SQLiteRepository:
                 )
             except Exception:
                 answer, llm_grounded, anchors = "", False, []
+        ask_stage("answer_llm", _t)
 
         # Relevance-aware grounding (no longer LLM self-report alone).
         evidence_level, top_relevance = classify_evidence(
@@ -2751,6 +2963,7 @@ class SQLiteRepository:
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id
         )
+        ask_stage("total", ask_started)
         return response
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:

@@ -23,6 +23,8 @@ from app.models.schemas import (
     KnowledgeTypeCount,
     KnowledgeUpdate,
     MergeRequest,
+    MergeReviewRequest,
+    MergeReviewSummary,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
@@ -37,6 +39,7 @@ from app.models.schemas import (
     SourceElement,
     SourceImportRequest,
     SourceSummary,
+    UnifiedKgStatus,
     UserProfile,
 )
 from app.services.kg import scheduler as kg_scheduler
@@ -487,6 +490,14 @@ def rebuild_unified_kg(notebook_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
+@router.get("/notebooks/{notebook_id}/unified-kg/status")
+def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
+    try:
+        return UnifiedKgStatus(**repository().unified_kg_status(notebook_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
 @router.get("/notebooks/{notebook_id}/unified-kg")
 def get_unified_kg(notebook_id: str, level: str = Query("concept")) -> dict:
     try:
@@ -535,3 +546,15 @@ def reject_merge(notebook_id: str, candidate_id: str) -> dict:
         return {"ok": True}
     except KeyError:
         raise HTTPException(status_code=404, detail="Merge candidate not found")
+
+
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/review")
+def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> MergeReviewSummary:
+    try:
+        return MergeReviewSummary(**repository().review_pending_merges(
+            notebook_id,
+            limit=payload.limit,
+            auto_confirm_threshold=payload.auto_confirm_threshold,
+        ))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")

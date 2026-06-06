@@ -56,3 +56,35 @@ def test_ask_matrix_path_returns_matching_object(repo):
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Engram improves perplexity"}}])
     resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity"))
     assert any("Engram" in r.headline for r in resp.related_knowledge)
+
+
+def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
+    repo.llm_client = _FakeLLM()
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo._test_insert_object(nb.id, "claim", {"name": "Channel loss depends on equalization"})
+
+    def fail_backfill(*args, **kwargs):
+        raise AssertionError("ask() must not synchronously backfill knowledge embeddings")
+
+    monkeypatch.setattr(repo, "_backfill_knowledge_embeddings", fail_backfill)
+    resp = repo.ask(nb.id, AskRequest(question="channel loss equalization"))
+    assert resp.conversation_id
+    assert resp.answer_id
+
+
+def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, monkeypatch):
+    repo.llm_client = _FakeLLM()
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    oid = repo._test_insert_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})
+    repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Finite cable bandwidth attenuates high frequencies"}}])
+
+    original = repo._gather_elements
+
+    def guard(db, notebook_id, with_vectors=True):
+        if with_vectors is False:
+            raise AssertionError("ask() must not gather every element only to build a valid id set")
+        return original(db, notebook_id, with_vectors=with_vectors)
+
+    monkeypatch.setattr(repo, "_gather_elements", guard)
+    resp = repo.ask(nb.id, AskRequest(question="why does cable bandwidth matter"))
+    assert any("bandwidth" in r.headline.lower() for r in resp.related_knowledge)

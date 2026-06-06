@@ -33,6 +33,42 @@ def test_perf_2000_reps_under_2s():
     cluster_concepts(concepts, vecs, confirmed=set(), rejected=set(), hi=0.9, lo=0.82)
     assert time.perf_counter() - t < 2.0
 
+def test_large_seed_set_still_uses_vector_candidates():
+    concepts = [_concept(f"o{i}", f"concept {i}") for i in range(4500)]
+    concepts.extend([
+        _concept("mos_a", "voltage-controlled oscillator"),
+        _concept("mos_b", "VCO"),
+    ])
+    vecs = {f"o{i}": [1.0 if (i % 16) == k else 0.0 for k in range(16)] for i in range(4500)}
+    vecs["mos_a"] = [1.0] + [0.0] * 15
+    vecs["mos_b"] = [0.99, 0.01] + [0.0] * 14
+
+    res = cluster_concepts(concepts, vecs, confirmed=set(), rejected=set(), hi=0.94, lo=0.86)
+
+    assert res["capped"] is False
+    assert res["cluster_map"]["mos_a"] == res["cluster_map"]["mos_b"]
+
+
+def test_pending_candidates_are_bounded_and_ranked():
+    concepts = [_concept(f"o{i}", f"concept {i}") for i in range(200)]
+    vecs = {f"o{i}": [1.0, i / 1000.0] for i in range(200)}
+
+    res = cluster_concepts(
+        concepts,
+        vecs,
+        confirmed=set(),
+        rejected=set(),
+        hi=0.9999,
+        lo=0.90,
+        top_k=3,
+        max_pending=50,
+    )
+
+    assert len(res["pending"]) <= 50
+    scores = [score for _a, _b, score in res["pending"]]
+    assert scores == sorted(scores, reverse=True)
+
+
 from app.services.kg_merge import derive_unified_graph
 
 def test_derive_rewires_and_dedups_edges():
