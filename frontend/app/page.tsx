@@ -13,6 +13,7 @@ import {
   type AnswerReference,
   type MarkdownBlock,
 } from "./answer-formatting";
+import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -114,7 +115,7 @@ type AskResponse = {
   evidence_level?: "grounded" | "overview" | "inferred";
   retrieval_query?: string;
   top_relevance?: number;
-  reasoning_trace?: Array<{ step_type: string; summary: string; detail: Record<string, unknown> }>;
+  reasoning_trace?: ReasoningTraceStep[];
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -466,6 +467,69 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
+async function readAskStream<TResponse>(
+  path: string,
+  payload: unknown,
+  onProgress: (step: ReasoningTraceStep) => void,
+): Promise<TResponse> {
+  const started = performance.now();
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const elapsed = Math.round(performance.now() - started);
+  const requestId = response.headers.get("X-Request-Id") || "";
+  console.debug(`[api] POST ${path} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`);
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.clone().json();
+      detail = (body && (body.detail || body.message)) || "";
+    } catch {
+      detail = (await response.text().catch(() => "")) || "";
+    }
+    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
+    throw new Error(`${response.status} ${response.statusText}${suffix}${requestId ? ` [${requestId}]` : ""}`);
+  }
+  if (!response.body) {
+    throw new Error("Streaming response body is unavailable");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse: TResponse | null = null;
+
+  const consumeLine = (line: string) => {
+    const event = JSON.parse(line) as AskStreamEvent<TResponse>;
+    if (event.event === "progress") {
+      onProgress(event.step);
+    } else if (event.event === "final") {
+      finalResponse = event.response;
+    } else if (event.event === "error") {
+      throw new Error(event.error);
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parsed = takeNdjsonLines(buffer);
+    buffer = parsed.remainder;
+    parsed.lines.forEach(consumeLine);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    consumeLine(buffer.trim());
+  }
+  if (!finalResponse) {
+    throw new Error("Streaming response ended without a final answer");
+  }
+  return finalResponse;
+}
+
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
 
 function formatRelativeTime(iso: string): string {
@@ -680,6 +744,8 @@ export default function Home() {
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [asking, setAsking] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
+  const [pendingReasoning, setPendingReasoning] = useState(false);
+  const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
   const [studioOutput, setStudioOutput] = useState<StudioOutput | null>(null);
   const [filter, setFilter] = useState("mine");
   const [viewMode, setViewMode] = useState("grid");
@@ -1229,6 +1295,8 @@ export default function Home() {
     setSessions([]);
     setAsking(false);
     setPendingQuestion("");
+    setPendingReasoning(false);
+    setPendingTrace([]);
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     window.scrollTo(0, 0);
   }
@@ -1407,15 +1475,25 @@ export default function Home() {
     if (!currentNotebookId) return;
     const q = nextQuestion.trim();
     if (!q) return;
+    const useReasoning = reasoningMode;
     setChatMode("ask");
     setQuestion("");
     setPendingQuestion(q);
+    setPendingReasoning(useReasoning);
+    setPendingTrace([]);
     setAsking(true);
     try {
-      const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
-        method: "POST",
-        body: JSON.stringify({ question: q, conversation_id: conversationId ?? undefined, mode: reasoningMode ? "reasoning" : "fast" })
-      });
+      const payload = { question: q, conversation_id: conversationId ?? undefined, mode: useReasoning ? "reasoning" : "fast" };
+      const response = useReasoning
+        ? await readAskStream<AskResponse>(
+          `/notebooks/${currentNotebookId}/ask/stream`,
+          payload,
+          (step) => setPendingTrace((previous) => [...previous, step]),
+        )
+        : await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
@@ -1423,6 +1501,8 @@ export default function Home() {
       reportError(error);
     } finally {
       setPendingQuestion("");
+      setPendingReasoning(false);
+      setPendingTrace([]);
       setAsking(false);
     }
     await loadSessions(currentNotebookId);
@@ -1439,6 +1519,8 @@ export default function Home() {
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setConversationId(id);
     setPendingQuestion("");
+    setPendingReasoning(false);
+    setPendingTrace([]);
     setChatMode("ask");
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
@@ -1448,6 +1530,8 @@ export default function Home() {
     setTurns([]);
     setConversationId(null);
     setPendingQuestion("");
+    setPendingReasoning(false);
+    setPendingTrace([]);
     setChatMode("ask");
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
@@ -1459,6 +1543,8 @@ export default function Home() {
       setTurns([]);
       setConversationId(null);
       setPendingQuestion("");
+      setPendingReasoning(false);
+      setPendingTrace([]);
     }
     await loadSessions(currentNotebookId);
     setToast("会话已删除");
@@ -2174,7 +2260,11 @@ export default function Home() {
                     {asking && (
                       <div className="chat-turn">
                         {pendingQuestion && <div className="chat-user">{pendingQuestion}</div>}
-                        <div className="chat-assistant chat-thinking">思考中…</div>
+                        <div className="chat-assistant chat-thinking">
+                          {pendingReasoning ? (
+                            <ReasoningTracePanel steps={pendingTrace} live />
+                          ) : "思考中…"}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -3480,6 +3570,55 @@ function SelectedReferenceDetail({
   );
 }
 
+const TRACE_STEP_LABELS: Record<string, string> = {
+  start: "启动",
+  plan: "规划",
+  retrieve: "检索",
+  reflect: "反思",
+  expand: "扩展",
+  fallback: "原文",
+  answer: "合成",
+  skip: "跳过",
+};
+
+function traceStepDetail(step: ReasoningTraceStep): string {
+  const detail = step.detail ?? {};
+  if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
+    return `${detail.sub_queries.length} 个子查询`;
+  }
+  if (typeof detail.count === "number") return `${detail.count} 个候选`;
+  if (typeof detail.found === "number") return `新增 ${detail.found}`;
+  if (typeof detail.next_action === "string") return detail.next_action;
+  if (typeof detail.kg === "number" || typeof detail.elements === "number") {
+    return `${Number(detail.kg ?? 0)} 个 KG / ${Number(detail.elements ?? 0)} 段原文`;
+  }
+  return "";
+}
+
+function ReasoningTracePanel({ steps, live = false }: { steps: ReasoningTraceStep[]; live?: boolean }) {
+  const latest = steps[steps.length - 1];
+  return (
+    <div className={`reasoning-trace-panel ${live ? "live" : ""}`}>
+      <div className="reasoning-trace-head">
+        <Sparkles size={15} />
+        <span>{live ? "Agent 推理中" : "Agent 推理轨迹"}</span>
+        {latest && <small>{latest.summary}</small>}
+      </div>
+      <ol className="reasoning-trace-list">
+        {steps.length === 0 ? (
+          <li className="reasoning-trace-empty">等待后端事件…</li>
+        ) : steps.map((step, index) => (
+          <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
+            <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
+            <strong>{step.summary}</strong>
+            {traceStepDetail(step) && <small>{traceStepDetail(step)}</small>}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function AnswerView({
   answer,
   feedbackSent,
@@ -3538,6 +3677,9 @@ function AnswerView({
         selectedReferenceId={selectedReferenceId}
         onSelectReference={(reference) => setSelectedReferenceId((current) => current === reference.id ? null : reference.id)}
       />
+      {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
+        <ReasoningTracePanel steps={answer.reasoning_trace} />
+      )}
       {selectedReference && (
         <div ref={selectedReferenceRef}>
           <SelectedReferenceDetail reference={selectedReference} onOpenKnowledgeGraph={onOpenKnowledgeGraph} />

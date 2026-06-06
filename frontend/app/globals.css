@@ -1119,6 +1119,87 @@ button.chat-session-card {
   font-size: 15px;
 }
 
+.reasoning-trace-panel {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.reasoning-trace-head {
+  display: grid;
+  grid-template-columns: 18px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #20242a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.reasoning-trace-head svg {
+  color: #2f6f73;
+}
+
+.reasoning-trace-head small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.reasoning-trace-list {
+  list-style: none;
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+}
+
+.reasoning-trace-list li {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.reasoning-trace-list li span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 44px;
+  height: 22px;
+  border: 1px solid #d9dfeb;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #475569;
+  font-weight: 700;
+}
+
+.reasoning-trace-list li strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #20242a;
+  font-weight: 600;
+}
+
+.reasoning-trace-list li small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.reasoning-trace-list li.active span {
+  border-color: #2f6f73;
+  background: #e7f3f1;
+  color: #155e63;
+}
+
+.reasoning-trace-empty {
+  color: var(--muted);
+}
+
 .chat-answer {
   align-self: start;
   display: grid;
