@@ -93,10 +93,14 @@ from app.services.prompts import (
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import (
     RetrievedKnowledge,
+    RetrievedElement,
+    W_KEYWORD,
+    W_SEMANTIC,
     _payload_text,
     cosine,
     keyword_score,
     score_knowledge,
+    score_elements,
     type_weight,
     is_process_query,
     ensure_procedure_quota,
@@ -2822,10 +2826,100 @@ class SQLiteRepository:
                 citations.append(_citation(label, evidence))
         return citations
 
+    def _retrieve_scored(self, notebook_id: str, query: str,
+                         types: Optional[Iterable[str]] = None,
+                         w_keyword: float = W_KEYWORD,
+                         w_semantic: float = W_SEMANTIC) -> List[RetrievedKnowledge]:
+        """Score KG objects of `types` (default all 4 _KG_TYPES) for `query`,
+        returning RetrievedKnowledge sorted by fused relevance desc. Shared by
+        the reasoning retriever's tools; `w_keyword`/`w_semantic` carry the
+        per-sub-query `prefer` bias."""
+        type_list = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
+        with self._connect() as db:
+            kg_objs = {t: self._knowledge_objects(db, notebook_id, t) for t in type_list}
+            query_vector = self._embed_query(query)
+            elem_ids, elem_mat = self._vector_matrix(db, notebook_id, "element_embeddings", "element_id")
+            kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+        from app.services.vector_index import query_sims
+        element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
+        knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+        scored: List[RetrievedKnowledge] = []
+        for t in type_list:
+            objs = kg_objs.get(t) or []
+            if not objs:
+                continue
+            scored.extend(score_knowledge(
+                query, objs, t, query_vector, None, None,
+                element_sims=element_sims, knowledge_sims=knowledge_sims,
+                w_keyword=w_keyword, w_semantic=w_semantic,
+            ))
+        scored.sort(key=lambda it: it.score, reverse=True)
+        return scored
+
+    def _retrieve_neighbors(self, notebook_id: str, object_id: str,
+                            edge_type: Optional[str] = None,
+                            direction: str = "both") -> List[RetrievedKnowledge]:
+        """1-hop graph neighbours of `object_id` as RetrievedKnowledge with
+        placeholder relevance=0 (final relevance unified by run() via the
+        original question). Honours edge_type filter; direction out=object as
+        source, in=as target, both=either."""
+        # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
+        # instead of loading every notebook edge: O(neighbours), not O(E).
+        edge_clause = " AND edge_type=?" if edge_type else ""
+        edge_param = [edge_type] if edge_type else []
+        neighbour_ids: set = set()
+        with self._connect() as db:
+            if direction in ("out", "both"):
+                neighbour_ids.update(
+                    r["target_object_id"] for r in db.execute(
+                        f"SELECT target_object_id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND source_object_id=?{edge_clause}",
+                        [notebook_id, object_id, *edge_param],
+                    ).fetchall()
+                )
+            if direction in ("in", "both"):
+                neighbour_ids.update(
+                    r["source_object_id"] for r in db.execute(
+                        f"SELECT source_object_id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND target_object_id=?{edge_clause}",
+                        [notebook_id, object_id, *edge_param],
+                    ).fetchall()
+                )
+            if not neighbour_ids:
+                return []
+            placeholders = ",".join("?" for _ in neighbour_ids)
+            status_ph = ",".join("?" for _ in USABLE_STATUSES)
+            rows = db.execute(
+                f"SELECT * FROM knowledge_objects WHERE id IN ({placeholders}) "
+                f"AND status IN ({status_ph})",
+                [*neighbour_ids, *USABLE_STATUSES],
+            ).fetchall()
+        out: List[RetrievedKnowledge] = []
+        for row in rows:
+            keys = row.keys()
+            out.append(RetrievedKnowledge(
+                object_id=row["id"], object_type=row["object_type"],
+                payload=json.loads(row["payload"] or "{}"),
+                evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
+                score=0.0, relevance=0.0, status=row["status"], owner=row["owner"],
+                last_reviewed=row["last_reviewed"] if "last_reviewed" in keys else "",
+            ))
+        return out
+
+    def _retrieve_elements(self, notebook_id: str, query: str,
+                           limit: int = 8) -> List[RetrievedElement]:
+        """Keyword+semantic search over raw source_elements (fallback layer 2)."""
+        query_vector = self._embed_query(query)
+        with self._connect() as db:
+            elements = self._gather_elements(db, notebook_id, with_vectors=True)
+        return score_elements(query, elements, query_vector, limit=limit)
+
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
         procedure/concept), performs 1-hop relation expansion, and synthesises
         a conclusion via the LLM (or deterministic fallback)."""
+        if getattr(payload, "mode", "fast") == "reasoning":
+            return self.ask_reasoning(notebook_id, payload)
         import time
         ask_started = time.perf_counter()
 
@@ -2898,14 +2992,27 @@ class SQLiteRepository:
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         _t = time.perf_counter()
         hit_ids = {item.object_id for item in top_hits}
-        relations = self.relations_for_notebook(notebook_id)
+        # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
+        # instead of loading every notebook edge: O(touching edges), not O(E).
         neighbour_ids: set = set()
-        for rel in relations:
-            src, tgt = rel["source_object_id"], rel["target_object_id"]
-            if src in hit_ids and tgt not in hit_ids:
-                neighbour_ids.add(tgt)
-            elif tgt in hit_ids and src not in hit_ids:
-                neighbour_ids.add(src)
+        if hit_ids:
+            hit_list = list(hit_ids)
+            ph = ",".join("?" for _ in hit_list)
+            with self._connect() as db:
+                for r in db.execute(
+                    f"SELECT target_object_id FROM knowledge_relations "
+                    f"WHERE notebook_id=? AND source_object_id IN ({ph})",
+                    [notebook_id, *hit_list],
+                ).fetchall():
+                    if r["target_object_id"] not in hit_ids:
+                        neighbour_ids.add(r["target_object_id"])
+                for r in db.execute(
+                    f"SELECT source_object_id FROM knowledge_relations "
+                    f"WHERE notebook_id=? AND target_object_id IN ({ph})",
+                    [notebook_id, *hit_list],
+                ).fetchall():
+                    if r["source_object_id"] not in hit_ids:
+                        neighbour_ids.add(r["source_object_id"])
 
         # Fetch neighbour objects if any.
         neighbour_objs: List[dict] = []
@@ -3139,6 +3246,104 @@ class SQLiteRepository:
         llm_grounded = bool(data.get("grounded", False))
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
+
+    def _answer_reasoning(self, notebook_id, question, top_hits, elements, history=""):
+        """Synthesise the reasoning-mode answer: reuse _answer_context for KG
+        hits (so [k] anchors/citations stay identical to fast mode), then append
+        fallback document passages as reference-only context (no [k] id, so they
+        never become anchors). Returns (answer, llm_grounded, anchors)."""
+        context_block, id_map = self._answer_context(notebook_id, top_hits)
+        if elements:
+            extra = "\n".join(
+                f"(原文 {i+1}) {el.source_title} · {el.location_label}: {el.text[:200]}"
+                for i, el in enumerate(elements[:6])
+            )
+            context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
+        raw = self.llm_client.chat_json(
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            ANSWER_SCHEMA_HINT,
+        )
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("answer did not return a JSON object")
+        answer = str(data.get("answer", "")).strip()
+        llm_grounded = bool(data.get("grounded", False))
+        anchors = self._parse_answer_anchors(answer, id_map)
+        return answer, llm_grounded, anchors
+
+    def ask_reasoning(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """Reasoning-mode ask: agentic plan→retrieve→reflect(自由深挖)→answer。
+        检索委托 ReasoningRetriever;答案/证据分档复用 fast 路径口径;响应携带
+        reasoning_trace。任何阶段异常不向用户抛出(逐层容错 + 兜底空候选)。"""
+        from app.services.reasoning_retrieval import ReasoningRetriever
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        with self._connect() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+            history = self._conversation_history(db, conversation_id)
+
+        try:
+            result = ReasoningRetriever(self, self.settings).run(notebook_id, question, history)
+            top_hits, elements, trace = result.top_hits, result.elements, result.trace
+        except Exception:
+            top_hits, elements, trace = [], [], []
+
+        registry = self.effective_schemas()
+        seen_ids: set = set()
+        related_knowledge: List[KnowledgeRecord] = []
+        for item in top_hits:
+            if item.object_id in seen_ids:
+                continue
+            seen_ids.add(item.object_id)
+            related_knowledge.append(self._knowledge_record(
+                item.object_type,
+                {"id": item.object_id, "payload": item.payload, "status": item.status,
+                 "owner": getattr(item, "owner", ""),
+                 "last_reviewed": getattr(item, "last_reviewed", ""),
+                 "evidence": item.evidence},
+                registry.get(item.object_type)))
+        related_knowledge = related_knowledge[:12]
+
+        cited_element_ids = {ev.element_id for item in top_hits
+                             for ev in item.evidence if ev.element_id}
+        citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
+
+        answer, llm_grounded, anchors = "", False, []
+        if self.llm_client.configured and (top_hits or elements):
+            try:
+                answer, llm_grounded, anchors = self._answer_reasoning(
+                    notebook_id, question, top_hits, elements, history)
+            except Exception:
+                answer, llm_grounded, anchors = "", False, []
+
+        evidence_level, top_relevance = classify_evidence(
+            top_hits, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        grounded = evidence_level == "grounded"
+
+        if answer:
+            conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        else:
+            llm_mode = "deterministic"
+            conclusion = (
+                f"Found {len(top_hits)} relevant KG object(s) for this question."
+                if top_hits else
+                "The notebook does not yet contain approved knowledge that matches "
+                "this question. Upload and review sources to build coverage.")
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors,
+            related_knowledge=related_knowledge, citations=citations,
+            llm_mode=llm_mode, conversation_id=conversation_id,
+            retrieval_query=question, top_relevance=top_relevance,
+            reasoning_trace=trace or None,
+        )
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        return response
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor

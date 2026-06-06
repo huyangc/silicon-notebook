@@ -263,14 +263,17 @@ def token_overlap(span: str, text: str) -> float:
     return sum(1 for token in span_tokens if token in haystack) / len(span_tokens)
 
 
-def _fuse(keyword: float, semantic: float, has_vector: bool) -> float:
+def _fuse(keyword: float, semantic: float, has_vector: bool,
+          w_keyword: float = W_KEYWORD, w_semantic: float = W_SEMANTIC) -> float:
     """Weighted-sum fusion, renormalized by active signals so keyword-only
-    objects are scored on the same 0..1 scale instead of being capped at W_KEYWORD."""
+    objects are scored on the same 0..1 scale instead of being capped at the
+    keyword weight. Weights default to the module constants; the reasoning
+    retriever overrides them per sub-query (prefer=keyword/semantic/balanced)."""
     semantic = max(0.0, semantic)
-    denom = W_KEYWORD + (W_SEMANTIC if has_vector else 0.0)
+    denom = w_keyword + (w_semantic if has_vector else 0.0)
     if denom <= 0:
         return 0.0
-    return (W_KEYWORD * keyword + (W_SEMANTIC * semantic if has_vector else 0.0)) / denom
+    return (w_keyword * keyword + (w_semantic * semantic if has_vector else 0.0)) / denom
 
 
 def score_knowledge(
@@ -282,6 +285,8 @@ def score_knowledge(
     knowledge_vectors: Optional[Dict[str, List[float]]] = None,
     element_sims: Optional[Dict[str, float]] = None,
     knowledge_sims: Optional[Dict[str, float]] = None,
+    w_keyword: float = W_KEYWORD,
+    w_semantic: float = W_SEMANTIC,
 ) -> List[RetrievedKnowledge]:
     """Score knowledge by keyword + optional semantic similarity.
 
@@ -326,7 +331,7 @@ def score_knowledge(
                         has_vector = True
                         semantic = max(semantic, cosine(query_vector, vector))
 
-        relevance = _fuse(keyword, semantic, has_vector)
+        relevance = _fuse(keyword, semantic, has_vector, w_keyword, w_semantic)
         if relevance < RELEVANCE_FLOOR:
             continue
         final = relevance

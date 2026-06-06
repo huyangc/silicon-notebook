@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     evidence_tau_high: float = Field(0.35, env="EVIDENCE_TAU_HIGH")
     # 流程类问题 top-N 至少保底召回的 procedure 条数。
     proc_min: int = Field(2, env="PROC_MIN")
+    # 推理模式(mode=reasoning)护栏: Reflect 循环总步数 circuit breaker。
+    reasoning_max_steps: int = Field(50, env="REASONING_MAX_STEPS")
+    # 推理模式 Plan 输出子查询数上限。
+    reasoning_max_subqueries: int = Field(5, env="REASONING_MAX_SUBQUERIES")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

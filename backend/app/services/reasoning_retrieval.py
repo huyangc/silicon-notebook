@@ -1,0 +1,235 @@
+"""推理模式 (mode=reasoning) 的 agentic KG 检索。
+
+结构化骨架 Plan→Retrieve→Reflect→Answer + Reflect 阶段自由图遍历深挖。
+手搓 JSON-action 循环(无原生 tool calling),复用 SQLiteRepository 的检索原语。
+ReasoningRetriever 持 repo 引用,运行时注入,避免与 sqlite_repository 循环导入。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+from app.models.schemas import TraceStep
+from app.services.prompts import (
+    PLAN_SCHEMA_HINT, REFLECT_SCHEMA_HINT, plan_prompt, reflect_prompt,
+)
+from app.services.retrieval import (
+    RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
+)
+
+KG_TYPES = ("claim", "formula", "procedure", "concept")
+PREFER_WEIGHTS = {
+    "keyword": (0.7, 0.3),
+    "semantic": (0.2, 0.8),
+    "balanced": (W_KEYWORD, W_SEMANTIC),
+}
+_PER_QUERY_LIMIT = 8
+
+
+@dataclass
+class SubQuery:
+    query: str
+    types: List[str] = field(default_factory=list)   # 空 = 全部 4 类
+    prefer: str = "balanced"
+    reason: str = ""
+
+
+@dataclass
+class ReflectDecision:
+    sufficient: bool = False
+    next_action: str = "answer"   # answer|expand_graph|add_subquery|search_elements
+    expand_object_id: str = ""
+    expand_edge_type: Optional[str] = None
+    expand_direction: str = "both"
+    new_sub_query: Optional[SubQuery] = None
+    elements_query: str = ""
+    reason: str = ""
+
+
+@dataclass
+class ReasoningResult:
+    top_hits: List[RetrievedKnowledge] = field(default_factory=list)
+    elements: List[RetrievedElement] = field(default_factory=list)
+    trace: List[TraceStep] = field(default_factory=list)
+
+
+class ReasoningRetriever:
+    def __init__(self, repo, settings):
+        self.repo = repo
+        self.settings = settings
+
+    # --- KG 工具箱(薄封装 repo 原语) ---
+    def search(self, notebook_id, query, types=None, prefer="balanced"):
+        wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
+        return self.repo._retrieve_scored(notebook_id, query, types=types,
+                                          w_keyword=wk, w_semantic=ws)
+
+    def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
+        return self.repo._retrieve_neighbors(notebook_id, object_id, edge_type, direction)
+
+    def get(self, notebook_id, object_id):
+        try:
+            return self.repo.node_context(notebook_id, object_id)
+        except KeyError:
+            return {}
+
+    def search_elements(self, notebook_id, query):
+        return self.repo._retrieve_elements(notebook_id, query)
+
+    # --- LLM 决策点 ---
+    def plan(self, question, history=""):
+        fallback = [SubQuery(query=question)]
+        if not getattr(self.repo.llm_client, "configured", False):
+            return fallback
+        try:
+            raw = self.repo.llm_client.chat_json(
+                [{"role": "user", "content": plan_prompt(question, history)}],
+                PLAN_SCHEMA_HINT)
+            data = json.loads(raw)
+            subs = data.get("sub_queries") if isinstance(data, dict) else None
+            if not isinstance(subs, list) or not subs:
+                return fallback
+            out: List[SubQuery] = []
+            for s in subs[: self.settings.reasoning_max_subqueries]:
+                if not isinstance(s, dict):
+                    continue
+                q = str(s.get("query", "")).strip()
+                if not q:
+                    continue
+                _types_raw = s.get("types")
+                types = [t for t in (_types_raw if isinstance(_types_raw, list) else []) if t in KG_TYPES]
+                prefer = s.get("prefer") if s.get("prefer") in PREFER_WEIGHTS else "balanced"
+                out.append(SubQuery(query=q, types=types, prefer=prefer,
+                                    reason=str(s.get("reason", ""))))
+            return out or fallback
+        except Exception:
+            return fallback
+
+    def reflect(self, question, candidates_summary):
+        answer_decision = ReflectDecision(sufficient=True, next_action="answer")
+        if not getattr(self.repo.llm_client, "configured", False):
+            return answer_decision
+        try:
+            raw = self.repo.llm_client.chat_json(
+                [{"role": "user", "content": reflect_prompt(question, candidates_summary)}],
+                REFLECT_SCHEMA_HINT)
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return answer_decision
+            action = str(data.get("next_action", "answer"))
+            if action not in ("answer", "expand_graph", "add_subquery", "search_elements"):
+                action = "answer"
+            d = ReflectDecision(
+                sufficient=bool(data.get("sufficient", False)),
+                next_action=action, reason=str(data.get("reason", "")))
+            exp = data.get("expand")
+            if isinstance(exp, dict):
+                d.expand_object_id = str(exp.get("object_id", ""))
+                et = exp.get("edge_type")
+                d.expand_edge_type = str(et) if et else None
+                dr = exp.get("direction")
+                d.expand_direction = dr if dr in ("out", "in", "both") else "both"
+            nsq = data.get("new_sub_query")
+            if isinstance(nsq, dict) and str(nsq.get("query", "")).strip():
+                _nsq_types = nsq.get("types")
+                types = [t for t in (_nsq_types if isinstance(_nsq_types, list) else []) if t in KG_TYPES]
+                prefer = nsq.get("prefer") if nsq.get("prefer") in PREFER_WEIGHTS else "balanced"
+                d.new_sub_query = SubQuery(query=str(nsq["query"]).strip(),
+                                           types=types, prefer=prefer,
+                                           reason=str(nsq.get("reason", "")))
+            d.elements_query = str(data.get("elements_query", "")).strip()
+            return d
+        except Exception:
+            return answer_decision
+
+    # --- 编排 ---
+    def _summarize(self, collected, elements):
+        lines = []
+        for rk in list(collected.values())[:30]:
+            name = str(rk.payload.get("name", "")).strip() or rk.object_id
+            lines.append(f"- [{rk.object_type}] {name} (id={rk.object_id})")
+        for el in elements[:10]:
+            lines.append(f"- [element] {el.source_title} · {el.location_label}: {el.text[:80]}")
+        return "\n".join(lines) if lines else "(no candidates yet)"
+
+    def run(self, notebook_id, question, history=""):
+        trace: List[TraceStep] = []
+        collected: Dict[str, RetrievedKnowledge] = {}
+        elements: List[RetrievedElement] = []
+        visited: set = set()
+
+        subqueries = self.plan(question, history)
+        trace.append(TraceStep(
+            step_type="plan", summary=f"规划了 {len(subqueries)} 个子查询",
+            detail={"sub_queries": [{"query": s.query, "types": s.types,
+                                     "prefer": s.prefer, "reason": s.reason}
+                                    for s in subqueries]}))
+
+        for sq in subqueries:
+            for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
+                collected.setdefault(h.object_id, h)
+        trace.append(TraceStep(step_type="retrieve",
+                               summary=f"初检索得到 {len(collected)} 个候选节点",
+                               detail={"count": len(collected)}))
+
+        steps = 0
+        while steps < self.settings.reasoning_max_steps:
+            steps += 1
+            decision = self.reflect(question, self._summarize(collected, elements))
+            trace.append(TraceStep(step_type="reflect",
+                                   summary=decision.reason or decision.next_action,
+                                   detail={"next_action": decision.next_action,
+                                           "sufficient": decision.sufficient}))
+            if decision.next_action == "answer" or decision.sufficient:
+                break
+            if decision.next_action == "expand_graph":
+                oid = decision.expand_object_id
+                if not oid or oid in visited:
+                    trace.append(TraceStep(step_type="skip",
+                                           summary="跳过 expand_graph(空或已访问节点)",
+                                           detail={"object_id": oid, "reason": "empty_or_visited"}))
+                    continue
+                visited.add(oid)
+                neigh = self.neighbors(notebook_id, oid,
+                                       decision.expand_edge_type, decision.expand_direction)
+                for h in neigh:
+                    collected.setdefault(h.object_id, h)
+                trace.append(TraceStep(step_type="expand",
+                                       summary=f"顺关系深挖 {oid},得到 {len(neigh)} 个邻居",
+                                       detail={"object_id": oid,
+                                               "edge_type": decision.expand_edge_type,
+                                               "found": len(neigh)}))
+            elif decision.next_action == "add_subquery":
+                if not decision.new_sub_query:
+                    trace.append(TraceStep(step_type="skip",
+                                           summary="跳过 add_subquery(缺少 new_sub_query)",
+                                           detail={"reason": "missing_new_sub_query"}))
+                    continue
+                sq = decision.new_sub_query
+                for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
+                    collected.setdefault(h.object_id, h)
+                trace.append(TraceStep(step_type="retrieve",
+                                       summary=f"补充子查询: {sq.query}",
+                                       detail={"query": sq.query}))
+            elif decision.next_action == "search_elements":
+                eq = decision.elements_query or question
+                seen_el = {e.element_id for e in elements}
+                els = [e for e in self.search_elements(notebook_id, eq)
+                       if e.element_id not in seen_el]
+                elements.extend(els)
+                trace.append(TraceStep(step_type="fallback",
+                                       summary=f"降级查原文: {eq},新增 {len(els)} 段",
+                                       detail={"query": eq, "found": len(els)}))
+            else:
+                break
+
+        # 统一口径: 用原问题对全库重打分,agent 召回的候选优先用此版本(带原问题 relevance)
+        scored_map = {h.object_id: h for h in self.repo._retrieve_scored(notebook_id, question)}
+        top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
+        top_hits.sort(key=lambda h: h.relevance, reverse=True)
+        top_hits = top_hits[: self.settings.retrieval_top_n]
+        trace.append(TraceStep(step_type="answer",
+                               summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
+                               detail={"kg": len(top_hits), "elements": len(elements)}))
+        return ReasoningResult(top_hits=top_hits, elements=elements, trace=trace)
