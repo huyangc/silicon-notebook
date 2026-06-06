@@ -1,4 +1,4 @@
-from app.eval.report import render_quality_report, render_speed_report
+from app.eval.report import render_quality_report, render_speed_report, render_inference_report
 
 
 def test_render_quality_report_has_sections():
@@ -37,3 +37,23 @@ def test_render_speed_report():
     assert "100000" in md or "100,000" in md
     assert "推荐文档上限" in md
     assert "250" in md
+
+
+def test_render_inference_report():
+    rows = [
+        {"id": "q01", "level": "L1", "question": "什么是 cascode?",
+         "answer": "...[k1]", "evidence_level": "grounded",
+         "judge": {"correctness": 2, "inference_quality": 2,
+                   "grounding_consistency": True, "fabricated_citation": False,
+                   "reason": "准确"}},
+        {"id": "q16", "level": "L3", "question": "为何...摆幅?",
+         "answer": "...", "evidence_level": "overview",
+         "judge": {"correctness": 1, "inference_quality": 1,
+                   "grounding_consistency": True, "fabricated_citation": False,
+                   "reason": "部分综合"}},
+    ]
+    md = render_inference_report(rows)
+    assert "# 推断问答评测报告" in md
+    assert "L1" in md and "L3" in md
+    assert "落差" in md      # L3 vs L1 落差
+    assert "q16" in md

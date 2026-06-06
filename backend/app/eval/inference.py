@@ -51,3 +51,36 @@ def parse_judge(raw: str) -> Dict[str, Any]:
         "fabricated_citation": bool(d.get("fabricated_citation", False)),
         "reason": str(d.get("reason", ""))[:200],
     }
+
+
+def run_inference(notebook_id: str,
+                  questions_path: str = "backend/app/eval/questions.yaml"
+                  ) -> List[Dict[str, Any]]:
+    """对每题:repo.ask -> LLM-judge。返回逐题结果(含 judge)。"""
+    from app.core.config import Settings
+    from app.models.schemas import AskRequest
+    from app.services.sqlite_repository import SQLiteRepository
+    repo = SQLiteRepository(Settings())
+    assert repo.llm_client.configured, "LLM 未配置(.env)"
+    questions = load_questions(questions_path)
+    rows: List[Dict[str, Any]] = []
+    for q in questions:
+        resp = repo.ask(notebook_id, AskRequest(question=q["question"]))
+        msgs = judge_prompt(q["question"], q["expected_points"], resp.answer or resp.conclusion,
+                            resp.evidence_level, q["expected_behavior"])
+        try:
+            judged = parse_judge(repo.llm_client.chat_json(msgs, _JUDGE_SCHEMA))
+        except Exception as exc:  # judge 调用失败不应中断整轮
+            judged = {"correctness": 0, "inference_quality": 0,
+                      "grounding_consistency": False, "fabricated_citation": False,
+                      "reason": f"judge_error: {type(exc).__name__}"}
+        rows.append({
+            "id": q["id"], "level": q["level"], "question": q["question"],
+            "answer": resp.answer or resp.conclusion,
+            "evidence_level": resp.evidence_level,
+            "anchors": len(resp.anchors), "top_relevance": resp.top_relevance,
+            "judge": judged,
+        })
+        print(f"[infer] {q['id']} {q['level']} -> correctness={judged['correctness']} "
+              f"evidence={resp.evidence_level}", flush=True)
+    return rows

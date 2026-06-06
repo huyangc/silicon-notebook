@@ -53,3 +53,38 @@ def render_speed_report(measured: list, extrapolated: list,
             f"满足 ≤ {target_seconds}s 的最大文档约 **{recommended_max_chars} 字符**;"
             f"超出建议拆分上传或下调 KG_EXTRACT_WORKERS 以减少限流重试。"]
     return "\n".join(out) + "\n"
+
+
+def render_inference_report(rows: list) -> str:
+    from collections import defaultdict
+    by_level = defaultdict(list)
+    for r in rows:
+        by_level[r["level"]].append(r)
+    out = ["# 推断问答评测报告", "",
+           "judge=deepseek。correctness/inference_quality 0–2;越高越好。", "",
+           "## 分层得分", "",
+           "| 层 | 题数 | 平均正确性 | 平均推断质量 | grounding一致率 | 伪引用率 |",
+           "|---|---|---|---|---|---|"]
+    avg = {}
+    for lvl in ("L1", "L2", "L3", "L4"):
+        rs = by_level.get(lvl, [])
+        if not rs:
+            continue
+        c = sum(r["judge"]["correctness"] for r in rs) / len(rs)
+        iq = sum(r["judge"]["inference_quality"] for r in rs) / len(rs)
+        gc = sum(1 for r in rs if r["judge"]["grounding_consistency"]) / len(rs)
+        fc = sum(1 for r in rs if r["judge"]["fabricated_citation"]) / len(rs)
+        avg[lvl] = c
+        out.append(f"| {lvl} | {len(rs)} | {c:.2f} | {iq:.2f} | {gc:.0%} | {fc:.0%} |")
+    if "L1" in avg and "L3" in avg:
+        out += ["", f"**推断能力信号:L3 多跳综合均分 {avg['L3']:.2f} − L1 直接均分 "
+                f"{avg['L1']:.2f} = 落差 {avg['L1'] - avg['L3']:+.2f}**(落差越小越好)。"]
+    out += ["", "## 逐题明细", "",
+            "| id | 层 | 正确 | 推断 | 伪引用 | evidence_level | 理由 |",
+            "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        j = r["judge"]
+        out.append(f"| {r['id']} | {r['level']} | {j['correctness']} | "
+                   f"{j['inference_quality']} | {'是' if j['fabricated_citation'] else '否'} | "
+                   f"{r['evidence_level']} | {j['reason']} |")
+    return "\n".join(out) + "\n"
