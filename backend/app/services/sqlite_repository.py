@@ -1196,10 +1196,12 @@ class SQLiteRepository:
                 self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
                 override=self.settings.kg_window_target_chars,
             )
+            whitelist = self.concept_whitelist_terms()
             graph = kg_ingest.extract_graph(
                 self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
                 n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
+                whitelist=whitelist,
             )
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
@@ -1213,7 +1215,9 @@ class SQLiteRepository:
             fw, tw = graph.failed_windows, graph.total_windows
             with self._connect() as db:
                 db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
-                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} windows_failed={fw}/{tw}", _now(), run_id))
+                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} "
+                            f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
+                            f"concepts_dropped={graph.concepts_dropped}", _now(), run_id))
         except Exception as exc:
             with self._connect() as db:
                 db.execute("UPDATE extraction_runs SET status='failed', error_message=?, updated_at=? WHERE id=?",
