@@ -2067,6 +2067,23 @@ class SQLiteRepository:
         confirmed = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "confirmed"}
         rejected = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "rejected"}
         res = cluster_concepts(concepts, vectors, confirmed, rejected)
+        # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
+        from app.services.concept_merge_review import review_merge_candidates
+        autoc = res.get("auto_candidates", [])
+        if autoc and getattr(self.llm_client, "configured", False):
+            cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
+                          for i, (a, b, s) in enumerate(autoc)]
+            decisions = review_merge_candidates(self.llm_client, cand_dicts)
+            by_id = {d["candidate_id"]: d for d in decisions}
+            extra = set()
+            for i, (a, b, s) in enumerate(autoc):
+                d = by_id.get(f"ac{i}")
+                if d and d["decision"] == "merge" and d["confidence"] >= 0.90:
+                    extra.add(frozenset((a[2:] if a.startswith("K-") else a,
+                                        b[2:] if b.startswith("K-") else b)))
+            if extra:
+                confirmed = set(confirmed) | extra
+                res = cluster_concepts(concepts, vectors, confirmed, rejected)
         rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
                  "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
         self.write_clusters(notebook_id, rows)
