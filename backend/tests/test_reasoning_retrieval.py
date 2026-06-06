@@ -1,3 +1,4 @@
+import json
 import pytest
 
 
@@ -133,3 +134,92 @@ def test_toolbox_delegates_to_repo(rrepo):
     assert ctx.get("object_type") == "claim"
     assert rr.get(nb.id, "no-such-id") == {}     # KeyError 吞掉
     assert rr.search_elements(nb.id, "x") == []   # 无原文不报错
+
+
+class _StubLLM:
+    """按 schema_hint 返回预置 JSON;configured 可控。"""
+    def __init__(self, plan=None, reflect=None, configured=True):
+        self._plan = plan
+        self._reflect = reflect
+        self.configured = configured
+    def chat_json(self, messages, schema_hint):
+        if "sub_queries" in schema_hint:
+            return json.dumps(self._plan)
+        return json.dumps(self._reflect)
+
+
+def _rr_with_llm(repo, **llm):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    repo.llm_client = _StubLLM(**llm)
+    return ReasoningRetriever(repo, repo.settings)
+
+
+def test_plan_parses_subqueries(rrepo):
+    rr = _rr_with_llm(rrepo, plan={"sub_queries": [
+        {"query": "RTL综合", "types": ["claim"], "prefer": "keyword", "reason": "r"},
+        {"query": "布线", "types": ["bogus"], "prefer": "weird"},
+    ]})
+    subs = rr.plan("问题", "")
+    assert [s.query for s in subs] == ["RTL综合", "布线"]
+    assert subs[0].types == ["claim"] and subs[0].prefer == "keyword"
+    assert subs[1].types == [] and subs[1].prefer == "balanced"  # 非法值被清洗
+
+
+def test_plan_truncates_to_max_subqueries(rrepo):
+    rrepo.settings.reasoning_max_subqueries = 2
+    rr = _rr_with_llm(rrepo, plan={"sub_queries": [
+        {"query": "a"}, {"query": "b"}, {"query": "c"}]})
+    assert len(rr.plan("q", "")) == 2
+
+
+def test_plan_falls_back_on_bad_json(rrepo):
+    rr = _rr_with_llm(rrepo, plan={"garbage": 1})
+    subs = rr.plan("原问题X", "")
+    assert len(subs) == 1 and subs[0].query == "原问题X"
+
+
+def test_plan_falls_back_when_llm_unconfigured(rrepo):
+    rr = _rr_with_llm(rrepo, configured=False)
+    subs = rr.plan("原问题Y", "")
+    assert len(subs) == 1 and subs[0].query == "原问题Y"
+
+
+def test_reflect_parses_expand(rrepo):
+    rr = _rr_with_llm(rrepo, reflect={
+        "sufficient": False, "next_action": "expand_graph",
+        "expand": {"object_id": "ko-1", "edge_type": "relates", "direction": "out"},
+        "reason": "深挖"})
+    d = rr.reflect("q", "summary")
+    assert d.next_action == "expand_graph" and d.expand_object_id == "ko-1"
+    assert d.expand_edge_type == "relates" and d.expand_direction == "out"
+
+
+def test_reflect_bad_json_becomes_answer(rrepo):
+    rr = _rr_with_llm(rrepo, reflect=["not", "a", "dict"])
+    d = rr.reflect("q", "s")
+    assert d.next_action == "answer" and d.sufficient is True
+
+
+def test_reflect_falls_back_when_llm_unconfigured(rrepo):
+    rr = _rr_with_llm(rrepo, reflect={"next_action": "expand_graph"}, configured=False)
+    d = rr.reflect("q", "s")
+    assert d.next_action == "answer" and d.sufficient is True
+
+
+def test_reflect_parses_add_subquery(rrepo):
+    rr = _rr_with_llm(rrepo, reflect={
+        "next_action": "add_subquery",
+        "new_sub_query": {"query": "补充查询", "types": ["procedure"], "prefer": "semantic"}})
+    d = rr.reflect("q", "s")
+    assert d.next_action == "add_subquery"
+    assert d.new_sub_query is not None
+    assert d.new_sub_query.query == "补充查询"
+    assert d.new_sub_query.types == ["procedure"] and d.new_sub_query.prefer == "semantic"
+
+
+def test_reflect_parses_search_elements(rrepo):
+    rr = _rr_with_llm(rrepo, reflect={
+        "next_action": "search_elements", "elements_query": "原文检索词"})
+    d = rr.reflect("q", "s")
+    assert d.next_action == "search_elements"
+    assert d.elements_query == "原文检索词"

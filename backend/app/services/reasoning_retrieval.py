@@ -76,3 +76,69 @@ class ReasoningRetriever:
 
     def search_elements(self, notebook_id, query):
         return self.repo._retrieve_elements(notebook_id, query)
+
+    # --- LLM 决策点 ---
+    def plan(self, question, history=""):
+        fallback = [SubQuery(query=question)]
+        if not getattr(self.repo.llm_client, "configured", False):
+            return fallback
+        try:
+            raw = self.repo.llm_client.chat_json(
+                [{"role": "user", "content": plan_prompt(question, history)}],
+                PLAN_SCHEMA_HINT)
+            data = json.loads(raw)
+            subs = data.get("sub_queries") if isinstance(data, dict) else None
+            if not isinstance(subs, list) or not subs:
+                return fallback
+            out: List[SubQuery] = []
+            for s in subs[: self.settings.reasoning_max_subqueries]:
+                if not isinstance(s, dict):
+                    continue
+                q = str(s.get("query", "")).strip()
+                if not q:
+                    continue
+                _types_raw = s.get("types")
+                types = [t for t in (_types_raw if isinstance(_types_raw, list) else []) if t in KG_TYPES]
+                prefer = s.get("prefer") if s.get("prefer") in PREFER_WEIGHTS else "balanced"
+                out.append(SubQuery(query=q, types=types, prefer=prefer,
+                                    reason=str(s.get("reason", ""))))
+            return out or fallback
+        except Exception:
+            return fallback
+
+    def reflect(self, question, candidates_summary):
+        answer_decision = ReflectDecision(sufficient=True, next_action="answer")
+        if not getattr(self.repo.llm_client, "configured", False):
+            return answer_decision
+        try:
+            raw = self.repo.llm_client.chat_json(
+                [{"role": "user", "content": reflect_prompt(question, candidates_summary)}],
+                REFLECT_SCHEMA_HINT)
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return answer_decision
+            action = str(data.get("next_action", "answer"))
+            if action not in ("answer", "expand_graph", "add_subquery", "search_elements"):
+                action = "answer"
+            d = ReflectDecision(
+                sufficient=bool(data.get("sufficient", False)),
+                next_action=action, reason=str(data.get("reason", "")))
+            exp = data.get("expand")
+            if isinstance(exp, dict):
+                d.expand_object_id = str(exp.get("object_id", ""))
+                et = exp.get("edge_type")
+                d.expand_edge_type = str(et) if et else None
+                dr = exp.get("direction")
+                d.expand_direction = dr if dr in ("out", "in", "both") else "both"
+            nsq = data.get("new_sub_query")
+            if isinstance(nsq, dict) and str(nsq.get("query", "")).strip():
+                _nsq_types = nsq.get("types")
+                types = [t for t in (_nsq_types if isinstance(_nsq_types, list) else []) if t in KG_TYPES]
+                prefer = nsq.get("prefer") if nsq.get("prefer") in PREFER_WEIGHTS else "balanced"
+                d.new_sub_query = SubQuery(query=str(nsq["query"]).strip(),
+                                           types=types, prefer=prefer,
+                                           reason=str(nsq.get("reason", "")))
+            d.elements_query = str(data.get("elements_query", "")).strip()
+            return d
+        except Exception:
+            return answer_decision
