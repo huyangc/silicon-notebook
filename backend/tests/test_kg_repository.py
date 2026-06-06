@@ -354,3 +354,18 @@ def test_only_kg_profiles_and_schemas():
     for legacy in ("rule", "method", "risk", "case", "checklist", "glossary",
                    "finding", "principle", "example"):
         assert legacy not in OBJECT_SCHEMAS
+
+
+def test_builtin_whitelist_seeded(repo):
+    terms = repo.concept_whitelist_terms()
+    assert "vco" in terms
+    assert "mosfet" in terms
+
+
+def test_whitelist_add_list_remove(repo):
+    repo.concept_whitelist_add("Gm Cell", note="custom")
+    assert "gm cell" in repo.concept_whitelist_terms()
+    listed = repo.concept_whitelist_list()
+    assert any(e["term"] == "gm cell" and e["note"] == "custom" for e in listed)
+    repo.concept_whitelist_remove("gm cell")
+    assert "gm cell" not in repo.concept_whitelist_terms()

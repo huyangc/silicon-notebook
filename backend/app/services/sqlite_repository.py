@@ -375,6 +375,11 @@ class SQLiteRepository:
                   cluster_count INTEGER NOT NULL DEFAULT 0,
                   updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS concept_whitelist (
+                  term TEXT PRIMARY KEY,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                );
 
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
@@ -491,6 +496,17 @@ class SQLiteRepository:
                     now,
                 ),
             )
+            from app.services.kg.filters import _norm as _wl_norm
+            builtin_whitelist = [
+                "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",
+                "NMOS", "PMOS", "BiCMOS", "JFET", "op amp", "ADC", "DAC",
+                "CMRR", "PSRR", "ESD", "PVT",
+            ]
+            for term in builtin_whitelist:
+                db.execute(
+                    "INSERT OR IGNORE INTO concept_whitelist (term, note, created_at) VALUES (?, 'builtin', ?)",
+                    (_wl_norm(term), now),
+                )
     def _count(self, db: sqlite3.Connection, table: str, column: str, value: str) -> int:
         row = db.execute(
             f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?",
@@ -1902,6 +1918,33 @@ class SQLiteRepository:
         with self._connect() as db:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
         return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
+
+    def concept_whitelist_terms(self) -> set:
+        with self._connect() as db:
+            return {r["term"] for r in db.execute("SELECT term FROM concept_whitelist").fetchall()}
+
+    def concept_whitelist_list(self) -> List[dict]:
+        with self._connect() as db:
+            rows = db.execute("SELECT term, note, created_at FROM concept_whitelist ORDER BY term").fetchall()
+        return [{"term": r["term"], "note": r["note"], "created_at": r["created_at"]} for r in rows]
+
+    def concept_whitelist_add(self, term: str, note: str = "") -> dict:
+        from app.services.kg.filters import _norm
+        t = _norm(term)
+        if not t:
+            raise ValueError("empty term")
+        now = _now()
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO concept_whitelist (term, note, created_at) VALUES (?, ?, ?)",
+                (t, note, now),
+            )
+        return {"term": t, "note": note, "created_at": now}
+
+    def concept_whitelist_remove(self, term: str) -> None:
+        from app.services.kg.filters import _norm
+        with self._connect() as db:
+            db.execute("DELETE FROM concept_whitelist WHERE term = ?", (_norm(term),))
 
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
