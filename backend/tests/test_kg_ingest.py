@@ -180,10 +180,10 @@ def test_canonicalize_merges_across_windows():
     )
 
 
-def test_extract_graph_accepts_workers_param():
+def test_extract_graph_uses_global_pool():
     import json
     payload = json.dumps({"nodes": [{"local_id": "a", "type": "Concept",
                                       "name": "Engram", "ev": 0}], "edges": []})
-    g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic", workers=4)
+    g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
     assert g.total_windows >= 1
     assert any(n.name == "Engram" for n in g.nodes)
