@@ -118,3 +118,18 @@ def test_retrieve_elements_degrades_gracefully(rrepo):
     nb = _seed_two_nodes(rrepo)
     # 无 source_elements 时返回空列表,不报错
     assert rrepo._retrieve_elements(nb.id, "任意查询") == []
+
+
+def test_toolbox_delegates_to_repo(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    hits = rr.search(nb.id, "RTL到GDSII流程", types=["claim"], prefer="keyword")
+    assert all(h.object_type == "claim" for h in hits)
+    claim = hits[0]
+    neigh = rr.neighbors(nb.id, claim.object_id)
+    assert any(n.object_type == "procedure" for n in neigh)
+    ctx = rr.get(nb.id, claim.object_id)
+    assert ctx.get("object_type") == "claim"
+    assert rr.get(nb.id, "no-such-id") == {}     # KeyError 吞掉
+    assert rr.search_elements(nb.id, "x") == []   # 无原文不报错
