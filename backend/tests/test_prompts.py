@@ -18,6 +18,16 @@ def test_answer_prompt_includes_history_when_present():
     assert "prev q" not in p2
 
 
+def test_answer_prompt_forbids_fabricated_citation():
+    from app.services.prompts import answer_prompt
+    p = answer_prompt("q?", "k1: [concept] X")
+    assert "DIRECTLY from that specific knowledge item" in p
+    assert "MUST NOT contain any [k]" in p
+    assert "NEVER attach [k]" in p
+    # 原有推断标注规则仍在
+    assert "推断" in p
+
+
 def test_extract_prompt_excludes_enumerated_values_and_meta_claims():
     from app.services.kg.extract import _prompt
     p = _prompt("[1] sample text", "Section 1", "textbook")
