@@ -153,14 +153,19 @@ class ReasoningRetriever:
             lines.append(f"- [element] {el.source_title} · {el.location_label}: {el.text[:80]}")
         return "\n".join(lines) if lines else "(no candidates yet)"
 
-    def run(self, notebook_id, question, history=""):
+    def run(self, notebook_id, question, history="", on_step=None):
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
         visited: set = set()
 
+        def record(step: TraceStep) -> None:
+            trace.append(step)
+            if on_step:
+                on_step(step)
+
         subqueries = self.plan(question, history)
-        trace.append(TraceStep(
+        record(TraceStep(
             step_type="plan", summary=f"规划了 {len(subqueries)} 个子查询",
             detail={"sub_queries": [{"query": s.query, "types": s.types,
                                      "prefer": s.prefer, "reason": s.reason}
@@ -169,58 +174,58 @@ class ReasoningRetriever:
         for sq in subqueries:
             for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
                 collected.setdefault(h.object_id, h)
-        trace.append(TraceStep(step_type="retrieve",
-                               summary=f"初检索得到 {len(collected)} 个候选节点",
-                               detail={"count": len(collected)}))
+        record(TraceStep(step_type="retrieve",
+                         summary=f"初检索得到 {len(collected)} 个候选节点",
+                         detail={"count": len(collected)}))
 
         steps = 0
         while steps < self.settings.reasoning_max_steps:
             steps += 1
             decision = self.reflect(question, self._summarize(collected, elements))
-            trace.append(TraceStep(step_type="reflect",
-                                   summary=decision.reason or decision.next_action,
-                                   detail={"next_action": decision.next_action,
-                                           "sufficient": decision.sufficient}))
+            record(TraceStep(step_type="reflect",
+                             summary=decision.reason or decision.next_action,
+                             detail={"next_action": decision.next_action,
+                                     "sufficient": decision.sufficient}))
             if decision.next_action == "answer" or decision.sufficient:
                 break
             if decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
                 if not oid or oid in visited:
-                    trace.append(TraceStep(step_type="skip",
-                                           summary="跳过 expand_graph(空或已访问节点)",
-                                           detail={"object_id": oid, "reason": "empty_or_visited"}))
+                    record(TraceStep(step_type="skip",
+                                     summary="跳过 expand_graph(空或已访问节点)",
+                                     detail={"object_id": oid, "reason": "empty_or_visited"}))
                     continue
                 visited.add(oid)
                 neigh = self.neighbors(notebook_id, oid,
                                        decision.expand_edge_type, decision.expand_direction)
                 for h in neigh:
                     collected.setdefault(h.object_id, h)
-                trace.append(TraceStep(step_type="expand",
-                                       summary=f"顺关系深挖 {oid},得到 {len(neigh)} 个邻居",
-                                       detail={"object_id": oid,
-                                               "edge_type": decision.expand_edge_type,
-                                               "found": len(neigh)}))
+                record(TraceStep(step_type="expand",
+                                 summary=f"顺关系深挖 {oid},得到 {len(neigh)} 个邻居",
+                                 detail={"object_id": oid,
+                                         "edge_type": decision.expand_edge_type,
+                                         "found": len(neigh)}))
             elif decision.next_action == "add_subquery":
                 if not decision.new_sub_query:
-                    trace.append(TraceStep(step_type="skip",
-                                           summary="跳过 add_subquery(缺少 new_sub_query)",
-                                           detail={"reason": "missing_new_sub_query"}))
+                    record(TraceStep(step_type="skip",
+                                     summary="跳过 add_subquery(缺少 new_sub_query)",
+                                     detail={"reason": "missing_new_sub_query"}))
                     continue
                 sq = decision.new_sub_query
                 for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
                     collected.setdefault(h.object_id, h)
-                trace.append(TraceStep(step_type="retrieve",
-                                       summary=f"补充子查询: {sq.query}",
-                                       detail={"query": sq.query}))
+                record(TraceStep(step_type="retrieve",
+                                 summary=f"补充子查询: {sq.query}",
+                                 detail={"query": sq.query}))
             elif decision.next_action == "search_elements":
                 eq = decision.elements_query or question
                 seen_el = {e.element_id for e in elements}
                 els = [e for e in self.search_elements(notebook_id, eq)
                        if e.element_id not in seen_el]
                 elements.extend(els)
-                trace.append(TraceStep(step_type="fallback",
-                                       summary=f"降级查原文: {eq},新增 {len(els)} 段",
-                                       detail={"query": eq, "found": len(els)}))
+                record(TraceStep(step_type="fallback",
+                                 summary=f"降级查原文: {eq},新增 {len(els)} 段",
+                                 detail={"query": eq, "found": len(els)}))
             else:
                 break
 
@@ -229,7 +234,7 @@ class ReasoningRetriever:
         top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
         top_hits.sort(key=lambda h: h.relevance, reverse=True)
         top_hits = top_hits[: self.settings.retrieval_top_n]
-        trace.append(TraceStep(step_type="answer",
-                               summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
-                               detail={"kg": len(top_hits), "elements": len(elements)}))
+        record(TraceStep(step_type="answer",
+                         summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
+                         detail={"kg": len(top_hits), "elements": len(elements)}))
         return ReasoningResult(top_hits=top_hits, elements=elements, trace=trace)
