@@ -1136,7 +1136,6 @@ class SQLiteRepository:
                 self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
                 n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
-                workers=self.settings.kg_extract_workers,
             )
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:

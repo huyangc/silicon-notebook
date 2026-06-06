@@ -3,7 +3,6 @@ The ONLY bridge between app.services.kg.* and the product. Extraction model is
 the product LLM (deepseek-v4-flash via OPENAI_COMPAT_*)."""
 from __future__ import annotations
 
-import concurrent.futures as cf
 import math
 import re
 from typing import Any, List, Tuple
@@ -12,9 +11,9 @@ from app.services.kg.windowing import windows_with_elements
 from app.services.kg.extract import extract_window
 from app.services.kg.canonicalize import canonicalize
 from app.services.kg.models import Edge, KnowledgeGraph, Node
+from app.services.kg.scheduler import submit_window
 
 DOC_TYPE_MAP = {"academic_paper": "academic", "article": "academic", "textbook": "textbook"}
-_WORKERS = 16
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +131,7 @@ def plan_window_size(content_chars: int, workers: int, w_min: int, w_max: int,
 
 
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
-                  n: int = 9000, m: int = 450, workers: int = _WORKERS) -> KnowledgeGraph:
+                  n: int = 9000, m: int = 450) -> KnowledgeGraph:
     """Window the text, extract a KG fragment per window concurrently, then
     canonicalize. Evidence is anchored by element-id markers: each window's
     prose elements are numbered and the LLM emits only an int "ev" per node/edge,
@@ -144,20 +143,20 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
     edges: List[Edge] = []
     failed = 0
     if pairs:
-        workers = max(1, min(workers, len(pairs)))
-        # pool.submit + per-future .result() (NOT pool.map, which aborts on the
-        # first exception): one window's network failure must not abort the rest.
-        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(extract_window, client, els, w.section_path,
-                                doc_type, idx)
-                    for idx, (w, els) in enumerate(pairs)]
-            for fut in futs:
-                try:
-                    ns, es = fut.result()
-                    nodes += ns
-                    edges += es
-                except Exception:
-                    failed += 1
+        # Submit every window to the process-global window pool (one global cap
+        # across all docs, FIFO). Collect only THIS doc's futures so per-source
+        # completion semantics are unchanged. submit + per-future .result()
+        # (NOT a barrier): one window's failure must not abort the rest.
+        futs = [submit_window(extract_window, client, els, w.section_path,
+                              doc_type, idx)
+                for idx, (w, els) in enumerate(pairs)]
+        for fut in futs:
+            try:
+                ns, es = fut.result()
+                nodes += ns
+                edges += es
+            except Exception:
+                failed += 1
     nodes, edges = canonicalize(nodes, edges, doc_id=source_file)
     return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes,
                           edges=edges, total_windows=len(pairs),
