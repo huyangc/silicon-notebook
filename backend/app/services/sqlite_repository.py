@@ -1918,54 +1918,123 @@ class SQLiteRepository:
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
-        cmap = self.cluster_map(notebook_id)
-        members = [oid for oid, cid in cmap.items() if cid == canonical_id]
-        mset = set(members)
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,)).fetchall()
-            nrow = db.execute(
+            # Get cluster members and canonical name in one query
+            cluster_rows = db.execute(
+                "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
+                "FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
+                (notebook_id, canonical_id),
+            ).fetchall()
+            # canonical_name comes from the cluster table (same for all rows)
+            name_row = db.execute(
                 "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
-                (notebook_id, canonical_id)).fetchone()
-        name = nrow["canonical_name"] if nrow else ""
-        by_id = {r["id"]: {"id": r["id"], "object_type": r["object_type"],
-                           "payload": json.loads(r["payload"] or "{}"),
-                           "evidence": json.loads(r["evidence"] or "[]")} for r in rows}
+                (notebook_id, canonical_id),
+            ).fetchone()
+            name = name_row["canonical_name"] if name_row else ""
+
+        members = []
+        member_ids = []
+        for r in cluster_rows:
+            obj = {
+                "id": r["member_object_id"],
+                "object_type": r["object_type"],
+                "payload": json.loads(r["payload"] or "{}"),
+                "evidence": json.loads(r["evidence"] or "[]"),
+            }
+            members.append(obj)
+            member_ids.append(r["member_object_id"])
+
+        mset = set(member_ids)
+
+        if not mset:
+            # No members found; still return valid shape
+            return {"canonical_id": canonical_id, "canonical_name": name,
+                    "members": [], "attached": [], "evidence": []}
+
+        ph = ",".join("?" for _ in mset)
+        mlist = list(mset)
+
+        with self._connect() as db:
+            # Targeted relation queries using member placeholders
+            rels_out = db.execute(
+                f"SELECT source_object_id, target_object_id, edge_type "
+                f"FROM knowledge_relations WHERE notebook_id=? AND source_object_id IN ({ph})",
+                [notebook_id] + mlist,
+            ).fetchall()
+            rels_in = db.execute(
+                f"SELECT source_object_id, target_object_id, edge_type "
+                f"FROM knowledge_relations WHERE notebook_id=? AND target_object_id IN ({ph})",
+                [notebook_id] + mlist,
+            ).fetchall()
+
+            # Collect attached object ids (non-member side of relations)
+            attached_ids: set[str] = set()
+            rel_edges: list[dict] = []
+            for rel in rels_out:
+                other = rel["target_object_id"]
+                if other not in mset:
+                    attached_ids.add(other)
+                    rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+            for rel in rels_in:
+                other = rel["source_object_id"]
+                if other not in mset:
+                    attached_ids.add(other)
+                    rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+
+            # Batch-read attached objects
+            by_other: dict[str, dict] = {}
+            if attached_ids:
+                aph = ",".join("?" for _ in attached_ids)
+                arows = db.execute(
+                    f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
+                    f"WHERE id IN ({aph}) AND status!='deprecated'",
+                    list(attached_ids),
+                ).fetchall()
+                by_other = {
+                    r["id"]: {
+                        "id": r["id"],
+                        "object_type": r["object_type"],
+                        "payload": json.loads(r["payload"] or "{}"),
+                        "evidence": json.loads(r["evidence"] or "[]"),
+                    }
+                    for r in arows
+                }
+
         attached = []
         seen_attached: set[str] = set()
-        for rel in self.relations_for_notebook(notebook_id):
-            s, t = rel["source_object_id"], rel["target_object_id"]
-            if s in mset and t not in mset:
-                other = t
-            elif t in mset and s not in mset:
-                other = s
-            else:
-                continue
-            if other in by_id and by_id[other]["object_type"] != "concept" and other not in seen_attached:
+        for edge in rel_edges:
+            other = edge["other"]
+            if other in by_other and by_other[other]["object_type"] != "concept" and other not in seen_attached:
                 seen_attached.add(other)
-                attached.append({**by_id[other], "edge_type": rel["edge_type"]})
-        evidence = [ev for oid in members for ev in by_id.get(oid, {}).get("evidence", [])]
+                attached.append({**by_other[other], "edge_type": edge["edge_type"]})
+
+        member_by_id = {m["id"]: m for m in members}
+        evidence = [ev for oid in member_ids for ev in member_by_id.get(oid, {}).get("evidence", [])]
         with self._connect() as db:
             evidence = self._enrich_evidence(db, evidence)
+
         return {"canonical_id": canonical_id, "canonical_name": name,
-                "members": [by_id[o] for o in members if o in by_id],
+                "members": [member_by_id[o] for o in member_ids if o in member_by_id],
                 "attached": attached, "evidence": evidence}
 
-    def _element_texts(self, db, element_ids):
+    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
         ids = [e for e in element_ids if e]
         if not ids:
             return {}, {}
         ph = ",".join("?" for _ in ids)
         rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
         texts = {r["id"]: r["text"] for r in rows}
-        # NOTE: assumes ids[0]'s element belongs to `notebook_id` (single-tenant;
-        # element ids here always come from objects in the target notebook).
+        if not with_ordinal:
+            return texts, {}
         order_rows = db.execute(
             "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
             "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
             "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
-            "ORDER BY se.created_at ASC, se.id ASC", (ids[0],)).fetchall()
+            "ORDER BY se.created_at ASC, se.id ASC",
+            (ids[0],),
+        ).fetchall()
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
 
@@ -2026,7 +2095,7 @@ class SQLiteRepository:
                         candidate_steps.append((ppay.get("name", ""), first_eid))
                     all_step_first_eids = [eid for _, eid in candidate_steps if eid]
                     if all_step_first_eids:
-                        texts, ordinal = self._element_texts(db, all_step_first_eids)
+                        texts, ordinal = self._element_texts(db, all_step_first_eids, with_ordinal=True)
                     else:
                         texts, ordinal = {}, {}
                     steps = []

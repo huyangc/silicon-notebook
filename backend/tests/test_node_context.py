@@ -59,6 +59,36 @@ def test_node_context_procedure_steps_doc_order(repo):
     assert names == ["extract", "modulate", "refine"]
     assert "suffix N-grams" in ctx["steps"][0]["element_text"]
 
+def test_element_texts_does_not_scan_entire_notebook(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid, eids = _src_with_elements(repo, nb.id, ["A target sentence.", "Another sentence."])
+
+    executed = []
+    original_connect = repo._connect
+
+    class TrackingConnection:
+        def __init__(self, inner):
+            self.inner = inner
+        def __enter__(self):
+            self.conn = self.inner.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+        def execute(self, sql, params=()):
+            executed.append(" ".join(sql.split()))
+            return self.conn.execute(sql, params)
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+    monkeypatch.setattr(repo, "_connect", lambda: TrackingConnection(original_connect()))
+    with repo._connect() as db:
+        texts, ordinal = repo._element_texts(db, [eids[0]])
+
+    assert texts[eids[0]] == "A target sentence."
+    assert ordinal == {}
+    assert not any("ORDER BY se.created_at ASC, se.id ASC" in sql for sql in executed)
+
+
 def test_concept_detail_includes_element_text(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid, eids = _src_with_elements(repo, nb.id, ["As shown, Engram is a conditional memory module."])
