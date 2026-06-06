@@ -95,6 +95,7 @@ def procedure_degraded(payload: dict) -> bool:
 _NON_ATOMIC = ("symbol", "reference", "quantity", "code", "short")
 
 
+
 def aggregate_quality(concepts: List[dict], degree: Dict[str, int]) -> dict:
     counts: Dict[str, int] = defaultdict(int)
     samples: Dict[str, List[str]] = defaultdict(list)
@@ -125,3 +126,49 @@ def aggregate_quality(concepts: List[dict], degree: Dict[str, int]) -> dict:
         "suspect_non_atomic_rate": round(len(suspect_ids) / total, 4),
         "samples": {k: v for k, v in samples.items()},
     }
+
+
+def run_quality(db_path: str, notebook_id: str) -> Dict[str, dict]:
+    """扫现有 KG,按书 × 类型 聚合质量指标。返回 {book_label: {type: metrics}}。"""
+    from app.eval.db import EvalDB
+    ed = EvalDB(db_path)
+    titles = ed.source_titles(notebook_id)
+
+    def book_label(src_id):
+        name = titles.get(src_id, src_id or "unknown")
+        return (name or "unknown")[:36]
+
+    per_book: Dict[str, dict] = defaultdict(dict)
+    degree = ed.relation_degree(notebook_id)
+
+    concepts_by_book: Dict[str, List[dict]] = defaultdict(list)
+    for c in ed.objects(notebook_id, "concept"):
+        concepts_by_book[book_label(c["source_id"])].append(c)
+    for book, items in concepts_by_book.items():
+        per_book[book]["concept"] = aggregate_quality(items, degree)
+
+    degraders = {"claim": claim_degraded, "formula": formula_degraded}
+    for otype, fn in degraders.items():
+        by_book: Dict[str, List[dict]] = defaultdict(list)
+        for o in ed.objects(notebook_id, otype):
+            by_book[book_label(o["source_id"])].append(o)
+        for book, items in by_book.items():
+            bad = sum(1 for o in items if fn(o["name"]))
+            total = len(items) or 1
+            per_book[book][otype] = {
+                "total": len(items), "degraded": bad,
+                "degraded_rate": round(bad / total, 4),
+                "samples": [o["name"] for o in items if fn(o["name"])][:20],
+            }
+    proc_by_book: Dict[str, List[dict]] = defaultdict(list)
+    for o in ed.objects(notebook_id, "procedure"):
+        proc_by_book[book_label(o["source_id"])].append(o)
+    for book, items in proc_by_book.items():
+        bad = sum(1 for o in items if procedure_degraded(o["payload"]))
+        total = len(items) or 1
+        per_book[book]["procedure"] = {
+            "total": len(items), "degraded": bad,
+            "degraded_rate": round(bad / total, 4),
+            "samples": [o["name"] for o in items if procedure_degraded(o["payload"])][:20],
+        }
+    return dict(per_book)
