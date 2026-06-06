@@ -83,3 +83,13 @@ def test_backmatter_matches_segment_not_substring():
     # content sections that merely contain 'index' as a word/substring -> keep
     assert should_extract_window("2 > Indexed Addressing", [_el("Indexed addressing adds a base and offset.")], "textbook")[0] is True
     assert should_extract_window("3 > Index Register Theory", [_el("The index register holds an address.")], "textbook")[0] is True
+
+
+def test_multiword_name_with_symbol_kept():
+    # bare single-token symbols are dropped
+    for n in ["V_DD", "g_m1", "(W/L)_1", "A_v^+", "phi_MS"]:
+        assert is_noise_concept(n, WL)[0] is True, n
+    # descriptive multi-word concepts that merely CONTAIN a symbol notation are kept
+    for n in ["Oxide Capacitance (C_ox)", "Threshold Voltage (V_T0)",
+              "gate-to-source capacitance (C_GS)", "depletion-layer capacitance C_j"]:
+        assert is_noise_concept(n, WL)[0] is False, n

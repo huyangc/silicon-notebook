@@ -75,8 +75,8 @@ def is_noise_concept(name: str, whitelist) -> Tuple[bool, str]:
         return True, "reference"
     if _SECTION_RE.match(raw):
         return True, "section_heading"
-    if "_" in raw or "^" in raw:
-        return True, "symbol"
+    if (" " not in raw) and ("_" in raw or "^" in raw):
+        return True, "symbol"  # bare single-token symbol; multi-word names with a symbol are kept
     if _INSTANCE_RE.match(raw):
         return True, "instance_label"
     return False, ""
