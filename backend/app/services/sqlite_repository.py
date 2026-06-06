@@ -1284,7 +1284,7 @@ class SQLiteRepository:
             except Exception:  # noqa: BLE001 — warm-up only
                 pass
 
-        def _embed_and_store(els: list) -> int:
+        def _embed_only(els: list) -> list:
             texts = [el.text[:trunc] for el in els]
             try:
                 vectors = self.embedder.embed_texts(texts)
@@ -1293,27 +1293,24 @@ class SQLiteRepository:
                     "embed batch failed (%d elements) for source %s: %s",
                     len(els), source_id, exc,
                 )
-                return 0
-            now = _now()
-            with self._write() as db:  # own connection per thread (WAL + busy_timeout)
-                for el, vector in zip(els, vectors):
-                    db.execute(
-                        """
-                        INSERT OR REPLACE INTO element_embeddings
-                        (element_id, source_id, notebook_id, vector, created_at)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (el.id, source_id, notebook_id, json.dumps(vector), now),
-                    )
-            return len(els)
+                return []
+            return [(el.id, vector) for el, vector in zip(els, vectors)]
 
         workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        stored = 0
+        rows = []
         with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-el") as pool:
-            for n in pool.map(_embed_and_store, batches):
-                stored += n
+            for part in pool.map(_embed_only, batches):
+                rows.extend(part)
+        now = _now()
+        if rows:
+            with self._write() as db:
+                db.executemany(
+                    "INSERT OR REPLACE INTO element_embeddings "
+                    "(element_id, source_id, notebook_id, vector, created_at) VALUES (?,?,?,?,?)",
+                    [(eid, source_id, notebook_id, json.dumps(vec), now) for eid, vec in rows],
+                )
         self.event_log.logger.info(
-            "embedded %s/%s elements for source %s", stored, len(pending), source_id
+            "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
         )
 
     def _embed_knowledge(
@@ -1344,11 +1341,8 @@ class SQLiteRepository:
             )
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
-        """Concurrently embed object payload text into knowledge_embeddings
-        (best-effort, per-batch isolated). Mirrors _embed_source: batches of
-        embed_batch_size run on an embed_concurrency thread pool, each batch
-        persists with its own connection (WAL+busy_timeout). A failed batch is
-        logged and skipped without losing the others."""
+        """并发 COMPUTE payload 向量, 再用一次写事务持久化到 knowledge_embeddings。
+        每批计算失败照旧 log + 跳过(best-effort)。"""
         if not self.settings.embedder_configured:
             return
         pending = []
@@ -1369,7 +1363,7 @@ class SQLiteRepository:
             except Exception:  # noqa: BLE001 — warm-up only
                 pass
 
-        def _embed_and_store(batch) -> None:
+        def _embed_only(batch) -> list:
             texts = [t for _, t in batch]
             try:
                 vectors = self.embedder.embed_texts(texts)
@@ -1378,17 +1372,22 @@ class SQLiteRepository:
                     "embed kg-objects batch failed (%d) for %s: %s",
                     len(batch), notebook_id, exc,
                 )
-                return
-            now = _now()
-            with self._write() as db:
-                for (oid, _), vec in zip(batch, vectors):
-                    db.execute(
-                        "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                        (oid, notebook_id, json.dumps(vec), now))
+                return []
+            return [(oid, vec) for (oid, _), vec in zip(batch, vectors)]
 
         workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        rows = []
         with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-kg") as pool:
-            list(pool.map(_embed_and_store, batches))
+            for part in pool.map(_embed_only, batches):
+                rows.extend(part)
+        if not rows:
+            return
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+                [(oid, notebook_id, json.dumps(vec), now) for oid, vec in rows],
+            )
 
     def _knowledge_vectors(
         self,

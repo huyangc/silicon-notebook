@@ -68,3 +68,46 @@ def test_all_writes_go_through_write_lock():
             elif WRITE.search(ln) and cur not in ALLOW:
                 offenders.append((i, cur, ln.strip()[:70]))
     assert not offenders, f"这些写仍走 _connect()(应改 _write()): {offenders}"
+
+
+@pytest.fixture
+def embed_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")     # embedder_configured == True
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "10")
+    r = SQLiteRepository(Settings())
+
+    class _FakeEmbedder:
+        def embed_texts(self, texts):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    r.embedder = _FakeEmbedder()
+    return r
+
+
+def test_embed_objects_batch_writes_in_one_transaction(embed_repo, monkeypatch):
+    nb = embed_repo.create_notebook(NotebookCreate(name="nb"))
+    writes = {"n": 0}
+    import contextlib
+    real_write = embed_repo._write
+
+    @contextlib.contextmanager
+    def counting_write():
+        writes["n"] += 1
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(embed_repo, "_write", counting_write)
+    items = [{"_oid": f"ko-{i}", "payload": {"name": f"concept number {i}"}} for i in range(35)]
+    embed_repo._embed_objects_batch(nb.id, items)
+
+    assert writes["n"] == 1                       # 35项/批10 = 4批, 但只 1 次写事务
+    with embed_repo._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
+    assert n == 35
