@@ -2570,6 +2570,15 @@ class SQLiteRepository:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
         procedure/concept), performs 1-hop relation expansion, and synthesises
         a conclusion via the LLM (or deterministic fallback)."""
+        import time
+        ask_started = time.perf_counter()
+
+        def ask_stage(name: str, started: float, **extra) -> None:
+            self.event_log.emit({
+                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
+                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
+            })
+
         self.get_notebook(notebook_id)
         question = payload.question.strip()
         # Legacy `scenario` is accepted for frontend back-compat but no longer
@@ -2590,18 +2599,17 @@ class SQLiteRepository:
         query = retrieval_query
         process_intent = is_process_query(question)
 
+        _t = time.perf_counter()
         with self._connect() as db:
             kg_objs: Dict[str, List[dict]] = {
-                t: self._knowledge_objects(db, notebook_id, t) for t in _KG_TYPES
+                kgt: self._knowledge_objects(db, notebook_id, kgt) for kgt in _KG_TYPES
             }
-            elements = self._gather_elements(db, notebook_id, with_vectors=False)
             query_vector = self._embed_query(query)
-            all_kg = [o for objs in kg_objs.values() for o in objs]
-            self._backfill_knowledge_embeddings(db, notebook_id, all_kg)
             elem_ids, elem_mat = self._vector_matrix(
                 db, notebook_id, "element_embeddings", "element_id")
             kn_ids, kn_mat = self._vector_matrix(
                 db, notebook_id, "knowledge_embeddings", "object_id")
+        ask_stage("load_indexes", _t)
 
         from app.services.vector_index import query_sims
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
@@ -2609,6 +2617,7 @@ class SQLiteRepository:
 
         # Score each KG type, pool, then rank by relevance * intent-aware type
         # weight (process/flow questions stop burying procedures).
+        _t = time.perf_counter()
         scored_all: List[RetrievedKnowledge] = []
         for t in _KG_TYPES:
             objs = kg_objs[t]
@@ -2628,8 +2637,10 @@ class SQLiteRepository:
                 scored_all, top_n, self.settings.proc_min, rank_key)
         else:
             top_hits = scored_all[:top_n]
+        ask_stage("score", _t)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
+        _t = time.perf_counter()
         hit_ids = {item.object_id for item in top_hits}
         relations = self.relations_for_notebook(notebook_id)
         neighbour_ids: set = set()
@@ -2666,6 +2677,7 @@ class SQLiteRepository:
                     "owner": row["owner"],
                     "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
                 })
+        ask_stage("expand", _t)
 
         # Build related_knowledge from hits + neighbours (hits first, no dups).
         registry = self.effective_schemas()
@@ -2700,10 +2712,16 @@ class SQLiteRepository:
 
         related_knowledge = related_knowledge[:12]
 
-        # Citations from top hits.
-        valid_element_ids = {element["element_id"] for element in elements}
+        # Citations from top hits — use only the element ids already referenced
+        # by the retrieved evidence (no full-table scan required).
+        cited_element_ids = {
+            evidence.element_id
+            for item in top_hits
+            for evidence in item.evidence
+            if evidence.element_id
+        }
         citations: List[Citation] = []
-        citations.extend(self._citations_from(top_hits, valid_element_ids, "KG evidence"))
+        citations.extend(self._citations_from(top_hits, cited_element_ids, "KG evidence"))
 
         # related_knowledge is always derived from top_hits (hits + 1-hop
         # neighbours), so top_hits being non-empty implies related_knowledge is
@@ -2715,6 +2733,7 @@ class SQLiteRepository:
         llm_grounded = False
         anchors: List[AnswerAnchor] = []
 
+        _t = time.perf_counter()
         if self.llm_client.configured:
             try:
                 answer, llm_grounded, anchors = self._answer_kg(
@@ -2722,6 +2741,7 @@ class SQLiteRepository:
                 )
             except Exception:
                 answer, llm_grounded, anchors = "", False, []
+        ask_stage("answer_llm", _t)
 
         # Relevance-aware grounding (no longer LLM self-report alone).
         evidence_level, top_relevance = classify_evidence(
@@ -2765,6 +2785,7 @@ class SQLiteRepository:
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id
         )
+        ask_stage("total", ask_started)
         return response
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
