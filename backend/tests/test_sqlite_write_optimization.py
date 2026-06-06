@@ -48,7 +48,8 @@ def test_all_writes_go_through_write_lock():
     import re
     src = pathlib.Path(__file__).resolve().parents[1] / "app" / "services" / "sqlite_repository.py"
     lines = src.read_text(encoding="utf-8").splitlines()
-    WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
+    # 负向后顾排除 Python 方法调用(如 set.update()/str.replace()/list.insert())误报, 只匹配 SQL 关键字
+    WRITE = re.compile(r"(?<!\.)\b(INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
     ALLOW = {"_migrate", "_seed"}            # 起步单线程, 不并发, 豁免
     cur = None
     in_block = False
