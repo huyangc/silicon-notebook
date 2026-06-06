@@ -223,3 +223,77 @@ def test_reflect_parses_search_elements(rrepo):
     d = rr.reflect("q", "s")
     assert d.next_action == "search_elements"
     assert d.elements_query == "原文检索词"
+
+
+class _SeqLLM:
+    """plan 固定;reflect 按序列返回(耗尽后默认 answer)。"""
+    configured = True
+    def __init__(self, plan, reflects):
+        self._plan = plan
+        self._reflects = list(reflects)
+    def chat_json(self, messages, schema_hint):
+        if "sub_queries" in schema_hint:
+            return json.dumps(self._plan)
+        if self._reflects:
+            return json.dumps(self._reflects.pop(0))
+        return json.dumps({"next_action": "answer", "sufficient": True})
+
+
+def test_run_plan_then_answer(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True, "reason": "够了"}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    assert res.top_hits  # 召回到候选
+    kinds = [t.step_type for t in res.trace]
+    assert kinds[0] == "plan" and "retrieve" in kinds and kinds[-1] == "answer"
+
+
+def test_run_expand_graph_records_trace(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
+        reflects=[
+            {"next_action": "expand_graph", "expand": {"object_id": claim.object_id},
+             "reason": "深挖关系"},
+            {"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    assert any(t.step_type == "expand" for t in res.trace)
+    assert any(h.object_type == "procedure" for h in res.top_hits)  # 邻居被纳入
+
+
+def test_run_dedups_expand_and_respects_step_cap(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    rrepo.settings.reasoning_max_steps = 3
+    # 始终要求 expand 同一节点 → 去重后无新增,且步数撞上限强制收尾
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "expand_graph",
+                   "expand": {"object_id": claim.object_id}}] * 10)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
+    assert len(reflect_steps) <= 3                 # circuit breaker 生效
+    assert res.trace[-1].step_type == "answer"     # 仍正常收尾
+
+
+def test_run_add_subquery_without_payload_continues(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    # add_subquery 但缺 new_sub_query: 应记 skip 并继续(不提前 break),下一轮才 answer
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "add_subquery"},
+                  {"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
+    assert len(reflect_steps) == 2                  # 两轮 reflect 都执行,未提前终止
+    assert any(t.step_type == "skip" for t in res.trace)
+    assert res.trace[-1].step_type == "answer"
