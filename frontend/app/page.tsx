@@ -260,6 +260,7 @@ type ConceptDetailResp = { canonical_id: string; canonical_name: string; members
 type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: { quoted_span: string; source_title: string; element_text: string }[]; definition: string | null; steps: { name: string; element_text: string }[] | null };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
 type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number };
+type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
 type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
 
@@ -483,6 +484,11 @@ const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}
 const fetchUnifiedKgStatus = (nb: string) => api<UnifiedKgStatus>(`/notebooks/${nb}/unified-kg/status`);
 const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
 const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
+const reviewPendingMergesApi = (nb: string) =>
+  api<MergeReviewSummary>(`/notebooks/${nb}/unified-kg/merges/review`, {
+    method: "POST",
+    body: JSON.stringify({ limit: 50, auto_confirm_threshold: 0.95 }),
+  });
 
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
@@ -723,6 +729,7 @@ export default function Home() {
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
+  const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
@@ -1641,6 +1648,22 @@ export default function Home() {
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
     finally { setKgRefreshBusy(false); }
+  }
+
+  async function reviewPendingMerges() {
+    if (!currentNotebookId) return;
+    setKgReviewBusy(true);
+    try {
+      const summary = await reviewPendingMergesApi(currentNotebookId);
+      setToast(`已预审 ${summary.reviewed} 项：合并 ${summary.confirmed}，分开 ${summary.rejected}，保留 ${summary.unsure}`);
+      const [pend, status] = await Promise.all([
+        fetchPendingMerges(currentNotebookId),
+        fetchUnifiedKgStatus(currentNotebookId),
+      ]);
+      setPendingMerges(pend);
+      setUnifiedKgStatus(status);
+    } catch (err) { reportError(err); }
+    finally { setKgReviewBusy(false); }
   }
 
   function focusKgGraphNode(nodeId: string) {
@@ -2640,6 +2663,9 @@ export default function Home() {
               </div>
               <div className="kg-rail-section">
                 <h3>待确认合并 ({pendingMerges.length})</h3>
+                <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
+                  LLM 预审
+                </button>
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
                     <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>

@@ -23,6 +23,8 @@ from app.models.schemas import (
     KnowledgeTypeCount,
     KnowledgeUpdate,
     MergeRequest,
+    MergeReviewRequest,
+    MergeReviewSummary,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
@@ -544,3 +546,15 @@ def reject_merge(notebook_id: str, candidate_id: str) -> dict:
         return {"ok": True}
     except KeyError:
         raise HTTPException(status_code=404, detail="Merge candidate not found")
+
+
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/review")
+def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> MergeReviewSummary:
+    try:
+        return MergeReviewSummary(**repository().review_pending_merges(
+            notebook_id,
+            limit=payload.limit,
+            auto_confirm_threshold=payload.auto_confirm_threshold,
+        ))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")

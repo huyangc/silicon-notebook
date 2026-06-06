@@ -382,3 +382,15 @@ class UnifiedKgStatus(BaseModel):
     objects: int = 0
     relations: int = 0
     clusters: int = 0
+
+
+class MergeReviewRequest(BaseModel):
+    limit: int = 50
+    auto_confirm_threshold: float = 0.95
+
+
+class MergeReviewSummary(BaseModel):
+    reviewed: int = 0
+    confirmed: int = 0
+    rejected: int = 0
+    unsure: int = 0

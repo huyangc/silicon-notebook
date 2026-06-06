@@ -424,6 +424,14 @@ class SQLiteRepository:
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
                 db.execute("ALTER TABLE sources ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
+            # LLM review metadata columns for concept_merge_candidates.
+            cm_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_merge_candidates)").fetchall()}
+            if "confidence" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN confidence REAL NOT NULL DEFAULT 0")
+            if "rationale" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''")
+            if "reviewed_by" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -1857,6 +1865,39 @@ class SQLiteRepository:
         self.set_merge_decision(notebook_id, candidate_id, "rejected")
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
+
+    def review_pending_merges(self, notebook_id: str, limit: int = 50, auto_confirm_threshold: float = 0.95) -> dict:
+        self.get_notebook(notebook_id)
+        pending = self.pending_merges(notebook_id)[: max(1, min(limit, 200))]
+        from app.services.concept_merge_review import review_merge_candidates
+        decisions = review_merge_candidates(self.llm_client, pending)
+        confirmed = rejected = unsure = 0
+        now = _now()
+        with self._connect() as db:
+            for decision in decisions:
+                candidate_id = decision["candidate_id"]
+                confidence = decision["confidence"]
+                status = "pending"
+                if decision["decision"] == "merge" and confidence >= auto_confirm_threshold:
+                    status = "confirmed"
+                    confirmed += 1
+                elif decision["decision"] == "keep_separate" and confidence >= auto_confirm_threshold:
+                    status = "rejected"
+                    rejected += 1
+                else:
+                    unsure += 1
+                db.execute(
+                    """
+                    UPDATE concept_merge_candidates
+                    SET status=?, confidence=?, rationale=?, reviewed_by='llm', updated_at=?
+                    WHERE id=? AND notebook_id=?
+                    """,
+                    (status, confidence, decision["rationale"], now, candidate_id, notebook_id),
+                )
+        if confirmed or rejected:
+            self._mark_unified_kg_dirty(notebook_id)
+            self._invalidate_unified_cache(notebook_id)
+        return {"reviewed": len(decisions), "confirmed": confirmed, "rejected": rejected, "unsure": unsure}
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self._connect() as db:
