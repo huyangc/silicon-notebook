@@ -10,6 +10,7 @@ from typing import Any, List, Tuple
 from app.services.kg.windowing import windows_with_elements
 from app.services.kg.extract import extract_window
 from app.services.kg.canonicalize import canonicalize
+from app.services.kg.filters import should_extract_window, is_noise_concept
 from app.services.kg.models import Edge, KnowledgeGraph, Node
 from app.services.kg.scheduler import submit_window
 
@@ -130,23 +131,43 @@ def plan_window_size(content_chars: int, workers: int, w_min: int, w_max: int,
     return math.ceil(content_chars / n_windows)
 
 
+def drop_noise_concepts(nodes: List[Node], edges: List[Edge],
+                        whitelist) -> Tuple[List[Node], List[Edge], int]:
+    """丢弃噪声 Concept 节点（白名单保护），并移除指向被丢节点的悬空边。
+    仅对 Concept 生效；Claim/Formula/Procedure 一律保留。"""
+    kept_ids = set()
+    kept_nodes: List[Node] = []
+    dropped = 0
+    for nd in nodes:
+        if nd.type == "Concept" and is_noise_concept(nd.name, whitelist)[0]:
+            dropped += 1
+            continue
+        kept_ids.add(nd.id)
+        kept_nodes.append(nd)
+    kept_edges = [e for e in edges if e.source_id in kept_ids and e.target_id in kept_ids]
+    return kept_nodes, kept_edges, dropped
+
+
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
-                  n: int = 9000, m: int = 450) -> KnowledgeGraph:
-    """Window the text, extract a KG fragment per window concurrently, then
-    canonicalize. Evidence is anchored by element-id markers: each window's
-    prose elements are numbered and the LLM emits only an int "ev" per node/edge,
-    which extract_window maps back to the element's exact text/offsets.
-    Ungroundable nodes are dropped inside extract_window."""
-    pairs = [(w, els) for w, els in windows_with_elements(raw_text, source_file,
-                                                          None, n, m) if els]
+                  n: int = 9000, m: int = 450, whitelist=frozenset()) -> KnowledgeGraph:
+    """Window the text, extract a KG fragment per window concurrently, denoise,
+    then canonicalize. 抽取前按 should_extract_window 跳过低价值窗口；抽取后按
+    is_noise_concept 丢弃噪声 Concept（连带删悬空边）。Ungroundable nodes are
+    dropped inside extract_window."""
+    all_pairs = [(w, els) for w, els in windows_with_elements(raw_text, source_file,
+                                                              None, n, m) if els]
+    pairs = []
+    windows_skipped = 0
+    for w, els in all_pairs:
+        keep, _reason = should_extract_window(w.section_path, els, doc_type)
+        if keep:
+            pairs.append((w, els))
+        else:
+            windows_skipped += 1
     nodes: List[Node] = []
     edges: List[Edge] = []
     failed = 0
     if pairs:
-        # Submit every window to the process-global window pool (one global cap
-        # across all docs, FIFO). Collect only THIS doc's futures so per-source
-        # completion semantics are unchanged. submit + per-future .result()
-        # (NOT a barrier): one window's failure must not abort the rest.
         futs = [submit_window(extract_window, client, els, w.section_path,
                               doc_type, idx)
                 for idx, (w, els) in enumerate(pairs)]
@@ -157,7 +178,9 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                 edges += es
             except Exception:
                 failed += 1
+    nodes, edges, concepts_dropped = drop_noise_concepts(nodes, edges, whitelist)
     nodes, edges = canonicalize(nodes, edges, doc_id=source_file)
     return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes,
                           edges=edges, total_windows=len(pairs),
-                          failed_windows=failed)
+                          failed_windows=failed, windows_skipped=windows_skipped,
+                          concepts_dropped=concepts_dropped)

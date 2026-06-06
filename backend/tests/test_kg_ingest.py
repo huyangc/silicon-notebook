@@ -187,3 +187,29 @@ def test_extract_graph_uses_global_pool():
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
     assert g.total_windows >= 1
     assert any(n.name == "Engram" for n in g.nodes)
+
+
+def test_drop_noise_concepts_removes_symbols_and_dangling_edges():
+    from app.services.kg.models import Node, Edge
+    from app.services.kg_ingest import drop_noise_concepts
+    nodes = [
+        Node(id="n1", type="Concept", name="current mirror"),
+        Node(id="n2", type="Concept", name="V_DD"),
+        Node(id="n3", type="Claim", name="The current mirror copies the reference current."),
+    ]
+    edges = [
+        Edge(id="e1", type="about", source_id="n3", target_id="n1"),
+        Edge(id="e2", type="about", source_id="n3", target_id="n2"),
+    ]
+    kept_nodes, kept_edges, dropped = drop_noise_concepts(nodes, edges, frozenset())
+    assert dropped == 1
+    assert {n.id for n in kept_nodes} == {"n1", "n3"}
+    assert {e.id for e in kept_edges} == {"e1"}
+
+
+def test_drop_noise_concepts_keeps_whitelisted():
+    from app.services.kg.models import Node
+    from app.services.kg_ingest import drop_noise_concepts
+    nodes = [Node(id="n1", type="Concept", name="VCO")]
+    kept, _e, dropped = drop_noise_concepts(nodes, [], frozenset({"vco"}))
+    assert dropped == 0 and len(kept) == 1
