@@ -40,6 +40,8 @@ class KnowledgeGraph(BaseModel):
     edges: List[Edge] = Field(default_factory=list)
     total_windows: int = 0
     failed_windows: int = 0
+    windows_skipped: int = 0
+    concepts_dropped: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         d = self.model_dump(mode="python", exclude_none=True)
