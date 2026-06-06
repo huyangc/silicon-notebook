@@ -72,7 +72,14 @@ _VERB_RE = re.compile(
     r"organizes?|distinguishes?|compensates?|attenuates?|distorts?|exceeds?|"
     r"affects?|enables?|allows?|generates?|introduces?|represents?|behaves?|"
     r"flows?|drives?|sets?|makes?|takes?|gives?|shows?|needs?|means?|occurs?|"
-    r"consists?|contains?|maintains?|determines?|describes?)\b", re.I)
+    r"consists?|contains?|maintains?|determines?|describes?|"
+    r"finds?|performs?|demands?|proves?|senses?|processes|process|extracts?|"
+    r"handles?|supports?|realizes?|implements?|derives?|relates?|varies|vary|"
+    r"scales?|dominates?|tends?|measures?|controls?|converts?|amplifies|amplify|"
+    r"biases|couples?|filters?|samples?|stores?|computes?|assumes?|suffers?|"
+    r"avoids?|prevents?|ensures?|exploits?|constitutes?|characterizes?|"
+    r"illustrates?|demonstrates?|indicates?|suggests?|implies|imply|refers?|"
+    r"denotes?|consumes?|emerges?|arises?|leads?|enable|model|models)\b", re.I)
 
 _META_RE = re.compile(
     r"\b(this (chapter|book|text|section|paper)|next chapter|chapter \d|section \d|"

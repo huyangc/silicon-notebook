@@ -59,6 +59,11 @@ def test_claim_degraded():
     # 校准:元叙述/前言/纯标题仍判退化
     assert claim_degraded("This chapter forms the foundation for synthesizers")
     assert claim_degraded("Effect of Negative Feedback on Distortion")
+    # 二次校准(T-opt3 暴露的真技术动词不再误判退化)
+    assert not claim_degraded("Silicon bipolar and III-V devices find niche applications")
+    assert not claim_degraded("Many electronic systems perform two principal functions")
+    assert not claim_degraded("The sensing interface still demands high-performance analog design")
+    assert not claim_degraded("An analog equalizer proves more efficient than an ADC")
 
 
 def test_formula_degraded():
