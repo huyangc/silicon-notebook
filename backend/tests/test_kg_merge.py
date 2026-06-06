@@ -83,3 +83,19 @@ def test_derive_rewires_and_dedups_edges():
     assert concept_ids == {"K1"}                       # two MOSFET nodes -> one canonical
     about = [e for e in g["edges"] if e["edge_type"]=="about"]
     assert len(about) == 1 and about[0]["target_object_id"]=="K1"   # rewired + deduped
+
+
+def test_discriminative_conflict_blocks_contrast_twins():
+    from app.services.kg_merge import _discriminative_conflict
+    assert _discriminative_conflict("voltage voltage feedback", "current voltage feedback")
+    assert _discriminative_conflict("single balanced mixer", "double balanced mixer")
+    assert _discriminative_conflict("drain", "source")
+    assert _discriminative_conflict("NMOS", "PMOS")
+
+
+def test_discriminative_conflict_keeps_subtypes_and_aliases():
+    from app.services.kg_merge import _discriminative_conflict
+    assert not _discriminative_conflict("current mirror", "wilson current mirror")
+    assert not _discriminative_conflict("current mirror", "cascode current mirror")
+    assert not _discriminative_conflict("VCO", "voltage controlled oscillator")
+    assert not _discriminative_conflict("low pass filter", "low pass filter")

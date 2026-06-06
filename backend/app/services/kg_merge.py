@@ -11,6 +11,7 @@ Note — transitive-reject limitation (v1):
 from __future__ import annotations
 import logging
 import re
+from collections import Counter
 from typing import Dict, List, Set, FrozenSet
 
 import numpy as np
@@ -34,6 +35,28 @@ def _norm(name: str) -> str:
     cleaned = re.sub(r"[^a-z0-9+/ ]+", " ", (name or "").strip().lower())
     cleaned = re.sub(r"[\s\-_]+", " ", cleaned).strip()
     return _ALIASES.get(cleaned, cleaned)
+
+
+_CONTRAST_GROUPS = [
+    {"single", "double"}, {"low", "high"}, {"n", "p"}, {"nmos", "pmos"},
+    {"series", "shunt"}, {"voltage", "current"}, {"positive", "negative"},
+    {"input", "output"}, {"forward", "reverse"},
+    {"drain", "source", "gate", "bulk", "body"},
+    {"first", "second", "third", "fourth"}, {"upper", "lower"},
+    {"even", "odd"}, {"internal", "external"}, {"inverting", "noninverting"},
+]
+
+
+def _discriminative_conflict(name_a: str, name_b: str) -> bool:
+    """两个规范名仅各差一个 token 且该对差异 token 属同一对立组 → 视为不同变体, 禁止合并。"""
+    ta, tb = _norm(name_a).split(), _norm(name_b).split()
+    only_a = list((Counter(ta) - Counter(tb)).elements())
+    only_b = list((Counter(tb) - Counter(ta)).elements())
+    if len(only_a) == 1 and len(only_b) == 1 and only_a[0] != only_b[0]:
+        for g in _CONTRAST_GROUPS:
+            if only_a[0] in g and only_b[0] in g:
+                return True
+    return False
 
 
 class _UF:
