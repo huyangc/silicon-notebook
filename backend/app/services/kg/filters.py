@@ -59,7 +59,7 @@ def should_extract_window(section_path: str, elements: Sequence[SourceElementQ],
 
 # --- concept noise filter ---
 _REF_RE = re.compile(r"^(fig|figure|table|eq|equation|sec|section|§)\b", re.IGNORECASE)
-_SECTION_RE = re.compile(r"^\d+(\.\d+)+")
+_SECTION_RE = re.compile(r"^\d+(\.\d+)+\s+[A-Z]")  # dotted-number + space + Title-Case heading; keeps '0.8 μm ...', '802.11g'
 _INSTANCE_RE = re.compile(r"^[A-Za-z]\d+$")
 
 

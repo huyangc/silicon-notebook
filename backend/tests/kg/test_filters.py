@@ -93,3 +93,12 @@ def test_multiword_name_with_symbol_kept():
     for n in ["Oxide Capacitance (C_ox)", "Threshold Voltage (V_T0)",
               "gate-to-source capacitance (C_GS)", "depletion-layer capacitance C_j"]:
         assert is_noise_concept(n, WL)[0] is False, n
+
+
+def test_section_heading_vs_measurement_or_standard():
+    # real numbered section headings (number + Title-Case) -> drop
+    for n in ["1.1 Introduction", "1.2.1 Depletion-Region Capacitance", "8.4.1 Series-Shunt Feedback"]:
+        assert is_noise_concept(n, WL)[0] is True, n
+    # decimals that are measurements / standards / ratios -> keep
+    for n in ["0.8 μm CMOS process", "802.11g band", "1.25 divider"]:
+        assert is_noise_concept(n, WL)[0] is False, n
