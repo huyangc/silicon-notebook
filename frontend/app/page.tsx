@@ -114,6 +114,7 @@ type AskResponse = {
   evidence_level?: "grounded" | "overview" | "inferred";
   retrieval_query?: string;
   top_relevance?: number;
+  reasoning_trace?: Array<{ step_type: string; summary: string; detail: Record<string, unknown> }>;
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -711,6 +712,7 @@ export default function Home() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
+  const [reasoningMode, setReasoningMode] = useState(false);
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
@@ -1412,7 +1414,7 @@ export default function Home() {
     try {
       const response = await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
         method: "POST",
-        body: JSON.stringify({ question: q, conversation_id: conversationId ?? undefined })
+        body: JSON.stringify({ question: q, conversation_id: conversationId ?? undefined, mode: reasoningMode ? "reasoning" : "fast" })
       });
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
@@ -2200,6 +2202,13 @@ export default function Home() {
                 <div className="chat-input-bar">
                   <textarea className="chat-input" rows={1} placeholder={askHint} value={question} onChange={(event) => setQuestion(event.target.value)} />
                   <span>{sources.length} 个来源</span>
+                  <button
+                    className={`reasoning-toggle${reasoningMode ? " active" : ""}`}
+                    onClick={() => setReasoningMode((v) => !v)}
+                    title={reasoningMode ? "推理模式已开启（点击关闭）" : "开启推理模式"}
+                  >
+                    ✦ 推理
+                  </button>
                   <button className="send-button" onClick={() => runAsk().catch(reportError)}>→</button>
                 </div>
               )}
