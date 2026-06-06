@@ -501,9 +501,175 @@ Expected: pytest 全 PASS（不低于改造前 220 passed/1 skipped 基线 + 本
 
 ---
 
+## Task 6: 系统性写吞吐基准（离线，无 LLM）
+
+**Files:** Create `scripts/bench_sqlite_writes.py`；Test `backend/tests/test_sqlite_write_optimization.py`
+
+> 目的：在单写者(`_write` 串行)下，N 个并发 writer 各写 M 条 `knowledge_objects`，测吞吐(rec/s) + 确认无 `database is locked`。**纯离线**：不配 `EMBED_*` → `embedder_configured` False → `store_kg` 不触发嵌入，纯写。两种模式：`thread`(贴合 app 单进程多线程，`_write_lock` 串行) / `process`(多进程，SQLite WAL 自身单写者，测 SQLite 裸吞吐)。
+
+- [ ] **Step 1: 写基准 pytest 护栏（小规模, 进 CI）**
+
+追加到 `backend/tests/test_sqlite_write_optimization.py`:
+
+```python
+def test_write_throughput_smoke_no_lock(repo, capsys):
+    import time
+    nb = repo.create_notebook(NotebookCreate(name="bench"))
+    WORKERS, RECORDS = 64, 100
+    errors = []
+
+    def work(w):
+        try:
+            objs = [{"local_id": f"{w}-{i}", "object_type": "concept",
+                     "payload": {"name": f"c{w}-{i}"}, "evidence": []} for i in range(RECORDS)]
+            repo.store_kg(nb.id, None, objs, [])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    ts = [threading.Thread(target=work, args=(w,)) for w in range(WORKERS)]
+    t0 = time.perf_counter()
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    elapsed = time.perf_counter() - t0
+    total = WORKERS * RECORDS
+    with repo._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
+    print(f"\n[bench] {WORKERS}w x {RECORDS} = {total} rows in {elapsed:.2f}s = {total / elapsed:,.0f} rec/s")
+    assert not errors, errors
+    assert n == total
+```
+
+- [ ] **Step 2: 跑确认通过（无锁 + 计数正确）**
+
+Run: `cd backend && /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest tests/test_sqlite_write_optimization.py::test_write_throughput_smoke_no_lock -q -s`
+Expected: PASS，并打印一行 `[bench] 64w x 100 = 6400 rows in ...s = ... rec/s`。
+
+- [ ] **Step 3: 写完整基准脚本**
+
+Create `scripts/bench_sqlite_writes.py`:
+
+```python
+"""离线 SQLite 写吞吐基准（无 LLM/无嵌入）。
+单写者下 N 个并发 writer 各写 RECORDS 条 knowledge_objects, 测吞吐 + 确认无锁。
+用法（repo 根）:
+  PYTHONPATH=backend python scripts/bench_sqlite_writes.py --workers 1000 --records 100 --mode thread
+  PYTHONPATH=backend python scripts/bench_sqlite_writes.py --workers 1000 --records 100 --mode process
+"""
+import argparse
+import os
+import tempfile
+import time
+
+
+def _make_repo(db_path):
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
+    os.environ.setdefault("SILICON_NOTEBOOK_STORAGE_DIR", db_path + "_storage")
+    os.environ["EVENT_LOG_ENABLED"] = "false"
+    os.environ["LLM_LOG_ENABLED"] = "false"
+    # 不配 EMBED_* → embedder_configured False → store_kg 不嵌入(纯写基准)
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    return SQLiteRepository(Settings())
+
+
+def _objs(worker, n):
+    return [{"local_id": f"{worker}-{i}", "object_type": "concept",
+             "payload": {"name": f"concept {worker}-{i}"}, "evidence": []} for i in range(n)]
+
+
+def _run_threads(repo, nb_id, workers, records):
+    import threading
+    errors = []
+
+    def work(w):
+        try:
+            repo.store_kg(nb_id, None, _objs(w, records), [])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    ts = [threading.Thread(target=work, args=(w,)) for w in range(workers)]
+    t0 = time.perf_counter()
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    return time.perf_counter() - t0, errors
+
+
+def _proc_work(args):
+    db_path, nb_id, w, records = args
+    repo = _make_repo(db_path)
+    try:
+        repo.store_kg(nb_id, None, _objs(w, records), [])
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return repr(exc)
+
+
+def _run_processes(db_path, nb_id, workers, records):
+    import multiprocessing as mp
+    cap = min(workers, (os.cpu_count() or 4) * 8)
+    t0 = time.perf_counter()
+    with mp.Pool(cap) as pool:
+        results = pool.map(_proc_work, [(db_path, nb_id, w, records) for w in range(workers)])
+    return time.perf_counter() - t0, [r for r in results if r]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--workers", type=int, default=1000)
+    ap.add_argument("--records", type=int, default=100)
+    ap.add_argument("--mode", choices=["thread", "process"], default="thread")
+    a = ap.parse_args()
+
+    tmp = tempfile.mkdtemp(prefix="bench_sqlite_")
+    db_path = os.path.join(tmp, "bench.db")
+    repo = _make_repo(db_path)
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="bench"))
+    total = a.workers * a.records
+
+    if a.mode == "thread":
+        elapsed, errors = _run_threads(repo, nb.id, a.workers, a.records)
+    else:
+        elapsed, errors = _run_processes(db_path, nb.id, a.workers, a.records)
+
+    repo2 = _make_repo(db_path)
+    with repo2._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
+    locked = len([e for e in errors if "lock" in e.lower()])
+    print(f"mode={a.mode} workers={a.workers} records/worker={a.records} total={total}")
+    print(f"elapsed={elapsed:.2f}s  throughput={total / elapsed:,.0f} rec/s")
+    print(f"locked_errors={locked}  other_errors={len(errors) - locked}")
+    print(f"stored={n}/{total}  {'OK' if n == total and not errors else 'MISMATCH/ERRORS'}")
+    if errors[:3]:
+        print("sample errors:", errors[:3])
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 4: py_compile + 跑 1000×100 基准（thread 与 process 各一次, 记录数字）**
+
+Run:
+```bash
+/opt/homebrew/Caskroom/miniconda/base/bin/python -m py_compile scripts/bench_sqlite_writes.py
+cd /Users/hzf/workspace/silicon_notebook && PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python scripts/bench_sqlite_writes.py --workers 1000 --records 100 --mode thread
+cd /Users/hzf/workspace/silicon_notebook && PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python scripts/bench_sqlite_writes.py --workers 1000 --records 100 --mode process
+```
+Expected：两次都 `locked_errors=0`、`stored=100000/100000 OK`，并打印 `throughput=... rec/s`。把两组吞吐数字记录到本任务下作为结论。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add scripts/bench_sqlite_writes.py backend/tests/test_sqlite_write_optimization.py
+git commit -m "test(db): 离线 SQLite 写吞吐基准(1000writer×100条, thread/process), 验证单写无锁"
+```
+
+---
+
 ## 自检（Self-Review）
 
-- **Spec 覆盖**：C1=Task1；C2(写锁+_write+全量转换+审计)=Task2；C3(嵌入算写分离, knowledge+element)=Task3；C4(store_kg 切块)=Task4；并发去锁测试=Task2 Step1；写完整性审计=Task2 Step1；回归=Task5。全覆盖。
+- **Spec 覆盖**：C1=Task1；C2(写锁+_write+全量转换+审计)=Task2；C3(嵌入算写分离, knowledge+element)=Task3；C4(store_kg 切块)=Task4；并发去锁测试=Task2 Step1；写完整性审计=Task2 Step1；回归=Task5；离线写吞吐基准(thread/process, 1000w×100)=Task6。全覆盖。
 - **占位扫描**：无 TBD/TODO；C2 Step6 的"机械转换"由审计测试精确枚举待改项并迭代到空，非占位。
 - **类型/命名一致**：`_write()`、`self._write_lock`、`_embed_only`(替代旧 `_embed_and_store`)、`CHUNK`、PRAGMA 值（synchronous=1/temp_store=2/mmap=268435456/cache=-65536）在各任务间一致。
 - **顺序/依赖**：C1 独立；C2 引入 `_write()`（C3/C4 依赖）；C3/C4 重构的方法在 C2 Step6 已先转为 `_write()`，再在 C3/C4 内保持 `_write()` 重构——无回退冲突。
