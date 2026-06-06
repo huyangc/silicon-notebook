@@ -658,6 +658,11 @@ cd /Users/hzf/workspace/silicon_notebook && PYTHONPATH=backend /opt/homebrew/Cas
 ```
 Expected：两次都 `locked_errors=0`、`stored=100000/100000 OK`，并打印 `throughput=... rec/s`。把两组吞吐数字记录到本任务下作为结论。
 
+**实测结果（2026-06-06，10万行）：**
+- thread（app 单进程多线程模型）：2.59s，**38,586 rec/s**，locked_errors=0，stored 100000/100000 OK。
+- process（SQLite 裸跨进程单写）：8.24s，12,141 rec/s，locked_errors=0，stored 100000/100000 OK。
+- 结论：1000 并发 writer、单写者串行下零 `database is locked`、零丢数据；SQLite 单写吞吐充足，无需迁 PG。
+
 - [ ] **Step 5: 提交**
 
 ```bash
