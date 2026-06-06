@@ -128,3 +128,23 @@ def test_ann_candidates_recall_vs_bruteforce():
     if brute:
         recall = len(got & brute) / len(brute)
         assert recall >= 0.9, recall
+
+
+def test_star_groups_breaks_chains():
+    from app.services.kg_merge import _star_groups
+    seeds = ["A", "B", "C"]
+    members = {"A": [1, 2, 3], "B": [1], "C": [1]}   # A 质量最高 → A 当锚点
+    edges = [("A", "B", 0.96), ("B", "C", 0.96)]      # A~B、B~C ≥hi; 无 A~C
+    asn = _star_groups(seeds, members, edges, hi=0.94)
+    assert asn["A"] == "A"
+    assert asn["B"] == "A"
+    assert asn["C"] == "C"
+
+
+def test_star_groups_claims_direct_neighbors():
+    from app.services.kg_merge import _star_groups
+    seeds = ["X", "Y", "Z"]
+    members = {"X": [1, 2], "Y": [1], "Z": [1]}
+    edges = [("X", "Y", 0.97), ("X", "Z", 0.95)]
+    asn = _star_groups(seeds, members, edges, hi=0.94)
+    assert asn["Y"] == "X" and asn["Z"] == "X"

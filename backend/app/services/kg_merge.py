@@ -95,6 +95,28 @@ def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
     return out
 
 
+def _star_groups(seeds: List[str], members: Dict[str, List[str]],
+                 edges: List[tuple], hi: float) -> Dict[str, str]:
+    """贪心星型: 按成员数降序, 未分配 seed 作锚点, 认领其 ≥hi 直接邻居中未分配者。
+    只允许"锚点—直接邻居", 不允许锚点间再链 → 簇直径有界, 无链式大簇。
+    返回 seed -> anchor。O(N log N + N·k)。"""
+    adj: Dict[str, List[tuple]] = {}
+    for a, b, sim in edges:
+        if sim >= hi:
+            adj.setdefault(a, []).append((b, sim))
+            adj.setdefault(b, []).append((a, sim))
+    order = sorted(seeds, key=lambda s: (-len(members.get(s, [])), s))
+    assigned: Dict[str, str] = {}
+    for s in order:
+        if s in assigned:
+            continue
+        assigned[s] = s
+        for nb, _sim in adj.get(s, []):
+            if nb not in assigned:
+                assigned[nb] = s
+    return assigned
+
+
 class _UF:
     def __init__(self, items): self.p = {x: x for x in items}
     def find(self, x):
