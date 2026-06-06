@@ -10,7 +10,7 @@ class _SeqLLM:
     configured = True
     def __init__(self, plan, reflects, answer):
         self._plan, self._reflects, self._answer = plan, list(reflects), answer
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, **kwargs):
         if "sub_queries" in schema_hint:
             return json.dumps(self._plan)
         if "next_action" in schema_hint:
@@ -67,7 +67,7 @@ def test_reasoning_degrades_gracefully_on_llm_error(arepo):
     nb = _seed(arepo)
     class _BoomLLM:
         configured = True
-        def chat_json(self, messages, schema_hint):
+        def chat_json(self, messages, schema_hint, **kwargs):
             raise RuntimeError("boom")
     arepo.llm_client = _BoomLLM()
     # LLM 全程抛错: run 内 plan/reflect 各自容错降级,answer 合成失败被吞,

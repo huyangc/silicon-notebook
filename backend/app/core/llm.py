@@ -75,6 +75,9 @@ class OpenAICompatibleClient:
         self,
         messages: List[Dict[str, str]],
         response_schema_hint: str,
+        *,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -110,8 +113,18 @@ class OpenAICompatibleClient:
             },
         }
         start = time.perf_counter()
+        # Per-call overrides (interactive reasoning uses a shorter timeout / fewer
+        # retries than the batch-extraction global defaults). When not supplied,
+        # behavior is byte-for-byte identical to before: attempts uses the global
+        # setting and no `timeout` is passed to .create() (client default applies).
+        req_kwargs: Dict[str, Any] = {}
+        if timeout is not None:
+            req_kwargs["timeout"] = timeout
         try:
-            attempts = 1 + self.settings.openai_compat_max_retries
+            attempts = 1 + (
+                max_retries if max_retries is not None
+                else self.settings.openai_compat_max_retries
+            )
             response = None
             for attempt in range(attempts):
                 try:
@@ -119,7 +132,7 @@ class OpenAICompatibleClient:
                     # the param.
                     try:
                         response = self.client().chat.completions.create(
-                            **kwargs, response_format={"type": "json_object"}
+                            **kwargs, **req_kwargs, response_format={"type": "json_object"}
                         )
                     except (APIConnectionError, APITimeoutError):
                         # Network stall/timeout: do NOT retry the whole request
@@ -130,7 +143,7 @@ class OpenAICompatibleClient:
                         # Server rejected response_format (param unsupported):
                         # retry once in plain mode. NOT a connection error, so it
                         # never enters the bounded connection-retry loop.
-                        response = self.client().chat.completions.create(**kwargs)
+                        response = self.client().chat.completions.create(**kwargs, **req_kwargs)
                     break
                 except (APIConnectionError, APITimeoutError) as exc:
                     if attempt + 1 >= attempts:
