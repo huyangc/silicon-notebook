@@ -154,3 +154,61 @@ def article_prompt(title: str, elements_block: str, rules_block: str) -> str:
         f"Article elements:\n{elements_block}\n\n"
         f"Existing notebook rules (for relationship analysis):\n{rules_block}"
     )
+
+
+PLAN_SCHEMA_HINT = (
+    '{"sub_queries":[{"query":"","types":["concept","claim","formula","procedure"],'
+    '"prefer":"keyword|semantic|balanced","reason":""}]}'
+)
+
+
+def plan_prompt(question: str, history_block: str = "") -> str:
+    history_section = (
+        "Prior conversation (resolve pronouns/ellipsis against it):\n"
+        f"{history_block}\n\n" if history_block else ""
+    )
+    return (
+        "You plan how to retrieve a knowledge graph (KG) to answer an "
+        "engineer's question. The KG has 4 node types: concept (definitions), "
+        "claim (conclusions), formula (math/models), procedure (step flows).\n"
+        "Decompose the question into 1-N standalone sub-queries. For EACH:\n"
+        "- query: a self-contained search string (resolve any references using "
+        "the prior conversation).\n"
+        "- types: which node types to search (subset of the 4; omit/empty = all).\n"
+        "- prefer: keyword (exact terms/codes), semantic (paraphrase/concept), "
+        "or balanced.\n"
+        "- reason: one line on why this sub-query.\n"
+        "Keep sub-queries focused and non-redundant.\n\n"
+        f"{history_section}"
+        f"Question: {question}\n\n"
+        'Return JSON only: {"sub_queries":[{"query":"","types":[],'
+        '"prefer":"balanced","reason":""}]}'
+    )
+
+
+REFLECT_SCHEMA_HINT = (
+    '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
+    'search_elements","expand":{"object_id":"","edge_type":null,'
+    '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
+    '"prefer":"balanced","reason":""},"elements_query":"","reason":""}'
+)
+
+
+def reflect_prompt(question: str, candidates_summary: str) -> str:
+    return (
+        "You decide the NEXT retrieval step for answering a question from a "
+        "knowledge graph. Below are the candidates gathered so far.\n"
+        "Choose next_action:\n"
+        "- answer: candidates suffice — stop and answer.\n"
+        "- expand_graph: a candidate looks central; follow its relations one "
+        "more hop (set expand.object_id, optional edge_type/direction). You may "
+        "expand repeatedly across turns — go as deep as the question needs.\n"
+        "- add_subquery: an aspect of the question is uncovered; add one "
+        "sub-query (set new_sub_query).\n"
+        "- search_elements: the KG is too thin; fall back to raw document "
+        "passages (set elements_query).\n"
+        "Set sufficient=true only when you can answer well. reason: one line.\n\n"
+        f"Question: {question}\n\n"
+        f"Candidates so far:\n{candidates_summary}\n\n"
+        'Return JSON only matching the schema (omit unused branch fields).'
+    )
