@@ -131,11 +131,13 @@ def cluster_concepts(
     vectors: Dict[str, List[float]],
     confirmed: Set[FrozenSet[str]],
     rejected: Set[FrozenSet[str]],
-    hi: float = 0.90,
+    hi: float = 0.94,
     lo: float = 0.82,
     top_k: int = 5,
     max_pending: int = 1000,
 ) -> dict:
+    """精确同名 + 已确认对 force-union; 向量候选经 ANN→护栏→星型, 但**不自动 union**:
+    ≥hi 进 auto_candidates(LLM 兜底), [lo,hi) 进 pending(人工)。全程 sub-quadratic。"""
     seed_of = {c["object_id"]: _norm(c["name"]) for c in concepts}
     seeds = sorted(set(seed_of.values()))
     uf = _UF(seeds)
@@ -145,7 +147,6 @@ def cluster_concepts(
             uf.union(a, b)
     rej = {frozenset(_norm(n) for n in p) for p in rejected}
 
-    # O(N) pre-pass: first name seen for each seed (used for canonical name lookup)
     seed_first_name: Dict[str, str] = {}
     for c in concepts:
         s = seed_of[c["object_id"]]
@@ -156,62 +157,23 @@ def cluster_concepts(
     for c in concepts:
         members.setdefault(seed_of[c["object_id"]], []).append(c["object_id"])
 
-    # Build representative vectors (mean of member vectors) for each seed
-    reps = []
+    reps: Dict[str, np.ndarray] = {}
     for s in seeds:
         vs = [vectors[o] for o in members[s] if o in vectors]
-        reps.append(np.mean(np.asarray(vs, dtype=np.float32), axis=0) if vs else None)
-    idx = [i for i, r in enumerate(reps) if r is not None]
+        if vs:
+            reps[s] = np.mean(np.asarray(vs, dtype=np.float32), axis=0)
 
-    raw_candidates: List[tuple] = []
-    if idx:
-        if len(seeds) > _MAX_REPS:
-            _log.info(
-                "kg_merge: %d seeds exceeds _MAX_REPS=%d; using bounded top-k vector candidates",
-                len(seeds), _MAX_REPS,
-            )
-        M = np.asarray([reps[i] for i in idx], dtype=np.float32)
-        M /= (np.linalg.norm(M, axis=1, keepdims=True) + 1e-8)
-        block = 512
-        seen_pairs: set = set()
-        for start in range(0, len(idx), block):
-            end = min(start + block, len(idx))
-            sims = M[start:end] @ M.T
-            for local_i, row in enumerate(sims):
-                global_i = start + local_i
-                row[global_i] = -1.0
-                k = min(top_k, len(row) - 1)
-                if k <= 0:
-                    continue
-                top = np.argpartition(row, -k)[-k:]
-                for global_j in top:
-                    global_j = int(global_j)
-                    if global_j <= global_i:
-                        continue
-                    pair_key = (global_i, global_j)
-                    if pair_key in seen_pairs:
-                        continue
-                    seen_pairs.add(pair_key)
-                    sa, sb = seeds[idx[global_i]], seeds[idx[global_j]]
-                    if rej and frozenset((sa, sb)) in rej:
-                        continue
-                    sim = float(row[global_j])
-                    if sim >= lo:
-                        raw_candidates.append((sa, sb, sim))
+    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo)
+    cand = []
+    for a, b, sim in raw:
+        if rej and frozenset((a, b)) in rej:
+            continue
+        if _discriminative_conflict(seed_first_name.get(a, a), seed_first_name.get(b, b)):
+            continue
+        cand.append((a, b, sim))
 
-    # Sort all candidates by score descending; process hi first for auto-union
-    raw_candidates.sort(key=lambda t: t[2], reverse=True)
-
-    pending_set: set = set()
-    pending: List[tuple] = []
-    for sa, sb, sim in raw_candidates:
-        if sim >= hi:
-            uf.union(sa, sb)
-        else:
-            pair_key = frozenset((sa, sb))
-            if pair_key not in pending_set:
-                pending_set.add(pair_key)
-                pending.append((sa, sb, sim))
+    star = _star_groups(seeds, members, cand, hi)
+    auto_set = {frozenset((nb, anc)) for nb, anc in star.items() if nb != anc}
 
     groups: Dict[str, List[str]] = {}
     for s in seeds:
@@ -225,12 +187,16 @@ def cluster_concepts(
         canon_name[cid] = seed_first_name[best]
     cluster_map = {c["object_id"]: canon_id[seed_of[c["object_id"]]] for c in concepts}
     names = {c["object_id"]: canon_name[cluster_map[c["object_id"]]] for c in concepts}
-    pend_out = [(canon_id[a], canon_id[b], sim) for a, b, sim in pending if canon_id[a] != canon_id[b]]
-    # Cap pending at max_pending (already sorted desc by score)
-    was_capped = len(pend_out) > max_pending
-    pend_out = pend_out[:max_pending]
-    return {"cluster_map": cluster_map, "canonical_names": names, "pending": pend_out,
-            "capped": was_capped}
+
+    auto_candidates = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
+                       if sim >= hi and frozenset((a, b)) in auto_set and canon_id[a] != canon_id[b]]
+    pending = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
+               if sim < hi and canon_id[a] != canon_id[b]]
+    pending.sort(key=lambda t: t[2], reverse=True)
+    was_capped = len(pending) > max_pending
+    pending = pending[:max_pending]
+    return {"cluster_map": cluster_map, "canonical_names": names,
+            "auto_candidates": auto_candidates, "pending": pending, "capped": was_capped}
 
 
 def derive_unified_graph(nodes: List[dict], edges: List[dict], cluster_map: Dict[str, str]) -> dict:
