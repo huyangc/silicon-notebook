@@ -19,6 +19,7 @@ def test_render_quality_report_has_sections():
     assert "疑似非原子" in md
     assert "Vb1" in md          # 样例出现
     assert "Level 1 Model" in md
+    assert "cascode" in md      # claim 退化样例出现
 
 
 def test_render_speed_report():

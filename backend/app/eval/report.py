@@ -26,6 +26,9 @@ def render_quality_report(per_book: Dict[str, dict]) -> str:
             if om:
                 out.append(f"- {other}:总数 {om.get('total', 0)},"
                            f"退化 {om.get('degraded', 0)}({om.get('degraded_rate', 0):.1%})")
+                osamples = om.get("samples", [])
+                if osamples:
+                    out.append(f"  - {other} 退化样例:" + "; ".join(str(s) for s in osamples[:12]))
         samples = cm.get("samples", {})
         for tag, items in sorted(samples.items()):
             if items:
