@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from app.core.config import get_settings
 from app.models.schemas import (
@@ -39,6 +39,7 @@ from app.models.schemas import (
     SourceSummary,
     UserProfile,
 )
+from app.services.kg import scheduler as kg_scheduler
 from app.services.repository import NotebookRepository, UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -165,7 +166,6 @@ def import_sources(
 @router.post("/notebooks/{notebook_id}/sources", response_model=List[SourceSummary])
 async def upload_sources(
     notebook_id: str,
-    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     doc_types: List[str] = Form(default=[]),
 ) -> List[SourceSummary]:
@@ -190,7 +190,7 @@ async def upload_sources(
         return repo.upload_sources(
             notebook_id,
             uploaded_files,
-            scheduler=lambda source_id: background_tasks.add_task(repo.process_source, source_id),
+            scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")

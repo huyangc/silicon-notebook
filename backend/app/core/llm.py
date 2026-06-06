@@ -1,3 +1,4 @@
+import httpx
 import re
 import time
 from datetime import datetime
@@ -45,14 +46,27 @@ class OpenAICompatibleClient:
         if not (self.settings.openai_compat_base_url and self.settings.openai_compat_api_key):
             raise RuntimeError("OpenAI-compatible API settings are not configured")
         if self._client is None:
+            # Connection pool sized to the global extraction cap PLUS a reserve
+            # for interactive ask, so ask never waits behind extraction for a
+            # free connection. (Default httpx max_connections is only 1000.)
+            timeout = self.settings.openai_compat_timeout_seconds
+            max_conn = self.settings.kg_extract_workers + self.settings.kg_ask_reserve
+            http_client = httpx.Client(
+                timeout=timeout,
+                limits=httpx.Limits(
+                    max_connections=max_conn,
+                    max_keepalive_connections=self.settings.kg_ask_reserve,
+                ),
+            )
             self._client = OpenAI(
                 api_key=self.settings.openai_compat_api_key,
                 base_url=self.settings.openai_compat_base_url,
-                timeout=self.settings.openai_compat_timeout_seconds,
+                timeout=timeout,
                 # Don't let the SDK silently retry connection errors 2x: a stalled
                 # connection would otherwise block ~3x the timeout per call. We
                 # fail fast and let the caller (per-window extraction) drop it.
                 max_retries=0,
+                http_client=http_client,
             )
         return self._client
 

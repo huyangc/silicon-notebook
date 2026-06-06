@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
+    # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
+    kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
+    # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。
+    kg_ask_reserve: int = Field(64, env="KG_ASK_RESERVE")
     # 单文档窗口数超过此值 → 记 WARN（不截断、不丢弃，仍全量抽取）。
     kg_window_warn_threshold: int = Field(1200, env="KG_WINDOW_WARN_THRESHOLD")
     # embedding：每条截断长度、每条 API 批大小、落库分块大小。
