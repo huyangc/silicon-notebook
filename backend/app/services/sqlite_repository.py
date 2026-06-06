@@ -1798,19 +1798,18 @@ class SQLiteRepository:
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
-        """Insert KG nodes as approved knowledge_objects and edges as
-        knowledge_relations (remapping local ids to DB ids). Embeds node payload.
+        """Insert KG nodes/edges (remapping local ids to DB ids), embeds payload.
 
-        Objects and relations are written atomically in a single transaction so
-        a mid-write failure cannot leave orphan objects with no edges.
-        Relations whose source_local_id or target_local_id is not present in
-        the given objects are silently skipped.
-        """
+        分块写入(每块 CHUNK 行, 各自一个 _write() 事务), 避免单源 2.6万行塞一个
+        事务长时间持锁。本地 id->DB id 在分块前一次性预分配, 跨块关系仍能正确
+        remap。代价: 失整源原子性(崩溃可能留半本); _run_extraction 逐源自清 +
+        可重跑兜底。Relations 引用不到的 local id 静默跳过。"""
+        CHUNK = 1000
         now = _now()
         local_to_id: Dict[str, str] = {}
-        # Pre-assign DB ids and remap relations before opening the connection.
         for obj in objects:
             local_to_id[obj["local_id"]] = f"ko-{uuid4().hex[:10]}"
+            obj["_oid"] = local_to_id[obj["local_id"]]   # _embed_objects_batch 依赖
         db_relations = []
         for rel in relations:
             s = local_to_id.get(rel["source_local_id"])
@@ -1818,40 +1817,33 @@ class SQLiteRepository:
             if not s or not t:
                 continue
             db_relations.append({
-                "source_object_id": s,
-                "target_object_id": t,
-                "edge_type": rel["edge_type"],
-                "evidence": rel.get("evidence", []),
+                "source_object_id": s, "target_object_id": t,
+                "edge_type": rel["edge_type"], "evidence": rel.get("evidence", []),
             })
-        with self._write() as db:
-            for obj in objects:
-                oid = local_to_id[obj["local_id"]]
-                obj["_oid"] = oid
-                db.execute(
-                    """INSERT INTO knowledge_objects
-                       (id, notebook_id, object_type, status, owner, payload, evidence,
-                        source_candidate_id, source_id, created_at, updated_at)
-                       VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?, ?)""",
-                    (oid, notebook_id, obj["object_type"],
-                     json.dumps(obj["payload"], ensure_ascii=False),
-                     json.dumps(obj["evidence"], ensure_ascii=False),
-                     source_id or '', now, now),
+
+        for i in range(0, len(objects), CHUNK):
+            chunk = objects[i:i + CHUNK]
+            with self._write() as db:
+                db.executemany(
+                    "INSERT INTO knowledge_objects "
+                    "(id, notebook_id, object_type, status, owner, payload, evidence, "
+                    "source_candidate_id, source_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?, ?)",
+                    [(o["_oid"], notebook_id, o["object_type"],
+                      json.dumps(o["payload"], ensure_ascii=False),
+                      json.dumps(o["evidence"], ensure_ascii=False),
+                      source_id or '', now, now) for o in chunk],
                 )
-            for rel in db_relations:
-                db.execute(
-                    """
-                    INSERT INTO knowledge_relations
-                    (id, notebook_id, source_id, source_object_id, target_object_id,
-                     edge_type, evidence, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
-                        rel["source_object_id"], rel["target_object_id"],
-                        rel["edge_type"],
-                        json.dumps(rel["evidence"], ensure_ascii=False),
-                        now,
-                    ),
+        for i in range(0, len(db_relations), CHUNK):
+            chunk = db_relations[i:i + CHUNK]
+            with self._write() as db:
+                db.executemany(
+                    "INSERT INTO knowledge_relations "
+                    "(id, notebook_id, source_id, source_object_id, target_object_id, "
+                    "edge_type, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [(f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
+                      r["source_object_id"], r["target_object_id"], r["edge_type"],
+                      json.dumps(r["evidence"], ensure_ascii=False), now) for r in chunk],
                 )
         self._embed_objects_batch(notebook_id, objects)
         self._invalidate_unified_cache(notebook_id)

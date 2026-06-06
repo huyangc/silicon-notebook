@@ -111,3 +111,19 @@ def test_embed_objects_batch_writes_in_one_transaction(embed_repo, monkeypatch):
     with embed_repo._connect() as db:
         n = db.execute("SELECT COUNT(*) c FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
     assert n == 35
+
+
+def test_store_kg_chunks_large_insert(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    objs = [{"local_id": f"L{i}", "object_type": "concept",
+             "payload": {"name": f"c{i}"}, "evidence": []} for i in range(2500)]
+    rels = [{"source_local_id": "L0", "target_local_id": f"L{i}",
+             "edge_type": "about", "evidence": []} for i in range(1, 2500)]
+    n_obj, n_rel = repo.store_kg(nb.id, None, objs, rels)
+    assert n_obj == 2500 and n_rel == 2499
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchone()["c"] == 2500
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)).fetchone()["c"] == 2499
+        r = db.execute("SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id=? LIMIT 1", (nb.id,)).fetchone()
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE id=?", (r["source_object_id"],)).fetchone()["c"] == 1
+        assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE id=?", (r["target_object_id"],)).fetchone()["c"] == 1
