@@ -56,7 +56,7 @@ def test_getters_reflect_config():
 def _kg_json():
     import json
     return json.dumps({"nodes": [{"local_id": "a", "type": "Concept",
-                                  "name": "x", "ev": 0}], "edges": []})
+                                  "name": "current mirror", "ev": 0}], "edges": []})
 
 
 def test_extract_graph_goes_through_window_pool(monkeypatch):
