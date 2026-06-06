@@ -138,10 +138,18 @@ class Citation(BaseModel):
     quoted_span: str
 
 
+class TraceStep(BaseModel):
+    """推理模式 agent 的一步轨迹(供前端折叠展示)。"""
+    step_type: str            # plan | retrieve | reflect | expand | fallback | answer
+    summary: str              # 人话摘要
+    detail: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AskRequest(BaseModel):
     question: str
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
+    mode: str = "fast"        # "fast" | "reasoning"
 
 
 class AnswerAnchor(BaseModel):
@@ -171,6 +179,8 @@ class AskResponse(BaseModel):
     # 实际用于检索的 query（原问或改写后）+ 最高命中相关度，供排错/二期标定。
     retrieval_query: str = ""
     top_relevance: float = 0.0
+    # 推理模式 agent 轨迹;fast 模式恒为 None。
+    reasoning_trace: Optional[List["TraceStep"]] = None
 
 
 class ConversationRenameRequest(BaseModel):
