@@ -2856,18 +2856,30 @@ class SQLiteRepository:
         placeholder relevance=0 (final relevance unified by run() via the
         original question). Honours edge_type filter; direction out=object as
         source, in=as target, both=either."""
+        # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
+        # instead of loading every notebook edge: O(neighbours), not O(E).
+        edge_clause = " AND edge_type=?" if edge_type else ""
+        edge_param = [edge_type] if edge_type else []
         neighbour_ids: set = set()
-        for rel in self.relations_for_notebook(notebook_id):
-            if edge_type and rel["edge_type"] != edge_type:
-                continue
-            src, tgt = rel["source_object_id"], rel["target_object_id"]
-            if object_id == src and direction in ("out", "both"):
-                neighbour_ids.add(tgt)
-            elif object_id == tgt and direction in ("in", "both"):
-                neighbour_ids.add(src)
-        if not neighbour_ids:
-            return []
         with self._connect() as db:
+            if direction in ("out", "both"):
+                neighbour_ids.update(
+                    r["target_object_id"] for r in db.execute(
+                        f"SELECT target_object_id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND source_object_id=?{edge_clause}",
+                        [notebook_id, object_id, *edge_param],
+                    ).fetchall()
+                )
+            if direction in ("in", "both"):
+                neighbour_ids.update(
+                    r["source_object_id"] for r in db.execute(
+                        f"SELECT source_object_id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND target_object_id=?{edge_clause}",
+                        [notebook_id, object_id, *edge_param],
+                    ).fetchall()
+                )
+            if not neighbour_ids:
+                return []
             placeholders = ",".join("?" for _ in neighbour_ids)
             status_ph = ",".join("?" for _ in USABLE_STATUSES)
             rows = db.execute(
@@ -2973,14 +2985,27 @@ class SQLiteRepository:
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
         _t = time.perf_counter()
         hit_ids = {item.object_id for item in top_hits}
-        relations = self.relations_for_notebook(notebook_id)
+        # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
+        # instead of loading every notebook edge: O(touching edges), not O(E).
         neighbour_ids: set = set()
-        for rel in relations:
-            src, tgt = rel["source_object_id"], rel["target_object_id"]
-            if src in hit_ids and tgt not in hit_ids:
-                neighbour_ids.add(tgt)
-            elif tgt in hit_ids and src not in hit_ids:
-                neighbour_ids.add(src)
+        if hit_ids:
+            hit_list = list(hit_ids)
+            ph = ",".join("?" for _ in hit_list)
+            with self._connect() as db:
+                for r in db.execute(
+                    f"SELECT target_object_id FROM knowledge_relations "
+                    f"WHERE notebook_id=? AND source_object_id IN ({ph})",
+                    [notebook_id, *hit_list],
+                ).fetchall():
+                    if r["target_object_id"] not in hit_ids:
+                        neighbour_ids.add(r["target_object_id"])
+                for r in db.execute(
+                    f"SELECT source_object_id FROM knowledge_relations "
+                    f"WHERE notebook_id=? AND target_object_id IN ({ph})",
+                    [notebook_id, *hit_list],
+                ).fetchall():
+                    if r["source_object_id"] not in hit_ids:
+                        neighbour_ids.add(r["source_object_id"])
 
         # Fetch neighbour objects if any.
         neighbour_objs: List[dict] = []
