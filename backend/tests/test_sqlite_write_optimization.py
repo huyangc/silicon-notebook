@@ -127,3 +127,30 @@ def test_store_kg_chunks_large_insert(repo):
         r = db.execute("SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id=? LIMIT 1", (nb.id,)).fetchone()
         assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE id=?", (r["source_object_id"],)).fetchone()["c"] == 1
         assert db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE id=?", (r["target_object_id"],)).fetchone()["c"] == 1
+
+
+def test_write_throughput_smoke_no_lock(repo, capsys):
+    import time
+    nb = repo.create_notebook(NotebookCreate(name="bench"))
+    WORKERS, RECORDS = 64, 100
+    errors = []
+
+    def work(w):
+        try:
+            objs = [{"local_id": f"{w}-{i}", "object_type": "concept",
+                     "payload": {"name": f"c{w}-{i}"}, "evidence": []} for i in range(RECORDS)]
+            repo.store_kg(nb.id, None, objs, [])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    ts = [threading.Thread(target=work, args=(w,)) for w in range(WORKERS)]
+    t0 = time.perf_counter()
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    elapsed = time.perf_counter() - t0
+    total = WORKERS * RECORDS
+    with repo._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
+    print(f"\n[bench] {WORKERS}w x {RECORDS} = {total} rows in {elapsed:.2f}s = {total / elapsed:,.0f} rec/s")
+    assert not errors, errors
+    assert n == total
