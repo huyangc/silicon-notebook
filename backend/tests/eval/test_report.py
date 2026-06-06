@@ -30,6 +30,9 @@ def test_render_speed_report():
         {"chars": 100000, "n_windows": 13, "wall_s": 9.0,
          "latency_p50_s": 4.0, "latency_p95_s": 8.0, "total_tokens": 30000,
          "retries": 2, "effective_concurrency": 13},
+        {"chars": 200000, "n_windows": 50, "wall_s": 14.0,
+         "latency_p50_s": 0.0, "latency_p95_s": 0.0, "total_tokens": 0,
+         "retries": 110, "effective_concurrency": 50},
     ]
     extrapolated = [{"chars": 500000, "n_windows": 63, "est_s": 21.0}]
     md = render_speed_report(measured, extrapolated, recommended_max_chars=250000,
@@ -38,6 +41,7 @@ def test_render_speed_report():
     assert "100000" in md or "100,000" in md
     assert "推荐文档上限" in md
     assert "250" in md
+    assert "失败" in md         # 失败档(tokens=0)被标注
 
 
 def test_render_inference_report():

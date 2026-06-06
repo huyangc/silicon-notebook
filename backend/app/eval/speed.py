@@ -161,3 +161,15 @@ def extrapolate(measured: List[dict], target_chars: List[int],
         out.append({"chars": c, "n_windows": n,
                     "est_s": estimate_extract_seconds(n, eff, p50, overhead)})
     return out
+
+
+def recommend_max_chars(measured: List[dict], target_seconds: int) -> int:
+    """推荐文档上限,仅基于成功档(total_tokens>0)。返回 wall<=target 的最大成功档字数;
+    无满足则取成功档最小字数;全失败返回 0。"""
+    ok = [m for m in measured if m.get("total_tokens", 0) > 0]
+    within = [m["chars"] for m in ok if m["wall_s"] <= target_seconds]
+    if within:
+        return max(within)
+    if ok:
+        return min(m["chars"] for m in ok)
+    return 0

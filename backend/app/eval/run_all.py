@@ -2,7 +2,7 @@
 PYTHONPATH=backend python -m app.eval.run_all --notebook nb-012fb94249 --only quality,speed,inference
 """
 from __future__ import annotations
-import argparse, glob, pathlib
+import argparse, glob, json, pathlib
 from datetime import datetime
 
 DEFAULT_DB = ".local/silicon_notebook.db"
@@ -38,7 +38,7 @@ def main() -> int:
 
     if "speed" in only:
         from app.core.config import Settings
-        from app.eval.speed import measure_speed, extrapolate
+        from app.eval.speed import measure_speed, extrapolate, recommend_max_chars
         from app.eval.report import render_speed_report
         s = Settings()
         source_md = a.source_md or _find_source_md(a.notebook)
@@ -46,8 +46,10 @@ def main() -> int:
         measured = measure_speed(source_md)
         extra = extrapolate(measured, [100000, 200000, 500000, 1000000],
                             s.kg_extract_workers, s.kg_window_min_chars, s.kg_window_max_chars)
-        within = [m["chars"] for m in measured if m["wall_s"] <= a.target_seconds]
-        rec = max(within) if within else (measured[0]["chars"] if measured else 0)
+        rec = recommend_max_chars(measured, a.target_seconds)
+        (out / "speed_raw.json").write_text(
+            json.dumps({"measured": measured, "extrapolated": extra},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
         (out / "speed_report.md").write_text(
             render_speed_report(measured, extra, rec, a.target_seconds), encoding="utf-8")
         print("[eval] speed_report.md done")

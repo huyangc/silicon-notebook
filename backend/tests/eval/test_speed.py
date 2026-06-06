@@ -35,3 +35,16 @@ def test_parse_llm_log_filters_by_ts(tmp_path):
     assert stats["retries"] == 1
     assert stats["latency_p50_s"] == 2.0
     assert stats["total_tokens"] == 500
+
+
+def test_recommend_max_chars_excludes_failed():
+    from app.eval.speed import recommend_max_chars
+    measured = [
+        {"chars": 5000, "wall_s": 60.0, "total_tokens": 1000},
+        {"chars": 20000, "wall_s": 200.0, "total_tokens": 5000},    # 成功但超时
+        {"chars": 200000, "wall_s": 14.0, "total_tokens": 0},       # 失败:wall小但0token
+    ]
+    # 200000 虽 wall=14<=120,但 tokens=0(失败)不应入选;只有 5000 满足
+    assert recommend_max_chars(measured, 120) == 5000
+    # 全失败 -> 0
+    assert recommend_max_chars([{"chars": 100, "wall_s": 5, "total_tokens": 0}], 120) == 0
