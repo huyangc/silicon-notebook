@@ -71,11 +71,11 @@ MinerU 不可达/报错/产出空 → 静默回退 pypdf，上传永不阻塞。
 
 `_PROSE_TYPES = (paragraph, list_item, formula, table, figure_caption)`（**不含 heading / code_block**）。
 
-按文档顺序**贪心打包** prose 块到 `kg_window_target_chars`（默认 9000）字符、相邻 overlap `kg_window_overlap_chars`（450）；吸收碎小节；超长单元素按 step = target - overlap 内切。窗口数超 `kg_window_warn_threshold`（1200）记 WARNING，不截断。
+按文档顺序**贪心打包** prose 块到目标窗口字符、相邻 overlap `kg_window_overlap_chars`（450）；吸收碎小节；超长单元素按 step = target - overlap 内切。窗口大小**自适应**：`plan_window_size` 取 `clamp(内容字符 / KG_EXTRACT_WORKERS, KG_WINDOW_MIN_CHARS=4000, KG_WINDOW_MAX_CHARS=8000)` 并等长切分（`KG_WINDOW_TARGET_CHARS>0` 时固定为该值）。窗口数超 `kg_window_warn_threshold`（1200）记 WARNING，不截断。
 
 ### 2.3 KG 抽取（`kg_ingest.extract_graph`）
 
-`ThreadPoolExecutor(kg_extract_workers=16)` 并发逐窗 LLM 抽取（`kg/extract.py`）：
+经**全局窗口池**（`kg/scheduler.py` 的 `submit_window`，容量 `KG_EXTRACT_WORKERS` 全局封顶、跨所有文档共享、FIFO）并发逐窗 LLM 抽取；文档级并发由**作业池** `KG_JOB_CONCURRENCY` 控制（上传分发经 `submit_job(process_source)`，替代顺序 BackgroundTask）：
 
 - `NODE_TYPES = {Concept, Claim, Formula, Procedure}`
 - `EDGE_TYPES = {defines, part_of, composed_of, contrasts_with, kind_of, …}`
@@ -184,7 +184,7 @@ OpenAI 兼容；`chat_json`（`response_format=json_object` + `strip_json_fences
 
 - **模型服务**：`openai_compat_base_url/api_key/model/timeout=60/max_retries=2`（所有模型经 URL 端点接入，不启动本地服务）。
 - **嵌入**：`embed_provider`（""/dashscope）/`embed_model`/`embed_base_url`/`embed_api_key`/`embed_dim=1024`/`embed_truncate_chars=2000`/`embed_batch_size=10`/`embed_persist_chunk=200`/`embed_concurrency=50`。
-- **KG 抽取**：`kg_window_target_chars=9000`/`kg_window_overlap_chars=450`/`kg_extract_workers=16`/`kg_window_warn_threshold=1200`。
+- **KG 抽取**：`kg_extract_workers=16`（全局窗口并发上限）/`kg_job_concurrency=8`（文档级并发）/`kg_ask_reserve=64`（Ask 连接预留）/`kg_window_target_chars=0`（0=自适应）/`kg_window_min_chars=4000`/`kg_window_max_chars=8000`/`kg_window_overlap_chars=450`/`kg_window_warn_threshold=1200`。
 - **DB**：`db_busy_timeout_ms=30000`。
 - **检索**：`retrieval_top_n=12`。
 - **MinerU**：`mineru_mode(off|http|cli)` · `mineru_api_url` · `mineru_backend` · `mineru_vlm_server_url` · `mineru_parse_method` · `mineru_lang` · `mineru_model_source` · `mineru_timeout_seconds` · `mineru_formula_enable` · `mineru_table_enable`。

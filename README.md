@@ -124,7 +124,7 @@ The outer page is a notebook collection/library (KG-native pipeline):
 
 1. Click `＋ 新建` — the app creates an `Untitled notebook` and enters it immediately (no dialog).
 2. Upload PDF, Markdown, DOCX, PPTX, CSV, or XLSX sources (multipart).
-3. Backend: structured Markdown parse → KG extraction (Concept / Claim / Formula / Procedure objects, 16-worker concurrent windows) running in the foreground, while element embedding runs concurrently in a background daemon thread.
+3. Backend: structured Markdown parse → KG extraction (Concept / Claim / Formula / Procedure objects) via a shared global extraction pool — window concurrency capped by `KG_EXTRACT_WORKERS` across all documents, document concurrency by `KG_JOB_CONCURRENCY` — while element embedding runs concurrently in a background daemon thread.
 4. Source turns green (`extracted`) as soon as KG extraction completes — no need to wait for embedding.
 5. Knowledge objects are stored in `knowledge_objects` + `knowledge_relations` with element-level evidence bindings.
 6. Hybrid retrieval (bi-gram keyword + float32 matrix semantic) feeds KG-native Q&A: answers contain sentence-level `[k_i]` citations, support multi-turn conversations, and expand via 1-hop KG neighbours.
@@ -188,12 +188,19 @@ EMBED_PERSIST_CHUNK     # rows written to DB per batch (default 200)
 EMBED_CONCURRENCY       # concurrent embedding threads (default 50)
 ```
 
-**KG extraction windowing:**
+**KG extraction concurrency & windowing:**
 
 ```text
-KG_WINDOW_TARGET_CHARS      # greedy-pack target window size (default 9000)
+KG_EXTRACT_WORKERS          # GLOBAL cap on concurrent extraction LLM calls (windows),
+                            # shared across all documents, intra- + inter-doc (default 16)
+KG_JOB_CONCURRENCY          # how many documents extract concurrently; their windows
+                            # share the global KG_EXTRACT_WORKERS budget (default 8)
+KG_ASK_RESERVE              # LLM connections reserved for interactive Ask so it is not
+                            # starved during extraction; pool = WORKERS + RESERVE (default 64)
+KG_WINDOW_TARGET_CHARS      # 0 = adaptive window size (default); >0 forces a fixed size
+KG_WINDOW_MIN_CHARS         # adaptive window lower bound (default 4000)
+KG_WINDOW_MAX_CHARS         # adaptive window upper bound (default 8000)
 KG_WINDOW_OVERLAP_CHARS     # overlap between adjacent windows (default 450)
-KG_EXTRACT_WORKERS          # ThreadPoolExecutor size for window extraction (default 16)
 KG_WINDOW_WARN_THRESHOLD    # log WARNING when window count exceeds this (default 1200)
 ```
 
