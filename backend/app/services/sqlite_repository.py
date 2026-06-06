@@ -153,6 +153,10 @@ class SQLiteRepository:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(f"PRAGMA busy_timeout = {int(self.settings.db_busy_timeout_ms)}")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA cache_size = -65536")
+        connection.execute("PRAGMA temp_store = MEMORY")
+        connection.execute("PRAGMA mmap_size = 268435456")
         return connection
 
     def _migrate(self) -> None:
