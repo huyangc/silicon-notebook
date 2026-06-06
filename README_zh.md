@@ -116,7 +116,7 @@ npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 
 1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
 2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。
-3. 后端：结构化 Markdown 解析 → KG 抽取（Concept / Claim / Formula / Procedure，16 线程并发窗口化）在前台运行，元素向量化同时在后台 daemon 线程并发执行。
+3. 后端：结构化 Markdown 解析 → KG 抽取（Concept / Claim / Formula / Procedure）经**全局抽取池**并发——窗口并发由 `KG_EXTRACT_WORKERS` 跨所有文档封顶、文档并发由 `KG_JOB_CONCURRENCY` 控制，元素向量化同时在后台 daemon 线程并发执行。
 4. 来源在 KG 抽取完成后立即变绿（`extracted`）——无需等待向量化完成。
 5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
 6. 混合检索（bi-gram 关键词 + float32 矩阵语义）驱动 KG-native 问答：答案含逐句 `[k_i]` 引用，支持多轮会话，并沿 KG 关系做 1-hop 邻居扩展。
@@ -180,12 +180,16 @@ EMBED_PERSIST_CHUNK     # 每批落库行数（默认 200）
 EMBED_CONCURRENCY       # 并发嵌入线程数（默认 50）
 ```
 
-**KG 抽取窗口化：**
+**KG 抽取并发与窗口化：**
 
 ```text
-KG_WINDOW_TARGET_CHARS      # 贪心打包目标窗口字符数（默认 9000）
+KG_EXTRACT_WORKERS          # 全局并发抽取窗口(LLM 调用)上限，跨所有文档共享(文档内+文档间)（默认 16）
+KG_JOB_CONCURRENCY          # 同时抽取的文档数(作业池)；各文档窗口共享上面的全局预算（默认 8）
+KG_ASK_RESERVE              # 为交互式 Ask 预留的 LLM 连接数，抽取打满时 Ask 不被饿死；连接池=WORKERS+RESERVE（默认 64）
+KG_WINDOW_TARGET_CHARS      # 0=窗口大小自适应（默认）；>0 强制固定窗口字符数
+KG_WINDOW_MIN_CHARS         # 自适应窗口下限（默认 4000）
+KG_WINDOW_MAX_CHARS         # 自适应窗口上限（默认 8000）
 KG_WINDOW_OVERLAP_CHARS     # 相邻窗口重叠字符数（默认 450）
-KG_EXTRACT_WORKERS          # 窗口抽取线程池大小（默认 16）
 KG_WINDOW_WARN_THRESHOLD    # 窗口数超此值记 WARNING（默认 1200）
 ```
 
