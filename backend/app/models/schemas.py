@@ -140,7 +140,7 @@ class Citation(BaseModel):
 
 class TraceStep(BaseModel):
     """推理模式 agent 的一步轨迹(供前端折叠展示)。"""
-    step_type: str            # plan | retrieve | reflect | expand | fallback | answer
+    step_type: str            # plan | retrieve | reflect | expand | fallback | answer | skip
     summary: str              # 人话摘要
     detail: Dict[str, Any] = Field(default_factory=dict)
 
