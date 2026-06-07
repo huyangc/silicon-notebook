@@ -119,3 +119,18 @@ def test_health_exposes_reasoning_llm_configured():
     # 与 settings 口径一致（对环境是否配置鲁棒）。
     assert body["reasoning_llm_configured"] == get_settings().reasoning_llm_configured
     get_settings.cache_clear()
+
+
+def test_partial_reasoning_config_warns_and_falls_back(tmp_path, monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("REASONING_LLM_BASE_URL", "https://reason")  # 只填 1/3
+    monkeypatch.delenv("REASONING_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("REASONING_LLM_MODEL", raising=False)
+    with caplog.at_level(logging.WARNING):
+        r = SQLiteRepository(Settings())
+        r.embedder = FakeEmbedder(dim=16)
+    assert any("REASONING_LLM" in rec.message for rec in caplog.records)
+    assert r.reasoning_llm_client is r.llm_client   # 部分配置 → 仍整体回退

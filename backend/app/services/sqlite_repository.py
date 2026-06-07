@@ -152,6 +152,10 @@ class SQLiteRepository:
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
         self.event_log = EventLogger(settings, channel="events")
+        if settings.reasoning_llm_partially_configured:
+            self.event_log.logger.warning(
+                "REASONING_LLM_* 仅部分配置(base_url/api_key/model 需全填)，"
+                "推理搜索将回退到全局 OPENAI_COMPAT_* 模型。")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}

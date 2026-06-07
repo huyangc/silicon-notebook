@@ -167,6 +167,12 @@ class Settings(BaseSettings):
         )
 
     @property
+    def reasoning_llm_partially_configured(self) -> bool:
+        """有些 REASONING_LLM_* 填了但非全填（疑似配漏，将整体回退全局）。"""
+        vals = [self.reasoning_llm_base_url, self.reasoning_llm_api_key, self.reasoning_llm_model]
+        return any(vals) and not all(vals)
+
+    @property
     def embedder_configured(self) -> bool:
         return bool(
             (self.embed_provider or "").strip() == "dashscope"
