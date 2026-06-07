@@ -427,6 +427,9 @@ class SQLiteRepository:
                   level INTEGER NOT NULL DEFAULT 0,
                   member_ids TEXT NOT NULL,
                   size INTEGER NOT NULL,
+                  title TEXT NOT NULL DEFAULT '',
+                  summary TEXT NOT NULL DEFAULT '',
+                  findings TEXT NOT NULL DEFAULT '[]',
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_communities_nb ON communities(notebook_id);
@@ -480,6 +483,11 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN object_type TEXT NOT NULL DEFAULT 'concept'")
             if "canonical_description" not in cc_cols:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_description TEXT NOT NULL DEFAULT ''")
+            # Community report columns (title/summary/findings).
+            comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
+            for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
+                if col not in comm_cols:
+                    db.execute(f"ALTER TABLE communities ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -2261,6 +2269,70 @@ class SQLiteRepository:
                 "SELECT member_ids FROM communities WHERE notebook_id=? AND level=? ORDER BY size DESC, id ASC",
                 (notebook_id, level)).fetchall()
         return [json.loads(r["member_ids"]) for r in rows]
+
+    def summarize_communities(self, notebook_id: str, level: int = 0) -> int:
+        """For each detected community, generate an LLM report (title/summary/
+        findings) from its members + internal relations; persist on the community
+        row. No-op (returns 0) when disabled or LLM unconfigured. Returns the
+        number of communities summarized."""
+        self.get_notebook(notebook_id)
+        if not self.settings.kg_community_summary_enabled or not getattr(self.llm_client, "configured", False):
+            return 0
+        from app.services.prompts import community_report_prompt, COMMUNITY_REPORT_SCHEMA_HINT
+        with self._connect() as db:
+            crows = db.execute(
+                "SELECT id, member_ids FROM communities WHERE notebook_id=? AND level=?",
+                (notebook_id, level)).fetchall()
+        done = 0
+        for cr in crows:
+            members = json.loads(cr["member_ids"] or "[]")
+            if not members:
+                continue
+            ph = ",".join("?" for _ in members)
+            with self._connect() as db:
+                orows = db.execute(
+                    f"SELECT id, object_type, payload FROM knowledge_objects WHERE id IN ({ph})", members).fetchall()
+                rrows = db.execute(
+                    f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
+                    f"WHERE notebook_id=? AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+                    [notebook_id, *members, *members]).fetchall()
+            name_by_id = {}
+            mlines = []
+            for o in orows:
+                nm = json.loads(o["payload"] or "{}").get("name", "")
+                name_by_id[o["id"]] = nm
+                mlines.append(f"- [{o['object_type']}] {nm}")
+            rlines = [f"{name_by_id.get(r['source_object_id'],'?')} -[{r['edge_type']}]-> {name_by_id.get(r['target_object_id'],'?')}"
+                      for r in rrows]
+            members_block = "\n".join(mlines)
+            relations_block = "\n".join(rlines) if rlines else "(none)"
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user", "content": community_report_prompt(members_block, relations_block)}],
+                    COMMUNITY_REPORT_SCHEMA_HINT)
+                data = json.loads(raw)
+            except Exception:
+                continue
+            title = str(data.get("title", "")).strip()
+            summary = str(data.get("summary", "")).strip()
+            findings = data.get("findings") if isinstance(data.get("findings"), list) else []
+            if not summary:
+                continue
+            with self._write() as db:
+                db.execute("UPDATE communities SET title=?, summary=?, findings=? WHERE id=?",
+                           (title, summary, json.dumps(findings), cr["id"]))
+            done += 1
+        return done
+
+    def get_community_reports(self, notebook_id: str, level: int = 0) -> List[dict]:
+        """Persisted community reports (only those summarized). For global search."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT member_ids, title, summary, findings FROM communities "
+                "WHERE notebook_id=? AND level=? AND summary!='' ORDER BY size DESC, id ASC",
+                (notebook_id, level)).fetchall()
+        return [{"member_ids": json.loads(r["member_ids"] or "[]"), "title": r["title"],
+                 "summary": r["summary"], "findings": json.loads(r["findings"] or "[]")} for r in rows]
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
