@@ -295,3 +295,16 @@ def global_reduce_prompt(question: str, points_block: str) -> str:
         "grounded=false. Return JSON only with 'answer' and 'grounded'.\n\n"
         f"Question: {question}\n\nKey points:\n{points_block}"
     )
+
+
+EVIDENCE_REFINE_SCHEMA_HINT = '{"relevant":[""]}'
+
+
+def evidence_refine_prompt(question: str, evidence_block: str) -> str:
+    return (
+        "From the retrieved knowledge items below, extract ONLY the statements "
+        "directly relevant to answering the question, as a concise list (verbatim "
+        "or lightly compressed, faithful to the items). Drop irrelevant items. If "
+        "none are relevant, return an empty list. Return JSON only with 'relevant'.\n\n"
+        f"Question: {question}\n\nRetrieved items:\n{evidence_block}"
+    )

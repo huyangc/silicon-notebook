@@ -3721,6 +3721,28 @@ class SQLiteRepository:
         classify_evidence. `history`
         (prior conversation turns) shapes the wording but not the retrieval."""
         context_block, id_map = self._answer_context(notebook_id, top_hits)
+        if (self.settings.kg_query_refine_enabled
+                and getattr(self.llm_client, "configured", False) and id_map):
+            from app.services.prompts import evidence_refine_prompt, EVIDENCE_REFINE_SCHEMA_HINT
+            ev_lines = []
+            for k, v in id_map.items():
+                txt = (v.get("definition") or v.get("snippet") or "").strip()
+                ev_lines.append(f"{k} {v.get('name','')}: {txt}".strip())
+            ev_block = "\n".join(ev_lines)[: self.settings.query_refine_max_chars]
+            try:
+                raw_refine = self.llm_client.chat_json(
+                    [{"role": "user", "content": evidence_refine_prompt(question, ev_block)}],
+                    EVIDENCE_REFINE_SCHEMA_HINT,
+                    timeout=self.settings.reasoning_timeout_seconds,
+                    max_retries=self.settings.reasoning_max_retries)
+                rel = json.loads(raw_refine).get("relevant") or []
+                rel = [str(x).strip() for x in rel if str(x).strip()]
+            except Exception:
+                rel = []
+            if rel:
+                context_block = ("Focused relevant evidence (for this question):\n"
+                                 + "\n".join(f"- {x}" for x in rel[:12])
+                                 + "\n\n" + context_block)
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,

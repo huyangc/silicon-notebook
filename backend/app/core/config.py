@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     reasoning_max_retries: int = Field(1, env="REASONING_MAX_RETRIES")
     # Global 问答:map-reduce 时纳入的社区报告上限(按 size 取前 N)。
     global_max_communities: int = Field(20, env="GLOBAL_MAX_COMMUNITIES")
+    # 问题感知证据精炼: 默认关闭; 开启后答题前对已装配证据按问题抽"相关要点"前置(聚焦答题)。
+    kg_query_refine_enabled: bool = Field(False, env="KG_QUERY_REFINE_ENABLED")
+    query_refine_max_chars: int = Field(4000, env="QUERY_REFINE_MAX_CHARS")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief
