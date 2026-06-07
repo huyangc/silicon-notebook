@@ -3279,6 +3279,8 @@ class SQLiteRepository:
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
+            timeout=self.settings.reasoning_timeout_seconds,
+            max_retries=self.settings.reasoning_max_retries,
         )
         data = json.loads(raw)
         if not isinstance(data, dict):

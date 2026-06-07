@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     reasoning_max_steps: int = Field(50, env="REASONING_MAX_STEPS")
     # 推理模式 Plan 输出子查询数上限。
     reasoning_max_subqueries: int = Field(5, env="REASONING_MAX_SUBQUERIES")
+    # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
+    # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
+    reasoning_timeout_seconds: int = Field(90, env="REASONING_TIMEOUT_SECONDS")
+    reasoning_max_retries: int = Field(1, env="REASONING_MAX_RETRIES")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

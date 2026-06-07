@@ -1,4 +1,6 @@
 import json
+import threading
+
 import pytest
 
 
@@ -29,6 +31,22 @@ def test_reasoning_settings_knobs():
     s = Settings()
     assert s.reasoning_max_steps == 50
     assert s.reasoning_max_subqueries == 5
+
+
+def test_reasoning_timeout_retry_knobs_defaults():
+    from app.core.config import Settings
+    s = Settings()
+    assert s.reasoning_timeout_seconds == 90
+    assert s.reasoning_max_retries == 1
+
+
+def test_reasoning_timeout_retry_knobs_env(monkeypatch):
+    monkeypatch.setenv("REASONING_TIMEOUT_SECONDS", "33")
+    monkeypatch.setenv("REASONING_MAX_RETRIES", "4")
+    from app.core.config import Settings
+    s = Settings()
+    assert s.reasoning_timeout_seconds == 33
+    assert s.reasoning_max_retries == 4
 
 
 def test_plan_prompt_contains_question_and_schema():
@@ -142,7 +160,7 @@ class _StubLLM:
         self._plan = plan
         self._reflect = reflect
         self.configured = configured
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, **kwargs):
         if "sub_queries" in schema_hint:
             return json.dumps(self._plan)
         return json.dumps(self._reflect)
@@ -152,6 +170,89 @@ def _rr_with_llm(repo, **llm):
     from app.services.reasoning_retrieval import ReasoningRetriever
     repo.llm_client = _StubLLM(**llm)
     return ReasoningRetriever(repo, repo.settings)
+
+
+class _KwargsRecordingLLM:
+    """Records every chat_json call's kwargs so we can assert plan/reflect
+    forward the reasoning-specific timeout/max_retries. Accepting **kwargs is
+    itself part of the contract: the call sites must be passing them."""
+    configured = True
+
+    def __init__(self, plan, reflect):
+        self._plan = plan
+        self._reflect = reflect
+        self.calls = []  # list of (schema_hint, kwargs)
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.calls.append((schema_hint, kwargs))
+        if "sub_queries" in schema_hint:
+            return json.dumps(self._plan)
+        return json.dumps(self._reflect)
+
+
+class _AnswerRecordingLLM:
+    """Fake llm_client for repository answer paths: records chat_json kwargs,
+    returns a minimal valid answer JSON."""
+    configured = True
+
+    def __init__(self):
+        self.calls = []  # list of kwargs dicts
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.calls.append(kwargs)
+        return json.dumps({"answer": "ok", "grounded": False})
+
+
+def test_answer_reasoning_passes_reasoning_timeout_and_retries(rrepo):
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_timeout_seconds = 88
+    rrepo.settings.reasoning_max_retries = 2
+    llm = _AnswerRecordingLLM()
+    rrepo.llm_client = llm
+    rrepo._answer_reasoning(nb.id, "问题", [], [], "")
+    assert llm.calls, "_answer_reasoning must call chat_json"
+    assert llm.calls[0].get("timeout") == 88
+    assert llm.calls[0].get("max_retries") == 2
+
+
+def test_answer_kg_fast_path_does_not_pass_reasoning_overrides(rrepo):
+    """Boundary guard: the fast-path _answer_kg must keep using the global
+    default (no per-call timeout/max_retries), so extraction/fast paths are
+    unaffected."""
+    nb = _seed_two_nodes(rrepo)
+    llm = _AnswerRecordingLLM()
+    rrepo.llm_client = llm
+    rrepo._answer_kg(nb.id, "问题", [], "")
+    assert llm.calls, "_answer_kg must call chat_json"
+    assert "timeout" not in llm.calls[0]
+    assert "max_retries" not in llm.calls[0]
+
+
+def test_plan_passes_reasoning_timeout_and_retries(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_timeout_seconds = 90
+    rrepo.settings.reasoning_max_retries = 1
+    llm = _KwargsRecordingLLM(plan={"sub_queries": [{"query": "q"}]}, reflect={})
+    rrepo.llm_client = llm
+    ReasoningRetriever(rrepo, rrepo.settings).plan("问题", "")
+    assert llm.calls, "plan must call chat_json"
+    _, kwargs = llm.calls[0]
+    assert kwargs.get("timeout") == rrepo.settings.reasoning_timeout_seconds
+    assert kwargs.get("max_retries") == rrepo.settings.reasoning_max_retries
+
+
+def test_reflect_passes_reasoning_timeout_and_retries(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_timeout_seconds = 77
+    rrepo.settings.reasoning_max_retries = 3
+    llm = _KwargsRecordingLLM(
+        plan={}, reflect={"next_action": "answer", "sufficient": True})
+    rrepo.llm_client = llm
+    ReasoningRetriever(rrepo, rrepo.settings).reflect("问题", "summary")
+    assert llm.calls, "reflect must call chat_json"
+    _, kwargs = llm.calls[0]
+    assert kwargs.get("timeout") == 77
+    assert kwargs.get("max_retries") == 3
 
 
 def test_plan_parses_subqueries(rrepo):
@@ -231,7 +332,7 @@ class _SeqLLM:
     def __init__(self, plan, reflects):
         self._plan = plan
         self._reflects = list(reflects)
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, **kwargs):
         if "sub_queries" in schema_hint:
             return json.dumps(self._plan)
         if self._reflects:
@@ -297,3 +398,144 @@ def test_run_add_subquery_without_payload_continues(rrepo):
     assert len(reflect_steps) == 2                  # 两轮 reflect 都执行,未提前终止
     assert any(t.step_type == "skip" for t in res.trace)
     assert res.trace[-1].step_type == "answer"
+
+
+def test_run_feeds_no_progress_signal_to_reflect_after_fruitless_retrieval(rrepo):
+    """复现根因:某次检索动作未带来任何新证据时,下一轮 reflect 的输入必须携带
+    '无新进展'信号,让模型据此自主决定是否直接作答;否则模型盲目重复同一动作,
+    一路空转到 reasoning_max_steps —— 这正是推理模式'整体运行很久'的根因。
+
+    注意:本用例不替模型拍板(不强制 answer),只断言信号被喂回 reflect。
+    是否作答仍由模型决定(契合用户要求:始终进 reflect,由模型判断)。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)  # 该库无 source_elements → search_elements 恒返回 []
+
+    captured_reflect_prompts: list[str] = []
+
+    class _RecordingLLM:
+        configured = True
+
+        def __init__(self):
+            # 第1轮 search_elements(必 0 新增,因无原文段),第2轮 answer
+            self._reflects = [
+                {"next_action": "search_elements", "elements_query": "q"},
+                {"next_action": "answer", "sufficient": True},
+            ]
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+            captured_reflect_prompts.append(messages[-1]["content"])
+            nxt = self._reflects.pop(0) if self._reflects else {
+                "next_action": "answer", "sufficient": True}
+            return json.dumps(nxt)
+
+    rrepo.llm_client = _RecordingLLM()
+    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+
+    assert len(captured_reflect_prompts) == 2
+    # 初检索命中 KG 节点(有新增)→ 首轮 reflect 不应带"无新进展"信号
+    assert "未带来新证据" not in captured_reflect_prompts[0]
+    # search_elements 零新增 → 次轮 reflect 必须带"无新进展"信号(待实现)
+    assert "未带来新证据" in captured_reflect_prompts[1]
+
+
+def _mk_rk(object_id, name):
+    """构造一个可辨识的 RetrievedKnowledge(payload.name 带标记,便于断言去重保留了哪条)。"""
+    from app.services.retrieval import RetrievedKnowledge
+    return RetrievedKnowledge(object_id=object_id, object_type="claim",
+                              payload={"name": name})
+
+
+def test_run_initial_retrieval_is_parallel(rrepo, monkeypatch):
+    """并发性测试:≥3 个子查询的初检索必须并发执行。
+
+    用 threading.Barrier(parties=子查询数) 证明:每个子查询的 search 调用内
+    都 barrier.wait(timeout)。串行实现下只有 1 个线程能到达 barrier,wait 超时
+    抛 BrokenBarrierError → 本测试 RED;并行实现下所有线程同时到达 → GREEN。
+
+    reflect 桩首步即 answer,让 reflect 循环立刻结束,聚焦初检索。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    subq = [{"query": "q1"}, {"query": "q2"}, {"query": "q3"}]
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": subq},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+
+    barrier = threading.Barrier(len(subq))
+
+    def fake_search(self, notebook_id, query, types=None, prefer="balanced"):
+        # 串行:第一个线程在此 wait,无人来汇合 → 超时抛 BrokenBarrierError。
+        # 并行:三个线程同时到达 → 全部放行。
+        barrier.wait(timeout=3)
+        return [_mk_rk(f"id-{query}", query)]
+
+    monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "原问题", "")
+
+    # 并发成立才能跑到这里(否则 search 抛 BrokenBarrierError 被吞 → 三条都丢)。
+    # 三个子查询各贡献一个不同 id → 初检索计数为 3。
+    retrieve_steps = [t for t in res.trace if t.step_type == "retrieve"]
+    assert retrieve_steps and retrieve_steps[0].detail["count"] == 3
+
+
+def test_run_initial_retrieval_preserves_order_and_dedup(rrepo, monkeypatch):
+    """顺序/去重确定性测试:并发后,重复 object_id 仍保留"按子查询顺序的第一个"版本。
+
+    两个子查询命中有重叠 id 的结果但顺序不同:
+      sq1 -> [shared(标记A), only1]
+      sq2 -> [shared(标记B), only2]
+    并发收集后,shared 必须保留 sq1 的版本(标记A),证明纳入顺序按子查询原序、
+    而非线程完成顺序。用注入的可辨识 payload 直接断言去重保留了哪一条。
+
+    注意:run() 末尾会用原问题对 collected 统一重打分,但这里注入的 id
+    不在 _seed_two_nodes 的真实库内 → _retrieve_scored 取不到 → 回退到 collected
+    版本,故 top_hits 里 shared 的 payload 即为去重保留的那条。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "first"}, {"query": "second"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+
+    returns = {
+        "first": [_mk_rk("shared", "A-from-first"), _mk_rk("only1", "only1")],
+        "second": [_mk_rk("shared", "B-from-second"), _mk_rk("only2", "only2")],
+    }
+
+    def fake_search(self, notebook_id, query, types=None, prefer="balanced"):
+        return returns[query]
+
+    monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "原问题", "")
+
+    by_id = {h.object_id: h for h in res.top_hits}
+    assert set(by_id) == {"shared", "only1", "only2"}      # 去重:shared 只一份
+    # 第一个出现(sq1=first)的版本胜出
+    assert by_id["shared"].payload["name"] == "A-from-first"
+
+
+def test_run_initial_retrieval_swallows_single_search_failure(rrepo, monkeypatch):
+    """容错:任一子查询 search 抛异常不应让整个 run 崩,失败者记空结果,其余正常。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "boom"}, {"query": "ok"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+
+    def fake_search(self, notebook_id, query, types=None, prefer="balanced"):
+        if query == "boom":
+            raise RuntimeError("search blew up")
+        return [_mk_rk("ok-id", "ok")]
+
+    monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "原问题", "")
+
+    retrieve_steps = [t for t in res.trace if t.step_type == "retrieve"]
+    assert retrieve_steps[0].detail["count"] == 1          # 只剩成功者
+    assert {h.object_id for h in res.top_hits} == {"ok-id"}

@@ -3,7 +3,7 @@ connection must NOT be amplified into a ~6-minute block by SDK auto-retries or
 by the JSON-mode -> plain-mode fallback."""
 import httpx
 import pytest
-from openai import APIConnectionError
+from openai import APIConnectionError, APITimeoutError
 
 import app.core.llm as llm_mod
 from app.core.config import Settings
@@ -117,6 +117,63 @@ def test_non_connection_error_does_not_loop(monkeypatch):
     out = c.chat_json([{"role": "user", "content": "hi"}], "{}")
     assert out == '{"ok":1}'
     assert len(create.calls) == 2  # one fallback, NOT 1+max_retries
+
+
+def test_per_call_timeout_passed_to_create(monkeypatch):
+    """(A) timeout=5 must be forwarded to chat.completions.create as timeout=5."""
+    create = _FakeCreate([_Resp()])
+    c = _make(monkeypatch, create)
+    out = c.chat_json([{"role": "user", "content": "hi"}], "{}", timeout=5)
+    assert out == '{"ok":1}'
+    assert create.calls[0].get("timeout") == 5
+
+
+def test_no_timeout_omits_kwarg_default_path_unchanged(monkeypatch):
+    """(A) Default path: when timeout is not passed, create kwargs must NOT
+    contain a `timeout` key (proves the default behavior is byte-for-byte
+    equivalent — client default timeout is used)."""
+    create = _FakeCreate([_Resp()])
+    c = _make(monkeypatch, create)
+    out = c.chat_json([{"role": "user", "content": "hi"}], "{}")
+    assert out == '{"ok":1}'
+    assert "timeout" not in create.calls[0]
+
+
+def test_per_call_timeout_passed_on_plain_fallback(monkeypatch):
+    """(A) The plain-mode fallback create must also carry the per-call timeout."""
+    create = _FakeCreate([ValueError("response_format unsupported"), _Resp()])
+    c = _make(monkeypatch, create)
+    out = c.chat_json([{"role": "user", "content": "hi"}], "{}", timeout=7)
+    assert out == '{"ok":1}'
+    assert len(create.calls) == 2
+    assert create.calls[0].get("timeout") == 7  # json-mode attempt
+    assert create.calls[1].get("timeout") == 7  # plain-mode fallback
+
+
+def test_per_call_max_retries_zero_no_retry(monkeypatch):
+    """(B) max_retries=0 -> exactly 1 attempt (no retry) even though the global
+    setting allows several; the per-call override wins."""
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "5")  # global allows many
+    err = APITimeoutError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err])  # repeats forever
+    c = _make(monkeypatch, create)
+    with pytest.raises(APITimeoutError):
+        c.chat_json([{"role": "user", "content": "hi"}], "{}", max_retries=0)
+    assert len(create.calls) == 1  # override forces fail-fast
+
+
+def test_per_call_max_retries_overrides_global(monkeypatch):
+    """(B) max_retries=2 -> 1 + 2 = 3 attempts, independent of the (smaller)
+    global setting, confirming the override path is used for the loop bound."""
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "0")  # global says fail-fast
+    err = APITimeoutError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err])
+    c = _make(monkeypatch, create)
+    with pytest.raises(APITimeoutError):
+        c.chat_json([{"role": "user", "content": "hi"}], "{}", max_retries=2)
+    assert len(create.calls) == 3  # 1 + 2 retries from the override
 
 
 def test_client_built_with_no_sdk_retries(monkeypatch):

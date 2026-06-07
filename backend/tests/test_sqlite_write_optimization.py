@@ -48,8 +48,15 @@ def test_all_writes_go_through_write_lock():
     import re
     src = pathlib.Path(__file__).resolve().parents[1] / "app" / "services" / "sqlite_repository.py"
     lines = src.read_text(encoding="utf-8").splitlines()
-    # 负向后顾排除 Python 方法调用(如 set.update()/str.replace()/list.insert())误报, 只匹配 SQL 关键字
+    # SQL 写关键字; (?<!\.) 排除 Python 的同名方法调用(集合 .update()/列表 .insert()/
+    # 字符串 .replace() 等)。真正的 SQL 写在字符串字面量里, 关键字前是引号/空格而非 ".", 仍会命中。
     WRITE = re.compile(r"(?<!\.)\b(INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
+    # 自检: 必须命中真写, 又要放过同名方法调用(否则像 neighbour_ids.update() 那样误报)
+    assert WRITE.search('db.execute("INSERT INTO t VALUES(?)")')
+    assert WRITE.search('db.execute("UPDATE t SET x=? WHERE id=?")')
+    assert not WRITE.search("neighbour_ids.update(r['x'] for r in rows)")
+    assert not WRITE.search("buf.insert(0, item)")
+    assert not WRITE.search('name.replace("a", "b")')
     ALLOW = {"_migrate", "_seed"}            # 起步单线程, 不并发, 豁免
     cur = None
     in_block = False
