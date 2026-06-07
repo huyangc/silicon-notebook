@@ -3226,6 +3226,8 @@ class SQLiteRepository:
                 "location_label": (occ[0].get("section_path", "") if occ else ""),
             }
         # In-network relations: edges whose BOTH endpoints are in the context.
+        # id_map values carry unique object_ids (one entry per surviving hit;
+        # concept-cluster de-dup runs above), so this inversion drops no keys.
         oid_to_key = {v["object_id"]: k for k, v in id_map.items()}
         if len(oid_to_key) >= 2:
             ids = list(oid_to_key)
@@ -3242,11 +3244,12 @@ class SQLiteRepository:
             for r in rels:
                 s = oid_to_key.get(r["source_object_id"])
                 t = oid_to_key.get(r["target_object_id"])
-                if s and t and (s, r["edge_type"], t) not in seen_rel:
+                if s and t and s != t and (s, r["edge_type"], t) not in seen_rel:
                     seen_rel.add((s, r["edge_type"], t))
                     rel_lines.append(f"{s} -[{r['edge_type']}]-> {t}")
             if rel_lines:
-                lines.append("relations: " + "; ".join(rel_lines))
+                # Cap so a dense subgraph can't blow the answer context past budget.
+                lines.append("relations: " + "; ".join(rel_lines[:30]))
         return ("\n".join(lines) if lines else "(none)"), id_map
 
     def _rewrite_followup_query(self, history: str, question: str) -> str:
