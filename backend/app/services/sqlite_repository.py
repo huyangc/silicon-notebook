@@ -3184,8 +3184,11 @@ class SQLiteRepository:
         Concept hits belonging to the same unified cluster (D4) are collapsed —
         the first (highest-scored) per cluster is kept, later duplicates dropped.
         Returns (context_block_str, id_map)."""
+        budget = self.settings.answer_context_budget_chars
+        min_items = self.settings.answer_context_min_items
         lines, id_map = [], {}
         seen_concept_clusters: set = set()
+        used = 0
         i = 0
         for hit in top_hits:
             if hit.object_type == "concept":
@@ -3197,18 +3200,25 @@ class SQLiteRepository:
                 ctx = self.node_context(notebook_id, hit.object_id)
             except KeyError:
                 continue
+            # Stop once the budget is spent, but always keep at least min_items.
+            if used >= budget and len(lines) >= min_items:
+                break
             i += 1
             key = f"k{i}"
             name = str(hit.payload.get("name", "")).strip()
             occ = ctx.get("occurrences") or []
             snippet = occ[0].get("element_text") if occ else ""
             definition = ctx.get("definition") or snippet
-            extra = f" — def: {definition[:200]}" if definition else ""
+            remaining = max(0, budget - used)
+            def_cap = max(0, min(300, remaining))   # per-line cap shrinks as budget fills
+            extra = f" — def: {definition[:def_cap]}" if (definition and def_cap) else ""
             if ctx.get("steps"):
                 extra += "; steps: " + " -> ".join(
                     s.get("name", "") for s in ctx["steps"][:8]
                 )
-            lines.append(f"{key}: [{hit.object_type}] {name}{extra}")
+            line = f"{key}: [{hit.object_type}] {name}{extra}"
+            lines.append(line)
+            used += len(line)
             id_map[key] = {
                 "object_id": hit.object_id, "object_type": hit.object_type,
                 "name": name, "definition": definition, "snippet": snippet,
