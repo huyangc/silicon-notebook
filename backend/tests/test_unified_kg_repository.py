@@ -145,3 +145,32 @@ def test_unified_kg_dirty_status_lifecycle(repo):
     status = repo.unified_kg_status(nb.id)
     assert status["dirty"] is False
     assert status["clusters"] == 1
+
+
+def test_rebuild_applies_llm_confirmed_auto_candidate(repo):
+    """LLM 兜底: auto_candidate 经 LLM 确认 merge 后, rebuild 应将两个概念合入同一簇。"""
+    from app.services.sqlite_repository import _now
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    o1 = repo._test_insert_object(nb.id, "concept", {"name": "operational amplifier"})
+    o2 = repo._test_insert_object(nb.id, "concept", {"name": "op amplifier circuit"})
+    # 用16维向量(与 EMBED_DIM=16 匹配), 方向相同 -> 余弦相似度=1.0(≥hi=0.94)
+    vec = [1.0] + [0.0] * 15
+    with repo._write() as db:
+        for oid in (o1, o2):
+            db.execute(
+                "INSERT OR REPLACE INTO knowledge_embeddings "
+                "(object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                (oid, nb.id, json.dumps(vec), _now()))
+
+    class _LLM:
+        configured = True
+        def chat_json(self, messages, schema):
+            return ('{"decisions":[{"candidate_id":"ac0","decision":"merge",'
+                    '"canonical_name":"operational amplifier","confidence":0.99,'
+                    '"rationale":"same concept"}]}')
+
+    repo.llm_client = _LLM()
+    repo.rebuild_unified_kg(nb.id)
+    cmap = repo.cluster_map(nb.id)
+    assert cmap.get(o1) == cmap.get(o2), (
+        f"Expected same cluster after LLM-confirmed merge, got {cmap}")

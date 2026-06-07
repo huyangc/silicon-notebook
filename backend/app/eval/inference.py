@@ -1,16 +1,21 @@
 """推断问答评测:跑 repo.ask + LLM-judge。"""
 from __future__ import annotations
 import json
+import pathlib
 from typing import Any, Dict, List
 
 import yaml
+
+_QUESTIONS_PATH = pathlib.Path(__file__).resolve().parent / "questions.yaml"
 
 _JUDGE_SCHEMA = ('{"correctness":0,"inference_quality":0,'
                  '"grounding_consistency":true,"fabricated_citation":false,"reason":""}')
 
 
-def load_questions(path: str) -> List[Dict[str, Any]]:
-    data = yaml.safe_load(open(path, encoding="utf-8"))
+def load_questions(path=None) -> List[Dict[str, Any]]:
+    """path 省略时用与本模块同目录的 questions.yaml(不依赖 CWD)。"""
+    p = path or _QUESTIONS_PATH
+    data = yaml.safe_load(open(p, encoding="utf-8"))
     assert isinstance(data, list) and data, "questions.yaml 应为非空列表"
     return data
 
