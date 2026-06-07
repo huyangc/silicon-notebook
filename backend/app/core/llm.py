@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
+from app.core.llm_cache import cache_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
 
 
@@ -38,6 +39,20 @@ class OpenAICompatibleClient:
         self.settings = settings
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)
+        self._cache = None
+
+    def _get_cache(self):
+        if not getattr(self.settings, "llm_cache_enabled", False):
+            return None
+        if self._cache is None:
+            from pathlib import Path
+            from app.core.llm_cache import LLMCache
+            path = self.settings.llm_cache_path
+            p = Path(path)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parents[3] / path   # anchor to repo root
+            self._cache = LLMCache(str(p))
+        return self._cache
 
     @property
     def configured(self) -> bool:
@@ -93,6 +108,12 @@ class OpenAICompatibleClient:
             *messages,
         ]
         model = self.settings.openai_compat_model
+        cache = self._get_cache()
+        ckey = cache_key(model, full_messages, response_schema_hint) if cache else ""
+        if cache and ckey:
+            cached = cache.get(ckey)
+            if cached is not None:
+                return cached
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": full_messages,
@@ -163,6 +184,8 @@ class OpenAICompatibleClient:
                     backoff = min(2 ** attempt, 30)
                     time.sleep(backoff + random.uniform(0, backoff))
             content = strip_json_fences(response.choices[0].message.content or "") or "{}"
+            if cache and ckey:
+                cache.put(ckey, content)
             record["status"] = "ok"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)
             usage = _usage_dict(response)
