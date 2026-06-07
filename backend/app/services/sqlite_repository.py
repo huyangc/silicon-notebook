@@ -378,6 +378,7 @@ class SQLiteRepository:
                   member_object_id TEXT NOT NULL,
                   canonical_name TEXT NOT NULL,
                   object_type TEXT NOT NULL DEFAULT 'concept',
+                  canonical_description TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb ON concept_clusters(notebook_id);
@@ -467,6 +468,8 @@ class SQLiteRepository:
             cc_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_clusters)").fetchall()}
             if "object_type" not in cc_cols:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN object_type TEXT NOT NULL DEFAULT 'concept'")
+            if "canonical_description" not in cc_cols:
+                db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_description TEXT NOT NULL DEFAULT ''")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -1895,10 +1898,11 @@ class SQLiteRepository:
                        (notebook_id, object_type))
             for r in rows:
                 db.execute(
-                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
-                    "VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
-                     r["member_object_id"], r["canonical_name"], object_type, now))
+                     r["member_object_id"], r["canonical_name"], object_type,
+                     r.get("canonical_description", ""), now))
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         with self._connect() as db:
@@ -2102,6 +2106,45 @@ class SQLiteRepository:
                 res = cluster_concepts(concepts, vectors, confirmed, rejected)
         rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
                  "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
+        if self.settings.kg_concept_desc_enabled and getattr(self.llm_client, "configured", False):
+            from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
+            # members per canonical cluster
+            members_by_cid: Dict[str, List[str]] = {}
+            for r in rows:
+                members_by_cid.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+            desc_by_cid: Dict[str, str] = {}
+            for cid, mids in members_by_cid.items():
+                if len(mids) < 2:
+                    continue   # only fuse cross-doc merged clusters (cost bound)
+                # gather member evidence quotes
+                ph = ",".join("?" for _ in mids)
+                with self._connect() as db:
+                    erows = db.execute(
+                        f"SELECT evidence FROM knowledge_objects WHERE id IN ({ph})", mids).fetchall()
+                quotes = []
+                for er in erows:
+                    for ev in json.loads(er["evidence"] or "[]"):
+                        q = (ev.get("quoted_span") or "").strip()
+                        if q:
+                            quotes.append(q)
+                quotes = list(dict.fromkeys(quotes))[:8]   # dedup, cap
+                if not quotes:
+                    continue
+                name = next((r["canonical_name"] for r in rows if r["canonical_id"] == cid), "")
+                block = "\n".join(f"- {q}" for q in quotes)
+                try:
+                    raw = self.llm_client.chat_json(
+                        [{"role": "user", "content": concept_description_prompt(name, block)}],
+                        CONCEPT_DESC_SCHEMA_HINT)
+                    desc = (json.loads(raw).get("description") or "").strip()
+                except Exception:
+                    desc = ""
+                if desc:
+                    desc_by_cid[cid] = desc
+            if desc_by_cid:
+                for r in rows:
+                    if r["canonical_id"] in desc_by_cid:
+                        r["canonical_description"] = desc_by_cid[r["canonical_id"]]
         self.write_clusters(notebook_id, rows)
         # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
         # vector near-dup remains concept-only). Each type isolated by id prefix.
@@ -2312,13 +2355,21 @@ class SQLiteRepository:
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
                       "section_path": section, "occurrences": occurrences, "definition": None, "steps": None}
             if obj_type == "concept":
-                drow = db.execute(
-                    "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
-                    "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
-                if drow is not None:
-                    dpay = json.loads(drow["payload"] or "{}")
-                    den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
-                    result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
+                # prefer the unified cluster's fused description when present
+                crow = db.execute(
+                    "SELECT canonical_description FROM concept_clusters "
+                    "WHERE notebook_id=? AND member_object_id=? AND canonical_description!='' LIMIT 1",
+                    (notebook_id, object_id)).fetchone()
+                if crow and crow["canonical_description"]:
+                    result["definition"] = crow["canonical_description"]
+                else:
+                    drow = db.execute(
+                        "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
+                        "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
+                    if drow is not None:
+                        dpay = json.loads(drow["payload"] or "{}")
+                        den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
+                        result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
             if obj_type == "procedure":
                 steps_payload = payload.get("steps")
                 if isinstance(steps_payload, list) and steps_payload:

@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     # gleaning 补抽: 默认关闭; 开启后每窗口首抽完再多轮让 LLM 补"遗漏的节点"。
     kg_gleaning_enabled: bool = Field(False, env="KG_GLEANING_ENABLED")
     kg_gleaning_rounds: int = Field(1, env="KG_GLEANING_ROUNDS")
+    # 概念簇描述融合: 默认关闭; 开启后对 ≥2 成员的概念簇用 LLM 融合证据成一段描述。
+    kg_concept_desc_enabled: bool = Field(False, env="KG_CONCEPT_DESC_ENABLED")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。

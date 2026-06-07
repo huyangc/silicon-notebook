@@ -9,6 +9,20 @@ from __future__ import annotations
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
+CONCEPT_DESC_SCHEMA_HINT = '{"description":""}'
+
+
+def concept_description_prompt(name: str, evidence_block: str) -> str:
+    return (
+        "Write a concise 1-2 sentence technical description of the concept "
+        f'"{name}" for a semiconductor/IC-design knowledge base, synthesizing the '
+        "source snippets below (which mention it across documents). Merge the "
+        "snippets, resolve any contradictions into a single coherent description, "
+        "stay factual to the snippets, third person, include the concept name. "
+        "Return JSON only with a 'description' field.\n\n"
+        f"Concept: {name}\n\nSource snippets:\n{evidence_block}"
+    )
+
 
 def notebook_description_prompt(sources_block: str) -> str:
     return (
