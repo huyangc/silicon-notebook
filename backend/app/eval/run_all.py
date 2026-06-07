@@ -68,9 +68,8 @@ def main() -> int:
         from app.services.sqlite_repository import SQLiteRepository
         repo = SQLiteRepository(Settings())
         rows = run_recall(repo, a.notebook, load_questions())
-        import json as _json
         (out / "recall_report.json").write_text(
-            _json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[eval] recall_report.json done ({len(rows)} annotated questions)")
 
     print(f"[eval] all done -> {out}")

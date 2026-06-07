@@ -16,8 +16,10 @@ def recall_at_k(retrieved_ids: Sequence[str], gold_ids: Sequence[str],
     return len(topk & gold) / len(gold)
 
 
-def mrr(retrieved_ids: Sequence[str], gold_ids: Sequence[str]) -> float:
+def mrr(retrieved_ids: Sequence[str], gold_ids: Sequence[str]) -> Optional[float]:
     gold = set(gold_ids)
+    if not gold:
+        return None   # undefined — consistent with recall_at_k
     for i, rid in enumerate(retrieved_ids):
         if rid in gold:
             return 1.0 / (i + 1)
@@ -27,7 +29,8 @@ def mrr(retrieved_ids: Sequence[str], gold_ids: Sequence[str]) -> float:
 def run_recall(repo: Any, notebook_id: str, questions: List[Dict[str, Any]],
                k: int = 12) -> List[Dict[str, Any]]:
     """For each question carrying `gold_object_ids`, run KG retrieval and score
-    recall@k + MRR. Keyword-only retrieval works without an LLM."""
+    recall@k + MRR. Uses _retrieve_scored (keyword + semantic if an embedder is
+    configured); no LLM answer call, so it is cheap to run."""
     rows: List[Dict[str, Any]] = []
     for q in questions:
         gold = q.get("gold_object_ids")
