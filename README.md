@@ -133,9 +133,9 @@ The outer page is a notebook collection/library (KG-native pipeline):
 Inside a notebook:
 
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
-- Center column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, live collapsed reasoning trace with expandable details, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection).
+- Main column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, live collapsed reasoning trace with expandable details, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection). The inactive Studio right sidebar is not shown in the primary workspace, so the Ask panel can use the freed width.
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection.
-- Right column: Studio with articles, derived-rule candidates, and Knowledge Graph entry.
+- Studio-style article research, mind map / infographic generation, and derived-rule review remain reachable from the top analysis toolbar and show their output in dialogs rather than a fixed right column.
 
 The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
 
@@ -339,7 +339,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — `mineru_mode=off`, no real LLM/embedding keys) covering upload/parse, structural Markdown parsing, KG windowing, concurrent embedding with per-batch DB writes, float32 vector matrix build and cache, hybrid retrieval (keyword/vector/None modes), multi-turn `ask`, status machine (`extracted` = green), article research, feedback, JSON fence cleanup, and restart persistence. Also runs Next.js `tsc --noEmit` when `frontend/node_modules` is present.
+This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — `mineru_mode=off`, no real LLM/embedding keys) covering upload/parse, structural Markdown parsing, KG windowing, concurrent embedding with per-batch DB writes, float32 vector matrix build and cache, hybrid retrieval (keyword/vector/None modes), multi-turn `ask`, status machine (`extracted` = green), article research, feedback, JSON fence cleanup, and restart persistence. Also runs frontend `node --test app/*.test.mjs` and Next.js `tsc --noEmit` when `frontend/node_modules` is present.
 
 ## Documentation Maintenance
 

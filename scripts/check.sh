@@ -41,6 +41,7 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_backend.py
 
 if [[ -d "$ROOT_DIR/frontend/node_modules" ]]; then
   cd "$ROOT_DIR/frontend"
+  npm run test
   npm run lint
 else
   echo "frontend/node_modules not found; skipping frontend lint"
