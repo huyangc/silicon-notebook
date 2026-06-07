@@ -1,6 +1,8 @@
 """推理搜索独立模型配置 (REASONING_LLM_*) 的回归测试。"""
+import json
 import pytest
 from app.core.config import Settings
+from app.models.schemas import NotebookCreate, AskRequest
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 
@@ -65,3 +67,44 @@ def test_reasoning_client_distinct_and_uses_reasoning_model(tmp_path, monkeypatc
     assert r.reasoning_llm_client.base_url == "https://reason"
     assert r.reasoning_llm_client.model == "reason-model"
     assert r.reasoning_llm_client.configured is True
+
+
+class _SeqLLM:
+    """按 schema_hint 顺序返回预置 JSON，并记录调用次数。"""
+    configured = True
+    def __init__(self, plan, reflects, answer):
+        self._plan, self._reflects, self._answer = plan, list(reflects), answer
+        self.calls = 0
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.calls += 1
+        if "sub_queries" in schema_hint:
+            return json.dumps(self._plan)
+        if "next_action" in schema_hint:
+            return json.dumps(self._reflects.pop(0) if self._reflects
+                              else {"next_action": "answer", "sufficient": True})
+        return json.dumps(self._answer)
+
+
+def test_reasoning_path_routes_through_reasoning_client(repo):
+    # 注入"独立推理 client"为记录型 fake；全局 llm_client 设为一调用即爆，
+    # 证明推理路径全程只走 reasoning_llm_client、绝不碰全局 client。
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "C1", "object_type": "claim",
+         "payload": {"name": "RTL到GDSII流程概述", "section_path": "1"}, "evidence": []},
+    ], [])
+    reasoning_llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "答案 [k1].", "grounded": True})
+
+    class _BoomLLM:
+        configured = True
+        def chat_json(self, *a, **k):
+            raise AssertionError("reasoning 路径不得使用全局 llm_client")
+
+    repo.llm_client = _BoomLLM()
+    repo._reasoning_llm_client = reasoning_llm   # 模拟已配置独立推理模型
+    resp = repo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
+    assert resp.answer.startswith("答案")
+    assert reasoning_llm.calls >= 1

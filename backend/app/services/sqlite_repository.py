@@ -3296,7 +3296,7 @@ class SQLiteRepository:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
-        raw = self.llm_client.chat_json(
+        raw = self.reasoning_llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -3350,7 +3350,7 @@ class SQLiteRepository:
         citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
 
         answer, llm_grounded, anchors = "", False, []
-        if self.llm_client.configured and (top_hits or elements):
+        if self.reasoning_llm_client.configured and (top_hits or elements):
             try:
                 answer, llm_grounded, anchors = self._answer_reasoning(
                     notebook_id, question, top_hits, elements, history)
