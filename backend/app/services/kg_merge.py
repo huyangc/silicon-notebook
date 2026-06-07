@@ -37,6 +37,56 @@ def _norm(name: str) -> str:
     return _ALIASES.get(cleaned, cleaned)
 
 
+def _norm_statement(s: str) -> str:
+    """Claim/step text normalizer: lowercase, drop punctuation, collapse whitespace."""
+    cleaned = re.sub(r"[^\w\s]+", " ", (s or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _norm_formula(s: str) -> str:
+    """Formula normalizer: drop ALL whitespace, lowercase (expression identity)."""
+    return re.sub(r"\s+", "", (s or "").lower())
+
+
+def _steps_signature(payload: dict) -> str:
+    steps = (payload or {}).get("steps")
+    if not isinstance(steps, list):
+        return ""
+    names = sorted(_norm_statement(st.get("name", ""))
+                   for st in steps if isinstance(st, dict) and st.get("name"))
+    return "|".join(n for n in names if n)
+
+
+def seed_concept(obj) -> str:
+    """Seed function for concepts. obj may be a dict (production) or str (test shorthand)."""
+    if isinstance(obj, str):
+        return _norm(obj)
+    return _norm(obj.get("name", ""))
+
+
+def seed_claim(obj) -> str:
+    """Seed function for claims. obj may be a dict (production) or str (test shorthand)."""
+    if isinstance(obj, str):
+        return _norm_statement(obj)
+    return _norm_statement(obj.get("name", ""))
+
+
+def seed_formula(obj) -> str:
+    """Seed function for formulas. obj may be a dict (production) or str (test shorthand)."""
+    if isinstance(obj, str):
+        return _norm_formula(obj)
+    return _norm_formula(obj.get("name", ""))
+
+
+def seed_procedure(obj) -> str:
+    """Seed function for procedures. obj may be a dict (production) or str (test shorthand)."""
+    if isinstance(obj, str):
+        return _norm_statement(obj)
+    nm = _norm_statement(obj.get("name", ""))
+    sig = _steps_signature(obj.get("payload") or {})
+    return f"{nm}#{sig}" if sig else nm
+
+
 _CONTRAST_GROUPS = [
     {"single", "double"}, {"low", "high"}, {"n", "p"}, {"nmos", "pmos"},
     {"series", "shunt"}, {"voltage", "current"}, {"positive", "negative"},

@@ -2103,6 +2103,32 @@ class SQLiteRepository:
         rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
                  "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
         self.write_clusters(notebook_id, rows)
+        # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
+        # vector near-dup remains concept-only). Each type isolated by id prefix.
+        from app.services.kg_merge import (cluster_objects, seed_claim,
+                                           seed_formula, seed_procedure)
+        _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
+                       "formula": (seed_formula, "KF-"),
+                       "procedure": (seed_procedure, "KP-")}
+        for t, (sfn, prefix) in _TYPE_MERGE.items():
+            with self._connect() as db:
+                trows = db.execute(
+                    "SELECT id, payload FROM knowledge_objects "
+                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
+                    (notebook_id, t)).fetchall()
+            tobjs = [{"object_id": r["id"],
+                      "name": json.loads(r["payload"] or "{}").get("name", ""),
+                      "payload": json.loads(r["payload"] or "{}")} for r in trows]
+            if not tobjs:
+                self.write_clusters(notebook_id, [], object_type=t)   # clear stale rows
+                continue
+            res_t = cluster_objects(tobjs, {}, set(), set(), seed_fn=sfn,
+                                    conflict_fn=None, id_prefix=prefix)
+            trows_w = [{"canonical_id": res_t["cluster_map"][o["object_id"]],
+                        "member_object_id": o["object_id"],
+                        "canonical_name": res_t["canonical_names"][o["object_id"]]}
+                       for o in tobjs]
+            self.write_clusters(notebook_id, trows_w, object_type=t)
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = _now()
@@ -3295,21 +3321,23 @@ class SQLiteRepository:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
         first-occurrence snippet / procedure steps) is pulled via node_context.
-        Concept hits belonging to the same unified cluster (D4) are collapsed —
+        Hits belonging to the same unified cluster (any type) are collapsed —
         the first (highest-scored) per cluster is kept, later duplicates dropped.
+        Objects without a cluster entry use their own object_id as cluster key,
+        so they are never erroneously deduplicated.
         Returns (context_block_str, id_map)."""
         budget = self.settings.answer_context_budget_chars
         min_items = self.settings.answer_context_min_items
         lines, id_map = [], {}
-        seen_concept_clusters: set = set()
+        seen_clusters: set = set()
+        cmap = self.cluster_map(notebook_id)
         used = 0
         i = 0
         for hit in top_hits:
-            if hit.object_type == "concept":
-                cid = self._concept_cluster_id(notebook_id, hit.object_id)
-                if cid in seen_concept_clusters:
-                    continue
-                seen_concept_clusters.add(cid)
+            cid = cmap.get(hit.object_id, hit.object_id)
+            if cid in seen_clusters:
+                continue
+            seen_clusters.add(cid)
             try:
                 ctx = self.node_context(notebook_id, hit.object_id)
             except KeyError:
