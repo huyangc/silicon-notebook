@@ -82,12 +82,14 @@ from app.services.prompts import (
     DESCRIPTION_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
     NOTEBOOK_META_SCHEMA_HINT,
+    RERANK_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
     followup_rewrite_prompt,
     notebook_description_prompt,
     notebook_meta_prompt,
+    rerank_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
@@ -3000,11 +3002,13 @@ class SQLiteRepository:
         rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
         scored_all.sort(key=rank_key, reverse=True)
         top_n = self.settings.retrieval_top_n
+        pool = scored_all[: max(top_n, self.settings.rerank_candidates)]
+        pool = self._rerank_hits(query, pool)
         if process_intent:
             top_hits: List[RetrievedKnowledge] = ensure_procedure_quota(
-                scored_all, top_n, self.settings.proc_min, rank_key)
+                pool, top_n, self.settings.proc_min, rank_key)
         else:
-            top_hits = scored_all[:top_n]
+            top_hits = pool[:top_n]
         ask_stage("score", _t)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
@@ -3176,6 +3180,36 @@ class SQLiteRepository:
         not populated for the notebook (no cluster row for this object), fall
         back to `object_id` so dedup degrades gracefully (no merge, no crash)."""
         return self.cluster_map(notebook_id).get(object_id, object_id)
+
+    def _rerank_hits(self, query: str, hits: List[RetrievedKnowledge]) -> List[RetrievedKnowledge]:
+        """LLM relevance rerank over a candidate pool. No-op when disabled, the
+        client is unconfigured, or the response is unusable (keeps input order)."""
+        if not hits or not self.settings.rerank_enabled \
+                or not getattr(self.llm_client, "configured", False):
+            return hits
+        block = "\n".join(
+            f"[{i}] [{h.object_type}] {str(h.payload.get('name', ''))[:200]}"
+            for i, h in enumerate(hits)
+        )
+        try:
+            raw = self.llm_client.chat_json(
+                [{"role": "user", "content": rerank_prompt(query, block)}],
+                RERANK_SCHEMA_HINT, max_retries=0,
+            )
+            data = json.loads(raw)
+        except Exception:
+            return hits
+        scores: Dict[int, float] = {}
+        for it in (data.get("items") if isinstance(data, dict) else None) or []:
+            if isinstance(it, dict) and isinstance(it.get("index"), int):
+                try:
+                    scores[it["index"]] = float(it.get("score", 0.0))
+                except (TypeError, ValueError):
+                    pass
+        if not scores:
+            return hits
+        order = sorted(range(len(hits)), key=lambda i: scores.get(i, -1.0), reverse=True)
+        return [hits[i] for i in order]
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer

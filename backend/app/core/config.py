@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+    rerank_enabled: bool = Field(True, env="RERANK_ENABLED")
+    rerank_candidates: int = Field(20, env="RERANK_CANDIDATES")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # 追问改写：问题长度 ≤ 此值（或含指代标记）才触发轻量 LLM 改写。
