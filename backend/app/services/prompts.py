@@ -55,7 +55,8 @@ def refine_prompt(section_path: str, records_block: str, elements_block: str) ->
 def gleaning_prompt(section_path: str, doc_type: str) -> str:
     return (
         "You already extracted a knowledge-graph fragment from this passage "
-        f"(section: {section_path}). MANY valid nodes may have been missed. Add "
+        f"(section: {section_path}, doc type: {doc_type}). MANY valid nodes may "
+        "have been missed. Add "
         "ONLY the NODES that were missed — use the SAME node types (Concept, "
         "Claim, Formula, Procedure) and the SAME JSON schema, each with its "
         'integer "ev" element label. Do NOT repeat nodes you already extracted. '
