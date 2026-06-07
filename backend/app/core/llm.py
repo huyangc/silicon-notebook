@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
+from app.core.llm_cache import cache_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
 
 
@@ -46,6 +47,20 @@ class OpenAICompatibleClient:
                             else settings.openai_compat_max_retries)
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)
+        self._cache = None
+
+    def _get_cache(self):
+        if not getattr(self.settings, "llm_cache_enabled", False):
+            return None
+        if self._cache is None:
+            from pathlib import Path
+            from app.core.llm_cache import LLMCache
+            path = self.settings.llm_cache_path
+            p = Path(path)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parents[3] / path   # anchor to repo root
+            self._cache = LLMCache(str(p))
+        return self._cache
 
     @property
     def configured(self) -> bool:
@@ -101,6 +116,18 @@ class OpenAICompatibleClient:
             *messages,
         ]
         model = self.model
+        # Best-effort cache lookup: a cache fault must never break the call.
+        cache = None
+        ckey = ""
+        try:
+            cache = self._get_cache()
+            if cache is not None:
+                ckey = cache_key(model, full_messages, response_schema_hint)
+                cached = cache.get(ckey)
+                if cached is not None:
+                    return cached
+        except Exception:
+            cache, ckey = None, ""
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": full_messages,
@@ -171,6 +198,13 @@ class OpenAICompatibleClient:
                     backoff = min(2 ** attempt, 30)
                     time.sleep(backoff + random.uniform(0, backoff))
             content = strip_json_fences(response.choices[0].message.content or "") or "{}"
+            # Best-effort write; never cache the empty "{}" fallback so a transient
+            # empty/garbage response isn't frozen in for this prompt.
+            if cache and ckey and content != "{}":
+                try:
+                    cache.put(ckey, content)
+                except Exception:
+                    pass
             record["status"] = "ok"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)
             usage = _usage_dict(response)

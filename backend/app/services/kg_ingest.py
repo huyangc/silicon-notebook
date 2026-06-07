@@ -149,7 +149,8 @@ def drop_noise_concepts(nodes: List[Node], edges: List[Edge],
 
 
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
-                  n: int = 9000, m: int = 450, whitelist=frozenset()) -> KnowledgeGraph:
+                  n: int = 9000, m: int = 450, whitelist=frozenset(),
+                  refine: bool = False, gleaning_rounds: int = 0) -> KnowledgeGraph:
     """Window the text, extract a KG fragment per window concurrently, denoise,
     then canonicalize. 抽取前按 should_extract_window 跳过低价值窗口；抽取后按
     is_noise_concept 丢弃噪声 Concept（连带删悬空边）。Ungroundable nodes are
@@ -169,7 +170,8 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
     failed = 0
     if pairs:
         futs = [submit_window(extract_window, client, els, w.section_path,
-                              doc_type, idx)
+                              doc_type, idx, refine=refine,
+                              gleaning_rounds=gleaning_rounds)
                 for idx, (w, els) in enumerate(pairs)]
         for fut in futs:
             try:

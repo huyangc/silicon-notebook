@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     embed_base_url: str = Field("", env="EMBED_BASE_URL")
     embed_api_key: str = Field("", env="EMBED_API_KEY")
     embed_dim: int = Field(1024, env="EMBED_DIM")
+    llm_cache_enabled: bool = Field(False, env="LLM_CACHE_ENABLED")
+    llm_cache_path: str = Field(".local/llm_cache.db", env="LLM_CACHE_PATH")
 
     # --- 大文档摄取/检索旋钮（2026-06-04 大文档加固）---
     # KG 窗口化：相邻 prose 贪心打包到 target 字符、相邻窗口 overlap。
@@ -59,6 +61,15 @@ class Settings(BaseSettings):
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
+    # 抽取自校验: 默认关闭; 开启后每个窗口抽取完再做一次 LLM refine pass 剔除幻觉节点。
+    kg_refine_enabled: bool = Field(False, env="KG_REFINE_ENABLED")
+    # gleaning 补抽: 默认关闭; 开启后每窗口首抽完再多轮让 LLM 补"遗漏的节点"。
+    kg_gleaning_enabled: bool = Field(False, env="KG_GLEANING_ENABLED")
+    kg_gleaning_rounds: int = Field(1, env="KG_GLEANING_ROUNDS")
+    # 概念簇描述融合: 默认关闭; 开启后对 ≥2 成员的概念簇用 LLM 融合证据成一段描述。
+    kg_concept_desc_enabled: bool = Field(False, env="KG_CONCEPT_DESC_ENABLED")
+    # 社区摘要: 默认关闭; 开启后对每个社区用 LLM 生成 title/summary/findings 报告。
+    kg_community_summary_enabled: bool = Field(False, env="KG_COMMUNITY_SUMMARY_ENABLED")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。
@@ -75,6 +86,15 @@ class Settings(BaseSettings):
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+    # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
+    retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
+    retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
+    rerank_enabled: bool = Field(False, env="RERANK_ENABLED")
+    rerank_candidates: int = Field(20, env="RERANK_CANDIDATES")
+    # 候选池 LLM 重排的专用短超时(秒): 廉价重排须快速降级,不沿用更长的全局/推理超时。
+    rerank_timeout_seconds: int = Field(20, env="RERANK_TIMEOUT_SECONDS")
+    answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
+    answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # 追问改写：问题长度 ≤ 此值（或含指代标记）才触发轻量 LLM 改写。
     followup_max_len: int = Field(12, env="FOLLOWUP_MAX_LEN")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
@@ -91,6 +111,11 @@ class Settings(BaseSettings):
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, env="REASONING_TIMEOUT_SECONDS")
     reasoning_max_retries: int = Field(1, env="REASONING_MAX_RETRIES")
+    # Global 问答:map-reduce 时纳入的社区报告上限(按 size 取前 N)。
+    global_max_communities: int = Field(20, env="GLOBAL_MAX_COMMUNITIES")
+    # 问题感知证据精炼: 默认关闭; 开启后答题前对已装配证据按问题抽"相关要点"前置(聚焦答题)。
+    kg_query_refine_enabled: bool = Field(False, env="KG_QUERY_REFINE_ENABLED")
+    query_refine_max_chars: int = Field(4000, env="QUERY_REFINE_MAX_CHARS")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

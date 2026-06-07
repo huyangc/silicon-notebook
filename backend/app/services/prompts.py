@@ -9,6 +9,20 @@ from __future__ import annotations
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
+CONCEPT_DESC_SCHEMA_HINT = '{"description":""}'
+
+
+def concept_description_prompt(name: str, evidence_block: str) -> str:
+    return (
+        "Write a concise 1-2 sentence technical description of the concept "
+        f'"{name}" for a semiconductor/IC-design knowledge base, synthesizing the '
+        "source snippets below (which mention it across documents). Merge the "
+        "snippets, resolve any contradictions into a single coherent description, "
+        "stay factual to the snippets, third person, include the concept name. "
+        "Return JSON only with a 'description' field.\n\n"
+        f"Concept: {name}\n\nSource snippets:\n{evidence_block}"
+    )
+
 
 def notebook_description_prompt(sources_block: str) -> str:
     return (
@@ -34,26 +48,33 @@ def notebook_meta_prompt(sources_block: str) -> str:
     )
 
 
-REFINE_SCHEMA_HINT = (
-    '{"items":[{"index":0,"keep":true,"quoted_span":"","reason":""}]}'
-)
+REFINE_SCHEMA_HINT = '{"items":[{"index":0,"keep":true}]}'
 
 
-def refine_prompt(source_title: str, records_block: str, elements_block: str) -> str:
+def refine_prompt(section_path: str, records_block: str, elements_block: str) -> str:
     return (
         "You verify extracted knowledge items against their source document "
-        "(self-refinement pass). For EACH numbered item decide:\n"
+        "(self-refinement pass). For EACH numbered item decide keep=true or "
+        "keep=false:\n"
         "- keep=false if the item is NOT supported by the source text "
         "(hallucinated), is too vague to be useful, or merely restates a "
         "heading; otherwise keep=true.\n"
-        "- If a more faithful VERBATIM span exists in the source for a kept "
-        "item, return it in quoted_span (copied exactly from the source); "
-        "otherwise leave quoted_span empty.\n"
-        "- reason: a short justification.\n"
         "Return JSON only, one entry per input index.\n\n"
-        f"Source title: {source_title}\n\n"
+        f"Source section: {section_path}\n\n"
         f"Extracted items:\n{records_block}\n\n"
         f"Source elements (ground truth):\n{elements_block}"
+    )
+
+
+def gleaning_prompt(section_path: str, doc_type: str) -> str:
+    return (
+        "You already extracted a knowledge-graph fragment from this passage "
+        f"(section: {section_path}, doc type: {doc_type}). MANY valid nodes may "
+        "have been missed. Add "
+        "ONLY the NODES that were missed — use the SAME node types (Concept, "
+        "Claim, Formula, Procedure) and the SAME JSON schema, each with its "
+        'integer "ev" element label. Do NOT repeat nodes you already extracted. '
+        "If nothing was missed, return an empty nodes list. Return JSON only."
     )
 
 
@@ -190,6 +211,19 @@ def plan_prompt(question: str, history_block: str = "") -> str:
     )
 
 
+RERANK_SCHEMA_HINT = '{"items":[{"index":0,"score":0.0}]}'
+
+
+def rerank_prompt(query: str, candidates_block: str) -> str:
+    return (
+        "Score how relevant each candidate knowledge item is to the user question "
+        "on a 0.0-1.0 scale (1.0 = directly answers it, 0.0 = irrelevant). "
+        "Return JSON only: one entry per candidate index.\n\n"
+        f"Question: {query}\n\n"
+        f"Candidates:\n{candidates_block}"
+    )
+
+
 REFLECT_SCHEMA_HINT = (
     '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
     'search_elements","expand":{"object_id":"","edge_type":null,'
@@ -215,4 +249,62 @@ def reflect_prompt(question: str, candidates_summary: str) -> str:
         f"Question: {question}\n\n"
         f"Candidates so far:\n{candidates_summary}\n\n"
         'Return JSON only matching the schema (omit unused branch fields).'
+    )
+
+
+COMMUNITY_REPORT_SCHEMA_HINT = '{"title":"","summary":"","findings":[""]}'
+
+
+def community_report_prompt(members_block: str, relations_block: str) -> str:
+    return (
+        "You are summarizing a community of related items from a semiconductor/IC "
+        "design knowledge graph into a short report. Given the member items and "
+        "their internal relationships, produce: a short title (the community's "
+        "theme), a 2-4 sentence summary, and 3-6 key findings (each a concise "
+        "sentence). Stay factual to the members. Return JSON only with "
+        "'title','summary','findings'.\n\n"
+        f"Members:\n{members_block}\n\nInternal relationships:\n{relations_block}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Global map-reduce 问答 (R4, GraphRAG-style)
+# ---------------------------------------------------------------------------
+
+GLOBAL_MAP_SCHEMA_HINT = '{"points":[{"description":"","score":0}]}'
+
+
+def global_map_prompt(question: str, report_block: str) -> str:
+    return (
+        "You extract, from ONE community report, the points relevant to the user "
+        "question, each with an importance score 0-100 (0 = irrelevant). If the "
+        "report is irrelevant, return an empty points list. Be faithful to the "
+        "report. Return JSON only with 'points':[{'description','score'}].\n\n"
+        f"Question: {question}\n\nCommunity report:\n{report_block}"
+    )
+
+
+GLOBAL_REDUCE_SCHEMA_HINT = '{"answer":"","grounded":true}'
+
+
+def global_reduce_prompt(question: str, points_block: str) -> str:
+    return (
+        "You answer the user question by synthesizing the key points below "
+        "(gathered from community reports, sorted by importance). Be concrete and "
+        "structured. If the points do not cover the question, say so and set "
+        "grounded=false. Return JSON only with 'answer' and 'grounded'.\n\n"
+        f"Question: {question}\n\nKey points:\n{points_block}"
+    )
+
+
+EVIDENCE_REFINE_SCHEMA_HINT = '{"relevant":[""]}'
+
+
+def evidence_refine_prompt(question: str, evidence_block: str) -> str:
+    return (
+        "From the retrieved knowledge items below, extract ONLY the statements "
+        "directly relevant to answering the question, as a concise list (verbatim "
+        "or lightly compressed, faithful to the items). Drop irrelevant items. If "
+        "none are relevant, return an empty list. Return JSON only with 'relevant'.\n\n"
+        f"Question: {question}\n\nRetrieved items:\n{evidence_block}"
     )

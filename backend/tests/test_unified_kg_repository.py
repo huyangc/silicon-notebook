@@ -174,3 +174,18 @@ def test_rebuild_applies_llm_confirmed_auto_candidate(repo):
     cmap = repo.cluster_map(nb.id)
     assert cmap.get(o1) == cmap.get(o2), (
         f"Expected same cluster after LLM-confirmed merge, got {cmap}")
+
+
+def test_write_clusters_is_per_type_isolated(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_clusters(nb.id, [{"canonical_id": "K-a", "member_object_id": "o1",
+                                 "canonical_name": "A"}], object_type="concept")
+    repo.write_clusters(nb.id, [{"canonical_id": "KL-b", "member_object_id": "o2",
+                                 "canonical_name": "B"}], object_type="claim")
+    cm = repo.cluster_map(nb.id)
+    assert cm.get("o1") == "K-a" and cm.get("o2") == "KL-b"   # both persist
+    # rewriting concept clusters must NOT delete claim clusters
+    repo.write_clusters(nb.id, [{"canonical_id": "K-a2", "member_object_id": "o1b",
+                                 "canonical_name": "A2"}], object_type="concept")
+    cm2 = repo.cluster_map(nb.id)
+    assert "o2" in cm2 and cm2.get("o1") is None and cm2.get("o1b") == "K-a2"

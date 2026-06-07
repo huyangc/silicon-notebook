@@ -82,12 +82,14 @@ from app.services.prompts import (
     DESCRIPTION_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
     NOTEBOOK_META_SCHEMA_HINT,
+    RERANK_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
     followup_rewrite_prompt,
     notebook_description_prompt,
     notebook_meta_prompt,
+    rerank_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
@@ -96,9 +98,12 @@ from app.services.retrieval import (
     RetrievedElement,
     W_KEYWORD,
     W_SEMANTIC,
+    _TYPE_WEIGHT,
     _payload_text,
+    bm25_scores,
     cosine,
     keyword_score,
+    rrf_fuse,
     score_knowledge,
     score_elements,
     type_weight,
@@ -396,6 +401,8 @@ class SQLiteRepository:
                   canonical_id TEXT NOT NULL,
                   member_object_id TEXT NOT NULL,
                   canonical_name TEXT NOT NULL,
+                  object_type TEXT NOT NULL DEFAULT 'concept',
+                  canonical_description TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb ON concept_clusters(notebook_id);
@@ -437,6 +444,20 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_source ON knowledge_relations(source_id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb ON knowledge_embeddings(notebook_id);
                 CREATE INDEX IF NOT EXISTS idx_element_embeddings_nb ON element_embeddings(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS communities (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  level INTEGER NOT NULL DEFAULT 0,
+                  member_ids TEXT NOT NULL,
+                  size INTEGER NOT NULL,
+                  title TEXT NOT NULL DEFAULT '',
+                  summary TEXT NOT NULL DEFAULT '',
+                  findings TEXT NOT NULL DEFAULT '[]',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_communities_nb_level ON communities(notebook_id, level);
+                DROP INDEX IF EXISTS idx_communities_nb;
                 """
             )
             # Lightweight column migrations for pre-existing databases.
@@ -481,6 +502,17 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''")
             if "reviewed_by" not in cm_cols:
                 db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
+            # object_type column for concept_clusters (per-type isolation).
+            cc_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_clusters)").fetchall()}
+            if "object_type" not in cc_cols:
+                db.execute("ALTER TABLE concept_clusters ADD COLUMN object_type TEXT NOT NULL DEFAULT 'concept'")
+            if "canonical_description" not in cc_cols:
+                db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_description TEXT NOT NULL DEFAULT ''")
+            # Community report columns (title/summary/findings).
+            comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
+            for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
+                if col not in comm_cols:
+                    db.execute(f"ALTER TABLE communities ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -1254,6 +1286,8 @@ class SQLiteRepository:
                 n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
                 whitelist=whitelist,
+                refine=self.settings.kg_refine_enabled,
+                gleaning_rounds=(self.settings.kg_gleaning_rounds if self.settings.kg_gleaning_enabled else 0),
             )
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
@@ -1899,14 +1933,19 @@ class SQLiteRepository:
 
     # --- Concept-cluster / merge-candidate CRUD (Task 5) -------------------
 
-    def write_clusters(self, notebook_id: str, rows: List[dict]) -> None:
+    def write_clusters(self, notebook_id: str, rows: List[dict],
+                       object_type: str = "concept") -> None:
         now = _now()
         with self._write() as db:
-            db.execute("DELETE FROM concept_clusters WHERE notebook_id=?", (notebook_id,))
+            db.execute("DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
+                       (notebook_id, object_type))
             for r in rows:
                 db.execute(
-                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,created_at) VALUES (?,?,?,?,?,?)",
-                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"], r["canonical_name"], now))
+                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
+                     r["member_object_id"], r["canonical_name"], object_type,
+                     r.get("canonical_description", ""), now))
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         with self._connect() as db:
@@ -2110,7 +2149,74 @@ class SQLiteRepository:
                 res = cluster_concepts(concepts, vectors, confirmed, rejected)
         rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
                  "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
+        if self.settings.kg_concept_desc_enabled and getattr(self.llm_client, "configured", False):
+            from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
+            # members per canonical cluster
+            members_by_cid: Dict[str, List[str]] = {}
+            for r in rows:
+                members_by_cid.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+            desc_by_cid: Dict[str, str] = {}
+            for cid, mids in members_by_cid.items():
+                if len(mids) < 2:
+                    continue   # only fuse cross-doc merged clusters (cost bound)
+                # gather member evidence quotes
+                ph = ",".join("?" for _ in mids)
+                with self._connect() as db:
+                    erows = db.execute(
+                        f"SELECT evidence FROM knowledge_objects WHERE id IN ({ph})", mids).fetchall()
+                quotes = []
+                for er in erows:
+                    for ev in json.loads(er["evidence"] or "[]"):
+                        q = (ev.get("quoted_span") or "").strip()
+                        if q:
+                            quotes.append(q)
+                quotes = list(dict.fromkeys(quotes))[:8]   # dedup, cap
+                if not quotes:
+                    continue
+                name = next((r["canonical_name"] for r in rows if r["canonical_id"] == cid), "")
+                block = "\n".join(f"- {q}" for q in quotes)
+                try:
+                    raw = self.llm_client.chat_json(
+                        [{"role": "user", "content": concept_description_prompt(name, block)}],
+                        CONCEPT_DESC_SCHEMA_HINT)
+                    desc = (json.loads(raw).get("description") or "").strip()
+                except Exception:
+                    desc = ""
+                if desc:
+                    desc_by_cid[cid] = desc
+            if desc_by_cid:
+                for r in rows:
+                    if r["canonical_id"] in desc_by_cid:
+                        r["canonical_description"] = desc_by_cid[r["canonical_id"]]
         self.write_clusters(notebook_id, rows)
+        # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
+        # vector near-dup remains concept-only). Each type isolated by id prefix.
+        from app.services.kg_merge import (cluster_objects, seed_claim,
+                                           seed_formula, seed_procedure)
+        _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
+                       "formula": (seed_formula, "KF-"),
+                       "procedure": (seed_procedure, "KP-")}
+        for t, (sfn, prefix) in _TYPE_MERGE.items():
+            with self._connect() as db:
+                trows = db.execute(
+                    "SELECT id, payload FROM knowledge_objects "
+                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
+                    (notebook_id, t)).fetchall()
+            tobjs = []
+            for r in trows:
+                pay = json.loads(r["payload"] or "{}")
+                tobjs.append({"object_id": r["id"], "name": pay.get("name", ""),
+                              "payload": pay})
+            if not tobjs:
+                self.write_clusters(notebook_id, [], object_type=t)   # clear stale rows
+                continue
+            res_t = cluster_objects(tobjs, {}, set(), set(), seed_fn=sfn,
+                                    conflict_fn=None, id_prefix=prefix)
+            trows_w = [{"canonical_id": res_t["cluster_map"][o["object_id"]],
+                        "member_object_id": o["object_id"],
+                        "canonical_name": res_t["canonical_names"][o["object_id"]]}
+                       for o in tobjs]
+            self.write_clusters(notebook_id, trows_w, object_type=t)
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = _now()
@@ -2147,6 +2253,111 @@ class SQLiteRepository:
                 (notebook_id, now, object_count, relation_count, cluster_count, now),
             )
         return cluster_count
+
+    def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
+        """Detect communities over the notebook's KG (objects linked by relations)
+        via networkx Louvain; persist them (delete + reinsert). No LLM. Returns the
+        community count. Deterministic (fixed seed)."""
+        self.get_notebook(notebook_id)
+        import networkx as nx
+        from networkx.algorithms.community import louvain_communities
+        with self._connect() as db:
+            rels = db.execute(
+                "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id=?",
+                (notebook_id,)).fetchall()
+        g = nx.Graph()
+        for r in rels:
+            s, t = r["source_object_id"], r["target_object_id"]
+            if not s or not t or s == t:
+                continue
+            if g.has_edge(s, t):
+                g[s][t]["weight"] += 1
+            else:
+                g.add_edge(s, t, weight=1)
+        comms = (louvain_communities(g, weight="weight", seed=42)
+                 if g.number_of_nodes() else [])
+        now = _now()
+        with self._write() as db:
+            db.execute("DELETE FROM communities WHERE notebook_id=? AND level=?", (notebook_id, level))
+            for comm in comms:
+                members = sorted(comm)
+                db.execute(
+                    "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (f"cm-{uuid4().hex[:10]}", notebook_id, level, json.dumps(members), len(members), now))
+        return len(comms)
+
+    def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
+        """Member-id lists of each detected community (for summaries / global search)."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT member_ids FROM communities WHERE notebook_id=? AND level=? ORDER BY size DESC, id ASC",
+                (notebook_id, level)).fetchall()
+        return [json.loads(r["member_ids"]) for r in rows]
+
+    def summarize_communities(self, notebook_id: str, level: int = 0) -> int:
+        """For each detected community, generate an LLM report (title/summary/
+        findings) from its members + internal relations; persist on the community
+        row. No-op (returns 0) when disabled or LLM unconfigured. Returns the
+        number of communities summarized."""
+        self.get_notebook(notebook_id)
+        if not self.settings.kg_community_summary_enabled or not getattr(self.llm_client, "configured", False):
+            return 0
+        from app.services.prompts import community_report_prompt, COMMUNITY_REPORT_SCHEMA_HINT
+        with self._connect() as db:
+            crows = db.execute(
+                "SELECT id, member_ids FROM communities WHERE notebook_id=? AND level=?",
+                (notebook_id, level)).fetchall()
+        done = 0
+        for cr in crows:
+            members = json.loads(cr["member_ids"] or "[]")
+            if not members:
+                continue
+            ph = ",".join("?" for _ in members)
+            with self._connect() as db:
+                orows = db.execute(
+                    f"SELECT id, object_type, payload FROM knowledge_objects WHERE id IN ({ph})", members).fetchall()
+                rrows = db.execute(
+                    f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
+                    f"WHERE notebook_id=? AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+                    [notebook_id, *members, *members]).fetchall()
+            name_by_id = {}
+            mlines = []
+            for o in orows:
+                nm = json.loads(o["payload"] or "{}").get("name", "")
+                name_by_id[o["id"]] = nm
+                mlines.append(f"- [{o['object_type']}] {nm}")
+            rlines = [f"{name_by_id.get(r['source_object_id'],'?')} -[{r['edge_type']}]-> {name_by_id.get(r['target_object_id'],'?')}"
+                      for r in rrows]
+            members_block = "\n".join(mlines)
+            relations_block = "\n".join(rlines) if rlines else "(none)"
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user", "content": community_report_prompt(members_block, relations_block)}],
+                    COMMUNITY_REPORT_SCHEMA_HINT)
+                data = json.loads(raw)
+            except Exception:
+                continue
+            title = str(data.get("title", "")).strip()
+            summary = str(data.get("summary", "")).strip()
+            findings = data.get("findings") if isinstance(data.get("findings"), list) else []
+            if not summary:
+                continue
+            with self._write() as db:
+                db.execute("UPDATE communities SET title=?, summary=?, findings=? WHERE id=?",
+                           (title, summary, json.dumps(findings), cr["id"]))
+            done += 1
+        return done
+
+    def get_community_reports(self, notebook_id: str, level: int = 0) -> List[dict]:
+        """Persisted community reports (only those summarized). For global search."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT member_ids, title, summary, findings FROM communities "
+                "WHERE notebook_id=? AND level=? AND summary!='' ORDER BY size DESC, id ASC",
+                (notebook_id, level)).fetchall()
+        return [{"member_ids": json.loads(r["member_ids"] or "[]"), "title": r["title"],
+                 "summary": r["summary"], "findings": json.loads(r["findings"] or "[]")} for r in rows]
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
@@ -2292,13 +2503,21 @@ class SQLiteRepository:
             result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
                       "section_path": section, "occurrences": occurrences, "definition": None, "steps": None}
             if obj_type == "concept":
-                drow = db.execute(
-                    "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
-                    "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
-                if drow is not None:
-                    dpay = json.loads(drow["payload"] or "{}")
-                    den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
-                    result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
+                # prefer the unified cluster's fused description when present
+                crow = db.execute(
+                    "SELECT canonical_description FROM concept_clusters "
+                    "WHERE notebook_id=? AND member_object_id=? AND canonical_description!='' LIMIT 1",
+                    (notebook_id, object_id)).fetchone()
+                if crow and crow["canonical_description"]:
+                    result["definition"] = crow["canonical_description"]
+                else:
+                    drow = db.execute(
+                        "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
+                        "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
+                    if drow is not None:
+                        dpay = json.loads(drow["payload"] or "{}")
+                        den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
+                        result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
             if obj_type == "procedure":
                 steps_payload = payload.get("steps")
                 if isinstance(steps_payload, list) and steps_payload:
@@ -2961,6 +3180,8 @@ class SQLiteRepository:
         a conclusion via the LLM (or deterministic fallback)."""
         if getattr(payload, "mode", "fast") == "reasoning":
             return self.ask_reasoning(notebook_id, payload)
+        if getattr(payload, "mode", "fast") == "global":
+            return self._ask_global(notebook_id, payload)
         import time
         ask_started = time.perf_counter()
 
@@ -3009,25 +3230,33 @@ class SQLiteRepository:
         # Score each KG type, pool, then rank by relevance * intent-aware type
         # weight (process/flow questions stop burying procedures).
         _t = time.perf_counter()
-        scored_all: List[RetrievedKnowledge] = []
-        for t in _KG_TYPES:
-            objs = kg_objs[t]
-            if not objs:
-                continue
-            scored_all.extend(
-                score_knowledge(
-                    query, objs, t, query_vector, None, None,
-                    element_sims=element_sims, knowledge_sims=knowledge_sims,
+        if self.settings.retrieval_rrf_enabled:
+            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims)
+        else:
+            scored_all: List[RetrievedKnowledge] = []
+            for t in _KG_TYPES:
+                objs = kg_objs[t]
+                if not objs:
+                    continue
+                scored_all.extend(
+                    score_knowledge(
+                        query, objs, t, query_vector, None, None,
+                        element_sims=element_sims, knowledge_sims=knowledge_sims,
+                    )
                 )
-            )
         rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
         scored_all.sort(key=rank_key, reverse=True)
         top_n = self.settings.retrieval_top_n
+        pool = scored_all[: max(top_n, self.settings.rerank_candidates)]
+        pool = self._rerank_hits(query, pool)
+        # NOTE: for process queries, ensure_procedure_quota re-imposes the
+        # type-weighted (rank_key) order when it back-fills procedures — so rerank
+        # refines pool *membership* there, not the final order.
         if process_intent:
             top_hits: List[RetrievedKnowledge] = ensure_procedure_quota(
-                scored_all, top_n, self.settings.proc_min, rank_key)
+                pool, top_n, self.settings.proc_min, rank_key)
         else:
-            top_hits = scored_all[:top_n]
+            top_hits = pool[:top_n]
         ask_stage("score", _t)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
@@ -3192,6 +3421,118 @@ class SQLiteRepository:
         ask_stage("total", ask_started)
         return response
 
+    # ------------------------------------------------------------------
+    # Global map-reduce 问答 (R4, GraphRAG-style)
+    # ------------------------------------------------------------------
+
+    def _ask_global(self, notebook_id: str, payload) -> "AskResponse":
+        """GraphRAG-style global map-reduce over community reports."""
+        self.get_notebook(notebook_id)   # KeyError->404 on missing nb (match fast/reasoning)
+        question = payload.question.strip()
+
+        # Resolve / create conversation (same as fast path).
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question
+            )
+
+        def _fallback(msg: str) -> AskResponse:
+            resp = AskResponse(
+                answer_id="",
+                conclusion=msg,
+                answer=msg,
+                grounded=False,
+                evidence_level="inferred",
+                anchors=[],
+                related_knowledge=[],
+                citations=[],
+                llm_mode="global-fallback",
+                conversation_id=conversation_id,
+                retrieval_query=question,
+                top_relevance=0.0,
+            )
+            resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
+            return resp
+
+        reports = self.get_community_reports(notebook_id)[: self.settings.global_max_communities]
+        if not reports or not getattr(self.llm_client, "configured", False):
+            return _fallback(
+                "No community reports available. Run community "
+                "summarization (kg_community_summary_enabled) or use fast mode."
+            )
+
+        from app.services.prompts import (
+            global_map_prompt, GLOBAL_MAP_SCHEMA_HINT,
+            global_reduce_prompt, GLOBAL_REDUCE_SCHEMA_HINT,
+        )
+
+        scored = []
+        for rep in reports:
+            block = (
+                f"Title: {rep.get('title', '')}\nSummary: {rep.get('summary', '')}\n"
+                "Findings:\n" + "\n".join(f"- {f}" for f in (rep.get("findings") or []))
+            )
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user", "content": global_map_prompt(question, block)}],
+                    GLOBAL_MAP_SCHEMA_HINT,
+                    timeout=self.settings.reasoning_timeout_seconds,
+                    max_retries=self.settings.reasoning_max_retries,
+                )
+                pts = json.loads(raw).get("points") or []
+            except Exception:
+                continue
+            for p in pts:
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    sc = float(p.get("score", 0))
+                except (TypeError, ValueError):
+                    sc = 0.0
+                desc = str(p.get("description", "")).strip()
+                if desc and sc > 0:
+                    scored.append((sc, desc))
+
+        if not scored:
+            return _fallback("No relevant community information was found for this question.")
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        points_block = "\n".join(f"- ({int(s)}) {d}" for s, d in scored[:50])
+
+        try:
+            raw = self.llm_client.chat_json(
+                [{"role": "user", "content": global_reduce_prompt(question, points_block)}],
+                GLOBAL_REDUCE_SCHEMA_HINT,
+                timeout=self.settings.reasoning_timeout_seconds,
+                max_retries=self.settings.reasoning_max_retries,
+            )
+            data = json.loads(raw)
+            answer = str(data.get("answer", "")).strip()
+            grounded = bool(data.get("grounded", True))
+        except Exception:
+            return _fallback("Failed to synthesize a global answer.")
+
+        if not answer:
+            return _fallback("No global answer could be produced.")
+
+        evidence_level = "overview" if grounded else "inferred"
+        response = AskResponse(
+            answer_id="",
+            conclusion=answer,
+            answer=answer,
+            grounded=grounded,
+            evidence_level=evidence_level,
+            anchors=[],
+            related_knowledge=[],
+            citations=[],
+            llm_mode="global" if grounded else "global-ungrounded",
+            conversation_id=conversation_id,
+            retrieval_query=question,
+            top_relevance=0.0,
+        )
+        response.answer_id = self._save_answer(notebook_id, question, response, conversation_id)
+        return response
+
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
         """Canonical unified-cluster id for a concept `object_id`, reusing the
         same `concept_clusters` membership map `concept_detail` relies on
@@ -3200,44 +3541,172 @@ class SQLiteRepository:
         back to `object_id` so dedup degrades gracefully (no merge, no crash)."""
         return self.cluster_map(notebook_id).get(object_id, object_id)
 
+    def _rrf_scored(
+        self,
+        query: str,
+        kg_objs: Dict[str, List[dict]],
+        knowledge_sims: Optional[Dict[str, float]],
+    ) -> List[RetrievedKnowledge]:
+        """BM25 + 语义 RRF 融合排序,产出与 score_knowledge 池化同构的列表。
+
+        - BM25: 对所有类型的对象文本计算 Okapi BM25 分。
+        - 语义: 直接使用 knowledge_sims (object_id->cosine_sim)。
+        - RRF: 两组排名融合得最终分。
+        - 不套 RELEVANCE_FLOOR(RRF 分量级很小,floor 会清空结果)。
+        - score=relevance=RRF 分; weight 取 _TYPE_WEIGHT(类型权威)。
+        """
+        # 汇集所有类型对象,构建 (id, text) 列表及 id->obj 映射
+        docs: List[tuple] = []
+        id_to_obj: Dict[str, dict] = {}
+        id_to_type: Dict[str, str] = {}
+        for t in _KG_TYPES:
+            for obj in (kg_objs.get(t) or []):
+                oid = obj["id"]
+                payload = obj.get("payload", {})
+                evidence = obj.get("evidence", [])
+                ev_text = " ".join(e.quoted_span for e in evidence)
+                text = _payload_text(payload) + (" " + ev_text if ev_text else "")
+                docs.append((oid, text))
+                id_to_obj[oid] = obj
+                id_to_type[oid] = t
+
+        bm25 = bm25_scores(query, docs)
+        sims: Dict[str, float] = knowledge_sims or {}
+
+        fused = rrf_fuse([bm25, sims], k=self.settings.retrieval_rrf_k)
+
+        result: List[RetrievedKnowledge] = []
+        for oid, rrf_score in fused.items():
+            if rrf_score <= 0:
+                continue
+            obj = id_to_obj.get(oid)
+            if obj is None:
+                continue
+            object_type = id_to_type[oid]
+            weight = _TYPE_WEIGHT.get(object_type, 0.5)
+            result.append(
+                RetrievedKnowledge(
+                    object_id=oid,
+                    object_type=object_type,
+                    payload=obj.get("payload", {}),
+                    evidence=obj.get("evidence", []),
+                    score=rrf_score,
+                    relevance=rrf_score,
+                    weight=weight,
+                    status=str(obj.get("status", "approved")),
+                    owner=str(obj.get("owner", "")),
+                    last_reviewed=str(obj.get("last_reviewed", "")),
+                )
+            )
+        result.sort(key=lambda it: it.score, reverse=True)
+        return result
+
+    def _rerank_hits(self, query: str, hits: List[RetrievedKnowledge]) -> List[RetrievedKnowledge]:
+        """LLM relevance rerank over a candidate pool. No-op when disabled, the
+        client is unconfigured, or the response is unusable (keeps input order)."""
+        if not hits or not self.settings.rerank_enabled \
+                or not getattr(self.llm_client, "configured", False):
+            return hits
+        block = "\n".join(
+            f"[{i}] [{h.object_type}] {str(h.payload.get('name', ''))[:200]}"
+            for i, h in enumerate(hits)
+        )
+        try:
+            raw = self.llm_client.chat_json(
+                [{"role": "user", "content": rerank_prompt(query, block)}],
+                RERANK_SCHEMA_HINT,
+                timeout=self.settings.rerank_timeout_seconds, max_retries=0,
+            )
+            data = json.loads(raw)
+        except Exception:
+            return hits
+        scores: Dict[int, float] = {}
+        for it in (data.get("items") if isinstance(data, dict) else None) or []:
+            if isinstance(it, dict) and isinstance(it.get("index"), int):
+                try:
+                    scores[it["index"]] = float(it.get("score", 0.0))
+                except (TypeError, ValueError):
+                    pass
+        if not scores:
+            return hits
+        order = sorted(range(len(hits)), key=lambda i: scores.get(i, -1.0), reverse=True)
+        return [hits[i] for i in order]
+
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
         first-occurrence snippet / procedure steps) is pulled via node_context.
-        Concept hits belonging to the same unified cluster (D4) are collapsed —
+        Hits belonging to the same unified cluster (any type) are collapsed —
         the first (highest-scored) per cluster is kept, later duplicates dropped.
+        Objects without a cluster entry use their own object_id as cluster key,
+        so they are never erroneously deduplicated.
         Returns (context_block_str, id_map)."""
+        budget = self.settings.answer_context_budget_chars
+        min_items = self.settings.answer_context_min_items
         lines, id_map = [], {}
-        seen_concept_clusters: set = set()
+        seen_clusters: set = set()
+        cmap = self.cluster_map(notebook_id)
+        used = 0
         i = 0
         for hit in top_hits:
-            if hit.object_type == "concept":
-                cid = self._concept_cluster_id(notebook_id, hit.object_id)
-                if cid in seen_concept_clusters:
-                    continue
-                seen_concept_clusters.add(cid)
+            cid = cmap.get(hit.object_id, hit.object_id)
+            if cid in seen_clusters:
+                continue
+            seen_clusters.add(cid)
             try:
                 ctx = self.node_context(notebook_id, hit.object_id)
             except KeyError:
                 continue
+            # Stop once the budget is spent, but always keep at least min_items.
+            if used >= budget and len(lines) >= min_items:
+                break
             i += 1
             key = f"k{i}"
             name = str(hit.payload.get("name", "")).strip()
             occ = ctx.get("occurrences") or []
             snippet = occ[0].get("element_text") if occ else ""
             definition = ctx.get("definition") or snippet
-            extra = f" — def: {definition[:200]}" if definition else ""
-            if ctx.get("steps"):
+            remaining = max(0, budget - used)
+            def_cap = max(0, min(300, remaining))   # per-line cap shrinks as budget fills
+            extra = f" — def: {definition[:def_cap]}" if (definition and def_cap) else ""
+            if ctx.get("steps") and def_cap:   # steps share the per-line budget gate
                 extra += "; steps: " + " -> ".join(
                     s.get("name", "") for s in ctx["steps"][:8]
                 )
-            lines.append(f"{key}: [{hit.object_type}] {name}{extra}")
+            line = f"{key}: [{hit.object_type}] {name}{extra}"
+            lines.append(line)
+            used += len(line)
             id_map[key] = {
                 "object_id": hit.object_id, "object_type": hit.object_type,
                 "name": name, "definition": definition, "snippet": snippet,
                 "source_title": (occ[0].get("source_title", "") if occ else ""),
                 "location_label": (occ[0].get("section_path", "") if occ else ""),
             }
+        # In-network relations: edges whose BOTH endpoints are in the context.
+        # id_map values carry unique object_ids (one entry per surviving hit;
+        # concept-cluster de-dup runs above), so this inversion drops no keys.
+        oid_to_key = {v["object_id"]: k for k, v in id_map.items()}
+        if len(oid_to_key) >= 2:
+            ids = list(oid_to_key)
+            ph = ",".join("?" for _ in ids)
+            with self._connect() as db:
+                rels = db.execute(
+                    f"SELECT source_object_id, target_object_id, edge_type "
+                    f"FROM knowledge_relations WHERE notebook_id=? "
+                    f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+                    [notebook_id, *ids, *ids],
+                ).fetchall()
+            rel_lines = []
+            seen_rel = set()
+            for r in rels:
+                s = oid_to_key.get(r["source_object_id"])
+                t = oid_to_key.get(r["target_object_id"])
+                if s and t and s != t and (s, r["edge_type"], t) not in seen_rel:
+                    seen_rel.add((s, r["edge_type"], t))
+                    rel_lines.append(f"{s} -[{r['edge_type']}]-> {t}")
+            if rel_lines:
+                # Cap so a dense subgraph can't blow the answer context past budget.
+                lines.append("relations: " + "; ".join(rel_lines[:30]))
         return ("\n".join(lines) if lines else "(none)"), id_map
 
     def _rewrite_followup_query(self, history: str, question: str) -> str:
@@ -3276,6 +3745,30 @@ class SQLiteRepository:
         classify_evidence. `history`
         (prior conversation turns) shapes the wording but not the retrieval."""
         context_block, id_map = self._answer_context(notebook_id, top_hits)
+        if (self.settings.kg_query_refine_enabled
+                and getattr(self.llm_client, "configured", False) and id_map):
+            from app.services.prompts import evidence_refine_prompt, EVIDENCE_REFINE_SCHEMA_HINT
+            ev_lines = []
+            for k, v in id_map.items():
+                txt = (v.get("definition") or v.get("snippet") or "").strip()
+                ev_lines.append(f"{k} {v.get('name','')}: {txt}".strip())
+            ev_block = "\n".join(ev_lines)[: self.settings.query_refine_max_chars]
+            try:
+                raw_refine = self.llm_client.chat_json(
+                    [{"role": "user", "content": evidence_refine_prompt(question, ev_block)}],
+                    EVIDENCE_REFINE_SCHEMA_HINT,
+                    timeout=self.settings.reasoning_timeout_seconds,
+                    max_retries=self.settings.reasoning_max_retries)
+                rel = json.loads(raw_refine).get("relevant")
+                if not isinstance(rel, list):   # guard: LLM may return a str/None
+                    rel = []
+                rel = [str(x).strip() for x in rel if str(x).strip()]
+            except Exception:
+                rel = []
+            if rel:
+                context_block = ("Focused relevant evidence (for this question):\n"
+                                 + "\n".join(f"- {x}" for x in rel[:12])
+                                 + "\n\n" + context_block)
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,

@@ -61,6 +61,17 @@ def main() -> int:
         (out / "inference_report.md").write_text(render_inference_report(rows), encoding="utf-8")
         print("[eval] inference_report.md done")
 
+    if "recall" in only:
+        from app.core.config import Settings
+        from app.eval.inference import load_questions
+        from app.eval.retrieval_metrics import run_recall
+        from app.services.sqlite_repository import SQLiteRepository
+        repo = SQLiteRepository(Settings())
+        rows = run_recall(repo, a.notebook, load_questions())
+        (out / "recall_report.json").write_text(
+            json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[eval] recall_report.json done ({len(rows)} annotated questions)")
+
     print(f"[eval] all done -> {out}")
     return 0
 

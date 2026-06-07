@@ -1,5 +1,6 @@
 # 分层问答评测集。level: L1 直接 / L2 单跳 / L3 多跳综合 / L4 应拒答。
 # expected_behavior: grounded | use_neighbor | synthesize | refuse_or_infer
+# 可选字段 gold_object_ids: [<knowledge_objects.id>, ...] —— 标注该题期望命中的 KG 对象,供 recall@k/MRR(--only recall)使用;未标注的题在 recall 评测中跳过。
 - {id: q01, level: L1, question: "什么是 cascode connection?它的主要作用是什么?", expected_points: ["级联/串叠晶体管", "提高输出电阻"], expected_evidence_level: grounded, expected_behavior: grounded}
 - {id: q02, level: L1, question: "MOSFET 的 square-law characteristic 指什么?", expected_points: ["漏电流与过驱动电压平方成正比"], expected_evidence_level: grounded, expected_behavior: grounded}
 - {id: q03, level: L1, question: "什么是 current mirror?", expected_points: ["复制/镜像电流"], expected_evidence_level: grounded, expected_behavior: grounded}
