@@ -3,7 +3,7 @@ from app.eval.inference import load_questions, judge_prompt, parse_judge
 
 
 def test_load_questions():
-    qs = load_questions("backend/app/eval/questions.yaml")
+    qs = load_questions()
     assert len(qs) == 30
     assert {q["level"] for q in qs} == {"L1", "L2", "L3", "L4"}
     assert all(q.get("question") and q.get("expected_points") for q in qs)
