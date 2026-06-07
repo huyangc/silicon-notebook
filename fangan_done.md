@@ -150,7 +150,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - `scenario_query()`：`ScenarioQueryRequest` 扩展 signal_type / constraint / process_or_node / application 等字段，构造 scenario 后走 ask。
 - `case_search()`：对 cases 知识对象 + element 相似检索，删除写死案例。
 - `checklist()`：从匹配的 rules / risks 生成 checklist item，删除写死 3 条。
-- **推理模式 agentic search 实时进度（§6.5 / §11）**：新增 `POST /api/notebooks/{id}/ask/stream` NDJSON 流；后端先发 `start`，再把 `ReasoningRetriever` 的 plan / retrieve / reflect / expand / fallback / answer trace step 逐行推给前端，最后发送完整 `AskResponse`。前端推理按钮开启时走 stream，在 pending answer 中实时显示 agent 轨迹，并在最终回答中保留 `reasoning_trace` 供回看；普通 `/ask` 仍作为兼容非流式路径。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
+- **推理模式 agentic search 实时进度（§6.5 / §11）**：新增 `POST /api/notebooks/{id}/ask/stream` NDJSON 流；后端先发 `start`，再把 `ReasoningRetriever` 的 plan / retrieve / reflect / expand / fallback / answer trace step 逐行推给前端，最后发送完整 `AskResponse`。前端推理按钮开启时走 stream，在 pending answer 中实时显示一行 agent 轨迹摘要，按最新 progress 事件刷新，点击后展开完整步骤；最终回答中保留默认折叠的 `reasoning_trace` 供回看；普通 `/ask` 仍作为兼容非流式路径。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
 
 ## 13. 真实 Article Studio
 
@@ -285,4 +285,4 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
 
 - 已完成（2026-06-06）：大笔记本 KG 性能与合并治理——Ask 去同步 backfill/全量扫描 + notebook 级索引 + 阶段计时；node_context/concept_detail 收窄查询；unified-KG 改显式 rebuild + dirty status（摄取不再同步重建、打开图谱不自动重建）；跨文档概念合并改有界 top-k 向量候选 + 别名归一化；可选 LLM 概念合并预审。已通过 `scripts/check.sh` 与前端 build。
-- 已完成（2026-06-06）：推理模式 agentic search 实时进度——`/ask/stream` 输出 NDJSON progress/final 事件，Ask 前端在运行中展示 agent 轨迹并在答案中保留最终 trace。已通过 `scripts/check.sh` 与前端 build。
+- 已完成（2026-06-06）：推理模式 agentic search 实时进度——`/ask/stream` 输出 NDJSON progress/final 事件，Ask 前端在运行中展示按事件刷新的折叠 agent 轨迹摘要，点击可展开完整步骤，并在答案中保留默认折叠的最终 trace。已通过 `scripts/check.sh` 与前端 build。

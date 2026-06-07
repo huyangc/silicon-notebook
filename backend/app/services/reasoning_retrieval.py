@@ -90,10 +90,10 @@ class ReasoningRetriever:
     # --- LLM 决策点 ---
     def plan(self, question, history=""):
         fallback = [SubQuery(query=question)]
-        if not getattr(self.repo.llm_client, "configured", False):
+        if not getattr(self.repo.reasoning_llm_client, "configured", False):
             return fallback
         try:
-            raw = self.repo.llm_client.chat_json(
+            raw = self.repo.reasoning_llm_client.chat_json(
                 [{"role": "user", "content": plan_prompt(question, history)}],
                 PLAN_SCHEMA_HINT,
                 timeout=self.settings.reasoning_timeout_seconds,
@@ -120,10 +120,10 @@ class ReasoningRetriever:
 
     def reflect(self, question, candidates_summary):
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
-        if not getattr(self.repo.llm_client, "configured", False):
+        if not getattr(self.repo.reasoning_llm_client, "configured", False):
             return answer_decision
         try:
-            raw = self.repo.llm_client.chat_json(
+            raw = self.repo.reasoning_llm_client.chat_json(
                 [{"role": "user", "content": reflect_prompt(question, candidates_summary)}],
                 REFLECT_SCHEMA_HINT,
                 timeout=self.settings.reasoning_timeout_seconds,

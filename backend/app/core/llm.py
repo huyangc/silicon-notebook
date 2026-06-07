@@ -35,8 +35,16 @@ def strip_json_fences(text: str) -> str:
 
 
 class OpenAICompatibleClient:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, base_url: Optional[str] = None,
+                 api_key: Optional[str] = None, model: Optional[str] = None,
+                 max_retries: Optional[int] = None):
         self.settings = settings
+        # 默认取全局 openai_compat_*；显式传入则覆盖（推理专用 client 走此路）。
+        self.base_url = base_url if base_url is not None else settings.openai_compat_base_url
+        self.api_key = api_key if api_key is not None else settings.openai_compat_api_key
+        self.model = model if model is not None else settings.openai_compat_model
+        self.max_retries = (max_retries if max_retries is not None
+                            else settings.openai_compat_max_retries)
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)
         self._cache = None
@@ -56,10 +64,10 @@ class OpenAICompatibleClient:
 
     @property
     def configured(self) -> bool:
-        return self.settings.llm_configured
+        return bool(self.base_url and self.api_key and self.model)
 
     def client(self) -> OpenAI:
-        if not (self.settings.openai_compat_base_url and self.settings.openai_compat_api_key):
+        if not (self.base_url and self.api_key):
             raise RuntimeError("OpenAI-compatible API settings are not configured")
         if self._client is None:
             # Connection pool sized to the global extraction cap PLUS a reserve
@@ -75,8 +83,8 @@ class OpenAICompatibleClient:
                 ),
             )
             self._client = OpenAI(
-                api_key=self.settings.openai_compat_api_key,
-                base_url=self.settings.openai_compat_base_url,
+                api_key=self.api_key,
+                base_url=self.base_url,
                 timeout=timeout,
                 # Don't let the SDK silently retry connection errors 2x: a stalled
                 # connection would otherwise block ~3x the timeout per call. We
@@ -107,7 +115,7 @@ class OpenAICompatibleClient:
             },
             *messages,
         ]
-        model = self.settings.openai_compat_model
+        model = self.model
         # Best-effort cache lookup: a cache fault must never break the call.
         cache = None
         ckey = ""
@@ -150,7 +158,7 @@ class OpenAICompatibleClient:
         try:
             attempts = 1 + (
                 max_retries if max_retries is not None
-                else self.settings.openai_compat_max_retries
+                else self.max_retries
             )
             response = None
             for attempt in range(attempts):

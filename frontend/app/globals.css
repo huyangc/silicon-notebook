@@ -1121,31 +1121,76 @@ button.chat-session-card {
 
 .reasoning-trace-panel {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
 }
 
-.reasoning-trace-head {
+.reasoning-trace-summary {
   display: grid;
-  grid-template-columns: 18px auto minmax(0, 1fr);
+  grid-template-columns: 18px auto auto minmax(0, 1fr) auto auto 16px;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #20242a;
   font-size: 13px;
   font-weight: 700;
+  text-align: left;
+  cursor: pointer;
 }
 
-.reasoning-trace-head svg {
+.reasoning-trace-summary svg {
+  flex: 0 0 auto;
   color: #2f6f73;
 }
 
-.reasoning-trace-head small {
+.reasoning-trace-title,
+.reasoning-trace-count,
+.reasoning-trace-summary small {
+  white-space: nowrap;
+}
+
+.reasoning-trace-chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 42px;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid #d9dfeb;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reasoning-trace-chip.empty {
+  visibility: hidden;
+}
+
+.reasoning-trace-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #20242a;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reasoning-trace-summary small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--muted);
   font-weight: 500;
+}
+
+.reasoning-trace-count {
+  color: var(--muted);
+  font-weight: 600;
 }
 
 .reasoning-trace-list {
