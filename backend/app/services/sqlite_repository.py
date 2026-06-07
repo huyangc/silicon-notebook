@@ -432,7 +432,8 @@ class SQLiteRepository:
                   findings TEXT NOT NULL DEFAULT '[]',
                   created_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_communities_nb ON communities(notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_communities_nb_level ON communities(notebook_id, level);
+                DROP INDEX IF EXISTS idx_communities_nb;
                 """
             )
             # Lightweight column migrations for pre-existing databases.
