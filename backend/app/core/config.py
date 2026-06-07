@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
     # 抽取自校验: 默认关闭; 开启后每个窗口抽取完再做一次 LLM refine pass 剔除幻觉节点。
     kg_refine_enabled: bool = Field(False, env="KG_REFINE_ENABLED")
+    # gleaning 补抽: 默认关闭; 开启后每窗口首抽完再多轮让 LLM 补"遗漏的节点"。
+    kg_gleaning_enabled: bool = Field(False, env="KG_GLEANING_ENABLED")
+    kg_gleaning_rounds: int = Field(1, env="KG_GLEANING_ROUNDS")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。

@@ -9,7 +9,7 @@ from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
-from app.services.prompts import refine_prompt, REFINE_SCHEMA_HINT
+from app.services.prompts import gleaning_prompt, refine_prompt, REFINE_SCHEMA_HINT
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
 EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
@@ -142,8 +142,62 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
     return [n for i, n in enumerate(nodes) if i not in drop]
 
 
+def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
+                 doc_type: str, first_raw: str, nodes: List[Node], win_idx: int,
+                 max_rounds: int) -> None:
+    """Gleaning: ask the LLM for MISSED nodes and append new (deduped, grounded)
+    ones to `nodes` in place. v1 = nodes only (no edges). Best-effort: no-op when
+    unconfigured; on any failure returns with whatever was gathered (never raises —
+    the first pass already succeeded). Early-stops when a round adds nothing."""
+    if not getattr(client, "configured", False) or max_rounds < 1:
+        return
+
+    def _nm(s: str) -> str:
+        return " ".join((s or "").split()).lower()
+
+    seen = {(n.type, _nm(n.name)) for n in nodes}
+    labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
+    messages = [
+        {"role": "user", "content": _prompt(labeled, section_path, doc_type)},
+        {"role": "assistant", "content": first_raw},
+        {"role": "user", "content": gleaning_prompt(section_path, doc_type)},
+    ]
+    for _ in range(max_rounds):
+        try:
+            raw = client.chat_json(messages, _KG_SCHEMA_HINT)
+            data = safe_json(raw)
+        except Exception:
+            return
+        added = 0
+        for it in (data.get("nodes") or []):
+            if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
+                continue
+            nm = _nm(str(it.get("name", "")))
+            key = (it["type"], nm)
+            if not nm or key in seen:
+                continue
+            el = _resolve(elements, it.get("ev"), str(it.get("name", "")))
+            if el is None:
+                continue
+            node = Node(id=f"W{win_idx}-{len(nodes)}", type=it["type"],
+                        name=str(it.get("name", "")), section_path=section_path,
+                        evidence=[_ev(el)])
+            if it["type"] == "Procedure":
+                node.steps = _parse_steps(elements, it.get("steps"))
+            nodes.append(node)
+            seen.add(key)
+            added += 1
+        if added == 0:
+            return   # early stop: nothing new this round
+        messages += [
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content": "Any more missed nodes? Same rules; empty list if none."},
+        ]
+
+
 def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
-                   doc_type: str, win_idx: int = 0, refine: bool = False) -> Tuple[List[Node], List[Edge]]:
+                   doc_type: str, win_idx: int = 0, refine: bool = False,
+                   gleaning_rounds: int = 0) -> Tuple[List[Node], List[Edge]]:
     if not elements:
         return [], []
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
@@ -174,6 +228,9 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         nodes.append(node)
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
+    if gleaning_rounds and nodes:
+        _glean_nodes(client, elements, section_path, doc_type, raw, nodes, win_idx,
+                     gleaning_rounds)
     if refine and nodes:
         # refine is best-effort: a failure (incl. hard transport errors that
         # refine_nodes re-raises) must NOT discard a successfully extracted
