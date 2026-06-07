@@ -126,35 +126,42 @@ class _UF:
     def union(self, a, b): self.p[self.find(a)] = self.find(b)
 
 
-def cluster_concepts(
-    concepts: List[dict],
+def cluster_objects(
+    objects: List[dict],
     vectors: Dict[str, List[float]],
     confirmed: Set[FrozenSet[str]],
     rejected: Set[FrozenSet[str]],
+    *,
+    seed_fn,
+    conflict_fn=None,
+    id_prefix: str = "K-",
     hi: float = 0.94,
     lo: float = 0.82,
     top_k: int = 5,
     max_pending: int = 1000,
 ) -> dict:
-    """精确同名 + 已确认对 force-union; 向量候选经 ANN→护栏→星型, 但**不自动 union**:
-    ≥hi 进 auto_candidates(LLM 兜底), [lo,hi) 进 pending(人工)。全程 sub-quadratic。"""
-    seed_of = {c["object_id"]: _norm(c["name"]) for c in concepts}
+    """Generic cross-document clustering (concept/claim/formula/procedure).
+    seed_fn(obj)->str 决定精确合并 key;conflict_fn(name_a,name_b)->bool 为护栏(None=不拦);
+    id_prefix 决定 canonical_id 前缀(各类型隔离)。其余算法(ANN→护栏→星型→三档分流→
+    confirmed/rejected force-union/block)与原 cluster_concepts 完全一致。"""
+    seed_of = {c["object_id"]: seed_fn(c) for c in objects}
     seeds = sorted(set(seed_of.values()))
     uf = _UF(seeds)
+    # confirmed/rejected 存储的是已经过 seed_fn 处理的 seed 字符串(caller 负责对齐)
     for pair in confirmed:
-        a, b = (_norm(n) for n in tuple(pair))
+        a, b = tuple(pair)
         if a in uf.p and b in uf.p:
             uf.union(a, b)
-    rej = {frozenset(_norm(n) for n in p) for p in rejected}
+    rej = {frozenset(p) for p in rejected}
 
     seed_first_name: Dict[str, str] = {}
-    for c in concepts:
+    for c in objects:
         s = seed_of[c["object_id"]]
         if s not in seed_first_name:
-            seed_first_name[s] = c["name"]
+            seed_first_name[s] = c.get("name", "")
 
     members: Dict[str, List[str]] = {}
-    for c in concepts:
+    for c in objects:
         members.setdefault(seed_of[c["object_id"]], []).append(c["object_id"])
 
     reps: Dict[str, np.ndarray] = {}
@@ -168,7 +175,7 @@ def cluster_concepts(
     for a, b, sim in raw:
         if rej and frozenset((a, b)) in rej:
             continue
-        if _discriminative_conflict(seed_first_name.get(a, a), seed_first_name.get(b, b)):
+        if conflict_fn and conflict_fn(seed_first_name.get(a, a), seed_first_name.get(b, b)):
             continue
         cand.append((a, b, sim))
 
@@ -181,12 +188,12 @@ def cluster_concepts(
     canon_id, canon_name = {}, {}
     for root, grp in groups.items():
         best = max(grp, key=lambda s: len(members[s]))
-        cid = "K-" + min(grp)
+        cid = id_prefix + min(grp)
         for s in grp:
             canon_id[s] = cid
         canon_name[cid] = seed_first_name[best]
-    cluster_map = {c["object_id"]: canon_id[seed_of[c["object_id"]]] for c in concepts}
-    names = {c["object_id"]: canon_name[cluster_map[c["object_id"]]] for c in concepts}
+    cluster_map = {c["object_id"]: canon_id[seed_of[c["object_id"]]] for c in objects}
+    names = {c["object_id"]: canon_name[cluster_map[c["object_id"]]] for c in objects}
 
     auto_candidates = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
                        if sim >= hi and frozenset((a, b)) in auto_set and canon_id[a] != canon_id[b]]
@@ -197,6 +204,31 @@ def cluster_concepts(
     pending = pending[:max_pending]
     return {"cluster_map": cluster_map, "canonical_names": names,
             "auto_candidates": auto_candidates, "pending": pending, "capped": was_capped}
+
+
+def cluster_concepts(
+    concepts: List[dict],
+    vectors: Dict[str, List[float]],
+    confirmed: Set[FrozenSet[str]],
+    rejected: Set[FrozenSet[str]],
+    hi: float = 0.94,
+    lo: float = 0.82,
+    top_k: int = 5,
+    max_pending: int = 1000,
+) -> dict:
+    """精确同名 + 已确认对 force-union; 向量候选经 ANN→护栏→星型, 但**不自动 union**:
+    ≥hi 进 auto_candidates(LLM 兜底), [lo,hi) 进 pending(人工)。全程 sub-quadratic。
+    薄包装: 委托 cluster_objects,使用 _norm seed + _discriminative_conflict 护栏 + K- 前缀。
+    confirmed/rejected 中的名称先用 _norm 标准化,与 cluster_objects 期待的 seed 格式对齐。"""
+    norm_confirmed = {frozenset(_norm(n) for n in p) for p in confirmed}
+    norm_rejected = {frozenset(_norm(n) for n in p) for p in rejected}
+    return cluster_objects(
+        concepts, vectors, norm_confirmed, norm_rejected,
+        seed_fn=lambda c: _norm(c.get("name", "")),
+        conflict_fn=_discriminative_conflict,
+        id_prefix="K-",
+        hi=hi, lo=lo, top_k=top_k, max_pending=max_pending,
+    )
 
 
 def derive_unified_graph(nodes: List[dict], edges: List[dict], cluster_map: Dict[str, str]) -> dict:

@@ -377,6 +377,7 @@ class SQLiteRepository:
                   canonical_id TEXT NOT NULL,
                   member_object_id TEXT NOT NULL,
                   canonical_name TEXT NOT NULL,
+                  object_type TEXT NOT NULL DEFAULT 'concept',
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb ON concept_clusters(notebook_id);
@@ -462,6 +463,10 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''")
             if "reviewed_by" not in cm_cols:
                 db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
+            # object_type column for concept_clusters (per-type isolation).
+            cc_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_clusters)").fetchall()}
+            if "object_type" not in cc_cols:
+                db.execute("ALTER TABLE concept_clusters ADD COLUMN object_type TEXT NOT NULL DEFAULT 'concept'")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -1882,14 +1887,18 @@ class SQLiteRepository:
 
     # --- Concept-cluster / merge-candidate CRUD (Task 5) -------------------
 
-    def write_clusters(self, notebook_id: str, rows: List[dict]) -> None:
+    def write_clusters(self, notebook_id: str, rows: List[dict],
+                       object_type: str = "concept") -> None:
         now = _now()
         with self._write() as db:
-            db.execute("DELETE FROM concept_clusters WHERE notebook_id=?", (notebook_id,))
+            db.execute("DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
+                       (notebook_id, object_type))
             for r in rows:
                 db.execute(
-                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,created_at) VALUES (?,?,?,?,?,?)",
-                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"], r["canonical_name"], now))
+                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
+                     r["member_object_id"], r["canonical_name"], object_type, now))
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         with self._connect() as db:
