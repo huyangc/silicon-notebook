@@ -149,6 +149,8 @@ def cluster_objects(
     uf = _UF(seeds)
     # confirmed/rejected 存储的是已经过 seed_fn 处理的 seed 字符串(caller 负责对齐)
     for pair in confirmed:
+        if len(pair) != 2:
+            continue   # both names normalize equal (size-1 fold) or malformed: harmless
         a, b = tuple(pair)
         if a in uf.p and b in uf.p:
             uf.union(a, b)

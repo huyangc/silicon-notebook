@@ -26,3 +26,12 @@ def test_cluster_concepts_wrapper_preserves_behavior():
     assert cm["o1"] == cm["o2"]                       # vco alias -> full name, merged
     assert cm["o1"].startswith("K-")
     assert cm["o3"] != cm["o1"]
+
+
+def test_cluster_objects_confirmed_same_name_fold_no_crash():
+    # a confirmed pair whose two seeds collapse to one (size-1 frozenset after a
+    # caller's normalization) must be skipped harmlessly, not raise ValueError.
+    objs = [_obj("o1", "x"), _obj("o2", "y")]
+    res = cluster_objects(objs, {}, {frozenset({"x"})}, set(),
+                          seed_fn=lambda c: c["name"], id_prefix="K-")
+    assert "o1" in res["cluster_map"] and "o2" in res["cluster_map"]
