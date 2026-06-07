@@ -62,3 +62,11 @@ def test_global_ask_no_reports_graceful(repo):
     # no community reports -> graceful fallback, no crash, no reduce call
     assert resp is not None and (resp.answer or resp.conclusion)
     assert repo.llm_client.reduce_calls == 0
+
+
+def test_global_ask_missing_notebook_raises(repo):
+    # missing notebook must raise KeyError (route -> 404), like fast/reasoning,
+    # not an uncaught IntegrityError -> 500.
+    repo.llm_client = _GlobalLLM()
+    with pytest.raises(KeyError):
+        repo.ask("nb-does-not-exist", AskRequest(question="x", mode="global"))

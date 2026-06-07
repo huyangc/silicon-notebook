@@ -3402,6 +3402,7 @@ class SQLiteRepository:
 
     def _ask_global(self, notebook_id: str, payload) -> "AskResponse":
         """GraphRAG-style global map-reduce over community reports."""
+        self.get_notebook(notebook_id)   # KeyError->404 on missing nb (match fast/reasoning)
         question = payload.question.strip()
 
         # Resolve / create conversation (same as fast path).
