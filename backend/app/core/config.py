@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     embed_base_url: str = Field("", env="EMBED_BASE_URL")
     embed_api_key: str = Field("", env="EMBED_API_KEY")
     embed_dim: int = Field(1024, env="EMBED_DIM")
-    llm_cache_enabled: bool = Field(True, env="LLM_CACHE_ENABLED")
+    llm_cache_enabled: bool = Field(False, env="LLM_CACHE_ENABLED")
     llm_cache_path: str = Field(".local/llm_cache.db", env="LLM_CACHE_PATH")
 
     # --- 大文档摄取/检索旋钮（2026-06-04 大文档加固）---

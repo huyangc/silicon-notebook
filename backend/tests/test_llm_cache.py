@@ -50,6 +50,7 @@ def _configured_client(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
     monkeypatch.setenv("OPENAI_COMPAT_MODEL", "m")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_CACHE_ENABLED", "true")
     monkeypatch.setenv("LLM_CACHE_PATH", str(tmp_path / "cache.db"))
     client = OpenAICompatibleClient(Settings())
     fake = _FakeOpenAI()

@@ -14,6 +14,8 @@ from typing import Dict, List, Optional
 
 
 def cache_key(model: str, messages: List[Dict[str, str]], schema_hint: str) -> str:
+    # temperature is a fixed constant (0.1) in chat_json, intentionally excluded;
+    # if a per-call temperature is ever added, include it in the key.
     payload = json.dumps(
         {"model": model, "messages": messages, "schema": schema_hint},
         sort_keys=True, ensure_ascii=False,
@@ -36,8 +38,8 @@ class LLMCache:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
     def get(self, key: str) -> Optional[str]:
