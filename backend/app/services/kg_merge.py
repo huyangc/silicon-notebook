@@ -284,8 +284,14 @@ def cluster_concepts(
 
 
 def derive_unified_graph(nodes: List[dict], edges: List[dict], cluster_map: Dict[str, str]) -> dict:
-    """Rewire member-Concept endpoints to canonical ids; dedup edges. O(V+E)."""
-    def canon(oid): return cluster_map.get(oid, oid)
+    """Rewire member-Concept endpoints to canonical ids; dedup edges. O(V+E).
+
+    Only CONCEPT members are folded to canonical ids. cluster_map may also carry
+    non-concept (claim/formula/procedure) entries (used for answer-context dedup),
+    but the unified graph view folds concepts only — folding non-concept node ids
+    on edges while keeping their nodes raw would create dangling edges."""
+    concept_ids = {n["id"] for n in nodes if n["object_type"] == "concept"}
+    def canon(oid): return cluster_map.get(oid, oid) if oid in concept_ids else oid
     seen_concept, out_nodes = set(), []
     for n in nodes:
         if n["object_type"] == "concept":

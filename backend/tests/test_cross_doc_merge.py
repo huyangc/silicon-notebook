@@ -76,3 +76,28 @@ def test_answer_context_dedups_merged_claims(repo):
             for i in ids.values()]
     block, id_map = repo._answer_context(nb.id, hits)
     assert len(id_map) == 1   # the two merged claims collapse to one context line
+
+
+def test_unified_graph_object_level_no_dangling_after_merge(repo):
+    # regression: non-concept merge must not create dangling edges at level=object
+    # (the level the frontend requests). Non-concept nodes stay raw; concept->claim
+    # edge endpoints must still resolve to real nodes.
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    # source_id=None (no real source rows here): the relation FK requires a valid
+    # sources(id), and the cross-doc merge is by content seed, not source_id.
+    repo.store_kg(nb.id, None, [
+        {"local_id": "K1", "object_type": "concept",
+         "payload": {"name": "cascode", "section_path": "1"}, "evidence": []},
+        {"local_id": "C1", "object_type": "claim",
+         "payload": {"name": "cascode raises output resistance", "section_path": "1"}, "evidence": []},
+    ], [{"source_local_id": "K1", "target_local_id": "C1", "edge_type": "about", "evidence": []}])
+    repo.store_kg(nb.id, None, [
+        {"local_id": "C2", "object_type": "claim",
+         "payload": {"name": "Cascode raises output resistance.", "section_path": "2"}, "evidence": []},
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+    g = repo.unified_graph(nb.id, level="object")
+    node_ids = {n["id"] for n in g["nodes"]}
+    for e in g["edges"]:
+        assert e["source_object_id"] in node_ids
+        assert e["target_object_id"] in node_ids   # no dangling refs after merge

@@ -2116,9 +2116,11 @@ class SQLiteRepository:
                     "SELECT id, payload FROM knowledge_objects "
                     "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
                     (notebook_id, t)).fetchall()
-            tobjs = [{"object_id": r["id"],
-                      "name": json.loads(r["payload"] or "{}").get("name", ""),
-                      "payload": json.loads(r["payload"] or "{}")} for r in trows]
+            tobjs = []
+            for r in trows:
+                pay = json.loads(r["payload"] or "{}")
+                tobjs.append({"object_id": r["id"], "name": pay.get("name", ""),
+                              "payload": pay})
             if not tobjs:
                 self.write_clusters(notebook_id, [], object_type=t)   # clear stale rows
                 continue
