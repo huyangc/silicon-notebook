@@ -3225,6 +3225,28 @@ class SQLiteRepository:
                 "source_title": (occ[0].get("source_title", "") if occ else ""),
                 "location_label": (occ[0].get("section_path", "") if occ else ""),
             }
+        # In-network relations: edges whose BOTH endpoints are in the context.
+        oid_to_key = {v["object_id"]: k for k, v in id_map.items()}
+        if len(oid_to_key) >= 2:
+            ids = list(oid_to_key)
+            ph = ",".join("?" for _ in ids)
+            with self._connect() as db:
+                rels = db.execute(
+                    f"SELECT source_object_id, target_object_id, edge_type "
+                    f"FROM knowledge_relations WHERE notebook_id=? "
+                    f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+                    [notebook_id, *ids, *ids],
+                ).fetchall()
+            rel_lines = []
+            seen_rel = set()
+            for r in rels:
+                s = oid_to_key.get(r["source_object_id"])
+                t = oid_to_key.get(r["target_object_id"])
+                if s and t and (s, r["edge_type"], t) not in seen_rel:
+                    seen_rel.add((s, r["edge_type"], t))
+                    rel_lines.append(f"{s} -[{r['edge_type']}]-> {t}")
+            if rel_lines:
+                lines.append("relations: " + "; ".join(rel_lines))
         return ("\n".join(lines) if lines else "(none)"), id_map
 
     def _rewrite_followup_query(self, history: str, question: str) -> str:
