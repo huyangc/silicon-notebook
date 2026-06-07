@@ -190,3 +190,32 @@ def test_client_built_with_no_sdk_retries(monkeypatch):
     c = OpenAICompatibleClient(Settings())
     c.client()
     assert captured.get("max_retries") == 0
+
+
+def test_override_params_win_over_global(monkeypatch):
+    """显式覆盖参数应优先于全局 OPENAI_COMPAT_*，并驱动 configured/base_url/model。"""
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://global")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gk")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "global-model")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    create = _FakeCreate([_Resp()])
+    c = OpenAICompatibleClient(Settings(), base_url="https://reason",
+                               api_key="rk", model="reason-model")
+    assert c.configured is True
+    assert c.base_url == "https://reason" and c.model == "reason-model"
+    monkeypatch.setattr(c, "client", lambda: _FakeOpenAI(create))
+    out = c.chat_json([{"role": "user", "content": "hi"}], "{}")
+    assert out == '{"ok":1}'
+    assert create.calls[0]["model"] == "reason-model"  # 发出的是覆盖后的 model
+
+
+def test_default_params_fall_back_to_global(monkeypatch):
+    """不传覆盖参数 → 三项取全局 OPENAI_COMPAT_*（向后兼容）。"""
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://global")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gk")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "global-model")
+    c = OpenAICompatibleClient(Settings())
+    assert c.base_url == "https://global"
+    assert c.api_key == "gk"
+    assert c.model == "global-model"
+    assert c.configured is True
