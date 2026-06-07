@@ -108,3 +108,14 @@ def test_reasoning_path_routes_through_reasoning_client(repo):
     resp = repo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert resp.answer.startswith("答案")
     assert reasoning_llm.calls >= 1
+
+
+def test_health_exposes_reasoning_llm_configured():
+    from app.api.routes import health
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    body = health()
+    assert "reasoning_llm_configured" in body
+    # 与 settings 口径一致（对环境是否配置鲁棒）。
+    assert body["reasoning_llm_configured"] == get_settings().reasoning_llm_configured
+    get_settings.cache_clear()
