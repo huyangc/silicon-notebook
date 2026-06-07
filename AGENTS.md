@@ -278,3 +278,16 @@ http://localhost:3000
 - Do not remove generated or user-provided files unless the user explicitly asks.
 - Keep changes scoped to the requested product or engineering task.
 - Use `apply_patch` for manual file edits.
+
+## Feature Completion (Finish With a PR)
+
+Every completed feature ends with a pull request — do not merge straight to `master`, and do not hand the wind-down back to the user.
+
+Standard wind-down, once the feature branch (usually a worktree) is done, the full test suite is green, and final review passes:
+
+1. 3-way merge the latest `master` into the feature branch (so the PR diff shows only the feature, not a spurious revert of newer `master` commits); resolve conflicts; re-run the suite green.
+2. `git push -u origin <branch>`.
+3. `gh pr create --base master --head <branch>` with a body covering background / approach / measured results / testing (end with the Generated-with-Claude-Code line).
+4. Report the PR link to the user.
+
+Never squash- or force-overwrite `master`'s newer commits — use a real merge, or rebase first.
