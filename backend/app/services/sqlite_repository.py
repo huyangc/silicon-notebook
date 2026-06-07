@@ -136,10 +136,26 @@ class SQLiteRepository:
         self.db_path = self._resolve_path(settings.sqlite_path)
         self.storage_dir = self._resolve_path(settings.storage_dir)
         self.llm_client = OpenAICompatibleClient(settings)
+        # 推理搜索专用 client：配齐 REASONING_LLM_* → 独立模型实例；否则 None，
+        # 由 reasoning_llm_client 属性动态回退到 self.llm_client。
+        self._reasoning_llm_client = (
+            OpenAICompatibleClient(
+                settings,
+                base_url=settings.reasoning_llm_base_url,
+                api_key=settings.reasoning_llm_api_key,
+                model=settings.reasoning_llm_model,
+            )
+            if settings.reasoning_llm_configured
+            else None
+        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
         self.event_log = EventLogger(settings, channel="events")
+        if settings.reasoning_llm_partially_configured:
+            self.event_log.logger.warning(
+                "REASONING_LLM_* 仅部分配置(base_url/api_key/model 需全填)，"
+                "推理搜索将回退到全局 OPENAI_COMPAT_* 模型。")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
@@ -147,6 +163,14 @@ class SQLiteRepository:
         self._write_lock = threading.RLock()
         self._migrate()
         self._seed()
+
+    @property
+    def reasoning_llm_client(self):
+        """推理路径专用 LLM client。配齐 REASONING_LLM_* → 独立模型；否则动态回退到
+        当前 self.llm_client（含测试运行时替换的 fake），未配置时与全局行为完全一致。"""
+        if self._reasoning_llm_client is not None:
+            return self._reasoning_llm_client
+        return self.llm_client
 
     def _resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -3276,7 +3300,7 @@ class SQLiteRepository:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
-        raw = self.llm_client.chat_json(
+        raw = self.reasoning_llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -3330,7 +3354,7 @@ class SQLiteRepository:
         citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
 
         answer, llm_grounded, anchors = "", False, []
-        if self.llm_client.configured and (top_hits or elements):
+        if self.reasoning_llm_client.configured and (top_hits or elements):
             try:
                 answer, llm_grounded, anchors = self._answer_reasoning(
                     notebook_id, question, top_hits, elements, history)
