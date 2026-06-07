@@ -36,6 +36,13 @@ class Settings(BaseSettings):
         env="OPENAI_COMPAT_MAX_RETRIES",
     )
 
+    # 推理搜索 (mode=reasoning) 专用 LLM 端点（可选）。三项全部非空时推理路径改用此
+    # 模型，与全局 OPENAI_COMPAT_* 解耦；任一为空 → 整体回退全局。超时/重试沿用
+    # reasoning_timeout_seconds / reasoning_max_retries，此处不另设。
+    reasoning_llm_base_url: str = Field("", env="REASONING_LLM_BASE_URL")
+    reasoning_llm_api_key: str = Field("", env="REASONING_LLM_API_KEY")
+    reasoning_llm_model: str = Field("", env="REASONING_LLM_MODEL")
+
     embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""(off) | dashscope
     embed_model: str = Field("", env="EMBED_MODEL")
     embed_base_url: str = Field("", env="EMBED_BASE_URL")
@@ -149,6 +156,14 @@ class Settings(BaseSettings):
             self.openai_compat_base_url
             and self.openai_compat_api_key
             and self.openai_compat_model
+        )
+
+    @property
+    def reasoning_llm_configured(self) -> bool:
+        return bool(
+            self.reasoning_llm_base_url
+            and self.reasoning_llm_api_key
+            and self.reasoning_llm_model
         )
 
     @property
