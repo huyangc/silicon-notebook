@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
+    # 抽取自校验: 默认关闭; 开启后每个窗口抽取完再做一次 LLM refine pass 剔除幻觉节点。
+    kg_refine_enabled: bool = Field(False, env="KG_REFINE_ENABLED")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。

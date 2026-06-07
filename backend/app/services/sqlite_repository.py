@@ -1230,6 +1230,7 @@ class SQLiteRepository:
                 n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
                 whitelist=whitelist,
+                refine=self.settings.kg_refine_enabled,
             )
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:

@@ -9,6 +9,7 @@ from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
+from app.services.prompts import refine_prompt, REFINE_SCHEMA_HINT
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
 EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
@@ -107,8 +108,42 @@ def _parse_steps(elements: List[SourceElementQ], raw_steps: Any) -> List[Step]:
     return steps
 
 
+def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
+                 source_title: str = "") -> List[Node]:
+    """Self-refinement pass: ask the LLM to drop nodes not supported by the source
+    elements. No-op when there are no nodes or the client is unconfigured (so the
+    deterministic / test path never calls the network). On any parse/transport
+    soft-failure, returns nodes unchanged (only hard transport errors propagate)."""
+    if not nodes or not getattr(client, "configured", False):
+        return nodes
+    records_block = "\n".join(f"[{i}] {n.type}: {n.name}" for i, n in enumerate(nodes))
+    elements_block = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
+    try:
+        raw = client.chat_json(
+            [{"role": "user",
+              "content": refine_prompt(source_title, records_block, elements_block)}],
+            REFINE_SCHEMA_HINT,
+        )
+        data = safe_json(raw)
+    except (APIConnectionError, APITimeoutError):
+        raise
+    except Exception:
+        return nodes
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return nodes
+    drop = set()
+    for it in items:
+        if isinstance(it, dict) and isinstance(it.get("index"), int) \
+                and it.get("keep") is False:
+            drop.add(it["index"])
+    if not drop:
+        return nodes
+    return [n for i, n in enumerate(nodes) if i not in drop]
+
+
 def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
-                   doc_type: str, win_idx: int = 0) -> Tuple[List[Node], List[Edge]]:
+                   doc_type: str, win_idx: int = 0, refine: bool = False) -> Tuple[List[Node], List[Edge]]:
     if not elements:
         return [], []
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
@@ -139,6 +174,11 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         nodes.append(node)
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
+    if refine and nodes:
+        kept = refine_nodes(client, elements, nodes, section_path)
+        kept_ids = {n.id for n in kept}
+        nodes = kept
+        by_local = {lid: nid for lid, nid in by_local.items() if nid in kept_ids}
     edges: List[Edge] = []
     for it in (data.get("edges") or []):
         if not isinstance(it, dict) or it.get("type") not in EDGE_TYPES:
