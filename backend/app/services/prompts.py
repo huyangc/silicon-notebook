@@ -265,3 +265,33 @@ def community_report_prompt(members_block: str, relations_block: str) -> str:
         "'title','summary','findings'.\n\n"
         f"Members:\n{members_block}\n\nInternal relationships:\n{relations_block}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Global map-reduce 问答 (R4, GraphRAG-style)
+# ---------------------------------------------------------------------------
+
+GLOBAL_MAP_SCHEMA_HINT = '{"points":[{"description":"","score":0}]}'
+
+
+def global_map_prompt(question: str, report_block: str) -> str:
+    return (
+        "You extract, from ONE community report, the points relevant to the user "
+        "question, each with an importance score 0-100 (0 = irrelevant). If the "
+        "report is irrelevant, return an empty points list. Be faithful to the "
+        "report. Return JSON only with 'points':[{'description','score'}].\n\n"
+        f"Question: {question}\n\nCommunity report:\n{report_block}"
+    )
+
+
+GLOBAL_REDUCE_SCHEMA_HINT = '{"answer":"","grounded":true}'
+
+
+def global_reduce_prompt(question: str, points_block: str) -> str:
+    return (
+        "You answer the user question by synthesizing the key points below "
+        "(gathered from community reports, sorted by importance). Be concrete and "
+        "structured. If the points do not cover the question, say so and set "
+        "grounded=false. Return JSON only with 'answer' and 'grounded'.\n\n"
+        f"Question: {question}\n\nKey points:\n{points_block}"
+    )

@@ -3155,6 +3155,8 @@ class SQLiteRepository:
         a conclusion via the LLM (or deterministic fallback)."""
         if getattr(payload, "mode", "fast") == "reasoning":
             return self.ask_reasoning(notebook_id, payload)
+        if getattr(payload, "mode", "fast") == "global":
+            return self._ask_global(notebook_id, payload)
         import time
         ask_started = time.perf_counter()
 
@@ -3392,6 +3394,117 @@ class SQLiteRepository:
             notebook_id, question, response, conversation_id
         )
         ask_stage("total", ask_started)
+        return response
+
+    # ------------------------------------------------------------------
+    # Global map-reduce 问答 (R4, GraphRAG-style)
+    # ------------------------------------------------------------------
+
+    def _ask_global(self, notebook_id: str, payload) -> "AskResponse":
+        """GraphRAG-style global map-reduce over community reports."""
+        question = payload.question.strip()
+
+        # Resolve / create conversation (same as fast path).
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question
+            )
+
+        def _fallback(msg: str) -> AskResponse:
+            resp = AskResponse(
+                answer_id="",
+                conclusion=msg,
+                answer=msg,
+                grounded=False,
+                evidence_level="inferred",
+                anchors=[],
+                related_knowledge=[],
+                citations=[],
+                llm_mode="global-fallback",
+                conversation_id=conversation_id,
+                retrieval_query=question,
+                top_relevance=0.0,
+            )
+            resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
+            return resp
+
+        reports = self.get_community_reports(notebook_id)[: self.settings.global_max_communities]
+        if not reports or not getattr(self.llm_client, "configured", False):
+            return _fallback(
+                "No community reports available. Run community "
+                "summarization (kg_community_summary_enabled) or use fast mode."
+            )
+
+        from app.services.prompts import (
+            global_map_prompt, GLOBAL_MAP_SCHEMA_HINT,
+            global_reduce_prompt, GLOBAL_REDUCE_SCHEMA_HINT,
+        )
+
+        scored = []
+        for rep in reports:
+            block = (
+                f"Title: {rep.get('title', '')}\nSummary: {rep.get('summary', '')}\n"
+                "Findings:\n" + "\n".join(f"- {f}" for f in (rep.get("findings") or []))
+            )
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user", "content": global_map_prompt(question, block)}],
+                    GLOBAL_MAP_SCHEMA_HINT,
+                    timeout=self.settings.reasoning_timeout_seconds,
+                    max_retries=self.settings.reasoning_max_retries,
+                )
+                pts = json.loads(raw).get("points") or []
+            except Exception:
+                continue
+            for p in pts:
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    sc = float(p.get("score", 0))
+                except (TypeError, ValueError):
+                    sc = 0.0
+                desc = str(p.get("description", "")).strip()
+                if desc and sc > 0:
+                    scored.append((sc, desc))
+
+        if not scored:
+            return _fallback("No relevant community information was found for this question.")
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        points_block = "\n".join(f"- ({int(s)}) {d}" for s, d in scored[:50])
+
+        try:
+            raw = self.llm_client.chat_json(
+                [{"role": "user", "content": global_reduce_prompt(question, points_block)}],
+                GLOBAL_REDUCE_SCHEMA_HINT,
+                timeout=self.settings.reasoning_timeout_seconds,
+                max_retries=self.settings.reasoning_max_retries,
+            )
+            data = json.loads(raw)
+            answer = str(data.get("answer", "")).strip()
+            grounded = bool(data.get("grounded", True))
+        except Exception:
+            return _fallback("Failed to synthesize a global answer.")
+
+        if not answer:
+            return _fallback("No global answer could be produced.")
+
+        evidence_level = "overview" if grounded else "inferred"
+        response = AskResponse(
+            answer_id="",
+            conclusion=answer,
+            answer=answer,
+            grounded=grounded,
+            evidence_level=evidence_level,
+            anchors=[],
+            related_knowledge=[],
+            citations=[],
+            llm_mode="global" if grounded else "global-ungrounded",
+            conversation_id=conversation_id,
+            retrieval_query=question,
+            top_relevance=0.0,
+        )
+        response.answer_id = self._save_answer(notebook_id, question, response, conversation_id)
         return response
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
