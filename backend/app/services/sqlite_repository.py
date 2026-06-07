@@ -3735,7 +3735,9 @@ class SQLiteRepository:
                     EVIDENCE_REFINE_SCHEMA_HINT,
                     timeout=self.settings.reasoning_timeout_seconds,
                     max_retries=self.settings.reasoning_max_retries)
-                rel = json.loads(raw_refine).get("relevant") or []
+                rel = json.loads(raw_refine).get("relevant")
+                if not isinstance(rel, list):   # guard: LLM may return a str/None
+                    rel = []
                 rel = [str(x).strip() for x in rel if str(x).strip()]
             except Exception:
                 rel = []
