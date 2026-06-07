@@ -109,7 +109,7 @@ def _parse_steps(elements: List[SourceElementQ], raw_steps: Any) -> List[Step]:
 
 
 def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
-                 source_title: str = "") -> List[Node]:
+                 section_path: str = "") -> List[Node]:
     """Self-refinement pass: ask the LLM to drop nodes not supported by the source
     elements. No-op when there are no nodes or the client is unconfigured (so the
     deterministic / test path never calls the network). On any parse/transport
@@ -121,7 +121,7 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
     try:
         raw = client.chat_json(
             [{"role": "user",
-              "content": refine_prompt(source_title, records_block, elements_block)}],
+              "content": refine_prompt(section_path, records_block, elements_block)}],
             REFINE_SCHEMA_HINT,
         )
         data = safe_json(raw)
@@ -175,7 +175,13 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     if refine and nodes:
-        kept = refine_nodes(client, elements, nodes, section_path)
+        # refine is best-effort: a failure (incl. hard transport errors that
+        # refine_nodes re-raises) must NOT discard a successfully extracted
+        # window — degrade to unfiltered nodes instead.
+        try:
+            kept = refine_nodes(client, elements, nodes, section_path)
+        except Exception:
+            kept = nodes
         kept_ids = {n.id for n in kept}
         nodes = kept
         by_local = {lid: nid for lid, nid in by_local.items() if nid in kept_ids}

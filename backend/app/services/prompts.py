@@ -34,24 +34,19 @@ def notebook_meta_prompt(sources_block: str) -> str:
     )
 
 
-REFINE_SCHEMA_HINT = (
-    '{"items":[{"index":0,"keep":true,"quoted_span":"","reason":""}]}'
-)
+REFINE_SCHEMA_HINT = '{"items":[{"index":0,"keep":true}]}'
 
 
-def refine_prompt(source_title: str, records_block: str, elements_block: str) -> str:
+def refine_prompt(section_path: str, records_block: str, elements_block: str) -> str:
     return (
         "You verify extracted knowledge items against their source document "
-        "(self-refinement pass). For EACH numbered item decide:\n"
+        "(self-refinement pass). For EACH numbered item decide keep=true or "
+        "keep=false:\n"
         "- keep=false if the item is NOT supported by the source text "
         "(hallucinated), is too vague to be useful, or merely restates a "
         "heading; otherwise keep=true.\n"
-        "- If a more faithful VERBATIM span exists in the source for a kept "
-        "item, return it in quoted_span (copied exactly from the source); "
-        "otherwise leave quoted_span empty.\n"
-        "- reason: a short justification.\n"
         "Return JSON only, one entry per input index.\n\n"
-        f"Source title: {source_title}\n\n"
+        f"Source section: {section_path}\n\n"
         f"Extracted items:\n{records_block}\n\n"
         f"Source elements (ground truth):\n{elements_block}"
     )
