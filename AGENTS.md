@@ -88,9 +88,10 @@ Inside a notebook:
   - Provide multi-select type filters for dense graphs. Selecting a node from either the canvas or the overview should focus/highlight that node and update the selected-node relation/source details.
   - Keep node type color/shape marks consistent between the canvas, node overview, selected-node detail, and related-node sections. In the detail panel, label evidence/source excerpts as `出处`, hide raw `section_path`, and show concept-mounted objects as `相关节点` grouped by type.
   - The side panel should provide a type-grouped node overview (Concept, Claim, Formula, Procedure, plus future types) and selected-node relation/evidence details.
-- Right column: Studio.
-  - Keep Mind Map, New Article, and Infographic entries.
-  - Article research drives the Mind Map / Infographic output; created articles must be listed with delete actions, and the lower Studio output area stays for generated outputs.
+- Do not show a fixed right-column Studio sidebar in the primary notebook workspace while its tools are still early.
+  - Keep Ask / Knowledge as the main workspace surface and let the Ask panel use the freed width.
+  - Studio-style actions (Mind Map, New Article, Infographic, derived-rule review) should live in the top analysis toolbar or dialogs until they are mature enough for a dedicated workspace surface.
+  - Article research drives the Mind Map / Infographic output; created articles must still be listed with delete actions wherever the article surface is exposed, and generated outputs should be visible in dialogs or a future dedicated surface, not hidden state.
 - The candidate Review Queue was removed: the KG extractor writes approved knowledge objects directly (no candidate staging). Knowledge governance is dedupe/merge over the objects in the Knowledge browser.
 
 ## MVP Scope
@@ -257,7 +258,7 @@ This checks:
 - KG extraction boundary (`no-llm` offline), explicit KG/rule knowledge storage, delete → ask → feedback (with comment) → conversation APIs → article research smoke path, plus retrieval scoring (keyword/vector, CJK tokenization, hybrid fusion, scenario boost, payload-level embeddings), derived-rule persistence, and stale-source knowledge invalidation assertions. Fresh DB must still have no demo notebook.
 - Logging: LLM interaction log, generic event log (parseable/disable/never-raise), and pipeline stage events + `error_message` regression.
 - Source summary fallback and notebook-internal search.
-- Next.js TypeScript when `frontend/node_modules` exists.
+- Frontend `node --test app/*.test.mjs` and Next.js TypeScript when `frontend/node_modules` exists.
 
 For local API checks, use:
 

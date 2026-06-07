@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Copy, Edit3, ExternalLink, FileText, MessageSquareText, PanelRightClose, Plus, Search, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, MessageSquareText, Network, PanelRightClose, Plus, Search, Settings, Share2, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -306,6 +306,7 @@ type StudioOutput = {
 type InfoModal = {
   title: string;
   message: string;
+  sections?: Array<[string, string[]]>;
   actions: Array<{
     label: string;
     primary?: boolean;
@@ -758,7 +759,6 @@ export default function Home() {
   const [pendingQuestion, setPendingQuestion] = useState("");
   const [pendingReasoning, setPendingReasoning] = useState(false);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
-  const [studioOutput, setStudioOutput] = useState<StudioOutput | null>(null);
   const [filter, setFilter] = useState("mine");
   const [viewMode, setViewMode] = useState("grid");
   const [sortMode, setSortMode] = useState("recent");
@@ -1239,7 +1239,6 @@ export default function Home() {
     setConversationId(null);
     setAsking(false);
     setPendingQuestion("");
-    setStudioOutput(null);
     setFeedbackSent({});
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
@@ -1476,7 +1475,6 @@ export default function Home() {
     if (!currentNotebookId) return;
     await api<null>(`/articles/${articleId}`, { method: "DELETE" });
     setArticles((previous) => previous.filter((article) => article.id !== articleId));
-    setStudioOutput(null);
     await loadNotebookCollection();
     const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
     setCurrentNotebook(refreshed);
@@ -1858,11 +1856,20 @@ export default function Home() {
     }
   }
 
+  function showStudioOutput(output: StudioOutput) {
+    setInfoModal({
+      title: output.title,
+      message: "生成结果基于当前 notebook 的来源与文章研究，暂以弹窗形式展示。",
+      sections: output.sections,
+      actions: [{ label: "关闭", primary: true, action: () => {} }]
+    });
+  }
+
   async function runStudio(kind: "mindmap" | "infographic") {
     if (!currentNotebookId) return;
     const notebookArticles = articles.length > 0 ? articles : await loadArticles(currentNotebookId);
     if (notebookArticles.length === 0) {
-      setStudioOutput({
+      showStudioOutput({
         title: kind === "mindmap" ? "思维导图" : "信息图",
         sections: [
           ["暂无文章", ["该 notebook 还没有文章。请在 Article Studio 添加文章后再生成研究简报。"]],
@@ -1879,7 +1886,7 @@ export default function Home() {
     const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
     setCurrentNotebook(refreshed);
     if (kind === "mindmap") {
-      setStudioOutput({
+      showStudioOutput({
         title: "思维导图",
         sections: [
           ["中心主题", [brief.article.title]],
@@ -1890,7 +1897,7 @@ export default function Home() {
       });
       return;
     }
-    setStudioOutput({
+    showStudioOutput({
       title: "信息图",
       sections: [
         ["核心贡献", [brief.core_contribution]],
@@ -2062,30 +2069,55 @@ export default function Home() {
                 <p>{currentNotebook.purpose || "This notebook has not defined a purpose yet."}</p>
               </div>
             </div>
-            <div className="workspace-actions">
-              <button className="new-pill" onClick={() => openCreate().catch(reportError)}>＋ 创建笔记本</button>
-              <button className="sort-button" onClick={() => setInfoModal({
-                title: "分析",
-                message: "第一版提供本机 beta 的分析入口：可以从当前来源生成 Studio 输出，或直接跑一次 evidence-grounded 回答。",
-                actions: [
-                  { label: "运行思维导图", primary: true, action: () => runStudio("mindmap").catch(reportError) },
-                  { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
-                  { label: "运行对话分析", action: () => runAsk().catch(reportError) }
-                ]
-              })}>分析</button>
-              <button className="sort-button" onClick={() => openAnalytics().catch(reportError)}>看板</button>
-              <button className="sort-button" onClick={openSchemas}>Schema</button>
-              <button className="sort-button" onClick={() => openKgView()}>知识图谱</button>
-              <button className="sort-button" onClick={() => setInfoModal({
-                title: "分享",
-                message: "当前是本机单用户 beta，分享会生成本地 notebook 链接；多人权限后续再接入。",
-                actions: [{ label: "复制本机链接", primary: true, action: () => navigator.clipboard?.writeText(window.location.href).then(() => setToast("本机链接已复制")).catch(() => setStatusText(window.location.href)) }]
-              })}>分享</button>
-              <button className="sort-button" onClick={() => setInfoModal({
-                title: "设置",
-                message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与 notebook 编辑入口。`,
-                actions: [{ label: "编辑当前 notebook", primary: true, action: () => setEditingNotebook(currentNotebook) }]
-              })}>设置</button>
+            <div className="workspace-toolbar" aria-label="Notebook actions">
+              <button className="workspace-primary-action" onClick={() => openCreate().catch(reportError)}>
+                <Plus size={18} strokeWidth={2.8} />
+                <span>创建笔记本</span>
+              </button>
+              <div className="workspace-nav-group">
+                <button className="workspace-nav-button" onClick={() => setInfoModal({
+                  title: "分析",
+                  message: "从当前 notebook 的来源、文章研究和问答上下文进入分析。Studio 侧栏已收起，输出会在弹窗中呈现。",
+                  actions: [
+                    { label: "运行当前提问", primary: true, action: () => runAsk().catch(reportError) },
+                    { label: "运行思维导图", action: () => runStudio("mindmap").catch(reportError) },
+                    { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
+                    { label: "新建文章", action: () => setArticleModalOpen(true) },
+                    { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) }
+                  ]
+                })}>
+                  <BarChart3 size={17} />
+                  <span>分析</span>
+                </button>
+                <button className="workspace-nav-button" onClick={() => openAnalytics().catch(reportError)}>
+                  <LayoutDashboard size={17} />
+                  <span>看板</span>
+                </button>
+                <button className="workspace-nav-button" onClick={openSchemas}>
+                  <Database size={17} />
+                  <span>Schema</span>
+                </button>
+                <button className="workspace-nav-button" onClick={() => openKgView()}>
+                  <Network size={17} />
+                  <span>知识图谱</span>
+                </button>
+                <button className="workspace-nav-button" onClick={() => setInfoModal({
+                  title: "分享",
+                  message: "当前是本机单用户 beta，分享会生成本地 notebook 链接；多人权限后续再接入。",
+                  actions: [{ label: "复制本机链接", primary: true, action: () => navigator.clipboard?.writeText(window.location.href).then(() => setToast("本机链接已复制")).catch(() => setStatusText(window.location.href)) }]
+                })}>
+                  <Share2 size={17} />
+                  <span>分享</span>
+                </button>
+                <button className="workspace-nav-button" onClick={() => setInfoModal({
+                  title: "设置",
+                  message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与 notebook 编辑入口。`,
+                  actions: [{ label: "编辑当前 notebook", primary: true, action: () => setEditingNotebook(currentNotebook) }]
+                })}>
+                  <Settings size={17} />
+                  <span>设置</span>
+                </button>
+              </div>
             </div>
           </section>
 
@@ -2316,58 +2348,6 @@ export default function Home() {
               )}
             </section>
 
-            <aside className="workspace-panel studio-panel">
-              <div className="workspace-panel-header">
-                <h2>Studio</h2>
-                <span className="panel-count">输出</span>
-              </div>
-              <div className="studio-body">
-                <div className="studio-actions">
-                  <button className="studio-tile mindmap" onClick={() => runStudio("mindmap").catch(reportError)}><span>◇</span><strong>思维导图</strong></button>
-                  <button className="studio-tile slides" onClick={() => setArticleModalOpen(true)}><span>＋</span><strong>新建文章</strong></button>
-                  <button className="studio-tile infographic" onClick={() => runStudio("infographic").catch(reportError)}><span>▤</span><strong>信息图</strong></button>
-                  <button className="studio-tile mindmap" onClick={() => openDerivedRules().catch(reportError)}><span>⚖</span><strong>派生规则候选</strong></button>
-                </div>
-                {articles.length > 0 && (
-                  <div className="article-stack">
-                    <div className="article-stack-header">
-                      <span>文章</span>
-                      <span>{articles.length} 篇</span>
-                    </div>
-                    {articles.map((article) => (
-                      <article className="article-row" key={article.id}>
-                        <div className="article-row-main">
-                          <strong title={article.title}>{article.title}</strong>
-                          <span>{article.status} · {article.summary}</span>
-                        </div>
-                        <button className="article-delete-button" title="删除文章" onClick={() => confirmDeleteArticle(article)}>
-                          <Trash2 size={15} />
-                        </button>
-                      </article>
-                    ))}
-                  </div>
-                )}
-                <div className="studio-output">
-                  {!studioOutput ? (
-                    <div className="studio-empty">
-                      <span>✦</span>
-                      <strong>Studio 输出将保存在此处。</strong>
-                      <p>添加来源后，可生成思维导图和信息图；演示文稿当前不可用。</p>
-                    </div>
-                  ) : (
-                    <div className="stack">
-                      <article className="item"><h3>{studioOutput.title}</h3><p>Generated from the current notebook sources.</p></article>
-                      {studioOutput.sections.map(([title, values]) => (
-                        <article className="item" key={title}>
-                          <h3>{title}</h3>
-                          <p>{values.join(" / ")}</p>
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </aside>
           </section>
         </main>
       )}
@@ -2517,6 +2497,16 @@ export default function Home() {
               <button className="icon-button" onClick={() => setInfoModal(null)} title="Close">×</button>
             </div>
             <div className="info-body">
+              {infoModal.sections && (
+                <div className="info-section-stack">
+                  {infoModal.sections.map(([title, values]) => (
+                    <article className="info-section" key={title}>
+                      <strong>{title}</strong>
+                      <p>{values.length > 0 ? values.join(" / ") : "暂无数据"}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
               {infoModal.actions.map((action) => (
                 <button
                   key={action.label}

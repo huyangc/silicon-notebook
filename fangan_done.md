@@ -61,7 +61,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 5. Notebook 工作区界面
 
-- 三栏工作区：左 Source Stack / 中 Knowhow 工具 / 右 Studio。
+- 两列工作区：左 Source Stack / 右侧主 Ask + Knowledge 工作区；固定 Studio 右栏已移除，主问答面板使用释放出的宽度。
 - 左上角 notebook 名称可编辑保存；左栏显示来源数量、仅显示用户导入文件；网络来源检索保留为 disabled affordance。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
@@ -74,7 +74,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
 - **文章创建入口**：真实文章创建 modal，移除写死的 `ARTICLE_ID`、`DEMO_NOTEBOOK_ID` 常量。
 - **source detail 结构化渲染**：`formula` 元素用 KaTeX 排版（失败回退原始 LaTeX）、`table` 元素用 sanitized `table_html` 渲染、其余文本 + element_type 徽标。
-- Studio 输出区保留思维导图 / 新建文章 / 信息图入口。
+- Studio 类能力从顶部「分析」工具栏进入：可运行当前提问、思维导图、信息图、新建文章、打开派生规则候选；思维导图 / 信息图输出以弹窗 sections 展示，不再占用固定右栏。
 
 ## 6. Source 上传与管理（异步闭环）
 
@@ -200,7 +200,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 ## 19. 历史新增（dev 分支，方案 §6/§7/§16，部分已被 KG-native 主线替代）
 
 - **规则解释旧方案（§6.10）**：早期实现过 rule card 的 explain 方向；当前主线不再暴露 `/rules/{rule_id}/explain` 旧路由，改由通用 knowledge 详情与全屏 KG 详情展示 `出处`、相关节点和关系。
-- **Derived Rule Candidate 审核队列（§7.5）**：`GET /notebooks/{id}/derived-rules` + `POST /derived-rules/{id}/approve|reject`；approve 携 evidence 落入正式 `knowledge_objects`(rule)；前端 Studio「派生规则候选」弹窗审核。
+- **Derived Rule Candidate 审核队列（§7.5）**：`GET /notebooks/{id}/derived-rules` + `POST /derived-rules/{id}/approve|reject`；approve 携 evidence 落入正式 `knowledge_objects`(rule)；前端顶部「分析」菜单进入「派生规则候选」弹窗审核。
 - **创建富字段 + 模板（§6.1/§6.2）**：`NotebookCreate/Update/Summary` 增 `target_users/expected_questions/source_types/taxonomy/access_scope`（notebooks 表迁移）；6 套模板 `GET /notebook-templates`，创建按模板预填；前端集合页「从模板…」选择器 + 编辑弹窗富字段。
 - **CSV / Excel 解析（§6.3）**：`parse_csv`(stdlib) + `parse_xlsx`(openpyxl) → `table_row` 元素；上传校验/accept 扩 `.csv/.xlsx/.xlsm`。
 - **质量/分析看板（§16）**：`GET /notebooks/{id}/analytics`（有用率、低分提问=知识缺口、候选状态分布、知识覆盖、来源状态）；前端「看板」弹窗。
