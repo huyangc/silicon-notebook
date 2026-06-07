@@ -3212,7 +3212,7 @@ class SQLiteRepository:
             remaining = max(0, budget - used)
             def_cap = max(0, min(300, remaining))   # per-line cap shrinks as budget fills
             extra = f" — def: {definition[:def_cap]}" if (definition and def_cap) else ""
-            if ctx.get("steps"):
+            if ctx.get("steps") and def_cap:   # steps share the per-line budget gate
                 extra += "; steps: " + " -> ".join(
                     s.get("name", "") for s in ctx["steps"][:8]
                 )

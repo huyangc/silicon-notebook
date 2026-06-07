@@ -34,7 +34,7 @@ def test_answer_context_respects_char_budget(repo, monkeypatch):
     repo.settings.answer_context_budget_chars = 1000
     repo.settings.answer_context_min_items = 2
     block, id_map = repo._answer_context(nb.id, [_hit(i) for i in range(5)])
-    assert len(block) <= 1000 + 5000      # bounded: at most one over-budget line
+    assert len(block) <= 1000 + 500       # tight bound: per-line def cap is 300
     assert len(id_map) >= 2               # min_items honored
     assert len(id_map) < 5                # not all 5 packed in
 
