@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, Edit3, ExternalLink, FileText, MessageSquareText, PanelRightClose, Plus, Search, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, Edit3, ExternalLink, FileText, MessageSquareText, PanelRightClose, Plus, Search, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -14,6 +14,7 @@ import {
   type MarkdownBlock,
 } from "./answer-formatting";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
+import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -470,7 +471,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 async function readAskStream<TResponse>(
   path: string,
   payload: unknown,
-  onProgress: (step: ReasoningTraceStep) => void,
+  onProgress: (step: ReasoningTraceStep) => void | Promise<void>,
 ): Promise<TResponse> {
   const started = performance.now();
   const response = await fetch(`${API_BASE}${path}`, {
@@ -501,10 +502,19 @@ async function readAskStream<TResponse>(
   let buffer = "";
   let finalResponse: TResponse | null = null;
 
-  const consumeLine = (line: string) => {
+  const yieldToPaint = () => new Promise<void>((resolve) => {
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      resolve();
+      return;
+    }
+    window.requestAnimationFrame(() => resolve());
+  });
+
+  const consumeLine = async (line: string) => {
     const event = JSON.parse(line) as AskStreamEvent<TResponse>;
     if (event.event === "progress") {
-      onProgress(event.step);
+      await onProgress(event.step);
+      await yieldToPaint();
     } else if (event.event === "final") {
       finalResponse = event.response;
     } else if (event.event === "error") {
@@ -518,11 +528,13 @@ async function readAskStream<TResponse>(
     buffer += decoder.decode(value, { stream: true });
     const parsed = takeNdjsonLines(buffer);
     buffer = parsed.remainder;
-    parsed.lines.forEach(consumeLine);
+    for (const line of parsed.lines) {
+      await consumeLine(line);
+    }
   }
   buffer += decoder.decode();
   if (buffer.trim()) {
-    consumeLine(buffer.trim());
+    await consumeLine(buffer.trim());
   }
   if (!finalResponse) {
     throw new Error("Streaming response ended without a final answer");
@@ -3570,51 +3582,38 @@ function SelectedReferenceDetail({
   );
 }
 
-const TRACE_STEP_LABELS: Record<string, string> = {
-  start: "启动",
-  plan: "规划",
-  retrieve: "检索",
-  reflect: "反思",
-  expand: "扩展",
-  fallback: "原文",
-  answer: "合成",
-  skip: "跳过",
-};
-
-function traceStepDetail(step: ReasoningTraceStep): string {
-  const detail = step.detail ?? {};
-  if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
-    return `${detail.sub_queries.length} 个子查询`;
-  }
-  if (typeof detail.count === "number") return `${detail.count} 个候选`;
-  if (typeof detail.found === "number") return `新增 ${detail.found}`;
-  if (typeof detail.next_action === "string") return detail.next_action;
-  if (typeof detail.kg === "number" || typeof detail.elements === "number") {
-    return `${Number(detail.kg ?? 0)} 个 KG / ${Number(detail.elements ?? 0)} 段原文`;
-  }
-  return "";
-}
-
 function ReasoningTracePanel({ steps, live = false }: { steps: ReasoningTraceStep[]; live?: boolean }) {
-  const latest = steps[steps.length - 1];
+  const [expanded, setExpanded] = useState(false);
+  const summary = getReasoningTraceSummary(steps, live);
   return (
-    <div className={`reasoning-trace-panel ${live ? "live" : ""}`}>
-      <div className="reasoning-trace-head">
+    <div className={`reasoning-trace-panel ${live ? "live" : ""} ${expanded ? "expanded" : "collapsed"}`}>
+      <button
+        aria-expanded={expanded}
+        className="reasoning-trace-summary"
+        onClick={() => setExpanded((value) => !value)}
+        type="button"
+      >
         <Sparkles size={15} />
-        <span>{live ? "Agent 推理中" : "Agent 推理轨迹"}</span>
-        {latest && <small>{latest.summary}</small>}
-      </div>
-      <ol className="reasoning-trace-list">
-        {steps.length === 0 ? (
-          <li className="reasoning-trace-empty">等待后端事件…</li>
-        ) : steps.map((step, index) => (
-          <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
-            <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
-            <strong>{step.summary}</strong>
-            {traceStepDetail(step) && <small>{traceStepDetail(step)}</small>}
-          </li>
-        ))}
-      </ol>
+        <span className="reasoning-trace-title">{summary.title}</span>
+        <span className={`reasoning-trace-chip ${summary.latestLabel ? "" : "empty"}`}>{summary.latestLabel || "空"}</span>
+        <strong>{summary.latestSummary}</strong>
+        <small>{summary.latestDetail}</small>
+        <span className="reasoning-trace-count">{summary.stepCountLabel}</span>
+        {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+      </button>
+      {expanded && (
+        <ol className="reasoning-trace-list">
+          {steps.length === 0 ? (
+            <li className="reasoning-trace-empty">等待后端事件…</li>
+          ) : steps.map((step, index) => (
+            <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
+              <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
+              <strong>{step.summary}</strong>
+              {getTraceStepDetail(step) && <small>{getTraceStepDetail(step)}</small>}
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   );
 }
