@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
     retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+    # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
+    retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
+    retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
     rerank_enabled: bool = Field(False, env="RERANK_ENABLED")
     rerank_candidates: int = Field(20, env="RERANK_CANDIDATES")
     # 候选池 LLM 重排的专用短超时(秒): 廉价重排须快速降级,不沿用更长的全局/推理超时。

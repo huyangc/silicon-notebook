@@ -353,6 +353,62 @@ def score_knowledge(
     return scored
 
 
+def bm25_scores(query: str, docs: Sequence[tuple], k1: float = 1.5,
+                b: float = 0.75) -> Dict[str, float]:
+    """BM25 Okapi over (id, text) docs, using the CJK-aware `_tokens` tokenizer.
+
+    IDF is computed over THIS doc set (a notebook's objects). Returns {id: score}
+    for docs with score > 0 (query-term miss -> absent). Stopwords dropped from
+    the query basis (same as keyword_score).
+    """
+    q_terms = [t for t in _tokens(query) if t not in _STOPWORDS]
+    if not q_terms or not docs:
+        return {}
+    doc_tokens = {did: _tokens(text) for did, text in docs}
+    n = len(doc_tokens)
+    total_len = sum(len(t) for t in doc_tokens.values())
+    avgdl = (total_len / n) if n else 1.0
+    if avgdl <= 0:
+        avgdl = 1.0
+    df: Dict[str, int] = {}
+    for toks in doc_tokens.values():
+        for term in set(toks):
+            df[term] = df.get(term, 0) + 1
+    qset = set(q_terms)
+    idf = {
+        t: math.log(1 + (n - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5))
+        for t in qset
+    }
+    scores: Dict[str, float] = {}
+    for did, toks in doc_tokens.items():
+        if not toks:
+            continue
+        dl = len(toks)
+        tf: Dict[str, int] = {}
+        for t in toks:
+            if t in qset:
+                tf[t] = tf.get(t, 0) + 1
+        s = 0.0
+        for t, f in tf.items():
+            s += idf.get(t, 0.0) * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
+        if s > 0:
+            scores[did] = s
+    return scores
+
+
+def rrf_fuse(rankings: Sequence[Dict[str, float]], k: int = 60) -> Dict[str, float]:
+    """Reciprocal Rank Fusion. Each ranking maps id->score (higher=better).
+
+    Returns id->fused score = sum over rankings of 1/(k + rank), rank from 1.
+    """
+    fused: Dict[str, float] = {}
+    for ranking in rankings:
+        ordered = sorted(ranking.items(), key=lambda kv: kv[1], reverse=True)
+        for rank, (did, _s) in enumerate(ordered, start=1):
+            fused[did] = fused.get(did, 0.0) + 1.0 / (k + rank)
+    return fused
+
+
 def _payload_text(payload: Dict[str, object]) -> str:
     parts: List[str] = []
     for key, value in payload.items():

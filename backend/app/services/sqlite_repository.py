@@ -98,9 +98,12 @@ from app.services.retrieval import (
     RetrievedElement,
     W_KEYWORD,
     W_SEMANTIC,
+    _TYPE_WEIGHT,
     _payload_text,
+    bm25_scores,
     cosine,
     keyword_score,
+    rrf_fuse,
     score_knowledge,
     score_elements,
     type_weight,
@@ -2989,17 +2992,20 @@ class SQLiteRepository:
         # Score each KG type, pool, then rank by relevance * intent-aware type
         # weight (process/flow questions stop burying procedures).
         _t = time.perf_counter()
-        scored_all: List[RetrievedKnowledge] = []
-        for t in _KG_TYPES:
-            objs = kg_objs[t]
-            if not objs:
-                continue
-            scored_all.extend(
-                score_knowledge(
-                    query, objs, t, query_vector, None, None,
-                    element_sims=element_sims, knowledge_sims=knowledge_sims,
+        if self.settings.retrieval_rrf_enabled:
+            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims)
+        else:
+            scored_all: List[RetrievedKnowledge] = []
+            for t in _KG_TYPES:
+                objs = kg_objs[t]
+                if not objs:
+                    continue
+                scored_all.extend(
+                    score_knowledge(
+                        query, objs, t, query_vector, None, None,
+                        element_sims=element_sims, knowledge_sims=knowledge_sims,
+                    )
                 )
-            )
         rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
         scored_all.sort(key=rank_key, reverse=True)
         top_n = self.settings.retrieval_top_n
@@ -3184,6 +3190,66 @@ class SQLiteRepository:
         not populated for the notebook (no cluster row for this object), fall
         back to `object_id` so dedup degrades gracefully (no merge, no crash)."""
         return self.cluster_map(notebook_id).get(object_id, object_id)
+
+    def _rrf_scored(
+        self,
+        query: str,
+        kg_objs: Dict[str, List[dict]],
+        knowledge_sims: Optional[Dict[str, float]],
+    ) -> List[RetrievedKnowledge]:
+        """BM25 + 语义 RRF 融合排序,产出与 score_knowledge 池化同构的列表。
+
+        - BM25: 对所有类型的对象文本计算 Okapi BM25 分。
+        - 语义: 直接使用 knowledge_sims (object_id->cosine_sim)。
+        - RRF: 两组排名融合得最终分。
+        - 不套 RELEVANCE_FLOOR(RRF 分量级很小,floor 会清空结果)。
+        - score=relevance=RRF 分; weight 取 _TYPE_WEIGHT(类型权威)。
+        """
+        # 汇集所有类型对象,构建 (id, text) 列表及 id->obj 映射
+        docs: List[tuple] = []
+        id_to_obj: Dict[str, dict] = {}
+        id_to_type: Dict[str, str] = {}
+        for t in _KG_TYPES:
+            for obj in (kg_objs.get(t) or []):
+                oid = obj["id"]
+                payload = obj.get("payload", {})
+                evidence = obj.get("evidence", [])
+                ev_text = " ".join(e.quoted_span for e in evidence)
+                text = _payload_text(payload) + (" " + ev_text if ev_text else "")
+                docs.append((oid, text))
+                id_to_obj[oid] = obj
+                id_to_type[oid] = t
+
+        bm25 = bm25_scores(query, docs)
+        sims: Dict[str, float] = knowledge_sims or {}
+
+        fused = rrf_fuse([bm25, sims], k=self.settings.retrieval_rrf_k)
+
+        result: List[RetrievedKnowledge] = []
+        for oid, rrf_score in fused.items():
+            if rrf_score <= 0:
+                continue
+            obj = id_to_obj.get(oid)
+            if obj is None:
+                continue
+            object_type = id_to_type[oid]
+            weight = _TYPE_WEIGHT.get(object_type, 0.5)
+            result.append(
+                RetrievedKnowledge(
+                    object_id=oid,
+                    object_type=object_type,
+                    payload=obj.get("payload", {}),
+                    evidence=obj.get("evidence", []),
+                    score=rrf_score,
+                    relevance=rrf_score,
+                    weight=weight,
+                    status=str(obj.get("status", "approved")),
+                    owner=str(obj.get("owner", "")),
+                    last_reviewed=str(obj.get("last_reviewed", "")),
+                )
+            )
+        result.sort(key=lambda it: it.score, reverse=True)
+        return result
 
     def _rerank_hits(self, query: str, hits: List[RetrievedKnowledge]) -> List[RetrievedKnowledge]:
         """LLM relevance rerank over a candidate pool. No-op when disabled, the
