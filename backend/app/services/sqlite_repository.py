@@ -420,6 +420,16 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_source ON knowledge_relations(source_id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb ON knowledge_embeddings(notebook_id);
                 CREATE INDEX IF NOT EXISTS idx_element_embeddings_nb ON element_embeddings(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS communities (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  level INTEGER NOT NULL DEFAULT 0,
+                  member_ids TEXT NOT NULL,
+                  size INTEGER NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_communities_nb ON communities(notebook_id);
                 """
             )
             # Lightweight column migrations for pre-existing databases.
@@ -2210,6 +2220,47 @@ class SQLiteRepository:
                 (notebook_id, now, object_count, relation_count, cluster_count, now),
             )
         return cluster_count
+
+    def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
+        """Detect communities over the notebook's KG (objects linked by relations)
+        via networkx Louvain; persist them (delete + reinsert). No LLM. Returns the
+        community count. Deterministic (fixed seed)."""
+        self.get_notebook(notebook_id)
+        import networkx as nx
+        from networkx.algorithms.community import louvain_communities
+        with self._connect() as db:
+            rels = db.execute(
+                "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id=?",
+                (notebook_id,)).fetchall()
+        g = nx.Graph()
+        for r in rels:
+            s, t = r["source_object_id"], r["target_object_id"]
+            if not s or not t or s == t:
+                continue
+            if g.has_edge(s, t):
+                g[s][t]["weight"] += 1
+            else:
+                g.add_edge(s, t, weight=1)
+        comms = (louvain_communities(g, weight="weight", seed=42)
+                 if g.number_of_nodes() else [])
+        now = _now()
+        with self._write() as db:
+            db.execute("DELETE FROM communities WHERE notebook_id=? AND level=?", (notebook_id, level))
+            for comm in comms:
+                members = sorted(comm)
+                db.execute(
+                    "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (f"cm-{uuid4().hex[:10]}", notebook_id, level, json.dumps(members), len(members), now))
+        return len(comms)
+
+    def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
+        """Member-id lists of each detected community (for summaries / global search)."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT member_ids FROM communities WHERE notebook_id=? AND level=? ORDER BY size DESC, id ASC",
+                (notebook_id, level)).fetchall()
+        return [json.loads(r["member_ids"]) for r in rows]
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
