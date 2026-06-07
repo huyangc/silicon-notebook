@@ -136,6 +136,18 @@ class SQLiteRepository:
         self.db_path = self._resolve_path(settings.sqlite_path)
         self.storage_dir = self._resolve_path(settings.storage_dir)
         self.llm_client = OpenAICompatibleClient(settings)
+        # 推理搜索专用 client：配齐 REASONING_LLM_* → 独立模型实例；否则 None，
+        # 由 reasoning_llm_client 属性动态回退到 self.llm_client。
+        self._reasoning_llm_client = (
+            OpenAICompatibleClient(
+                settings,
+                base_url=settings.reasoning_llm_base_url,
+                api_key=settings.reasoning_llm_api_key,
+                model=settings.reasoning_llm_model,
+            )
+            if settings.reasoning_llm_configured
+            else None
+        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
@@ -147,6 +159,14 @@ class SQLiteRepository:
         self._write_lock = threading.RLock()
         self._migrate()
         self._seed()
+
+    @property
+    def reasoning_llm_client(self):
+        """推理路径专用 LLM client。配齐 REASONING_LLM_* → 独立模型；否则动态回退到
+        当前 self.llm_client（含测试运行时替换的 fake），未配置时与全局行为完全一致。"""
+        if self._reasoning_llm_client is not None:
+            return self._reasoning_llm_client
+        return self.llm_client
 
     def _resolve_path(self, value: str) -> Path:
         path = Path(value)
