@@ -3004,6 +3004,9 @@ class SQLiteRepository:
         top_n = self.settings.retrieval_top_n
         pool = scored_all[: max(top_n, self.settings.rerank_candidates)]
         pool = self._rerank_hits(query, pool)
+        # NOTE: for process queries, ensure_procedure_quota re-imposes the
+        # type-weighted (rank_key) order when it back-fills procedures — so rerank
+        # refines pool *membership* there, not the final order.
         if process_intent:
             top_hits: List[RetrievedKnowledge] = ensure_procedure_quota(
                 pool, top_n, self.settings.proc_min, rank_key)
@@ -3194,7 +3197,8 @@ class SQLiteRepository:
         try:
             raw = self.llm_client.chat_json(
                 [{"role": "user", "content": rerank_prompt(query, block)}],
-                RERANK_SCHEMA_HINT, max_retries=0,
+                RERANK_SCHEMA_HINT,
+                timeout=self.settings.rerank_timeout_seconds, max_retries=0,
             )
             data = json.loads(raw)
         except Exception:

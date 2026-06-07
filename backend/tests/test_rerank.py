@@ -33,6 +33,7 @@ class _RerankLLM:
 
 def test_rerank_reorders_by_llm_score(repo):
     repo.llm_client = _RerankLLM()
+    repo.settings.rerank_enabled = True
     hits = [_hit(0, 0.9), _hit(1, 0.8), _hit(2, 0.7)]   # original order by score
     out = repo._rerank_hits("q", hits)
     assert [h.object_id for h in out] == ["o2", "o1", "o0"]
@@ -44,6 +45,7 @@ def test_rerank_noop_when_unconfigured(repo):
         def chat_json(self, *a, **k):  # pragma: no cover
             raise AssertionError("must not call LLM")
     repo.llm_client = _Off()
+    repo.settings.rerank_enabled = True   # no-op must be due to unconfigured, not disabled
     hits = [_hit(0, 0.9), _hit(1, 0.8)]
     assert repo._rerank_hits("q", hits) == hits
 
@@ -61,5 +63,6 @@ def test_rerank_falls_back_on_bad_json(repo):
         def chat_json(self, messages, schema_hint, **kwargs):
             return "not json"
     repo.llm_client = _BadLLM()
+    repo.settings.rerank_enabled = True
     hits = [_hit(0, 0.9), _hit(1, 0.8)]
     assert repo._rerank_hits("q", hits) == hits   # unchanged order on parse failure
