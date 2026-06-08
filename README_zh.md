@@ -199,13 +199,38 @@ KG_WINDOW_WARN_THRESHOLD    # 窗口数超此值记 WARNING（默认 1200）
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
 DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
-STORAGE_DIR             # 上传文件存储目录
+SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
 
 **检索：**
 
 ```text
 RETRIEVAL_TOP_N         # 1-hop 扩展前的 top-N 命中数（默认 12）
+```
+
+**检索 / KG 增强（GraphRAG + ToG-3 借鉴，Phase 1+2）：**
+
+大多默认关（opt-in）；`ANSWER_CONTEXT_*` 与 `KG_QUERY_REFINE_ENABLED` 默认开。请**逐个开启**并用
+评测脚本（`backend/app/eval`）验证——RRF + 重排 + 精炼三个全开会回归。
+
+```text
+LLM_CACHE_ENABLED            # 把 LLM 响应缓存到独立 sqlite（默认 false）
+LLM_CACHE_PATH               # 缓存 DB 路径（默认 .local/llm_cache.db）
+KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 false）
+KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 false）
+KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
+KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 false）
+KG_COMMUNITY_SUMMARY_ENABLED # LLM 社区报告；Global 问答必需（默认 false）
+ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
+ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
+RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
+RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
+RERANK_ENABLED               # 对 top 候选池做 LLM 重排（默认 false）
+RERANK_CANDIDATES            # 交给 LLM 重排的候选数（默认 20）
+RERANK_TIMEOUT_SECONDS       # 重排专用短超时（默认 20）
+KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
+QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
+GLOBAL_MAX_COMMUNITIES       # Global 问答(ask mode="global")考虑的社区报告上限（默认 20）
 ```
 
 **MinerU（PDF 解析）：**
@@ -231,6 +256,8 @@ EVENT_LOG_ENABLED / EVENT_LOG_DIR
 SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000）
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
+
+`.env.example` 是每个环境变量的权威完整清单（含默认值与逐行注释）——上面分组只列常用项。其余可调项还包括：可选的推理专用 LLM（`REASONING_LLM_BASE_URL` / `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`）及其护栏（`REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`）、检索/接地调参（`PROC_MIN`、`FOLLOWUP_MAX_LEN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`），以及运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
 
 没有配置 LLM 时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
 

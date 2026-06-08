@@ -210,13 +210,40 @@ KG_WINDOW_WARN_THRESHOLD    # log WARNING when window count exceeds this (defaul
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
 DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
-STORAGE_DIR             # uploaded file storage directory
+SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
 
 **Retrieval:**
 
 ```text
 RETRIEVAL_TOP_N         # top-N hits before 1-hop expansion (default 12)
+```
+
+**Retrieval / KG enhancements (GraphRAG + ToG-3 borrow, Phase 1+2):**
+
+Most are opt-in (default off); `ANSWER_CONTEXT_*` and `KG_QUERY_REFINE_ENABLED` are
+on by default. Enable extras **one at a time** and validate with the eval harness
+(`backend/app/eval`) — turning RRF + rerank + refinement on together regressed answer
+quality in eval.
+
+```text
+LLM_CACHE_ENABLED            # cache LLM responses in a separate sqlite (default false)
+LLM_CACHE_PATH               # cache DB path (default .local/llm_cache.db)
+KG_REFINE_ENABLED            # extraction self-verify: drop hallucinated nodes (default false)
+KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (default false)
+KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
+KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default false)
+KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports; required for Global QA (default false)
+ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000)
+ANSWER_CONTEXT_MIN_ITEMS     # keep >= N items regardless of budget (default 3)
+RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
+RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
+RERANK_ENABLED               # LLM rerank of the top candidate pool (default false)
+RERANK_CANDIDATES            # candidates re-scored by the LLM (default 20)
+RERANK_TIMEOUT_SECONDS       # dedicated short timeout for rerank (default 20)
+KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)
+QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
+GLOBAL_MAX_COMMUNITIES       # max community reports for Global QA, ask mode="global" (default 20)
 ```
 
 **MinerU (PDF parsing):**
@@ -242,6 +269,16 @@ EVENT_LOG_ENABLED / EVENT_LOG_DIR
 SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (default 3000)
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
+
+`.env.example` is the authoritative, complete list of every variable with its default
+and an inline comment — the groups above highlight the common ones. Other documented
+knobs include the optional dedicated reasoning LLM (`REASONING_LLM_BASE_URL` /
+`REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`) and its guardrails (`REASONING_MAX_STEPS`,
+`REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, `REASONING_MAX_RETRIES`),
+retrieval/grounding tuning (`PROC_MIN`, `FOLLOWUP_MAX_LEN`, `EVIDENCE_TAU_LOW`,
+`EVIDENCE_TAU_HIGH`), the opt-in debug log viewer (`DEBUG_LOGS_ENABLED`), and runtime
+identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
+`SILICON_NOTEBOOK_SINGLE_USER_NAME`).
 
 When LLM settings are not configured, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.
 
