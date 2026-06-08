@@ -4001,7 +4001,7 @@ class SQLiteRepository:
                 raise KeyError(conversation_id)
             rows = db.execute(
                 "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id = ? ORDER BY created_at ASC",
+                "WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
                 (conversation_id,),
             ).fetchall()
         turns = []
@@ -4018,12 +4018,14 @@ class SQLiteRepository:
                     created_at=row["created_at"],
                 )
             )
+        used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
         return ConversationDetail(
             id=conv["id"],
             notebook_id=conv["notebook_id"],
             title=conv["title"] or "",
             updated_at=conv["updated_at"] or "",
             turn_count=len(turns),
+            used_reasoning=used_reasoning,
             turns=turns,
         )
 
@@ -4035,7 +4037,10 @@ class SQLiteRepository:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
-                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count "
+                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
+                "(SELECT COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
+                "   FROM answers a WHERE a.conversation_id = c.id "
+                "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
                 "ORDER BY c.updated_at DESC",
                 (notebook_id, self.current_user().id),
@@ -4047,6 +4052,7 @@ class SQLiteRepository:
                 title=row["title"] or "",
                 updated_at=row["updated_at"] or "",
                 turn_count=row["turn_count"],
+                used_reasoning=bool(row["used_reasoning"]),
             )
             for row in rows
         ]

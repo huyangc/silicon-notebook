@@ -15,6 +15,7 @@ import {
 } from "./answer-formatting";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
+import { lastTurnUsedReasoning } from "./session-reasoning";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -120,7 +121,7 @@ type AskResponse = {
 };
 
 type ChatTurn = { question: string; response: AskResponse };
-type ConversationSummary = { id: string; title: string; updated_at: string; turn_count: number };
+type ConversationSummary = { id: string; title: string; updated_at: string; turn_count: number; used_reasoning?: boolean };
 type ConversationDetail = {
   id: string;
   notebook_id: string;
@@ -1529,6 +1530,7 @@ export default function Home() {
   async function openSession(id: string) {
     const detail = await api<ConversationDetail>(`/conversations/${id}`);
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
+    setReasoningMode(lastTurnUsedReasoning(detail.turns));
     setConversationId(id);
     setPendingQuestion("");
     setPendingReasoning(false);
@@ -1541,6 +1543,7 @@ export default function Home() {
   function startNewSession() {
     setTurns([]);
     setConversationId(null);
+    setReasoningMode(false);
     setPendingQuestion("");
     setPendingReasoning(false);
     setPendingTrace([]);
@@ -2263,7 +2266,10 @@ export default function Home() {
                           <>
                             <button className="chat-session-card-main" type="button" onClick={() => openSession(session.id).catch(reportError)}>
                               <span>{session.title || "未命名会话"}</span>
-                              <small>{formatRelativeTime(session.updated_at)} · {session.turn_count} 轮</small>
+                              <small>
+                                {formatRelativeTime(session.updated_at)} · {session.turn_count} 轮
+                                {session.used_reasoning && <span className="chat-session-reasoning-badge">✦ 推理</span>}
+                              </small>
                             </button>
                             <div className="chat-session-card-actions">
                               <button type="button" title="重命名" onClick={() => beginRenameSession(session)}><Edit3 size={14} /></button>
