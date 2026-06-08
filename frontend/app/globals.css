@@ -1033,7 +1033,7 @@ button.chat-session-card {
   font-size: 12px;
 }
 
-.chat-session-reasoning-badge {
+.chat-session-card-main .chat-session-reasoning-badge {
   display: inline-block;
   margin-left: 6px;
   padding: 0 7px;
