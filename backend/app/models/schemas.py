@@ -193,6 +193,7 @@ class ConversationSummary(BaseModel):
     title: str = ""
     updated_at: str = ""
     turn_count: int = 0
+    used_reasoning: bool = False
 
 
 class ConversationTurn(BaseModel):

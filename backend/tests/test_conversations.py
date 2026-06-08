@@ -138,3 +138,49 @@ def test_conversation_mutation_routes(tmp_path, monkeypatch):
     assert client.get(f"/api/conversations/{cid}").status_code == 404
     assert client.patch("/api/conversations/bogus", json={"title": "x"}).status_code == 404
     assert client.delete("/api/conversations/bogus").status_code == 404
+
+
+def test_list_conversations_used_reasoning_last_turn(repo):
+    """used_reasoning 反映会话最后一轮是否走了推理（reasoning_trace 非空）。"""
+    from app.models.schemas import AskResponse, TraceStep
+    nb = _seed(repo)
+
+    def used_reasoning(conv_id):
+        return next(c.used_reasoning for c in repo.list_conversations(nb.id) if c.id == conv_id)
+
+    # 1) 单条快速轮（repo.ask 不写 reasoning_trace）→ 最后一轮快速 → False
+    r = repo.ask(nb.id, AskRequest(question="q1"))
+    cid = r.conversation_id
+    assert used_reasoning(cid) is False
+
+    # 2) 追加一条推理轮（带非空 reasoning_trace）→ 最后一轮推理 → True
+    repo._save_answer(
+        nb.id, "q2",
+        AskResponse(conclusion="c", conversation_id=cid,
+                    reasoning_trace=[TraceStep(step_type="answer", summary="s")]),
+        conversation_id=cid,
+    )
+    assert used_reasoning(cid) is True
+
+    # 3) 再追加一条快速轮 → 最后一轮又变快速 → False（证明看的是"最后一轮"而非"任意一轮"）
+    repo._save_answer(
+        nb.id, "q3",
+        AskResponse(conclusion="c", conversation_id=cid),
+        conversation_id=cid,
+    )
+    assert used_reasoning(cid) is False
+
+    # 4) 单条推理会话 → True（直接建会话行 + 一条推理 answer，沿用本文件直插风格）
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("conv-r", nb.id, "r", repo.current_user().id, "t", "t"),
+        )
+    repo._save_answer(
+        nb.id, "qr",
+        AskResponse(conclusion="c", conversation_id="conv-r",
+                    reasoning_trace=[TraceStep(step_type="answer", summary="s")]),
+        conversation_id="conv-r",
+    )
+    assert used_reasoning("conv-r") is True

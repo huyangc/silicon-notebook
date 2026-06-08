@@ -4035,7 +4035,10 @@ class SQLiteRepository:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
-                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count "
+                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
+                "(SELECT json_extract(a.payload, '$.reasoning_trace') IS NOT NULL "
+                "   FROM answers a WHERE a.conversation_id = c.id "
+                "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
                 "ORDER BY c.updated_at DESC",
                 (notebook_id, self.current_user().id),
@@ -4047,6 +4050,7 @@ class SQLiteRepository:
                 title=row["title"] or "",
                 updated_at=row["updated_at"] or "",
                 turn_count=row["turn_count"],
+                used_reasoning=bool(row["used_reasoning"]),
             )
             for row in rows
         ]
