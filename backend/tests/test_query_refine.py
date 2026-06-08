@@ -79,7 +79,8 @@ def test_answer_kg_refines_when_enabled(repo):
 
 
 def test_answer_kg_no_refine_when_disabled(repo):
-    repo.llm_client = _RefineAnswerLLM()  # kg_query_refine_enabled defaults False
+    repo.llm_client = _RefineAnswerLLM()
+    repo.settings.kg_query_refine_enabled = False  # default is now True; disable explicitly
     nb, hits = _seed_hit(repo)
     answer, grounded, anchors = repo._answer_kg(nb.id, "q?", hits, [])
     assert repo.llm_client.refine_calls == 0  # no refinement

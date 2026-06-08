@@ -86,3 +86,20 @@ def test_rrf_path_disabled_by_default(repo):
     ], [])
     resp = repo.ask(nb.id, AskRequest(question="gate oxide"))
     assert resp is not None
+
+
+def test_rrf_scored_relevance_on_fused_scale_not_rrf(repo):
+    # regression for the eval-found bug: _rrf_scored must put the [0,1] fused
+    # keyword/semantic relevance on .relevance (for classify_evidence's tau),
+    # NOT the tiny RRF score (which made every answer classify as "inferred").
+    kg_objs = {
+        "claim": [{"id": "o1", "payload": {"name": "cascode output resistance"},
+                   "evidence": [], "status": "approved", "owner": "", "last_reviewed": ""}],
+        "concept": [], "formula": [], "procedure": [],
+    }
+    hits = repo._rrf_scored("cascode output resistance", kg_objs, None)
+    assert hits
+    h = hits[0]
+    assert h.relevance >= 0.35     # full keyword match -> crosses tau_high (grounded-capable)
+    assert h.score < 0.1          # RRF micro-score, used only for ordering
+    assert h.relevance != h.score
