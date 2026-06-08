@@ -184,3 +184,19 @@ def test_list_conversations_used_reasoning_last_turn(repo):
         conversation_id="conv-r",
     )
     assert used_reasoning("conv-r") is True
+
+
+def test_get_conversation_used_reasoning_reflects_last_turn(repo):
+    """ConversationDetail.used_reasoning 与最后一轮一致(不再恒为 False)。"""
+    from app.models.schemas import AskResponse, TraceStep
+    nb = _seed(repo)
+    r = repo.ask(nb.id, AskRequest(question="q1"))
+    cid = r.conversation_id
+    assert repo.get_conversation(cid).used_reasoning is False   # 末轮快速
+    repo._save_answer(
+        nb.id, "q2",
+        AskResponse(conclusion="c", conversation_id=cid,
+                    reasoning_trace=[TraceStep(step_type="answer", summary="s")]),
+        conversation_id=cid,
+    )
+    assert repo.get_conversation(cid).used_reasoning is True    # 末轮推理

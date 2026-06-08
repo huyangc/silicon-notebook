@@ -4001,7 +4001,7 @@ class SQLiteRepository:
                 raise KeyError(conversation_id)
             rows = db.execute(
                 "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id = ? ORDER BY created_at ASC",
+                "WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
                 (conversation_id,),
             ).fetchall()
         turns = []
@@ -4018,12 +4018,14 @@ class SQLiteRepository:
                     created_at=row["created_at"],
                 )
             )
+        used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
         return ConversationDetail(
             id=conv["id"],
             notebook_id=conv["notebook_id"],
             title=conv["title"] or "",
             updated_at=conv["updated_at"] or "",
             turn_count=len(turns),
+            used_reasoning=used_reasoning,
             turns=turns,
         )
 
