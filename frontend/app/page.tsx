@@ -260,7 +260,9 @@ type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
 type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number; element_text?: string };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
-type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: { quoted_span: string; source_title: string; element_text: string }[]; definition: string | null; steps: { name: string; element_text: string }[] | null };
+type KgOccurrence = { quoted_span?: string; source_title?: string; source_id?: string; element_text?: string; location_label?: string; element_type?: string; confidence?: number };
+type KgProcedureStep = { name: string; element_text: string };
+type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: KgOccurrence[]; definition: string | null; steps: KgProcedureStep[] | null };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
 type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number };
 type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
@@ -2862,17 +2864,17 @@ export default function Home() {
                         ))}
                       </>
                     )}
-                    {nodeCtx?.definition && (<><h4>定义</h4><p className="kg-evidence">{nodeCtx.definition}</p></>)}
+                    {nodeCtx?.definition && (<><h4>定义</h4><p className="kg-text-card">{nodeCtx.definition}</p></>)}
                     {nodeCtx?.object_type === "procedure" && nodeCtx.steps && nodeCtx.steps.length > 0 && (
                       <><h4>流程步骤</h4>{nodeCtx.steps.map((s, i) => (
-                        <div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>
+                        <KgProcedureStepCard step={s} index={i} key={`${s.name}-${i}`} />
                       ))}</>
                     )}
                     {conceptDetail && (
                       <>
                         <h4>出处</h4>
                         {conceptDetail.evidence.length === 0 ? <p className="tool-hint">无</p> : conceptDetail.evidence.slice(0, 20).map((ev, i) => (
-                          <div className="kg-evidence" key={i}><span className="tag">{ev.source_title || ev.source_id}</span> <span>{ev.element_text || ev.quoted_span}</span></div>
+                          <KgEvidenceCard evidence={ev} index={i} key={`${ev.source_id}-${ev.element_id}-${i}`} />
                         ))}
                         <h4>相关节点</h4>
                         {relatedNodeGroups.length === 0 ? <p className="tool-hint">无</p> : relatedNodeGroups.map((group) => (
@@ -2895,7 +2897,7 @@ export default function Home() {
                     )}
                     {!conceptDetail && nodeCtx && (nodeCtx.occurrences ?? []).length > 0 && (
                       <><h4>出处</h4>{(nodeCtx.occurrences ?? []).slice(0, 10).map((o, i) => (
-                        <div className="kg-evidence" key={i}><span className="tag">{o.source_title}</span> <span>{o.element_text || o.quoted_span}</span></div>
+                        <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
                       ))}</>
                     )}
                   </div>
@@ -3048,6 +3050,84 @@ function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
       <div>{first.location_label}</div>
       <div>{first.quoted_span}</div>
     </div>
+  );
+}
+
+function kgEvidenceBody(text?: string | null) {
+  const value = (text ?? "").trim();
+  return value || "暂无原文片段";
+}
+
+function kgConfidenceLabel(confidence?: number) {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return "";
+  const normalized = confidence > 1 ? confidence : confidence * 100;
+  return `置信 ${Math.round(normalized)}%`;
+}
+
+function KgEvidenceCard({ evidence, index }: { evidence: EvidenceItem; index: number }) {
+  const sourceLabel = evidence.source_title || evidence.source_id || "未知来源";
+  const meta = [
+    evidence.location_label,
+    evidence.element_type,
+    kgConfidenceLabel(evidence.confidence)
+  ].filter(Boolean);
+
+  return (
+    <article className="kg-evidence-card">
+      <div className="kg-evidence-header">
+        <span className="kg-evidence-index">{index + 1}</span>
+        <div className="kg-evidence-source">
+          <strong title={sourceLabel}>{sourceLabel}</strong>
+          {meta.length > 0 && (
+            <div className="kg-evidence-meta">
+              {meta.map((item) => <span key={item}>{item}</span>)}
+            </div>
+          )}
+        </div>
+      </div>
+      <p className="kg-evidence-body">{kgEvidenceBody(evidence.element_text || evidence.quoted_span)}</p>
+    </article>
+  );
+}
+
+function KgOccurrenceCard({ occurrence, index }: { occurrence: KgOccurrence; index: number }) {
+  const sourceLabel = occurrence.source_title || occurrence.source_id || "未知来源";
+  const meta = [
+    occurrence.location_label,
+    occurrence.element_type,
+    kgConfidenceLabel(occurrence.confidence)
+  ].filter(Boolean);
+
+  return (
+    <article className="kg-evidence-card">
+      <div className="kg-evidence-header">
+        <span className="kg-evidence-index">{index + 1}</span>
+        <div className="kg-evidence-source">
+          <strong title={sourceLabel}>{sourceLabel}</strong>
+          {meta.length > 0 && (
+            <div className="kg-evidence-meta">
+              {meta.map((item) => <span key={item}>{item}</span>)}
+            </div>
+          )}
+        </div>
+      </div>
+      <p className="kg-evidence-body">{kgEvidenceBody(occurrence.element_text || occurrence.quoted_span)}</p>
+    </article>
+  );
+}
+
+function KgProcedureStepCard({ step, index }: { step: KgProcedureStep; index: number }) {
+  return (
+    <article className="kg-evidence-card kg-step-card">
+      <div className="kg-evidence-header">
+        <span className="kg-evidence-index">{index + 1}</span>
+        <div className="kg-evidence-source">
+          <strong>{step.name || `步骤 ${index + 1}`}</strong>
+          <div className="kg-evidence-meta"><span>流程步骤</span></div>
+        </div>
+      </div>
+      <p className="kg-evidence-body">{kgEvidenceBody(step.element_text)}</p>
+    </article>
   );
 }
 
@@ -3360,12 +3440,12 @@ function KnowledgeBrowser({
                 <>
                   {ctx[item.id].object_type === "procedure" && ctx[item.id].steps && (ctx[item.id].steps ?? []).length > 0 && (
                     <><p className="section-title">流程步骤</p>{(ctx[item.id].steps ?? []).map((s, i) => (
-                      <div className="kg-evidence" key={i}><span className="tag">{i + 1}</span> <span><strong>{s.name}</strong>：{s.element_text}</span></div>
+                      <KgProcedureStepCard step={s} index={i} key={`${s.name}-${i}`} />
                     ))}</>
                   )}
                   {(ctx[item.id].occurrences ?? []).length > 0 && (
                     <><p className="section-title">原文出处</p>{(ctx[item.id].occurrences ?? []).slice(0, 5).map((o, i) => (
-                      <div className="kg-evidence" key={i}><span className="tag">{o.source_title}</span> <span>{o.element_text || o.quoted_span}</span></div>
+                      <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
                     ))}</>
                   )}
                 </>
