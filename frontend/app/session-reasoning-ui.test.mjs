@@ -25,3 +25,9 @@ test("历史卡片渲染推理标记", () => {
 test("标记样式已定义", () => {
   assert.match(css, /\.chat-session-reasoning-badge\s*\{/);
 });
+
+test("新会话重置推理按钮为关", () => {
+  const m = page.match(/function startNewSession\(\)\s*\{[\s\S]*?\n {2}\}/);
+  assert.ok(m, "startNewSession block found");
+  assert.match(m[0], /setReasoningMode\(false\)/);
+});

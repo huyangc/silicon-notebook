@@ -1541,6 +1541,7 @@ export default function Home() {
   function startNewSession() {
     setTurns([]);
     setConversationId(null);
+    setReasoningMode(false);
     setPendingQuestion("");
     setPendingReasoning(false);
     setPendingTrace([]);
