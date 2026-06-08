@@ -99,6 +99,7 @@ from app.services.retrieval import (
     W_KEYWORD,
     W_SEMANTIC,
     _TYPE_WEIGHT,
+    _fuse,
     _payload_text,
     bm25_scores,
     cosine,
@@ -3553,7 +3554,9 @@ class SQLiteRepository:
         - 语义: 直接使用 knowledge_sims (object_id->cosine_sim)。
         - RRF: 两组排名融合得最终分。
         - 不套 RELEVANCE_FLOOR(RRF 分量级很小,floor 会清空结果)。
-        - score=relevance=RRF 分; weight 取 _TYPE_WEIGHT(类型权威)。
+        - score=RRF 分(排序用); relevance=[0,1] 融合(keyword+语义)分,供
+          classify_evidence 的 tau 阈值判 grounded(RRF 微分会让全部判 inferred)。
+        - weight 取 _TYPE_WEIGHT(类型权威)。
         """
         # 汇集所有类型对象,构建 (id, text) 列表及 id->obj 映射
         docs: List[tuple] = []
@@ -3574,6 +3577,7 @@ class SQLiteRepository:
         sims: Dict[str, float] = knowledge_sims or {}
 
         fused = rrf_fuse([bm25, sims], k=self.settings.retrieval_rrf_k)
+        text_by_id = dict(docs)
 
         result: List[RetrievedKnowledge] = []
         for oid, rrf_score in fused.items():
@@ -3584,6 +3588,12 @@ class SQLiteRepository:
                 continue
             object_type = id_to_type[oid]
             weight = _TYPE_WEIGHT.get(object_type, 0.5)
+            # score = RRF (ordering); relevance = [0,1] fused keyword+semantic so
+            # classify_evidence's tau thresholds stay valid (RRF micro-scores would
+            # otherwise classify every answer as "inferred").
+            has_vec = oid in sims
+            relevance = _fuse(keyword_score(query, text_by_id.get(oid, "")),
+                              sims.get(oid, 0.0), has_vec)
             result.append(
                 RetrievedKnowledge(
                     object_id=oid,
@@ -3591,7 +3601,7 @@ class SQLiteRepository:
                     payload=obj.get("payload", {}),
                     evidence=obj.get("evidence", []),
                     score=rrf_score,
-                    relevance=rrf_score,
+                    relevance=relevance,
                     weight=weight,
                     status=str(obj.get("status", "approved")),
                     owner=str(obj.get("owner", "")),
