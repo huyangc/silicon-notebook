@@ -63,7 +63,7 @@
 ## 边界与取舍
 
 - **推理但最终 trace 为空**的容错极端情况会被算作快速（方案 A 已知代价，罕见，可接受）。
-- `startNewSession`（[:1541](../../../frontend/app/page.tsx#L1541)）**不改**：新会话保持用户当前的推理按钮选择，用户未要求重置，YAGNI。
+- `startNewSession`（[:1541](../../../frontend/app/page.tsx#L1541)）**重置为关**：新建会话时 `setReasoningMode(false)`，回到应用默认（推理关）。理由：本特性让 `reasoningMode` 可被「打开会话」程序化置真；若新会话沿用旧值，会出现「开过推理会话后，新问题静默走更慢/更贵的推理」。推理是重型非默认模式，新会话回默认更可预测、更安全。（评审发现，用户拍板）
 - 空会话（0 轮）：`used_reasoning=false`，恢复时 `lastTurnUsedReasoning([])=false`，按钮关。
 - 卡片标记（后端 `used_reasoning`，看最后一轮）与恢复按钮（前端 `lastTurnUsedReasoning`，看最后一轮）规则一致，不会出现「标了推理但恢复成关」的不一致。
 
@@ -77,5 +77,9 @@
 ## 不在本次范围
 
 - 不加 `answers.mode` 列、不做数据迁移。
-- 不改 `startNewSession` 的按钮行为。
 - 不做按会话级以外（如逐轮在卡片上展开）的更细粒度标记——逐轮推理轨迹在回答区已有 `ReasoningTracePanel` 呈现。
+
+## 实现细化（评审后）
+
+- **`get_conversation` 也填充 `used_reasoning`**：`ConversationDetail` 继承该字段；原设计说 detail 不动，但那样 `/conversations/{id}` 会恒返回 `used_reasoning=false`（契约不一致）。改为从其返回的 `turns[-1].response.reasoning_trace` 派生，与 `list_conversations` 同口径；并给 answers 查询加 `ORDER BY created_at ASC, rowid ASC` 的确定性次序，使「最后一轮」在同秒并列时仍确定。
+- **徽标选择器特异性**：`.chat-session-reasoning-badge` 会被既有 `.chat-session-card-main span`（特异性 (0,1,1)）盖掉 color/font-size/font-weight，致近黑字落近黑底而不可见。选择器提升为 `.chat-session-card-main .chat-session-reasoning-badge`（(0,2,0)）修复。

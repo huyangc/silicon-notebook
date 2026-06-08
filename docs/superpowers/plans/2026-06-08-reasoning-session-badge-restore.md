@@ -423,3 +423,11 @@ Expected: 标记与按钮还原行为符合「看最后一轮」规则。
 - **占位符扫描：** 无 TBD/TODO；每个改动步骤均给出完整代码与确切命令/预期。
 - **类型/命名一致：** `used_reasoning`（后端 schema + 前端类型 + SQL 列别名）、`lastTurnUsedReasoning`（`.ts` 定义 / `.test.mjs` 与 `page.tsx` 调用）、`chat-session-reasoning-badge`（JSX className + CSS 选择器 + UI 测试断言）三处命名跨任务一致。
 - **细化说明：** 「最后一轮」排序键由 spec 的 `created_at DESC` 改为 `rowid DESC`（理由见顶部），语义不变。
+
+---
+
+## 评审后增补
+
+执行中两阶段 review 引入的增改（均已 TDD + 提交）：
+- **Task 1**：`get_conversation` 也填充 `used_reasoning`（从 `turns[-1].response.reasoning_trace` 派生）+ answers 查询加 `ORDER BY created_at ASC, rowid ASC` 确定性次序，修复 `/conversations/{id}` 契约恒返回 false（commit `1846895`）。
+- **Task 3**：徽标选择器由 `.chat-session-reasoning-badge` 提升为 `.chat-session-card-main .chat-session-reasoning-badge`，修复被卡片 `span` 规则盖成不可见（commit `7d01ca9`）；`startNewSession` 增加 `setReasoningMode(false)` + 回归断言——用户拍板「新会话回默认推理关」，避免跨会话静默带入推理（commit `32938d1`）。
