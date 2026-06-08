@@ -186,6 +186,26 @@ def test_list_conversations_used_reasoning_last_turn(repo):
     assert used_reasoning("conv-r") is True
 
 
+def test_used_reasoning_empty_trace_counts_as_fast(repo):
+    """空 reasoning_trace([]) 在 list 与 detail 端一致地算作快速(False)。"""
+    nb = _seed(repo)
+    # 直接落一条 reasoning_trace 为空数组的 answer，绕过 ask 写入路径(它会把空 trace 存成 null)
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("conv-empty", nb.id, "e", repo.current_user().id, "t", "t"),
+        )
+        db.execute(
+            "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
+            "VALUES (?,?,?,?,?,?)",
+            ("ans-empty", nb.id, "q", json.dumps({"conclusion": "c", "reasoning_trace": []}), "t", "conv-empty"),
+        )
+    ur = next(c.used_reasoning for c in repo.list_conversations(nb.id) if c.id == "conv-empty")
+    assert ur is False                                              # list 端:空数组算快速
+    assert repo.get_conversation("conv-empty").used_reasoning is False  # detail 端一致
+
+
 def test_get_conversation_used_reasoning_reflects_last_turn(repo):
     """ConversationDetail.used_reasoning 与最后一轮一致(不再恒为 False)。"""
     from app.models.schemas import AskResponse, TraceStep

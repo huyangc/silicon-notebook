@@ -4038,7 +4038,7 @@ class SQLiteRepository:
             rows = db.execute(
                 "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
                 "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
-                "(SELECT json_extract(a.payload, '$.reasoning_trace') IS NOT NULL "
+                "(SELECT COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
                 "   FROM answers a WHERE a.conversation_id = c.id "
                 "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
