@@ -1033,6 +1033,19 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+.chat-session-reasoning-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #101820;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: middle;
+}
+
 .chat-session-card-main {
   min-width: 0;
   display: grid;
