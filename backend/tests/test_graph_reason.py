@@ -214,3 +214,101 @@ def test_render_subgraph_context_chain_format():
     # Both endpoints present as k-keys
     assert "[k1]" in ctx
     assert "[k2]" in ctx
+
+
+# ── Task 4: adversarial chain verification (LLM mocked) ──────────────────────
+
+class _FakeLLMClient:
+    configured = True
+
+    def __init__(self, responses):
+        self._responses = iter(responses)
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        return next(self._responses)
+
+
+def test_verify_chain_edges_all_pass():
+    """All edges verified → chain_trust = 1.0, no flagged edges."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, verify_chain_edges
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from", "supports"}, max_depth=2, max_fan_out=10)
+    import json
+    # LLM returns valid=true for every edge
+    llm = _FakeLLMClient([
+        json.dumps({"valid": True,  "reason": "ok"}),
+        json.dumps({"valid": True,  "reason": "ok"}),
+    ])
+    result = verify_chain_edges(sub, llm)
+    assert result["chain_trust"] == 1.0
+    assert result["flagged"] == []
+
+
+def test_verify_chain_edges_bad_edge_flagged():
+    """One edge returns valid=false → that edge is flagged; chain_trust drops."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, verify_chain_edges
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from", "supports"}, max_depth=2, max_fan_out=10)
+    import json
+    # First edge (A→B derived_from) passes; second (B→C supports) fails
+    llm = _FakeLLMClient([
+        json.dumps({"valid": True,  "reason": "ok"}),
+        json.dumps({"valid": False, "reason": "evidence does not support this"}),
+    ])
+    result = verify_chain_edges(sub, llm)
+    assert len(result["flagged"]) == 1
+    assert result["flagged"][0]["edge_type"] == "supports"
+    assert result["chain_trust"] < 1.0
+
+
+def test_verify_chain_edges_majority_vote():
+    """Majority vote (votes=3): 2 valid + 1 invalid → valid; 1 valid + 2 invalid → invalid."""
+    from app.services.kg.graph_reason import verify_chain_edges, build_rx_graph, multihop_subgraph
+    import json
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=1, max_fan_out=10)
+    # 3 votes for the single edge: 2 valid → edge passes
+    llm_pass = _FakeLLMClient([
+        json.dumps({"valid": True}),
+        json.dumps({"valid": False}),
+        json.dumps({"valid": True}),
+    ])
+    result_pass = verify_chain_edges(sub, llm_pass, votes=3)
+    assert result_pass["flagged"] == []
+
+    G2, idx_to_oid2, oid_to_idx2 = build_rx_graph(NODES, RELATIONS)
+    sub2 = multihop_subgraph(G2, oid_to_idx2, idx_to_oid2, ["A"],
+                             {"derived_from"}, max_depth=1, max_fan_out=10)
+    # 3 votes: 1 valid + 2 invalid → edge fails
+    llm_fail = _FakeLLMClient([
+        json.dumps({"valid": True}),
+        json.dumps({"valid": False}),
+        json.dumps({"valid": False}),
+    ])
+    result_fail = verify_chain_edges(sub2, llm_fail, votes=3)
+    assert len(result_fail["flagged"]) == 1
+
+
+def test_verify_chain_edges_no_edges_no_calls():
+    """Seed-only subgraph (no edges) → chain_trust=1.0, zero LLM calls."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, verify_chain_edges
+    import json
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    # Depth 0 → only the seed, no edges
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=0, max_fan_out=10)
+    calls = []
+
+    class _CountingLLM:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            calls.append(1)
+            return json.dumps({"valid": True})
+
+    result = verify_chain_edges(sub, _CountingLLM())
+    assert result["chain_trust"] == 1.0
+    assert len(calls) == 0

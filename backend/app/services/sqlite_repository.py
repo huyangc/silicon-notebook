@@ -4025,6 +4025,24 @@ class SQLiteRepository:
         # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
         context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
 
+        # Answer-time chain verification: an adversarial LLM check per chain edge.
+        # Flagged edges get their confidence demoted to 0.05; the context is then
+        # re-rendered so the demotion is visible to the answer LLM. chain_trust is
+        # the weakest-link confidence over all edges (1.0 when there are no edges).
+        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": []}
+        if getattr(self.reasoning_llm_client, "configured", False):
+            from app.services.kg.graph_reason import verify_chain_edges
+            verify_result = verify_chain_edges(
+                subgraph, self.reasoning_llm_client,
+                votes=1, timeout=self.settings.reasoning_timeout_seconds,
+            )
+            if verify_result["flagged"]:
+                flagged_types = {f["edge_type"] for f in verify_result["flagged"]}
+                for _node, edge, _src in subgraph:
+                    if edge and edge.get("edge_type") in flagged_types:
+                        edge["confidence"] = 0.05
+                context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
+
         # Synthesise the answer through the existing LLM + grounding path.
         answer, llm_grounded, anchors = "", False, []
         if getattr(self.llm_client, "configured", False) and id_map:
@@ -4055,12 +4073,21 @@ class SQLiteRepository:
                 f"{len(use_seeds)} seed(s).")
             llm_mode = "deterministic"
 
+        from app.models.schemas import TraceStep
+        graph_trace = [TraceStep(
+            step_type="graph_verify",
+            summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
+                     f"{len(verify_result['flagged'])} edge(s) flagged; "
+                     f"{len(subgraph)} node(s) traversed"),
+            detail=verify_result,
+        )]
+
         response = AskResponse(
             answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
             evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
             citations=[], llm_mode=llm_mode,
             conversation_id=conversation_id, retrieval_query=question,
-            top_relevance=top_relevance,
+            top_relevance=top_relevance, reasoning_trace=graph_trace,
         )
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)

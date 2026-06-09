@@ -216,3 +216,107 @@ def render_subgraph_context(
         lines.extend(chain_lines)
 
     return ("\n".join(lines) if lines else "(none)"), id_map
+
+
+# Prompt + schema for adversarial edge verification
+_VERIFY_SCHEMA_HINT = '{"valid": true, "reason": ""}'
+
+_VERIFY_PROMPT = (
+    "Does the cited evidence below actually support the claimed knowledge-graph edge? "
+    "Answer valid=true only if the quote directly substantiates the edge; "
+    "valid=false if the quote is absent, unrelated, or only tangentially relevant.\n\n"
+    "Edge: {src_name} --{edge_type}--> {tgt_name}\n"
+    "Evidence quote: \"{quote}\"\n\n"
+    "Respond ONLY with JSON matching: {schema}"
+)
+
+
+def verify_chain_edges(
+    subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
+    llm_client,
+    votes: int = 1,
+    timeout: int = 30,
+) -> dict:
+    """Adversarial LLM check for each edge in the chain.
+
+    For each (node, edge, src_oid) triple where edge is not None, ask the LLM
+    `votes` times whether the evidence supports the edge.  A majority of
+    valid=True votes → edge passes; otherwise it is flagged and its confidence
+    is demoted to 0.05 in the returned flagged list.
+
+    chain_trust = min(confidence) over all edges (1.0 if no edges).
+
+    Returns:
+        {
+          "chain_trust": float,       # weakest-link confidence
+          "flagged": [                # edges that failed verification
+            {"edge_type": str, "src_name": str, "tgt_name": str,
+             "reason": str, "demoted_confidence": 0.05}
+          ],
+          "edge_results": [           # per-edge detail
+            {"edge_type": str, "valid": bool, "original_confidence": float}
+          ]
+        }
+    """
+    import json as _json
+
+    edge_results = []
+    flagged = []
+    confidences = []
+
+    for node, edge, src_oid in subgraph:
+        if not edge:
+            continue
+        tgt_name = node.get("name", node.get("object_id", "?"))
+        src_name = src_oid or "?"  # source object_id (no name lookup here)
+
+        edge_type = edge.get("edge_type", "?")
+        ev_list = edge.get("evidence", [])
+        quote = ev_list[0].get("quote", "") if ev_list and isinstance(ev_list[0], dict) else ""
+        original_conf = float(edge.get("confidence", 1.0))
+
+        # Cast majority vote
+        valid_votes = 0
+        last_reason = ""
+        if not getattr(llm_client, "configured", False) or not quote:
+            # No LLM or no evidence → pass-through (cannot verify; fail-open)
+            valid_votes = votes
+        else:
+            prompt = _VERIFY_PROMPT.format(
+                src_name=src_name, edge_type=edge_type, tgt_name=tgt_name,
+                quote=quote, schema=_VERIFY_SCHEMA_HINT,
+            )
+            for _ in range(votes):
+                try:
+                    raw = llm_client.chat_json(
+                        [{"role": "user", "content": prompt}],
+                        _VERIFY_SCHEMA_HINT,
+                        timeout=timeout,
+                        max_retries=1,
+                    )
+                    data = _json.loads(raw)
+                    if isinstance(data, dict) and data.get("valid", True):
+                        valid_votes += 1
+                    last_reason = str(data.get("reason", "")) if isinstance(data, dict) else ""
+                except Exception:
+                    valid_votes += 1   # on error, assume valid (fail-open)
+
+        passed = valid_votes > (votes / 2)
+        effective_conf = original_conf if passed else 0.05
+        confidences.append(effective_conf)
+        edge_results.append({
+            "edge_type": edge_type,
+            "valid": passed,
+            "original_confidence": original_conf,
+        })
+        if not passed:
+            flagged.append({
+                "edge_type": edge_type,
+                "src_name": src_name,
+                "tgt_name": tgt_name,
+                "reason": last_reason,
+                "demoted_confidence": 0.05,
+            })
+
+    chain_trust = min(confidences) if confidences else 1.0
+    return {"chain_trust": chain_trust, "flagged": flagged, "edge_results": edge_results}
