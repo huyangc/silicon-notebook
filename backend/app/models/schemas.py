@@ -103,6 +103,10 @@ class NotebookSummary(BaseModel):
     source_types: List[str] = Field(default_factory=list)
     taxonomy: List[str] = Field(default_factory=list)
     access_scope: str = ""
+    # Two-tier federation: 'base' = authoritative reference KG (analog textbook),
+    # 'personal' = user notes (default). Drives tier-weighted relevance + conflict
+    # precedence in ask().
+    tier: str = "personal"
 
 
 class NotebookTemplate(BaseModel):

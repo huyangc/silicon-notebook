@@ -491,6 +491,11 @@ class SQLiteRepository:
             # may be regenerated; set to 0 once the user edits it manually.
             if "purpose_auto" not in nb_cols:
                 db.execute("ALTER TABLE notebooks ADD COLUMN purpose_auto INTEGER NOT NULL DEFAULT 0")
+            # tier column: 'personal' (default) or 'base' (analog-textbook KG).
+            # Existing notebooks default to 'personal'; the base KG is marked via
+            # mark_notebook_base(). PRAGMA guard keeps this idempotent.
+            if "tier" not in nb_cols:
+                db.execute("ALTER TABLE notebooks ADD COLUMN tier TEXT NOT NULL DEFAULT 'personal'")
             # Per-source document type drives schema/profile selection at extraction.
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
@@ -778,6 +783,16 @@ class SQLiteRepository:
                     values,
                 )
         return self.get_notebook(notebook_id)
+
+    def mark_notebook_base(self, notebook_id: str) -> None:
+        """Mark a notebook as the authoritative base KG (tier='base').
+        Idempotent; raises KeyError if the notebook does not exist."""
+        self.get_notebook(notebook_id)  # raises KeyError if missing
+        with self._write() as db:
+            db.execute(
+                "UPDATE notebooks SET tier='base', updated_at=? WHERE id=?",
+                (_now(), notebook_id),
+            )
 
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)
@@ -4631,6 +4646,7 @@ class SQLiteRepository:
             source_types=_list("source_types"),
             taxonomy=_list("taxonomy"),
             access_scope=row["access_scope"] if "access_scope" in keys else "",
+            tier=row["tier"] if "tier" in keys else "personal",
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
