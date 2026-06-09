@@ -3164,6 +3164,50 @@ class SQLiteRepository:
         scored.sort(key=lambda it: it.score, reverse=True)
         return scored
 
+    def federated_retrieve(
+        self,
+        active_notebook_id: str,
+        query: str,
+        types: Optional[Iterable[str]] = None,
+        w_keyword: float = W_KEYWORD,
+        w_semantic: float = W_SEMANTIC,
+    ) -> List[RetrievedKnowledge]:
+        """Gather scored KG candidates from {base notebook(s)} ∪ {active personal
+        notebook}, tagging each hit with .notebook_id and .tier.
+
+        Each notebook's scoring path is IDENTICAL to _retrieve_scored — same
+        _fuse, same dual-index best-of — so the [0,1]/tau and dual-index best-of
+        invariants are preserved by construction. Hits are merged and sorted by
+        score desc; no cross-notebook normalisation is applied (the same fused
+        relevance scale applies to both tiers).
+        """
+        notebook_ids: List[str] = [active_notebook_id]
+        with self._connect() as db:
+            # Add base notebooks (excluding the active one if it is itself base).
+            base_rows = db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                (active_notebook_id,),
+            ).fetchall()
+            notebook_ids.extend(r["id"] for r in base_rows)
+            # Tier for each notebook_id (active + base) in one pass.
+            tier_map: Dict[str, str] = {}
+            for nid in notebook_ids:
+                row = db.execute("SELECT tier FROM notebooks WHERE id=?", (nid,)).fetchone()
+                tier_map[nid] = (row["tier"] if row else "personal")
+
+        all_hits: List[RetrievedKnowledge] = []
+        for nid in notebook_ids:
+            hits = self._retrieve_scored(
+                nid, query, types=types, w_keyword=w_keyword, w_semantic=w_semantic)
+            tier = tier_map.get(nid, "personal")
+            for h in hits:
+                h.notebook_id = nid
+                h.tier = tier
+            all_hits.extend(hits)
+
+        all_hits.sort(key=lambda it: it.score, reverse=True)
+        return all_hits
+
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
                             direction: str = "both") -> List[RetrievedKnowledge]:
@@ -3297,6 +3341,29 @@ class SQLiteRepository:
                         keyword_token_sets=token_sets,
                     )
                 )
+        # Two-tier federation (additive scope expansion): tag the active
+        # notebook's hits with their tier, then fold in candidates from any
+        # tier='base' notebook. The active-notebook scoring above is left
+        # byte-identical (incl. the RRF branch); base hits are scored by the SAME
+        # _retrieve_scored path on their OWN embedding matrices, so [0,1]/tau and
+        # dual-index best-of hold per notebook. No cross-notebook normalisation.
+        with self._connect() as db:
+            arow = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+            active_tier = arow["tier"] if arow else "personal"
+            base_rows = db.execute(
+                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+                (notebook_id,),
+            ).fetchall()
+        for it in scored_all:
+            it.notebook_id = notebook_id
+            it.tier = active_tier
+        for brow in base_rows:
+            base_hits = self._retrieve_scored(brow["id"], query)
+            for bh in base_hits:
+                bh.notebook_id = brow["id"]
+                bh.tier = brow["tier"]
+            scored_all.extend(base_hits)
         rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
         scored_all.sort(key=rank_key, reverse=True)
         top_n = self.settings.retrieval_top_n
@@ -3313,26 +3380,32 @@ class SQLiteRepository:
         ask_stage("score", _t)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
+        # Federation-aware: scope each hit's expansion to ITS OWN notebook so a
+        # base hit expands within the base KG, not the active notebook. Single
+        # notebook → exactly one group keyed by notebook_id (identical to before).
         _t = time.perf_counter()
         hit_ids = {item.object_id for item in top_hits}
         # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
         # instead of loading every notebook edge: O(touching edges), not O(E).
+        hit_ids_by_nb: Dict[str, set] = {}
+        for item in top_hits:
+            hit_ids_by_nb.setdefault(item.notebook_id or notebook_id, set()).add(item.object_id)
         neighbour_ids: set = set()
-        if hit_ids:
-            hit_list = list(hit_ids)
+        for nb_id, ids in hit_ids_by_nb.items():
+            hit_list = list(ids)
             ph = ",".join("?" for _ in hit_list)
             with self._connect() as db:
                 for r in db.execute(
                     f"SELECT target_object_id FROM knowledge_relations "
                     f"WHERE notebook_id=? AND source_object_id IN ({ph})",
-                    [notebook_id, *hit_list],
+                    [nb_id, *hit_list],
                 ).fetchall():
                     if r["target_object_id"] not in hit_ids:
                         neighbour_ids.add(r["target_object_id"])
                 for r in db.execute(
                     f"SELECT source_object_id FROM knowledge_relations "
                     f"WHERE notebook_id=? AND target_object_id IN ({ph})",
-                    [notebook_id, *hit_list],
+                    [nb_id, *hit_list],
                 ).fetchall():
                     if r["source_object_id"] not in hit_ids:
                         neighbour_ids.add(r["source_object_id"])

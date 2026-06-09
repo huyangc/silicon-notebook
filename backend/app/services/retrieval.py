@@ -45,6 +45,11 @@ class RetrievedKnowledge:
     status: str = "approved"
     owner: str = ""
     last_reviewed: str = ""
+    # Two-tier federation tags. Default "" / "personal" so every existing caller
+    # that does not set them keeps working unchanged. federated_retrieve() fills
+    # them in with the hit's source notebook and that notebook's tier.
+    notebook_id: str = ""
+    tier: str = "personal"
 
 
 @dataclass
