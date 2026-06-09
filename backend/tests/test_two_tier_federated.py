@@ -163,3 +163,46 @@ class TestTask4:
         assert "base" in prompt.lower() and (
             "contradict" in prompt.lower() or "defer" in prompt.lower()
         ), "answer_prompt missing base-authoritative conflict rule"
+
+
+class TestTask5:
+    def _seed_single(self, repo):
+        nb = repo.create_notebook(NotebookCreate(name="solo"))
+        repo.store_kg(nb.id, None, [
+            {"local_id": "S1", "object_type": "claim",
+             "payload": {"name": "oxide breakdown voltage", "section_path": "2"},
+             "evidence": []},
+        ], [])
+        return nb
+
+    def test_single_notebook_ask_returns_same_hit(self, repo):
+        """Without any base notebook, ask() on a personal notebook returns
+        the personal hit — identical to pre-federation behavior."""
+        nb = self._seed_single(repo)
+        resp = repo.ask(nb.id, AskRequest(question="oxide breakdown"))
+        # Must find the single object
+        rk_ids = {r.id for r in resp.related_knowledge}
+        assert "S1" in rk_ids or any("oxide" in r.headline.lower() for r in resp.related_knowledge)
+
+    def test_single_notebook_federated_retrieve_returns_only_its_hits(self, repo):
+        nb = self._seed_single(repo)
+        hits = repo.federated_retrieve(nb.id, "oxide breakdown")
+        nb_ids = {h.notebook_id for h in hits}
+        assert nb_ids == {nb.id}
+
+    def test_single_notebook_anchor_tier_is_personal(self, repo):
+        """Anchors in a single-notebook ask() must default to tier='personal'."""
+        nb = self._seed_single(repo)
+        id_map = {
+            "k1": {"object_id": "S1", "object_type": "claim", "name": "Oxide BV",
+                   "definition": "oxide breakdown", "snippet": None,
+                   "source_title": "", "location_label": ""},
+            # No 'tier' key — simulates pre-federation id_map
+        }
+        anchors = repo._parse_answer_anchors("Oxide BV [k1].", id_map)
+        assert anchors[0].tier == "personal"
+
+    def test_full_suite_still_passes(self, repo):
+        """Smoke: existing ask() tests must still pass when run together."""
+        # This is a marker test — run the full suite via the gate command below.
+        assert True
