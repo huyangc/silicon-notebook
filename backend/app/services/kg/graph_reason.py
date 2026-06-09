@@ -10,6 +10,7 @@ version-keying (same (COUNT, MAX created_at) pattern as _vector_matrix).
 from __future__ import annotations
 
 import json
+from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 import rustworkx as rx
@@ -72,3 +73,68 @@ def build_rx_graph(
         )
 
     return G, idx_to_oid, oid_to_idx
+
+
+def multihop_subgraph(
+    G: rx.PyDiGraph,
+    oid_to_idx: Dict[str, int],
+    idx_to_oid: Dict[int, str],
+    seed_ids: List[str],
+    edge_types: Optional[frozenset] = None,
+    max_depth: int = 3,
+    max_fan_out: int = 8,
+) -> List[Tuple[dict, Optional[dict], Optional[str]]]:
+    """BFS from `seed_ids` along `edge_types`, bounded by depth and fan-out.
+
+    Returns ordered list of (node_payload, edge_payload_or_None, src_object_id)
+    triples.  Seed nodes carry edge_payload=None and src_object_id=None; each
+    non-seed item's src_object_id is the object_id of the node the edge was
+    traversed FROM (so render_subgraph_context can emit full chain annotations).
+    Each node appears at most once (visited set guards cycles).  At each hop the
+    eligible out-edges are sorted by confidence desc, then capped to
+    `max_fan_out`.
+
+    edge_types: frozenset of edge_type strings to follow; None = all edges.
+    """
+    if edge_types is None:
+        edge_types = frozenset()   # empty = treat as "all" below
+    use_all = len(edge_types) == 0
+
+    visited: set = set()
+    result: List[Tuple[dict, Optional[dict], Optional[str]]] = []
+    # queue entries: (node_idx, depth)
+    queue: deque = deque()
+
+    for oid in seed_ids:
+        idx = oid_to_idx.get(oid)
+        if idx is None or idx in visited:
+            continue
+        visited.add(idx)
+        result.append((G[idx], None, None))
+        queue.append((idx, 0))
+
+    while queue:
+        cur_idx, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        cur_oid = idx_to_oid.get(cur_idx)
+        # Gather eligible out-edges for this node
+        out_edges = []
+        for tgt_idx in G.successor_indices(cur_idx):
+            if tgt_idx in visited:
+                continue
+            edge_data = G.get_edge_data(cur_idx, tgt_idx)
+            if use_all or edge_data.get("edge_type") in edge_types:
+                out_edges.append((tgt_idx, edge_data))
+        # Sort by confidence desc, cap fan-out
+        out_edges.sort(key=lambda x: x[1].get("confidence", 1.0), reverse=True)
+        out_edges = out_edges[:max_fan_out]
+
+        for tgt_idx, edge_data in out_edges:
+            if tgt_idx in visited:
+                continue
+            visited.add(tgt_idx)
+            result.append((G[tgt_idx], edge_data, cur_oid))
+            queue.append((tgt_idx, depth + 1))
+
+    return result
