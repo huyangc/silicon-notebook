@@ -94,6 +94,15 @@ def multihop_subgraph(
     eligible out-edges are sorted by confidence desc, then capped to
     `max_fan_out`.
 
+    The returned node and edge payloads are shallow COPIES, never the live dicts
+    stored inside `G`.  rustworkx's get_edge_data / G[idx] hand back the same
+    object held in the graph, and `G` is typically the version-cached PyDiGraph
+    (see SqliteRepository._rx_graph) reused across many asks.  A consumer that
+    mutates a payload in place — e.g. ask_graph demoting a flagged edge's
+    confidence to 0.05 before re-rendering — would otherwise corrupt the cached
+    graph and leak that change into every subsequent ask until the next version
+    rebuild.  Copying here keeps the cache pristine for all downstream callers.
+
     edge_types: frozenset of edge_type strings to follow; None = all edges.
     """
     if edge_types is None:
@@ -110,7 +119,7 @@ def multihop_subgraph(
         if idx is None or idx in visited:
             continue
         visited.add(idx)
-        result.append((G[idx], None, None))
+        result.append((dict(G[idx]), None, None))
         queue.append((idx, 0))
 
     while queue:
@@ -134,7 +143,7 @@ def multihop_subgraph(
             if tgt_idx in visited:
                 continue
             visited.add(tgt_idx)
-            result.append((G[tgt_idx], edge_data, cur_oid))
+            result.append((dict(G[tgt_idx]), dict(edge_data), cur_oid))
             queue.append((tgt_idx, depth + 1))
 
     return result

@@ -312,3 +312,65 @@ def test_verify_chain_edges_no_edges_no_calls():
     result = verify_chain_edges(sub, _CountingLLM())
     assert result["chain_trust"] == 1.0
     assert len(calls) == 0
+
+
+# ── Cache-isolation regression (cross-ask leak) ──────────────────────────────
+# Bug: multihop_subgraph used to return LIVE references into the cached
+# PyDiGraph (rustworkx get_edge_data / G[idx] hand back the same object).
+# ask_graph demotes a flagged edge in-place (edge["confidence"] = 0.05) before
+# re-rendering, which mutated the CACHED graph and leaked into the NEXT ask on
+# the same cached graph. multihop_subgraph must now hand back COPIES so the
+# cache stays pristine.
+
+def test_multihop_subgraph_returns_edge_payload_copies():
+    """Edge payloads returned by multihop_subgraph must be copies, not the live
+    dicts stored in the PyDiGraph (so callers can mutate them safely)."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    src_idx, tgt_idx = oid_to_idx["A"], oid_to_idx["B"]
+    cached_edge = G.get_edge_data(src_idx, tgt_idx)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=1, max_fan_out=10)
+    returned_edges = [e for _n, e, _s in sub if e is not None]
+    assert returned_edges, "expected at least one edge in the subgraph"
+    # Same content...
+    assert returned_edges[0]["edge_type"] == cached_edge["edge_type"]
+    # ...but NOT the same object as the one held inside the cached graph.
+    assert returned_edges[0] is not cached_edge
+
+
+def test_flag_demotion_does_not_leak_into_next_ask():
+    """Cross-ask cache isolation: build the graph ONCE (as the version-cache
+    would hand it out), traverse + demote a flagged edge in the first ask, then
+    traverse AGAIN on the SAME cached graph. The cached graph's edge confidence
+    must still be 1.0 — the first ask's demotion must not leak into the second.
+    """
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+
+    # Build ONCE — this stands in for the version-keyed cached PyDiGraph that
+    # _rx_graph hands out by reference across multiple asks.
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    src_idx, tgt_idx = oid_to_idx["A"], oid_to_idx["B"]
+    assert G.get_edge_data(src_idx, tgt_idx)["confidence"] == 1.0
+
+    # ── First ask: traverse, then demote the flagged edge in-place exactly as
+    # ask_graph does (sqlite_repository.py: edge["confidence"] = 0.05).
+    sub1 = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                             {"derived_from"}, max_depth=1, max_fan_out=10)
+    flagged = [e for _n, e, _s in sub1 if e and e.get("edge_type") == "derived_from"]
+    assert flagged, "expected the derived_from edge in the first traversal"
+    for edge in flagged:
+        edge["confidence"] = 0.05
+    # Within this ask the demotion is visible on the returned payload.
+    assert flagged[0]["confidence"] == 0.05
+
+    # ── The cached graph itself must be untouched by the first ask's demotion.
+    assert G.get_edge_data(src_idx, tgt_idx)["confidence"] == 1.0
+
+    # ── Second ask on the SAME cached graph: it must see the original 1.0,
+    # not the leaked 0.05.
+    sub2 = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                             {"derived_from"}, max_depth=1, max_fan_out=10)
+    edges2 = [e for _n, e, _s in sub2 if e and e.get("edge_type") == "derived_from"]
+    assert edges2, "expected the derived_from edge in the second traversal"
+    assert edges2[0]["confidence"] == 1.0
