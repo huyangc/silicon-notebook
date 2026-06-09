@@ -3263,10 +3263,10 @@ class SQLiteRepository:
         # Score each KG type, pool, then rank by relevance * intent-aware type
         # weight (process/flow questions stop burying procedures).
         _t = time.perf_counter()
-        token_sets = {}
         if self.settings.retrieval_rrf_enabled:
             scored_all = self._rrf_scored(query, kg_objs, knowledge_sims)
         else:
+            token_sets = {}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
             with self._connect() as db:
                 token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
