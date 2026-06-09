@@ -30,6 +30,8 @@
 - **Committee review spans front + back end** (review/promotion queue UX).
 - **Edges auto-extracted**; trust via layered signals + targeted review, not blanket human review (T3).
 
+**POC reality (chosen 2026-06-09):** base KG = the **EXISTING analog-textbook KG** already extracted (~36k objects in the prod DB: Razavi/Gray/Allen-Holberg sources), tagged `tier=base`, curated by you (committee = you, for now). Personal tier = **ordinary user notebooks**. **Large-scale extraction is deferred (effect-driven).** At ~36k objects the scale phases (P2.5/P4/P6/P7 + the 100k build + the 50–100-doc calibration) leave the near-term path into the backlog (revive when the base scales to 10k+ docs). The near term is the **two-tier + strict-reasoning POC on existing data** — see §11.
+
 ---
 
 ## 1. Trigger scenario — the BASE KG ("unified KG over 10k+ academic docs")
@@ -90,6 +92,8 @@ One managed Postgres serves multiple ports: tables for `ObjectStore`/`RelationSt
 ---
 
 ## 6. Phase map
+
+> **Near-term (POC) note:** with large-scale extraction deferred and base = the existing ~36k-object textbook KG, **scale phases P2.5/P4/P6/P7 are DEFERRED** (scale-triggered). The near-term executable plan is the parallel tracks in **§11**.
 
 **A. Scale infrastructure**
 
@@ -207,3 +211,27 @@ Automatic signals: extraction confidence (self-rate × cross-window agreement ×
 **Near-term POC slice (single-user):** SA (align + calibrate) → P1 → P2 → P2.5, then P3+P4 to stand up the base substrate, P5+T1 for tier-aware retrieval, T2 for the strict-reasoning demo. P6/P7 scale the base build; T3/T4 add curation+governance.
 
 **Honest bottom line:** single-ask latency stays **LLM-bound** at every scale — this roadmap buys **feasibility, throughput, concurrency, and trustworthy strict reasoning** for a two-tier 10k→100k KG, not a faster single ask. The first real walls are **extraction throughput** (P7/SA) and the **in-RAM matrix + per-query full-scan** (P4+P5); the two-tier/reasoning/governance layer (T1–T4) is what turns "a big KG" into "the anti-hallucination, citable, strict-reasoning product."
+
+---
+
+## 11. Near-term POC plan (existing textbook KG as base; parallel tracks)
+
+**POC shape:** base = the existing analog-textbook KG (`tier=base`); personal = user notebooks (`tier=personal`); federated tier-aware retrieval (base authoritative on conflict); strict multi-hop reasoning on an in-memory rustworkx graph — all on the current ~36k-object SQLite data, **no scale infra, no new extraction**.
+
+**Wave 1 — 3 independent tracks run concurrently** (different code areas → low conflict; 3 worktrees / 3 subagents):
+
+| Track | Plan doc | Scope | Code area |
+|---|---|---|---|
+| **A — Interface hardening** | `2026-06-09-trackA-interface-hardening.md` | close `_connect` leaks + `CacheBackend` + fix `_rrf_scored` element_sims bug | `app/eval/*`, `core/llm*`, small `sqlite_repository._rrf_scored` |
+| **B — Two-tier federated retrieval** | `2026-06-09-trackB-two-tier-federated-retrieval.md` | `tier` field; federate base∪personal; tier-weighted relevance; conflict precedence; tier in `[k]` | `sqlite_repository` ask/retrieve path, `prompts`, migration |
+| **C — Graph reasoning POC** | `2026-06-09-trackC-graph-reasoning-poc.md` | rustworkx graph from relations; multi-hop subgraph→synthesis; answer-time chain verify | NEW `kg/graph_reason.py` + ask hook |
+
+**Coordination:** B and C both plug into the `ask` orchestration → one owns the ask entry, the other is a flagged pluggable mode; integrate in Wave 2. A is fully independent.
+
+**Wave 2 (after Wave 1):** D = cross-tier multi-hop (B+C: chains spanning base∪personal); E = edge-trust/centrality curation (T3, uses C's graph); F = governance/promotion (T4, uses B's tier model).
+
+**Deferred backlog (effect-driven / scale-triggered):** SA (extraction alignment to schema v1.0.0: `validity_scope`, broaden + hunt sparse reasoning edges) + **50–100-doc calibration (TODO)** · P2 full ports · P2.5 scale-eval · P4 Postgres substrate · P6 batch merge/community at scale · P7 ingestion scaling · the 100k extraction. **Revive when the base scales to 10k+ docs.**
+
+**Two risks to hold:**
+1. **Thin reasoning edges on the existing KG** — `derived_from`(4160)/`supports`(6068) well-fed → **lead the reasoning demo with derivation/support chains**; `depends_on`/`contrasts_with`/`prerequisite_of` (791/556/68) thin → trade-off/prereq/contradiction chains stay weak until SA re-extraction (deferred).
+2. **God-object debt** — B/C build on `SQLiteRepository`; introduce only a **light seam** (`GraphTraversal` + a `federated_retrieve` method), not the full P2 port refactor (deferred), to keep POC speed without over-bloating the monolith.
