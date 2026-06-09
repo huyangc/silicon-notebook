@@ -2052,7 +2052,12 @@ class SQLiteRepository:
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
-        self._vector_cache.invalidate(f"{notebook_id}:knowledge")
+        # Matrices are stored under "{nb}:matrix:{table}" (see _vector_matrix). The old
+        # "{nb}:knowledge" key never matched (dead no-op). Invalidate BOTH embedding
+        # tables so an in-place re-embed (same row count + same-second created_at, i.e.
+        # an unchanged version tuple) cannot serve a stale vector.
+        for table in ("knowledge_embeddings", "element_embeddings"):
+            self._vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
