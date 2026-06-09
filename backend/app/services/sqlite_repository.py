@@ -2059,6 +2059,9 @@ class SQLiteRepository:
         for table in ("knowledge_embeddings", "element_embeddings"):
             self._vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
         self._vector_cache.invalidate(f"{notebook_id}:kwtok")
+        # In-memory reasoning graph (built from knowledge_relations) — evict so a
+        # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
+        self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -3066,6 +3069,45 @@ class SQLiteRepository:
             return out
 
         return self._vector_cache.get(f"{notebook_id}:kwtok", version, _load)
+
+    def _rx_graph(self, notebook_id: str):
+        """Return the cached rustworkx PyDiGraph for `notebook_id`.
+
+        Version-keyed on (COUNT, MAX created_at) of knowledge_relations
+        (same pattern as _vector_matrix at :3020-3045).  Graph is rebuilt
+        only on new ingest/delete.  Returned tuple: (G, idx_to_oid, oid_to_idx).
+        Nodes are the USABLE_STATUSES knowledge_objects (same filter as the
+        retrieval path); dangling edges (endpoint not a node) are dropped.
+        """
+        from app.services.kg.graph_reason import build_rx_graph
+        with self._connect() as db:
+            ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                "FROM knowledge_relations WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+            version = ("rxgraph", ver["c"], ver["ts"])
+
+            def _load():
+                ph = ",".join("?" for _ in USABLE_STATUSES)
+                obj_rows = db.execute(
+                    "SELECT id, object_type, payload FROM knowledge_objects "
+                    f"WHERE notebook_id = ? AND status IN ({ph})",
+                    (notebook_id, *USABLE_STATUSES),
+                ).fetchall()
+                nodes = {}
+                for r in obj_rows:
+                    p = json.loads(r["payload"] or "{}")
+                    nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                rel_rows = db.execute(
+                    "SELECT id, source_object_id, target_object_id, edge_type, evidence "
+                    "FROM knowledge_relations WHERE notebook_id = ?",
+                    (notebook_id,),
+                ).fetchall()
+                relations = [dict(r) for r in rel_rows]
+                return build_rx_graph(nodes, relations)
+
+            return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
