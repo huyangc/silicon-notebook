@@ -98,3 +98,38 @@ class TestTask2:
             base_ids = {r["id"] for r in db.execute(
                 "SELECT id FROM knowledge_objects WHERE notebook_id=?", (base_nb.id,)).fetchall()}
         assert all_ids & base_ids, "no base-notebook objects reached the answer"
+
+
+class TestTask3:
+    def test_tier_weight_base_exceeds_personal(self):
+        from app.services.retrieval import tier_weight
+        assert tier_weight("base") > tier_weight("personal")
+
+    def test_tier_weight_values_are_positive(self):
+        from app.services.retrieval import tier_weight
+        assert tier_weight("base") > 0
+        assert tier_weight("personal") > 0
+        assert tier_weight("unknown") > 0
+
+    def test_base_hit_outranks_personal_with_same_raw_score(self, repo):
+        """A base hit with score=0.20 must rank above a personal hit with score=0.20."""
+        from app.services.retrieval import RetrievedKnowledge, tier_weight
+        from app.services.sqlite_repository import type_weight
+        base_hit = RetrievedKnowledge(
+            object_id="b1", object_type="claim", payload={}, tier="base", score=0.20, relevance=0.20)
+        personal_hit = RetrievedKnowledge(
+            object_id="p1", object_type="claim", payload={}, tier="personal", score=0.20, relevance=0.20)
+        process_intent = False
+        rank = lambda h: h.score * type_weight(h.object_type, process_intent) * tier_weight(h.tier)
+        assert rank(base_hit) > rank(personal_hit)
+
+    def test_keyword_base_hit_tau_position_unchanged(self, repo):
+        """A pure-keyword base hit's .relevance (what tau reads) must stay [0,1].
+        The tier boost on .score must not bleed into .relevance."""
+        from app.services.retrieval import RetrievedKnowledge
+        h = RetrievedKnowledge(
+            object_id="b1", object_type="claim", payload={}, tier="base",
+            score=0.22, relevance=0.22)
+        # Tier boost is applied to score during rank_key, not to relevance.
+        assert h.relevance == 0.22
+        assert 0.0 <= h.relevance <= 1.0

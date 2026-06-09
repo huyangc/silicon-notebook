@@ -108,6 +108,7 @@ from app.services.retrieval import (
     score_knowledge,
     score_elements,
     type_weight,
+    tier_weight,
     is_process_query,
     ensure_procedure_quota,
     classify_evidence,
@@ -3364,7 +3365,13 @@ class SQLiteRepository:
                 bh.notebook_id = brow["id"]
                 bh.tier = brow["tier"]
             scored_all.extend(base_hits)
-        rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
+        # Tier authority composes at the SAME level as type_weight (multiplies
+        # score for ranking), NEVER inside _fuse — so relevance/tau are untouched.
+        rank_key = lambda it: (
+            it.score
+            * type_weight(it.object_type, process_intent)
+            * tier_weight(getattr(it, "tier", "personal"))
+        )
         scored_all.sort(key=rank_key, reverse=True)
         top_n = self.settings.retrieval_top_n
         pool = scored_all[: max(top_n, self.settings.rerank_candidates)]
