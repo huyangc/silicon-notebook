@@ -394,17 +394,19 @@ git commit -m "chore(eval): per-stage ask P50/P95 from ask_stage events (baselin
 
 ---
 
-## Measured baseline (fill in during P0 Task 4)
+## Measured baseline (captured 2026-06-09, P0 Task 4)
 
-| Stage | P50 (ms) | P95 (ms) |
-|---|---|---|
-| rewrite-LLM | _TBD_ | _TBD_ |
-| load_indexes | _TBD_ | _TBD_ |
-| score | _TBD_ | _TBD_ |
-| rerank-LLM | _TBD_ | _TBD_ |
-| answer_llm | _TBD_ | _TBD_ |
+Real run: notebook `nb-012fb94249` ("Analog CMOS IC Design", 35.8k objects / 9.1k knowledge embeddings), 30 questions through `repo.ask` with the production LLM + embedding endpoints, on an online-backup copy of the 1.3 GB prod DB. Aggregated from `ask_stage` events via `app/eval/ask_latency.py` (nearest-rank percentile). The **P0 token cache is active** in these numbers.
 
-> After P0 Task 3 (token cache), re-measure `score`. If `score` is already < ~50 ms and LLM stages dominate, **Phase 3 is not justified** — record that decision here.
+| Stage | P50 (ms) | P95 (ms) | max (ms) | share of total (P50) |
+|---|---|---|---|---|
+| load_indexes | 724 | 836 | 6983 | ~7% |
+| score | 75 | 165 | 2457 | ~0.7% |
+| expand (1-hop) | 2 | 4 | 5 | ~0.02% |
+| **answer_llm** | **9302** | **21932** | 22665 | **~91%** |
+| **total** | **10244** | **22807** | 23476 | 100% |
+
+**Conclusion — Phase 3 (ANN) is NOT justified on latency grounds.** The LLM answer call is ~91% of wall-clock and dwarfs everything else by ~10×. The entire vector/score layer is ~8% of total, and most of `load_indexes` (724 ms P50) is the query-embedding network round-trip + object load, **not** the matmul — the matmul is buried inside `score`, which with the P0 token cache is only 75 ms P50. The `max` spikes (`load_indexes` 6983 ms, `score` 2457 ms) are the first ask's cold matrix build, paid once and cached. So: the all-in-memory matrix the user worried about is a third-order cost; **decompose the storage layer for testability/swappability (P1→P2), not for latency.** If end-to-end ask latency is the goal, the lever is the answer LLM (model/streaming/output-length), not retrieval.
 
 ---
 
