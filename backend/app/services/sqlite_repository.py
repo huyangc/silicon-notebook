@@ -3294,7 +3294,8 @@ class SQLiteRepository:
         # weight (process/flow questions stop burying procedures).
         _t = time.perf_counter()
         if self.settings.retrieval_rrf_enabled:
-            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims)
+            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims,
+                                          element_sims=element_sims)
         else:
             token_sets = {}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
@@ -3614,6 +3615,7 @@ class SQLiteRepository:
         query: str,
         kg_objs: Dict[str, List[dict]],
         knowledge_sims: Optional[Dict[str, float]],
+        element_sims: Optional[Dict[str, float]] = None,
     ) -> List[RetrievedKnowledge]:
         """BM25 + 语义 RRF 融合排序,产出与 score_knowledge 池化同构的列表。
 
@@ -3658,9 +3660,20 @@ class SQLiteRepository:
             # score = RRF (ordering); relevance = [0,1] fused keyword+semantic so
             # classify_evidence's tau thresholds stay valid (RRF micro-scores would
             # otherwise classify every answer as "inferred").
+            # Best-of: object-level sim OR max(element-level sims), same as
+            # score_knowledge — protects the dual-index invariant so an object
+            # grounded only via an evidence-element embedding is not downgraded.
+            semantic = sims.get(oid, 0.0)
             has_vec = oid in sims
+            if element_sims:
+                for ev in obj.get("evidence", []):
+                    eid = getattr(ev, "element_id", "") or ""
+                    s = element_sims.get(eid)
+                    if s is not None:
+                        has_vec = True
+                        semantic = max(semantic, s)
             relevance = _fuse(keyword_score(query, text_by_id.get(oid, "")),
-                              sims.get(oid, 0.0), has_vec)
+                              semantic, has_vec)
             result.append(
                 RetrievedKnowledge(
                     object_id=oid,
