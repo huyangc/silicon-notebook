@@ -786,6 +786,15 @@ class SQLiteRepository:
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchall()
+            # knowledge_embeddings has no FK to notebooks (see DDL ~line 300), so
+            # deleting the notebooks row does NOT cascade to it. Delete it here so
+            # every public delete caller leaves zero orphan embedding rows.
+            # (element_embeddings DOES cascade transitively via
+            # source_elements -> sources -> notebooks, so it needs no explicit delete.)
+            db.execute(
+                "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
+                (notebook_id,),
+            )
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
         for row in source_rows:
             self._delete_file(row["file_path"])

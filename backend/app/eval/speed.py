@@ -73,7 +73,9 @@ def _insert_source(repo, nb_id, name, text, tmpdir):
 
 
 def _cleanup(repo, nb_id):
-    # delete_notebook cascades all child tables via FK ON DELETE CASCADE.
+    # delete_notebook removes the notebook plus every child table: FK-cascading
+    # tables via ON DELETE CASCADE, and the non-cascading knowledge_embeddings
+    # explicitly. Leaves zero orphan rows.
     repo.delete_notebook(nb_id)
 
 
