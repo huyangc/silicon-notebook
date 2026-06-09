@@ -2052,7 +2052,13 @@ class SQLiteRepository:
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
             self._unified_cache.pop(key, None)
-        self._vector_cache.invalidate(f"{notebook_id}:knowledge")
+        # Matrices are stored under "{nb}:matrix:{table}" (see _vector_matrix). The old
+        # "{nb}:knowledge" key never matched (dead no-op). Invalidate BOTH embedding
+        # tables so an in-place re-embed (same row count + same-second created_at, i.e.
+        # an unchanged version tuple) cannot serve a stale vector.
+        for table in ("knowledge_embeddings", "element_embeddings"):
+            self._vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
+        self._vector_cache.invalidate(f"{notebook_id}:kwtok")
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -3038,6 +3044,29 @@ class SQLiteRepository:
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
 
+    def _keyword_token_sets(self, db, notebook_id: str, objects: list) -> dict:
+        """Cached {object_id: frozenset(haystack_tokens)} for keyword scoring.
+
+        Version-keyed on (COUNT, MAX(updated_at)) of knowledge_objects so any
+        payload or evidence edit invalidates the cache. Evidence text is included
+        so the token set is byte-equivalent to what score_knowledge builds live."""
+        from app.services.retrieval import _tokens, _payload_text
+        ver = db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,)).fetchone()
+        version = ("kwtok", ver["c"], ver["ts"])
+
+        def _load():
+            out = {}
+            for o in objects:
+                ev_text = " ".join(
+                    e.quoted_span for e in o.get("evidence", [])
+                )
+                out[o["id"]] = frozenset(_tokens(f"{_payload_text(o['payload'])} {ev_text}"))
+            return out
+
+        return self._vector_cache.get(f"{notebook_id}:kwtok", version, _load)
+
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
         applies_to = payload.get("applies_to")
@@ -3101,6 +3130,8 @@ class SQLiteRepository:
             query_vector = self._embed_query(query)
             elem_ids, elem_mat = self._vector_matrix(db, notebook_id, "element_embeddings", "element_id")
             kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+            all_kg_objs = [o for objs in kg_objs.values() for o in objs]
+            token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
         from app.services.vector_index import query_sims
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
         knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
@@ -3113,6 +3144,7 @@ class SQLiteRepository:
                 query, objs, t, query_vector, None, None,
                 element_sims=element_sims, knowledge_sims=knowledge_sims,
                 w_keyword=w_keyword, w_semantic=w_semantic,
+                keyword_token_sets=token_sets,
             ))
         scored.sort(key=lambda it: it.score, reverse=True)
         return scored
@@ -3234,6 +3266,10 @@ class SQLiteRepository:
         if self.settings.retrieval_rrf_enabled:
             scored_all = self._rrf_scored(query, kg_objs, knowledge_sims)
         else:
+            token_sets = {}
+            all_kg_objs = [o for objs in kg_objs.values() for o in objs]
+            with self._connect() as db:
+                token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
             scored_all: List[RetrievedKnowledge] = []
             for t in _KG_TYPES:
                 objs = kg_objs[t]
@@ -3243,6 +3279,7 @@ class SQLiteRepository:
                     score_knowledge(
                         query, objs, t, query_vector, None, None,
                         element_sims=element_sims, knowledge_sims=knowledge_sims,
+                        keyword_token_sets=token_sets,
                     )
                 )
         rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)

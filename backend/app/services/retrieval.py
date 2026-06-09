@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, FrozenSet, List, Optional, Sequence, Set
 
 from app.models.schemas import Evidence
 
@@ -240,18 +240,23 @@ _STOPWORDS = {
 }
 
 
+def keyword_score_tokens(query_tokens: Set[str], haystack_tokens: Set[str]) -> float:
+    """Fraction of (content) query tokens present in a pre-tokenized haystack (0..1)."""
+    if not query_tokens:
+        return 0.0
+    hits = sum(1 for token in query_tokens if token in haystack_tokens)
+    return hits / len(query_tokens)
+
+
 def keyword_score(query: str, text: str) -> float:
     """Fraction of (content) query tokens present in the text (0..1).
 
     Stopwords are dropped from the query basis so verbose phrasings ("what is
     X and what are its problems") aren't diluted relative to concise ones.
+    Thin wrapper over keyword_score_tokens for callers without a cached token set.
     """
     query_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
-    if not query_tokens:
-        return 0.0
-    haystack = set(_tokens(text))
-    hits = sum(1 for token in query_tokens if token in haystack)
-    return hits / len(query_tokens)
+    return keyword_score_tokens(query_tokens, set(_tokens(text)))
 
 
 def token_overlap(span: str, text: str) -> float:
@@ -287,6 +292,7 @@ def score_knowledge(
     knowledge_sims: Optional[Dict[str, float]] = None,
     w_keyword: float = W_KEYWORD,
     w_semantic: float = W_SEMANTIC,
+    keyword_token_sets: Optional[Dict[str, FrozenSet[str]]] = None,
 ) -> List[RetrievedKnowledge]:
     """Score knowledge by keyword + optional semantic similarity.
 
@@ -296,6 +302,7 @@ def score_knowledge(
     None (no embedding configured) this degrades to keyword-only.
     """
     weight = _TYPE_WEIGHT.get(object_type, 0.5)
+    query_basis_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
     scored: List[RetrievedKnowledge] = []
     for obj in objects:
         object_id = obj["id"]
@@ -303,7 +310,10 @@ def score_knowledge(
         text = _payload_text(payload)
         evidence = obj.get("evidence", [])
         evidence_text = " ".join(e.quoted_span for e in evidence)
-        keyword = keyword_score(query, f"{text} {evidence_text}")
+        if keyword_token_sets is not None and object_id in keyword_token_sets:
+            keyword = keyword_score_tokens(query_basis_tokens, keyword_token_sets[object_id])
+        else:
+            keyword = keyword_score(query, f"{text} {evidence_text}")
 
         semantic = 0.0
         has_vector = False

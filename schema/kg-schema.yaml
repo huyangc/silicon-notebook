@@ -1,0 +1,236 @@
+# Canonical KG schema for the unified analog-circuit knowledge base.
+# Machine-readable source of truth for: extraction prompt generation, ingest
+# validation, and committee tooling. Human rationale + examples: kg-schema.md.
+#
+# Built on the CURRENT 4-type extractor (backend/app/services/kg/extract.py,
+# extraction_profiles.py, kg/models.py); this file LOCKS + EXTENDS it before the
+# ~100k-doc extraction. v1.0.0 (2026-06-09): the four prior open decisions are
+# resolved as recommended — validity_scope as a Claim/Formula attribute; reasoning
+# edges broadened to connect Claim/Formula; base-tier meta-text filtering; the
+# 50–100-doc calibration gate before the 100k run.
+
+version: 1.0.0
+status: locked              # LOCKED 2026-06-09. Change control: committee review + version bump.
+updated: "2026-06-09"
+domain: analog-circuit-design   # textbooks + papers (+ tool manuals filtered out of base)
+
+# ---------------------------------------------------------------------------
+# Tiers: two knowledge bases, retrieved together, base authoritative on conflict.
+# ---------------------------------------------------------------------------
+tiers:
+  base:
+    description: Vertical-domain foundation KB (all analog-circuit knowledge). Anti-hallucination grounding.
+    authoritative: true                 # base wins on conflict with personal
+    maintained_by: expert_committee
+    build: batch-one-time + rare additions behind strong human review
+    visibility: shared_read             # single-user for POC; multi-user/ACL deferred
+  personal:
+    description: Per-owner personalized KB from individual chip-design experience; scenario-specific.
+    authoritative: false
+    build: lightweight, owner-managed, no auto admission filtering
+    promotion: owner_triggered -> committee_final_review   # node-level promotion into base
+
+# ---------------------------------------------------------------------------
+# Atomic unit: ONE node = ONE atom. Same unit for reasoning / citation / review /
+# merge / promotion.
+# ---------------------------------------------------------------------------
+unit:
+  atom: node
+  rule: >
+    One node = one self-contained, verifiable proposition (Claim) / one equation
+    (Formula) / one named reusable entity (Concept) / one ordered process (Procedure).
+  same_unit_for: [reasoning, citation, review, merge, promotion]
+
+# ---------------------------------------------------------------------------
+# NODE TYPES — locked at 4 (empirically cover the corpus; claim+formula+concept = 96%).
+# Do NOT add node types for scale's sake (each new type costs extraction tokens +
+# prompt complexity + lower per-type precision). Parameters/quantities stay as Concept.
+# ---------------------------------------------------------------------------
+node_types:
+  concept:
+    plural: concepts
+    description: A NAMED, reusable technical entity — method/mechanism/component/device/material/named model/structure. Parameters & quantities (gain, GBW, phase margin, IIP3) are Concepts.
+    primary: name
+    payload_fields: [name, section_path]
+    optional_fields: [concept_subtype]   # deferred: tag (e.g. quantity|technique|component); NOT extracted yet
+    validity_scope: false
+    extraction: SELECTIVE — only distinctive named entities. Exclude bare symbols/variables, instance labels (Q1, M5, Pole p8), figure/table/eq refs, section headings, enumerated settings (Level 1/2/3).
+  claim:
+    plural: claims
+    description: A complete, truth-evaluable technical assertion (subject + predicate stating a fact/relationship). The reasoning-bearing unit.
+    primary: name                        # name carries the proposition text
+    payload_fields: [name, section_path, validity_scope]
+    validity_scope: true
+    extraction: ATOMIC — one proposition per node. Exclude section headings, narrative/meta sentences about the document, navigation. Split conditional statements so the condition goes into validity_scope (do NOT leave dangling "This holds for DC…" claims).
+  formula:
+    plural: formulas
+    description: An equation / expression. Capture EVERY formula present.
+    primary: name                        # name carries the LaTeX/expression
+    payload_fields: [name, section_path, validity_scope]
+    validity_scope: true
+    extraction: EXHAUSTIVE — do not skip equations.
+  procedure:
+    plural: procedures
+    description: An ordered process / derivation / worked example / design flow. Capture EVERY procedure.
+    primary: name
+    payload_fields: [name, section_path, steps]
+    validity_scope: false                # may add preconditions later
+    steps:
+      ordered: true
+      item_fields: [name, evidence]
+    extraction: Emit a multi-step flow as ONE Procedure node with an ordered `steps` array (steps are the source of truth for order).
+
+# ---------------------------------------------------------------------------
+# Common fields on EVERY node (beyond the per-type payload).
+# ---------------------------------------------------------------------------
+common_node_fields:
+  id:          {type: string, desc: stable node id (content/identity-based; sticky across batch re-runs)}
+  object_type: {type: enum, values: [concept, claim, formula, procedure]}
+  tier:        {type: enum, values: [base, personal]}
+  status:      {type: enum, values: [approved, pending, deprecated], default: pending}
+  confidence:  {type: float, range: "[0,1]", desc: extraction confidence (LLM self-rate × cross-window agreement × endpoint confidence)}
+  provenance:  {type: object, desc: "{source_id, doc_type, committee_reviewed: bool}"}
+  evidence:    {type: array, items_ref: evidence, desc: element-anchored proof; a node with no groundable evidence is DROPPED}
+
+# Element-anchored evidence (the stored/product form). Extraction intermediate uses
+# char-spans (kg/models.Evidence) then maps to element_id at ingest.
+evidence:
+  source_id:     string
+  source_title:  string
+  element_id:    string        # FK -> source_elements.id (the citation/grounding anchor)
+  element_type:  string        # paragraph | table | heading | formula | list_item | code_block
+  location_label: string
+  quoted_span:   string        # verbatim text supporting the node/edge
+  confidence:    float
+
+# Structured condition / scope-of-validity — the ONE essential addition for strict
+# reasoning (prevents out-of-scope application = a major hallucination source).
+# Attribute on claim & formula (NOT a node type). All sub-fields optional.
+validity_scope:
+  region:        {type: array, items: string, desc: "e.g. saturation | triode | weak-inversion | strong-inversion"}
+  assumptions:   {type: array, items: string, desc: "e.g. perfect matching | R_in << R_C | long-channel"}
+  approximation: {type: string, desc: "e.g. first-order / small-signal / neglecting body effect"}
+  range:         {type: string, desc: "validity range, e.g. low-frequency | f << f_T"}
+  upgrade_path:  "If retrieval-by-condition is needed, promote to a Condition node + holds_under edge."
+
+# ---------------------------------------------------------------------------
+# EDGE TYPES — 12, locked vocabulary. Split by extraction + curation PRIORITY.
+# NOTE: reasoning-bearing edges are intentionally BROADENED vs the current prompt
+# (which over-constrained derived_from->Formula-only and contrasts_with->Concept-only).
+# Strict reasoning lives on Claim/Formula, so these must connect Claims/Formulas.
+# ---------------------------------------------------------------------------
+edge_types:
+  # --- reasoning-bearing (HIGH extraction priority; committee curation focus) ---
+  supports:
+    category: reasoning
+    priority: high
+    source_types: [claim, formula, concept]
+    target_types: [claim]
+    desc: evidence/argument that backs a claim.
+  derived_from:
+    category: reasoning
+    priority: high
+    source_types: [claim, formula]        # BROADENED (was Formula->Formula)
+    target_types: [claim, formula]
+    desc: this result is derived/follows from that one (derivation chains, cross-doc).
+  depends_on:
+    category: reasoning
+    priority: high
+    source_types: [claim, formula, concept]   # BROADENED
+    target_types: [claim, formula, concept]
+    desc: validity/value of source depends on target.
+  contrasts_with:
+    category: reasoning
+    priority: high
+    source_types: [claim, formula, concept]   # BROADENED (was Concept->Concept) — enables claim↔claim trade-offs/contradictions
+    target_types: [claim, formula, concept]
+    desc: trade-off / disagreement / contradiction (symmetric).
+  prerequisite_of:
+    category: reasoning
+    priority: high
+    source_types: [concept, claim]        # BROADENED to allow claim prerequisites
+    target_types: [concept, claim]
+    desc: must be understood/established before the target.
+  used_in:
+    category: reasoning
+    priority: normal
+    source_types: [formula, concept]      # BROADENED (added concept)
+    target_types: [procedure]
+    desc: formula/concept is applied in a procedure.
+  precedes:
+    category: reasoning
+    priority: normal
+    source_types: [procedure, claim, formula]
+    target_types: [procedure, claim, formula]
+    desc: temporal/logical ordering (also encoded by Procedure.steps order).
+  # --- structural / connective (NORMAL priority; cheap, secondary) ---
+  about:
+    category: structural
+    priority: normal
+    source_types: [claim, formula]
+    target_types: [concept]
+    desc: this claim/formula is about that concept.
+  defines:
+    category: structural
+    priority: normal
+    source_types: [claim]
+    target_types: [concept]
+    desc: this claim defines the concept.
+  part_of:
+    category: structural
+    priority: normal
+    source_types: [concept]
+    target_types: [concept]
+  composed_of:
+    category: structural
+    priority: normal
+    source_types: [concept]
+    target_types: [concept]
+  kind_of:
+    category: structural
+    priority: normal
+    source_types: [concept]
+    target_types: [concept]
+
+edge_common_fields:
+  evidence:   {type: array, items_ref: evidence, desc: element-anchored proof; an edge with no/weak evidence is auto-suspect}
+  confidence: {type: float, range: "[0,1]"}
+  tier:       {type: enum, values: [base, personal]}
+  corroboration: {type: int, desc: "# of independent source docs asserting this edge (cross-doc trust signal at scale)"}
+
+# ---------------------------------------------------------------------------
+# Extraction directives (encode into the prompt for the 100k run).
+# ---------------------------------------------------------------------------
+extraction_directives:
+  atomicity: One claim = one verifiable proposition; split conjunctions/conditionals.
+  validity_scope: Extract conditions/assumptions/region into the structured validity_scope field, NOT as prose or dangling claims.
+  reasoning_edges: >
+    EXPLICITLY hunt the sparse reasoning relations — depends_on, contrasts_with,
+    prerequisite_of (these were thin in the current corpus: 791 / 556 / 68). Connect
+    Claims & Formulas, not only Concepts. Reasoning-edge recall is the #1 quality lever.
+  base_quality_filter: >
+    For the BASE tier, drop non-knowledge meta-text (pedagogical asides "In a semester
+    system…", exercise hints, tool/UI trivia, document navigation). Personal tier is NOT filtered.
+  evidence_required: Every node and edge must carry element-anchored evidence; ungroundable items are dropped.
+
+# ---------------------------------------------------------------------------
+# Calibration gate — MANDATORY before committing the ~100k-doc token spend.
+# ---------------------------------------------------------------------------
+calibration_gate:
+  sample: 50-100 representative docs (textbook chapters + several papers)
+  measure:
+    - per-relation edge density (esp. depends_on / contrasts_with / prerequisite_of)
+    - atomicity + validity_scope extraction quality (human spot-check)
+    - token cost per doc -> extrapolate full 100k cost ($ + wall-clock)
+  pass_condition: reasoning-edge density adequate AND cost within budget AND atomicity acceptable
+  rule: Do NOT run the full 100k extraction on an unvalidated prompt.
+
+# ---------------------------------------------------------------------------
+# Graph engine for reasoning/community (NOT a graph database server).
+# ---------------------------------------------------------------------------
+graph_engine:
+  kind: in-memory          # derived from the relations table; topology is MB-scale even at 100k docs
+  library: rustworkx
+  rebuilt: on (rare) base updates; personal overlaid per session
+  serves: [multi_hop_reasoning_traversal, pathfinding, community_detection_leiden, centrality_for_edge_review_priority]
+  store_of_record: postgres + pgvector + pg_fts   # vectors/objects/edges/text live here
