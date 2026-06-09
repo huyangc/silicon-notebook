@@ -166,6 +166,9 @@ class AnswerAnchor(BaseModel):
     snippet: Optional[str] = None      # element_text of the grounding sentence
     source_title: str = ""
     location_label: str = ""
+    # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
+    # user notes). Lets the UI surface authority + supports conflict precedence.
+    tier: str = "personal"
 
 
 class AskResponse(BaseModel):

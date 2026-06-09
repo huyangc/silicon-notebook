@@ -133,3 +133,33 @@ class TestTask3:
         # Tier boost is applied to score during rank_key, not to relevance.
         assert h.relevance == 0.22
         assert 0.0 <= h.relevance <= 1.0
+
+
+class TestTask4:
+    def test_answer_anchor_has_tier_field(self):
+        from app.models.schemas import AnswerAnchor
+        a = AnswerAnchor(key="k1", object_id="o1", object_type="claim",
+                         label="Cap", name="Capacitance", tier="base")
+        assert a.tier == "base"
+
+    def test_answer_anchor_tier_defaults_to_personal(self):
+        from app.models.schemas import AnswerAnchor
+        a = AnswerAnchor(key="k1", object_id="o1", object_type="claim", label="x")
+        assert a.tier == "personal"
+
+    def test_parse_answer_anchors_carries_tier(self, repo):
+        id_map = {
+            "k1": {"object_id": "o1", "object_type": "claim", "name": "Cap",
+                   "definition": "capacitance", "snippet": None,
+                   "source_title": "", "location_label": "", "tier": "base"},
+        }
+        anchors = repo._parse_answer_anchors("Capacitance [k1].", id_map)
+        assert anchors[0].tier == "base"
+
+    def test_answer_prompt_contains_conflict_rule(self):
+        from app.services.prompts import answer_prompt
+        prompt = answer_prompt("question", "context")
+        # The prompt must instruct the LLM to prefer base on contradiction.
+        assert "base" in prompt.lower() and (
+            "contradict" in prompt.lower() or "defer" in prompt.lower()
+        ), "answer_prompt missing base-authoritative conflict rule"

@@ -3795,8 +3795,12 @@ class SQLiteRepository:
             if cid in seen_clusters:
                 continue
             seen_clusters.add(cid)
+            # Federation: enrich each hit against ITS OWN notebook (a base hit
+            # lives in the base KG, not the active notebook). Falls back to the
+            # active notebook_id for legacy/untagged hits.
+            hit_nb = getattr(hit, "notebook_id", "") or notebook_id
             try:
-                ctx = self.node_context(notebook_id, hit.object_id)
+                ctx = self.node_context(hit_nb, hit.object_id)
             except KeyError:
                 continue
             # Stop once the budget is spent, but always keep at least min_items.
@@ -3815,7 +3819,10 @@ class SQLiteRepository:
                 extra += "; steps: " + " -> ".join(
                     s.get("name", "") for s in ctx["steps"][:8]
                 )
-            line = f"{key}: [{hit.object_type}] {name}{extra}"
+            tier = getattr(hit, "tier", "personal")
+            # Tier prefix surfaces authority to the LLM ([base] vs [personal]) so
+            # the conflict-precedence rule in answer_prompt has something to read.
+            line = f"{key}: [{hit.object_type}][{tier}] {name}{extra}"
             lines.append(line)
             used += len(line)
             id_map[key] = {
@@ -3823,6 +3830,7 @@ class SQLiteRepository:
                 "name": name, "definition": definition, "snippet": snippet,
                 "source_title": (occ[0].get("source_title", "") if occ else ""),
                 "location_label": (occ[0].get("section_path", "") if occ else ""),
+                "tier": tier,
             }
         # In-network relations: edges whose BOTH endpoints are in the context.
         # id_map values carry unique object_ids (one entry per surviving hit;
@@ -4042,6 +4050,7 @@ class SQLiteRepository:
                 label=(name[:40] or key), name=name,
                 definition=ctx.get("definition"), snippet=ctx.get("snippet"),
                 source_title=ctx.get("source_title", ""), location_label=ctx.get("location_label", ""),
+                tier=ctx.get("tier", "personal"),
             ))
         return cited
 
