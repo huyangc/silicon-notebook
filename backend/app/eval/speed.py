@@ -69,42 +69,12 @@ def _truncate_on_paragraph(text: str, limit: int) -> str:
 
 
 def _insert_source(repo, nb_id, name, text, tmpdir):
-    from app.services.kg.parsing import parse_elements
-    from app.services.sqlite_repository import _now
-    f = pathlib.Path(tmpdir) / f"{name}.md"
-    f.write_text(text, encoding="utf-8")
-    sid = f"src-{uuid.uuid4().hex[:10]}"
-    now = _now()
-    els = parse_elements(text, source_file=str(f))
-    with repo._connect() as db:
-        db.execute(
-            """INSERT INTO sources
-               (id, notebook_id, title, source_type, status, parse_status,
-                file_name, file_path, file_size, file_hash, summary, doc_type,
-                created_at, updated_at)
-               VALUES (?, ?, ?, 'markdown', 'extracted', 'parsed', ?, ?, 0, '', '', ?, ?, ?)""",
-            (sid, nb_id, name, f"{name}.md", str(f), "textbook", now, now))
-        for el in els:
-            db.execute(
-                """INSERT INTO source_elements
-                   (id, source_id, element_type, location_label, text, metadata, created_at)
-                   VALUES (?, ?, ?, ?, ?, '{}', ?)""",
-                (f"el-{uuid.uuid4().hex[:10]}", sid, el.type,
-                 f"L{el.line_start}-{el.line_end}", el.text, now))
-    return sid
+    return repo.eval_insert_source_for_test(nb_id, name, text, tmpdir)
 
 
 def _cleanup(repo, nb_id):
-    with repo._connect() as db:
-        sids = [r[0] for r in db.execute(
-            "SELECT id FROM sources WHERE notebook_id=?", (nb_id,)).fetchall()]
-        for sid in sids:
-            db.execute("DELETE FROM source_elements WHERE source_id=?", (sid,))
-        db.execute("DELETE FROM knowledge_relations WHERE notebook_id=?", (nb_id,))
-        db.execute("DELETE FROM knowledge_objects WHERE notebook_id=?", (nb_id,))
-        db.execute("DELETE FROM knowledge_embeddings WHERE notebook_id=?", (nb_id,))
-        db.execute("DELETE FROM sources WHERE notebook_id=?", (nb_id,))
-        db.execute("DELETE FROM notebooks WHERE id=?", (nb_id,))
+    # delete_notebook cascades all child tables via FK ON DELETE CASCADE.
+    repo.delete_notebook(nb_id)
 
 
 def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,

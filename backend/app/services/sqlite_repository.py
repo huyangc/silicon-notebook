@@ -806,6 +806,36 @@ class SQLiteRepository:
         self._invalidate_unified_cache(notebook_id)
         return counts
 
+    def eval_insert_source_for_test(
+        self, nb_id: str, name: str, text: str, tmpdir: str
+    ) -> str:
+        """Insert a parsed source directly for eval speed tests.
+        Uses the repo's write path; avoids raw _connect access in eval scripts."""
+        import pathlib
+        import uuid
+        from app.services.kg.parsing import parse_elements
+        f = pathlib.Path(tmpdir) / f"{name}.md"
+        f.write_text(text, encoding="utf-8")
+        sid = f"src-{uuid.uuid4().hex[:10]}"
+        now = _now()
+        els = parse_elements(text, source_file=str(f))
+        with self._write() as db:
+            db.execute(
+                """INSERT INTO sources
+                   (id, notebook_id, title, source_type, status, parse_status,
+                    file_name, file_path, file_size, file_hash, summary, doc_type,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, 'markdown', 'extracted', 'parsed', ?, ?, 0, '', '', ?, ?, ?)""",
+                (sid, nb_id, name, f"{name}.md", str(f), "textbook", now, now))
+            for el in els:
+                db.execute(
+                    """INSERT INTO source_elements
+                       (id, source_id, element_type, location_label, text, metadata, created_at)
+                       VALUES (?, ?, ?, ?, ?, '{}', ?)""",
+                    (f"el-{uuid.uuid4().hex[:10]}", sid, el.type,
+                     f"L{el.line_start}-{el.line_end}", el.text, now))
+        return sid
+
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         self.get_notebook(notebook_id)
         with self._connect() as db:
