@@ -144,3 +144,73 @@ def test_multihop_subgraph_cycle_guard():
     visited_oids = [n["object_id"] for n, _, _ in result]
     # each node appears at most once despite the cycle
     assert len(visited_oids) == len(set(visited_oids))
+
+
+# ── Task 3: render subgraph → [k] context + ask graph mode ───────────────────
+
+def test_render_subgraph_context_k_ids():
+    """Each node in the subgraph gets a stable k{i} key; seed has no edge annotation."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from", "supports"}, max_depth=2, max_fan_out=10)
+    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    # k1 = seed A (no edge), k2 = B (derived_from), k3 = C (supports)
+    assert "k1" in id_map and id_map["k1"]["object_id"] == "A"
+    assert "k2" in id_map and id_map["k2"]["object_id"] == "B"
+    assert "k3" in id_map and id_map["k3"]["object_id"] == "C"
+
+
+def test_render_subgraph_context_edge_annotation():
+    """Edge annotation line: '[k2] Node B --derived_from--> [k1] Node A'."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=1, max_fan_out=10)
+    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    # The context block must contain the chain annotation
+    assert "derived_from" in ctx
+    assert "[k2]" in ctx
+    assert "[k1]" in ctx
+
+
+def test_render_subgraph_context_id_offset():
+    """id_offset=5 starts keys at k6, not k1."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=1, max_fan_out=10)
+    ctx, id_map = render_subgraph_context(sub, id_offset=5)
+    assert "k6" in id_map
+    assert "k7" in id_map
+    assert "k1" not in id_map
+
+
+def test_render_subgraph_context_evidence_quote():
+    """Evidence quote from the edge is included in the context block."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=1, max_fan_out=10)
+    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    assert "A derives B" in ctx
+
+
+def test_ask_request_mode_graph_accepted():
+    from app.models.schemas import AskRequest
+    r = AskRequest(question="derive?", mode="graph")
+    assert r.mode == "graph"
+
+
+def test_render_subgraph_context_chain_format():
+    """Full chain annotation: '[k2] B --derived_from--> [k1] A'."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
+    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
+    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
+                            {"derived_from"}, max_depth=1, max_fan_out=10)
+    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    # Exact chain annotation in context block
+    assert "--derived_from-->" in ctx
+    # Both endpoints present as k-keys
+    assert "[k1]" in ctx
+    assert "[k2]" in ctx

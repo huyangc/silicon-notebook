@@ -138,3 +138,81 @@ def multihop_subgraph(
             queue.append((tgt_idx, depth + 1))
 
     return result
+
+
+def render_subgraph_context(
+    subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
+    id_offset: int = 0,
+) -> Tuple[str, dict]:
+    """Render the (node, edge, src_oid) subgraph into (context_block_str, id_map).
+
+    The format mirrors _answer_context (sqlite_repository.py:3682-3757) so that
+    _answer_kg, _parse_answer_anchors, and _MARKER_RE all work unchanged:
+
+        k1: [Formula] Node A
+        k2: [Claim] Node B  — ev: "A derives B"
+        chain:
+          [k2] Node B --derived_from--> [k1] Node A
+
+    The per-edge chain line carries BOTH endpoint keys (`[k_tgt] tgt
+    --edge_type--> [k_src] src`), mirroring `_answer_context`'s existing
+    `k2 -[derived_from]-> k1` relation lines so the `[k]` anchor markers remain
+    resolvable by `_parse_answer_anchors` / `_MARKER_RE`.
+
+    id_map[k{i}] = {"object_id": ..., "object_type": ..., "name": ...,
+                    "definition": "", "snippet": quote, "source_title": "",
+                    "location_label": ""}
+
+    id_offset lets the caller start numbering after an existing context block
+    (e.g., if fast-mode hits were already assigned k1..k5, graph nodes begin k6).
+    """
+    lines: List[str] = []
+    id_map: Dict[str, dict] = {}
+    oid_to_key: Dict[str, str] = {}
+
+    for i, (node, edge, _src_oid) in enumerate(subgraph, start=id_offset + 1):
+        key = f"k{i}"
+        oid = node["object_id"]
+        name = node.get("name", oid)
+        otype = node.get("object_type", "")
+        quote = ""
+        if edge:
+            ev_list = edge.get("evidence", [])
+            if ev_list and isinstance(ev_list[0], dict):
+                quote = ev_list[0].get("quote", "")
+        ev_suffix = f'  — ev: "{quote}"' if quote else ""
+        lines.append(f"{key}: [{otype}] {name}{ev_suffix}")
+        id_map[key] = {
+            "object_id": oid,
+            "object_type": otype,
+            "name": name,
+            "definition": "",
+            "snippet": quote,
+            "source_title": "",
+            "location_label": "",
+        }
+        oid_to_key[oid] = key
+
+    # Chain annotation lines (one per edge, in traversal order). BFS visits the
+    # source node before its targets, so oid_to_key[src_oid] is always populated.
+    chain_lines: List[str] = []
+    for node, edge, src_oid in subgraph:
+        if not edge:
+            continue
+        tgt_oid = node["object_id"]
+        tgt_key = oid_to_key.get(tgt_oid, "?")
+        src_key = oid_to_key.get(src_oid, "?")
+        etype = edge.get("edge_type", "?")
+        src_name = ""  # source name resolved from id_map if present
+        if src_key in id_map:
+            src_name = id_map[src_key].get("name", "")
+        tgt_name = node.get("name", tgt_oid)
+        chain_lines.append(
+            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}".rstrip()
+        )
+
+    if chain_lines:
+        lines.append("chain:")
+        lines.extend(chain_lines)
+
+    return ("\n".join(lines) if lines else "(none)"), id_map

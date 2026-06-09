@@ -3255,6 +3255,8 @@ class SQLiteRepository:
         a conclusion via the LLM (or deterministic fallback)."""
         if getattr(payload, "mode", "fast") == "reasoning":
             return self.ask_reasoning(notebook_id, payload)
+        if getattr(payload, "mode", "fast") == "graph":
+            return self.ask_graph(notebook_id, payload)
         if getattr(payload, "mode", "fast") == "global":
             return self._ask_global(notebook_id, payload)
         import time
@@ -3966,6 +3968,99 @@ class SQLiteRepository:
             llm_mode=llm_mode, conversation_id=conversation_id,
             retrieval_query=question, top_relevance=top_relevance,
             reasoning_trace=trace or None,
+        )
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        return response
+
+    def ask_graph(self, notebook_id: str, payload: "AskRequest",
+                  seed_ids: Optional[List[str]] = None) -> AskResponse:
+        """Multi-hop graph reasoning mode.
+
+        1. Retrieve top seeds via _retrieve_scored (same as fast path).
+        2. Build the rx graph for this notebook (version-cached _rx_graph).
+        3. BFS from seed object_ids along DEFAULT_REASONING_EDGES.
+        4. Render subgraph → (context_block, id_map) via render_subgraph_context.
+        5. Feed context_block to the existing answer LLM + grounding path.
+
+        The [k] anchor markers, _parse_answer_anchors, classify_evidence, and
+        AskResponse assembly are all reused verbatim from the fast path.
+        """
+        from app.services.kg.graph_reason import (
+            DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,
+        )
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+            history = self._conversation_history(db, conversation_id)
+
+        # Seed: top-N by relevance (reuse existing scored-retrieval path).
+        top_hits = self._retrieve_scored(notebook_id, question)[:self.settings.retrieval_top_n]
+        if not top_hits and not seed_ids:
+            response = AskResponse(
+                answer_id="",
+                conclusion="The notebook does not yet contain approved knowledge "
+                           "that matches this question. Upload and review sources "
+                           "to build coverage.",
+                conversation_id=conversation_id, retrieval_query=question,
+                llm_mode="deterministic",
+            )
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id)
+            return response
+
+        use_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+
+        G, idx_to_oid, oid_to_idx = self._rx_graph(notebook_id)
+        subgraph = multihop_subgraph(
+            G, oid_to_idx, idx_to_oid,
+            seed_ids=use_seeds,
+            edge_types=DEFAULT_REASONING_EDGES,
+            max_depth=getattr(self.settings, "graph_max_depth", 3),
+            max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
+        )
+        # Render subgraph into (context_block, id_map) — same k{i} format as
+        # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
+        context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
+
+        # Synthesise the answer through the existing LLM + grounding path.
+        answer, llm_grounded, anchors = "", False, []
+        if getattr(self.llm_client, "configured", False) and id_map:
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user",
+                      "content": answer_prompt(question, context_block, history)}],
+                    ANSWER_SCHEMA_HINT,
+                )
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    answer = str(data.get("answer", "")).strip()
+                    llm_grounded = bool(data.get("grounded", False))
+                    anchors = self._parse_answer_anchors(answer, id_map)
+            except Exception:
+                answer, llm_grounded, anchors = "", False, []
+
+        evidence_level, top_relevance = classify_evidence(
+            top_hits, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        grounded = evidence_level == "grounded"
+        if answer:
+            conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        else:
+            conclusion = (
+                f"Graph traversal found {len(subgraph)} node(s) across "
+                f"{len(use_seeds)} seed(s).")
+            llm_mode = "deterministic"
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+            citations=[], llm_mode=llm_mode,
+            conversation_id=conversation_id, retrieval_query=question,
+            top_relevance=top_relevance,
         )
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
