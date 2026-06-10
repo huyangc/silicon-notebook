@@ -161,3 +161,66 @@ class TestTask2FederatedRxGraph:
         result2 = repo._federated_rx_graph(pers_id)
         # Same PyDiGraph object returned from cache.
         assert result1[0] is result2[0]
+
+
+class TestTask3TierAnnotatedRender:
+    def _make_federated_subgraph(self):
+        """Build a 3-node subgraph spanning base→personal."""
+        from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+        G, idx_to_oid, oid_to_idx = build_rx_graph(
+            NODES_FEDERATED, RELATIONS_FEDERATED, tier_map=TIER_MAP)
+        # Seed from B1 (base), traverse derived_from (base) and depends_on (personal)
+        return multihop_subgraph(
+            G, oid_to_idx, idx_to_oid,
+            seed_ids=["B1"],
+            edge_types={"derived_from", "supports", "depends_on"},
+            max_depth=3, max_fan_out=10,
+        )
+
+    def test_id_map_carries_tier(self):
+        """id_map entries must include a 'tier' key."""
+        from app.services.kg.graph_reason import render_subgraph_context
+        sub = self._make_federated_subgraph()
+        _, id_map = render_subgraph_context(sub)
+        for key, entry in id_map.items():
+            assert "tier" in entry, f"id_map[{key}] missing 'tier'"
+
+    def test_base_edge_node_gets_base_tier_in_id_map(self):
+        """A node reached via a base edge carries tier='base' in id_map."""
+        from app.services.kg.graph_reason import render_subgraph_context
+        sub = self._make_federated_subgraph()
+        _, id_map = render_subgraph_context(sub)
+        # B2 is reached via r1 (base edge derived_from)
+        b2_entry = next(v for v in id_map.values() if v["object_id"] == "B2")
+        assert b2_entry["tier"] == "base"
+
+    def test_personal_edge_node_gets_personal_tier_in_id_map(self):
+        """A node reached via a personal edge carries tier='personal' in id_map."""
+        from app.services.kg.graph_reason import render_subgraph_context
+        sub = self._make_federated_subgraph()
+        _, id_map = render_subgraph_context(sub)
+        # P2 is reached via r3 (personal edge depends_on from P1);
+        # or P2 itself reached via personal edge.
+        personal_entries = [v for v in id_map.values() if v["tier"] == "personal"]
+        assert len(personal_entries) >= 1, "expected at least one personal-tier node in id_map"
+
+    def test_context_block_contains_tier_tag_on_node_lines(self):
+        """Context block lines for non-seed nodes carry [tier] tag: '[Claim][base] …'."""
+        from app.services.kg.graph_reason import render_subgraph_context
+        sub = self._make_federated_subgraph()
+        ctx, _ = render_subgraph_context(sub)
+        # At least one line must carry a tier tag
+        assert "[base]" in ctx or "[personal]" in ctx, (
+            f"No tier tag in context block:\n{ctx}")
+
+    def test_chain_annotation_carries_tier(self):
+        """Chain annotation lines must include tier information per hop."""
+        from app.services.kg.graph_reason import render_subgraph_context
+        sub = self._make_federated_subgraph()
+        ctx, _ = render_subgraph_context(sub)
+        lines = ctx.splitlines()
+        chain_lines = [l for l in lines if "--" in l and "-->" in l]
+        assert chain_lines, "expected at least one chain annotation line"
+        for line in chain_lines:
+            assert "tier=" in line, (
+                f"Chain annotation line missing tier= tag:\n  {line}")

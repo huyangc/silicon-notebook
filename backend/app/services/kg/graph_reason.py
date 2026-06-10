@@ -197,13 +197,17 @@ def render_subgraph_context(
         oid = node["object_id"]
         name = node.get("name", oid)
         otype = node.get("object_type", "")
+        # Tier comes from the incoming edge; seed nodes (no edge) default
+        # "personal" since we cannot know their tier without an edge to read.
+        node_tier = edge.get("tier", "personal") if edge else "personal"
         quote = ""
         if edge:
             ev_list = edge.get("evidence", [])
             if ev_list and isinstance(ev_list[0], dict):
                 quote = ev_list[0].get("quote", "")
         ev_suffix = f'  — ev: "{quote}"' if quote else ""
-        lines.append(f"{key}: [{otype}] {name}{ev_suffix}")
+        # [type][tier] matches the format answer_prompt expects (prompts.py).
+        lines.append(f"{key}: [{otype}][{node_tier}] {name}{ev_suffix}")
         id_map[key] = {
             "object_id": oid,
             "object_type": otype,
@@ -212,6 +216,7 @@ def render_subgraph_context(
             "snippet": quote,
             "source_title": "",
             "location_label": "",
+            "tier": node_tier,
         }
         oid_to_key[oid] = key
 
@@ -225,12 +230,13 @@ def render_subgraph_context(
         tgt_key = oid_to_key.get(tgt_oid, "?")
         src_key = oid_to_key.get(src_oid, "?")
         etype = edge.get("edge_type", "?")
+        edge_tier = edge.get("tier", "personal")
         src_name = ""  # source name resolved from id_map if present
         if src_key in id_map:
             src_name = id_map[src_key].get("name", "")
         tgt_name = node.get("name", tgt_oid)
         chain_lines.append(
-            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}".rstrip()
+            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}  (tier={edge_tier})".rstrip()
         )
 
     if chain_lines:
