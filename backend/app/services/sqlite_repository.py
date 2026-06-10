@@ -2247,6 +2247,14 @@ class SQLiteRepository:
         # In-memory reasoning graph (built from knowledge_relations) — evict so a
         # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
         self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
+        # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
+        # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
+        # (e.g. a base notebook) may affect any federated graph that includes it,
+        # so evict every fed_rxgraph entry; tracking participants per key is
+        # overkill for the POC. This explicit eviction also guards against
+        # same-second in-place edits that leave the version tuple unchanged.
+        for key in [k for k in self._vector_cache._store if k.endswith(":fed_rxgraph")]:
+            self._vector_cache.invalidate(key)
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -3310,6 +3318,84 @@ class SQLiteRepository:
 
             return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
 
+    def _federated_rx_graph(self, active_notebook_id: str):
+        """Return a federated PyDiGraph merging base notebook(s) + active notebook.
+
+        Version-keyed, per participating notebook, on BOTH the relations
+        (COUNT, MAX created_at) and the objects (COUNT, MAX updated_at), so an
+        ingest into ANY of them — or an object-only change (status flip /
+        payload edit bumps updated_at) — triggers a rebuild even without an
+        explicit eviction.  Cache key: "{active_id}:fed_rxgraph".
+
+        Each relation row is tagged with its notebook_id before passing to
+        build_rx_graph so per-edge tier stamping works.
+        """
+        from app.services.kg.graph_reason import build_rx_graph
+        with self._connect() as db:
+            # Participating notebooks: active + all base notebooks (excl. active
+            # if active is itself base, to avoid duplication).
+            base_rows = db.execute(
+                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+                (active_notebook_id,),
+            ).fetchall()
+            active_row = db.execute(
+                "SELECT id, tier FROM notebooks WHERE id=?",
+                (active_notebook_id,),
+            ).fetchone()
+            active_tier = active_row["tier"] if active_row else "personal"
+
+            # Build participating list: active first, then all base notebooks.
+            participants = [(active_notebook_id, active_tier)] + [
+                (r["id"], r["tier"]) for r in base_rows
+            ]
+            # Version key: per-notebook (nb_id, relations (count, max created_at),
+            # objects (count, max updated_at)). Object coverage makes object-only
+            # changes (deprecate / status flip / payload edit) rebuild the graph.
+            version_parts = []
+            for nb_id, _ in participants:
+                rel_ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                    "FROM knowledge_relations WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
+                obj_ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+                    "FROM knowledge_objects WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
+                version_parts.append(
+                    (nb_id, rel_ver["c"], rel_ver["ts"], obj_ver["c"], obj_ver["ts"]))
+            version = ("fed_rxgraph", tuple(version_parts))
+
+            tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
+
+            def _load():
+                nodes: dict = {}
+                all_relations: list = []
+                ph = ",".join("?" for _ in USABLE_STATUSES)
+                for nb_id, _ in participants:
+                    obj_rows = db.execute(
+                        "SELECT id, object_type, payload FROM knowledge_objects "
+                        f"WHERE notebook_id = ? AND status IN ({ph})",
+                        (nb_id, *USABLE_STATUSES),
+                    ).fetchall()
+                    for r in obj_rows:
+                        p = json.loads(r["payload"] or "{}")
+                        nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                    rel_rows = db.execute(
+                        "SELECT id, source_object_id, target_object_id, edge_type, evidence "
+                        "FROM knowledge_relations WHERE notebook_id = ?",
+                        (nb_id,),
+                    ).fetchall()
+                    for r in rel_rows:
+                        d = dict(r)
+                        d["notebook_id"] = nb_id   # tag for tier_map lookup
+                        all_relations.append(d)
+                return build_rx_graph(nodes, all_relations, tier="personal", tier_map=tier_map)
+
+            return self._vector_cache.get(
+                f"{active_notebook_id}:fed_rxgraph", version, _load)
+
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
         applies_to = payload.get("applies_to")
@@ -4314,7 +4400,7 @@ class SQLiteRepository:
 
         use_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
 
-        G, idx_to_oid, oid_to_idx = self._rx_graph(notebook_id)
+        G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         subgraph = multihop_subgraph(
             G, oid_to_idx, idx_to_oid,
             seed_ids=use_seeds,
@@ -4330,7 +4416,8 @@ class SQLiteRepository:
         # Flagged edges get their confidence demoted to 0.05; the context is then
         # re-rendered so the demotion is visible to the answer LLM. chain_trust is
         # the weakest-link confidence over all edges (1.0 when there are no edges).
-        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": []}
+        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
+                         "authority_notes": []}
         if getattr(self.reasoning_llm_client, "configured", False):
             from app.services.kg.graph_reason import verify_chain_edges
             verify_result = verify_chain_edges(
@@ -4380,7 +4467,8 @@ class SQLiteRepository:
             summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
                      f"{len(verify_result['flagged'])} edge(s) flagged; "
                      f"{len(subgraph)} node(s) traversed"),
-            detail=verify_result,
+            detail={**verify_result,
+                    "authority_notes": verify_result.get("authority_notes", [])},
         )]
 
         response = AskResponse(
