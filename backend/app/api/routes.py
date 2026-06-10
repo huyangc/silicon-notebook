@@ -22,6 +22,8 @@ from app.models.schemas import (
     ConversationSummary,
     DerivedRuleCandidate,
     DuplicateGroup,
+    EdgeReviewItem,
+    EdgeReviewRequest,
     FeedbackRequest,
     FeedbackResponse,
     KnowledgeGraph,
@@ -517,6 +519,36 @@ def reject_derived_rule(notebook_id: str, candidate_id: str) -> DerivedRuleCandi
         return repository().reject_derived_rule(notebook_id, candidate_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Derived rule candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Edge trust & curation (Track E)
+# ---------------------------------------------------------------------------
+
+@router.get("/notebooks/{notebook_id}/edge-review-queue", response_model=List[EdgeReviewItem])
+def edge_review_queue(notebook_id: str, limit: int = 100) -> List[EdgeReviewItem]:
+    """Return edges ranked by review priority (high centrality × low trust) desc.
+    Excludes already-rejected edges.
+    """
+    try:
+        return repository().review_queue(notebook_id, limit=limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/relations/{rel_id}/review", status_code=200)
+def review_relation(notebook_id: str, rel_id: str,
+                    payload: EdgeReviewRequest) -> dict:
+    """Mark an edge as 'verified', 'rejected', or 'pending'.
+    Rejected edges are excluded from all future graph-reasoning traversals.
+    """
+    try:
+        repository().set_edge_review(notebook_id, rel_id, payload.status)
+        return {"rel_id": rel_id, "review_status": payload.status}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
