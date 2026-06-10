@@ -17,54 +17,82 @@ EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
               "used_in", "precedes"}
 
 _KG_SCHEMA_HINT = (
-    '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure",'
-    '"name":"","ev":0,"steps":[{"name":"","ev":0}]}],'
-    '"edges":[{"type":"about|supports|...","source":"","target":"","ev":0}]}'
+    '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure","name":"",'
+    '"ev":0,"validity_scope":{"region":[],"assumptions":[],"approximation":"","range":""},'
+    '"steps":[{"name":"","ev":0}]}],'
+    '"edges":[{"type":"about|supports|derived_from|depends_on|contrasts_with|'
+    'prerequisite_of|defines|part_of|composed_of|kind_of|used_in|precedes",'
+    '"source":"<local_id>","target":"<local_id>","ev":0}]}'
 )
 
 
-def _prompt(labeled_text: str, section_path: str, doc_type: str) -> str:
+def _prompt(labeled_text: str, section_path: str, doc_type: str,
+            base_filter: bool = False) -> str:
+    base_rule = (
+        "\nBASE-TIER QUALITY FILTER: drop non-knowledge meta-text — pedagogical "
+        "asides (\"In a semester system…\"), exercise/homework hints, tool/UI "
+        "trivia, document navigation. Keep only durable technical knowledge.\n"
+        if base_filter else ""
+    )
     return f"""Extract a knowledge-graph fragment from this {doc_type} passage
 (section: {section_path}). Use EXACTLY these node types: Concept, Claim, Formula,
-Procedure (see definitions: Concept=a NAMED, reusable technical entity — a method,
-mechanism, component, named model/structure/distribution; Claim=truth-evaluable
-assertion about concepts; Formula=equation; Procedure=ordered process). Edges
-(source->target): defines(Claim->Concept), about(Claim|Formula->Concept),
-supports(Claim|Formula->Claim), part_of/composed_of/contrasts_with/kind_of(Concept->
-Concept), derived_from(Formula->Formula), depends_on/prerequisite_of,
-used_in(Formula->Procedure), precedes.
+Procedure (Concept=a NAMED reusable technical entity — method, mechanism,
+component, named model/structure/distribution; Claim=truth-evaluable assertion;
+Formula=equation; Procedure=ordered process).
 
-Be SELECTIVE with Concepts: emit a Concept only for a distinctive named entity.
-Do NOT emit Concepts for generic/common terms (e.g. training, inference, buffer,
-latency, forward pass, backward pass, hidden state, input sequence, host memory) or
-for trivial sub-parts of another concept. Also do NOT emit Concepts for: bare
-symbols/variables (e.g. V_DD, g_m1, i_b68, R_E26, (W/L)_1, A_v^+); instance labels
-of a specific device/node/pole (e.g. Q1, M5, Pole p8); figure/table/equation/section
-references (e.g. Fig. 5.38, Table 2.1, Eq. 9.4); or section headings/numbers (e.g.
-"8.4.1 Series-Shunt Feedback"); or numeric levels / enumerated values that are
-settings of a parent concept (e.g. "Level 1/2/3 Model", "Type I/II PLL", "Case I/II",
-op-amp part-number series like "702/709/741 op amp") — treat these as attributes or
-instances of the parent concept, NOT separate Concepts. In contrast, capture EVERY
-Formula (equation) and EVERY Procedure (process/phase) present — do not skip those.
+Be SELECTIVE with Concepts: emit a Concept only for a distinctive NAMED entity.
+Do NOT emit Concepts for generic/common terms or trivial sub-parts; nor for bare
+symbols/variables (V_DD, g_m1, (W/L)_1); instance labels (Q1, M5, Pole p8);
+figure/table/equation/section references (Fig. 5.38, Eq. 9.4); section headings;
+or enumerated settings (Level 1/2/3 Model, Type I/II). Capture EVERY Formula and
+EVERY Procedure present.
 
-For Claims: emit a Claim ONLY for a complete, truth-evaluable technical assertion
-(a subject plus a predicate stating a fact or relationship). Do NOT emit Claims for:
-section headings or titles (e.g. "Effect of Negative Feedback on Distortion");
-narrative/meta sentences about the document itself (e.g. "This chapter covers…",
-"This book deals with…", "I wanted to teach…"); or chapter/section navigation.
+CLAIMS — ATOMIC (one proposition per node). SPLIT compound statements:
+- "A and B" / "A; B"  ->  two separate Claims.
+- "B because/therefore A", "A, which causes B"  ->  TWO atomic Claims (A, B) PLUS
+  a reasoning edge between them (supports / derived_from / depends_on) by local_id.
+  Connecting the atoms with an edge is HOW reasoning edges get built — do it.
+GUARDRAIL: split ONLY when each part stands alone as truth-evaluable; never
+fragment a single proposition just because it is long. Do NOT emit Claims for
+section headings, narrative/meta sentences about the document ("This chapter
+covers…"), or navigation.
 
-The passage is given as numbered elements, one per line, each prefixed with its
-integer label like [3]. Every node and edge MUST include "ev": the INTEGER label
-of the element that best contains it (NOT a quote, NOT text). Give each node a
-"local_id" you reuse in edges. "name" carries the node's text (Concept/Procedure
-name, Claim statement, Formula expression). For a Procedure that is an ordered multi-step process/flow, emit it as ONE Procedure node (named after the flow — use the section heading if it names the flow) and list its ordered steps in a `steps` array, each {{"name":..,"ev":..}} where ev is the element label containing that step; prefer this over many separate Procedure nodes. `steps` is the source of truth for order (you may still add `precedes` edges). Skip narrative/filler.
+VALIDITY SCOPE: when a Claim or Formula holds only under a stated condition, put
+that condition in a structured `validity_scope` object ON that node — NOT as prose,
+NOT as a separate dangling Claim (never emit "This holds for DC…" as its own Claim).
+Fields (ALL optional; include only what the text explicitly states):
+  region: [..]        e.g. ["saturation"] | ["weak-inversion"]
+  assumptions: [..]   e.g. ["perfect matching", "R_in << R_C"]
+  approximation: ".." e.g. "small-signal" | "neglecting body effect"
+  range: ".."         e.g. "low-frequency" | "f << f_T"
+NEVER invent a scope the text does not state; OMIT validity_scope when none.
+
+EDGES (source->target by local_id). REASONING-BEARING edges are the PRIORITY and
+connect Claims/Formulas/Concepts (not only Concept->Concept):
+- supports (claim/formula/concept -> claim): evidence/argument backing a claim.
+- derived_from (claim/formula -> claim/formula): result follows from another.
+- depends_on (claim/formula/concept -> ...): validity/value depends on target.
+- contrasts_with (claim/formula/concept <-> ...): trade-off / disagreement /
+  contradiction.
+- prerequisite_of (concept/claim -> concept/claim): must hold/be understood first.
+EXPLICITLY HUNT depends_on, contrasts_with, prerequisite_of — rare and high-value;
+look for "requires", "assuming", "unlike", "trade-off", "valid when", "before".
+Structural edges (secondary): about(claim/formula->concept), defines(claim->
+concept), part_of/composed_of/kind_of(concept->concept), used_in(formula/concept->
+procedure), precedes.
+{base_rule}
+The passage is numbered elements, one per line, prefixed like [3]. Every node and
+edge MUST include "ev": the INTEGER label of the element that best contains it.
+Give each node a "local_id" reused in edges. "name" carries the node's text
+(Concept/Procedure name, Claim proposition, Formula expression). For an ordered
+multi-step Procedure emit ONE Procedure node with an ordered `steps` array, each
+{{"name":..,"ev":..}}. Skip narrative/filler.
 
 Passage:
 \"\"\"{labeled_text}\"\"\"
 
 Return JSON ONLY:
-{{"nodes":[{{"local_id":"..","type":"..","name":"..","ev":0,"steps":[{{"name":"..","ev":0}}]}}],
- "edges":[{{"type":"..","source":"<local_id>","target":"<local_id>","ev":0}}]}}
+{_KG_SCHEMA_HINT}
 """
 
 
