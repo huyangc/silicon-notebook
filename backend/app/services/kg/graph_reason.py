@@ -368,11 +368,47 @@ def verify_chain_edges(
                 "tier": edge_tier,
             })
 
-    authority_notes = [
-        f"{er['edge_type']} ({er['tier']}): this step rests on a personal note"
-        for er in edge_results
-        if er["tier"] == "personal"
-    ]
+    # Conflict precedence: group edges by (src_oid, tgt_oid). If a personal edge
+    # is flagged AND a base edge on the same pair passed, mark the personal flag
+    # with base_override=True and record in authority_notes. edge_results and the
+    # edge_triples below share the same loop order, so index i lines up.
+    edge_triples = [(node, edge, src_oid)
+                    for node, edge, src_oid in subgraph if edge]
+    pair_to_results: Dict[tuple, list] = {}
+    for i, (node, edge, src_oid) in enumerate(edge_triples):
+        tgt_oid = node.get("object_id", "")
+        pair = (src_oid or "", tgt_oid)
+        pair_to_results.setdefault(pair, []).append(i)
+
+    for pair, indices in pair_to_results.items():
+        if len(indices) < 2:
+            continue
+        base_valid = any(
+            edge_results[i]["tier"] == "base" and edge_results[i]["valid"]
+            for i in indices
+        )
+        pers_invalid = any(
+            edge_results[i]["tier"] == "personal" and not edge_results[i]["valid"]
+            for i in indices
+        )
+        if base_valid and pers_invalid:
+            for fi, f in enumerate(flagged):
+                if f.get("tier") == "personal":
+                    flagged[fi]["base_override"] = True
+
+    authority_notes = []
+    for er in edge_results:
+        if er["tier"] == "personal":
+            authority_notes.append(
+                f"{er['edge_type']} (personal): this step rests on a personal note"
+            )
+    for f in flagged:
+        if f.get("base_override"):
+            authority_notes.append(
+                f"{f['edge_type']} (personal overridden by base): base_override=True; "
+                "base reference supersedes personal note on this hop"
+            )
+
     chain_trust = min(confidences) if confidences else 1.0
     return {
         "chain_trust": chain_trust,

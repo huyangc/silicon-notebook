@@ -318,3 +318,76 @@ class TestTask4AuthorityWeightedChainTrust:
         assert result["flagged"], "expected at least one flagged edge"
         for f in result["flagged"]:
             assert "tier" in f, f"flagged entry missing 'tier': {f}"
+
+
+class TestTask5ConflictPrecedence:
+    def _conflicting_subgraph(self):
+        """Manually built subgraph with a base AND personal edge on the same hop.
+
+        Triple format: (node_payload, edge_payload_or_None, src_oid).
+        We create:
+          - seed node X (no edge)
+          - node Y via base edge (derived_from, valid evidence)
+          - node Y′ (same logical concept as Y) via personal edge (derived_from,
+            but LLM will say invalid)
+        In practice multihop only emits one hop per target, so we construct
+        the subgraph directly to exercise the conflict logic.
+        """
+        # Two hops to the SAME src_oid/tgt_oid pair: one base, one personal.
+        seed   = ({"object_id": "X", "object_type": "Concept", "name": "X"}, None, None)
+        base_hop = (
+            {"object_id": "Y", "object_type": "Claim", "name": "Y"},
+            {"edge_type": "derived_from", "confidence": 1.0, "tier": "base",
+             "evidence": [{"quote": "base evidence for Y"}]},
+            "X",
+        )
+        pers_hop = (
+            {"object_id": "Y", "object_type": "Claim", "name": "Y"},
+            # DEVIATION from plan: the plan used an empty quote ("") to make the
+            # LLM reject this edge, but verify_chain_edges treats an empty quote
+            # as "cannot verify → fail-open (valid)", so the edge never reaches
+            # the LLM and is never flagged.  We give it a NON-EMPTY but
+            # unsubstantiated quote that _SelectiveLLM rejects, which is the
+            # operational definition of "contradicting" the plan intends.
+            {"edge_type": "derived_from", "confidence": 1.0, "tier": "personal",
+             "evidence": [{"quote": "personal note claims Y but cites nothing"}]},
+            "X",
+        )
+        return [seed, base_hop, pers_hop]
+
+    class _SelectiveLLM:
+        """Returns valid=True for base evidence, valid=False otherwise."""
+        configured = True
+        def chat_json(self, messages, schema, **kw):
+            import json as _j
+            content = messages[0]["content"] if messages else ""
+            if "base evidence for Y" in content:
+                return _j.dumps({"valid": True, "reason": "base evidence ok"})
+            return _j.dumps({"valid": False, "reason": "no evidence"})
+
+    def test_personal_edge_flagged_with_base_override(self):
+        """When base and personal edges contradict, personal is flagged base_override=True."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._conflicting_subgraph()
+        result = verify_chain_edges(sub, self._SelectiveLLM())
+        pers_flags = [f for f in result["flagged"] if f.get("tier") == "personal"]
+        assert pers_flags, "personal edge should be in flagged"
+        assert pers_flags[0].get("base_override") is True, (
+            "Expected base_override=True on personal flagged entry")
+
+    def test_base_edge_not_flagged_despite_conflict(self):
+        """The base edge itself must not appear in flagged."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._conflicting_subgraph()
+        result = verify_chain_edges(sub, self._SelectiveLLM())
+        base_flags = [f for f in result["flagged"] if f.get("tier") == "base"]
+        assert not base_flags, f"base edge must not be flagged; got {base_flags}"
+
+    def test_authority_notes_records_override(self):
+        """authority_notes must record the base-wins override."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._conflicting_subgraph()
+        result = verify_chain_edges(sub, self._SelectiveLLM())
+        assert any("base_override" in note or "overridden" in note.lower()
+                   for note in result["authority_notes"]), (
+            f"No override note in authority_notes: {result['authority_notes']}")
