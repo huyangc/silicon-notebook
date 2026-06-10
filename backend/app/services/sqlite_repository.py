@@ -2117,13 +2117,14 @@ class SQLiteRepository:
         # In-memory reasoning graph (built from knowledge_relations) — evict so a
         # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
         self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
-        # Federated graph cache: invalidate this notebook's own entry (covers both
-        # the case where it is the active notebook and where it is a base notebook
-        # whose change should ripple into any personal notebook's federated graph).
-        # The federated version key already lists every participant's (count, ts),
-        # so any participant's re-ingest forces a rebuild on next read regardless;
-        # this explicit eviction is defensive against same-tuple in-place edits.
-        self._vector_cache.invalidate(f"{notebook_id}:fed_rxgraph")
+        # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
+        # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
+        # (e.g. a base notebook) may affect any federated graph that includes it,
+        # so evict every fed_rxgraph entry; tracking participants per key is
+        # overkill for the POC. This explicit eviction also guards against
+        # same-second in-place edits that leave the version tuple unchanged.
+        for key in [k for k in self._vector_cache._store if k.endswith(":fed_rxgraph")]:
+            self._vector_cache.invalidate(key)
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -3174,9 +3175,11 @@ class SQLiteRepository:
     def _federated_rx_graph(self, active_notebook_id: str):
         """Return a federated PyDiGraph merging base notebook(s) + active notebook.
 
-        Version-keyed on the concatenated (COUNT, MAX created_at) for every
-        participating notebook so that an ingest into ANY of them triggers a
-        rebuild.  Cache key: "{active_id}:fed_rxgraph".
+        Version-keyed, per participating notebook, on BOTH the relations
+        (COUNT, MAX created_at) and the objects (COUNT, MAX updated_at), so an
+        ingest into ANY of them — or an object-only change (status flip /
+        payload edit bumps updated_at) — triggers a rebuild even without an
+        explicit eviction.  Cache key: "{active_id}:fed_rxgraph".
 
         Each relation row is tagged with its notebook_id before passing to
         build_rx_graph so per-edge tier stamping works.
@@ -3199,15 +3202,23 @@ class SQLiteRepository:
             participants = [(active_notebook_id, active_tier)] + [
                 (r["id"], r["tier"]) for r in base_rows
             ]
-            # Version key: tuple of per-notebook (nb_id, count, max_ts) pairs.
+            # Version key: per-notebook (nb_id, relations (count, max created_at),
+            # objects (count, max updated_at)). Object coverage makes object-only
+            # changes (deprecate / status flip / payload edit) rebuild the graph.
             version_parts = []
             for nb_id, _ in participants:
-                ver = db.execute(
+                rel_ver = db.execute(
                     "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
                     "FROM knowledge_relations WHERE notebook_id = ?",
                     (nb_id,),
                 ).fetchone()
-                version_parts.append((nb_id, ver["c"], ver["ts"]))
+                obj_ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+                    "FROM knowledge_objects WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
+                version_parts.append(
+                    (nb_id, rel_ver["c"], rel_ver["ts"], obj_ver["c"], obj_ver["ts"]))
             version = ("fed_rxgraph", tuple(version_parts))
 
             tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}

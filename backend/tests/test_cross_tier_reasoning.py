@@ -162,6 +162,32 @@ class TestTask2FederatedRxGraph:
         # Same PyDiGraph object returned from cache.
         assert result1[0] is result2[0]
 
+    def test_federated_graph_drops_deprecated_base_object(self, repo_two_notebooks):
+        """Regression: deprecating a BASE object via the public update path must
+        not leave a stale federated graph for the PERSONAL notebook.
+
+        The federated cache key is "{pers}:fed_rxgraph"; before the fix,
+        _invalidate_unified_cache(base_id) evicted "{base}:fed_rxgraph" (wrong
+        key) and the version tuple only covered knowledge_relations, so an
+        object-only change (status flip) kept serving the deprecated node."""
+        from app.models.schemas import KnowledgeUpdate
+        repo, base_id, pers_id = repo_two_notebooks
+        # Warm the personal notebook's federated graph; the base object is in it.
+        G1, _, oid_to_idx1 = repo._federated_rx_graph(pers_id)
+        with repo._connect() as db:
+            b2_id = db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=? AND payload LIKE ?",
+                (base_id, "%Base Claim%"),
+            ).fetchone()["id"]
+        assert b2_id in oid_to_idx1, "warm federated graph must contain the base object"
+        # Object-only change on the BASE notebook (no knowledge_relations row
+        # touched): deprecate through the public update path.
+        repo.update_knowledge(base_id, b2_id, KnowledgeUpdate(status="deprecated"))
+        # A fresh federated graph for the PERSONAL notebook must reflect it.
+        _, _, oid_to_idx2 = repo._federated_rx_graph(pers_id)
+        assert b2_id not in oid_to_idx2, (
+            "deprecated base object still present — stale federated graph served")
+
 
 class TestTask3TierAnnotatedRender:
     def _make_federated_subgraph(self):
@@ -392,6 +418,31 @@ class TestTask5ConflictPrecedence:
                    for note in result["authority_notes"]), (
             f"No override note in authority_notes: {result['authority_notes']}")
 
+    def test_unrelated_flagged_personal_edge_not_marked_base_override(self):
+        """base_override is scoped per (src,tgt) pair: a flagged personal edge
+        on a DIFFERENT pair than the base-wins conflict must NOT be marked."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._conflicting_subgraph()
+        # Unrelated personal hop on its own (src,tgt) pair (Y→W). _SelectiveLLM
+        # rejects its quote so it IS flagged, but no base edge exists on (Y, W),
+        # so it must not be marked as overridden by base.
+        sub.append((
+            {"object_id": "W", "object_type": "Claim", "name": "W"},
+            {"edge_type": "supports", "confidence": 1.0, "tier": "personal",
+             "evidence": [{"quote": "unrelated personal note about W"}]},
+            "Y",
+        ))
+        result = verify_chain_edges(sub, self._SelectiveLLM())
+        unrelated = [f for f in result["flagged"]
+                     if f.get("tier") == "personal" and f.get("tgt_name") == "W"]
+        assert unrelated, "unrelated personal edge should be flagged"
+        assert not unrelated[0].get("base_override"), (
+            "unrelated flagged personal edge must NOT get base_override")
+        # The true conflict pair (X→Y) still gets base_override.
+        conflict = [f for f in result["flagged"]
+                    if f.get("tier") == "personal" and f.get("tgt_name") == "Y"]
+        assert conflict and conflict[0].get("base_override") is True
+
 
 class TestTask6AskGraphFederated:
     @pytest.fixture
@@ -493,25 +544,41 @@ class TestTask6AskGraphFederated:
             "reasoning_trace detail missing 'authority_notes' from verify_chain_edges")
 
     def test_ask_graph_cache_invalidation_on_reingest(self, repo_with_two_notebooks):
-        """Re-ingesting into base_nb must invalidate personal_nb's fed_rxgraph cache."""
-        from app.models.schemas import AskRequest
+        """Re-ingesting into base_nb must invalidate personal_nb's fed_rxgraph cache.
+
+        The federated cache key is "{pers}:fed_rxgraph" (the ACTIVE notebook's
+        id), so a base-side change cannot be evicted by key derivation from
+        base_nb alone: _invalidate_unified_cache evicts ALL *:fed_rxgraph
+        entries, and the version tuple covers every participant's relations
+        (count, max created_at) AND objects (count, max updated_at). Assert the
+        fresh federated graph actually reflects the base-side change."""
         repo, base_nb, pers_nb = repo_with_two_notebooks
-        # Build the federated graph (populates cache).
-        G1, _, _ = repo._federated_rx_graph(pers_nb.id)
-        # Trigger cache invalidation for base notebook (simulates re-ingest).
-        # DEVIATION from plan: the plan referenced `_mark_caches_dirty`, but the
-        # actual cache-invalidation method in merged master is
-        # `_invalidate_unified_cache` (sqlite_repository.py:2107). We call the
-        # real method.
-        repo._invalidate_unified_cache(base_nb.id)
-        # Now re-build; should NOT return the same cached object
-        # because the version key for base_nb has changed.
-        # (Since we just cleared base_nb's knowledge_relations count is unchanged,
-        #  but the explicit invalidate of fed_rxgraph ensures cache miss.)
-        cache_key = f"{pers_nb.id}:fed_rxgraph"
-        # After invalidation, the cache entry for the personal notebook's fed graph
-        # must be gone (or rebuilt on next call).
-        # We can check indirectly: invalidating base_nb:rxgraph ALSO invalidates
-        # pers_nb:fed_rxgraph; calling _federated_rx_graph again should not raise.
-        G2, _, _ = repo._federated_rx_graph(pers_nb.id)
-        assert G2 is not None  # rebuilt successfully
+        # Warm the personal notebook's federated graph cache.
+        G1, _, oid_to_idx1 = repo._federated_rx_graph(pers_nb.id)
+        # Change the BASE notebook: ingest a new object pair + relation
+        # (store_kg calls _invalidate_unified_cache(base_nb.id) itself).
+        repo.store_kg(base_nb.id, None, [
+            {"local_id": "B3", "object_type": "formula",
+             "payload": {"name": "New Base Formula", "section_path": "3"},
+             "evidence": []},
+            {"local_id": "B4", "object_type": "claim",
+             "payload": {"name": "New Base Claim", "section_path": "3"},
+             "evidence": []},
+        ], [
+            {"local_id": "rel3", "source_local_id": "B3", "target_local_id": "B4",
+             "edge_type": "derived_from", "evidence": []},
+        ])
+        with repo._connect() as db:
+            new_ids = [r["id"] for r in db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=? AND payload LIKE ?",
+                (base_nb.id, "%New Base%"),
+            ).fetchall()]
+        assert len(new_ids) == 2
+        # The fresh federated graph for the PERSONAL notebook must contain the
+        # new base nodes (and they must not have been in the warm graph).
+        G2, _, oid_to_idx2 = repo._federated_rx_graph(pers_nb.id)
+        for oid in new_ids:
+            assert oid not in oid_to_idx1, "fixture error: node predates the change"
+            assert oid in oid_to_idx2, (
+                "base-side ingest not reflected — stale federated graph served")
+        assert G2.num_edges() == G1.num_edges() + 1

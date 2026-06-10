@@ -305,6 +305,7 @@ def verify_chain_edges(
 
     edge_results = []
     flagged = []
+    flagged_pairs = []   # parallel to `flagged`: (src_oid, tgt_oid) per entry
     confidences = []
 
     for node, edge, src_oid in subgraph:
@@ -367,6 +368,7 @@ def verify_chain_edges(
                 "demoted_confidence": 0.05,
                 "tier": edge_tier,
             })
+            flagged_pairs.append((src_oid or "", node.get("object_id", "")))
 
     # Conflict precedence: group edges by (src_oid, tgt_oid). If a personal edge
     # is flagged AND a base edge on the same pair passed, mark the personal flag
@@ -380,6 +382,7 @@ def verify_chain_edges(
         pair = (src_oid or "", tgt_oid)
         pair_to_results.setdefault(pair, []).append(i)
 
+    override_pairs = set()
     for pair, indices in pair_to_results.items():
         if len(indices) < 2:
             continue
@@ -392,9 +395,13 @@ def verify_chain_edges(
             for i in indices
         )
         if base_valid and pers_invalid:
-            for fi, f in enumerate(flagged):
-                if f.get("tier") == "personal":
-                    flagged[fi]["base_override"] = True
+            override_pairs.add(pair)
+
+    # Scope base_override per (src,tgt) pair: only flagged personal entries on a
+    # pair where a base edge verified OK get marked — never unrelated flags.
+    for fi, f in enumerate(flagged):
+        if f.get("tier") == "personal" and flagged_pairs[fi] in override_pairs:
+            flagged[fi]["base_override"] = True
 
     authority_notes = []
     for er in edge_results:
