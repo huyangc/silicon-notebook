@@ -786,6 +786,15 @@ class SQLiteRepository:
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchall()
+            # knowledge_embeddings has no FK to notebooks (see DDL ~line 300), so
+            # deleting the notebooks row does NOT cascade to it. Delete it here so
+            # every public delete caller leaves zero orphan embedding rows.
+            # (element_embeddings DOES cascade transitively via
+            # source_elements -> sources -> notebooks, so it needs no explicit delete.)
+            db.execute(
+                "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
+                (notebook_id,),
+            )
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
         for row in source_rows:
             self._delete_file(row["file_path"])
@@ -805,6 +814,36 @@ class SQLiteRepository:
                 counts[table] = cur.rowcount
         self._invalidate_unified_cache(notebook_id)
         return counts
+
+    def eval_insert_source_for_test(
+        self, nb_id: str, name: str, text: str, tmpdir: str
+    ) -> str:
+        """Insert a parsed source directly for eval speed tests.
+        Uses the repo's write path; avoids raw _connect access in eval scripts."""
+        import pathlib
+        import uuid
+        from app.services.kg.parsing import parse_elements
+        f = pathlib.Path(tmpdir) / f"{name}.md"
+        f.write_text(text, encoding="utf-8")
+        sid = f"src-{uuid.uuid4().hex[:10]}"
+        now = _now()
+        els = parse_elements(text, source_file=str(f))
+        with self._write() as db:
+            db.execute(
+                """INSERT INTO sources
+                   (id, notebook_id, title, source_type, status, parse_status,
+                    file_name, file_path, file_size, file_hash, summary, doc_type,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, 'markdown', 'extracted', 'parsed', ?, ?, 0, '', '', ?, ?, ?)""",
+                (sid, nb_id, name, f"{name}.md", str(f), "textbook", now, now))
+            for el in els:
+                db.execute(
+                    """INSERT INTO source_elements
+                       (id, source_id, element_type, location_label, text, metadata, created_at)
+                       VALUES (?, ?, ?, ?, ?, '{}', ?)""",
+                    (f"el-{uuid.uuid4().hex[:10]}", sid, el.type,
+                     f"L{el.line_start}-{el.line_end}", el.text, now))
+        return sid
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         self.get_notebook(notebook_id)
@@ -3264,7 +3303,8 @@ class SQLiteRepository:
         # weight (process/flow questions stop burying procedures).
         _t = time.perf_counter()
         if self.settings.retrieval_rrf_enabled:
-            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims)
+            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims,
+                                          element_sims=element_sims)
         else:
             token_sets = {}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
@@ -3584,6 +3624,7 @@ class SQLiteRepository:
         query: str,
         kg_objs: Dict[str, List[dict]],
         knowledge_sims: Optional[Dict[str, float]],
+        element_sims: Optional[Dict[str, float]] = None,
     ) -> List[RetrievedKnowledge]:
         """BM25 + 语义 RRF 融合排序,产出与 score_knowledge 池化同构的列表。
 
@@ -3628,9 +3669,20 @@ class SQLiteRepository:
             # score = RRF (ordering); relevance = [0,1] fused keyword+semantic so
             # classify_evidence's tau thresholds stay valid (RRF micro-scores would
             # otherwise classify every answer as "inferred").
+            # Best-of: object-level sim OR max(element-level sims), same as
+            # score_knowledge — protects the dual-index invariant so an object
+            # grounded only via an evidence-element embedding is not downgraded.
+            semantic = sims.get(oid, 0.0)
             has_vec = oid in sims
+            if element_sims:
+                for ev in obj.get("evidence", []):
+                    eid = getattr(ev, "element_id", "") or ""
+                    s = element_sims.get(eid)
+                    if s is not None:
+                        has_vec = True
+                        semantic = max(semantic, s)
             relevance = _fuse(keyword_score(query, text_by_id.get(oid, "")),
-                              sims.get(oid, 0.0), has_vec)
+                              semantic, has_vec)
             result.append(
                 RetrievedKnowledge(
                     object_id=oid,
