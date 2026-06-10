@@ -111,6 +111,7 @@ type AnswerAnchor = {
   snippet?: string | null;
   source_title: string;
   location_label: string;
+  tier?: string;
 };
 
 type AskResponse = {

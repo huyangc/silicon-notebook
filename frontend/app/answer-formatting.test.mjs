@@ -16,6 +16,7 @@ const anchors = [
     name: "Second claim",
     source_title: "source.md",
     location_label: "L2",
+    tier: "base",
   },
   {
     key: "k1",
@@ -72,4 +73,9 @@ test("parses code fences, display formulas, and markdown tables", () => {
   assert.equal(blocks[1].type === "code" ? blocks[1].language : "", "ts");
   assert.equal(blocks[2].type === "formula" ? blocks[2].latex : "", "E = mc^2");
   assert.deepEqual(blocks[3].type === "table" ? blocks[3].headers : [], ["A", "B"]);
+});
+
+test("preserves anchor tier on built references", () => {
+  const references = buildAnswerReferences("看 [k2]。", anchors, []);
+  assert.equal(references[0].anchor?.tier, "base");
 });
