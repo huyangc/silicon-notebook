@@ -26,15 +26,6 @@ class SourceElementQ(BaseModel):
     text: str  # verbatim slice of source_file[char_start:char_end]
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    # Compatibility aliases used by kg_ingest._ev (which expects SourceElement interface)
-    @property
-    def element_type(self) -> str:
-        return self.type
-
-    @property
-    def location_label(self) -> str:
-        return self.metadata.get("section_path", "")
-
 
 class SectionNode(BaseModel):
     id: str

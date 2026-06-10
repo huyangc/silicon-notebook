@@ -90,24 +90,35 @@ def test_extract_window_accepts_base_filter():
 
 
 from app.services.kg_ingest import build_records
-from app.services.kg.models import Node, Edge, Evidence, KnowledgeGraph
+from app.services.kg.models import Node, Evidence, KnowledgeGraph
 
 
-def _ev_for(el):
-    return Evidence(file=el.file, char_start=el.char_start, char_end=el.char_end,
-                    line_start=el.line_start, line_end=el.line_end, quote=el.text)
+class _PElem:
+    """Minimal product-element stand-in for build_records — the SourceElement
+    interface (id/text/element_type/location_label), NOT SourceElementQ."""
+    def __init__(self, eid, text):
+        self.id = eid
+        self.text = text
+        self.element_type = "paragraph"
+        self.location_label = "1"
+
+
+def _ev_quote(text):
+    return Evidence(file="d.md", char_start=0, char_end=len(text),
+                    line_start=1, line_end=1, quote=text)
 
 
 def test_build_records_threads_validity_scope_into_payload():
-    el = _ELS[0]
+    e1 = _PElem("EL-0", "In saturation, I_D depends on V_GS.")
+    e2 = _PElem("EL-1", "Threshold voltage definition.")
     claim = Node(id="c1", type="Claim", name="I_D depends on V_GS",
-                 section_path="1", evidence=[_ev_for(el)],
+                 section_path="1", evidence=[_ev_quote(e1.text)],
                  validity_scope={"region": ["saturation"]})
     plain = Node(id="c2", type="Claim", name="Threshold voltage definition.",
-                 section_path="1", evidence=[_ev_for(_ELS[1])])
+                 section_path="1", evidence=[_ev_quote(e2.text)])
     g = KnowledgeGraph(doc_id="d.md", doc_type="textbook",
                        nodes=[claim, plain], edges=[])
-    objects, _ = build_records(g, "src1", "Doc", _ELS)
+    objects, _ = build_records(g, "src1", "Doc", [e1, e2])
     by = {o["payload"]["name"]: o["payload"] for o in objects}
     assert by["I_D depends on V_GS"]["validity_scope"] == {"region": ["saturation"]}
     assert "validity_scope" not in by["Threshold voltage definition."]
