@@ -18,7 +18,10 @@
 - PDF 走 MinerU（公式/表格/版面）；本机或未配置时回退 pypdf
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
 - KG-native 接地问答：逐句 `[k_i]` 引用、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
-- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除
+- 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`base` 是权威参考 KG（如模拟设计教材），`personal` 是用户自己的笔记。`federated_retrieve` 跨 `base ∪ 当前 personal` 收集候选、给每条命中打 tier 标签，排序时施加 base 权威权重；当 base 与 personal 冲突时答案以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`）
+- 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `fast`）
+- 边可信与治理：每条边的可信信号（evidence / 同源佐证 / 类型合法性）+ 高风险边优先的审核队列；被审核拒绝的边从图推理中排除
+- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除。个人→基准节点晋升（propose → under_review → approve/reject），批准时去重入库，配套策展晋升队列
 - 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
 - Object 级 KG 可视化：Concept / Claim / Formula / Procedure 节点，类型形状、边标签、多选过滤、按类型分组侧栏
 - Notebook 集合页（网格/紧凑/列表、编辑/删除）；点击「＋ 新建」直接创建 `Untitled notebook` 并进入，无弹窗
@@ -127,7 +130,7 @@ npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
 - 主栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
-- Studio 类文章研究、思维导图/信息图生成、派生规则审核仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
+- Studio 类文章研究、思维导图/信息图生成、派生规则审核，以及治理**晋升队列**（把个人 KG 节点申请晋升到基准语料，并批准/拒绝待审请求）仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
 
 notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
 
@@ -142,7 +145,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
-- `POST /api/notebooks/{id}/ask` — KG-native 接地问答（逐句 `[k_i]` 引用）
+- `POST /api/notebooks/{id}/ask` — KG-native 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `fast` | `reasoning` | `graph` | `global`；tier 感知，跨 base + 当前 personal 联合检索）
 - `POST /api/notebooks/{id}/ask/stream` — 推理模式问答进度的 NDJSON stream（先发 `progress` 轨迹事件并渲染为实时折叠摘要行，最后发完整 `AskResponse`）
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
@@ -152,6 +155,8 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - `GET /api/notebooks/{id}/derived-rules`、`POST /api/derived-rules/{id}/approve|reject`
+- 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
+- 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
 
 ## 配置
 
@@ -232,6 +237,14 @@ KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 tru
 QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
 GLOBAL_MAX_COMMUNITIES       # Global 问答(ask mode="global")考虑的社区报告上限（默认 20）
 ```
+
+**两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
+（`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法
+`mark_notebook_base()` 设置；一旦某 notebook 标为 `base`，tier 感知联合检索、base
+权威排序权重（base `1.20` vs personal `1.00`）、以及答案里的 base 优先冲突规则即始终生效。
+可选的图推理 Ask 模式（`mode="graph"`）多跳遍历用固定默认 `max_depth=3`、`max_fan_out=8`
+（经 `getattr` 读取 settings，因此将来加 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env 覆盖无需改代码）。
+边可信打分、策展审核队列、个人→基准晋升同样是行为，不由 env 控制。
 
 **MinerU（PDF 解析）：**
 
@@ -337,6 +350,7 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 - 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
+- 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `fast`/`reasoning` 路径）；把 notebook 标为 `base`（`mark_notebook_base()`）与边可信审核队列目前只在仓库/API 层暴露，尚无专属前端控件。晋升（个人→基准）已有策展队列 UI。
 - Article Studio 当前基于标题/摘要文本，并在存在关联 source 时使用其元素；一等文章全文上传与更丰富的关系打分是下一步（Tier 3）。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。

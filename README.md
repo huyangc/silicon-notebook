@@ -18,7 +18,10 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured; pypdf text fallback locally or when MinerU is off
 - Hybrid retrieval: CJK-aware bi-gram keyword + float32 matrix semantic search with per-notebook cache
 - KG-native grounded Q&A: sentence-level `[k_i]` citations, multi-turn conversations, 1-hop KG neighbour expansion, and a live, expandable one-line agent trace for reasoning mode
-- Knowledge governance: browse by type via `/knowledge-types` + `/knowledge?type=...`, status lifecycle, duplicate detection & merge, conflict detection; `deprecated` objects excluded from retrieval and 1-hop expansion
+- Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). `base` is the authoritative reference KG (e.g. an analog-design textbook); `personal` is the user's own notes. `federated_retrieve` gathers candidates across `base ∪ active personal`, tags each hit with its tier, applies a base-authority weight in ranking, and on a base↔personal contradiction the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`)
+- Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `fast`)
+- Edge trust & curation: per-edge trust signals (evidence / corroboration / type-validity) plus a curator review queue; reviewer-rejected edges are excluded from graph reasoning
+- Knowledge governance: browse by type via `/knowledge-types` + `/knowledge?type=...`, status lifecycle, duplicate detection & merge, conflict detection; `deprecated` objects excluded from retrieval and 1-hop expansion. Personal→base node promotion (propose → under review → approve/reject) with dedup-on-approve and a curator promotion queue
 - Unified KG: cross-document concept clustering (`concept_clusters`), pending-merges review
 - Object-level KG visualization: Concept / Claim / Formula / Procedure nodes with type-specific shapes, edge labels, multi-select filters, and a type-grouped side panel
 - Notebook collection (grid/compact/list, edit/delete); clicking `＋ 新建` creates an `Untitled notebook` and enters it immediately — no dialog
@@ -135,7 +138,7 @@ Inside a notebook:
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
 - Main column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, live collapsed reasoning trace with expandable details, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection). The inactive Studio right sidebar is not shown in the primary workspace, so the Ask panel can use the freed width.
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection. The side panel renders source excerpts as structured evidence cards so long titles, locations, formulas, and mixed Chinese/English text wrap inside the panel.
-- Studio-style article research, mind map / infographic generation, and derived-rule review remain reachable from the top analysis toolbar and show their output in dialogs rather than a fixed right column.
+- Studio-style article research, mind map / infographic generation, derived-rule review, and the governance **promotion queue** (propose a personal-KG node for promotion to the base corpus, then approve/reject pending requests) remain reachable from the top analysis toolbar and show their output in dialogs rather than a fixed right column.
 
 The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
 
@@ -150,7 +153,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
-- `POST /api/notebooks/{id}/ask` — KG-native grounded Q&A with `[k_i]` citations
+- `POST /api/notebooks/{id}/ask` — KG-native grounded Q&A with `[k_i]` citations (`mode`: `fast` default | `reasoning` | `graph` | `global`; tier-aware, federates across base + active personal)
 - `POST /api/notebooks/{id}/ask/stream` — NDJSON stream for reasoning-mode Ask progress (`progress` trace events rendered as a live collapsed trace row, then final `AskResponse`)
 - `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
@@ -160,6 +163,8 @@ Key local beta APIs:
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - `GET /api/notebooks/{id}/derived-rules`, `POST /api/derived-rules/{id}/approve|reject`
+- Edge trust & curation: `GET /api/notebooks/{id}/edge-review-queue`, `POST /api/notebooks/{id}/relations/{rel_id}/review`
+- Governance / promotion: `POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`, `GET /api/promotion-queue`, `POST /api/promotion-queue/{candidate_id}/approve|reject`
 
 ## Configuration
 
@@ -245,6 +250,17 @@ KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answeri
 QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
 GLOBAL_MAX_COMMUNITIES       # max community reports for Global QA, ask mode="global" (default 20)
 ```
+
+**Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
+A notebook's `tier` (`base` | `personal`, default `personal`) is data on the notebook
+row, set via the repository's `mark_notebook_base()`; tier-aware federation, the
+base-authority ranking weight (base `1.20` vs personal `1.00`), and the base-wins
+conflict rule in answers are always on once a notebook is marked `base`. The opt-in
+graph-reasoning Ask mode (`mode="graph"`) bounds its multi-hop traversal with fixed
+defaults `max_depth=3` and `max_fan_out=8` (read via `getattr` on settings, so a future
+`GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env override would slot in without code changes).
+Edge-trust scoring, the curator review queue, and personal→base promotion are likewise
+behavior, not env-gated.
 
 **MinerU (PDF parsing):**
 
@@ -363,6 +379,7 @@ MinerU output maps to structured `SourceElement`s: formulas become `formula` ele
 - Unified KG rebuild is explicit and observable via `GET /notebooks/{id}/unified-kg/status`; ingesting a source marks the graph dirty instead of rebuilding synchronously, and opening the graph overlay no longer auto-rebuilds (refresh on demand).
 - Cross-document concept merge uses deterministic alias normalization plus bounded top-k vector candidates (scales past thousands of concepts); optional LLM pre-review (`POST /notebooks/{id}/unified-kg/merges/review`) confirms/rejects high-confidence near-synonym merges in small batches.
 - LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
+- Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `fast`/`reasoning` paths), and marking a notebook `base` (`mark_notebook_base()`) and the edge-trust review queue are exposed at the repository/API layer without a dedicated front-end control yet. Promotion (personal→base) does have a curator queue UI.
 - Article Studio works from title/abstract text and linked source elements; first-class article full-text upload and richer relation scoring are next (Tier 3).
 - PostgreSQL + pgvector are not required for the local beta and are deferred.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
