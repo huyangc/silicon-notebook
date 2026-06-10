@@ -40,6 +40,9 @@ from app.models.schemas import (
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,
+    PromotionApproveResult,
+    PromotionCandidate,
+    PromotionRejectRequest,
     RuleCard,
     SourceDetail,
     SourceElement,
@@ -631,3 +634,56 @@ def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> M
         ))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+# --- Governance: promotion queue (Track F) ------------------------------
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowledge/{knowledge_id}/promote",
+    response_model=PromotionCandidate,
+    status_code=201,
+)
+def propose_promotion(notebook_id: str, knowledge_id: str) -> PromotionCandidate:
+    try:
+        return PromotionCandidate(**repository().propose_promotion(notebook_id, knowledge_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook or knowledge object not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/promotion-queue", response_model=List[PromotionCandidate])
+def list_promotion_queue(status: str = Query(None)) -> List[PromotionCandidate]:
+    return [
+        PromotionCandidate(**c)
+        for c in repository().list_promotion_queue(status_filter=status)
+    ]
+
+
+@router.post(
+    "/promotion-queue/{candidate_id}/approve",
+    response_model=PromotionApproveResult,
+)
+def approve_promotion(candidate_id: str) -> PromotionApproveResult:
+    try:
+        return PromotionApproveResult(**repository().approve_promotion(candidate_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Promotion candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/promotion-queue/{candidate_id}/reject",
+    response_model=PromotionCandidate,
+)
+def reject_promotion(candidate_id: str, payload: PromotionRejectRequest) -> PromotionCandidate:
+    try:
+        return PromotionCandidate(
+            **repository().reject_promotion(candidate_id, reason=payload.reason)
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Promotion candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
