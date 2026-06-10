@@ -24,6 +24,7 @@ def build_rx_graph(
     nodes: Dict[str, dict],
     relations: List[dict],
     tier: str = "base",
+    tier_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[rx.PyDiGraph, Dict[int, str], Dict[str, int]]:
     """Build a PyDiGraph from dicts.
 
@@ -35,6 +36,12 @@ def build_rx_graph(
     `evidence` in each edge payload is a list[dict] (JSON-decoded Evidence dicts).
     `confidence` defaults to 1.0 (no confidence column in knowledge_relations).
     `tier` is injected per-call (default "base" for single-tier POC).
+
+    `tier_map` — optional {notebook_id: tier_str} mapping.  When provided,
+    each relation's tier is looked up via rel["notebook_id"]; falls back to
+    `tier` when the key is absent or tier_map is None.  Federated callers pass
+    tier_map AND tier="personal" so any unmapped (orphan) relation is treated
+    conservatively as personal rather than authoritative base.
     """
     G: rx.PyDiGraph = rx.PyDiGraph()
     idx_to_oid: Dict[int, str] = {}
@@ -60,6 +67,12 @@ def build_rx_graph(
                 ev_raw = json.loads(ev_raw)
             except Exception:
                 ev_raw = []
+        rel_nb = rel.get("notebook_id", "")
+        edge_tier = (
+            tier_map[rel_nb]
+            if (tier_map and rel_nb in tier_map)
+            else tier
+        )
         G.add_edge(
             oid_to_idx[src_oid],
             oid_to_idx[tgt_oid],
@@ -68,7 +81,7 @@ def build_rx_graph(
                 "edge_type": rel["edge_type"],
                 "evidence": ev_raw if isinstance(ev_raw, list) else [],
                 "confidence": float(rel.get("confidence", 1.0)),
-                "tier": tier,
+                "tier": edge_tier,
             },
         )
 
