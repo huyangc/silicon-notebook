@@ -3637,6 +3637,10 @@ function referenceLocation(reference: AnswerReference): string {
   return reference.citation?.location_label || "";
 }
 
+function referenceTier(reference: AnswerReference): string {
+  return reference.anchor?.tier || "";
+}
+
 function CiteChip({
   reference,
   selected,
@@ -3778,11 +3782,17 @@ function SelectedReferenceDetail({
   const snippet = referenceSnippet(reference);
   const source = referenceSource(reference);
   const location = referenceLocation(reference);
+  const tier = referenceTier(reference);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
         <strong>{reference.displayLabel}</strong>
         {objectType && <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>}
+        {tier && (
+          <span className={`tier-badge tier-${tier}`} title={tier === "base" ? "来自基准库（权威参考层）" : "来自个人层"}>
+            {tier === "base" ? "base" : "personal"}
+          </span>
+        )}
         <button
           type="button"
           onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
