@@ -24,6 +24,7 @@ import {
   type PromotionCandidate,
 } from "./promotion-queue";
 import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
+import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -815,6 +816,9 @@ export default function Home() {
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
   const [promoOpen, setPromoOpen] = useState(false);
   const [promoBusy, setPromoBusy] = useState(false);
+  const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
+  const [edgeReviewOpen, setEdgeReviewOpen] = useState(false);
+  const [edgeBusy, setEdgeBusy] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
@@ -1907,6 +1911,27 @@ export default function Home() {
     }
   }
 
+  // --- Track E: edge review queue ----------------------------------------
+  async function openEdgeReviewQueue() {
+    if (!currentNotebookId) return;
+    const queue = await fetchEdgeReviewQueue(currentNotebookId);
+    setEdgeQueue(queue);
+    setEdgeReviewOpen(true);
+  }
+
+  async function decideEdge(relId: string, status: "verified" | "rejected") {
+    if (!currentNotebookId) return;
+    setEdgeBusy(true);
+    try {
+      await reviewRelation(currentNotebookId, relId, status);
+      setToast(status === "verified" ? "关系已确认" : "关系已拒绝，后续图推理将忽略它");
+      const queue = await fetchEdgeReviewQueue(currentNotebookId);
+      setEdgeQueue(queue);
+    } finally {
+      setEdgeBusy(false);
+    }
+  }
+
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
     if (mode === "rules") {
@@ -2151,7 +2176,8 @@ export default function Home() {
                     { label: "新建文章", action: () => setArticleModalOpen(true) },
                     { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
                     { label: "晋升队列", action: () => openPromoQueue().catch(reportError) },
-                    { label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) }
+                    { label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) },
+                    { label: "边审查队列", action: () => openEdgeReviewQueue().catch(reportError) }
                   ]
                 })}>
                   <BarChart3 size={17} />
@@ -3068,6 +3094,62 @@ export default function Home() {
                             onClick={() => decidePromotion(cand.id, "approve").catch(reportError)}
                           >
                             批准晋升
+                          </button>
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {edgeReviewOpen && (
+        <section
+          className="utility-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => { if (event.currentTarget === event.target) setEdgeReviewOpen(false); }}
+        >
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>边审查队列</h2>
+                <p>按「高中心性 × 低可信」排序的关系。确认可信边，或拒绝错误边（被拒边将从所有图推理遍历中排除）。</p>
+              </div>
+              <button className="icon-button" onClick={() => setEdgeReviewOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {(edgeQueue ?? []).length === 0 ? (
+                <p className="tool-hint">暂无待审关系。</p>
+              ) : (
+                <div className="stack">
+                  {(edgeQueue ?? []).map((edge) => (
+                    <article className="item" key={edge.rel_id}>
+                      <div className="tag-row">
+                        <span className="tag">{edge.edge_type}</span>
+                        <span className="tag">{edge.review_status}</span>
+                        <span className="tag">可信 {edge.trust_score.toFixed(2)}</span>
+                        <span className="tag">优先级 {edge.review_priority.toFixed(2)}</span>
+                      </div>
+                      <h3>{(edge.source_name || edge.source_object_id)} → {(edge.target_name || edge.target_object_id)}</h3>
+                      {edge.review_status !== "rejected" && (
+                        <div className="modal-actions">
+                          <button
+                            className="sort-button"
+                            disabled={edgeBusy}
+                            onClick={() => decideEdge(edge.rel_id, "rejected").catch(reportError)}
+                          >
+                            拒绝
+                          </button>
+                          <button
+                            className="new-pill"
+                            disabled={edgeBusy}
+                            onClick={() => decideEdge(edge.rel_id, "verified").catch(reportError)}
+                          >
+                            确认可信
                           </button>
                         </div>
                       )}
