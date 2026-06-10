@@ -135,6 +135,30 @@ _KG_TYPES = ("claim", "formula", "procedure", "concept")
 # deriving the back-compat `conclusion` string.
 _MARKER_RE = re.compile(r"\[(k\d+)\]")
 
+# Tolerant variant that ALSO matches malformed markers with internal whitespace
+# (e.g. `[ k1]`). Used only to scrub citation-shaped tokens that did NOT bind to
+# a real anchor, so no fabricated/malformed marker reaches the user. Kept
+# separate from _MARKER_RE so the strict marker->anchor resolution is unchanged.
+_LOOSE_MARKER_RE = re.compile(r"\[\s*k\d+\s*\]")
+
+
+def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
+    """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
+    keys that actually resolved to an anchor):
+      - key in bound_keys  → rewrite to the canonical `[key]` form (repairs a
+        malformed spaced `[ k1]` so it reads as a clean citation, not a fabricated
+        one, while still pointing at its real anchor);
+      - key not in bound_keys → drop the token (out-of-map ids like `[k99]`, or a
+        spaced id with no anchor).
+    Collapses the double space a removed mid-sentence marker would leave behind."""
+    def _sub(m: re.Match) -> str:
+        key = m.group(0).strip("[]").strip()
+        return f"[{key}]" if key in bound_keys else ""
+    cleaned = _LOOSE_MARKER_RE.sub(_sub, answer or "")
+    # A stripped marker between words leaves "word  word"; normalise to one space
+    # without disturbing newlines / other whitespace runs the model intended.
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
 
 class SQLiteRepository:
     def __init__(self, settings: Settings):
@@ -4776,12 +4800,46 @@ class SQLiteRepository:
                     answer = str(data.get("answer", "")).strip()
                     llm_grounded = bool(data.get("grounded", False))
                     anchors = self._parse_answer_anchors(answer, id_map)
+                    # Scrub citation-shaped tokens that did NOT bind to a real
+                    # id_map entry (out-of-map ids like [k99], malformed [ k1]).
+                    # Unlike the fast path — whose id_map IS top_hits, so the LLM
+                    # rarely invents ids — graph mode shows a wider subgraph and
+                    # the answer LLM occasionally emits markers the strict
+                    # _MARKER_RE can't bind; left in place they read as fabricated
+                    # citations. Strip them so only resolved [k] markers ship.
+                    answer = _strip_unbound_markers(answer, {a.key for a in anchors})
             except Exception:
                 answer, llm_grounded, anchors = "", False, []
 
+        # classify_evidence keys "grounded" off the relevance of the CITED hit.
+        # In the fast path id_map IS built from top_hits, so every anchor is a
+        # scored hit. In graph mode the cited node can be a multi-hop NEIGHBOUR
+        # that is in id_map but NOT in top_hits → its relevance would read 0 and
+        # the answer would be demoted to "overview" even though it cites a real,
+        # chain-connected node (the q17/q18 "overview while citing specifics"
+        # contradiction). Mirror the fast-path invariant: give each cited
+        # neighbour a relevance inherited from the strongest seed, discounted by
+        # chain_trust (the verifier's weakest-link confidence), so a trusted
+        # chain can reach "grounded" while a flagged/weak one still falls back.
+        hits_for_classify = list(top_hits)
+        if anchors:
+            scored_oids = {h.object_id for h in top_hits}
+            seed_rel = max((h.relevance for h in top_hits), default=0.0)
+            neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
+            for a in anchors:
+                if a.object_id in scored_oids:
+                    continue
+                scored_oids.add(a.object_id)
+                hits_for_classify.append(RetrievedKnowledge(
+                    object_id=a.object_id, object_type=a.object_type,
+                    payload={"name": a.name}, relevance=neighbour_rel,
+                    tier=getattr(a, "tier", "personal"), notebook_id=notebook_id))
+
         evidence_level, top_relevance = classify_evidence(
-            top_hits, anchors, llm_grounded,
+            hits_for_classify, anchors, llm_grounded,
             self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        # Report the genuine seed relevance, not the synthetic neighbour value.
+        top_relevance = max((h.relevance for h in top_hits), default=top_relevance)
         grounded = evidence_level == "grounded"
         if answer:
             conclusion = _MARKER_RE.sub("", answer).strip()
