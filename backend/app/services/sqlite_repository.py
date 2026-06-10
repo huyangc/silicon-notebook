@@ -846,6 +846,17 @@ class SQLiteRepository:
                 (_now(), notebook_id),
             )
 
+    def set_notebook_personal(self, notebook_id: str) -> None:
+        """Reset a notebook back to the personal tier (tier='personal').
+        Symmetric inverse of mark_notebook_base; idempotent.
+        Raises KeyError if the notebook does not exist."""
+        self.get_notebook(notebook_id)  # raises KeyError if missing
+        with self._write() as db:
+            db.execute(
+                "UPDATE notebooks SET tier='personal', updated_at=? WHERE id=?",
+                (_now(), notebook_id),
+            )
+
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)
         with self._write() as db:

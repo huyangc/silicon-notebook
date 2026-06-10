@@ -916,6 +916,18 @@ def main() -> None:
         assert auto_nb.purpose == ""
         manual_nb = repository.create_notebook(NotebookCreate(name="Manual", purpose="hand-written"))
         assert manual_nb.purpose == "hand-written"
+
+        # Two-tier: tier toggle round-trips on the repository.
+        assert repository.get_notebook(manual_nb.id).tier == "personal"
+        repository.mark_notebook_base(manual_nb.id)
+        assert repository.get_notebook(manual_nb.id).tier == "base"
+        repository.set_notebook_personal(manual_nb.id)
+        assert repository.get_notebook(manual_nb.id).tier == "personal"
+        try:
+            repository.set_notebook_personal("nb-missing")
+            raise AssertionError("set_notebook_personal should raise KeyError on missing notebook")
+        except KeyError:
+            pass
         typed = repository.upload_sources(
             auto_nb.id,
             [
