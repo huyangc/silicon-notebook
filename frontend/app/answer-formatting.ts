@@ -101,10 +101,21 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    if (/^\$\$\s*$/.test(lines[index])) {
+    // Single-line display formula: `$$ ... $$` or `\[ ... \]` on one line.
+    const singleLineFormula = matchSingleLineFormula(lines[index]);
+    if (singleLineFormula) {
+      blocks.push({ type: "formula", latex: singleLineFormula.trim() });
+      index += 1;
+      continue;
+    }
+
+    // Multi-line display formula opened by a bare `$$` or `\[` line.
+    const fenceOpen = /^\$\$\s*$/.test(lines[index]) ? "$$" : /^\\\[\s*$/.test(lines[index]) ? "\\[" : "";
+    if (fenceOpen) {
+      const closeRe = fenceOpen === "$$" ? /^\$\$\s*$/ : /^\\\]\s*$/;
       const latex: string[] = [];
       index += 1;
-      while (index < lines.length && !/^\$\$\s*$/.test(lines[index])) {
+      while (index < lines.length && !closeRe.test(lines[index])) {
         latex.push(lines[index]);
         index += 1;
       }
@@ -150,7 +161,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       index < lines.length &&
       lines[index].trim() &&
       !/^```/.test(lines[index]) &&
-      !/^\$\$\s*$/.test(lines[index]) &&
+      !isDisplayFormulaLine(lines[index]) &&
       !isTableStart(lines, index) &&
       !/^\s*[-*]\s+/.test(lines[index]) &&
       !/^\s*\d+\.\s+/.test(lines[index])
@@ -162,6 +173,50 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   }
 
   return blocks;
+}
+
+// Extract the latex body of a one-line `$$ ... $$` or `\[ ... \]`, else null.
+function matchSingleLineFormula(line: string): string | null {
+  const dollar = line.match(/^\s*\$\$([\s\S]+?)\$\$\s*$/);
+  if (dollar) return dollar[1];
+  const bracket = line.match(/^\s*\\\[([\s\S]+?)\\\]\s*$/);
+  if (bracket) return bracket[1];
+  return null;
+}
+
+// True when a line begins (or is) a display-formula block, so paragraphs stop here.
+function isDisplayFormulaLine(line: string): boolean {
+  return (
+    /^\$\$\s*$/.test(line) || // bare `$$` opener
+    /^\\\[\s*$/.test(line) || // bare `\[` opener
+    matchSingleLineFormula(line) !== null
+  );
+}
+
+export type InlineSegment = { type: "text" | "math"; value: string };
+
+// Split prose into plain-text and inline-math segments, recognizing `$...$`
+// and `\( ... \)`. Text without delimiters is returned as a single text
+// segment, so normal prose (and `[k]` markers) is never mangled.
+export function splitInlineLatex(text: string): InlineSegment[] {
+  const segments: InlineSegment[] = [];
+  // Single-line `$...$` (no embedded `$` or newline) or `\( ... \)`.
+  const pattern = /\$([^$\n]+?)\$|\\\(([\s\S]+?)\\\)/g;
+  let lastIndex = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index == null) continue;
+    if (match.index > lastIndex) {
+      segments.push({ type: "text", value: text.slice(lastIndex, match.index) });
+    }
+    const body = match[1] ?? match[2] ?? "";
+    segments.push({ type: "math", value: body.trim() });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    segments.push({ type: "text", value: text.slice(lastIndex) });
+  }
+  if (segments.length === 0) segments.push({ type: "text", value: text });
+  return segments;
 }
 
 function isTableStart(lines: string[], index: number): boolean {
