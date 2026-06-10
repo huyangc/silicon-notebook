@@ -329,3 +329,60 @@ def verify_chain_edges(
 
     chain_trust = min(confidences) if confidences else 1.0
     return {"chain_trust": chain_trust, "flagged": flagged, "edge_results": edge_results}
+
+
+# ---------------------------------------------------------------------------
+# Centrality helpers (Track E — edge trust & curation tooling)
+# These are ADDITIVE functions; they do not modify any existing function.
+# ---------------------------------------------------------------------------
+
+def compute_centrality(
+    G: rx.PyDiGraph,
+    idx_to_oid: Dict[int, str],
+) -> dict:
+    """Compute node-level betweenness and pagerank over the graph.
+
+    Returns:
+        {
+          "betweenness": {object_id: float, ...},   # digraph betweenness centrality
+          "pagerank":    {object_id: float, ...},   # PageRank (alpha=0.85)
+        }
+
+    Both metrics are keyed by object_id (string), not node index.
+    Empty graph returns {"betweenness": {}, "pagerank": {}}.
+    """
+    if G.num_nodes() == 0:
+        return {"betweenness": {}, "pagerank": {}}
+
+    btwn_raw: Dict[int, float] = rx.digraph_betweenness_centrality(G, normalized=True)
+    pr_raw: Dict[int, float] = rx.pagerank(G, alpha=0.85)
+
+    betweenness = {idx_to_oid[idx]: v for idx, v in btwn_raw.items() if idx in idx_to_oid}
+    pagerank    = {idx_to_oid[idx]: v for idx, v in pr_raw.items()   if idx in idx_to_oid}
+    return {"betweenness": betweenness, "pagerank": pagerank}
+
+
+def compute_edge_centrality(G: rx.PyDiGraph) -> Dict[str, float]:
+    """Compute edge betweenness centrality for each edge in the graph.
+
+    Returns {rel_id: float} where rel_id is taken from the edge payload key
+    'rel_id'.  If a payload has no rel_id, falls back to str(edge_index).
+
+    Empty graph returns {}.
+    """
+    if G.num_edges() == 0:
+        return {}
+
+    ec_raw: Dict[int, float] = rx.digraph_edge_betweenness_centrality(G, normalized=True)
+    edge_idx_map = G.edge_index_map()   # {edge_idx: (src_idx, tgt_idx, payload)}
+
+    result: Dict[str, float] = {}
+    for edge_idx, score in ec_raw.items():
+        # rustworkx.EdgeIndexMap supports __contains__/__getitem__ but not .get()
+        if edge_idx not in edge_idx_map:
+            continue
+        _, _, payload = edge_idx_map[edge_idx]
+        rel_id = payload.get("rel_id") if isinstance(payload, dict) else None
+        key = str(rel_id) if rel_id else str(edge_idx)
+        result[key] = float(score)
+    return result
