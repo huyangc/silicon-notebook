@@ -3164,6 +3164,74 @@ class SQLiteRepository:
 
             return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
 
+    def _federated_rx_graph(self, active_notebook_id: str):
+        """Return a federated PyDiGraph merging base notebook(s) + active notebook.
+
+        Version-keyed on the concatenated (COUNT, MAX created_at) for every
+        participating notebook so that an ingest into ANY of them triggers a
+        rebuild.  Cache key: "{active_id}:fed_rxgraph".
+
+        Each relation row is tagged with its notebook_id before passing to
+        build_rx_graph so per-edge tier stamping works.
+        """
+        from app.services.kg.graph_reason import build_rx_graph
+        with self._connect() as db:
+            # Participating notebooks: active + all base notebooks (excl. active
+            # if active is itself base, to avoid duplication).
+            base_rows = db.execute(
+                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+                (active_notebook_id,),
+            ).fetchall()
+            active_row = db.execute(
+                "SELECT id, tier FROM notebooks WHERE id=?",
+                (active_notebook_id,),
+            ).fetchone()
+            active_tier = active_row["tier"] if active_row else "personal"
+
+            # Build participating list: active first, then all base notebooks.
+            participants = [(active_notebook_id, active_tier)] + [
+                (r["id"], r["tier"]) for r in base_rows
+            ]
+            # Version key: tuple of per-notebook (nb_id, count, max_ts) pairs.
+            version_parts = []
+            for nb_id, _ in participants:
+                ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                    "FROM knowledge_relations WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
+                version_parts.append((nb_id, ver["c"], ver["ts"]))
+            version = ("fed_rxgraph", tuple(version_parts))
+
+            tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
+
+            def _load():
+                nodes: dict = {}
+                all_relations: list = []
+                ph = ",".join("?" for _ in USABLE_STATUSES)
+                for nb_id, _ in participants:
+                    obj_rows = db.execute(
+                        "SELECT id, object_type, payload FROM knowledge_objects "
+                        f"WHERE notebook_id = ? AND status IN ({ph})",
+                        (nb_id, *USABLE_STATUSES),
+                    ).fetchall()
+                    for r in obj_rows:
+                        p = json.loads(r["payload"] or "{}")
+                        nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                    rel_rows = db.execute(
+                        "SELECT id, source_object_id, target_object_id, edge_type, evidence "
+                        "FROM knowledge_relations WHERE notebook_id = ?",
+                        (nb_id,),
+                    ).fetchall()
+                    for r in rel_rows:
+                        d = dict(r)
+                        d["notebook_id"] = nb_id   # tag for tier_map lookup
+                        all_relations.append(d)
+                return build_rx_graph(nodes, all_relations, tier="personal", tier_map=tier_map)
+
+            return self._vector_cache.get(
+                f"{active_notebook_id}:fed_rxgraph", version, _load)
+
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
         applies_to = payload.get("applies_to")
