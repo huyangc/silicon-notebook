@@ -396,3 +396,118 @@ class TestPromotionRoutes:
     def test_reject_unknown_candidate_returns_404(self, client):
         r = client.post("/api/promotion-queue/promo-nope/reject", json={"reason": "x"})
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — base strong-review gate & promotion edge cases
+# ---------------------------------------------------------------------------
+
+
+def _store_claim(repo, notebook_id, name, source="s1"):
+    repo.store_kg(
+        notebook_id,
+        source,
+        [{"local_id": "C1", "object_type": "claim",
+          "payload": {"name": name, "section_path": "1"}, "evidence": []}],
+        [],
+    )
+
+
+class TestBaseReviewGateEdgeCases:
+    def test_store_kg_base_objects_appear_in_retrieval_as_reviewed(self, repo):
+        """Objects stored to base with status='reviewed' are in USABLE_STATUSES
+        and therefore appear in list_knowledge queries."""
+        base = _make_base_nb(repo)
+        _store_claim(repo, base.id, "reviewed base claim about gain")
+        records = repo.list_knowledge(base.id, "claim")
+        assert len(records) == 1
+        assert _objects_in(repo, base.id, "claim")[0]["status"] == "reviewed"
+
+    def test_curator_can_upgrade_reviewed_to_approved(self, repo):
+        """update_knowledge(status='approved') on a base reviewed object works."""
+        base = _make_base_nb(repo)
+        _store_claim(repo, base.id, "to be upgraded")
+        oid = _objects_in(repo, base.id, "claim")[0]["id"]
+        assert _status_of(repo, oid) == "reviewed"
+        repo.update_knowledge(base.id, oid, KnowledgeUpdate(status="approved"))
+        assert _status_of(repo, oid) == "approved"
+
+    def test_ask_surfaces_base_reviewed_objects(self, repo):
+        """ask() on a personal notebook surfaces base objects at status='reviewed'.
+        Regression guard for USABLE_STATUSES inclusion."""
+        from app.models.schemas import AskRequest
+
+        base = _make_base_nb(repo)
+        _store_claim(repo, base.id, "capacitance scales with area")
+        personal = _make_personal_nb(repo)
+        _store_claim(repo, personal.id, "personal note on capacitance")
+        # All base claims are 'reviewed' (the gate); confirm before asking.
+        assert all(r["status"] == "reviewed" for r in _objects_in(repo, base.id, "claim"))
+        resp = repo.ask(personal.id, AskRequest(question="capacitance"))
+        all_ids = {a.object_id for a in resp.anchors}
+        all_ids |= {r.id for r in resp.related_knowledge}
+        base_ids = {r["id"] for r in _objects_in(repo, base.id, "claim")}
+        assert all_ids & base_ids, "reviewed base object did not reach the answer"
+
+    def test_reject_promotion_does_not_affect_personal_retrieval(self, repo):
+        """After rejection the personal object is still retrievable from its
+        personal notebook (no side effects on the personal corpus)."""
+        from app.models.schemas import AskRequest
+
+        _make_base_nb(repo)
+        personal = _make_personal_nb(repo)
+        _store_claim(repo, personal.id, "miller effect increases input capacitance")
+        oid = _objects_in(repo, personal.id, "claim")[0]["id"]
+        cand = repo.propose_promotion(personal.id, oid)
+        repo.reject_promotion(cand["id"], reason="not canonical")
+        resp = repo.ask(personal.id, AskRequest(question="miller effect"))
+        all_ids = {a.object_id for a in resp.anchors}
+        all_ids |= {r.id for r in resp.related_knowledge}
+        assert oid in all_ids, "rejected personal object vanished from its own notebook"
+
+    def test_rejected_object_does_not_leak_into_base_only_ask(self, repo):
+        """A base-only ask() must NOT surface a rejected personal object."""
+        from app.models.schemas import AskRequest
+
+        base = _make_base_nb(repo)
+        _store_claim(repo, base.id, "base only claim about noise figure")
+        personal = _make_personal_nb(repo)
+        _store_claim(repo, personal.id, "personal claim about noise figure")
+        p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
+        cand = repo.propose_promotion(personal.id, p_oid)
+        repo.reject_promotion(cand["id"], reason="rejected")
+        # Ask against the BASE notebook directly (base-only view).
+        resp = repo.ask(base.id, AskRequest(question="noise figure"))
+        all_ids = {a.object_id for a in resp.anchors}
+        all_ids |= {r.id for r in resp.related_knowledge}
+        assert p_oid not in all_ids, "rejected personal object leaked into base retrieval"
+
+    def test_approve_promotion_makes_base_copy_live_in_federation(self, repo):
+        """After approval the base copy is live and reachable via federated
+        retrieval from the personal notebook."""
+        base = _make_base_nb(repo)
+        personal = _make_personal_nb(repo)
+        _store_claim(repo, personal.id, "thermal noise sets the noise floor")
+        p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
+        cand = repo.propose_promotion(personal.id, p_oid)
+        result = repo.approve_promotion(cand["id"])
+        hits = repo.federated_retrieve(personal.id, "thermal noise")
+        hit_ids = {h.object_id for h in hits}
+        assert result["base_object_id"] in hit_ids
+
+    def test_double_promotion_is_idempotent(self, repo):
+        """propose_promotion() called twice for the same object returns the same
+        candidate id without inserting a duplicate row."""
+        _make_base_nb(repo)
+        personal = _make_personal_nb(repo)
+        _store_claim(repo, personal.id, "idempotent double propose")
+        oid = _objects_in(repo, personal.id, "claim")[0]["id"]
+        first = repo.propose_promotion(personal.id, oid)
+        second = repo.propose_promotion(personal.id, oid)
+        assert first["id"] == second["id"]
+        with repo._connect() as db:
+            n = db.execute(
+                "SELECT COUNT(*) AS c FROM promotion_candidates WHERE object_id=?",
+                (oid,),
+            ).fetchone()["c"]
+        assert n == 1
