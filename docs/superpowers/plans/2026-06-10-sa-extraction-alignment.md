@@ -770,16 +770,24 @@ git commit -m "docs(sa): 回填 A/B 标定结果"
 
 ---
 
-## 标定结果(Task 7 回填)
+## 标定结果(Task 7 回填,2026-06-10)
+
+切片:RF Microelectronics 互调推导段(2 窗,两臂同输入 2794 tok est)。命令:
+`python -m app.eval.sa_calibration --source-md /tmp/sa_slice.md --doc-type textbook --max-windows 3`
 
 | 指标 | OLD | NEW | 门槛 | 判定 |
 |---|---|---|---|---|
-| sparse_per_1k_tok | — | — | NEW ≥ 1.5× OLD | — |
-| compound_claim_rate | — | — | NEW < 0.15 | — |
-| validity_scope_fill_rate | 0(必然) | — | NEW > 0 | — |
-| token/window(est) | — | — | NEW ≤ 1.8× OLD | — |
+| sparse_per_1k_tok | 0.0 | 0.358(1×`depends_on`) | NEW ≥ 1.5× OLD | ✅ |
+| compound_claim_rate | 0.75 | 0.438 | NEW < 0.15 | ❌ |
+| validity_scope_fill_rate | 0.0 | 0.034 | NEW > 0 | ✅ |
+| token 成本/文档 | — | — | NEW ≤ 1.8× OLD | ⚠️ 未测(harness 只估输入,两臂同;completion 未计) |
+| 旁证(非门槛) | claims 8 / edges 21 / derived_from 8 / supports 0 / about 9 | claims 16 / edges 35 / derived_from 14 / supports 7 / about 4 | — | NEW 推理结构更密、about 让位 |
 
-**结论:** _(待回填)_
+**GATE PASS=false**,但**仅卡在 compound<0.15 这一项**。
+
+**结论:** NEW 在每个可比轴上都优于 OLD——复合率近乎减半(0.75→0.44)、稀疏边与 validity_scope 从 0 到有、推理边密度上升、`about` 滥用下降。PASS=false 只因 `compound_claim_rate<0.15` 这个**激进绝对阈值**:(a) 单遍 prompt 已把它从 0.75 砍到 0.44;(b) 启发式把数学推导里自然的「A and B」枚举(如「IM3 出现在 2ω1−ω2 **and** 2ω2−ω1」——本是一条原子事实)误判为复合,过度惩罚;(c) 样本仅 2 窗(8 vs 16 claim),噪声大。**判定:阈值+启发式需重标定,prompt 本身方向正确、是明确改进。** token 成本门槛未真正测量(harness 只估输入;真要测需采 completion usage)。
+
+**后续(择一,见正文讨论):** ① 接受为方向性胜利、放宽/修正 compound 启发式与阈值 → SA-1+2 收口;② 迭代 prompt 把原子性推得更狠(注意过碎风险);③ 更大切片(10+ 窗)再测求稳。SA-3(重抽底库)仍 deferred。
 
 ---
 
