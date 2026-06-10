@@ -23,6 +23,7 @@ import {
   rejectPromotion,
   type PromotionCandidate,
 } from "./promotion-queue";
+import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -1858,6 +1859,20 @@ export default function Home() {
     }
   }
 
+  // --- Two-tier federation: mark notebook base / personal -----------------
+  async function toggleNotebookTier() {
+    if (!currentNotebook) return;
+    const target = nextTier(currentNotebook.tier);
+    const updated = await setNotebookTier(currentNotebook.id, target);
+    setCurrentNotebook(updated as NotebookSummary);
+    await loadNotebookCollection();
+    setToast(
+      target === "base"
+        ? "已设为基准库（base）— 该 KG 将作为权威参考层参与检索与冲突仲裁"
+        : "已取消基准库，恢复为个人层（personal）"
+    );
+  }
+
   // --- Governance: promotion queue (Track F) ---------------------------
   async function openPromoQueue() {
     const queue = await fetchPromotionQueue();
@@ -2134,7 +2149,8 @@ export default function Home() {
                     { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
                     { label: "新建文章", action: () => setArticleModalOpen(true) },
                     { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
-                    { label: "晋升队列", action: () => openPromoQueue().catch(reportError) }
+                    { label: "晋升队列", action: () => openPromoQueue().catch(reportError) },
+                    { label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) }
                   ]
                 })}>
                   <BarChart3 size={17} />
