@@ -1,0 +1,331 @@
+"""rustworkx-backed in-memory KG graph for multi-hop reasoning.
+
+Nodes carry: object_id, object_type, name.
+Edges carry: edge_type, evidence (list[dict]), confidence (float), tier (str).
+
+build_rx_graph() is a pure function — no I/O, easily unit-tested with a
+synthetic fixture.  The repo wraps it via _rx_graph() with VectorCache
+version-keying (same (COUNT, MAX created_at) pattern as _vector_matrix).
+"""
+from __future__ import annotations
+
+import json
+from collections import deque
+from typing import Dict, List, Optional, Tuple
+
+import rustworkx as rx
+
+# Default reasoning edge types (well-populated: derived_from=4160, supports=6068,
+# depends_on=791).  contrasts_with/prerequisite_of are thin; callers may extend.
+DEFAULT_REASONING_EDGES = frozenset({"derived_from", "supports", "depends_on"})
+
+
+def build_rx_graph(
+    nodes: Dict[str, dict],
+    relations: List[dict],
+    tier: str = "base",
+) -> Tuple[rx.PyDiGraph, Dict[int, str], Dict[str, int]]:
+    """Build a PyDiGraph from dicts.
+
+    `nodes`  — {object_id: {"type": str, "name": str, ...}}
+    `relations` — list of knowledge_relations rows (dicts with keys:
+        id, source_object_id, target_object_id, edge_type, evidence)
+
+    Returns (graph, idx_to_oid, oid_to_idx).
+    `evidence` in each edge payload is a list[dict] (JSON-decoded Evidence dicts).
+    `confidence` defaults to 1.0 (no confidence column in knowledge_relations).
+    `tier` is injected per-call (default "base" for single-tier POC).
+    """
+    G: rx.PyDiGraph = rx.PyDiGraph()
+    idx_to_oid: Dict[int, str] = {}
+    oid_to_idx: Dict[str, int] = {}
+
+    for oid, meta in nodes.items():
+        idx = G.add_node({
+            "object_id": oid,
+            "object_type": meta.get("type", ""),
+            "name": meta.get("name", ""),
+        })
+        idx_to_oid[idx] = oid
+        oid_to_idx[oid] = idx
+
+    for rel in relations:
+        src_oid = rel["source_object_id"]
+        tgt_oid = rel["target_object_id"]
+        if src_oid not in oid_to_idx or tgt_oid not in oid_to_idx:
+            continue  # skip dangling edges (object deleted/deprecated)
+        ev_raw = rel.get("evidence", [])
+        if isinstance(ev_raw, str):
+            try:
+                ev_raw = json.loads(ev_raw)
+            except Exception:
+                ev_raw = []
+        G.add_edge(
+            oid_to_idx[src_oid],
+            oid_to_idx[tgt_oid],
+            {
+                "rel_id": rel.get("id", ""),
+                "edge_type": rel["edge_type"],
+                "evidence": ev_raw if isinstance(ev_raw, list) else [],
+                "confidence": float(rel.get("confidence", 1.0)),
+                "tier": tier,
+            },
+        )
+
+    return G, idx_to_oid, oid_to_idx
+
+
+def multihop_subgraph(
+    G: rx.PyDiGraph,
+    oid_to_idx: Dict[str, int],
+    idx_to_oid: Dict[int, str],
+    seed_ids: List[str],
+    edge_types: Optional[frozenset] = None,
+    max_depth: int = 3,
+    max_fan_out: int = 8,
+) -> List[Tuple[dict, Optional[dict], Optional[str]]]:
+    """BFS from `seed_ids` along `edge_types`, bounded by depth and fan-out.
+
+    Returns ordered list of (node_payload, edge_payload_or_None, src_object_id)
+    triples.  Seed nodes carry edge_payload=None and src_object_id=None; each
+    non-seed item's src_object_id is the object_id of the node the edge was
+    traversed FROM (so render_subgraph_context can emit full chain annotations).
+    Each node appears at most once (visited set guards cycles).  At each hop the
+    eligible out-edges are sorted by confidence desc, then capped to
+    `max_fan_out`.
+
+    The returned node and edge payloads are shallow COPIES, never the live dicts
+    stored inside `G`.  rustworkx's get_edge_data / G[idx] hand back the same
+    object held in the graph, and `G` is typically the version-cached PyDiGraph
+    (see SqliteRepository._rx_graph) reused across many asks.  A consumer that
+    mutates a payload in place — e.g. ask_graph demoting a flagged edge's
+    confidence to 0.05 before re-rendering — would otherwise corrupt the cached
+    graph and leak that change into every subsequent ask until the next version
+    rebuild.  Copying here keeps the cache pristine for all downstream callers.
+
+    edge_types: frozenset of edge_type strings to follow; None = all edges.
+    """
+    if edge_types is None:
+        edge_types = frozenset()   # empty = treat as "all" below
+    use_all = len(edge_types) == 0
+
+    visited: set = set()
+    result: List[Tuple[dict, Optional[dict], Optional[str]]] = []
+    # queue entries: (node_idx, depth)
+    queue: deque = deque()
+
+    for oid in seed_ids:
+        idx = oid_to_idx.get(oid)
+        if idx is None or idx in visited:
+            continue
+        visited.add(idx)
+        result.append((dict(G[idx]), None, None))
+        queue.append((idx, 0))
+
+    while queue:
+        cur_idx, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        cur_oid = idx_to_oid.get(cur_idx)
+        # Gather eligible out-edges for this node
+        out_edges = []
+        for tgt_idx in G.successor_indices(cur_idx):
+            if tgt_idx in visited:
+                continue
+            edge_data = G.get_edge_data(cur_idx, tgt_idx)
+            if use_all or edge_data.get("edge_type") in edge_types:
+                out_edges.append((tgt_idx, edge_data))
+        # Sort by confidence desc, cap fan-out
+        out_edges.sort(key=lambda x: x[1].get("confidence", 1.0), reverse=True)
+        out_edges = out_edges[:max_fan_out]
+
+        for tgt_idx, edge_data in out_edges:
+            if tgt_idx in visited:
+                continue
+            visited.add(tgt_idx)
+            result.append((dict(G[tgt_idx]), dict(edge_data), cur_oid))
+            queue.append((tgt_idx, depth + 1))
+
+    return result
+
+
+def render_subgraph_context(
+    subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
+    id_offset: int = 0,
+) -> Tuple[str, dict]:
+    """Render the (node, edge, src_oid) subgraph into (context_block_str, id_map).
+
+    The format mirrors _answer_context (sqlite_repository.py:3682-3757) so that
+    _answer_kg, _parse_answer_anchors, and _MARKER_RE all work unchanged:
+
+        k1: [Formula] Node A
+        k2: [Claim] Node B  — ev: "A derives B"
+        chain:
+          [k2] Node B --derived_from--> [k1] Node A
+
+    The per-edge chain line carries BOTH endpoint keys (`[k_tgt] tgt
+    --edge_type--> [k_src] src`), mirroring `_answer_context`'s existing
+    `k2 -[derived_from]-> k1` relation lines so the `[k]` anchor markers remain
+    resolvable by `_parse_answer_anchors` / `_MARKER_RE`.
+
+    id_map[k{i}] = {"object_id": ..., "object_type": ..., "name": ...,
+                    "definition": "", "snippet": quote, "source_title": "",
+                    "location_label": ""}
+
+    id_offset lets the caller start numbering after an existing context block
+    (e.g., if fast-mode hits were already assigned k1..k5, graph nodes begin k6).
+    """
+    lines: List[str] = []
+    id_map: Dict[str, dict] = {}
+    oid_to_key: Dict[str, str] = {}
+
+    for i, (node, edge, _src_oid) in enumerate(subgraph, start=id_offset + 1):
+        key = f"k{i}"
+        oid = node["object_id"]
+        name = node.get("name", oid)
+        otype = node.get("object_type", "")
+        quote = ""
+        if edge:
+            ev_list = edge.get("evidence", [])
+            if ev_list and isinstance(ev_list[0], dict):
+                quote = ev_list[0].get("quote", "")
+        ev_suffix = f'  — ev: "{quote}"' if quote else ""
+        lines.append(f"{key}: [{otype}] {name}{ev_suffix}")
+        id_map[key] = {
+            "object_id": oid,
+            "object_type": otype,
+            "name": name,
+            "definition": "",
+            "snippet": quote,
+            "source_title": "",
+            "location_label": "",
+        }
+        oid_to_key[oid] = key
+
+    # Chain annotation lines (one per edge, in traversal order). BFS visits the
+    # source node before its targets, so oid_to_key[src_oid] is always populated.
+    chain_lines: List[str] = []
+    for node, edge, src_oid in subgraph:
+        if not edge:
+            continue
+        tgt_oid = node["object_id"]
+        tgt_key = oid_to_key.get(tgt_oid, "?")
+        src_key = oid_to_key.get(src_oid, "?")
+        etype = edge.get("edge_type", "?")
+        src_name = ""  # source name resolved from id_map if present
+        if src_key in id_map:
+            src_name = id_map[src_key].get("name", "")
+        tgt_name = node.get("name", tgt_oid)
+        chain_lines.append(
+            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}".rstrip()
+        )
+
+    if chain_lines:
+        lines.append("chain:")
+        lines.extend(chain_lines)
+
+    return ("\n".join(lines) if lines else "(none)"), id_map
+
+
+# Prompt + schema for adversarial edge verification
+_VERIFY_SCHEMA_HINT = '{"valid": true, "reason": ""}'
+
+_VERIFY_PROMPT = (
+    "Does the cited evidence below actually support the claimed knowledge-graph edge? "
+    "Answer valid=true only if the quote directly substantiates the edge; "
+    "valid=false if the quote is absent, unrelated, or only tangentially relevant.\n\n"
+    "Edge: {src_name} --{edge_type}--> {tgt_name}\n"
+    "Evidence quote: \"{quote}\"\n\n"
+    "Respond ONLY with JSON matching: {schema}"
+)
+
+
+def verify_chain_edges(
+    subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
+    llm_client,
+    votes: int = 1,
+    timeout: int = 30,
+) -> dict:
+    """Adversarial LLM check for each edge in the chain.
+
+    For each (node, edge, src_oid) triple where edge is not None, ask the LLM
+    `votes` times whether the evidence supports the edge.  A majority of
+    valid=True votes → edge passes; otherwise it is flagged and its confidence
+    is demoted to 0.05 in the returned flagged list.
+
+    chain_trust = min(confidence) over all edges (1.0 if no edges).
+
+    Returns:
+        {
+          "chain_trust": float,       # weakest-link confidence
+          "flagged": [                # edges that failed verification
+            {"edge_type": str, "src_name": str, "tgt_name": str,
+             "reason": str, "demoted_confidence": 0.05}
+          ],
+          "edge_results": [           # per-edge detail
+            {"edge_type": str, "valid": bool, "original_confidence": float}
+          ]
+        }
+    """
+    import json as _json
+
+    edge_results = []
+    flagged = []
+    confidences = []
+
+    for node, edge, src_oid in subgraph:
+        if not edge:
+            continue
+        tgt_name = node.get("name", node.get("object_id", "?"))
+        src_name = src_oid or "?"  # source object_id (no name lookup here)
+
+        edge_type = edge.get("edge_type", "?")
+        ev_list = edge.get("evidence", [])
+        quote = ev_list[0].get("quote", "") if ev_list and isinstance(ev_list[0], dict) else ""
+        original_conf = float(edge.get("confidence", 1.0))
+
+        # Cast majority vote
+        valid_votes = 0
+        last_reason = ""
+        if not getattr(llm_client, "configured", False) or not quote:
+            # No LLM or no evidence → pass-through (cannot verify; fail-open)
+            valid_votes = votes
+        else:
+            prompt = _VERIFY_PROMPT.format(
+                src_name=src_name, edge_type=edge_type, tgt_name=tgt_name,
+                quote=quote, schema=_VERIFY_SCHEMA_HINT,
+            )
+            for _ in range(votes):
+                try:
+                    raw = llm_client.chat_json(
+                        [{"role": "user", "content": prompt}],
+                        _VERIFY_SCHEMA_HINT,
+                        timeout=timeout,
+                        max_retries=1,
+                    )
+                    data = _json.loads(raw)
+                    if isinstance(data, dict) and data.get("valid", True):
+                        valid_votes += 1
+                    last_reason = str(data.get("reason", "")) if isinstance(data, dict) else ""
+                except Exception:
+                    valid_votes += 1   # on error, assume valid (fail-open)
+
+        passed = valid_votes > (votes / 2)
+        effective_conf = original_conf if passed else 0.05
+        confidences.append(effective_conf)
+        edge_results.append({
+            "edge_type": edge_type,
+            "valid": passed,
+            "original_confidence": original_conf,
+        })
+        if not passed:
+            flagged.append({
+                "edge_type": edge_type,
+                "src_name": src_name,
+                "tgt_name": tgt_name,
+                "reason": last_reason,
+                "demoted_confidence": 0.05,
+            })
+
+    chain_trust = min(confidences) if confidences else 1.0
+    return {"chain_trust": chain_trust, "flagged": flagged, "edge_results": edge_results}

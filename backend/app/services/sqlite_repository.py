@@ -2114,6 +2114,9 @@ class SQLiteRepository:
         for table in ("knowledge_embeddings", "element_embeddings"):
             self._vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
         self._vector_cache.invalidate(f"{notebook_id}:kwtok")
+        # In-memory reasoning graph (built from knowledge_relations) — evict so a
+        # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
+        self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -3122,6 +3125,45 @@ class SQLiteRepository:
 
         return self._vector_cache.get(f"{notebook_id}:kwtok", version, _load)
 
+    def _rx_graph(self, notebook_id: str):
+        """Return the cached rustworkx PyDiGraph for `notebook_id`.
+
+        Version-keyed on (COUNT, MAX created_at) of knowledge_relations
+        (same pattern as _vector_matrix at :3020-3045).  Graph is rebuilt
+        only on new ingest/delete.  Returned tuple: (G, idx_to_oid, oid_to_idx).
+        Nodes are the USABLE_STATUSES knowledge_objects (same filter as the
+        retrieval path); dangling edges (endpoint not a node) are dropped.
+        """
+        from app.services.kg.graph_reason import build_rx_graph
+        with self._connect() as db:
+            ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                "FROM knowledge_relations WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+            version = ("rxgraph", ver["c"], ver["ts"])
+
+            def _load():
+                ph = ",".join("?" for _ in USABLE_STATUSES)
+                obj_rows = db.execute(
+                    "SELECT id, object_type, payload FROM knowledge_objects "
+                    f"WHERE notebook_id = ? AND status IN ({ph})",
+                    (notebook_id, *USABLE_STATUSES),
+                ).fetchall()
+                nodes = {}
+                for r in obj_rows:
+                    p = json.loads(r["payload"] or "{}")
+                    nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                rel_rows = db.execute(
+                    "SELECT id, source_object_id, target_object_id, edge_type, evidence "
+                    "FROM knowledge_relations WHERE notebook_id = ?",
+                    (notebook_id,),
+                ).fetchall()
+                relations = [dict(r) for r in rel_rows]
+                return build_rx_graph(nodes, relations)
+
+            return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
+
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
         applies_to = payload.get("applies_to")
@@ -3312,6 +3354,8 @@ class SQLiteRepository:
         a conclusion via the LLM (or deterministic fallback)."""
         if getattr(payload, "mode", "fast") == "reasoning":
             return self.ask_reasoning(notebook_id, payload)
+        if getattr(payload, "mode", "fast") == "graph":
+            return self.ask_graph(notebook_id, payload)
         if getattr(payload, "mode", "fast") == "global":
             return self._ask_global(notebook_id, payload)
         import time
@@ -4079,6 +4123,126 @@ class SQLiteRepository:
             llm_mode=llm_mode, conversation_id=conversation_id,
             retrieval_query=question, top_relevance=top_relevance,
             reasoning_trace=trace or None,
+        )
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        return response
+
+    def ask_graph(self, notebook_id: str, payload: "AskRequest",
+                  seed_ids: Optional[List[str]] = None) -> AskResponse:
+        """Multi-hop graph reasoning mode.
+
+        1. Retrieve top seeds via _retrieve_scored (same as fast path).
+        2. Build the rx graph for this notebook (version-cached _rx_graph).
+        3. BFS from seed object_ids along DEFAULT_REASONING_EDGES.
+        4. Render subgraph → (context_block, id_map) via render_subgraph_context.
+        5. Feed context_block to the existing answer LLM + grounding path.
+
+        The [k] anchor markers, _parse_answer_anchors, classify_evidence, and
+        AskResponse assembly are all reused verbatim from the fast path.
+        """
+        from app.services.kg.graph_reason import (
+            DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,
+        )
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+            history = self._conversation_history(db, conversation_id)
+
+        # Seed: top-N by relevance (reuse existing scored-retrieval path).
+        top_hits = self._retrieve_scored(notebook_id, question)[:self.settings.retrieval_top_n]
+        if not top_hits and not seed_ids:
+            response = AskResponse(
+                answer_id="",
+                conclusion="The notebook does not yet contain approved knowledge "
+                           "that matches this question. Upload and review sources "
+                           "to build coverage.",
+                conversation_id=conversation_id, retrieval_query=question,
+                llm_mode="deterministic",
+            )
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id)
+            return response
+
+        use_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+
+        G, idx_to_oid, oid_to_idx = self._rx_graph(notebook_id)
+        subgraph = multihop_subgraph(
+            G, oid_to_idx, idx_to_oid,
+            seed_ids=use_seeds,
+            edge_types=DEFAULT_REASONING_EDGES,
+            max_depth=getattr(self.settings, "graph_max_depth", 3),
+            max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
+        )
+        # Render subgraph into (context_block, id_map) — same k{i} format as
+        # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
+        context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
+
+        # Answer-time chain verification: an adversarial LLM check per chain edge.
+        # Flagged edges get their confidence demoted to 0.05; the context is then
+        # re-rendered so the demotion is visible to the answer LLM. chain_trust is
+        # the weakest-link confidence over all edges (1.0 when there are no edges).
+        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": []}
+        if getattr(self.reasoning_llm_client, "configured", False):
+            from app.services.kg.graph_reason import verify_chain_edges
+            verify_result = verify_chain_edges(
+                subgraph, self.reasoning_llm_client,
+                votes=1, timeout=self.settings.reasoning_timeout_seconds,
+            )
+            if verify_result["flagged"]:
+                flagged_types = {f["edge_type"] for f in verify_result["flagged"]}
+                for _node, edge, _src in subgraph:
+                    if edge and edge.get("edge_type") in flagged_types:
+                        edge["confidence"] = 0.05
+                context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
+
+        # Synthesise the answer through the existing LLM + grounding path.
+        answer, llm_grounded, anchors = "", False, []
+        if getattr(self.llm_client, "configured", False) and id_map:
+            try:
+                raw = self.llm_client.chat_json(
+                    [{"role": "user",
+                      "content": answer_prompt(question, context_block, history)}],
+                    ANSWER_SCHEMA_HINT,
+                )
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    answer = str(data.get("answer", "")).strip()
+                    llm_grounded = bool(data.get("grounded", False))
+                    anchors = self._parse_answer_anchors(answer, id_map)
+            except Exception:
+                answer, llm_grounded, anchors = "", False, []
+
+        evidence_level, top_relevance = classify_evidence(
+            top_hits, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        grounded = evidence_level == "grounded"
+        if answer:
+            conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        else:
+            conclusion = (
+                f"Graph traversal found {len(subgraph)} node(s) across "
+                f"{len(use_seeds)} seed(s).")
+            llm_mode = "deterministic"
+
+        from app.models.schemas import TraceStep
+        graph_trace = [TraceStep(
+            step_type="graph_verify",
+            summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
+                     f"{len(verify_result['flagged'])} edge(s) flagged; "
+                     f"{len(subgraph)} node(s) traversed"),
+            detail=verify_result,
+        )]
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+            citations=[], llm_mode=llm_mode,
+            conversation_id=conversation_id, retrieval_query=question,
+            top_relevance=top_relevance, reasoning_trace=graph_trace,
         )
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)

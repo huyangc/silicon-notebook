@@ -153,7 +153,7 @@ class AskRequest(BaseModel):
     question: str
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
-    mode: str = "fast"        # "fast" | "reasoning"
+    mode: str = "fast"        # "fast" | "reasoning" | "graph"
 
 
 class AnswerAnchor(BaseModel):
