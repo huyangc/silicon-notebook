@@ -2117,6 +2117,13 @@ class SQLiteRepository:
         # In-memory reasoning graph (built from knowledge_relations) — evict so a
         # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
         self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
+        # Federated graph cache: invalidate this notebook's own entry (covers both
+        # the case where it is the active notebook and where it is a base notebook
+        # whose change should ripple into any personal notebook's federated graph).
+        # The federated version key already lists every participant's (count, ts),
+        # so any participant's re-ingest forces a rebuild on next read regardless;
+        # this explicit eviction is defensive against same-tuple in-place edits.
+        self._vector_cache.invalidate(f"{notebook_id}:fed_rxgraph")
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -4236,7 +4243,7 @@ class SQLiteRepository:
 
         use_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
 
-        G, idx_to_oid, oid_to_idx = self._rx_graph(notebook_id)
+        G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         subgraph = multihop_subgraph(
             G, oid_to_idx, idx_to_oid,
             seed_ids=use_seeds,
@@ -4252,7 +4259,8 @@ class SQLiteRepository:
         # Flagged edges get their confidence demoted to 0.05; the context is then
         # re-rendered so the demotion is visible to the answer LLM. chain_trust is
         # the weakest-link confidence over all edges (1.0 when there are no edges).
-        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": []}
+        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
+                         "authority_notes": []}
         if getattr(self.reasoning_llm_client, "configured", False):
             from app.services.kg.graph_reason import verify_chain_edges
             verify_result = verify_chain_edges(
@@ -4302,7 +4310,8 @@ class SQLiteRepository:
             summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
                      f"{len(verify_result['flagged'])} edge(s) flagged; "
                      f"{len(subgraph)} node(s) traversed"),
-            detail=verify_result,
+            detail={**verify_result,
+                    "authority_notes": verify_result.get("authority_notes", [])},
         )]
 
         response = AskResponse(
