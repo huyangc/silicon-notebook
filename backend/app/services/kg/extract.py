@@ -4,7 +4,7 @@ only an integer "ev" label per node/edge, and the backend maps it back to that
 source element's exact text/offsets (drop ungroundable nodes). Node types
 constrained to the 4; edges to the vocab."""
 from __future__ import annotations
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
@@ -94,6 +94,25 @@ Passage:
 Return JSON ONLY:
 {_KG_SCHEMA_HINT}
 """
+
+
+def _parse_validity_scope(raw: Any) -> Dict[str, Any]:
+    """Normalize an LLM validity_scope object -> {} unless real content.
+    Keeps only known keys; drops empty lists/strings. claim/formula only."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key in ("region", "assumptions"):
+        v = raw.get(key)
+        if isinstance(v, list):
+            items = [str(x).strip() for x in v if str(x).strip()]
+            if items:
+                out[key] = items
+    for key in ("approximation", "range"):
+        v = raw.get(key)
+        if isinstance(v, str) and v.strip():
+            out[key] = v.strip()
+    return out
 
 
 def _resolve(elements: List[SourceElementQ], ev: Any,
@@ -225,14 +244,16 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
 
 def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
                    doc_type: str, win_idx: int = 0, refine: bool = False,
-                   gleaning_rounds: int = 0) -> Tuple[List[Node], List[Edge]]:
+                   gleaning_rounds: int = 0, base_filter: bool = False
+                   ) -> Tuple[List[Node], List[Edge]]:
     if not elements:
         return [], []
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
     try:
         # OpenAICompatibleClient.chat_json takes (messages, response_schema_hint).
         raw = client.chat_json(
-            [{"role": "user", "content": _prompt(labeled, section_path, doc_type)}],
+            [{"role": "user",
+              "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
             _KG_SCHEMA_HINT,
         )
         data = safe_json(raw)
@@ -253,6 +274,8 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
                     section_path=section_path, evidence=[_ev(el)])
         if it["type"] == "Procedure":
             node.steps = _parse_steps(elements, it.get("steps"))
+        if it["type"] in ("Claim", "Formula"):
+            node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
         nodes.append(node)
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid

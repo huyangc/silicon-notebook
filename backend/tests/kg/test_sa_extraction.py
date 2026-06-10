@@ -35,3 +35,55 @@ def test_prompt_base_filter_toggles_meta_rule():
     off = _prompt("[0] x", "1", "textbook", base_filter=False)
     assert "QUALITY FILTER" in on
     assert "QUALITY FILTER" not in off
+
+
+from app.services.kg.extract import extract_window
+from app.services.kg.parsing import SourceElementQ
+
+
+def _el(idx, text, cs):
+    return SourceElementQ(id=f"SE-{idx}", type="paragraph", file="d.md",
+                          line_start=idx + 1, line_end=idx + 1,
+                          char_start=cs, char_end=cs + len(text), text=text)
+
+
+_ELS = [_el(0, "In saturation, I_D depends on V_GS.", 0),
+        _el(1, "Threshold voltage definition.", 100)]
+
+
+class _VSFake:
+    def chat_json(self, messages, hint):
+        return json.dumps({"nodes": [
+            {"local_id": "c1", "type": "Claim",
+             "name": "I_D depends on V_GS", "ev": 0,
+             "validity_scope": {"region": ["saturation"], "assumptions": [],
+                                "approximation": "", "range": ""}},
+            {"local_id": "k1", "type": "Concept", "name": "threshold voltage",
+             "ev": 1, "validity_scope": {"region": ["bogus"]}}],
+            "edges": []})
+
+
+def test_extract_window_parses_validity_scope_claim_only():
+    nodes, _ = extract_window(_VSFake(), _ELS, "1", "textbook", win_idx=0)
+    by = {n.name: n for n in nodes}
+    # claim keeps normalized scope (empty subfields dropped)
+    assert by["I_D depends on V_GS"].validity_scope == {"region": ["saturation"]}
+    # concept never carries validity_scope (schema: claim/formula only)
+    assert by["threshold voltage"].validity_scope == {}
+
+
+def test_extract_window_backward_compat_no_scope():
+    # node JSON without validity_scope still parses -> {}
+    class _Old:
+        def chat_json(self, m, h):
+            return json.dumps({"nodes": [
+                {"local_id": "c", "type": "Claim", "name": "I_D depends on V_GS",
+                 "ev": 0}], "edges": []})
+    nodes, _ = extract_window(_Old(), _ELS, "1", "textbook", win_idx=0)
+    assert nodes[0].validity_scope == {}
+
+
+def test_extract_window_accepts_base_filter():
+    nodes, _ = extract_window(_VSFake(), _ELS, "1", "textbook", win_idx=0,
+                              base_filter=True)
+    assert any(n.type == "Claim" for n in nodes)
