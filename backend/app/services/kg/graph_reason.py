@@ -24,6 +24,7 @@ def build_rx_graph(
     nodes: Dict[str, dict],
     relations: List[dict],
     tier: str = "base",
+    tier_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[rx.PyDiGraph, Dict[int, str], Dict[str, int]]:
     """Build a PyDiGraph from dicts.
 
@@ -35,6 +36,12 @@ def build_rx_graph(
     `evidence` in each edge payload is a list[dict] (JSON-decoded Evidence dicts).
     `confidence` defaults to 1.0 (no confidence column in knowledge_relations).
     `tier` is injected per-call (default "base" for single-tier POC).
+
+    `tier_map` — optional {notebook_id: tier_str} mapping.  When provided,
+    each relation's tier is looked up via rel["notebook_id"]; falls back to
+    `tier` when the key is absent or tier_map is None.  Federated callers pass
+    tier_map AND tier="personal" so any unmapped (orphan) relation is treated
+    conservatively as personal rather than authoritative base.
     """
     G: rx.PyDiGraph = rx.PyDiGraph()
     idx_to_oid: Dict[int, str] = {}
@@ -60,6 +67,12 @@ def build_rx_graph(
                 ev_raw = json.loads(ev_raw)
             except Exception:
                 ev_raw = []
+        rel_nb = rel.get("notebook_id", "")
+        edge_tier = (
+            tier_map[rel_nb]
+            if (tier_map and rel_nb in tier_map)
+            else tier
+        )
         G.add_edge(
             oid_to_idx[src_oid],
             oid_to_idx[tgt_oid],
@@ -68,7 +81,7 @@ def build_rx_graph(
                 "edge_type": rel["edge_type"],
                 "evidence": ev_raw if isinstance(ev_raw, list) else [],
                 "confidence": float(rel.get("confidence", 1.0)),
-                "tier": tier,
+                "tier": edge_tier,
             },
         )
 
@@ -184,13 +197,17 @@ def render_subgraph_context(
         oid = node["object_id"]
         name = node.get("name", oid)
         otype = node.get("object_type", "")
+        # Tier comes from the incoming edge; seed nodes (no edge) default
+        # "personal" since we cannot know their tier without an edge to read.
+        node_tier = edge.get("tier", "personal") if edge else "personal"
         quote = ""
         if edge:
             ev_list = edge.get("evidence", [])
             if ev_list and isinstance(ev_list[0], dict):
                 quote = ev_list[0].get("quote", "")
         ev_suffix = f'  — ev: "{quote}"' if quote else ""
-        lines.append(f"{key}: [{otype}] {name}{ev_suffix}")
+        # [type][tier] matches the format answer_prompt expects (prompts.py).
+        lines.append(f"{key}: [{otype}][{node_tier}] {name}{ev_suffix}")
         id_map[key] = {
             "object_id": oid,
             "object_type": otype,
@@ -199,6 +216,7 @@ def render_subgraph_context(
             "snippet": quote,
             "source_title": "",
             "location_label": "",
+            "tier": node_tier,
         }
         oid_to_key[oid] = key
 
@@ -212,12 +230,13 @@ def render_subgraph_context(
         tgt_key = oid_to_key.get(tgt_oid, "?")
         src_key = oid_to_key.get(src_oid, "?")
         etype = edge.get("edge_type", "?")
+        edge_tier = edge.get("tier", "personal")
         src_name = ""  # source name resolved from id_map if present
         if src_key in id_map:
             src_name = id_map[src_key].get("name", "")
         tgt_name = node.get("name", tgt_oid)
         chain_lines.append(
-            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}".rstrip()
+            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}  (tier={edge_tier})".rstrip()
         )
 
     if chain_lines:
@@ -240,6 +259,15 @@ _VERIFY_PROMPT = (
 )
 
 
+# Authority factor per tier: personal notes are plausible but unverified.
+# Applied as a multiplier on confidence before the chain_trust min so a
+# fully-confident personal hop never out-trusts a curated base hop.
+_AUTHORITY_FACTOR: Dict[str, float] = {
+    "base":     1.0,
+    "personal": 0.85,
+}
+
+
 def verify_chain_edges(
     subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
     llm_client,
@@ -253,24 +281,31 @@ def verify_chain_edges(
     valid=True votes → edge passes; otherwise it is flagged and its confidence
     is demoted to 0.05 in the returned flagged list.
 
-    chain_trust = min(confidence) over all edges (1.0 if no edges).
+    chain_trust = min(effective_confidence) over all edges (1.0 if no edges),
+    where effective_confidence = (original_conf if passed else 0.05) *
+    authority_factor(tier).  Base edges have factor 1.0; personal edges 0.85,
+    so a fully-confident personal hop caps chain_trust at 0.85.
 
     Returns:
         {
-          "chain_trust": float,       # weakest-link confidence
+          "chain_trust": float,       # weakest-link, authority-weighted
           "flagged": [                # edges that failed verification
             {"edge_type": str, "src_name": str, "tgt_name": str,
-             "reason": str, "demoted_confidence": 0.05}
+             "reason": str, "demoted_confidence": 0.05, "tier": str,
+             "base_override": bool}   # base_override only when base wins a conflict
           ],
           "edge_results": [           # per-edge detail
-            {"edge_type": str, "valid": bool, "original_confidence": float}
-          ]
+            {"edge_type": str, "valid": bool, "original_confidence": float,
+             "tier": str}
+          ],
+          "authority_notes": [str]    # one note per personal hop + override notes
         }
     """
     import json as _json
 
     edge_results = []
     flagged = []
+    flagged_pairs = []   # parallel to `flagged`: (src_oid, tgt_oid) per entry
     confidences = []
 
     for node, edge, src_oid in subgraph:
@@ -312,11 +347,17 @@ def verify_chain_edges(
 
         passed = valid_votes > (votes / 2)
         effective_conf = original_conf if passed else 0.05
-        confidences.append(effective_conf)
+        # Authority discount: a personal edge counts less than a base edge even
+        # when the LLM verifier passed it (curation, not just plausibility).
+        edge_tier = edge.get("tier", "personal")
+        auth_factor = _AUTHORITY_FACTOR.get(edge_tier, 0.85)
+        effective_conf_with_auth = effective_conf * auth_factor
+        confidences.append(effective_conf_with_auth)
         edge_results.append({
             "edge_type": edge_type,
             "valid": passed,
             "original_confidence": original_conf,
+            "tier": edge_tier,
         })
         if not passed:
             flagged.append({
@@ -325,7 +366,60 @@ def verify_chain_edges(
                 "tgt_name": tgt_name,
                 "reason": last_reason,
                 "demoted_confidence": 0.05,
+                "tier": edge_tier,
             })
+            flagged_pairs.append((src_oid or "", node.get("object_id", "")))
+
+    # Conflict precedence: group edges by (src_oid, tgt_oid). If a personal edge
+    # is flagged AND a base edge on the same pair passed, mark the personal flag
+    # with base_override=True and record in authority_notes. edge_results and the
+    # edge_triples below share the same loop order, so index i lines up.
+    edge_triples = [(node, edge, src_oid)
+                    for node, edge, src_oid in subgraph if edge]
+    pair_to_results: Dict[tuple, list] = {}
+    for i, (node, edge, src_oid) in enumerate(edge_triples):
+        tgt_oid = node.get("object_id", "")
+        pair = (src_oid or "", tgt_oid)
+        pair_to_results.setdefault(pair, []).append(i)
+
+    override_pairs = set()
+    for pair, indices in pair_to_results.items():
+        if len(indices) < 2:
+            continue
+        base_valid = any(
+            edge_results[i]["tier"] == "base" and edge_results[i]["valid"]
+            for i in indices
+        )
+        pers_invalid = any(
+            edge_results[i]["tier"] == "personal" and not edge_results[i]["valid"]
+            for i in indices
+        )
+        if base_valid and pers_invalid:
+            override_pairs.add(pair)
+
+    # Scope base_override per (src,tgt) pair: only flagged personal entries on a
+    # pair where a base edge verified OK get marked — never unrelated flags.
+    for fi, f in enumerate(flagged):
+        if f.get("tier") == "personal" and flagged_pairs[fi] in override_pairs:
+            flagged[fi]["base_override"] = True
+
+    authority_notes = []
+    for er in edge_results:
+        if er["tier"] == "personal":
+            authority_notes.append(
+                f"{er['edge_type']} (personal): this step rests on a personal note"
+            )
+    for f in flagged:
+        if f.get("base_override"):
+            authority_notes.append(
+                f"{f['edge_type']} (personal overridden by base): base_override=True; "
+                "base reference supersedes personal note on this hop"
+            )
 
     chain_trust = min(confidences) if confidences else 1.0
-    return {"chain_trust": chain_trust, "flagged": flagged, "edge_results": edge_results}
+    return {
+        "chain_trust": chain_trust,
+        "flagged": flagged,
+        "edge_results": edge_results,
+        "authority_notes": authority_notes,
+    }
