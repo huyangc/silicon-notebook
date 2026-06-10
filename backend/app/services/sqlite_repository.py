@@ -108,6 +108,7 @@ from app.services.retrieval import (
     score_knowledge,
     score_elements,
     type_weight,
+    tier_weight,
     is_process_query,
     ensure_procedure_quota,
     classify_evidence,
@@ -491,6 +492,11 @@ class SQLiteRepository:
             # may be regenerated; set to 0 once the user edits it manually.
             if "purpose_auto" not in nb_cols:
                 db.execute("ALTER TABLE notebooks ADD COLUMN purpose_auto INTEGER NOT NULL DEFAULT 0")
+            # tier column: 'personal' (default) or 'base' (analog-textbook KG).
+            # Existing notebooks default to 'personal'; the base KG is marked via
+            # mark_notebook_base(). PRAGMA guard keeps this idempotent.
+            if "tier" not in nb_cols:
+                db.execute("ALTER TABLE notebooks ADD COLUMN tier TEXT NOT NULL DEFAULT 'personal'")
             # Per-source document type drives schema/profile selection at extraction.
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
@@ -778,6 +784,16 @@ class SQLiteRepository:
                     values,
                 )
         return self.get_notebook(notebook_id)
+
+    def mark_notebook_base(self, notebook_id: str) -> None:
+        """Mark a notebook as the authoritative base KG (tier='base').
+        Idempotent; raises KeyError if the notebook does not exist."""
+        self.get_notebook(notebook_id)  # raises KeyError if missing
+        with self._write() as db:
+            db.execute(
+                "UPDATE notebooks SET tier='base', updated_at=? WHERE id=?",
+                (_now(), notebook_id),
+            )
 
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)
@@ -3188,6 +3204,50 @@ class SQLiteRepository:
         scored.sort(key=lambda it: it.score, reverse=True)
         return scored
 
+    def federated_retrieve(
+        self,
+        active_notebook_id: str,
+        query: str,
+        types: Optional[Iterable[str]] = None,
+        w_keyword: float = W_KEYWORD,
+        w_semantic: float = W_SEMANTIC,
+    ) -> List[RetrievedKnowledge]:
+        """Gather scored KG candidates from {base notebook(s)} ∪ {active personal
+        notebook}, tagging each hit with .notebook_id and .tier.
+
+        Each notebook's scoring path is IDENTICAL to _retrieve_scored — same
+        _fuse, same dual-index best-of — so the [0,1]/tau and dual-index best-of
+        invariants are preserved by construction. Hits are merged and sorted by
+        score desc; no cross-notebook normalisation is applied (the same fused
+        relevance scale applies to both tiers).
+        """
+        notebook_ids: List[str] = [active_notebook_id]
+        with self._connect() as db:
+            # Add base notebooks (excluding the active one if it is itself base).
+            base_rows = db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                (active_notebook_id,),
+            ).fetchall()
+            notebook_ids.extend(r["id"] for r in base_rows)
+            # Tier for each notebook_id (active + base) in one pass.
+            tier_map: Dict[str, str] = {}
+            for nid in notebook_ids:
+                row = db.execute("SELECT tier FROM notebooks WHERE id=?", (nid,)).fetchone()
+                tier_map[nid] = (row["tier"] if row else "personal")
+
+        all_hits: List[RetrievedKnowledge] = []
+        for nid in notebook_ids:
+            hits = self._retrieve_scored(
+                nid, query, types=types, w_keyword=w_keyword, w_semantic=w_semantic)
+            tier = tier_map.get(nid, "personal")
+            for h in hits:
+                h.notebook_id = nid
+                h.tier = tier
+            all_hits.extend(hits)
+
+        all_hits.sort(key=lambda it: it.score, reverse=True)
+        return all_hits
+
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
                             direction: str = "both") -> List[RetrievedKnowledge]:
@@ -3322,7 +3382,36 @@ class SQLiteRepository:
                         keyword_token_sets=token_sets,
                     )
                 )
-        rank_key = lambda it: it.score * type_weight(it.object_type, process_intent)
+        # Two-tier federation (additive scope expansion): tag the active
+        # notebook's hits with their tier, then fold in candidates from any
+        # tier='base' notebook. The active-notebook scoring above is left
+        # byte-identical (incl. the RRF branch); base hits are scored by the SAME
+        # _retrieve_scored path on their OWN embedding matrices, so [0,1]/tau and
+        # dual-index best-of hold per notebook. No cross-notebook normalisation.
+        with self._connect() as db:
+            arow = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+            active_tier = arow["tier"] if arow else "personal"
+            base_rows = db.execute(
+                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+                (notebook_id,),
+            ).fetchall()
+        for it in scored_all:
+            it.notebook_id = notebook_id
+            it.tier = active_tier
+        for brow in base_rows:
+            base_hits = self._retrieve_scored(brow["id"], query)
+            for bh in base_hits:
+                bh.notebook_id = brow["id"]
+                bh.tier = brow["tier"]
+            scored_all.extend(base_hits)
+        # Tier authority composes at the SAME level as type_weight (multiplies
+        # score for ranking), NEVER inside _fuse — so relevance/tau are untouched.
+        rank_key = lambda it: (
+            it.score
+            * type_weight(it.object_type, process_intent)
+            * tier_weight(getattr(it, "tier", "personal"))
+        )
         scored_all.sort(key=rank_key, reverse=True)
         top_n = self.settings.retrieval_top_n
         pool = scored_all[: max(top_n, self.settings.rerank_candidates)]
@@ -3338,26 +3427,32 @@ class SQLiteRepository:
         ask_stage("score", _t)
 
         # 1-hop expansion: for each top-hit object, pull its graph neighbours.
+        # Federation-aware: scope each hit's expansion to ITS OWN notebook so a
+        # base hit expands within the base KG, not the active notebook. Single
+        # notebook → exactly one group keyed by notebook_id (identical to before).
         _t = time.perf_counter()
         hit_ids = {item.object_id for item in top_hits}
         # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
         # instead of loading every notebook edge: O(touching edges), not O(E).
+        hit_ids_by_nb: Dict[str, set] = {}
+        for item in top_hits:
+            hit_ids_by_nb.setdefault(item.notebook_id or notebook_id, set()).add(item.object_id)
         neighbour_ids: set = set()
-        if hit_ids:
-            hit_list = list(hit_ids)
+        for nb_id, ids in hit_ids_by_nb.items():
+            hit_list = list(ids)
             ph = ",".join("?" for _ in hit_list)
             with self._connect() as db:
                 for r in db.execute(
                     f"SELECT target_object_id FROM knowledge_relations "
                     f"WHERE notebook_id=? AND source_object_id IN ({ph})",
-                    [notebook_id, *hit_list],
+                    [nb_id, *hit_list],
                 ).fetchall():
                     if r["target_object_id"] not in hit_ids:
                         neighbour_ids.add(r["target_object_id"])
                 for r in db.execute(
                     f"SELECT source_object_id FROM knowledge_relations "
                     f"WHERE notebook_id=? AND target_object_id IN ({ph})",
-                    [notebook_id, *hit_list],
+                    [nb_id, *hit_list],
                 ).fetchall():
                     if r["source_object_id"] not in hit_ids:
                         neighbour_ids.add(r["source_object_id"])
@@ -3752,8 +3847,12 @@ class SQLiteRepository:
             if cid in seen_clusters:
                 continue
             seen_clusters.add(cid)
+            # Federation: enrich each hit against ITS OWN notebook (a base hit
+            # lives in the base KG, not the active notebook). Falls back to the
+            # active notebook_id for legacy/untagged hits.
+            hit_nb = getattr(hit, "notebook_id", "") or notebook_id
             try:
-                ctx = self.node_context(notebook_id, hit.object_id)
+                ctx = self.node_context(hit_nb, hit.object_id)
             except KeyError:
                 continue
             # Stop once the budget is spent, but always keep at least min_items.
@@ -3772,7 +3871,10 @@ class SQLiteRepository:
                 extra += "; steps: " + " -> ".join(
                     s.get("name", "") for s in ctx["steps"][:8]
                 )
-            line = f"{key}: [{hit.object_type}] {name}{extra}"
+            tier = getattr(hit, "tier", "personal")
+            # Tier prefix surfaces authority to the LLM ([base] vs [personal]) so
+            # the conflict-precedence rule in answer_prompt has something to read.
+            line = f"{key}: [{hit.object_type}][{tier}] {name}{extra}"
             lines.append(line)
             used += len(line)
             id_map[key] = {
@@ -3780,6 +3882,7 @@ class SQLiteRepository:
                 "name": name, "definition": definition, "snippet": snippet,
                 "source_title": (occ[0].get("source_title", "") if occ else ""),
                 "location_label": (occ[0].get("section_path", "") if occ else ""),
+                "tier": tier,
             }
         # In-network relations: edges whose BOTH endpoints are in the context.
         # id_map values carry unique object_ids (one entry per surviving hit;
@@ -3999,6 +4102,7 @@ class SQLiteRepository:
                 label=(name[:40] or key), name=name,
                 definition=ctx.get("definition"), snippet=ctx.get("snippet"),
                 source_title=ctx.get("source_title", ""), location_label=ctx.get("location_label", ""),
+                tier=ctx.get("tier", "personal"),
             ))
         return cited
 
@@ -4683,6 +4787,7 @@ class SQLiteRepository:
             source_types=_list("source_types"),
             taxonomy=_list("taxonomy"),
             access_scope=row["access_scope"] if "access_scope" in keys else "",
+            tier=row["tier"] if "tier" in keys else "personal",
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:

@@ -103,6 +103,10 @@ class NotebookSummary(BaseModel):
     source_types: List[str] = Field(default_factory=list)
     taxonomy: List[str] = Field(default_factory=list)
     access_scope: str = ""
+    # Two-tier federation: 'base' = authoritative reference KG (analog textbook),
+    # 'personal' = user notes (default). Drives tier-weighted relevance + conflict
+    # precedence in ask().
+    tier: str = "personal"
 
 
 class NotebookTemplate(BaseModel):
@@ -162,6 +166,9 @@ class AnswerAnchor(BaseModel):
     snippet: Optional[str] = None      # element_text of the grounding sentence
     source_title: str = ""
     location_label: str = ""
+    # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
+    # user notes). Lets the UI surface authority + supports conflict precedence.
+    tier: str = "personal"
 
 
 class AskResponse(BaseModel):
