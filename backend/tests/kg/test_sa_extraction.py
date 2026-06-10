@@ -122,3 +122,33 @@ def test_build_records_threads_validity_scope_into_payload():
     by = {o["payload"]["name"]: o["payload"] for o in objects}
     assert by["I_D depends on V_GS"]["validity_scope"] == {"region": ["saturation"]}
     assert "validity_scope" not in by["Threshold voltage definition."]
+
+
+def test_extract_graph_forwards_base_filter(monkeypatch):
+    import app.services.kg_ingest as ingest
+    from app.services.kg.parsing import SourceElementQ
+    captured = {}
+
+    def fake_extract_window(client, els, section_path, doc_type, idx,
+                            refine=False, gleaning_rounds=0, base_filter=False):
+        captured["base_filter"] = base_filter
+        return [], []
+
+    class _Now:
+        def __init__(self, v): self._v = v
+        def result(self): return self._v
+
+    el = SourceElementQ(id="e0", type="paragraph", file="d.md", line_start=1,
+                        line_end=1, char_start=0, char_end=5, text="hello world")
+
+    class _W:
+        section_path = "1"
+
+    monkeypatch.setattr(ingest, "windows_with_elements",
+                        lambda *a, **k: [(_W(), [el])])
+    monkeypatch.setattr(ingest, "should_extract_window", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(ingest, "extract_window", fake_extract_window)
+    monkeypatch.setattr(ingest, "submit_window",
+                        lambda fn, *a, **k: _Now(fn(*a, **k)))
+    ingest.extract_graph(object(), "text", "d.md", "textbook", base_filter=True)
+    assert captured.get("base_filter") is True
