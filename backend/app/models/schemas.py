@@ -371,6 +371,11 @@ class EdgeReviewRequest(BaseModel):
     status: str   # "verified" | "rejected" | "pending"
 
 
+class SetTierRequest(BaseModel):
+    """Payload for POST /notebooks/{id}/tier."""
+    tier: str   # "base" | "personal"
+
+
 class DuplicateGroup(BaseModel):
     object_type: str
     similarity: float

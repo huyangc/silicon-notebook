@@ -3343,3 +3343,22 @@ button.chat-session-card {
     max-height: none;
   }
 }
+
+/* Two-tier federation — base/personal tier badge on Ask citations. */
+.tier-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.tier-badge.tier-base {
+  background: var(--soft);
+  color: var(--blue);
+  border-color: var(--blue);
+}
+.tier-badge.tier-personal {
+  background: var(--soft);
+  color: var(--muted);
+}

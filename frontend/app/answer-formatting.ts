@@ -8,6 +8,7 @@ export type AnswerAnchorLike = {
   snippet?: string | null;
   source_title?: string;
   location_label?: string;
+  tier?: string;
 };
 
 export type CitationLike = {

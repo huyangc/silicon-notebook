@@ -23,6 +23,8 @@ import {
   rejectPromotion,
   type PromotionCandidate,
 } from "./promotion-queue";
+import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
+import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -110,6 +112,7 @@ type AnswerAnchor = {
   snippet?: string | null;
   source_title: string;
   location_label: string;
+  tier?: string;
 };
 
 type AskResponse = {
@@ -813,6 +816,9 @@ export default function Home() {
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
   const [promoOpen, setPromoOpen] = useState(false);
   const [promoBusy, setPromoBusy] = useState(false);
+  const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
+  const [edgeReviewOpen, setEdgeReviewOpen] = useState(false);
+  const [edgeBusy, setEdgeBusy] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
@@ -1858,6 +1864,20 @@ export default function Home() {
     }
   }
 
+  // --- Two-tier federation: mark notebook base / personal -----------------
+  async function toggleNotebookTier() {
+    if (!currentNotebook) return;
+    const target = nextTier(currentNotebook.tier);
+    const updated = await setNotebookTier(currentNotebook.id, target);
+    setCurrentNotebook(updated as NotebookSummary);
+    await loadNotebookCollection();
+    setToast(
+      target === "base"
+        ? "已设为基准库（base）— 该 KG 将作为权威参考层参与检索与冲突仲裁"
+        : "已取消基准库，恢复为个人层（personal）"
+    );
+  }
+
   // --- Governance: promotion queue (Track F) ---------------------------
   async function openPromoQueue() {
     const queue = await fetchPromotionQueue();
@@ -1888,6 +1908,27 @@ export default function Home() {
       await loadNotebookCollection();
     } finally {
       setPromoBusy(false);
+    }
+  }
+
+  // --- Track E: edge review queue ----------------------------------------
+  async function openEdgeReviewQueue() {
+    if (!currentNotebookId) return;
+    const queue = await fetchEdgeReviewQueue(currentNotebookId);
+    setEdgeQueue(queue);
+    setEdgeReviewOpen(true);
+  }
+
+  async function decideEdge(relId: string, status: "verified" | "rejected") {
+    if (!currentNotebookId) return;
+    setEdgeBusy(true);
+    try {
+      await reviewRelation(currentNotebookId, relId, status);
+      setToast(status === "verified" ? "关系已确认" : "关系已拒绝，后续图推理将忽略它");
+      const queue = await fetchEdgeReviewQueue(currentNotebookId);
+      setEdgeQueue(queue);
+    } finally {
+      setEdgeBusy(false);
     }
   }
 
@@ -2134,7 +2175,9 @@ export default function Home() {
                     { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
                     { label: "新建文章", action: () => setArticleModalOpen(true) },
                     { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
-                    { label: "晋升队列", action: () => openPromoQueue().catch(reportError) }
+                    { label: "晋升队列", action: () => openPromoQueue().catch(reportError) },
+                    { label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) },
+                    { label: "边审查队列", action: () => openEdgeReviewQueue().catch(reportError) }
                   ]
                 })}>
                   <BarChart3 size={17} />
@@ -3063,6 +3106,62 @@ export default function Home() {
         </section>
       )}
 
+      {edgeReviewOpen && (
+        <section
+          className="utility-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => { if (event.currentTarget === event.target) setEdgeReviewOpen(false); }}
+        >
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>边审查队列</h2>
+                <p>按「高中心性 × 低可信」排序的关系。确认可信边，或拒绝错误边（被拒边将从所有图推理遍历中排除）。</p>
+              </div>
+              <button className="icon-button" onClick={() => setEdgeReviewOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {(edgeQueue ?? []).length === 0 ? (
+                <p className="tool-hint">暂无待审关系。</p>
+              ) : (
+                <div className="stack">
+                  {(edgeQueue ?? []).map((edge) => (
+                    <article className="item" key={edge.rel_id}>
+                      <div className="tag-row">
+                        <span className="tag">{edge.edge_type}</span>
+                        <span className="tag">{edge.review_status}</span>
+                        <span className="tag">可信 {edge.trust_score.toFixed(2)}</span>
+                        <span className="tag">优先级 {edge.review_priority.toFixed(2)}</span>
+                      </div>
+                      <h3>{(edge.source_name || edge.source_object_id)} → {(edge.target_name || edge.target_object_id)}</h3>
+                      {edge.review_status !== "rejected" && (
+                        <div className="modal-actions">
+                          <button
+                            className="sort-button"
+                            disabled={edgeBusy}
+                            onClick={() => decideEdge(edge.rel_id, "rejected").catch(reportError)}
+                          >
+                            拒绝
+                          </button>
+                          <button
+                            className="new-pill"
+                            disabled={edgeBusy}
+                            onClick={() => decideEdge(edge.rel_id, "verified").catch(reportError)}
+                          >
+                            确认可信
+                          </button>
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -3620,6 +3719,10 @@ function referenceLocation(reference: AnswerReference): string {
   return reference.citation?.location_label || "";
 }
 
+function referenceTier(reference: AnswerReference): string {
+  return reference.anchor?.tier || "";
+}
+
 function CiteChip({
   reference,
   selected,
@@ -3761,11 +3864,17 @@ function SelectedReferenceDetail({
   const snippet = referenceSnippet(reference);
   const source = referenceSource(reference);
   const location = referenceLocation(reference);
+  const tier = referenceTier(reference);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
         <strong>{reference.displayLabel}</strong>
         {objectType && <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>}
+        {tier && (
+          <span className={`tier-badge tier-${tier}`} title={tier === "base" ? "来自基准库（权威参考层）" : "来自个人层"}>
+            {tier === "base" ? "base" : "personal"}
+          </span>
+        )}
         <button
           type="button"
           onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
