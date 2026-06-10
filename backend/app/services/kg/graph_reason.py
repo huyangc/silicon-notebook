@@ -259,6 +259,15 @@ _VERIFY_PROMPT = (
 )
 
 
+# Authority factor per tier: personal notes are plausible but unverified.
+# Applied as a multiplier on confidence before the chain_trust min so a
+# fully-confident personal hop never out-trusts a curated base hop.
+_AUTHORITY_FACTOR: Dict[str, float] = {
+    "base":     1.0,
+    "personal": 0.85,
+}
+
+
 def verify_chain_edges(
     subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
     llm_client,
@@ -272,18 +281,24 @@ def verify_chain_edges(
     valid=True votes → edge passes; otherwise it is flagged and its confidence
     is demoted to 0.05 in the returned flagged list.
 
-    chain_trust = min(confidence) over all edges (1.0 if no edges).
+    chain_trust = min(effective_confidence) over all edges (1.0 if no edges),
+    where effective_confidence = (original_conf if passed else 0.05) *
+    authority_factor(tier).  Base edges have factor 1.0; personal edges 0.85,
+    so a fully-confident personal hop caps chain_trust at 0.85.
 
     Returns:
         {
-          "chain_trust": float,       # weakest-link confidence
+          "chain_trust": float,       # weakest-link, authority-weighted
           "flagged": [                # edges that failed verification
             {"edge_type": str, "src_name": str, "tgt_name": str,
-             "reason": str, "demoted_confidence": 0.05}
+             "reason": str, "demoted_confidence": 0.05, "tier": str,
+             "base_override": bool}   # base_override only when base wins a conflict
           ],
           "edge_results": [           # per-edge detail
-            {"edge_type": str, "valid": bool, "original_confidence": float}
-          ]
+            {"edge_type": str, "valid": bool, "original_confidence": float,
+             "tier": str}
+          ],
+          "authority_notes": [str]    # one note per personal hop + override notes
         }
     """
     import json as _json
@@ -331,11 +346,17 @@ def verify_chain_edges(
 
         passed = valid_votes > (votes / 2)
         effective_conf = original_conf if passed else 0.05
-        confidences.append(effective_conf)
+        # Authority discount: a personal edge counts less than a base edge even
+        # when the LLM verifier passed it (curation, not just plausibility).
+        edge_tier = edge.get("tier", "personal")
+        auth_factor = _AUTHORITY_FACTOR.get(edge_tier, 0.85)
+        effective_conf_with_auth = effective_conf * auth_factor
+        confidences.append(effective_conf_with_auth)
         edge_results.append({
             "edge_type": edge_type,
             "valid": passed,
             "original_confidence": original_conf,
+            "tier": edge_tier,
         })
         if not passed:
             flagged.append({
@@ -344,7 +365,18 @@ def verify_chain_edges(
                 "tgt_name": tgt_name,
                 "reason": last_reason,
                 "demoted_confidence": 0.05,
+                "tier": edge_tier,
             })
 
+    authority_notes = [
+        f"{er['edge_type']} ({er['tier']}): this step rests on a personal note"
+        for er in edge_results
+        if er["tier"] == "personal"
+    ]
     chain_trust = min(confidences) if confidences else 1.0
-    return {"chain_trust": chain_trust, "flagged": flagged, "edge_results": edge_results}
+    return {
+        "chain_trust": chain_trust,
+        "flagged": flagged,
+        "edge_results": edge_results,
+        "authority_notes": authority_notes,
+    }

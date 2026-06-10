@@ -224,3 +224,97 @@ class TestTask3TierAnnotatedRender:
         for line in chain_lines:
             assert "tier=" in line, (
                 f"Chain annotation line missing tier= tag:\n  {line}")
+
+
+_AUTHORITY_FACTOR = {"base": 1.0, "personal": 0.85}
+
+
+class TestTask4AuthorityWeightedChainTrust:
+    def _build_mixed_subgraph(self):
+        """Subgraph with one base edge (confidence=1.0) and one personal edge (confidence=1.0).
+
+        DEVIATION from plan fixture: the plan seeded only ["B1"] with
+        {derived_from, supports}, but the fixture's personal edges point INTO B2
+        (P2->B2 supports) / from P1 (P1->P2 depends_on), so BFS from B1 reaches
+        only B2 via the base derived_from edge — no personal edge is ever
+        traversed, leaving chain_trust=1.0.  To exercise the plan's stated intent
+        (a mixed base+personal chain with chain_trust capped at 0.85), we seed
+        BOTH B1 (yields base derived_from B1->B2) and P1 (yields personal
+        depends_on P1->P2) and include depends_on in the edge set.
+        """
+        from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+        G, idx_to_oid, oid_to_idx = build_rx_graph(
+            NODES_FEDERATED, RELATIONS_FEDERATED, tier_map=TIER_MAP)
+        return multihop_subgraph(
+            G, oid_to_idx, idx_to_oid,
+            seed_ids=["B1", "P1"],
+            edge_types={"derived_from", "supports", "depends_on"},
+            max_depth=2, max_fan_out=10,
+        )
+
+    class _NoLLM:
+        configured = False
+
+    def test_chain_trust_is_weakest_effective_confidence(self):
+        """With a personal edge (confidence=1.0), chain_trust = 0.85 (authority factor)."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._build_mixed_subgraph()
+        result = verify_chain_edges(sub, self._NoLLM())
+        # Base edge: effective_conf = 1.0 * 1.0 = 1.0
+        # Personal edge (P2→B2, confidence=1.0): effective_conf = 1.0 * 0.85 = 0.85
+        # chain_trust = min(1.0, 0.85) = 0.85
+        assert abs(result["chain_trust"] - 0.85) < 1e-9, (
+            f"Expected chain_trust≈0.85, got {result['chain_trust']}")
+
+    def test_all_base_edges_chain_trust_is_1(self):
+        """A chain with only base edges and confidence=1.0 → chain_trust = 1.0."""
+        import rustworkx as rx
+        from app.services.kg.graph_reason import multihop_subgraph, verify_chain_edges
+        G = rx.PyDiGraph()
+        n1 = G.add_node({"object_id": "X", "object_type": "Claim", "name": "X"})
+        n2 = G.add_node({"object_id": "Y", "object_type": "Claim", "name": "Y"})
+        G.add_edge(n1, n2, {"edge_type": "supports", "confidence": 1.0,
+                             "evidence": [], "tier": "base"})
+        idx_to_oid = {n1: "X", n2: "Y"}
+        oid_to_idx = {"X": n1, "Y": n2}
+        sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["X"],
+                                {"supports"}, max_depth=1, max_fan_out=10)
+        result = verify_chain_edges(sub, self._NoLLM())
+        assert result["chain_trust"] == 1.0
+
+    def test_edge_results_carry_tier(self):
+        """edge_results entries must carry a 'tier' field."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._build_mixed_subgraph()
+        result = verify_chain_edges(sub, self._NoLLM())
+        for er in result["edge_results"]:
+            assert "tier" in er, f"edge_result missing 'tier': {er}"
+
+    def test_authority_notes_surfaces_personal_edge(self):
+        """authority_notes must list a warning for each personal-tier edge."""
+        from app.services.kg.graph_reason import verify_chain_edges
+        sub = self._build_mixed_subgraph()
+        result = verify_chain_edges(sub, self._NoLLM())
+        assert "authority_notes" in result
+        # At least one note for the personal edge
+        assert any("personal" in note.lower() for note in result["authority_notes"]), (
+            f"No personal-tier note in authority_notes: {result['authority_notes']}")
+
+    def test_flagged_entry_carries_tier(self):
+        """When an edge is flagged (LLM invalid), the flagged entry carries 'tier'."""
+        import json
+        from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, verify_chain_edges
+
+        class _FailLLM:
+            configured = True
+            def chat_json(self, messages, schema, **kw):
+                return json.dumps({"valid": False, "reason": "bad"})
+
+        G, idx_to_oid, oid_to_idx = build_rx_graph(
+            NODES_FEDERATED, RELATIONS_FEDERATED, tier_map=TIER_MAP)
+        sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["B1"],
+                                {"derived_from"}, max_depth=1, max_fan_out=10)
+        result = verify_chain_edges(sub, _FailLLM())
+        assert result["flagged"], "expected at least one flagged edge"
+        for f in result["flagged"]:
+            assert "tier" in f, f"flagged entry missing 'tier': {f}"
