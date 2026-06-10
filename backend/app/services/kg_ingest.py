@@ -78,6 +78,8 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
             continue
         kept.add(node.id)
         payload = {"name": node.name, "section_path": node.section_path}
+        if node.validity_scope:
+            payload["validity_scope"] = node.validity_scope
         if node.steps:
             bound_steps = []
             for st in node.steps:

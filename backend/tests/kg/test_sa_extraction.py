@@ -87,3 +87,27 @@ def test_extract_window_accepts_base_filter():
     nodes, _ = extract_window(_VSFake(), _ELS, "1", "textbook", win_idx=0,
                               base_filter=True)
     assert any(n.type == "Claim" for n in nodes)
+
+
+from app.services.kg_ingest import build_records
+from app.services.kg.models import Node, Edge, Evidence, KnowledgeGraph
+
+
+def _ev_for(el):
+    return Evidence(file=el.file, char_start=el.char_start, char_end=el.char_end,
+                    line_start=el.line_start, line_end=el.line_end, quote=el.text)
+
+
+def test_build_records_threads_validity_scope_into_payload():
+    el = _ELS[0]
+    claim = Node(id="c1", type="Claim", name="I_D depends on V_GS",
+                 section_path="1", evidence=[_ev_for(el)],
+                 validity_scope={"region": ["saturation"]})
+    plain = Node(id="c2", type="Claim", name="Threshold voltage definition.",
+                 section_path="1", evidence=[_ev_for(_ELS[1])])
+    g = KnowledgeGraph(doc_id="d.md", doc_type="textbook",
+                       nodes=[claim, plain], edges=[])
+    objects, _ = build_records(g, "src1", "Doc", _ELS)
+    by = {o["payload"]["name"]: o["payload"] for o in objects}
+    assert by["I_D depends on V_GS"]["validity_scope"] == {"region": ["saturation"]}
+    assert "validity_scope" not in by["Threshold voltage definition."]
