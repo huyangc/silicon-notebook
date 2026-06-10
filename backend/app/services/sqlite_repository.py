@@ -3322,10 +3322,15 @@ class SQLiteRepository:
         """Return a federated PyDiGraph merging base notebook(s) + active notebook.
 
         Version-keyed, per participating notebook, on BOTH the relations
-        (COUNT, MAX created_at) and the objects (COUNT, MAX updated_at), so an
-        ingest into ANY of them — or an object-only change (status flip /
-        payload edit bumps updated_at) — triggers a rebuild even without an
+        (COUNT, MAX created_at, per-review-status counts) and the objects
+        (COUNT, MAX updated_at), so an ingest into ANY of them — or an
+        object-only change (status flip / payload edit bumps updated_at) — or
+        an edge review flip (Track E) — triggers a rebuild even without an
         explicit eviction.  Cache key: "{active_id}:fed_rxgraph".
+
+        Track E: relations with review_status = 'rejected' are excluded, same
+        as _rx_graph — a curator's rejection must not flow into reasoning via
+        the federated path either.
 
         Each relation row is tagged with its notebook_id before passing to
         build_rx_graph so per-edge tier stamping works.
@@ -3348,13 +3353,20 @@ class SQLiteRepository:
             participants = [(active_notebook_id, active_tier)] + [
                 (r["id"], r["tier"]) for r in base_rows
             ]
-            # Version key: per-notebook (nb_id, relations (count, max created_at),
-            # objects (count, max updated_at)). Object coverage makes object-only
-            # changes (deprecate / status flip / payload edit) rebuild the graph.
+            # Version key: per-notebook (nb_id, relations (count, max created_at,
+            # per-review-status counts), objects (count, max updated_at)). Object
+            # coverage makes object-only changes (deprecate / status flip /
+            # payload edit) rebuild the graph. Track E: the per-status counts
+            # (n_rej, n_ver) make a single edge flip between pending/verified/
+            # rejected change the version even when (COUNT, MAX created_at) is
+            # unchanged — same soundness argument as _rx_graph; set_edge_review's
+            # explicit evict-all-fed_rxgraph remains as belt-and-braces.
             version_parts = []
             for nb_id, _ in participants:
                 rel_ver = db.execute(
-                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
+                    "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
+                    "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
                     "FROM knowledge_relations WHERE notebook_id = ?",
                     (nb_id,),
                 ).fetchone()
@@ -3364,7 +3376,9 @@ class SQLiteRepository:
                     (nb_id,),
                 ).fetchone()
                 version_parts.append(
-                    (nb_id, rel_ver["c"], rel_ver["ts"], obj_ver["c"], obj_ver["ts"]))
+                    (nb_id, rel_ver["c"], rel_ver["ts"],
+                     rel_ver["n_rej"], rel_ver["n_ver"],
+                     obj_ver["c"], obj_ver["ts"]))
             version = ("fed_rxgraph", tuple(version_parts))
 
             tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
@@ -3382,9 +3396,15 @@ class SQLiteRepository:
                     for r in obj_rows:
                         p = json.loads(r["payload"] or "{}")
                         nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                    # Track E: rejected edges are excluded from the federated
+                    # reasoning graph too (curation feedback loop) — same bare
+                    # filter as _rx_graph; the column is NOT NULL DEFAULT
+                    # 'pending' (migration runs in __init__), so NULL is
+                    # impossible.
                     rel_rows = db.execute(
                         "SELECT id, source_object_id, target_object_id, edge_type, evidence "
-                        "FROM knowledge_relations WHERE notebook_id = ?",
+                        "FROM knowledge_relations "
+                        "WHERE notebook_id = ? AND review_status != 'rejected'",
                         (nb_id,),
                     ).fetchall()
                     for r in rel_rows:

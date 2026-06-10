@@ -244,6 +244,111 @@ def test_verify_chain_edges_skips_rejected(repo):
     assert rel_id not in sub_rel_ids
 
 
+# ── Feedback loop × federated graph (Track D integration) ────────────────────
+# ask(mode=graph) now reasons over _federated_rx_graph (base + personal merged),
+# so the rejected-edge demotion MUST apply there too — not only in _rx_graph.
+
+def _seed_federated(repo):
+    """Base notebook (marked base) + personal notebook, one edge each.
+
+    Returns (base_id, pers_id). _federated_rx_graph(pers_id) merges both.
+    """
+    base_nb = repo.create_notebook(NotebookCreate(name="base-nb"))
+    repo.mark_notebook_base(base_nb.id)
+    repo.store_kg(base_nb.id, None, [
+        {"local_id": "B1", "object_type": "Formula",
+         "payload": {"name": "Base Formula"}, "evidence": []},
+        {"local_id": "B2", "object_type": "Claim",
+         "payload": {"name": "Base Claim"}, "evidence": []},
+    ], [
+        {"source_local_id": "B1", "target_local_id": "B2",
+         "edge_type": "derived_from",
+         "evidence": [{"file": "f1", "char_start": 0, "char_end": 10,
+                       "line_start": 1, "line_end": 1,
+                       "quote": "base formula derives base claim"}]},
+    ])
+    pers_nb = repo.create_notebook(NotebookCreate(name="personal-nb"))
+    repo.store_kg(pers_nb.id, None, [
+        {"local_id": "P1", "object_type": "Concept",
+         "payload": {"name": "Personal Concept"}, "evidence": []},
+        {"local_id": "P2", "object_type": "Claim",
+         "payload": {"name": "Personal Claim"}, "evidence": []},
+    ], [
+        {"source_local_id": "P1", "target_local_id": "P2",
+         "edge_type": "supports",
+         "evidence": [{"file": "f2", "char_start": 0, "char_end": 10,
+                       "line_start": 1, "line_end": 1,
+                       "quote": "personal concept supports personal claim"}]},
+    ])
+    return base_nb.id, pers_nb.id
+
+
+def test_rejected_personal_edge_excluded_from_federated_graph(repo):
+    """Rejecting a PERSONAL edge must drop it from a warm federated graph.
+
+    Without the review filter in _federated_rx_graph's loader, the rejected
+    edge keeps flowing into ask(mode=graph) reasoning even though _rx_graph
+    excludes it.
+    """
+    base_id, pers_id = _seed_federated(repo)
+    pers_rel_id = repo.review_queue(pers_id)[0]["rel_id"]
+
+    # Warm the federated cache with the edge still active.
+    G_warm, _, _ = repo._federated_rx_graph(pers_id)
+    assert pers_rel_id in _rx_edge_rel_ids(G_warm)
+
+    repo.set_edge_review(pers_id, pers_rel_id, "rejected")
+
+    G_fresh, _, _ = repo._federated_rx_graph(pers_id)
+    assert pers_rel_id not in _rx_edge_rel_ids(G_fresh), (
+        "rejected personal edge still present in the federated reasoning graph")
+
+
+def test_rejected_base_edge_excluded_from_federated_graph_for_personal_active(repo):
+    """Rejecting a BASE-notebook edge must drop it from the PERSONAL notebook's
+    warm federated graph (cross-participant invalidation + loader filter)."""
+    base_id, pers_id = _seed_federated(repo)
+    base_rel_id = repo.review_queue(base_id)[0]["rel_id"]
+
+    G_warm, _, _ = repo._federated_rx_graph(pers_id)
+    assert base_rel_id in _rx_edge_rel_ids(G_warm)
+
+    # Review verdict lands on the BASE notebook; the federated cache key is
+    # "{pers}:fed_rxgraph" — both the evict-all-fed eviction and the
+    # per-participant version key must cover this.
+    repo.set_edge_review(base_id, base_rel_id, "rejected")
+
+    G_fresh, _, _ = repo._federated_rx_graph(pers_id)
+    assert base_rel_id not in _rx_edge_rel_ids(G_fresh), (
+        "rejected base edge still present in the personal federated graph")
+
+
+def test_federated_version_key_covers_review_flip_without_eviction(repo, monkeypatch):
+    """Pin the SOUND federated version key (per-status counts per participant).
+
+    set_edge_review's explicit _invalidate_unified_cache (which evicts all
+    *:fed_rxgraph) is belt-and-braces; here the eviction is no-op'd so the
+    test fails unless the federated version tuple ALONE detects the
+    verified→rejected flip — (COUNT, MAX created_at) cannot, since a status
+    UPDATE changes neither.
+    """
+    base_id, pers_id = _seed_federated(repo)
+    pers_rel_id = repo.review_queue(pers_id)[0]["rel_id"]
+    repo.set_edge_review(pers_id, pers_rel_id, "verified")
+
+    G_warm, _, _ = repo._federated_rx_graph(pers_id)
+    assert pers_rel_id in _rx_edge_rel_ids(G_warm)
+
+    # Disable explicit eviction: only the version key can force a rebuild now.
+    monkeypatch.setattr(repo, "_invalidate_unified_cache", lambda nb_id: None)
+    repo.set_edge_review(pers_id, pers_rel_id, "rejected")
+
+    G_fresh, _, _ = repo._federated_rx_graph(pers_id)
+    assert pers_rel_id not in _rx_edge_rel_ids(G_fresh), (
+        "stale federated graph served after verified→rejected flip — "
+        "version key does not cover review_status")
+
+
 # ── API endpoints (Track E — thin wrappers over repo methods) ────────────────
 
 @pytest.fixture
