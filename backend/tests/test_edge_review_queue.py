@@ -3,7 +3,6 @@
 Uses a real SQLiteRepository (in-memory / tmp_path) with FakeEmbedder.
 Synthetic graph with 4 nodes and 3 edges.
 """
-import json
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -93,8 +92,6 @@ def test_review_queue_type_violating_edge_lower_trust(repo):
     trust_score than the correctly-typed, evidenced edge (Claim→Concept defines)."""
     nb_id = _seed_graph(repo)
     q = repo.review_queue(nb_id)
-    by_type = {item["edge_type"] + "|" + item.get("source_name", "") + "|" + item.get("target_name", ""): item
-               for item in q}
     # Find the defines edge (valid + evidence) and the invalid used_in edge
     defines_item = next((i for i in q if i["edge_type"] == "defines"), None)
     # Both used_in edges — pick the one from Claim (type-violating)
@@ -147,6 +144,51 @@ def test_set_edge_review_invalid_status_raises(repo):
 
 
 # ── Feedback loop: rejected edges demoted in graph ───────────────────────────
+
+def _rx_edge_rel_ids(G) -> set:
+    """Collect all rel_ids present in a PyDiGraph returned by _rx_graph."""
+    rel_ids = set()
+    for src_idx in range(G.num_nodes()):
+        for tgt_idx in G.successor_indices(src_idx):
+            payload = G.get_edge_data(src_idx, tgt_idx)
+            if isinstance(payload, dict):
+                rel_ids.add(payload.get("rel_id", ""))
+    return rel_ids
+
+
+def test_review_flip_invalidates_warm_rx_graph_cache(repo):
+    """Pin the cache-invalidation guarantee on an already-WARM _rx_graph cache.
+
+    Scenario chosen so the unsound pre-fix MAX(review_status) version key
+    provably would NOT change: two edges are 'verified', then one flips
+    verified→rejected while the other stays verified — MAX remains
+    'verified' (lexically the maximum), so only a sound version key
+    (per-status counts: n_verified 2→1, n_rejected 0→1) or the explicit
+    _invalidate_unified_cache in set_edge_review forces a rebuild. This
+    test fails if BOTH mechanisms are ever broken.
+    """
+    nb_id = _seed_graph(repo)
+    q = repo.review_queue(nb_id)
+    assert len(q) >= 2, "need at least two edges"
+    keep_id, flip_id = q[0]["rel_id"], q[1]["rel_id"]
+    repo.set_edge_review(nb_id, keep_id, "verified")
+    repo.set_edge_review(nb_id, flip_id, "verified")
+
+    # Warm the cache: graph with both verified edges is now cached.
+    G_warm, _, _ = repo._rx_graph(nb_id)
+    warm_ids = _rx_edge_rel_ids(G_warm)
+    assert keep_id in warm_ids and flip_id in warm_ids
+
+    # Flip verified→rejected while ANOTHER verified edge remains.
+    repo.set_edge_review(nb_id, flip_id, "rejected")
+
+    G_fresh, _, _ = repo._rx_graph(nb_id)
+    fresh_ids = _rx_edge_rel_ids(G_fresh)
+    assert flip_id not in fresh_ids, (
+        "stale _rx_graph served after verified→rejected flip — "
+        "cache invalidation is broken")
+    assert keep_id in fresh_ids
+
 
 def test_rejected_edge_excluded_from_rx_graph(repo):
     """A rejected edge must not appear in the version-cached PyDiGraph used by reasoning."""

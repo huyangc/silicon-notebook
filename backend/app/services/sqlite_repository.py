@@ -2015,8 +2015,7 @@ class SQLiteRepository:
             rel_rows = db.execute(
                 "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
                 "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
-                "ko_s.object_type AS src_type, ko_s.payload AS src_payload, "
-                "ko_t.object_type AS tgt_type, ko_t.payload AS tgt_payload "
+                "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
                 "FROM knowledge_relations kr "
                 "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
                 "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
@@ -2111,6 +2110,8 @@ class SQLiteRepository:
             if cur.rowcount == 0:
                 raise KeyError(f"relation {rel_id!r} not found in notebook {notebook_id!r}")
         # Invalidate cached graph so _rx_graph rebuilds on next access
+        # (belt-and-braces: _rx_graph's per-status-count version key would
+        # also catch the flip on its own).
         self._invalidate_unified_cache(notebook_id)
 
     def _delete_relations_for_source(self, db, source_id: str) -> None:
@@ -3257,9 +3258,10 @@ class SQLiteRepository:
     def _rx_graph(self, notebook_id: str):
         """Return the cached rustworkx PyDiGraph for `notebook_id`.
 
-        Version-keyed on (COUNT, MAX created_at) of knowledge_relations
-        (same pattern as _vector_matrix at :3020-3045).  Graph is rebuilt
-        only on new ingest/delete.  Returned tuple: (G, idx_to_oid, oid_to_idx).
+        Version-keyed on (COUNT, MAX created_at, per-review-status counts) of
+        knowledge_relations (COUNT/MAX pattern as _vector_matrix at
+        :3020-3045).  Graph is rebuilt on new ingest/delete and on any edge
+        review flip.  Returned tuple: (G, idx_to_oid, oid_to_idx).
         Nodes are the USABLE_STATUSES knowledge_objects (same filter as the
         retrieval path); dangling edges (endpoint not a node) are dropped.
         """
@@ -3267,14 +3269,20 @@ class SQLiteRepository:
         with self._connect() as db:
             ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
-                "COALESCE(MAX(review_status), '') AS rs "
+                "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
+                "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
                 "FROM knowledge_relations WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchone()
-            # Track E: include review_status in the version key so a curation
-            # verdict change (e.g. reject) invalidates the cached graph even if
-            # the (COUNT, MAX created_at) tuple is otherwise unchanged.
-            version = ("rxgraph", ver["c"], ver["ts"], ver["rs"])
+            # Track E: per-status counts make the version key sound — any
+            # single-edge flip between pending/verified/rejected changes at
+            # least one of (n_rejected, n_verified), so a curation verdict
+            # invalidates the cached graph even when (COUNT, MAX created_at)
+            # is unchanged. (MAX(review_status) was NOT sound: statuses
+            # compare lexically, so e.g. verified→rejected with another
+            # verified edge present left MAX='verified'.) set_edge_review's
+            # explicit _invalidate_unified_cache remains as belt-and-braces.
+            version = ("rxgraph", ver["c"], ver["ts"], ver["n_rej"], ver["n_ver"])
 
             def _load():
                 ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -3288,12 +3296,13 @@ class SQLiteRepository:
                     p = json.loads(r["payload"] or "{}")
                     nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
                 # Track E: rejected edges are excluded from the reasoning graph
-                # (curation feedback loop). COALESCE guards rows predating the
-                # review_status migration (treated as 'pending').
+                # (curation feedback loop). Bare filter, same as review_queue:
+                # the column is NOT NULL DEFAULT 'pending' (migration runs in
+                # __init__), so NULL is impossible.
                 rel_rows = db.execute(
                     "SELECT id, source_object_id, target_object_id, edge_type, evidence "
                     "FROM knowledge_relations "
-                    "WHERE notebook_id = ? AND COALESCE(review_status, 'pending') != 'rejected'",
+                    "WHERE notebook_id = ? AND review_status != 'rejected'",
                     (notebook_id,),
                 ).fetchall()
                 relations = [dict(r) for r in rel_rows]
