@@ -200,3 +200,64 @@ def test_verify_chain_edges_skips_rejected(repo):
                             max_depth=3, max_fan_out=10)
     sub_rel_ids = {e["rel_id"] for _, e, _ in sub if e and "rel_id" in e}
     assert rel_id not in sub_rel_ids
+
+
+# ── API endpoints (Track E — thin wrappers over repo methods) ────────────────
+
+@pytest.fixture
+def client(repo, monkeypatch):
+    """TestClient with app.api.routes.repository() overridden to the fixture repo."""
+    from fastapi.testclient import TestClient
+    import app.api.routes as routes_mod
+    from app.main import app
+    monkeypatch.setattr(routes_mod, "repository", lambda: repo)
+    return TestClient(app)
+
+
+def test_api_edge_review_queue_returns_items(client, repo):
+    nb_id = _seed_graph(repo)
+    resp = client.get(f"/api/notebooks/{nb_id}/edge-review-queue")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body, list) and body
+    # response_model=EdgeReviewItem serialization keeps the curation fields
+    assert {"rel_id", "trust_score", "edge_centrality", "review_priority",
+            "review_status"} <= set(body[0])
+    # Highest-risk first (priority desc)
+    priorities = [i["review_priority"] for i in body]
+    assert priorities == sorted(priorities, reverse=True)
+
+
+def test_api_edge_review_queue_missing_notebook_404(client):
+    resp = client.get("/api/notebooks/does-not-exist/edge-review-queue")
+    assert resp.status_code == 404
+
+
+def test_api_review_relation_round_trip(client, repo):
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    resp = client.post(
+        f"/api/notebooks/{nb_id}/relations/{rel_id}/review",
+        json={"status": "rejected"})
+    assert resp.status_code == 200
+    assert resp.json() == {"rel_id": rel_id, "review_status": "rejected"}
+    # Rejected edge drops out of the queue surfaced by the API
+    after = client.get(f"/api/notebooks/{nb_id}/edge-review-queue").json()
+    assert all(i["rel_id"] != rel_id for i in after)
+
+
+def test_api_review_relation_bad_status_400(client, repo):
+    nb_id = _seed_graph(repo)
+    rel_id = repo.review_queue(nb_id)[0]["rel_id"]
+    resp = client.post(
+        f"/api/notebooks/{nb_id}/relations/{rel_id}/review",
+        json={"status": "nonsense"})
+    assert resp.status_code == 400
+
+
+def test_api_review_relation_missing_rel_404(client, repo):
+    nb_id = _seed_graph(repo)
+    resp = client.post(
+        f"/api/notebooks/{nb_id}/relations/rel-missing/review",
+        json={"status": "verified"})
+    assert resp.status_code == 404
