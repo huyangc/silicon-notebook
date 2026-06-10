@@ -349,6 +349,28 @@ class KnowledgeGraph(BaseModel):
     edges: List[KnowledgeEdge]
 
 
+class EdgeReviewItem(BaseModel):
+    """One item in the edge curation review queue."""
+    rel_id: str
+    notebook_id: str
+    edge_type: str
+    source_object_id: str
+    target_object_id: str
+    source_name: str = ""
+    target_name: str = ""
+    source_type: str = ""
+    target_type: str = ""
+    trust_score: float
+    edge_centrality: float
+    review_priority: float
+    review_status: str = "pending"
+
+
+class EdgeReviewRequest(BaseModel):
+    """Payload for POST /relations/{rel_id}/review."""
+    status: str   # "verified" | "rejected" | "pending"
+
+
 class DuplicateGroup(BaseModel):
     object_type: str
     similarity: float

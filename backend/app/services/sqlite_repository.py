@@ -539,6 +539,14 @@ class SQLiteRepository:
             for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
                 if col not in comm_cols:
                     db.execute(f"ALTER TABLE communities ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}")
+            # Track E: edge review_status column (curation feedback loop).
+            kr_cols = {r["name"] for r in db.execute(
+                "PRAGMA table_info(knowledge_relations)").fetchall()}
+            if "review_status" not in kr_cols:
+                db.execute(
+                    "ALTER TABLE knowledge_relations "
+                    "ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'"
+                )
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -2014,6 +2022,128 @@ class SQLiteRepository:
             for r in rows
         ]
 
+    # --- Track E: edge trust review queue + curation feedback loop ----------
+    _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
+
+    def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
+        """Return edges ranked by review priority = edge_centrality * (1 - trust_score).
+
+        Only edges with review_status != 'rejected' are included (rejected edges are
+        excluded from reasoning and need no further review).
+        Centrality is computed over the FULL graph (including non-rejected edges).
+        trust_score combines evidence anchoring + cross-doc corroboration + type validity.
+        """
+        import json as _json
+        from app.services.kg.edge_trust import (
+            compute_trust_score, corroboration_counts,
+            corroboration_score_from_count,
+        )
+        from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
+
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            rel_rows = db.execute(
+                "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
+                "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
+                "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
+                "FROM knowledge_relations kr "
+                "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
+                "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
+                "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
+                (notebook_id,),
+            ).fetchall()
+            # Build node types + names for trust signals
+            obj_rows = db.execute(
+                "SELECT id, object_type, payload FROM knowledge_objects "
+                "WHERE notebook_id = ?", (notebook_id,)
+            ).fetchall()
+
+        node_types: dict = {}
+        node_names: dict = {}
+        for r in obj_rows:
+            node_types[r["id"]] = r["object_type"]
+            p = _json.loads(r["payload"] or "{}")
+            node_names[r["id"]] = p.get("name", "")
+
+        rels = []
+        for r in rel_rows:
+            rels.append({
+                "id": r["id"],
+                "source_object_id": r["source_object_id"],
+                "target_object_id": r["target_object_id"],
+                "edge_type": r["edge_type"],
+                "evidence": _json.loads(r["evidence"] or "[]"),
+                "source_id": r["source_id"],
+                "review_status": r["review_status"],
+                "_src_type": r["src_type"] or "",
+                "_tgt_type": r["tgt_type"] or "",
+                "_src_name": node_names.get(r["source_object_id"], ""),
+                "_tgt_name": node_names.get(r["target_object_id"], ""),
+            })
+
+        # Corroboration counts (batched over all edges)
+        corr_counts = corroboration_counts(rels, node_names)
+
+        # Edge centrality from the live graph (non-rejected edges only)
+        G, idx_to_oid, oid_to_idx = build_rx_graph(
+            {oid: {"type": t, "name": node_names.get(oid, "")}
+             for oid, t in node_types.items()},
+            rels,
+        )
+        edge_centrality = compute_edge_centrality(G)
+
+        items = []
+        for rel in rels:
+            rid = rel["id"]
+            corr_score = corroboration_score_from_count(corr_counts.get(rid, 1))
+            trust = compute_trust_score(rel, node_types, corr_score)
+            ec = edge_centrality.get(rid, 0.0)
+            # review_priority = high centrality × low trust
+            priority = ec * (1.0 - trust)
+            items.append({
+                "rel_id": rid,
+                "notebook_id": notebook_id,
+                "edge_type": rel["edge_type"],
+                "source_object_id": rel["source_object_id"],
+                "target_object_id": rel["target_object_id"],
+                "source_name": rel["_src_name"],
+                "target_name": rel["_tgt_name"],
+                "source_type": rel["_src_type"],
+                "target_type": rel["_tgt_type"],
+                "trust_score": trust,
+                "edge_centrality": ec,
+                "review_priority": priority,
+                "review_status": rel["review_status"],
+            })
+
+        items.sort(key=lambda x: x["review_priority"], reverse=True)
+        return items[:limit]
+
+    def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
+        """Persist review_status on a knowledge_relation.
+
+        Allowed statuses: 'pending', 'verified', 'rejected'.
+        Raises ValueError for unknown statuses.
+        Raises KeyError if the relation does not exist in this notebook.
+        Invalidates the _rx_graph cache so the next graph-reasoning call sees
+        the updated set of active edges.
+        """
+        if status not in self._REVIEW_STATUSES:
+            raise ValueError(
+                f"review_status must be one of {sorted(self._REVIEW_STATUSES)}, got {status!r}")
+        with self._write() as db:
+            cur = db.execute(
+                "UPDATE knowledge_relations SET review_status=? "
+                "WHERE id=? AND notebook_id=?",
+                (status, rel_id, notebook_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"relation {rel_id!r} not found in notebook {notebook_id!r}")
+        # Invalidate cached graph so _rx_graph rebuilds on next access
+        # (belt-and-braces: _rx_graph's per-status-count version key would
+        # also catch the flip on its own).
+        self._invalidate_unified_cache(notebook_id)
+
     def _delete_relations_for_source(self, db, source_id: str) -> None:
         db.execute("DELETE FROM knowledge_relations WHERE source_id = ?", (source_id,))
 
@@ -2147,6 +2277,14 @@ class SQLiteRepository:
         # In-memory reasoning graph (built from knowledge_relations) — evict so a
         # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
         self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
+        # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
+        # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
+        # (e.g. a base notebook) may affect any federated graph that includes it,
+        # so evict every fed_rxgraph entry; tracking participants per key is
+        # overkill for the POC. This explicit eviction also guards against
+        # same-second in-place edits that leave the version tuple unchanged.
+        for key in [k for k in self._vector_cache._store if k.endswith(":fed_rxgraph")]:
+            self._vector_cache.invalidate(key)
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
@@ -3439,20 +3577,31 @@ class SQLiteRepository:
     def _rx_graph(self, notebook_id: str):
         """Return the cached rustworkx PyDiGraph for `notebook_id`.
 
-        Version-keyed on (COUNT, MAX created_at) of knowledge_relations
-        (same pattern as _vector_matrix at :3020-3045).  Graph is rebuilt
-        only on new ingest/delete.  Returned tuple: (G, idx_to_oid, oid_to_idx).
+        Version-keyed on (COUNT, MAX created_at, per-review-status counts) of
+        knowledge_relations (COUNT/MAX pattern as _vector_matrix at
+        :3020-3045).  Graph is rebuilt on new ingest/delete and on any edge
+        review flip.  Returned tuple: (G, idx_to_oid, oid_to_idx).
         Nodes are the USABLE_STATUSES knowledge_objects (same filter as the
         retrieval path); dangling edges (endpoint not a node) are dropped.
         """
         from app.services.kg.graph_reason import build_rx_graph
         with self._connect() as db:
             ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
+                "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
+                "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
                 "FROM knowledge_relations WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchone()
-            version = ("rxgraph", ver["c"], ver["ts"])
+            # Track E: per-status counts make the version key sound — any
+            # single-edge flip between pending/verified/rejected changes at
+            # least one of (n_rejected, n_verified), so a curation verdict
+            # invalidates the cached graph even when (COUNT, MAX created_at)
+            # is unchanged. (MAX(review_status) was NOT sound: statuses
+            # compare lexically, so e.g. verified→rejected with another
+            # verified edge present left MAX='verified'.) set_edge_review's
+            # explicit _invalidate_unified_cache remains as belt-and-braces.
+            version = ("rxgraph", ver["c"], ver["ts"], ver["n_rej"], ver["n_ver"])
 
             def _load():
                 ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -3465,15 +3614,118 @@ class SQLiteRepository:
                 for r in obj_rows:
                     p = json.loads(r["payload"] or "{}")
                     nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                # Track E: rejected edges are excluded from the reasoning graph
+                # (curation feedback loop). Bare filter, same as review_queue:
+                # the column is NOT NULL DEFAULT 'pending' (migration runs in
+                # __init__), so NULL is impossible.
                 rel_rows = db.execute(
                     "SELECT id, source_object_id, target_object_id, edge_type, evidence "
-                    "FROM knowledge_relations WHERE notebook_id = ?",
+                    "FROM knowledge_relations "
+                    "WHERE notebook_id = ? AND review_status != 'rejected'",
                     (notebook_id,),
                 ).fetchall()
                 relations = [dict(r) for r in rel_rows]
                 return build_rx_graph(nodes, relations)
 
             return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
+
+    def _federated_rx_graph(self, active_notebook_id: str):
+        """Return a federated PyDiGraph merging base notebook(s) + active notebook.
+
+        Version-keyed, per participating notebook, on BOTH the relations
+        (COUNT, MAX created_at, per-review-status counts) and the objects
+        (COUNT, MAX updated_at), so an ingest into ANY of them — or an
+        object-only change (status flip / payload edit bumps updated_at) — or
+        an edge review flip (Track E) — triggers a rebuild even without an
+        explicit eviction.  Cache key: "{active_id}:fed_rxgraph".
+
+        Track E: relations with review_status = 'rejected' are excluded, same
+        as _rx_graph — a curator's rejection must not flow into reasoning via
+        the federated path either.
+
+        Each relation row is tagged with its notebook_id before passing to
+        build_rx_graph so per-edge tier stamping works.
+        """
+        from app.services.kg.graph_reason import build_rx_graph
+        with self._connect() as db:
+            # Participating notebooks: active + all base notebooks (excl. active
+            # if active is itself base, to avoid duplication).
+            base_rows = db.execute(
+                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+                (active_notebook_id,),
+            ).fetchall()
+            active_row = db.execute(
+                "SELECT id, tier FROM notebooks WHERE id=?",
+                (active_notebook_id,),
+            ).fetchone()
+            active_tier = active_row["tier"] if active_row else "personal"
+
+            # Build participating list: active first, then all base notebooks.
+            participants = [(active_notebook_id, active_tier)] + [
+                (r["id"], r["tier"]) for r in base_rows
+            ]
+            # Version key: per-notebook (nb_id, relations (count, max created_at,
+            # per-review-status counts), objects (count, max updated_at)). Object
+            # coverage makes object-only changes (deprecate / status flip /
+            # payload edit) rebuild the graph. Track E: the per-status counts
+            # (n_rej, n_ver) make a single edge flip between pending/verified/
+            # rejected change the version even when (COUNT, MAX created_at) is
+            # unchanged — same soundness argument as _rx_graph; set_edge_review's
+            # explicit evict-all-fed_rxgraph remains as belt-and-braces.
+            version_parts = []
+            for nb_id, _ in participants:
+                rel_ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
+                    "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
+                    "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
+                    "FROM knowledge_relations WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
+                obj_ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+                    "FROM knowledge_objects WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
+                version_parts.append(
+                    (nb_id, rel_ver["c"], rel_ver["ts"],
+                     rel_ver["n_rej"], rel_ver["n_ver"],
+                     obj_ver["c"], obj_ver["ts"]))
+            version = ("fed_rxgraph", tuple(version_parts))
+
+            tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
+
+            def _load():
+                nodes: dict = {}
+                all_relations: list = []
+                ph = ",".join("?" for _ in USABLE_STATUSES)
+                for nb_id, _ in participants:
+                    obj_rows = db.execute(
+                        "SELECT id, object_type, payload FROM knowledge_objects "
+                        f"WHERE notebook_id = ? AND status IN ({ph})",
+                        (nb_id, *USABLE_STATUSES),
+                    ).fetchall()
+                    for r in obj_rows:
+                        p = json.loads(r["payload"] or "{}")
+                        nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                    # Track E: rejected edges are excluded from the federated
+                    # reasoning graph too (curation feedback loop) — same bare
+                    # filter as _rx_graph; the column is NOT NULL DEFAULT
+                    # 'pending' (migration runs in __init__), so NULL is
+                    # impossible.
+                    rel_rows = db.execute(
+                        "SELECT id, source_object_id, target_object_id, edge_type, evidence "
+                        "FROM knowledge_relations "
+                        "WHERE notebook_id = ? AND review_status != 'rejected'",
+                        (nb_id,),
+                    ).fetchall()
+                    for r in rel_rows:
+                        d = dict(r)
+                        d["notebook_id"] = nb_id   # tag for tier_map lookup
+                        all_relations.append(d)
+                return build_rx_graph(nodes, all_relations, tier="personal", tier_map=tier_map)
+
+            return self._vector_cache.get(
+                f"{active_notebook_id}:fed_rxgraph", version, _load)
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
@@ -4479,7 +4731,7 @@ class SQLiteRepository:
 
         use_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
 
-        G, idx_to_oid, oid_to_idx = self._rx_graph(notebook_id)
+        G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         subgraph = multihop_subgraph(
             G, oid_to_idx, idx_to_oid,
             seed_ids=use_seeds,
@@ -4495,7 +4747,8 @@ class SQLiteRepository:
         # Flagged edges get their confidence demoted to 0.05; the context is then
         # re-rendered so the demotion is visible to the answer LLM. chain_trust is
         # the weakest-link confidence over all edges (1.0 when there are no edges).
-        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": []}
+        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
+                         "authority_notes": []}
         if getattr(self.reasoning_llm_client, "configured", False):
             from app.services.kg.graph_reason import verify_chain_edges
             verify_result = verify_chain_edges(
@@ -4545,7 +4798,8 @@ class SQLiteRepository:
             summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
                      f"{len(verify_result['flagged'])} edge(s) flagged; "
                      f"{len(subgraph)} node(s) traversed"),
-            detail=verify_result,
+            detail={**verify_result,
+                    "authority_notes": verify_result.get("authority_notes", [])},
         )]
 
         response = AskResponse(
