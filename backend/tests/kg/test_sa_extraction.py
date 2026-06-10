@@ -152,3 +152,37 @@ def test_extract_graph_forwards_base_filter(monkeypatch):
                         lambda fn, *a, **k: _Now(fn(*a, **k)))
     ingest.extract_graph(object(), "text", "d.md", "textbook", base_filter=True)
     assert captured.get("base_filter") is True
+
+
+from app.services.kg.extract import _parse_validity_scope
+
+
+def test_parse_validity_scope_drops_non_string_items():
+    assert _parse_validity_scope({"region": [None, "saturation", 3]}) == {"region": ["saturation"]}
+    assert _parse_validity_scope("not a dict") == {}
+    assert _parse_validity_scope({"assumptions": []}) == {}
+
+
+def test_gleaning_threads_base_filter_and_parses_scope():
+    class _GleanFake:
+        configured = True
+        def __init__(self):
+            self.n = 0
+        def chat_json(self, messages, hint):
+            self.n += 1
+            if self.n == 1:
+                return json.dumps({"nodes": [
+                    {"local_id": "m", "type": "Claim", "name": "main claim", "ev": 0}],
+                    "edges": []})
+            # gleaning round: base_filter must have reached this prompt
+            assert "QUALITY FILTER" in messages[0]["content"]
+            return json.dumps({"nodes": [
+                {"local_id": "g", "type": "Claim",
+                 "name": "In saturation gleaned claim", "ev": 0,
+                 "validity_scope": {"region": ["saturation"]}}],
+                "edges": []})
+
+    nodes, _ = extract_window(_GleanFake(), _ELS, "1", "textbook", win_idx=0,
+                              gleaning_rounds=1, base_filter=True)
+    gleaned = [n for n in nodes if n.name == "In saturation gleaned claim"]
+    assert gleaned and gleaned[0].validity_scope == {"region": ["saturation"]}

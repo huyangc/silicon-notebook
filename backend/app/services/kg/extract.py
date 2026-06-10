@@ -105,7 +105,7 @@ def _parse_validity_scope(raw: Any) -> Dict[str, Any]:
     for key in ("region", "assumptions"):
         v = raw.get(key)
         if isinstance(v, list):
-            items = [str(x).strip() for x in v if str(x).strip()]
+            items = [x.strip() for x in v if isinstance(x, str) and x.strip()]
             if items:
                 out[key] = items
     for key in ("approximation", "range"):
@@ -191,7 +191,7 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
 
 def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
                  doc_type: str, first_raw: str, nodes: List[Node], win_idx: int,
-                 max_rounds: int) -> None:
+                 max_rounds: int, base_filter: bool = False) -> None:
     """Gleaning: ask the LLM for MISSED nodes and append new (deduped, grounded)
     ones to `nodes` in place. v1 = nodes only (no edges). Best-effort: no-op when
     unconfigured; on any failure returns with whatever was gathered (never raises —
@@ -205,7 +205,7 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
     seen = {(n.type, _nm(n.name)) for n in nodes}
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
     messages = [
-        {"role": "user", "content": _prompt(labeled, section_path, doc_type)},
+        {"role": "user", "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)},
         {"role": "assistant", "content": first_raw},
         {"role": "user", "content": gleaning_prompt(section_path, doc_type)},
     ]
@@ -231,6 +231,8 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
                         evidence=[_ev(el)])
             if it["type"] == "Procedure":
                 node.steps = _parse_steps(elements, it.get("steps"))
+            if it["type"] in ("Claim", "Formula"):
+                node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
             nodes.append(node)
             seen.add(key)
             added += 1
@@ -281,7 +283,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             by_local[str(it["local_id"])] = nid
     if gleaning_rounds and nodes:
         _glean_nodes(client, elements, section_path, doc_type, raw, nodes, win_idx,
-                     gleaning_rounds)
+                     gleaning_rounds, base_filter=base_filter)
     if refine and nodes:
         # refine is best-effort: a failure (incl. hard transport errors that
         # refine_nodes re-raises) must NOT discard a successfully extracted
