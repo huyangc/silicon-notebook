@@ -48,6 +48,7 @@ from app.models.schemas import (
     RuleCard,
     SourceDetail,
     SourceElement,
+    SetTierRequest,
     SourceImportRequest,
     SourceSummary,
     UnifiedKgStatus,
@@ -554,6 +555,24 @@ def review_relation(notebook_id: str, rel_id: str,
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary)
+def set_notebook_tier(notebook_id: str, payload: SetTierRequest) -> NotebookSummary:
+    """Set a notebook's federation tier: 'base' (authoritative reference KG)
+    or 'personal' (default user notes). Drives tier-weighted relevance and
+    conflict precedence in ask()."""
+    tier = payload.tier.strip().lower()
+    if tier not in {"base", "personal"}:
+        raise HTTPException(status_code=400, detail="tier must be 'base' or 'personal'")
+    try:
+        if tier == "base":
+            repository().mark_notebook_base(notebook_id)
+        else:
+            repository().set_notebook_personal(notebook_id)
+        return repository().get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)

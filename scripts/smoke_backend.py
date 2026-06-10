@@ -570,6 +570,17 @@ def check_api_layer() -> None:
         ok("GET", f"/api/notebooks/{nid}")
         assert ok("GET", f"/api/notebooks/{nid}/sources") == []
 
+        # Two-tier: set tier to base, then back to personal, via the REST route.
+        assert ok("GET", f"/api/notebooks/{nid}")["tier"] == "personal"
+        set_base = ok("POST", f"/api/notebooks/{nid}/tier", json={"tier": "base"})
+        assert set_base["tier"] == "base"
+        assert ok("GET", f"/api/notebooks/{nid}")["tier"] == "base"
+        set_personal = ok("POST", f"/api/notebooks/{nid}/tier", json={"tier": "personal"})
+        assert set_personal["tier"] == "personal"
+        # Bad tier -> 400; missing notebook -> 404.
+        assert client.post(f"/api/notebooks/{nid}/tier", json={"tier": "bogus"}).status_code == 400
+        assert client.post("/api/notebooks/nb-missing/tier", json={"tier": "base"}).status_code == 404
+
         ok("GET", f"/api/notebooks/{nid}/knowledge-types")
         ok("GET", f"/api/notebooks/{nid}/knowledge", params={"type": "claim"})
         ok("GET", f"/api/notebooks/{nid}/duplicates", params={"type": "claim"})
