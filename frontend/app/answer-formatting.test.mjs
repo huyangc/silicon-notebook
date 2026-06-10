@@ -5,6 +5,7 @@ import {
   buildAnswerReferences,
   parseMarkdownBlocks,
   renderTextWithReferenceNumbers,
+  splitInlineLatex,
 } from "./answer-formatting.ts";
 
 const anchors = [
@@ -78,4 +79,56 @@ test("parses code fences, display formulas, and markdown tables", () => {
 test("preserves anchor tier on built references", () => {
   const references = buildAnswerReferences("看 [k2]。", anchors, []);
   assert.equal(references[0].anchor?.tier, "base");
+});
+
+test("parses a single-line $$...$$ as a display formula block", () => {
+  const blocks = parseMarkdownBlocks(["前言", "", "$$E = mc^2$$", "", "尾声"].join("\n"));
+  assert.deepEqual(blocks.map((block) => block.type), ["paragraph", "formula", "paragraph"]);
+  assert.equal(blocks[1].type === "formula" ? blocks[1].latex : "", "E = mc^2");
+});
+
+test("parses a single-line \\[ ... \\] as a display formula block", () => {
+  const blocks = parseMarkdownBlocks(["介绍", "", "\\[ A_v = -g_m r_o \\]", "", "结论"].join("\n"));
+  assert.deepEqual(blocks.map((block) => block.type), ["paragraph", "formula", "paragraph"]);
+  assert.equal(blocks[1].type === "formula" ? blocks[1].latex : "", "A_v = -g_m r_o");
+});
+
+test("parses a multi-line \\[ ... \\] block spanning several lines", () => {
+  const blocks = parseMarkdownBlocks(["\\[", "x = 1", "y = 2", "\\]"].join("\n"));
+  assert.deepEqual(blocks.map((block) => block.type), ["formula"]);
+  assert.equal(blocks[0].type === "formula" ? blocks[0].latex : "", "x = 1\ny = 2");
+});
+
+test("keeps the existing $$-on-its-own-line block behavior", () => {
+  const blocks = parseMarkdownBlocks(["$$", "E = mc^2", "$$"].join("\n"));
+  assert.deepEqual(blocks.map((block) => block.type), ["formula"]);
+  assert.equal(blocks[0].type === "formula" ? blocks[0].latex : "", "E = mc^2");
+});
+
+test("splitInlineLatex segments $...$ inline math out of prose", () => {
+  const segments = splitInlineLatex("增益约为 $g_m r_o$ 量级。");
+  assert.deepEqual(segments, [
+    { type: "text", value: "增益约为 " },
+    { type: "math", value: "g_m r_o" },
+    { type: "text", value: " 量级。" },
+  ]);
+});
+
+test("splitInlineLatex segments \\( ... \\) inline math out of prose", () => {
+  const segments = splitInlineLatex("当 \\(v_i = 0\\) 时成立");
+  assert.deepEqual(segments, [
+    { type: "text", value: "当 " },
+    { type: "math", value: "v_i = 0" },
+    { type: "text", value: " 时成立" },
+  ]);
+});
+
+test("splitInlineLatex leaves plain prose untouched as a single text segment", () => {
+  const segments = splitInlineLatex("这里没有任何公式定界符");
+  assert.deepEqual(segments, [{ type: "text", value: "这里没有任何公式定界符" }]);
+});
+
+test("splitInlineLatex treats a whole formula name (no delimiters) as plain text", () => {
+  const raw = "R_o = (v_I/i_I)|_{v_i=0} = 1/((g_m1+g_m2)A) || r_o1 || r_o2";
+  assert.deepEqual(splitInlineLatex(raw), [{ type: "text", value: raw }]);
 });

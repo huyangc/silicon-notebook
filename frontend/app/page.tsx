@@ -10,6 +10,7 @@ import {
   parseMarkdownBlocks,
   referenceByAnchorKey,
   renderTextWithReferenceNumbers,
+  splitInlineLatex,
   type AnswerReference,
   type MarkdownBlock,
 } from "./answer-formatting";
@@ -2786,9 +2787,9 @@ export default function Home() {
                     const to = graph.nodes.find((n) => n.id === edge.to_id);
                     return (
                       <div className="checklist-row" key={`edge-${index}`}>
-                        <strong>{from?.headline ?? edge.from_id}</strong>
+                        <strong><LatexText text={from?.headline ?? edge.from_id} isFormula={from?.object_type === "formula"} /></strong>
                         <span className="tag">{RELATION_LABELS[edge.relation] ?? edge.relation}</span>
-                        → <strong>{to?.headline ?? edge.to_id}</strong>
+                        → <strong><LatexText text={to?.headline ?? edge.to_id} isFormula={to?.object_type === "formula"} /></strong>
                       </div>
                     );
                   })}
@@ -2939,7 +2940,7 @@ export default function Home() {
               <div className="kg-selected-detail">
                 {!selectedKgNode ? <p className="tool-hint">点击图中节点或总览列表查看详情。</p> : (
                   <div className="stack">
-                    <h3>{kgNodeName(selectedKgNode)}</h3>
+                    <h3><LatexText text={kgNodeName(selectedKgNode)} isFormula={selectedKgNode.object_type === "formula"} /></h3>
                     <div className="tag-row">
                       <span className="tag kg-selected-type"><KgTypeMark type={selectedKgNode.object_type} />{kgTypeLabel(selectedKgNode.object_type)}</span>
                       <span className="tag">关系 {selectedKgEdges.length}</span>
@@ -2983,7 +2984,7 @@ export default function Home() {
                             <div className="kg-related-list">
                               {group.nodes.map((node) => (
                                 <div className="kg-related-node" key={node.id}>
-                                  <span><KgTypeMark type={node.object_type} />{String(node.payload.name ?? "")}</span>
+                                  <span><KgTypeMark type={node.object_type} /><LatexText text={String(node.payload.name ?? "")} isFormula={node.object_type === "formula"} /></span>
                                   {node.edge_type ? <em>{RELATION_LABELS[node.edge_type] ?? node.edge_type}</em> : null}
                                 </div>
                               ))}
@@ -3603,7 +3604,7 @@ function KnowledgeBrowser({
               <div className="tag-row"><span className="tag">similarity {group.similarity}</span></div>
               {group.members.map((member, memberIndex) => (
                 <div className="dup-member" key={member.id}>
-                  <span>{member.headline} <span className="tag">{member.status}</span></span>
+                  <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{member.status}</span></span>
                   {memberIndex > 0 && (
                     <button className="sort-button" onClick={() => onMerge(member.id, group.members[0].id)}>
                       合并到第 1 条
@@ -3626,7 +3627,7 @@ function KnowledgeBrowser({
               <div className="knowledge-item-title">
                 <KgTypeMark type={item.object_type ?? kind} />
                 <span>{kgTypeLabel(item.object_type ?? kind)}</span>
-                <h3>{knowledgeHeadline(kind, item)}</h3>
+                <h3><LatexText text={knowledgeHeadline(kind, item)} isFormula={(item.object_type ?? kind) === "formula"} /></h3>
               </div>
               {knowledgeBody(kind, item)}
               <div className="tag-row">
@@ -3699,6 +3700,27 @@ function InlineFormula({ latex }: { latex: string }) {
   return <span className="answer-inline-formula" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+// Render a formula-name / headline string with KaTeX.
+//   isFormula=true  -> the WHOLE text is a Formula object's name (no $ delimiters),
+//                      rendered as one inline formula (raw fallback on katex error).
+//   isFormula=false -> prose: inline-render `$...$` and `\( ... \)` spans, leave the
+//                      rest as plain text (delimiter-free text is never mangled).
+function LatexText({ text, isFormula = false }: { text: string; isFormula?: boolean }) {
+  if (!text) return null;
+  if (isFormula) return <InlineFormula latex={text} />;
+  const segments = splitInlineLatex(text);
+  if (segments.length === 1 && segments[0].type === "text") return <>{segments[0].value}</>;
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === "math"
+          ? <InlineFormula latex={segment.value} key={`m-${index}`} />
+          : <span key={`t-${index}`}>{segment.value}</span>
+      )}
+    </>
+  );
+}
+
 function referenceTitle(reference: AnswerReference): string {
   if (reference.anchor) return reference.anchor.name || reference.anchor.label || reference.anchor.key;
   return reference.citation?.label || reference.displayLabel;
@@ -3751,7 +3773,7 @@ function renderInlineAnswerText(
   onSelectReference: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void
 ) {
   const nodes = [];
-  const tokenPattern = /(`[^`]+`|\$[^$\n]+\$|\[(k\d+)\])/g;
+  const tokenPattern = /(`[^`]+`|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\[(k\d+)\])/g;
   let lastIndex = 0;
   for (const match of text.matchAll(tokenPattern)) {
     if (match.index == null) continue;
@@ -3759,7 +3781,7 @@ function renderInlineAnswerText(
     const token = match[0];
     const marker = token.match(/^\[(k\d+)\]$/);
     const inlineCode = token.match(/^`([^`]+)`$/);
-    const inlineFormula = token.match(/^\$([^$\n]+)\$$/);
+    const inlineFormula = token.match(/^\$([^$\n]+)\$$/) ?? token.match(/^\\\(([\s\S]+?)\\\)$/);
     if (marker) {
       const reference = refsByKey[marker[1]];
       nodes.push(reference ? (
@@ -3885,8 +3907,8 @@ function SelectedReferenceDetail({
           知识图谱
         </button>
       </div>
-      <h4>{title}</h4>
-      {snippet && <p>{snippet}</p>}
+      <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>
+      {snippet && <p><LatexText text={snippet} /></p>}
       {(source || location) && <small>{[source, location].filter(Boolean).join(" · ")}</small>}
     </aside>
   );
