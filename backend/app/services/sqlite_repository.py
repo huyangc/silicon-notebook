@@ -419,6 +419,25 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
 
+                CREATE TABLE IF NOT EXISTS promotion_candidates (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  object_id TEXT NOT NULL,
+                  object_type TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'proposed',
+                  -- status values: proposed | under_review | approved | rejected
+                  reason TEXT NOT NULL DEFAULT '',
+                  reviewed_by TEXT NOT NULL DEFAULT '',
+                  base_match_id TEXT NOT NULL DEFAULT '',
+                  -- canonical_id in the base corpus if dedup found a match
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_promotion_status ON promotion_candidates(status);
+                CREATE INDEX IF NOT EXISTS idx_promotion_nb ON promotion_candidates(notebook_id, status);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_promotion_object ON promotion_candidates(object_id)
+                  WHERE status NOT IN ('approved', 'rejected');
+
                 CREATE TABLE IF NOT EXISTS unified_kg_state (
                   notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
                   dirty INTEGER NOT NULL DEFAULT 0,
@@ -1947,6 +1966,17 @@ class SQLiteRepository:
                 "edge_type": rel["edge_type"], "evidence": rel.get("evidence", []),
             })
 
+        # Base strong-review gate (Track F): objects written directly to a base
+        # notebook land as 'reviewed' (still in USABLE_STATUSES, so retrievable)
+        # rather than 'approved' — the curator confirms via update_knowledge
+        # before they are treated as canonical. Personal notebooks keep
+        # 'approved' (no behavior change).
+        with self._connect() as db:
+            nb_row = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()
+        auto_status = 'reviewed' if (nb_row and nb_row["tier"] == 'base') else 'approved'
+
         for i in range(0, len(objects), CHUNK):
             chunk = objects[i:i + CHUNK]
             with self._write() as db:
@@ -1954,8 +1984,8 @@ class SQLiteRepository:
                     "INSERT INTO knowledge_objects "
                     "(id, notebook_id, object_type, status, owner, payload, evidence, "
                     "source_candidate_id, source_id, created_at, updated_at) "
-                    "VALUES (?, ?, ?, 'approved', '', ?, ?, NULL, ?, ?, ?)",
-                    [(o["_oid"], notebook_id, o["object_type"],
+                    "VALUES (?, ?, ?, ?, '', ?, ?, NULL, ?, ?, ?)",
+                    [(o["_oid"], notebook_id, o["object_type"], auto_status,
                       json.dumps(o["payload"], ensure_ascii=False),
                       json.dumps(o["evidence"], ensure_ascii=False),
                       source_id or '', now, now) for o in chunk],
@@ -2894,6 +2924,287 @@ class SQLiteRepository:
                 "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
             ).fetchone()
         return self._derived_from_row(row)
+
+    # --- Governance: promotion state machine (Track F) -------------------
+
+    @staticmethod
+    def _promotion_row_to_dict(row: sqlite3.Row, *, payload=None, evidence=None) -> dict:
+        """Map a promotion_candidates row to the PromotionCandidate-shaped dict.
+        payload/evidence are denormalised from knowledge_objects when listing."""
+        return {
+            "id": row["id"],
+            "notebook_id": row["notebook_id"],
+            "object_id": row["object_id"],
+            "object_type": row["object_type"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "reviewed_by": row["reviewed_by"],
+            "base_match_id": row["base_match_id"],
+            "created_at": row["created_at"],
+            "payload": payload if payload is not None else {},
+            "evidence": evidence if evidence is not None else [],
+        }
+
+    def propose_promotion(self, notebook_id: str, object_id: str) -> dict:
+        """Propose a personal-KG object for promotion into the base corpus.
+
+        Idempotent for an already-active proposal of the same object. Raises
+        KeyError if the notebook or object is missing; ValueError if the
+        notebook is itself a base notebook (use the review gate there instead).
+        """
+        self.get_notebook(notebook_id)  # KeyError if notebook missing
+        now = _now()
+        with self._write() as db:
+            obj = db.execute(
+                "SELECT object_type FROM knowledge_objects WHERE id=? AND notebook_id=?",
+                (object_id, notebook_id),
+            ).fetchone()
+            if obj is None:
+                raise KeyError(object_id)
+            nb_row = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()
+            if nb_row and nb_row["tier"] == "base":
+                raise ValueError("cannot propose from a base notebook — use the review gate")
+            # Idempotency: return any active (non-approved, non-rejected) proposal.
+            existing = db.execute(
+                "SELECT * FROM promotion_candidates "
+                "WHERE object_id=? AND status NOT IN ('approved','rejected')",
+                (object_id,),
+            ).fetchone()
+            if existing is not None:
+                return self._promotion_row_to_dict(existing)
+            cand_id = f"promo-{uuid4().hex[:10]}"
+            db.execute(
+                """
+                INSERT INTO promotion_candidates
+                (id, notebook_id, object_id, object_type, status, reason,
+                 reviewed_by, base_match_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'proposed', '', '', '', ?, ?)
+                """,
+                (cand_id, notebook_id, object_id, obj["object_type"], now, now),
+            )
+            row = db.execute(
+                "SELECT * FROM promotion_candidates WHERE id=?", (cand_id,)
+            ).fetchone()
+        return self._promotion_row_to_dict(row)
+
+    def list_promotion_queue(self, status_filter: Optional[str] = None) -> List[dict]:
+        """List promotion candidates across all notebooks (the curator sees
+        everything). Defaults to the active queue (proposed + under_review);
+        pass status_filter to view a single status. Denormalises payload +
+        evidence from knowledge_objects for display."""
+        with self._connect() as db:
+            if status_filter:
+                rows = db.execute(
+                    "SELECT * FROM promotion_candidates WHERE status=? "
+                    "ORDER BY created_at ASC, id ASC",
+                    (status_filter,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM promotion_candidates "
+                    "WHERE status IN ('proposed','under_review') "
+                    "ORDER BY created_at ASC, id ASC"
+                ).fetchall()
+            out: List[dict] = []
+            for row in rows:
+                obj = db.execute(
+                    "SELECT payload, evidence FROM knowledge_objects WHERE id=?",
+                    (row["object_id"],),
+                ).fetchone()
+                payload = json.loads(obj["payload"] or "{}") if obj else {}
+                evidence = (
+                    [Evidence(**e) for e in json.loads(obj["evidence"] or "[]")]
+                    if obj
+                    else []
+                )
+                out.append(
+                    self._promotion_row_to_dict(row, payload=payload, evidence=evidence)
+                )
+        return out
+
+    def approve_promotion(self, candidate_id: str) -> dict:
+        """Approve a promotion: copy the personal object into the base corpus,
+        deduplicating against existing base objects of the same type via the
+        kg_merge seed clustering. Idempotent. Raises KeyError if the candidate
+        is missing; ValueError if it is rejected or there is no base notebook.
+        """
+        now = _now()
+        with self._write() as db:
+            cand = db.execute(
+                "SELECT * FROM promotion_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if cand is None:
+                raise KeyError(candidate_id)
+            if cand["status"] == "rejected":
+                raise ValueError("cannot approve a rejected promotion candidate")
+            object_type = cand["object_type"]
+
+            base_row = db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            if base_row is None:
+                raise ValueError("no base notebook — mark one with mark_notebook_base() first")
+            base_nb_id = base_row["id"]
+
+            # Idempotency: if already approved, return the existing base object.
+            if cand["status"] == "approved":
+                existing = db.execute(
+                    "SELECT id FROM knowledge_objects "
+                    "WHERE notebook_id=? AND source_candidate_id=? "
+                    "ORDER BY created_at ASC, id ASC LIMIT 1",
+                    (base_nb_id, candidate_id),
+                ).fetchone()
+                base_object_id = existing["id"] if existing else (cand["base_match_id"] or "")
+                return {
+                    "candidate_id": candidate_id,
+                    "base_object_id": base_object_id,
+                    "merged_into": cand["base_match_id"] or "",
+                }
+
+            # Fetch the personal object being promoted.
+            src = db.execute(
+                "SELECT * FROM knowledge_objects WHERE id=?", (cand["object_id"],)
+            ).fetchone()
+            if src is None:
+                raise KeyError(cand["object_id"])
+            src_payload = json.loads(src["payload"] or "{}")
+            src_evidence = json.loads(src["evidence"] or "[]")
+
+            # Cross-corpus dedup against existing base objects of the same type.
+            base_objs = db.execute(
+                "SELECT id, payload, evidence FROM knowledge_objects "
+                "WHERE notebook_id=? AND object_type=? AND status IN ({})".format(
+                    ",".join("?" for _ in USABLE_STATUSES)
+                ),
+                (base_nb_id, object_type, *USABLE_STATUSES),
+            ).fetchall()
+            base_match_id = self._find_base_dedup_match(
+                object_type, src_payload, base_objs
+            )
+
+            if base_match_id:
+                # Merge: combine evidence into the matched base object; keep its id.
+                matched = next(b for b in base_objs if b["id"] == base_match_id)
+                merged_evidence = self._merge_evidence_lists(
+                    json.loads(matched["evidence"] or "[]"), src_evidence
+                )
+                db.execute(
+                    "UPDATE knowledge_objects SET evidence=?, updated_at=? WHERE id=?",
+                    (json.dumps(merged_evidence, ensure_ascii=False), now, base_match_id),
+                )
+                base_object_id = base_match_id
+                merged_into = base_match_id
+            else:
+                # No match: insert a fresh base object at status='approved'.
+                base_object_id = f"ko-{uuid4().hex[:10]}"
+                db.execute(
+                    """
+                    INSERT INTO knowledge_objects
+                    (id, notebook_id, object_type, status, owner, payload, evidence,
+                     source_candidate_id, source_id, created_at, updated_at)
+                    VALUES (?, ?, ?, 'approved', '', ?, ?, ?, '', ?, ?)
+                    """,
+                    (
+                        base_object_id,
+                        base_nb_id,
+                        object_type,
+                        json.dumps(src_payload, ensure_ascii=False),
+                        json.dumps(src_evidence, ensure_ascii=False),
+                        candidate_id,
+                        now,
+                        now,
+                    ),
+                )
+                merged_into = ""
+
+            db.execute(
+                "UPDATE promotion_candidates "
+                "SET status='approved', base_match_id=?, reviewed_by='curator', updated_at=? "
+                "WHERE id=?",
+                (base_match_id, now, candidate_id),
+            )
+
+        # Embed the new base object's payload (best-effort; outside the txn so a
+        # failing embedder never blocks approval). Only for freshly-inserted ones.
+        if not base_match_id:
+            self._embed_knowledge(base_object_id, base_nb_id, src_payload)
+        self._invalidate_unified_cache(base_nb_id)
+        self._mark_unified_kg_dirty(base_nb_id)
+        return {
+            "candidate_id": candidate_id,
+            "base_object_id": base_object_id,
+            "merged_into": merged_into,
+        }
+
+    @staticmethod
+    def _seed_fn_for(object_type: str):
+        """Return the kg_merge seed function for a KG object type."""
+        from app.services.kg_merge import (
+            seed_claim, seed_concept, seed_formula, seed_procedure,
+        )
+        return {
+            "concept": seed_concept,
+            "claim": seed_claim,
+            "formula": seed_formula,
+            "procedure": seed_procedure,
+        }.get(object_type, seed_claim)
+
+    def _find_base_dedup_match(
+        self, object_type: str, src_payload: dict, base_objs: List[sqlite3.Row]
+    ) -> str:
+        """Exact-seed dedup (v1): return the id of an existing base object whose
+        normalized seed matches the source payload, else ''. This works at cold
+        start without vectors (the plan's v1 shortcut)."""
+        seed_fn = self._seed_fn_for(object_type)
+        src_seed = seed_fn({"name": src_payload.get("name", ""), "payload": src_payload})
+        if not src_seed:
+            return ""
+        for b in base_objs:
+            bp = json.loads(b["payload"] or "{}")
+            b_seed = seed_fn({"name": bp.get("name", ""), "payload": bp})
+            if b_seed and b_seed == src_seed:
+                return b["id"]
+        return ""
+
+    @staticmethod
+    def _merge_evidence_lists(base_ev: list, src_ev: list) -> list:
+        """Union two evidence lists, deduping on (source_id, element_id, quoted_span)."""
+        seen = set()
+        merged: list = []
+        for ev in [*base_ev, *src_ev]:
+            if not isinstance(ev, dict):
+                continue
+            key = (ev.get("source_id"), ev.get("element_id"), ev.get("quoted_span"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(ev)
+        return merged
+
+    def reject_promotion(self, candidate_id: str, reason: str = "") -> dict:
+        """Reject a promotion candidate. The personal object is left untouched.
+        Raises KeyError if missing; ValueError if already approved."""
+        now = _now()
+        with self._write() as db:
+            cand = db.execute(
+                "SELECT * FROM promotion_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if cand is None:
+                raise KeyError(candidate_id)
+            if cand["status"] == "approved":
+                raise ValueError("cannot reject an approved promotion candidate")
+            db.execute(
+                "UPDATE promotion_candidates "
+                "SET status='rejected', reason=?, reviewed_by='curator', updated_at=? "
+                "WHERE id=?",
+                (reason, now, candidate_id),
+            )
+            row = db.execute(
+                "SELECT * FROM promotion_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+        return self._promotion_row_to_dict(row)
 
     def update_knowledge(
         self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate

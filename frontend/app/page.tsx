@@ -16,6 +16,13 @@ import {
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
 import { lastTurnUsedReasoning } from "./session-reasoning";
+import {
+  approvePromotion,
+  fetchPromotionQueue,
+  proposePromotion,
+  rejectPromotion,
+  type PromotionCandidate,
+} from "./promotion-queue";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -34,6 +41,7 @@ type NotebookSummary = {
   source_types?: string[];
   taxonomy?: string[];
   access_scope?: string;
+  tier?: string;
 };
 
 type SourceSummary = {
@@ -801,6 +809,10 @@ export default function Home() {
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
   const [derivedOpen, setDerivedOpen] = useState(false);
+  // Promotion queue modal (Track F governance)
+  const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
+  const [promoOpen, setPromoOpen] = useState(false);
+  const [promoBusy, setPromoBusy] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
@@ -1846,6 +1858,39 @@ export default function Home() {
     }
   }
 
+  // --- Governance: promotion queue (Track F) ---------------------------
+  async function openPromoQueue() {
+    const queue = await fetchPromotionQueue();
+    setPromoQueue(queue);
+    setPromoOpen(true);
+  }
+
+  async function submitPromotion(objectId: string) {
+    if (!currentNotebookId) return;
+    await proposePromotion(currentNotebookId, objectId);
+    setToast("已提交晋升请求");
+  }
+
+  async function decidePromotion(candidateId: string, decision: "approve" | "reject", reason = "") {
+    setPromoBusy(true);
+    try {
+      if (decision === "approve") {
+        const result = await approvePromotion(candidateId);
+        const merged = result.merged_into ? `（与 ${result.merged_into.slice(0, 8)} 合并去重）` : "";
+        setToast(`晋升已批准${merged}，节点已加入基准语料`);
+      } else {
+        await rejectPromotion(candidateId, reason);
+        setToast("晋升已拒绝，个人 KG 节点保持不变");
+      }
+      // Refresh queue, then any loaded notebook collection / knowledge list.
+      const queue = await fetchPromotionQueue();
+      setPromoQueue(queue);
+      await loadNotebookCollection();
+    } finally {
+      setPromoBusy(false);
+    }
+  }
+
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
     if (mode === "rules") {
@@ -2088,7 +2133,8 @@ export default function Home() {
                     { label: "运行思维导图", action: () => runStudio("mindmap").catch(reportError) },
                     { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
                     { label: "新建文章", action: () => setArticleModalOpen(true) },
-                    { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) }
+                    { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
+                    { label: "晋升队列", action: () => openPromoQueue().catch(reportError) }
                   ]
                 })}>
                   <BarChart3 size={17} />
@@ -2337,6 +2383,8 @@ export default function Home() {
                     onFindDuplicates={() => findDuplicates(knowledgeKind).catch(reportError)}
                     onMerge={(sourceId, intoId) => mergeKnowledge(sourceId, intoId).catch(reportError)}
                     reload={() => loadKnowledge(knowledgeKind).catch(reportError)}
+                    tier={currentNotebook?.tier}
+                    onPropose={(id) => submitPromotion(id).catch(reportError)}
                   />
                 )}
               </div>
@@ -2951,6 +2999,70 @@ export default function Home() {
         </section>
       )}
 
+      {promoOpen && (
+        <section
+          className="utility-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => { if (event.currentTarget === event.target) setPromoOpen(false); }}
+        >
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>晋升队列</h2>
+                <p>个人 KG 节点申请晋升到基准语料。批准后会执行去重并加入基准库。</p>
+              </div>
+              <button className="icon-button" onClick={() => setPromoOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {(promoQueue ?? []).length === 0 ? (
+                <p className="tool-hint">暂无待审晋升请求。</p>
+              ) : (
+                <div className="stack">
+                  {(promoQueue ?? []).map((cand) => (
+                    <article className="item" key={cand.id}>
+                      <div className="tag-row">
+                        <span className="tag">{cand.status}</span>
+                        <span className="tag">{cand.object_type}</span>
+                        {cand.base_match_id && (
+                          <span className="tag conflict">去重匹配: {cand.base_match_id.slice(0, 10)}</span>
+                        )}
+                      </div>
+                      <h3>{String((cand.payload as Record<string, unknown>).name ?? (cand.payload as Record<string, unknown>).title ?? cand.object_id)}</h3>
+                      <p className="tool-hint">来源笔记本: {cand.notebook_id.slice(0, 10)}</p>
+                      {cand.evidence.length > 0 && (
+                        <p><strong>证据：</strong>{cand.evidence[0].quoted_span ?? ""}</p>
+                      )}
+                      {cand.base_match_id && (
+                        <p className="conflict-note">基准库中已有相似节点 — 批准后将合并去重。</p>
+                      )}
+                      {(cand.status === "proposed" || cand.status === "under_review") && (
+                        <div className="modal-actions">
+                          <button
+                            className="sort-button"
+                            disabled={promoBusy}
+                            onClick={() => decidePromotion(cand.id, "reject").catch(reportError)}
+                          >
+                            拒绝
+                          </button>
+                          <button
+                            className="new-pill"
+                            disabled={promoBusy}
+                            onClick={() => decidePromotion(cand.id, "approve").catch(reportError)}
+                          >
+                            批准晋升
+                          </button>
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -3334,7 +3446,9 @@ function KnowledgeBrowser({
   onOwner,
   onFindDuplicates,
   onMerge,
-  reload
+  reload,
+  tier,
+  onPropose
 }: {
   kind: KnowledgeKind;
   items: KnowledgeItem[] | null;
@@ -3349,6 +3463,8 @@ function KnowledgeBrowser({
   onFindDuplicates: () => void;
   onMerge: (sourceId: string, intoId: string) => void;
   reload: () => void;
+  tier?: string;
+  onPropose?: (id: string) => void;
 }) {
   const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   useEffect(() => { setCtx({}); }, [kind]);
@@ -3435,6 +3551,15 @@ function KnowledgeBrowser({
                   />
                 </label>
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
+                {tier === "personal" && item.status !== "deprecated" && onPropose && (
+                  <button
+                    className="sort-button"
+                    title="提交晋升到基准库"
+                    onClick={() => onPropose(item.id)}
+                  >
+                    ↑ 提交晋升
+                  </button>
+                )}
               </div>
               <EvidenceLine evidence={item.evidence} />
               {notebookId && !ctx[item.id] && (

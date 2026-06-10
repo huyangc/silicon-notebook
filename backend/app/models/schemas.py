@@ -436,6 +436,33 @@ class MergeReviewSummary(BaseModel):
     unsure: int = 0
 
 
+class PromotionCandidate(BaseModel):
+    """A personal-KG node proposed for promotion into the base corpus (Track F)."""
+
+    id: str
+    notebook_id: str
+    object_id: str
+    object_type: str
+    status: str
+    reason: str = ""
+    reviewed_by: str = ""
+    base_match_id: str = ""
+    created_at: str = ""
+    # Denormalised fields populated by the repo from knowledge_objects:
+    payload: dict = Field(default_factory=dict)
+    evidence: List[Evidence] = Field(default_factory=list)
+
+
+class PromotionApproveResult(BaseModel):
+    candidate_id: str
+    base_object_id: str
+    merged_into: str = ""   # non-empty if deduped into an existing base object
+
+
+class PromotionRejectRequest(BaseModel):
+    reason: str = ""
+
+
 class ConceptWhitelistEntry(BaseModel):
     term: str
     note: str = ""
