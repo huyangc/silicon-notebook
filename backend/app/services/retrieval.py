@@ -45,6 +45,11 @@ class RetrievedKnowledge:
     status: str = "approved"
     owner: str = ""
     last_reviewed: str = ""
+    # Two-tier federation tags. Default "" / "personal" so every existing caller
+    # that does not set them keeps working unchanged. federated_retrieve() fills
+    # them in with the hit's source notebook and that notebook's tier.
+    notebook_id: str = ""
+    tier: str = "personal"
 
 
 @dataclass
@@ -96,6 +101,21 @@ def type_weight(object_type: str, process_intent: bool) -> float:
     procedures (and slightly favour them)."""
     table = _PROCESS_TYPE_WEIGHT if process_intent else _TYPE_WEIGHT
     return table.get(object_type, 0.5)
+
+
+# Tier authority weights: base KG (curated textbook) outranks personal notes
+# when scores are tied. Applied in ask()'s rank_key alongside type_weight —
+# NEVER inside _fuse — so relevance stays [0,1] and the tau thresholds are not
+# shifted. A personal hit with higher raw relevance still wins.
+_TIER_WEIGHT = {
+    "base": 1.20,
+    "personal": 1.00,
+}
+
+
+def tier_weight(tier: str) -> float:
+    """Authority multiplier for a notebook tier; default 1.0 for unknowns."""
+    return _TIER_WEIGHT.get(tier, 1.00)
 
 
 def ensure_procedure_quota(scored_all, top_n, min_proc, key):

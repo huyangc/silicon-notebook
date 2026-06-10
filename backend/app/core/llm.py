@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
-from app.core.llm_cache import cache_key
+from app.core.llm_cache import CacheBackend, cache_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
 
 
@@ -37,7 +37,8 @@ def strip_json_fences(text: str) -> str:
 class OpenAICompatibleClient:
     def __init__(self, settings: Settings, *, base_url: Optional[str] = None,
                  api_key: Optional[str] = None, model: Optional[str] = None,
-                 max_retries: Optional[int] = None):
+                 max_retries: Optional[int] = None,
+                 cache: Optional[CacheBackend] = None):
         self.settings = settings
         # 默认取全局 openai_compat_*；显式传入则覆盖（推理专用 client 走此路）。
         self.base_url = base_url if base_url is not None else settings.openai_compat_base_url
@@ -48,18 +49,21 @@ class OpenAICompatibleClient:
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)
         self._cache = None
+        if cache is not None:
+            self._cache = cache
 
     def _get_cache(self):
+        if self._cache is not None:
+            return self._cache
         if not getattr(self.settings, "llm_cache_enabled", False):
             return None
-        if self._cache is None:
-            from pathlib import Path
-            from app.core.llm_cache import LLMCache
-            path = self.settings.llm_cache_path
-            p = Path(path)
-            if not p.is_absolute():
-                p = Path(__file__).resolve().parents[3] / path   # anchor to repo root
-            self._cache = LLMCache(str(p))
+        from pathlib import Path
+        from app.core.llm_cache import LLMCache
+        path = self.settings.llm_cache_path
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parents[3] / path   # anchor to repo root
+        self._cache = LLMCache(str(p))
         return self._cache
 
     @property

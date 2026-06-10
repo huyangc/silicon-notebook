@@ -10,7 +10,24 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, runtime_checkable
+from typing import Protocol as _Protocol
+
+
+@runtime_checkable
+class CacheBackend(_Protocol):
+    """Pluggable cache backend for chat_json responses (key -> JSON string)."""
+    def get(self, key: str) -> Optional[str]: ...
+    def put(self, key: str, value: str) -> None: ...
+
+
+class NoCacheBackend:
+    """Always-miss backend for use in tests or when cache is explicitly disabled."""
+    def get(self, key: str) -> Optional[str]:
+        return None
+
+    def put(self, key: str, value: str) -> None:
+        pass
 
 
 def cache_key(model: str, messages: List[Dict[str, str]], schema_hint: str) -> str:
