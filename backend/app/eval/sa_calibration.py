@@ -12,23 +12,47 @@ from typing import Any, Dict, List, Sequence
 from app.services.kg.models import Node, Edge
 
 _SPARSE = {"depends_on", "contrasts_with", "prerequisite_of"}
-# A claim is "compound" (non-atomic) if it asserts >= 2 independent propositions.
-# Signals: (a) >= 2 real sentences — a '.'/';' followed by space + capital; or
-# (b) a clause-level conjunction — and/but/;/"as well as" that joins two CLAUSES,
-# detected by the conjunction being followed by a clause-starter (subject pronoun /
-# determiner / symbol-subject like H_m / auxiliary / copula / common predicate).
-# Coordinated noun/symbol objects ("x and y", "w1 for w3 and -w2 for w2"),
-# ellipses ("H_1, ..., H_n"), and equation refs ("Eq. (2.237).") are intentionally
-# NOT flagged — those were the OLD heuristic's false positives. Comparative use only.
-_SENT_BOUNDARY = re.compile(r"[.;]\s+[A-Z]")
+# ---------------------------------------------------------------------------
+# Compound-claim heuristic — a deliberately PRECISION-LEANING surface proxy.
+#
+# HONEST LIMITS (do not over-trust):
+# * SAME-SLICE OLD-vs-NEW comparison ONLY. Never read it as an absolute
+#   atomicity measure, and never tune an extraction prompt against it —
+#   surface cues are trivially gameable (Goodhart). If the prompt changes,
+#   re-calibrate on a FRESH slice.
+# * Validated on a tiny fixed set: the 21 captured calibration claims plus the
+#   out-of-sample probes frozen in test_sa_calibration_metrics.py. Expect
+#   drift on other registers; at SA-3 scale use an LLM-judge / human rubric
+#   and keep this only as a free trend monitor.
+# * Known blind spots (the price of precision): "and the <noun> <verb>"
+#   clauses are NOT flagged (bare "the" caused FPs on "between the gate and
+#   the source"); word-level Chinese conjunctions (并且/而且/...) are NOT
+#   detected — Chinese is caught only via ；/。 boundaries.
+#
+# A claim is flagged "compound" (>= 2 independent propositions) iff:
+#   (a) it contains >= 2 real sentences — './;' followed by space+capital, or
+#       a mid-text 。 — or a mid-text ;/；; or
+#   (b) a conjunction joins two CLAUSES: and/but followed by a subject pronoun
+#       (it/they/we), an underscore-symbol subject + verb ("and H_m is"), or
+#       directly by a verb ("and could have been", "and compute"); or a
+#       clause-level while/whereas (followed by det/pronoun) or ", which".
+# Coordinated objects do NOT flag: "x and y", "ω1→0 and ω1→∞", "low noise and
+# high gain", "between the gate and the source", ellipses, "Eq. (2.237).".
+# ---------------------------------------------------------------------------
+_SENT_BOUNDARY = re.compile(r"[.;]\s+[A-Z]|。(?!\s*$)")
+_VERBISH = (
+    "is|are|was|were|be|can|could|should|would|will|may|might|must|"
+    "has|have|had|do|does|did|"
+    "yields?|gives?|produces?|appears?|becomes?|equals?|leads?|results?|"
+    "causes?|implies|requires?|depends?|computes?|compute"
+)
 _CLAUSE_CONJ = re.compile(
-    r";"
-    r"|\bas well as\b"
-    r"|\b(?:and|but)\s+(?:it|they|we|this|that|these|those|the\b|its?\b|h_?\w*|"
-    r"is|are|was|were|be|can|could|should|would|will|may|might|must|"
-    r"has|have|had|do|does|did|"
-    r"yields?|gives?|produces?|appears?|becomes?|equals?|leads?|results?|"
-    r"causes?|implies|requires?|depends?|computes?|compute)\b",
+    r"[;；](?!\s*$)"
+    r"|,\s*which\b"
+    r"|\b(?:while|whereas)\s+(?:it|they|we|the|a|an)\b"
+    r"|\b(?:and|but)\s+(?:it|they|we)\b"
+    rf"|\b(?:and|but)\s+[A-Za-z]\w*_\S+\s+(?:{_VERBISH})\b"
+    rf"|\b(?:and|but)\s+(?:{_VERBISH})\b",
     re.IGNORECASE,
 )
 
@@ -48,7 +72,11 @@ def evaluate_gate(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
     """NEW-vs-OLD pass/fail. Atomicity uses a RELATIVE criterion (absolute
     atomicity is content-dependent and noisy at small sample): NEW must cut the
     compound rate to <= 0.8x OLD and stay < 0.5. Sparse-edge density and
-    validity_scope presence keep their criteria. Returns {checks, pass}."""
+    validity_scope presence keep their criteria. Returns {checks, pass}.
+
+    USAGE DISCIPLINE: this is a ONE-SHOT sanity gate on a fixed slice, built on
+    surface-proxy metrics. Do NOT iterate the extraction prompt against it
+    (Goodhart); if the prompt changes, re-run on a fresh, unseen slice."""
     checks = {
         "sparse_density_up_1.5x":
             new["sparse_per_1k_tok"] >= 1.5 * max(1e-9, old["sparse_per_1k_tok"]),

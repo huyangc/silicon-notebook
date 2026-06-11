@@ -799,7 +799,15 @@ shipped 的 gate 代码会进 PR,故先修其缺陷(否则合入一个会误判�
 
 **诚实标注:** 单次 2 窗的**完整** PASS/FAIL 仍样本噪声大——两次运行 sparse 计数翻转(run1 OLD 0→NEW 1;run2 OLD depends_on 3→NEW 2),validity_scope 也随切片内容(数学推导段 0、需器件物理段才有条件)。**稳定的整体判定需更大切片(10+ 窗,deferred,本次不发新 LLM)。** 但 compound 这一项已用真实数据稳健证明 NEW 更优,且定性证据(claim 级推导链 vs OLD 公式号链)是更可靠的方向信号。
 
-**后续(择一):** ① 接受为方向性胜利 → SA-1+2 收口提 PR(gate 已修、compound 项过、定性决定性);② 更大切片(10+ 窗)再测 sparse/scope 求稳(需新 LLM);③ 迭代 prompt 推更狠原子性(性价比低,不推荐)。SA-3(重抽底库)仍 deferred。
+#### 出样本探针与第二次修正(2026-06-11,零新 LLM)
+
+用户质询「打分逻辑会不会过拟合」→ 用 8 个出样本探针(模拟电路典型句式)实测第一次修正后的启发式:**错 6/8(3 FP + 3 FN)**——坐实过拟合(第一次修正在同 21 条上调参并验证,训练集=测试集)。化石证据:`h_?\w*` 模式是 Volterra 样本(`H_m`)的化石,误报一切 h 开头词("and **high** output resistance");裸 `the`/`its` 误报介词协同("between the gate **and the** source");重写时丢了全角 `；` 使中文复合句隐形;`while`/`whereas`/`, which` 等真连接词缺失。
+
+**第二次修正**(`sa_calibration.py` + 3 个新单测):删 `h_?\w*`/裸 `the`/`its`/`as well as`/限定词代词;符号主语收紧为「含下划线符号+紧跟动词」(`and H_m is`);`while|whereas` 须跟限定词/代词(`while the …`,不误伤 `while in saturation`);补 `,\s*which`、全角 `；`、句中 `。`。**8/8 探针通过,且 21 条样本内数字不变(OLD 0.333 / NEW 0.167,gate 仍过)**——修正只清误差源,不动结论。探针固化为 held-out 单测(`test_compound_probe_*`),已知盲区也用断言文档化(`and the <noun> <verb>` 不检——精度优先的代价)。
+
+**诚实降级(写死在代码注释 + evaluate_gate docstring):** 该启发式**仅限同切片 OLD-vs-NEW 相对比较**;禁止当绝对原子性指标;**禁止拿 gate 迭代 prompt**(表面特征可被改写绕过,Goodhart)——prompt 一改必须换全新切片重测;中文仅检 `；/。` 边界、词级连词不检;SA-3 规模标定换 LLM-judge/人工 rubric,本启发式只留作免费趋势监控。
+
+**后续(择一):** ① 接受为方向性胜利 → SA-1+2 收口提 PR(gate 已两次修正、compound 项过、定性决定性);② 更大切片(10+ 窗)再测 sparse/scope 求稳(需新 LLM);③ 迭代 prompt 推更狠原子性(性价比低,且现在被 gate 纪律禁止用旧切片)。SA-3(重抽底库)仍 deferred。
 
 ---
 

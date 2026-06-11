@@ -60,6 +60,34 @@ def test_evaluate_gate_relative_compound_passes():
     assert r["pass"] is True
 
 
+def test_compound_probe_fps_stay_atomic():
+    # Held-out probes (2026-06-11) that exposed the overfitted ruler — frozen so
+    # the sample fossils (h-word pattern, bare "and the/that") cannot return.
+    atomic = [
+        _claim("The capacitance between the gate and the source is C_gs"),
+        _claim("The cascode provides low noise and high output resistance"),
+        _claim("The mismatch between V_in and the reference causes offset"),
+        _claim("The gain of the NMOS and that of the PMOS are matched"),
+    ]
+    assert compound_claim_rate(atomic) == 0.0
+
+
+def test_compound_probe_compounds_flagged():
+    compounds = [
+        _claim("增益提高；带宽下降"),                                   # full-width ；
+        _claim("The gain increases while the bandwidth drops"),          # while-clause
+        _claim("V_th shifts, which causes the bias point to drift"),     # ", which"
+    ]
+    assert compound_claim_rate(compounds) == 1.0
+
+
+def test_compound_known_blind_spot_documented():
+    # KNOWN limitation, asserted on purpose: "and the <noun> <verb>" clauses are
+    # NOT flagged — dropping bare "the" was the price of fixing the FP probes
+    # above. If this assertion ever flips, re-verify those FP probes still pass.
+    assert compound_claim_rate([_claim("The gain is high and the bandwidth is low")]) == 0.0
+
+
 def test_evaluate_gate_fails_when_compound_not_reduced():
     old = {"sparse_per_1k_tok": 1.0, "compound_claim_rate": 0.30,
            "validity_scope_fill_rate": 0.1}
