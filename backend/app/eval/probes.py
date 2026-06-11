@@ -85,7 +85,8 @@ _VERB_RE = re.compile(
     r"|counter(s|ed)?|anticipate(s|d)?)\b", re.I)
 
 _META_RE = re.compile(
-    r"\b(this (chapter|book|text|section|paper)|next chapter|chapter \d|section \d|"
+    r"\b(this (chapter|book|text|section|paper)|(next|previous|preceding|following) chapter|"
+    r"chapter \d|section \d|"
     r"i wanted|we will|in this (chapter|book|text|section))\b", re.I)
 
 
