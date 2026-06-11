@@ -1,6 +1,6 @@
 """Deterministic KG denoising filters (pure, no IO).
 
-- should_extract_window: skip低价值抽取窗口（习题/索引/参考文献/索引式）。
+- should_extract_window: skip低价值抽取窗口（习题/索引/参考文献/索引式/前言/目录页）。
 - is_noise_concept: 判定正文噪声概念（符号/实例号/图号/章节标题/过短），
   白名单命中优先保护。
 规则最终取值以现有概念上的离线验证（scripts/validate_concept_filter.py）为准。
@@ -24,6 +24,7 @@ def _norm(name: str) -> str:
 _PROBLEM_RE = re.compile(r"(^|[>\s])problems?$|(^|[>\s])exercises?$|习题|练习", re.IGNORECASE)
 _BACKMATTER_SEGMENTS = {"index", "glossary", "references", "bibliography"}
 _BACKMATTER_CJK = ("索引", "参考文献", "术语表")
+# 精确段名匹配(不做前缀/子串), 防 'Preface to the Noise Model' 这类正文标题误伤
 _FRONTMATTER_SEGMENTS = {
     "preface", "foreword", "acknowledgments", "acknowledgements",
     "contents", "table of contents", "brief contents",

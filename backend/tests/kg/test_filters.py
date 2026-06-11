@@ -55,20 +55,33 @@ def test_frontmatter_segment_exact_match_no_false_positive():
     assert keep is True
 
 
+def test_contents_segment_blocked_as_frontmatter():
+    keep, reason = should_extract_window("Contents", [_el("x")], "textbook")
+    assert keep is False and reason == "frontmatter_section"
+
+
 def test_skips_toc_like_window():
     els = [_el("1.1 General Considerations 7"),
            _el("1.2 Costs of Integration 9"),
            _el("2.1 General Considerations 15")]
-    keep, reason = should_extract_window("Contents", [_el("x")], "textbook")
-    assert keep is False  # 段名 Contents 直接拦
-    keep2, reason2 = should_extract_window("1 Overview", els, "textbook")
-    assert keep2 is False and reason2 == "toc_like_window"
+    keep, reason = should_extract_window("1 Overview", els, "textbook")
+    assert keep is False and reason == "toc_like_window"
 
 
 def test_toc_like_not_triggered_by_body_prose():
     els = [_el("The gain of the amplifier is set by the ratio of resistors."),
            _el("2.1 The small-signal model applies at low frequencies.")]
     keep, _ = should_extract_window("2 > 2.1 Body", els, "textbook")
+    assert keep is True
+
+
+def test_spec_like_lines_below_ratio_threshold_kept():
+    # "1.2 V supply 3" 单行确实命中 _TOC_LINE_RE(已知限制),
+    # 但正文窗口中此类行占比 < 0.6 → 不跳。固化该阈值保护行为。
+    els = [_el("1.2 V supply 3"),
+           _el("The amplifier operates from a single supply rail."),
+           _el("Gain accuracy depends on resistor matching.")]
+    keep, _ = should_extract_window("4 > 4.2 Body", els, "textbook")
     assert keep is True
 
 
