@@ -1399,6 +1399,11 @@ class SQLiteRepository:
                 override=self.settings.kg_window_target_chars,
             )
             whitelist = self.concept_whitelist_terms()
+            with self._connect() as db:
+                _nb = db.execute(
+                    "SELECT tier FROM notebooks WHERE id=?", (source.notebook_id,)
+                ).fetchone()
+            base_filter = bool(_nb and _nb["tier"] == "base")
             graph = kg_ingest.extract_graph(
                 self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
                 n=n_chars,
@@ -1406,6 +1411,7 @@ class SQLiteRepository:
                 whitelist=whitelist,
                 refine=self.settings.kg_refine_enabled,
                 gleaning_rounds=(self.settings.kg_gleaning_rounds if self.settings.kg_gleaning_enabled else 0),
+                base_filter=base_filter,
             )
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
