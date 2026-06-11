@@ -178,3 +178,9 @@ def test_technical_claims_kept():
         "Thermal noise increases with temperature",
     ]:
         assert is_meta_claim(s)[0] is False, s
+
+
+def test_this_section_circuit_sense_false_positive_documented():
+    # 已知误杀基线: "this section" 指电路区段时也会命中(见 filters.py 注释
+    # 的权衡说明)。若此测试开始失败, 说明口径变了, 需重新评估拦截/误杀面。
+    assert is_meta_claim("This section of the filter has a low-pass characteristic")[0] is True

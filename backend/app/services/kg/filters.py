@@ -115,6 +115,9 @@ def is_noise_concept(name: str, whitelist) -> Tuple[bool, str]:
 # --- meta-narrative claim filter ---
 # 口径刻意比 eval 探针(app/eval/probes.py _META_RE)窄: 只拦明确指涉文档自身的
 # 句式, 零误杀优先; 评测侧保持宽口径作"疑似信号"。
+# 已知权衡: "this section" 在电路语境可指电路区段(如 "this section of the
+# filter"), 会被误杀——接受, 因为 LLM 抽取偏好通用原理句, 实例描述通常落
+# evidence 而非 Claim; "section N" 谓词表刻意短于 "chapter N"(漏拦不误杀)。
 _META_CLAIM_RE = re.compile(
     r"\b(this (book|chapter|text|section|paper)\b"
     r"|in this (book|chapter|text|section)\b"
