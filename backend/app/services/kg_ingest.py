@@ -10,7 +10,7 @@ from typing import Any, List, Tuple
 from app.services.kg.windowing import windows_with_elements
 from app.services.kg.extract import extract_window
 from app.services.kg.canonicalize import canonicalize
-from app.services.kg.filters import should_extract_window, is_noise_concept
+from app.services.kg.filters import should_extract_window, is_noise_concept, is_meta_claim
 from app.services.kg.models import Edge, KnowledgeGraph, Node
 from app.services.kg.scheduler import submit_window
 
@@ -150,6 +150,21 @@ def drop_noise_concepts(nodes: List[Node], edges: List[Edge],
     return kept_nodes, kept_edges, dropped
 
 
+def drop_meta_claims(nodes: List[Node], edges: List[Edge]) -> Tuple[List[Node], List[Edge], int]:
+    """丢弃元叙述 Claim(讲文档自身的断言), 并移除悬空边。仅对 Claim 生效。"""
+    kept_ids = set()
+    kept_nodes: List[Node] = []
+    dropped = 0
+    for nd in nodes:
+        if nd.type == "Claim" and is_meta_claim(nd.name)[0]:
+            dropped += 1
+            continue
+        kept_ids.add(nd.id)
+        kept_nodes.append(nd)
+    kept_edges = [e for e in edges if e.source_id in kept_ids and e.target_id in kept_ids]
+    return kept_nodes, kept_edges, dropped
+
+
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                   n: int = 9000, m: int = 450, whitelist=frozenset(),
                   refine: bool = False, gleaning_rounds: int = 0,
@@ -185,8 +200,10 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
             except Exception:
                 failed += 1
     nodes, edges, concepts_dropped = drop_noise_concepts(nodes, edges, whitelist)
+    nodes, edges, claims_dropped = drop_meta_claims(nodes, edges)
     nodes, edges = canonicalize(nodes, edges, doc_id=source_file)
     return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes,
                           edges=edges, total_windows=len(pairs),
                           failed_windows=failed, windows_skipped=windows_skipped,
-                          concepts_dropped=concepts_dropped)
+                          concepts_dropped=concepts_dropped,
+                          claims_dropped=claims_dropped)

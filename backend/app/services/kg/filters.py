@@ -110,3 +110,25 @@ def is_noise_concept(name: str, whitelist) -> Tuple[bool, str]:
     if _INSTANCE_RE.match(raw):
         return True, "instance_label"
     return False, ""
+
+
+# --- meta-narrative claim filter ---
+# 口径刻意比 eval 探针(app/eval/probes.py _META_RE)窄: 只拦明确指涉文档自身的
+# 句式, 零误杀优先; 评测侧保持宽口径作"疑似信号"。
+_META_CLAIM_RE = re.compile(
+    r"\b(this (book|chapter|text|section|paper)\b"
+    r"|in this (book|chapter|text|section)\b"
+    r"|(next|previous|preceding|following) chapter\b"
+    r"|chapter \d+ (presents?|covers?|deals?|discuss(es)?|provides?|forms?"
+    r"|introduces?|can be|may (not )?fit|is relatively)"
+    r"|section \d+(\.\d+)* (gave|gives?|presents?|covers?|discuss(es)?)"
+    r"|i wanted to\b"
+    r"|we will (see|discuss|cover|return)\b)",
+    re.IGNORECASE)
+
+
+def is_meta_claim(name: str) -> Tuple[bool, str]:
+    """元叙述/导航类 Claim(讲文档自身而非技术内容) → 确定性丢弃。"""
+    if _META_CLAIM_RE.search((name or "").strip()):
+        return True, "meta_narrative"
+    return False, ""

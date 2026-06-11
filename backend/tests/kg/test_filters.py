@@ -148,3 +148,33 @@ def test_section_heading_vs_measurement_or_standard():
     # decimals that are measurements / standards / ratios -> keep
     for n in ["0.8 μm CMOS process", "802.11g band", "1.25 divider"]:
         assert is_noise_concept(n, WL)[0] is False, n
+
+
+# ---- is_meta_claim ----
+
+from app.services.kg.filters import is_meta_claim
+
+
+def test_meta_claims_dropped():
+    for s in [
+        "This book deals with the analysis and design of RF integrated circuits",
+        "CMOS technology is the subject of this text.",
+        "Chapter 9 presents the topic of switched capacitor circuits.",
+        "This chapter forms the foundation for synthesizers.",
+        "Section 1.1 gave a definition of signals in analog circuits",
+        "I wanted to teach design in addition to analysis",
+        "In this chapter, we will see the noise model of the MOSFET",
+    ]:
+        hit, reason = is_meta_claim(s)
+        assert hit is True and reason == "meta_narrative", s
+
+
+def test_technical_claims_kept():
+    for s in [
+        # 真断言不得误杀——含 chapter/section 词但指涉技术对象或他文引用
+        "The input section of the op amp dominates the noise budget",
+        "MOS transistors continue to become faster, but at the cost of their 'analog' properties.",
+        "The slew rate is set by the compensation capacitor.",
+        "Thermal noise increases with temperature",
+    ]:
+        assert is_meta_claim(s)[0] is False, s

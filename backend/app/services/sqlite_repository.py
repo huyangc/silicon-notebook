@@ -1427,7 +1427,7 @@ class SQLiteRepository:
                 db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
                            (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} "
                             f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
-                            f"concepts_dropped={graph.concepts_dropped}", _now(), run_id))
+                            f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped}", _now(), run_id))
         except Exception as exc:
             with self._write() as db:
                 db.execute("UPDATE extraction_runs SET status='failed', error_message=?, updated_at=? WHERE id=?",
