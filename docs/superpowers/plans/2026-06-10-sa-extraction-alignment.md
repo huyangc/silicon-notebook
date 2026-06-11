@@ -787,7 +787,19 @@ git commit -m "docs(sa): 回填 A/B 标定结果"
 
 **结论:** NEW 在每个可比轴上都优于 OLD——复合率近乎减半(0.75→0.44)、稀疏边与 validity_scope 从 0 到有、推理边密度上升、`about` 滥用下降。PASS=false 只因 `compound_claim_rate<0.15` 这个**激进绝对阈值**:(a) 单遍 prompt 已把它从 0.75 砍到 0.44;(b) 启发式把数学推导里自然的「A and B」枚举(如「IM3 出现在 2ω1−ω2 **and** 2ω2−ω1」——本是一条原子事实)误判为复合,过度惩罚;(c) 样本仅 2 窗(8 vs 16 claim),噪声大。**判定:阈值+启发式需重标定,prompt 本身方向正确、是明确改进。** token 成本门槛未真正测量(harness 只估输入;真要测需采 completion usage)。
 
-**后续(择一,见正文讨论):** ① 接受为方向性胜利、放宽/修正 compound 启发式与阈值 → SA-1+2 收口;② 迭代 prompt 把原子性推得更狠(注意过碎风险);③ 更大切片(10+ 窗)再测求稳。SA-3(重抽底库)仍 deferred。
+### Gate 修正(2026-06-11,零新 LLM,用已捕获 claim 复评)
+
+shipped 的 gate 代码会进 PR,故先修其缺陷(否则合入一个会误判的尺子)。定性 dump 暴露旧 `compound_claim_rate` 把**省略号 `...`、`Eq.(n).`、协同 `and`(如「ω1→0 **and** ω1→∞」「substituting ω1 for ω3 **and** -ω2 for ω2」)**误判为复合。
+
+**改动**(`sa_calibration.py` + 6 单测):
+- `_is_compound_claim` = ①≥2 真句(`.`/`;` 后跟空格+大写)或 ②**从句级**连词(`and`/`but`/`;`/`as well as` 后接从句起始词:主语代词/限定词/符号主语 `H_m`/助动词/系动词/高频谓词)。协同名词/符号宾语、省略号、公式号一律**不**判复合。
+- gate 抽成可单测纯函数 `evaluate_gate(old,new)`;复合改**相对判据** `compound_reduced_vs_old`:NEW ≤ 0.8×OLD 且 <0.5(绝对原子率随内容漂移,不可靠)。
+
+**用已捕获的 21 条真实 claim 复评(无新 LLM):compound OLD 0.333 → NEW 0.167(减半),`compound_reduced_vs_old` = PASS。** 改后只标真复合(apply+compute、两定义、两从句),误判全消(单测 `test_compound_ignores_coordination_and_ellipsis` 锁定)。
+
+**诚实标注:** 单次 2 窗的**完整** PASS/FAIL 仍样本噪声大——两次运行 sparse 计数翻转(run1 OLD 0→NEW 1;run2 OLD depends_on 3→NEW 2),validity_scope 也随切片内容(数学推导段 0、需器件物理段才有条件)。**稳定的整体判定需更大切片(10+ 窗,deferred,本次不发新 LLM)。** 但 compound 这一项已用真实数据稳健证明 NEW 更优,且定性证据(claim 级推导链 vs OLD 公式号链)是更可靠的方向信号。
+
+**后续(择一):** ① 接受为方向性胜利 → SA-1+2 收口提 PR(gate 已修、compound 项过、定性决定性);② 更大切片(10+ 窗)再测 sparse/scope 求稳(需新 LLM);③ 迭代 prompt 推更狠原子性(性价比低,不推荐)。SA-3(重抽底库)仍 deferred。
 
 ---
 

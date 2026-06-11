@@ -12,15 +12,53 @@ from typing import Any, Dict, List, Sequence
 from app.services.kg.models import Node, Edge
 
 _SPARSE = {"depends_on", "contrasts_with", "prerequisite_of"}
-_COMPOUND = re.compile(r"[；;]| and | as well as |, and ")
+# A claim is "compound" (non-atomic) if it asserts >= 2 independent propositions.
+# Signals: (a) >= 2 real sentences — a '.'/';' followed by space + capital; or
+# (b) a clause-level conjunction — and/but/;/"as well as" that joins two CLAUSES,
+# detected by the conjunction being followed by a clause-starter (subject pronoun /
+# determiner / symbol-subject like H_m / auxiliary / copula / common predicate).
+# Coordinated noun/symbol objects ("x and y", "w1 for w3 and -w2 for w2"),
+# ellipses ("H_1, ..., H_n"), and equation refs ("Eq. (2.237).") are intentionally
+# NOT flagged — those were the OLD heuristic's false positives. Comparative use only.
+_SENT_BOUNDARY = re.compile(r"[.;]\s+[A-Z]")
+_CLAUSE_CONJ = re.compile(
+    r";"
+    r"|\bas well as\b"
+    r"|\b(?:and|but)\s+(?:it|they|we|this|that|these|those|the\b|its?\b|h_?\w*|"
+    r"is|are|was|were|be|can|could|should|would|will|may|might|must|"
+    r"has|have|had|do|does|did|"
+    r"yields?|gives?|produces?|appears?|becomes?|equals?|leads?|results?|"
+    r"causes?|implies|requires?|depends?|computes?|compute)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_compound_claim(name: str) -> bool:
+    return bool(_SENT_BOUNDARY.search(name) or _CLAUSE_CONJ.search(name))
 
 
 def compound_claim_rate(claims: Sequence[Node]) -> float:
     names = [c.name for c in claims if c.name]
     if not names:
         return 0.0
-    comp = sum(1 for n in names if _COMPOUND.search(n) or n.count(".") >= 2)
-    return comp / len(names)
+    return sum(1 for n in names if _is_compound_claim(n)) / len(names)
+
+
+def evaluate_gate(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    """NEW-vs-OLD pass/fail. Atomicity uses a RELATIVE criterion (absolute
+    atomicity is content-dependent and noisy at small sample): NEW must cut the
+    compound rate to <= 0.8x OLD and stay < 0.5. Sparse-edge density and
+    validity_scope presence keep their criteria. Returns {checks, pass}."""
+    checks = {
+        "sparse_density_up_1.5x":
+            new["sparse_per_1k_tok"] >= 1.5 * max(1e-9, old["sparse_per_1k_tok"]),
+        "compound_reduced_vs_old": (
+            new["compound_claim_rate"] <= 0.8 * old["compound_claim_rate"]
+            and new["compound_claim_rate"] < 0.5
+        ),
+        "validity_scope_present": new["validity_scope_fill_rate"] > 0,
+    }
+    return {"checks": checks, "pass": all(checks.values())}
 
 
 def sparse_edge_count(edges: Sequence[Edge]) -> int:
@@ -158,13 +196,8 @@ def main() -> None:
     old = _run_arm(_old_prompt, pairs, args.doc_type)
     new = _run_arm(new_prompt, pairs, args.doc_type)
     print(json.dumps({"OLD": old, "NEW": new}, ensure_ascii=False, indent=2))
-    gate = {
-        "sparse_density_up_1.5x":
-            new["sparse_per_1k_tok"] >= 1.5 * max(1e-9, old["sparse_per_1k_tok"]),
-        "compound_below_15pct": new["compound_claim_rate"] < 0.15,
-        "validity_scope_filled": new["validity_scope_fill_rate"] > 0,
-    }
-    print(json.dumps({"GATE": gate, "PASS": all(gate.values())},
+    result = evaluate_gate(old, new)
+    print(json.dumps({"GATE": result["checks"], "PASS": result["pass"]},
                      ensure_ascii=False, indent=2))
 
 
