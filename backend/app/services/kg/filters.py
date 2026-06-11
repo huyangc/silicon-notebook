@@ -24,7 +24,15 @@ def _norm(name: str) -> str:
 _PROBLEM_RE = re.compile(r"(^|[>\s])problems?$|(^|[>\s])exercises?$|习题|练习", re.IGNORECASE)
 _BACKMATTER_SEGMENTS = {"index", "glossary", "references", "bibliography"}
 _BACKMATTER_CJK = ("索引", "参考文献", "术语表")
+_FRONTMATTER_SEGMENTS = {
+    "preface", "foreword", "acknowledgments", "acknowledgements",
+    "contents", "table of contents", "brief contents",
+    "about the author", "about the authors",
+    "to the instructor", "to the student", "suggestions for instructors",
+}
+_FRONTMATTER_CJK = ("前言", "目录", "致谢", "序言")
 _INDEX_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 /\-(),]+,\s*\d+([,–\-\s\d]+)?$")
+_TOC_LINE_RE = re.compile(r"^\d+(\.\d+)*\s+\S.{0,90}?\s+\d{1,4}$")
 
 
 def _index_like_ratio(elements: Sequence[SourceElementQ]) -> float:
@@ -32,6 +40,14 @@ def _index_like_ratio(elements: Sequence[SourceElementQ]) -> float:
     if not texts:
         return 0.0
     hits = sum(1 for t in texts if _INDEX_LINE_RE.match(t))
+    return hits / len(texts)
+
+
+def _toc_like_ratio(elements: Sequence[SourceElementQ]) -> float:
+    texts = [(e.text or "").strip() for e in elements if (e.text or "").strip()]
+    if not texts:
+        return 0.0
+    hits = sum(1 for t in texts if _TOC_LINE_RE.match(t))
     return hits / len(texts)
 
 
@@ -45,6 +61,15 @@ def _is_backmatter(section_path: str) -> bool:
     return any(t in (section_path or "") for t in _BACKMATTER_CJK)
 
 
+def _is_frontmatter(section_path: str) -> bool:
+    """Exact-segment match like _is_backmatter (avoids 'Preface to the Noise
+    Model' false positives). CJK terms match as substring."""
+    for seg in (section_path or "").split(">"):
+        if seg.strip().lower() in _FRONTMATTER_SEGMENTS:
+            return True
+    return any(t in (section_path or "") for t in _FRONTMATTER_CJK)
+
+
 def should_extract_window(section_path: str, elements: Sequence[SourceElementQ],
                           doc_type: str) -> Tuple[bool, str]:
     path = section_path or ""
@@ -52,8 +77,12 @@ def should_extract_window(section_path: str, elements: Sequence[SourceElementQ],
         return False, "textbook_problem_section"
     if _is_backmatter(path):
         return False, "backmatter_section"
+    if _is_frontmatter(path):
+        return False, "frontmatter_section"
     if _index_like_ratio(elements) >= 0.6:
         return False, "index_like_window"
+    if _toc_like_ratio(elements) >= 0.6:
+        return False, "toc_like_window"
     return True, ""
 
 

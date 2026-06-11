@@ -39,6 +39,39 @@ def test_problem_skip_only_for_textbook():
     assert keep is True
 
 
+def test_skips_frontmatter_sections():
+    for path in ["Preface", "PREFACE", "To the Instructor", "Foreword",
+                 "Acknowledgments", "前言", "目录"]:
+        keep, reason = should_extract_window(
+            path, [_el("This book deals with the analysis of RF circuits.")], "textbook")
+        assert keep is False and reason == "frontmatter_section", path
+
+
+def test_frontmatter_segment_exact_match_no_false_positive():
+    # 段内含 "preface" 词但不是 frontmatter 段名 → 不拦
+    keep, _ = should_extract_window(
+        "3 > 3.2 Preface to the Noise Model",
+        [_el("Thermal noise arises from random carrier motion.")], "textbook")
+    assert keep is True
+
+
+def test_skips_toc_like_window():
+    els = [_el("1.1 General Considerations 7"),
+           _el("1.2 Costs of Integration 9"),
+           _el("2.1 General Considerations 15")]
+    keep, reason = should_extract_window("Contents", [_el("x")], "textbook")
+    assert keep is False  # 段名 Contents 直接拦
+    keep2, reason2 = should_extract_window("1 Overview", els, "textbook")
+    assert keep2 is False and reason2 == "toc_like_window"
+
+
+def test_toc_like_not_triggered_by_body_prose():
+    els = [_el("The gain of the amplifier is set by the ratio of resistors."),
+           _el("2.1 The small-signal model applies at low frequencies.")]
+    keep, _ = should_extract_window("2 > 2.1 Body", els, "textbook")
+    assert keep is True
+
+
 # ---- is_noise_concept ----
 
 WL = frozenset()
