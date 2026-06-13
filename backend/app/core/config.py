@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     reasoning_max_steps: int = Field(50, env="REASONING_MAX_STEPS")
     # 推理模式 Plan 输出子查询数上限。
     reasoning_max_subqueries: int = Field(5, env="REASONING_MAX_SUBQUERIES")
+    # 退化循环熔断: 连续 N 轮无有效进展(含反复请求已访问节点)即强制收尾作答,
+    # 不空转到 reasoning_max_steps; search_elements 累计次数上限(防"每次有新增但永不满足")。
+    reasoning_stale_limit: int = Field(3, env="REASONING_STALE_LIMIT")
+    reasoning_max_element_searches: int = Field(5, env="REASONING_MAX_ELEMENT_SEARCHES")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, env="REASONING_TIMEOUT_SECONDS")

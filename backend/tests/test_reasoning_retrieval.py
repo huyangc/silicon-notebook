@@ -84,6 +84,11 @@ def rrepo(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_API_KEY", "test-key")
     monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
+    # 隔离 LLM/推理端点：清空真实 key，避免本地 .env(env_file=../.env) 让 reasoning
+    # 测试打真实网络(reasoning_llm_client 不 configured 时回退到测试桩 llm_client)。
+    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
+        monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
     r.embedder = FakeEmbedder(dim=16)
     return r
@@ -539,3 +544,118 @@ def test_run_initial_retrieval_swallows_single_search_failure(rrepo, monkeypatch
     retrieve_steps = [t for t in res.trace if t.step_type == "retrieve"]
     assert retrieve_steps[0].detail["count"] == 1          # 只剩成功者
     assert {h.object_id for h in res.top_hits} == {"ok-id"}
+
+
+# ---- 退化循环熔断 (reasoning loop guard) ----
+
+def test_reasoning_loop_guard_knobs():
+    from app.core.config import Settings
+    s = Settings()
+    assert s.reasoning_stale_limit == 3
+    assert s.reasoning_max_element_searches == 5
+
+
+def test_run_stale_breaker_on_repeated_visited_expand(rrepo, monkeypatch):
+    """模式A: reflect 反复请求展开同一已访问节点 → 连续无进展, stale 熔断提前收尾
+    (远早于 reasoning_max_steps=50, 不再空转几十轮)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_max_steps = 50
+    rrepo.settings.reasoning_stale_limit = 3
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
+    monkeypatch.setattr(ReasoningRetriever, "neighbors",
+                        lambda self, n, oid, edge_type=None, direction="both": [_mk_rk("B", "nodeB")])
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "q"}]},
+        reflects=[{"next_action": "expand_graph", "expand": {"object_id": "A"}}] * 40)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
+    assert len(reflect_steps) <= 5             # stale 熔断: 远小于 50
+    assert res.trace[-1].step_type == "answer" # 仍正常收尾
+
+
+def test_run_caps_repeated_element_search(rrepo, monkeypatch):
+    """模式B: reflect 反复 search_elements 且每次都有"新"原文段(no_progress 不触发),
+    靠 element 搜索次数上限熔断, 不空转到 reasoning_max_steps。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.retrieval import RetrievedElement
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_max_steps = 50
+    rrepo.settings.reasoning_max_element_searches = 4
+    rrepo.settings.reasoning_stale_limit = 3
+    counter = {"n": 0}
+
+    def fake_elements(self, n, q):
+        counter["n"] += 1
+        return [RetrievedElement(element_id=f"e{counter['n']}", source_id="s",
+                                 source_title="src", location_label="L",
+                                 element_type="paragraph", text="原文段")]
+
+    monkeypatch.setattr(ReasoningRetriever, "search_elements", fake_elements)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "q"}]},
+        reflects=[{"next_action": "search_elements", "elements_query": "q"}] * 40)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    assert counter["n"] <= 4                   # 实际执行的 element 检索不超过上限
+    reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
+    assert len(reflect_steps) < 20             # 远小于 50
+    assert res.trace[-1].step_type == "answer"
+
+
+def test_run_does_not_break_while_progressing(rrepo, monkeypatch):
+    """熔断不误杀: 只要每轮 expand 带来新节点(有进展), stale 一直重置, 不提前终止
+    —— 保证有效深挖不被熔断打断。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_max_steps = 50
+    rrepo.settings.reasoning_stale_limit = 3
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_mk_rk("seed", "seed")])
+    seq = {"n": 0}
+
+    def fake_neighbors(self, n, oid, edge_type=None, direction="both"):
+        seq["n"] += 1
+        return [_mk_rk(f"nb{seq['n']}", f"nb{seq['n']}")]   # 每轮全新邻居
+
+    monkeypatch.setattr(ReasoningRetriever, "neighbors", fake_neighbors)
+    reflects = [{"next_action": "expand_graph", "expand": {"object_id": f"x{i}"}}
+                for i in range(5)]                          # 5 轮深挖不同节点
+    reflects.append({"next_action": "answer", "sufficient": True})
+    rrepo.llm_client = _SeqLLM(plan={"sub_queries": [{"query": "q"}]}, reflects=reflects)
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
+    assert len(reflect_steps) == 6             # 5 轮有进展深挖 + 1 轮 answer, 未误熔断
+
+
+def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
+    """已访问节点回喂: 展开过的节点应出现在后续 reflect 的输入里, 提示模型勿重复请求
+    (治模式A的根源——模型反复请求同一节点)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_stale_limit = 10  # 调高避免熔断先于断言触发
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
+    monkeypatch.setattr(ReasoningRetriever, "neighbors",
+                        lambda self, n, oid, edge_type=None, direction="both": [_mk_rk("B", "nodeB")])
+    prompts = []
+
+    class _RecLLM:
+        configured = True
+
+        def __init__(self):
+            self._r = [{"next_action": "expand_graph", "expand": {"object_id": "A"}},
+                       {"next_action": "answer", "sufficient": True}]
+
+        def chat_json(self, messages, schema_hint, **kw):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "q"}]})
+            prompts.append(messages[-1]["content"])
+            return json.dumps(self._r.pop(0) if self._r else {"next_action": "answer", "sufficient": True})
+
+    rrepo.llm_client = _RecLLM()
+    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    assert len(prompts) >= 2
+    # 第1轮 expand A 后, 第2轮 reflect 输入应带"已展开/已访问"节点提示, 含节点标识
+    assert "nodeA" in prompts[1] or "A" in prompts[1]
+    assert ("已展开" in prompts[1] or "已访问" in prompts[1] or "visited" in prompts[1].lower())
