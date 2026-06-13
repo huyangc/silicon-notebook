@@ -39,6 +39,52 @@ def test_problem_skip_only_for_textbook():
     assert keep is True
 
 
+def test_skips_frontmatter_sections():
+    for path in ["Preface", "PREFACE", "To the Instructor", "Foreword",
+                 "Acknowledgments", "前言", "目录"]:
+        keep, reason = should_extract_window(
+            path, [_el("This book deals with the analysis of RF circuits.")], "textbook")
+        assert keep is False and reason == "frontmatter_section", path
+
+
+def test_frontmatter_segment_exact_match_no_false_positive():
+    # 段内含 "preface" 词但不是 frontmatter 段名 → 不拦
+    keep, _ = should_extract_window(
+        "3 > 3.2 Preface to the Noise Model",
+        [_el("Thermal noise arises from random carrier motion.")], "textbook")
+    assert keep is True
+
+
+def test_contents_segment_blocked_as_frontmatter():
+    keep, reason = should_extract_window("Contents", [_el("x")], "textbook")
+    assert keep is False and reason == "frontmatter_section"
+
+
+def test_skips_toc_like_window():
+    els = [_el("1.1 General Considerations 7"),
+           _el("1.2 Costs of Integration 9"),
+           _el("2.1 General Considerations 15")]
+    keep, reason = should_extract_window("1 Overview", els, "textbook")
+    assert keep is False and reason == "toc_like_window"
+
+
+def test_toc_like_not_triggered_by_body_prose():
+    els = [_el("The gain of the amplifier is set by the ratio of resistors."),
+           _el("2.1 The small-signal model applies at low frequencies.")]
+    keep, _ = should_extract_window("2 > 2.1 Body", els, "textbook")
+    assert keep is True
+
+
+def test_spec_like_lines_below_ratio_threshold_kept():
+    # "1.2 V supply 3" 单行确实命中 _TOC_LINE_RE(已知限制),
+    # 但正文窗口中此类行占比 < 0.6 → 不跳。固化该阈值保护行为。
+    els = [_el("1.2 V supply 3"),
+           _el("The amplifier operates from a single supply rail."),
+           _el("Gain accuracy depends on resistor matching.")]
+    keep, _ = should_extract_window("4 > 4.2 Body", els, "textbook")
+    assert keep is True
+
+
 # ---- is_noise_concept ----
 
 WL = frozenset()
@@ -102,3 +148,39 @@ def test_section_heading_vs_measurement_or_standard():
     # decimals that are measurements / standards / ratios -> keep
     for n in ["0.8 μm CMOS process", "802.11g band", "1.25 divider"]:
         assert is_noise_concept(n, WL)[0] is False, n
+
+
+# ---- is_meta_claim ----
+
+from app.services.kg.filters import is_meta_claim
+
+
+def test_meta_claims_dropped():
+    for s in [
+        "This book deals with the analysis and design of RF integrated circuits",
+        "CMOS technology is the subject of this text.",
+        "Chapter 9 presents the topic of switched capacitor circuits.",
+        "This chapter forms the foundation for synthesizers.",
+        "Section 1.1 gave a definition of signals in analog circuits",
+        "I wanted to teach design in addition to analysis",
+        "In this chapter, we will see the noise model of the MOSFET",
+    ]:
+        hit, reason = is_meta_claim(s)
+        assert hit is True and reason == "meta_narrative", s
+
+
+def test_technical_claims_kept():
+    for s in [
+        # 真断言不得误杀——含 chapter/section 词但指涉技术对象或他文引用
+        "The input section of the op amp dominates the noise budget",
+        "MOS transistors continue to become faster, but at the cost of their 'analog' properties.",
+        "The slew rate is set by the compensation capacitor.",
+        "Thermal noise increases with temperature",
+    ]:
+        assert is_meta_claim(s)[0] is False, s
+
+
+def test_this_section_circuit_sense_false_positive_documented():
+    # 已知误杀基线: "this section" 指电路区段时也会命中(见 filters.py 注释
+    # 的权衡说明)。若此测试开始失败, 说明口径变了, 需重新评估拦截/误杀面。
+    assert is_meta_claim("This section of the filter has a low-pass characteristic")[0] is True

@@ -79,10 +79,14 @@ _VERB_RE = re.compile(
     r"biases|couples?|filters?|samples?|stores?|computes?|assumes?|suffers?|"
     r"avoids?|prevents?|ensures?|exploits?|constitutes?|characterizes?|"
     r"illustrates?|demonstrates?|indicates?|suggests?|implies|imply|refers?|"
-    r"denotes?|consumes?|emerges?|arises?|leads?|enable|model|models)\b", re.I)
+    r"denotes?|consumes?|emerges?|arises?|leads?|enable|model|models|"
+    r"become(s)?|became|becoming|continue(s|d)?|detect(s|ed)?|activate(s|d)?"
+    r"|fall(s)?|fell|converted|filtered|adjust(s|ed)?|delay(s|ed)?"
+    r"|counter(s|ed)?|anticipate(s|d)?)\b", re.I)
 
 _META_RE = re.compile(
-    r"\b(this (chapter|book|text|section|paper)|next chapter|chapter \d|section \d|"
+    r"\b(this (chapter|book|text|section|paper)|(next|previous|preceding|following) chapter|"
+    r"chapter \d|section \d|"
     r"i wanted|we will|in this (chapter|book|text|section))\b", re.I)
 
 
