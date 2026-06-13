@@ -21,6 +21,8 @@ from app.models.schemas import (
     ConversationRenameRequest,
     ConversationSummary,
     DerivedRuleCandidate,
+    DetectDocTypesRequest,
+    DetectedDocType,
     DuplicateGroup,
     EdgeReviewItem,
     EdgeReviewRequest,
@@ -108,6 +110,22 @@ def list_doc_types():
 
     return [{"id": "", "label": "自动检测"}] + [
         {"id": profile.id, "label": profile.label} for profile in PROFILES.values()
+    ]
+
+
+@router.post("/detect-doc-types", response_model=List[DetectedDocType])
+def detect_doc_types(payload: DetectDocTypesRequest) -> List[DetectedDocType]:
+    """Best-effort document-type detection from leading text samples, batched
+    (one request for many files). Used by the upload picker to pre-fill each
+    file's type; doc_type_id '' means undetected so the UI shows '自动检测'."""
+    from app.services.extraction_profiles import detect_doc_type_from_sample
+
+    return [
+        DetectedDocType(
+            name=item.name,
+            doc_type_id=detect_doc_type_from_sample(item.sample) or "",
+        )
+        for item in payload.items
     ]
 
 

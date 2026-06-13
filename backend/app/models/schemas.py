@@ -376,6 +376,23 @@ class SetTierRequest(BaseModel):
     tier: str   # "base" | "personal"
 
 
+class DetectDocTypeItem(BaseModel):
+    """One file's name + leading text sample for upload-time type detection."""
+    name: str
+    sample: str = ""
+
+
+class DetectDocTypesRequest(BaseModel):
+    """Payload for POST /detect-doc-types (batched, one request for many files)."""
+    items: List[DetectDocTypeItem] = Field(default_factory=list)
+
+
+class DetectedDocType(BaseModel):
+    """Detection result per file; doc_type_id '' means undetected (-> auto)."""
+    name: str
+    doc_type_id: str
+
+
 class DuplicateGroup(BaseModel):
     object_type: str
     similarity: float
