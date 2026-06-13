@@ -1407,9 +1407,44 @@ export default function Home() {
       setStatusText("Select PDF, Markdown, DOCX, PPTX, CSV or Excel files");
       return;
     }
-    setStagedFiles(picked);
-    setStagedDocTypes(picked.map(() => ""));
+    // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
+    const merged = [...stagedFiles];
+    const mergedTypes = [...stagedDocTypes];
+    const added: File[] = [];
+    for (const file of picked) {
+      if (!merged.some((existing) => existing.name === file.name && existing.size === file.size)) {
+        merged.push(file);
+        mergedTypes.push("");
+        added.push(file);
+      }
+    }
+    setStagedFiles(merged);
+    setStagedDocTypes(mergedTypes);
     setSourceModalOpen(true);
+    // 对新增的文本类文件做内容检测，预填类型下拉（异步，不阻塞 UI；用户仍可改）。
+    void detectStagedTypes(added, merged);
+  }
+
+  // 读文本类文件前 8KB → 批量调 /detect-doc-types → 回填仍为空（未手动选）的类型。
+  async function detectStagedTypes(added: File[], fullList: File[]) {
+    const textFiles = added.filter((file) => /\.(md|markdown|csv|txt)$/i.test(file.name));
+    if (textFiles.length === 0) return;
+    try {
+      const items = await Promise.all(
+        textFiles.map(async (file) => ({ name: file.name, sample: await file.slice(0, 8000).text() }))
+      );
+      const results = await api<Array<{ name: string; doc_type_id: string }>>("/detect-doc-types", {
+        method: "POST",
+        body: JSON.stringify({ items })
+      });
+      const byName: Record<string, string> = {};
+      results.forEach((r) => { if (r.doc_type_id) byName[r.name] = r.doc_type_id; });
+      if (Object.keys(byName).length === 0) return;
+      // 按 fullList 的位置回填；只填仍为空的项，不覆盖用户已手动选择的。
+      setStagedDocTypes((prev) => prev.map((dt, i) => (dt ? dt : (byName[fullList[i]?.name] ?? dt))));
+    } catch {
+      // 检测失败不影响上传：保持"自动检测"，用户可手动选。
+    }
   }
 
   function setStagedDocType(index: number, value: string) {

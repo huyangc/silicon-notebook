@@ -2341,6 +2341,33 @@ button.chat-session-card {
   overflow: hidden;
 }
 
+.source-modal-card {
+  /* 卡片限高在视口内并纵向布局，避免文件多时整卡超出视口、底部上传按钮被裁掉 */
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.source-modal-card > .source-modal-header,
+.source-modal-card > .drop-zone {
+  flex: 0 0 auto;
+}
+
+.source-modal-card > .source-detail-body {
+  /* 由 flex 接管高度（覆盖公共 max-height），文件列表在剩余空间内滚动 */
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.source-modal-card .tag-row {
+  /* 上传/清空按钮吸附滚动区底部，始终可见可点 */
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  padding-top: 10px;
+}
+
 .utility-modal {
   position: fixed;
   inset: 0;

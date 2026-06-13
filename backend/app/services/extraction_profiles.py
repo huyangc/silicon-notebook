@@ -177,11 +177,13 @@ def _document_sample(
     return "\n".join(parts)
 
 
-def detect_doc_type(
-    title: str, elements: Sequence[SourceElement]
-) -> Optional[str]:
-    """Return a profile id if the document clearly looks like one type, else None."""
-    sample = _document_sample(title, elements)
+def detect_doc_type_from_sample(sample: str) -> Optional[str]:
+    """Classify a raw text sample (title + leading content already joined).
+
+    Returns a profile id only when one type clearly dominates (>= _DETECT_MIN_HITS
+    cue hits AND a >= _DETECT_MIN_LEAD lead over the runner-up); else None so the
+    caller can fall back to a default / 'auto'. Shared by content-based detection
+    (detect_doc_type) and the upload-time POST /detect-doc-types endpoint."""
     if not sample.strip():
         return None
     scores: List[tuple[str, int]] = []
@@ -197,6 +199,13 @@ def detect_doc_type(
     if best_hits >= _DETECT_MIN_HITS and best_hits - runner_up >= _DETECT_MIN_LEAD:
         return best_id
     return None
+
+
+def detect_doc_type(
+    title: str, elements: Sequence[SourceElement]
+) -> Optional[str]:
+    """Return a profile id if the document clearly looks like one type, else None."""
+    return detect_doc_type_from_sample(_document_sample(title, elements))
 
 
 def get_profile(profile_id: Optional[str]) -> ExtractionProfile:

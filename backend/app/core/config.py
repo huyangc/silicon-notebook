@@ -81,7 +81,13 @@ class Settings(BaseSettings):
     embed_batch_size: int = Field(10, env="EMBED_BATCH_SIZE")
     embed_persist_chunk: int = Field(200, env="EMBED_PERSIST_CHUNK")
     # 元素向量化并发度（并行发出的 batch 请求数；dashscope 单请求 batch≤10）。
-    embed_concurrency: int = Field(50, env="EMBED_CONCURRENCY")
+    # 注意：批量并发上传多文档时，每文档各自以此并发嵌入，峰值会叠加，过高会打爆
+    # embedding 服务 QPS（429 limit_requests）导致向量缺失；配合下面的 429 退避重试，
+    # 默认取一个温和值。账户 QPS 高时可上调。
+    embed_concurrency: int = Field(8, env="EMBED_CONCURRENCY")
+    # embedding 限流（429）退避重试：批量摄取易瞬时超 QPS，退避到窗口恢复而非丢批。
+    embed_rate_limit_retries: int = Field(5, env="EMBED_RATE_LIMIT_RETRIES")
+    embed_rate_limit_base_delay: float = Field(2.0, env="EMBED_RATE_LIMIT_BASE_DELAY")
     # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
     # 检索：top-N 知识对象。
