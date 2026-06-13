@@ -1,7 +1,8 @@
-"""dashscope (or any OpenAI-compatible) embeddings — batched + fail-fast."""
+"""dashscope (or any OpenAI-compatible) embeddings — batched + 429 backoff."""
 from __future__ import annotations
+import time
 from typing import List
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from app.core.config import Settings
 
 _BATCH = 10  # dashscope text-embedding-v3/v4 hard-cap: batch input <= 10 items
@@ -30,9 +31,27 @@ class DashscopeEmbedder:
         out: List[List[float]] = []
         for i in range(0, len(texts), batch):
             chunk = [t[:trunc] for t in texts[i:i + batch]]
-            resp = self._ensure().embeddings.create(model=self.model, input=chunk)
-            out.extend(list(d.embedding) for d in resp.data)
+            out.extend(self._embed_chunk(chunk))
         return out
+
+    def _embed_chunk(self, chunk: List[str]) -> List[List[float]]:
+        """Embed one batch with exponential backoff on 429 rate limits.
+
+        Concurrent bulk ingestion easily bursts past the embedding service's
+        QPS; a 429 means "retry later", not "give up" — backing off here keeps
+        vectors from silently going missing (which then degrades retrieval and
+        concept clustering). Non-429 errors propagate immediately."""
+        retries = max(0, getattr(self.settings, "embed_rate_limit_retries", 5))
+        base = getattr(self.settings, "embed_rate_limit_base_delay", 2.0)
+        for attempt in range(retries + 1):
+            try:
+                resp = self._ensure().embeddings.create(model=self.model, input=chunk)
+                return [list(d.embedding) for d in resp.data]
+            except RateLimitError:
+                if attempt >= retries:
+                    raise
+                time.sleep(base * (2 ** attempt))
+        return []  # unreachable (loop returns or raises)
 
     def embed_query(self, text: str) -> List[float]:
         return self.embed_texts([text])[0]
