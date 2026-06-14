@@ -209,17 +209,28 @@ class ReasoningRetriever:
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
         no_progress = len(collected) == 0
+        # 确定性熔断: 连续无有效进展轮数; search_elements 累计执行次数。
+        # 软提示(NO_NEW_EVIDENCE_NOTE)交模型自觉, stale 是硬熔断——模型若无视软提示
+        # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
+        stale = 1 if no_progress else 0
+        elements_searches = 0
         while steps < self.settings.reasoning_max_steps:
             steps += 1
             summary = self._summarize(collected, elements)
             if no_progress:
                 summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
+            # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
+            if visited:
+                vis = ", ".join(
+                    f"{str(collected[o].payload.get('name', o)) if o in collected else o}"
+                    for o in visited)
+                summary = f"{summary}\n\n（已展开过的节点，勿重复 expand_graph 请求它们: {vis}）"
             decision = self.reflect(question, summary)
             record(TraceStep(step_type="reflect",
                              summary=decision.reason or decision.next_action,
                              detail={"next_action": decision.next_action,
                                      "sufficient": decision.sufficient,
-                                     "no_progress": no_progress}))
+                                     "no_progress": no_progress, "stale": stale}))
             if decision.next_action == "answer" or decision.sufficient:
                 break
             before = len(collected) + len(elements)
@@ -253,18 +264,32 @@ class ReasoningRetriever:
                                      summary=f"补充子查询: {sq.query}",
                                      detail={"query": sq.query}))
             elif decision.next_action == "search_elements":
-                eq = decision.elements_query or question
-                seen_el = {e.element_id for e in elements}
-                els = [e for e in self.search_elements(notebook_id, eq)
-                       if e.element_id not in seen_el]
-                elements.extend(els)
-                record(TraceStep(step_type="fallback",
-                                 summary=f"降级查原文: {eq},新增 {len(els)} 段",
-                                 detail={"query": eq, "found": len(els)}))
+                if elements_searches >= self.settings.reasoning_max_element_searches:
+                    record(TraceStep(step_type="skip",
+                                     summary=f"跳过 search_elements(已达次数上限 "
+                                             f"{self.settings.reasoning_max_element_searches})",
+                                     detail={"reason": "element_search_cap"}))
+                else:
+                    elements_searches += 1
+                    eq = decision.elements_query or question
+                    seen_el = {e.element_id for e in elements}
+                    els = [e for e in self.search_elements(notebook_id, eq)
+                           if e.element_id not in seen_el]
+                    elements.extend(els)
+                    record(TraceStep(step_type="fallback",
+                                     summary=f"降级查原文: {eq},新增 {len(els)} 段",
+                                     detail={"query": eq, "found": len(els)}))
             else:
                 break
-            # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型。
+            # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
             no_progress = (len(collected) + len(elements)) == before
+            stale = stale + 1 if no_progress else 0
+            # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
+            if stale >= self.settings.reasoning_stale_limit:
+                record(TraceStep(step_type="skip",
+                                 summary=f"连续 {stale} 轮无新进展,熔断收尾(避免空转)",
+                                 detail={"reason": "stale_circuit_breaker", "stale": stale}))
+                break
 
         # 统一口径: 用原问题对全库重打分,agent 召回的候选优先用此版本(带原问题 relevance)
         scored_map = {h.object_id: h for h in self.repo._retrieve_scored(notebook_id, question)}
