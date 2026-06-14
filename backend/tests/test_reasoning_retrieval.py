@@ -659,3 +659,21 @@ def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
     # 第1轮 expand A 后, 第2轮 reflect 输入应带"已展开/已访问"节点提示, 含节点标识
     assert "nodeA" in prompts[1] or "A" in prompts[1]
     assert ("已展开" in prompts[1] or "已访问" in prompts[1] or "visited" in prompts[1].lower())
+
+
+def test_run_expand_summary_uses_node_name_not_id(rrepo):
+    """trace 可读性: expand step 的 summary 应显示节点名(人读), 而非裸 object_id。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
+        reflects=[{"next_action": "expand_graph", "expand": {"object_id": claim.object_id}},
+                  {"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    expand = next(t for t in res.trace if t.step_type == "expand")
+    assert "RTL到GDSII流程概述" in expand.summary          # 人读名
+    assert claim.object_id not in expand.summary           # 不再暴露裸 id
+    assert expand.detail.get("name") == "RTL到GDSII流程概述"  # detail 带 name
+    assert expand.detail.get("object_id") == claim.object_id  # detail 仍保留 id(机器/调试)
