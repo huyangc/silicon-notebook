@@ -90,7 +90,7 @@ class TestTask2:
     def test_ask_uses_federated_retrieve_when_base_exists(self, repo):
         """ask() on a personal notebook surfaces hits from the base notebook."""
         base_nb, personal_nb = self._seed_two_notebooks(repo)
-        resp = repo.ask(personal_nb.id, AskRequest(question="capacitance"))
+        resp = repo.ask(personal_nb.id, AskRequest(question="capacitance", mode="fast"))
         all_ids = {a.object_id for a in resp.anchors}
         all_ids |= {r.id for r in resp.related_knowledge}
         # At least one object from the base notebook must appear.
@@ -179,7 +179,7 @@ class TestTask5:
         """Without any base notebook, ask() on a personal notebook returns
         the personal hit — identical to pre-federation behavior."""
         nb = self._seed_single(repo)
-        resp = repo.ask(nb.id, AskRequest(question="oxide breakdown"))
+        resp = repo.ask(nb.id, AskRequest(question="oxide breakdown", mode="fast"))
         # Must find the single object
         rk_ids = {r.id for r in resp.related_knowledge}
         assert "S1" in rk_ids or any("oxide" in r.headline.lower() for r in resp.related_knowledge)

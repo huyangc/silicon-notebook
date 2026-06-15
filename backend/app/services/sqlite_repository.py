@@ -291,6 +291,26 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS chunks (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  text TEXT NOT NULL,
+                  section_path TEXT NOT NULL DEFAULT '',
+                  element_ids TEXT NOT NULL DEFAULT '[]',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_nb ON chunks(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                  chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL,
+                  vector TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_nb ON chunk_embeddings(notebook_id);
+
                 CREATE TABLE IF NOT EXISTS articles (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -1141,6 +1161,13 @@ class SQLiteRepository:
                     )
             self._set_source_status(source_id, "parsed", summary=summary)
 
+            # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
+            # best-effort: 失败不阻塞既有 parse->extract 流水线。
+            try:
+                self._build_chunks_for_source(source_id)
+            except Exception:
+                self.event_log.logger.exception("chunk build failed for %s", source_id)
+
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks
             # the KG result. 'extracted'/green below is gated on EXTRACTION only.
@@ -1152,6 +1179,7 @@ class SQLiteRepository:
             def _embed_bg() -> None:
                 try:
                     self._embed_source(source_id)
+                    self._embed_chunks_for_source(source_id)   # chunk 向量后台补, 不阻塞流水线
                     stage("embed", "done", embed_started)
                 except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
                     stage("embed", "error", embed_started,
@@ -1574,6 +1602,91 @@ class SQLiteRepository:
                 "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
                 [(oid, notebook_id, json.dumps(vec), now) for oid, vec in rows],
             )
+
+    def _build_chunks_for_source(self, source_id: str) -> None:
+        """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
+        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。元素 id 形如
+        el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。"""
+        from app.services.chunking import build_chunks
+        from uuid import uuid4
+        src = self.get_source(source_id)
+        notebook_id = src.notebook_id
+        with self._connect() as db:
+            erows = db.execute(
+                "SELECT id, element_type, text FROM source_elements "
+                "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
+        elements = [{"id": r["id"], "element_type": r["element_type"], "text": r["text"]} for r in erows]
+        chunks = build_chunks(elements,
+                              target_chars=self.settings.chunk_target_chars,
+                              overlap_chars=self.settings.chunk_overlap_chars)
+        now = _now()
+        rows = [(f"ck-{uuid4().hex[:12]}", notebook_id, source_id, c["text"],
+                 c["section_path"], json.dumps(c["element_ids"]), now) for c in chunks]
+        with self._write() as db:
+            db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))  # 级联删 embeddings
+            db.executemany(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)", rows)
+
+    def _embed_chunks_for_source(self, source_id: str) -> None:
+        """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
+        if not self.settings.embedder_configured:
+            return
+        notebook_id = self.get_source(source_id).notebook_id
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, text FROM chunks WHERE source_id=?", (source_id,)).fetchall()
+        items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
+        self._embed_chunks_batch(notebook_id, items)
+
+    def _chunk_and_embed_source(self, source_id: str) -> None:
+        """build + embed(供回填脚本/测试同步调用)。"""
+        self._build_chunks_for_source(source_id)
+        self._embed_chunks_for_source(source_id)
+
+    def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
+        """并发调用 embedder(resilience 由 DashscopeEmbedder 层负责), 落 chunk_embeddings。
+        每批失败时 log + 跳过(best-effort)。"""
+        if not self.settings.embedder_configured or not items:
+            return
+        pending = []
+        for it in items:
+            text = (it["payload"].get("text") or "").strip()
+            if text:
+                pending.append((it["_oid"], text[:2000]))
+        if not pending:
+            return
+        import concurrent.futures as _cf
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i+size] for i in range(0, len(pending), size)]
+        ensure = getattr(self.embedder, "_ensure", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # noqa: BLE001 — warm-up only
+                pass
+
+        def _emb(batch):
+            try:
+                vecs = self.embedder.embed_texts([t for _, t in batch])
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
+                self.event_log.logger.warning("embed chunks batch failed (%d) for %s: %s",
+                                              len(batch), notebook_id, exc)
+                return []
+            return [(cid, v) for (cid, _), v in zip(batch, vecs)]
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        out = []
+        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-ck") as pool:
+            for part in pool.map(_emb, batches):
+                out.extend(part)
+        if not out:
+            return
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                [(cid, notebook_id, json.dumps(v), now) for cid, v in out])
 
     def _knowledge_vectors(
         self,
@@ -3565,6 +3678,22 @@ class SQLiteRepository:
             if element.get("vector")
         }
 
+    def _gather_chunks(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+        rows = db.execute(
+            """
+            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,
+                   s.title AS source_title
+            FROM chunks c JOIN sources s ON s.id = c.source_id
+            WHERE c.notebook_id = ?
+            """,
+            (notebook_id,),
+        ).fetchall()
+        return [{
+            "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
+            "section_path": r["section_path"], "source_title": r["source_title"],
+            "element_ids": json.loads(r["element_ids"] or "[]"),
+        } for r in rows]
+
     def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
                        table: str, id_col: str):
         """Cached (ids, normalized float32 matrix) for a notebook's embeddings.
@@ -3952,16 +4081,165 @@ class SQLiteRepository:
             elements = self._gather_elements(db, notebook_id, with_vectors=True)
         return score_elements(query, elements, query_vector, limit=limit)
 
+    def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
+        """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
+        (matrix 行已 L2 归一化, 点积即余弦)。"""
+        from app.services.retrieval import score_chunks
+        from app.services.vector_index import query_sims
+        recall = recall or self.settings.chunk_recall
+        query_vector = self._embed_query(query)
+        with self._connect() as db:
+            chunks = self._gather_chunks(db, notebook_id)
+            ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
+        chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
+        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        return scored, ids, mat
+
+    def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
+        """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
+        from app.services.mmr import mmr_rerank
+        if len(scored) <= k:
+            return list(scored)
+        id_to_row = {cid: i for i, cid in enumerate(ids)}
+        relevance = {c.chunk_id: c.relevance for c in scored}
+
+        def pair_sim(a: str, b: str) -> float:
+            ia, ib = id_to_row.get(a), id_to_row.get(b)
+            if ia is None or ib is None:
+                return 0.0
+            return float(mat[ia] @ mat[ib])
+
+        chosen = mmr_rerank([c.chunk_id for c in scored], relevance, pair_sim, k, lambda_)
+        by_id = {c.chunk_id: c for c in scored}
+        return [by_id[cid] for cid in chosen]
+
+    def _chunk_answer_context(self, chunks) -> tuple:
+        """产出长上下文综合用的 id 标注块 + id_map。chunk.text 已含 [section] 前缀
+        (P1 build_chunks),故每行直接 `k_i: <text>`。id_map 形状与 KG 版一致,
+        使 _parse_answer_anchors 原样复用(object_id=chunk_id, object_type=chunk)。"""
+        budget = self.settings.chunk_answer_budget_chars
+        lines, id_map = [], {}
+        used = 0
+        for i, c in enumerate(chunks, 1):
+            if used >= budget and len(lines) >= 1:
+                break
+            key = f"k{i}"
+            line = f"{key}: {c.text}"
+            lines.append(line)
+            used += len(line)
+            id_map[key] = {
+                "object_id": c.chunk_id, "object_type": "chunk",
+                "name": c.section_path or c.source_title, "definition": None,
+                "snippet": c.text[:300], "source_title": c.source_title,
+                "location_label": c.section_path, "tier": "personal",
+            }
+        return ("\n".join(lines) if lines else "(none)"), id_map
+
+    def _answer_chunks(self, question, chunks, history="") -> tuple:
+        """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
+        (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。"""
+        from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
+        context_block, id_map = self._chunk_answer_context(chunks)
+        raw = self.llm_client.chat_json(
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            ANSWER_SCHEMA_HINT,
+            temperature=0.0,   # 确定性接地:同一上下文必出同一判定,消除偶发 "(推断)" 漏判
+        )
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("answer did not return a JSON object")
+        answer = str(data.get("answer", "")).strip()
+        llm_grounded = bool(data.get("grounded", False))
+        anchors = self._parse_answer_anchors(answer, id_map)
+        return answer, llm_grounded, anchors
+
+    def ask_chunk(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
+        引用绑回 chunk。KG 不参与(严格推理走 ask_reasoning)。"""
+        import time
+        from app.services.retrieval import classify_evidence
+        ask_started = time.perf_counter()
+
+        def ask_stage(name: str, started: float, **extra) -> None:
+            self.event_log.emit({
+                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
+                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
+            })
+
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+            history = self._conversation_history(db, conversation_id)
+        retrieval_query = self._rewrite_followup_query(history, question)
+
+        _t = time.perf_counter()
+        scored, ids, mat = self._retrieve_chunks(notebook_id, retrieval_query)
+        ask_stage("retrieve_chunks", _t, recall=len(scored))
+
+        _t = time.perf_counter()
+        selected = self._mmr_select_chunks(
+            scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
+        ask_stage("mmr", _t, selected=len(selected))
+
+        # 引用绑回 chunk:element_id 取 chunk 首个 element(前端既有 element 引用可解析)。
+        citations: List[Citation] = []
+        for c in selected:
+            eid = c.element_ids[0] if c.element_ids else ""
+            citations.append(Citation(
+                label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                source_id=c.source_id, element_id=eid,
+                location_label=c.section_path, quoted_span=c.text[:200]))
+
+        answer, llm_grounded, anchors = "", False, []
+        _t = time.perf_counter()
+        if self.llm_client.configured and selected:
+            try:
+                answer, llm_grounded, anchors = self._answer_chunks(
+                    question, selected, history)
+            except Exception:
+                self.event_log.logger.exception("_answer_chunks failed for %s", notebook_id)
+                answer, llm_grounded, anchors = "", False, []
+        ask_stage("answer_llm", _t)
+
+        evidence_level, top_relevance = classify_evidence(
+            selected, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        grounded = evidence_level == "grounded"
+
+        if answer:
+            conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        else:
+            llm_mode = "deterministic"
+            conclusion = (
+                f"Retrieved {len(selected)} relevant passage(s) for this question."
+                if selected else
+                "No indexed content matches this question yet. Upload sources or build chunks.")
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+            citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
+            retrieval_query=retrieval_query, top_relevance=top_relevance)
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        ask_stage("total", ask_started)
+        return response
+
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
         procedure/concept), performs 1-hop relation expansion, and synthesises
         a conclusion via the LLM (or deterministic fallback)."""
-        if getattr(payload, "mode", "fast") == "reasoning":
+        if getattr(payload, "mode", "chunk") == "reasoning":
             return self.ask_reasoning(notebook_id, payload)
-        if getattr(payload, "mode", "fast") == "graph":
+        if getattr(payload, "mode", "chunk") == "graph":
             return self.ask_graph(notebook_id, payload)
-        if getattr(payload, "mode", "fast") == "global":
+        if getattr(payload, "mode", "chunk") == "global":
             return self._ask_global(notebook_id, payload)
+        if getattr(payload, "mode", "chunk") == "chunk":
+            return self.ask_chunk(notebook_id, payload)
         import time
         ask_started = time.perf_counter()
 

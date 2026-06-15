@@ -485,3 +485,50 @@ def score_elements(
         )
     scored.sort(key=lambda item: item.score, reverse=True)
     return scored[:limit]
+
+
+@dataclass
+class RetrievedChunk:
+    chunk_id: str
+    source_id: str
+    source_title: str
+    section_path: str
+    text: str
+    element_ids: List[str] = field(default_factory=list)
+    score: float = 0.0
+    relevance: float = 0.0
+
+    @property
+    def object_id(self) -> str:
+        # classify_evidence 读 .object_id;anchors 的 object_id 也=chunk_id,
+        # 两边对齐才能算出 anchored_rel。
+        return self.chunk_id
+
+
+def score_chunks(
+    query: str,
+    chunks: List[dict],
+    query_vector: Optional[List[float]] = None,
+    chunk_sims: Optional[Dict[str, float]] = None,
+    limit: int = 150,
+) -> List[RetrievedChunk]:
+    """Keyword + 可选语义(预算好的 chunk_sims)融合打分 chunk;大召回(默认
+    top-150)。与 score_elements 同构,但作用于合并后的检索 chunk。"""
+    scored: List[RetrievedChunk] = []
+    for c in chunks:
+        keyword = keyword_score(query, c["text"])
+        semantic = 0.0
+        has_vector = bool(query_vector and chunk_sims is not None)
+        if has_vector:
+            semantic = chunk_sims.get(c["chunk_id"], 0.0)
+        score = _fuse(keyword, semantic, has_vector)
+        if score < RELEVANCE_FLOOR:
+            continue
+        scored.append(RetrievedChunk(
+            chunk_id=c["chunk_id"], source_id=c["source_id"],
+            source_title=c.get("source_title", ""), section_path=c.get("section_path", ""),
+            text=c["text"], element_ids=c.get("element_ids", []),
+            score=score, relevance=score,
+        ))
+    scored.sort(key=lambda x: x.score, reverse=True)
+    return scored[:limit]

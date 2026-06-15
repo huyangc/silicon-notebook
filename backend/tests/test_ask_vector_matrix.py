@@ -54,7 +54,7 @@ def test_ask_matrix_path_returns_matching_object(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Engram improves perplexity"}}])
-    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity"))
+    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity", mode="fast"))
     assert any("Engram" in r.headline for r in resp.related_knowledge)
 
 
@@ -86,5 +86,5 @@ def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, mon
         return original(db, notebook_id, with_vectors=with_vectors)
 
     monkeypatch.setattr(repo, "_gather_elements", guard)
-    resp = repo.ask(nb.id, AskRequest(question="why does cable bandwidth matter"))
+    resp = repo.ask(nb.id, AskRequest(question="why does cable bandwidth matter", mode="fast"))
     assert any("bandwidth" in r.headline.lower() for r in resp.related_knowledge)

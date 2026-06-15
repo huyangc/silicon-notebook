@@ -470,7 +470,7 @@ def check_kg_store_ask_and_conversations() -> None:
 
         answer = repo.ask(
             nb.id,
-            AskRequest(question="What is Engram conditional memory module?"),
+            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
         )
         assert answer.answer_id
         assert answer.conversation_id
@@ -495,6 +495,7 @@ def check_kg_store_ask_and_conversations() -> None:
             AskRequest(
                 question="Does it separate storage and computation?",
                 conversation_id=answer.conversation_id,
+                mode="fast",
             ),
         )
         assert second.conversation_id == answer.conversation_id
@@ -507,7 +508,7 @@ def check_kg_store_ask_and_conversations() -> None:
         assert all(node.id != claim_id for node in repo.knowledge_graph(nb.id).nodes)
         dep_answer = repo.ask(
             nb.id,
-            AskRequest(question="What is Engram conditional memory module?"),
+            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
         repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="reviewed"))
@@ -1054,7 +1055,7 @@ def main() -> None:
 
         answer = repository.ask(
             notebook.id,
-            AskRequest(question="What is Engram conditional memory module?"),
+            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
         )
         assert answer.answer_id
         assert answer.related_knowledge
@@ -1072,7 +1073,7 @@ def main() -> None:
         repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
         dep_answer = repository.ask(
             notebook.id,
-            AskRequest(question="What is Engram conditional memory module?"),
+            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
         repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="reviewed"))
