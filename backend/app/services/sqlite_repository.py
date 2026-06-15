@@ -1595,6 +1595,91 @@ class SQLiteRepository:
                 [(oid, notebook_id, json.dumps(vec), now) for oid, vec in rows],
             )
 
+    def _build_chunks_for_source(self, source_id: str) -> None:
+        """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
+        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。元素 id 形如
+        el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。"""
+        from app.services.chunking import build_chunks
+        from uuid import uuid4
+        src = self.get_source(source_id)
+        notebook_id = src.notebook_id
+        with self._connect() as db:
+            erows = db.execute(
+                "SELECT id, element_type, text FROM source_elements "
+                "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
+        elements = [{"id": r["id"], "element_type": r["element_type"], "text": r["text"]} for r in erows]
+        chunks = build_chunks(elements,
+                              target_chars=self.settings.chunk_target_chars,
+                              overlap_chars=self.settings.chunk_overlap_chars)
+        now = _now()
+        rows = [(f"ck-{uuid4().hex[:12]}", notebook_id, source_id, c["text"],
+                 c["section_path"], json.dumps(c["element_ids"]), now) for c in chunks]
+        with self._write() as db:
+            db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))  # 级联删 embeddings
+            db.executemany(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)", rows)
+
+    def _embed_chunks_for_source(self, source_id: str) -> None:
+        """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
+        if not self.settings.embedder_configured:
+            return
+        notebook_id = self.get_source(source_id).notebook_id
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, text FROM chunks WHERE source_id=?", (source_id,)).fetchall()
+        items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
+        self._embed_chunks_batch(notebook_id, items)
+
+    def _chunk_and_embed_source(self, source_id: str) -> None:
+        """build + embed(供回填脚本/测试同步调用)。"""
+        self._build_chunks_for_source(source_id)
+        self._embed_chunks_for_source(source_id)
+
+    def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
+        """并发调用 embedder(resilience 由 DashscopeEmbedder 层负责), 落 chunk_embeddings。
+        每批失败时 log + 跳过(best-effort)。"""
+        if not self.settings.embedder_configured or not items:
+            return
+        pending = []
+        for it in items:
+            text = (it["payload"].get("text") or "").strip()
+            if text:
+                pending.append((it["_oid"], text[:2000]))
+        if not pending:
+            return
+        import concurrent.futures as _cf
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i+size] for i in range(0, len(pending), size)]
+        ensure = getattr(self.embedder, "_ensure", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # noqa: BLE001 — warm-up only
+                pass
+
+        def _emb(batch):
+            try:
+                vecs = self.embedder.embed_texts([t for _, t in batch])
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
+                self.event_log.logger.warning("embed chunks batch failed (%d) for %s: %s",
+                                              len(batch), notebook_id, exc)
+                return []
+            return [(cid, v) for (cid, _), v in zip(batch, vecs)]
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        out = []
+        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-ck") as pool:
+            for part in pool.map(_emb, batches):
+                out.extend(part)
+        if not out:
+            return
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                [(cid, notebook_id, json.dumps(v), now) for cid, v in out])
+
     def _knowledge_vectors(
         self,
         db: sqlite3.Connection,
