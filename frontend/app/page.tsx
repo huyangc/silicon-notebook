@@ -1550,7 +1550,7 @@ export default function Home() {
     setPendingTrace([]);
     setAsking(true);
     try {
-      const payload = { question: q, conversation_id: conversationId ?? undefined, mode: useReasoning ? "reasoning" : "fast" };
+      const payload = { question: q, conversation_id: conversationId ?? undefined, mode: useReasoning ? "reasoning" : "chunk" };
       const response = useReasoning
         ? await readAskStream<AskResponse>(
           `/notebooks/${currentNotebookId}/ask/stream`,
