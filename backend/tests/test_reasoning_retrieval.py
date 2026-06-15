@@ -13,9 +13,10 @@ def test_trace_step_model_shape():
     assert d["detail"] == {"n": 2}
 
 
-def test_ask_request_mode_defaults_fast():
+def test_ask_request_mode_defaults_chunk():
     from app.models.schemas import AskRequest
-    assert AskRequest(question="x").mode == "fast"
+    assert AskRequest(question="x").mode == "chunk"
+    assert AskRequest(question="x", mode="fast").mode == "fast"
     assert AskRequest(question="x", mode="reasoning").mode == "reasoning"
 
 

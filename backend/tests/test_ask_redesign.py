@@ -46,7 +46,7 @@ def test_ask_global_topn_not_fixed_quota(repo, monkeypatch):
              "payload": {"name": f"engram claim number {i}", "section_path": "1"}, "evidence": []}
             for i in range(8)]
     repo.store_kg(nb.id, None, objs, [])
-    resp = repo.ask(nb.id, AskRequest(question="engram claim", scenario={}))
+    resp = repo.ask(nb.id, AskRequest(question="engram claim", scenario={}, mode="fast"))
     claim_hits = [r for r in resp.related_knowledge if r.object_type == "claim"]
     assert len(claim_hits) > 5   # old code capped claims at _TOP_PER_TYPE=5
 
@@ -72,7 +72,7 @@ def test_parse_answer_anchors_keeps_only_cited(repo):
 
 def test_ask_grounded_answer_has_anchors(repo):
     nb = _seed(repo)   # one concept "Engram"
-    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="fast"))
     assert resp.grounded is True
     assert resp.answer and "[k1]" in resp.answer
     assert any(a.object_type == "concept" for a in resp.anchors)
@@ -82,7 +82,7 @@ def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     repo.llm_client.chat_json = lambda m, s: __import__("json").dumps(
         {"answer": "（推断）Engram is likely a memory mechanism.", "grounded": False})
-    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="fast"))
     assert resp.llm_mode == "ungrounded"
     assert "not yet contain approved knowledge" not in resp.conclusion   # no canned dead-end
     assert resp.answer
@@ -105,6 +105,6 @@ def test_concept_dedup_degrades_gracefully_without_clusters(repo):
     oids = [r["id"] for r in rows]
     for oid in oids:
         assert repo._concept_cluster_id(nb.id, oid) == oid   # falls back to object_id
-    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
+    resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="fast"))
     # no clusters -> no dedup -> both concept hits remain available as anchors targets
     assert resp.answer  # did not crash

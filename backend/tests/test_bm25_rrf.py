@@ -64,7 +64,7 @@ def test_rrf_path_ask_returns_relevant_hit(repo):
     ], [])
 
     repo.settings.retrieval_rrf_enabled = True
-    resp = repo.ask(nb.id, AskRequest(question="cascode output resistance"))
+    resp = repo.ask(nb.id, AskRequest(question="cascode output resistance", mode="fast"))
     # 返回正常 AskResponse,不崩
     assert resp is not None
     # 命中了与 cascode 相关的 claim A

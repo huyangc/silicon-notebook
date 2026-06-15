@@ -1,9 +1,11 @@
+import json
+
 import pytest
 from app.services.retrieval import score_chunks, RetrievedChunk
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
-from app.models.schemas import NotebookCreate
+from app.models.schemas import AskRequest, NotebookCreate
 
 
 def _ck(cid, text):
@@ -89,3 +91,39 @@ def test_mmr_select_caps_and_subsets(repo):
     picked = repo._mmr_select_chunks(scored, ids, mat, k=3, lambda_=0.5)
     assert len(picked) <= 3
     assert {p.chunk_id for p in picked} <= {c.chunk_id for c in scored}
+
+
+class _FakeLLM:
+    """配置好的假 LLM:chat_json 回定长 JSON, 内含 [k1] 标记。"""
+    configured = True
+    def __init__(self, answer): self._answer = answer
+    def chat_json(self, messages, schema_hint, **kw):
+        return json.dumps({"answer": self._answer, "grounded": True})
+
+
+def test_ask_chunk_deterministic_without_llm(repo):
+    # fixture 清了 LLM key → llm_client.configured False → 走确定性兜底。
+    nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts routing " * 20,
+                                "deepseek v2 dense baseline architecture " * 20])
+    resp = repo.ask_chunk(nb.id, AskRequest(question="deepseek experts routing"))
+    assert resp.answer == "" and "passage" in resp.conclusion.lower()
+    assert resp.anchors == [] and resp.citations          # 有引用, 无 anchor
+    assert resp.citations[0].source_id and resp.evidence_level == "inferred"
+
+
+def test_ask_chunk_binds_anchor_to_chunk_with_llm(repo, monkeypatch):
+    nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts routing " * 20])
+    repo.llm_client = _FakeLLM("DeepSeek V3 uses MoE routing [k1].")
+    resp = repo.ask_chunk(nb.id, AskRequest(question="deepseek experts"))
+    assert resp.answer and resp.anchors
+    a = resp.anchors[0]
+    assert a.object_type == "chunk" and a.object_id.startswith("ck-")
+    assert resp.conclusion and "[k1]" not in resp.conclusion   # 标记已剥离
+
+
+def test_ask_routes_default_mode_to_chunk(repo, monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(repo, "ask_chunk", lambda nb, p: sentinel)
+    # AskRequest() 默认 mode 应为 "chunk" → ask() 分发到 ask_chunk
+    assert AskRequest(question="x").mode == "chunk"
+    assert repo.ask("nb-irrelevant", AskRequest(question="x")) is sentinel

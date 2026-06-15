@@ -443,7 +443,7 @@ class TestBaseReviewGateEdgeCases:
         _store_claim(repo, personal.id, "personal note on capacitance")
         # All base claims are 'reviewed' (the gate); confirm before asking.
         assert all(r["status"] == "reviewed" for r in _objects_in(repo, base.id, "claim"))
-        resp = repo.ask(personal.id, AskRequest(question="capacitance"))
+        resp = repo.ask(personal.id, AskRequest(question="capacitance", mode="fast"))
         all_ids = {a.object_id for a in resp.anchors}
         all_ids |= {r.id for r in resp.related_knowledge}
         base_ids = {r["id"] for r in _objects_in(repo, base.id, "claim")}
@@ -460,7 +460,7 @@ class TestBaseReviewGateEdgeCases:
         oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, oid)
         repo.reject_promotion(cand["id"], reason="not canonical")
-        resp = repo.ask(personal.id, AskRequest(question="miller effect"))
+        resp = repo.ask(personal.id, AskRequest(question="miller effect", mode="fast"))
         all_ids = {a.object_id for a in resp.anchors}
         all_ids |= {r.id for r in resp.related_knowledge}
         assert oid in all_ids, "rejected personal object vanished from its own notebook"

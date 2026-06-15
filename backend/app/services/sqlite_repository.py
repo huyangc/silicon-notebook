@@ -4113,16 +4113,132 @@ class SQLiteRepository:
         by_id = {c.chunk_id: c for c in scored}
         return [by_id[cid] for cid in chosen]
 
+    def _chunk_answer_context(self, chunks) -> tuple:
+        """产出长上下文综合用的 id 标注块 + id_map。chunk.text 已含 [section] 前缀
+        (P1 build_chunks),故每行直接 `k_i: <text>`。id_map 形状与 KG 版一致,
+        使 _parse_answer_anchors 原样复用(object_id=chunk_id, object_type=chunk)。"""
+        budget = self.settings.chunk_answer_budget_chars
+        lines, id_map = [], {}
+        used = 0
+        for i, c in enumerate(chunks, 1):
+            if used >= budget and len(lines) >= 1:
+                break
+            key = f"k{i}"
+            line = f"{key}: {c.text}"
+            lines.append(line)
+            used += len(line)
+            id_map[key] = {
+                "object_id": c.chunk_id, "object_type": "chunk",
+                "name": c.section_path or c.source_title, "definition": None,
+                "snippet": c.text[:300], "source_title": c.source_title,
+                "location_label": c.section_path, "tier": "personal",
+            }
+        return ("\n".join(lines) if lines else "(none)"), id_map
+
+    def _answer_chunks(self, question, chunks, history="") -> tuple:
+        """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
+        (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。"""
+        from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
+        context_block, id_map = self._chunk_answer_context(chunks)
+        raw = self.llm_client.chat_json(
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            ANSWER_SCHEMA_HINT,
+        )
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("answer did not return a JSON object")
+        answer = str(data.get("answer", "")).strip()
+        llm_grounded = bool(data.get("grounded", False))
+        anchors = self._parse_answer_anchors(answer, id_map)
+        return answer, llm_grounded, anchors
+
+    def ask_chunk(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
+        引用绑回 chunk。KG 不参与(严格推理走 ask_reasoning)。"""
+        import time
+        from app.services.retrieval import classify_evidence
+        ask_started = time.perf_counter()
+
+        def ask_stage(name: str, started: float, **extra) -> None:
+            self.event_log.emit({
+                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
+                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
+            })
+
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+            history = self._conversation_history(db, conversation_id)
+        retrieval_query = self._rewrite_followup_query(history, question)
+
+        _t = time.perf_counter()
+        scored, ids, mat = self._retrieve_chunks(notebook_id, retrieval_query)
+        ask_stage("retrieve_chunks", _t, recall=len(scored))
+
+        _t = time.perf_counter()
+        selected = self._mmr_select_chunks(
+            scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
+        ask_stage("mmr", _t, selected=len(selected))
+
+        # 引用绑回 chunk:element_id 取 chunk 首个 element(前端既有 element 引用可解析)。
+        citations: List[Citation] = []
+        for c in selected:
+            eid = c.element_ids[0] if c.element_ids else ""
+            citations.append(Citation(
+                label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                source_id=c.source_id, element_id=eid,
+                location_label=c.section_path, quoted_span=c.text[:200]))
+
+        answer, llm_grounded, anchors = "", False, []
+        _t = time.perf_counter()
+        if self.llm_client.configured and selected:
+            try:
+                answer, llm_grounded, anchors = self._answer_chunks(
+                    question, selected, history)
+            except Exception:
+                self.event_log.logger.exception("_answer_chunks failed for %s", notebook_id)
+                answer, llm_grounded, anchors = "", False, []
+        ask_stage("answer_llm", _t)
+
+        evidence_level, top_relevance = classify_evidence(
+            selected, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+        grounded = evidence_level == "grounded"
+
+        if answer:
+            conclusion = _MARKER_RE.sub("", answer).strip()
+            llm_mode = "grounded" if grounded else "ungrounded"
+        else:
+            llm_mode = "deterministic"
+            conclusion = (
+                f"Retrieved {len(selected)} relevant passage(s) for this question."
+                if selected else
+                "No indexed content matches this question yet. Upload sources or build chunks.")
+
+        response = AskResponse(
+            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+            evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+            citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
+            retrieval_query=retrieval_query, top_relevance=top_relevance)
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        ask_stage("total", ask_started)
+        return response
+
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
         procedure/concept), performs 1-hop relation expansion, and synthesises
         a conclusion via the LLM (or deterministic fallback)."""
-        if getattr(payload, "mode", "fast") == "reasoning":
+        if getattr(payload, "mode", "chunk") == "reasoning":
             return self.ask_reasoning(notebook_id, payload)
-        if getattr(payload, "mode", "fast") == "graph":
+        if getattr(payload, "mode", "chunk") == "graph":
             return self.ask_graph(notebook_id, payload)
-        if getattr(payload, "mode", "fast") == "global":
+        if getattr(payload, "mode", "chunk") == "global":
             return self._ask_global(notebook_id, payload)
+        if getattr(payload, "mode", "chunk") == "chunk":
+            return self.ask_chunk(notebook_id, payload)
         import time
         ask_started = time.perf_counter()
 

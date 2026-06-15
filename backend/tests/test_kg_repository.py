@@ -310,7 +310,7 @@ def test_ask_returns_kg_knowledge(repo):
     repo.llm_client = _FakeLLM("{}")   # _FakeLLM already defined in this file
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
-    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?"))
+    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?", mode="fast"))
     assert any("Engram" in r.headline for r in resp.related_knowledge)
 
 
@@ -337,7 +337,7 @@ def test_ask_1hop_expansion(repo):
          "edge_type": "about", "evidence": [{"quote": "Engram improves perplexity"}]},
     ])
 
-    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?"))
+    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?", mode="fast"))
 
     headlines = [r.headline for r in resp.related_knowledge]
     assert any("Engram" in h for h in headlines), "matching claim must be in results"
