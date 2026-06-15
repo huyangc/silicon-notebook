@@ -755,16 +755,17 @@ def test_run_quota_path_keeps_both_groups(rrepo, monkeypatch):
     nb = _seed_two_nodes(rrepo)
     rrepo.settings.reasoning_quota_enabled = True
     rrepo.settings.retrieval_top_n = 2
+    # 用纯字母 key 避免 expand_query 内 normalize_terms 插入空格后 dict 查找失效
     per_q = {
-        "qV3": [_rk("A", 0.5), _rk("B", 0.45)],
-        "qR1": [_rk("C", 0.95), _rk("D", 0.9), _rk("E", 0.85)],
+        "subV": [_rk("A", 0.5), _rk("B", 0.45)],
+        "subR": [_rk("C", 0.95), _rk("D", 0.9), _rk("E", 0.85)],
     }
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
     rrepo.llm_client = _SeqLLM(
-        plan={"sub_queries": [{"query": "qV3"}, {"query": "qR1"}]},
+        plan={"sub_queries": [{"query": "subV"}, {"query": "subR"}]},
         reflects=[{"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "qV3 qR1", "")
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "subV subR", "")
     ids = {h.object_id for h in res.top_hits}
     assert "A" in ids and "C" in ids          # 配额救回弱势组 A(全局 top-2 会是 C,D)
     ans = next(t for t in res.trace if t.step_type == "answer")
@@ -799,6 +800,17 @@ def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
     res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
     ans = next(t for t in res.trace if t.step_type == "answer")
     assert "quota" not in (ans.detail or {})   # 开关关 → 全局路径
+
+
+def test_plan_uses_expand_query(rrepo, monkeypatch):
+    import app.services.query_rewrite as qr
+    monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
+        query_en="x", sub_queries=[qr.SubQuerySpec("sub A", types=["concept"]),
+                                   qr.SubQuerySpec("sub B")]))
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    r = ReasoningRetriever(rrepo, rrepo.settings)
+    subs = r.plan("中文复合问题")
+    assert [s.query for s in subs] == ["sub A", "sub B"] and subs[0].types == ["concept"]
 
 
 def test_run_expand_summary_uses_node_name_not_id(rrepo):
