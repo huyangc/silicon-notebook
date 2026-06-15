@@ -4203,7 +4203,7 @@ class SQLiteRepository:
         from app.services.query_rewrite import expand_query
         from app.services.retrieval import quota_fuse
         if self.settings.query_rewrite_enabled:
-            ex = expand_query(self.llm_client, retrieval_query,
+            ex = expand_query(self.llm_client, retrieval_query, history,
                               max_subqueries=self.settings.chunk_max_subqueries)
             sub_queries = [s.query for s in ex.sub_queries]
         else:
