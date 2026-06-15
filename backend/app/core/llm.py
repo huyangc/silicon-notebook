@@ -105,6 +105,7 @@ class OpenAICompatibleClient:
         *,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
+        temperature: float = 0.1,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -135,7 +136,7 @@ class OpenAICompatibleClient:
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": full_messages,
-            "temperature": 0.1,
+            "temperature": temperature,
         }
         logger = self.interaction_logger
         record: Dict[str, Any] = {
