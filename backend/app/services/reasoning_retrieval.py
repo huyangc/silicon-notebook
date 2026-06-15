@@ -256,6 +256,9 @@ class ReasoningRetriever:
                          summary=f"初检索得到 {len(collected)} 个候选节点",
                          detail={"count": len(collected)}))
 
+        # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
+        used_queries = list(dict.fromkeys(s.query for s in subqueries))
+
         steps = 0
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
@@ -311,6 +314,8 @@ class ReasoningRetriever:
                     sq = decision.new_sub_query
                     for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
                         collected.setdefault(h.object_id, h)
+                    if sq.query not in used_queries:
+                        used_queries.append(sq.query)
                     record(TraceStep(step_type="retrieve",
                                      summary=f"补充子查询: {sq.query}",
                                      detail={"query": sq.query}))
@@ -342,12 +347,21 @@ class ReasoningRetriever:
                                  detail={"reason": "stale_circuit_breaker", "stale": stale}))
                 break
 
-        # 统一口径: 用原问题对全库重打分,agent 召回的候选优先用此版本(带原问题 relevance)
-        scored_map = {h.object_id: h for h in self.repo._retrieve_scored(notebook_id, question)}
-        top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
-        top_hits.sort(key=lambda h: h.relevance, reverse=True)
-        top_hits = top_hits[: self.settings.retrieval_top_n]
+        answer_detail = {"elements": len(elements)}
+        if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
+            # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
+            top_hits, counts = self._quota_rerank(
+                notebook_id, collected, used_queries, self.settings.retrieval_top_n)
+            # 只暴露各子查询贡献数(不含兜底组), 便于观测。
+            answer_detail["quota"] = counts[:len(used_queries)]
+        else:
+            # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
+            scored_map = {h.object_id: h for h in self.repo._retrieve_scored(notebook_id, question)}
+            top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
+            top_hits.sort(key=lambda h: h.relevance, reverse=True)
+            top_hits = top_hits[: self.settings.retrieval_top_n]
+        answer_detail["kg"] = len(top_hits)
         record(TraceStep(step_type="answer",
                          summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
-                         detail={"kg": len(top_hits), "elements": len(elements)}))
+                         detail=answer_detail))
         return ReasoningResult(top_hits=top_hits, elements=elements, trace=trace)

@@ -746,3 +746,55 @@ def test_quota_rerank_fallback_group_last(rrepo, monkeypatch):
     assert ids[0] == "A"                       # 子查询组优先
     assert "X" in ids                          # 兜底组仍入选(名额没满时)
     assert counts[-1] == 1                     # 最后一个 count 是兜底组
+
+
+def test_run_quota_path_keeps_both_groups(rrepo, monkeypatch):
+    """复合(≥2 子查询)+ 开关开 → 走配额, top_hits 同时含两组候选(弱势组不被挤掉)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_quota_enabled = True
+    rrepo.settings.retrieval_top_n = 2
+    per_q = {
+        "qV3": [_rk("A", 0.5), _rk("B", 0.45)],
+        "qR1": [_rk("C", 0.95), _rk("D", 0.9), _rk("E", 0.85)],
+    }
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "qV3"}, {"query": "qR1"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "qV3 qR1", "")
+    ids = {h.object_id for h in res.top_hits}
+    assert "A" in ids and "C" in ids          # 配额救回弱势组 A(全局 top-2 会是 C,D)
+    ans = next(t for t in res.trace if t.step_type == "answer")
+    assert ans.detail.get("quota") == [1, 1]  # 可观测: 每子查询贡献数
+
+
+def test_run_single_subquery_uses_global(rrepo, monkeypatch):
+    """单子查询 → 不进配额, 走原全局重排(行为不变)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_quota_enabled = True
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "only"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "only", "")
+    ans = next(t for t in res.trace if t.step_type == "answer")
+    assert "quota" not in (ans.detail or {})   # 全局路径不带 quota
+
+
+def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
+    """开关关 → 复合问题也走全局重排。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_quota_enabled = False
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "q1"}, {"query": "q2"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
+    ans = next(t for t in res.trace if t.step_type == "answer")
+    assert "quota" not in (ans.detail or {})   # 开关关 → 全局路径
