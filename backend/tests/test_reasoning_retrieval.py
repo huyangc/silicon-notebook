@@ -33,6 +33,17 @@ def test_reasoning_settings_knobs():
     assert s.reasoning_max_subqueries == 5
 
 
+def test_reasoning_quota_enabled_default():
+    from app.core.config import Settings
+    assert Settings().reasoning_quota_enabled is True
+
+
+def test_reasoning_quota_enabled_env(monkeypatch):
+    monkeypatch.setenv("REASONING_QUOTA_ENABLED", "false")
+    from app.core.config import Settings
+    assert Settings().reasoning_quota_enabled is False
+
+
 def test_reasoning_timeout_retry_knobs_defaults():
     from app.core.config import Settings
     s = Settings()
