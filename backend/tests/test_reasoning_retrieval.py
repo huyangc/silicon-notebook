@@ -798,3 +798,21 @@ def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
     res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
     ans = next(t for t in res.trace if t.step_type == "answer")
     assert "quota" not in (ans.detail or {})   # 开关关 → 全局路径
+
+
+def test_run_expand_summary_uses_node_name_not_id(rrepo):
+    """trace 可读性: expand step 的 summary 应显示节点名(人读), 而非裸 object_id。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
+        reflects=[{"next_action": "expand_graph", "expand": {"object_id": claim.object_id}},
+                  {"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    expand = next(t for t in res.trace if t.step_type == "expand")
+    assert "RTL到GDSII流程概述" in expand.summary          # 人读名
+    assert claim.object_id not in expand.summary           # 不再暴露裸 id
+    assert expand.detail.get("name") == "RTL到GDSII流程概述"  # detail 带 name
+    assert expand.detail.get("object_id") == claim.object_id  # detail 仍保留 id(机器/调试)

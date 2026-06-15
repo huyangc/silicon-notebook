@@ -300,9 +300,18 @@ class ReasoningRetriever:
                                            decision.expand_edge_type, decision.expand_direction)
                     for h in neigh:
                         collected.setdefault(h.object_id, h)
+                    # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
+                    # 避免 trace 里出现 "顺关系深挖 ko-8375b40126" 这种用户看不懂的内部 id。
+                    node_name = ""
+                    if oid in collected:
+                        node_name = str(collected[oid].payload.get("name", "")).strip()
+                    if not node_name:
+                        ctx = self.get(notebook_id, oid)
+                        node_name = str(ctx.get("name", "")).strip() if ctx else ""
+                    node_name = node_name or oid
                     record(TraceStep(step_type="expand",
-                                     summary=f"顺关系深挖 {oid},得到 {len(neigh)} 个邻居",
-                                     detail={"object_id": oid,
+                                     summary=f"顺关系深挖「{node_name}」,得到 {len(neigh)} 个邻居",
+                                     detail={"object_id": oid, "name": node_name,
                                              "edge_type": decision.expand_edge_type,
                                              "found": len(neigh)}))
             elif decision.next_action == "add_subquery":
