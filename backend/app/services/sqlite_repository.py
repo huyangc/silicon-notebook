@@ -291,6 +291,26 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS chunks (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  text TEXT NOT NULL,
+                  section_path TEXT NOT NULL DEFAULT '',
+                  element_ids TEXT NOT NULL DEFAULT '[]',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_nb ON chunks(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                  chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL,
+                  vector TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_nb ON chunk_embeddings(notebook_id);
+
                 CREATE TABLE IF NOT EXISTS articles (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
