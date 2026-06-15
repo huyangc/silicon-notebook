@@ -89,34 +89,16 @@ class ReasoningRetriever:
 
     # --- LLM 决策点 ---
     def plan(self, question, history=""):
+        from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
-        if not getattr(self.repo.reasoning_llm_client, "configured", False):
-            return fallback
-        try:
-            raw = self.repo.reasoning_llm_client.chat_json(
-                [{"role": "user", "content": plan_prompt(question, history)}],
-                PLAN_SCHEMA_HINT,
-                timeout=self.settings.reasoning_timeout_seconds,
-                max_retries=self.settings.reasoning_max_retries)
-            data = json.loads(raw)
-            subs = data.get("sub_queries") if isinstance(data, dict) else None
-            if not isinstance(subs, list) or not subs:
-                return fallback
-            out: List[SubQuery] = []
-            for s in subs[: self.settings.reasoning_max_subqueries]:
-                if not isinstance(s, dict):
-                    continue
-                q = str(s.get("query", "")).strip()
-                if not q:
-                    continue
-                _types_raw = s.get("types")
-                types = [t for t in (_types_raw if isinstance(_types_raw, list) else []) if t in KG_TYPES]
-                prefer = s.get("prefer") if s.get("prefer") in PREFER_WEIGHTS else "balanced"
-                out.append(SubQuery(query=q, types=types, prefer=prefer,
-                                    reason=str(s.get("reason", ""))))
-            return out or fallback
-        except Exception:
-            return fallback
+        ex = expand_query(self.repo.reasoning_llm_client, question, history,
+                          timeout=self.settings.reasoning_timeout_seconds,
+                          max_retries=self.settings.reasoning_max_retries,
+                          max_subqueries=self.settings.reasoning_max_subqueries,
+                          want_types=True)
+        out = [SubQuery(query=s.query, types=s.types, prefer=s.prefer, reason=s.reason)
+               for s in ex.sub_queries]
+        return out or fallback
 
     def reflect(self, question, candidates_summary):
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
