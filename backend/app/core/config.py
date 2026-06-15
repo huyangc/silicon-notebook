@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     reasoning_max_steps: int = Field(50, env="REASONING_MAX_STEPS")
     # 推理模式 Plan 输出子查询数上限。
     reasoning_max_subqueries: int = Field(5, env="REASONING_MAX_SUBQUERIES")
+    # 复合问题最终排序: 开启后按子查询配额 round-robin 选 top-N(避免整串全局排序让
+    # 信息量大的一方通吃); 关闭则回退全局重排。单子查询时自动等价全局。
+    reasoning_quota_enabled: bool = Field(True, env="REASONING_QUOTA_ENABLED")
     # 退化循环熔断: 连续 N 轮无有效进展(含反复请求已访问节点)即强制收尾作答,
     # 不空转到 reasoning_max_steps; search_elements 累计次数上限(防"每次有新增但永不满足")。
     reasoning_stale_limit: int = Field(3, env="REASONING_STALE_LIMIT")

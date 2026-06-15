@@ -33,6 +33,17 @@ def test_reasoning_settings_knobs():
     assert s.reasoning_max_subqueries == 5
 
 
+def test_reasoning_quota_enabled_default():
+    from app.core.config import Settings
+    assert Settings().reasoning_quota_enabled is True
+
+
+def test_reasoning_quota_enabled_env(monkeypatch):
+    monkeypatch.setenv("REASONING_QUOTA_ENABLED", "false")
+    from app.core.config import Settings
+    assert Settings().reasoning_quota_enabled is False
+
+
 def test_reasoning_timeout_retry_knobs_defaults():
     from app.core.config import Settings
     s = Settings()
@@ -659,6 +670,134 @@ def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
     # 第1轮 expand A 后, 第2轮 reflect 输入应带"已展开/已访问"节点提示, 含节点标识
     assert "nodeA" in prompts[1] or "A" in prompts[1]
     assert ("已展开" in prompts[1] or "已访问" in prompts[1] or "visited" in prompts[1].lower())
+
+
+def _rk(oid, rel, otype="claim"):
+    """构造带 relevance 的 RetrievedKnowledge(配额测试用)。"""
+    from app.services.retrieval import RetrievedKnowledge
+    return RetrievedKnowledge(object_id=oid, object_type=otype,
+                              payload={"name": oid}, relevance=rel)
+
+
+def test_quota_rerank_rescues_weak_group(rrepo, monkeypatch):
+    """配额核心: 弱势子查询组(分数低)也保底进 top-N, 不被强势组通吃。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    per_q = {
+        "qV3": [_rk("A", 0.5), _rk("B", 0.45)],
+        "qR1": [_rk("C", 0.95), _rk("D", 0.9), _rk("E", 0.85), _rk("F", 0.8)],
+    }
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
+    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    collected = {oid: _rk(oid, 0.0) for oid in ["A", "B", "C", "D", "E", "F"]}
+    hits, counts = rr._quota_rerank(nb.id, collected, ["qV3", "qR1"], top_n=2)
+    ids = [h.object_id for h in hits]
+    assert "A" in ids and "C" in ids       # 两组各贡献队首(全局会是 C,D)
+    assert counts == [1, 1, 0]               # [qV3, qR1, 兜底组]: 各子查询 1 条、兜底 0
+
+
+def test_quota_rerank_roundrobin_balance(rrepo, monkeypatch):
+    """组大小悬殊(4 vs 2)时 top_n=4 内两组都有名额, 不被大组占满。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    per_q = {
+        "qA": [_rk("a1", .9), _rk("a2", .8), _rk("a3", .7), _rk("a4", .6)],
+        "qB": [_rk("b1", .95), _rk("b2", .85)],
+    }
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
+    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    collected = {oid: _rk(oid, 0.0) for oid in ["a1","a2","a3","a4","b1","b2"]}
+    hits, counts = rr._quota_rerank(nb.id, collected, ["qA", "qB"], top_n=4)
+    ids = {h.object_id for h in hits}
+    assert "b1" in ids and "b2" in ids       # 小组的 2 条都进(round-robin 保底)
+    assert counts == [2, 2, 0]                # [qA, qB, 兜底组]: 4 名额两组均分、兜底 0
+
+
+def test_quota_rerank_tolerates_subquery_failure(rrepo, monkeypatch):
+    """某子查询 search 抛错 → 该组空, 其余组正常出候选, 不崩。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    def fake_search(self, n, q, types=None, prefer="balanced"):
+        if q == "boom":
+            raise RuntimeError("search blew up")
+        return [_rk("C", 0.9), _rk("D", 0.8)]
+    monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
+    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    collected = {oid: _rk(oid, 0.0) for oid in ["C", "D"]}
+    hits, counts = rr._quota_rerank(nb.id, collected, ["boom", "ok"], top_n=2)
+    ids = {h.object_id for h in hits}
+    assert ids == {"C", "D"}                  # 失败组空, ok 组正常
+    assert counts[0] == 0                      # 失败组贡献 0
+
+
+def test_quota_rerank_fallback_group_last(rrepo, monkeypatch):
+    """所有子查询都查不到的候选(relevance 全 0)进兜底组, 优先级最低但仍可入选。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
+    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    # X 不在任何子查询结果 → 兜底组
+    collected = {"A": _rk("A", 0.0), "X": _rk("X", 0.0)}
+    hits, counts = rr._quota_rerank(nb.id, collected, ["qA"], top_n=2)
+    ids = [h.object_id for h in hits]
+    assert ids[0] == "A"                       # 子查询组优先
+    assert "X" in ids                          # 兜底组仍入选(名额没满时)
+    assert counts[-1] == 1                     # 最后一个 count 是兜底组
+
+
+def test_run_quota_path_keeps_both_groups(rrepo, monkeypatch):
+    """复合(≥2 子查询)+ 开关开 → 走配额, top_hits 同时含两组候选(弱势组不被挤掉)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_quota_enabled = True
+    rrepo.settings.retrieval_top_n = 2
+    per_q = {
+        "qV3": [_rk("A", 0.5), _rk("B", 0.45)],
+        "qR1": [_rk("C", 0.95), _rk("D", 0.9), _rk("E", 0.85)],
+    }
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "qV3"}, {"query": "qR1"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "qV3 qR1", "")
+    ids = {h.object_id for h in res.top_hits}
+    assert "A" in ids and "C" in ids          # 配额救回弱势组 A(全局 top-2 会是 C,D)
+    ans = next(t for t in res.trace if t.step_type == "answer")
+    assert ans.detail.get("quota") == [1, 1]  # 可观测: 每子查询贡献数
+
+
+def test_run_single_subquery_uses_global(rrepo, monkeypatch):
+    """单子查询 → 不进配额, 走原全局重排(行为不变)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_quota_enabled = True
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "only"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "only", "")
+    ans = next(t for t in res.trace if t.step_type == "answer")
+    assert "quota" not in (ans.detail or {})   # 全局路径不带 quota
+
+
+def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
+    """开关关 → 复合问题也走全局重排。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_quota_enabled = False
+    monkeypatch.setattr(ReasoningRetriever, "search",
+                        lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "q1"}, {"query": "q2"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
+    ans = next(t for t in res.trace if t.step_type == "answer")
+    assert "quota" not in (ans.detail or {})   # 开关关 → 全局路径
 
 
 def test_run_expand_summary_uses_node_name_not_id(rrepo):
