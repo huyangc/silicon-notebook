@@ -32,8 +32,8 @@ def test_extract_prompt_excludes_enumerated_values_and_meta_claims():
     from app.services.kg.extract import _prompt
     p = _prompt("[1] sample text", "Section 1", "textbook")
     # concept:取值枚举不独立成节点
-    assert "numeric levels" in p and "NOT separate Concepts" in p
+    assert "enumerated settings" in p and "Do NOT emit Concepts" in p
     # claim:不抽标题/前言/元叙述
-    assert "emit a Claim ONLY for a complete, truth-evaluable" in p
-    assert "section headings or titles" in p
-    assert "narrative/meta sentences about the document itself" in p
+    assert "stands alone as truth-evaluable" in p
+    assert "section headings" in p
+    assert "narrative/meta sentences about the document" in p
