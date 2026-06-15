@@ -159,55 +159,18 @@ class ReasoningRetriever:
 
     # --- 编排 ---
     def _quota_rerank(self, notebook_id, collected, used_queries, top_n):
-        """复合问题: 按子查询配额 round-robin 选 top_n, 避免整串全局排序让信息量大的
-        一方通吃。每个候选归到它 relevance 最高的子查询组, 各组内降序后跨组轮流取队首;
-        所有子查询都查不到的候选(relevance 全 0)归兜底组, 最后轮转。
+        """复合问题: 按子查询配额 round-robin 选 top_n。
+        步骤 1: 每个子查询全库重打分(容错: 抛错则该组空)。
+        步骤 2-4: 分组+轮转委托给通用 quota_fuse。
         返回 (top_hits, counts): counts[i]=第 i 个子查询贡献数, counts[-1]=兜底组。"""
-        # 1. 每个子查询全库重打分(容错: 抛错则该组空)。
+        from app.services.retrieval import quota_fuse
         per_q = []
         for q in used_queries:
             try:
                 per_q.append({h.object_id: h for h in self.search(notebook_id, q)})
             except Exception:
                 per_q.append({})
-        # 2. 每个候选归到 relevance 最高的子查询组; 都查不到 → 兜底组。
-        groups = [[] for _ in used_queries]
-        fallback = []
-        for oid, rk in collected.items():
-            best_i, best_h = -1, None
-            for i, scored in enumerate(per_q):
-                h = scored.get(oid)
-                if h is not None and (best_h is None or h.relevance > best_h.relevance):
-                    best_i, best_h = i, h
-            if best_i >= 0:
-                groups[best_i].append(best_h)
-            else:
-                fallback.append(rk)
-        # 3. 组内按 relevance 降序。
-        for g in groups:
-            g.sort(key=lambda h: h.relevance, reverse=True)
-        # 4. round-robin 跨组轮流取队首未选过的; 兜底组放最后。
-        queues = groups + [fallback]
-        idx = [0] * len(queues)
-        result, seen, sources = [], set(), []
-        while len(result) < top_n:
-            progressed = False
-            for qi in range(len(queues)):
-                if len(result) >= top_n:
-                    break
-                while idx[qi] < len(queues[qi]):
-                    h = queues[qi][idx[qi]]
-                    idx[qi] += 1
-                    if h.object_id not in seen:
-                        seen.add(h.object_id)
-                        result.append(h)
-                        sources.append(qi)
-                        progressed = True
-                        break
-            if not progressed:
-                break
-        counts = [sources.count(i) for i in range(len(queues))]
-        return result, counts
+        return quota_fuse(collected, per_q, top_n)
 
     def _summarize(self, collected, elements):
         lines = []

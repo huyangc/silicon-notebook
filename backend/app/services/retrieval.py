@@ -532,3 +532,42 @@ def score_chunks(
         ))
     scored.sort(key=lambda x: x.score, reverse=True)
     return scored[:limit]
+
+
+def quota_fuse(collected, per_query, top_n, relevance=lambda h: h.relevance):
+    """复合查询配额 round-robin。collected: {id: item}; per_query: List[{id: scored_item}]
+    (第 i 个=第 i 个子查询的命中,scored_item 须有 relevance)。每个候选归到 relevance
+    最高的子查询组,组内降序,跨组轮流取队首;全未命中归兜底组最后轮转。
+    返回 (result, counts): counts[i]=第 i 子查询贡献数, counts[-1]=兜底组。"""
+    groups = [[] for _ in per_query]
+    fallback = []
+    for oid, item in collected.items():
+        best_i, best_h = -1, None
+        for i, scored in enumerate(per_query):
+            h = scored.get(oid)
+            if h is not None and (best_h is None or relevance(h) > relevance(best_h)):
+                best_i, best_h = i, h
+        if best_i >= 0:
+            groups[best_i].append(best_h)
+        else:
+            fallback.append(item)
+    for g in groups:
+        g.sort(key=relevance, reverse=True)
+    queues = groups + [fallback]
+    idx = [0] * len(queues)
+    result, seen, sources = [], set(), []
+    while len(result) < top_n:
+        progressed = False
+        for qi in range(len(queues)):
+            if len(result) >= top_n:
+                break
+            while idx[qi] < len(queues[qi]):
+                h = queues[qi][idx[qi]]; idx[qi] += 1
+                oid = getattr(h, "object_id", None) or getattr(h, "chunk_id", None) or id(h)
+                if oid not in seen:
+                    seen.add(oid); result.append(h); sources.append(qi); progressed = True
+                    break
+        if not progressed:
+            break
+    counts = [sources.count(i) for i in range(len(queues))]
+    return result, counts
