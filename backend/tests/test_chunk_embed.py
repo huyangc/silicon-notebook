@@ -84,3 +84,27 @@ def test_build_chunks_idempotent(repo):
         n = db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id=?", (sid,)).fetchone()["c"]
         ne = db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
     assert n >= 1 and ne == n                     # chunks replaced, embeddings 1:1, no orphans/dupes
+
+
+def test_process_source_builds_chunks(repo, monkeypatch):
+    """process_source 解析后应 INLINE 产出 chunks(轻摄取, query 立即可用)。
+    chunk 构建是同步的(无网络), 故这里无需等后台 embed 线程即可断言行数。"""
+    import app.services.sqlite_repository as mod
+    # mock 解析: 返回固定 elements(不依赖真实文件/MinerU)
+    monkeypatch.setattr(mod, "parse_source_file",
+                        lambda *a, **k: [type("E", (), {"element_type": "paragraph",
+                                         "location_label": "p1", "text": "chunk content " * 30,
+                                         "metadata": {}})()])
+    # 隔离重步骤: KG 抽取/摘要置 no-op, 聚焦验证 chunk 接线本身。
+    monkeypatch.setattr(repo, "_run_extraction", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_summarize_source", lambda *a, **k: "")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    import uuid; sid = f"src-{uuid.uuid4().hex[:8]}"; now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (sid, nb.id, "S", "document", "s.md", "/tmp/s.md", 0, "h", "", "", "queued", now, now))
+    repo.process_source(sid)
+    with repo._connect() as db:
+        n = db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id=?", (sid,)).fetchone()["c"]
+    assert n >= 1

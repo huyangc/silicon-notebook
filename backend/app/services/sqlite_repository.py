@@ -1161,6 +1161,13 @@ class SQLiteRepository:
                     )
             self._set_source_status(source_id, "parsed", summary=summary)
 
+            # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
+            # best-effort: 失败不阻塞既有 parse->extract 流水线。
+            try:
+                self._build_chunks_for_source(source_id)
+            except Exception:
+                self.event_log.logger.exception("chunk build failed for %s", source_id)
+
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks
             # the KG result. 'extracted'/green below is gated on EXTRACTION only.
@@ -1172,6 +1179,7 @@ class SQLiteRepository:
             def _embed_bg() -> None:
                 try:
                     self._embed_source(source_id)
+                    self._embed_chunks_for_source(source_id)   # chunk 向量后台补, 不阻塞流水线
                     stage("embed", "done", embed_started)
                 except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
                     stage("embed", "error", embed_started,
