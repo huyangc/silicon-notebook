@@ -4143,7 +4143,6 @@ class SQLiteRepository:
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
-            temperature=0.0,   # 确定性接地:同一上下文必出同一判定,消除偶发 "(推断)" 漏判
         )
         data = json.loads(raw)
         if not isinstance(data, dict):

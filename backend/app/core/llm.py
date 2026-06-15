@@ -105,7 +105,9 @@ class OpenAICompatibleClient:
         *,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
-        temperature: float = 0.1,
+        # DeepSeek-V4 官方推荐本地部署采样参数: temperature=1.0, top_p=1.0
+        temperature: float = 1.0,
+        top_p: float = 1.0,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -137,6 +139,7 @@ class OpenAICompatibleClient:
             "model": model,
             "messages": full_messages,
             "temperature": temperature,
+            "top_p": top_p,
         }
         logger = self.interaction_logger
         record: Dict[str, Any] = {
