@@ -1,4 +1,9 @@
+import pytest
 from app.services.retrieval import score_chunks, RetrievedChunk
+from app.core.config import Settings
+from app.services.sqlite_repository import SQLiteRepository, _now
+from app.services.embedding import FakeEmbedder
+from app.models.schemas import NotebookCreate
 
 
 def _ck(cid, text):
@@ -30,3 +35,57 @@ def test_score_chunks_uses_semantic_sims():
                        query_vector=[0.1]*4, chunk_sims={"c1": 0.9}, limit=10)
     assert [c.chunk_id for c in out] == ["c1"]
     assert out[0].relevance >= 0.5
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
+        monkeypatch.setenv(_k, "")
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)
+    return r
+
+
+def _seed_chunks(repo, texts):
+    """建 notebook+source+elements, 走 P1 的 build+embed 真路径产出 chunks。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    import uuid
+    sid = f"src-{uuid.uuid4().hex[:8]}"; now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", "document", "s.md", "/tmp/s.md", 0, "h", "", "", "extracted", now, now))
+        for i, t in enumerate(texts, 1):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", t, "{}", now))
+    repo._chunk_and_embed_source(sid)
+    return nb, sid
+
+
+def test_retrieve_chunks_returns_scored_with_matrix(repo):
+    nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts " * 20,
+                                "tomato soup cooking recipe " * 20])
+    scored, ids, mat = repo._retrieve_chunks(nb.id, "deepseek experts")
+    assert scored and scored[0].relevance > 0
+    assert len(ids) >= 1 and mat.shape[0] == len(ids)
+
+
+def test_mmr_select_caps_and_subsets(repo):
+    nb, _ = _seed_chunks(repo, [f"shared topic alpha detail {i} " * 20 for i in range(8)])
+    scored, ids, mat = repo._retrieve_chunks(nb.id, "shared topic alpha")
+    picked = repo._mmr_select_chunks(scored, ids, mat, k=3, lambda_=0.5)
+    assert len(picked) <= 3
+    assert {p.chunk_id for p in picked} <= {c.chunk_id for c in scored}

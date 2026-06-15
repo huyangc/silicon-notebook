@@ -133,6 +133,11 @@ class Settings(BaseSettings):
     # chunk-native 检索分块: chunk 目标字数 / 相邻重叠(P1 overlap 默认 0)。
     chunk_target_chars: int = Field(600, env="CHUNK_TARGET_CHARS")
     chunk_overlap_chars: int = Field(0, env="CHUNK_OVERLAP_CHARS")
+    # chunk-native 检索: 大召回候选数 / MMR 精选数 / MMR λ / 答案上下文预算(长上下文综合)。
+    chunk_recall: int = Field(150, env="CHUNK_RECALL")
+    chunk_mmr_k: int = Field(16, env="CHUNK_MMR_K")
+    chunk_mmr_lambda: float = Field(0.5, env="CHUNK_MMR_LAMBDA")
+    chunk_answer_budget_chars: int = Field(30000, env="CHUNK_ANSWER_BUDGET_CHARS")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

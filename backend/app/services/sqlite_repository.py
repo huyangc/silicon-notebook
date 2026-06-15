@@ -3678,6 +3678,22 @@ class SQLiteRepository:
             if element.get("vector")
         }
 
+    def _gather_chunks(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+        rows = db.execute(
+            """
+            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,
+                   s.title AS source_title
+            FROM chunks c JOIN sources s ON s.id = c.source_id
+            WHERE c.notebook_id = ?
+            """,
+            (notebook_id,),
+        ).fetchall()
+        return [{
+            "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
+            "section_path": r["section_path"], "source_title": r["source_title"],
+            "element_ids": json.loads(r["element_ids"] or "[]"),
+        } for r in rows]
+
     def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
                        table: str, id_col: str):
         """Cached (ids, normalized float32 matrix) for a notebook's embeddings.
@@ -4064,6 +4080,38 @@ class SQLiteRepository:
         with self._connect() as db:
             elements = self._gather_elements(db, notebook_id, with_vectors=True)
         return score_elements(query, elements, query_vector, limit=limit)
+
+    def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
+        """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
+        (matrix 行已 L2 归一化, 点积即余弦)。"""
+        from app.services.retrieval import score_chunks
+        from app.services.vector_index import query_sims
+        recall = recall or self.settings.chunk_recall
+        query_vector = self._embed_query(query)
+        with self._connect() as db:
+            chunks = self._gather_chunks(db, notebook_id)
+            ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
+        chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
+        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        return scored, ids, mat
+
+    def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
+        """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
+        from app.services.mmr import mmr_rerank
+        if len(scored) <= k:
+            return list(scored)
+        id_to_row = {cid: i for i, cid in enumerate(ids)}
+        relevance = {c.chunk_id: c.relevance for c in scored}
+
+        def pair_sim(a: str, b: str) -> float:
+            ia, ib = id_to_row.get(a), id_to_row.get(b)
+            if ia is None or ib is None:
+                return 0.0
+            return float(mat[ia] @ mat[ib])
+
+        chosen = mmr_rerank([c.chunk_id for c in scored], relevance, pair_sim, k, lambda_)
+        by_id = {c.chunk_id: c for c in scored}
+        return [by_id[cid] for cid in chosen]
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """KG-native ask: retrieves over the 4 KG object types (claim/formula/
