@@ -72,8 +72,8 @@ class ReasoningRetriever:
     # --- KG 工具箱(薄封装 repo 原语) ---
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
-        return self.repo._retrieve_scored(notebook_id, query, types=types,
-                                          w_keyword=wk, w_semantic=ws)
+        return self.repo.federated_retrieve(notebook_id, query, types=types,
+                                            w_keyword=wk, w_semantic=ws)
 
     def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
         return self.repo._retrieve_neighbors(notebook_id, object_id, edge_type, direction)

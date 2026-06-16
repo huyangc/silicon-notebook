@@ -22,6 +22,17 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     client = TestClient(create_app())
     notebook_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
 
+    # 需要至少一个 KG 节点，否则 P4-6 门控直接返回 kg_required=True（无 plan 步骤）
+    from app.core.config import get_settings as _gs
+    from app.services.sqlite_repository import SQLiteRepository
+    from app.services.embedding import FakeEmbedder
+    repo = SQLiteRepository(_gs())
+    repo.embedder = FakeEmbedder(dim=_gs().embed_dim)
+    repo.store_kg(notebook_id, None, [
+        {"local_id": "K1", "object_type": "concept",
+         "payload": {"name": "RTL到GDSII流程概述"}, "evidence": []}
+    ], [])
+
     response = client.post(
         f"/api/notebooks/{notebook_id}/ask/stream",
         json={"question": "RTL到GDSII流程", "mode": "reasoning"},

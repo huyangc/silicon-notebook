@@ -4677,6 +4677,19 @@ class SQLiteRepository:
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
 
+        if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
+            response = AskResponse(
+                answer_id="",
+                conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
+                           "请先点『构建知识图谱』,或把一个已建图的笔记本设为底层"
+                           "(POST /notebooks/{id}/tier)。",
+                conversation_id=conversation_id, retrieval_query=question,
+                llm_mode="deterministic", kg_required=True)
+            response.mode = "reasoning"
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id)
+            return response
+
         try:
             result = ReasoningRetriever(self, self.settings).run(
                 notebook_id, question, history, on_step=on_trace)
@@ -4764,8 +4777,21 @@ class SQLiteRepository:
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
 
-        # Seed: top-N by relevance (reuse existing scored-retrieval path).
-        top_hits = self._retrieve_scored(notebook_id, question)[:self.settings.retrieval_top_n]
+        if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
+            response = AskResponse(
+                answer_id="",
+                conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
+                           "请先点『构建知识图谱』,或把一个已建图的笔记本设为底层"
+                           "(POST /notebooks/{id}/tier)。",
+                conversation_id=conversation_id, retrieval_query=question,
+                llm_mode="deterministic", kg_required=True)
+            response.mode = "graph"
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id)
+            return response
+
+        # Seed: top-N by relevance (federated across base notebooks).
+        top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
         if not top_hits and not seed_ids:
             response = AskResponse(
                 answer_id="",

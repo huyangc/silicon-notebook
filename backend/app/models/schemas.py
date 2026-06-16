@@ -197,6 +197,8 @@ class AskResponse(BaseModel):
     top_relevance: float = 0.0
     # 推理模式 agent 轨迹;fast 模式恒为 None。
     reasoning_trace: Optional[List["TraceStep"]] = None
+    # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
+    kg_required: bool = False
 
 
 class ConversationRenameRequest(BaseModel):

@@ -163,3 +163,41 @@ def test_strict_modes_and_default_intact():
 def test_unknown_mode_still_raises():
     with pytest.raises(UnknownAskMode):
         resolve_mode("bogus")
+
+
+# ---------------------------------------------------------------------------
+# P4-6: 严格推理门控(kg_required) + federated_retrieve 接通
+# ---------------------------------------------------------------------------
+
+from app.models.schemas import AskRequest
+
+
+def test_strict_blocked_when_no_kg_no_base(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    resp = repo.ask_reasoning(nb.id, AskRequest(question="q", mode="reasoning"))
+    assert resp.kg_required is True
+    assert resp.reasoning_trace is None       # did NOT run the agentic loop
+
+
+def test_strict_allowed_when_base_has_kg(repo):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "Engram"}, "evidence": []}], [])
+    empty = repo.create_notebook(NotebookCreate(name="empty"))   # own KG empty
+    resp = repo.ask_reasoning(empty.id, AskRequest(question="Engram", mode="reasoning"))
+    assert resp.kg_required is False           # base satisfies the gate
+
+
+def test_reasoning_search_federates_base(repo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "Engram"}, "evidence": []}], [])
+    empty = repo.create_notebook(NotebookCreate(name="empty"))
+    hits = ReasoningRetriever(repo, repo.settings).search(empty.id, "Engram")
+    names = {h.payload.get("name") for h in hits}
+    assert "Engram" in names                   # base hit surfaced via federation
