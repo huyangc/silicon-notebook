@@ -7,13 +7,11 @@ import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import {
   buildAnswerReferences,
-  parseMarkdownBlocks,
-  referenceByAnchorKey,
   renderTextWithReferenceNumbers,
   splitInlineLatex,
   type AnswerReference,
-  type MarkdownBlock,
 } from "./answer-formatting";
+import { AnswerMarkdown } from "./answer-markdown";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
 import { lastTurnUsedReasoning } from "./session-reasoning";
@@ -3801,97 +3799,6 @@ function CiteChip({
   );
 }
 
-function renderInlineAnswerText(
-  text: string,
-  refsByKey: Record<string, AnswerReference>,
-  selectedReferenceId: string | null,
-  onSelectReference: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void
-) {
-  const nodes = [];
-  const tokenPattern = /(`[^`]+`|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\[(k\d+)\])/g;
-  let lastIndex = 0;
-  for (const match of text.matchAll(tokenPattern)) {
-    if (match.index == null) continue;
-    if (match.index > lastIndex) nodes.push(<span key={`text-${lastIndex}`}>{text.slice(lastIndex, match.index)}</span>);
-    const token = match[0];
-    const marker = token.match(/^\[(k\d+)\]$/);
-    const inlineCode = token.match(/^`([^`]+)`$/);
-    const inlineFormula = token.match(/^\$([^$\n]+)\$$/) ?? token.match(/^\\\(([\s\S]+?)\\\)$/);
-    if (marker) {
-      const reference = refsByKey[marker[1]];
-      nodes.push(reference ? (
-        <CiteChip
-          key={`cite-${match.index}`}
-          reference={reference}
-          selected={selectedReferenceId === reference.id}
-          onSelect={onSelectReference}
-        />
-      ) : <span key={`unknown-cite-${match.index}`}>{token}</span>);
-    } else if (inlineCode) {
-      nodes.push(<code className="answer-inline-code" key={`code-${match.index}`}>{inlineCode[1]}</code>);
-    } else if (inlineFormula) {
-      nodes.push(<InlineFormula latex={inlineFormula[1]} key={`formula-${match.index}`} />);
-    } else {
-      nodes.push(<span key={`token-${match.index}`}>{token}</span>);
-    }
-    lastIndex = match.index + token.length;
-  }
-  if (lastIndex < text.length) nodes.push(<span key={`text-${lastIndex}`}>{text.slice(lastIndex)}</span>);
-  return nodes;
-}
-
-function AnswerMarkdown({
-  text,
-  references,
-  selectedReferenceId,
-  onSelectReference
-}: {
-  text: string;
-  references: AnswerReference[];
-  selectedReferenceId: string | null;
-  onSelectReference: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void;
-}) {
-  const refsByKey = referenceByAnchorKey(references);
-  const blocks = parseMarkdownBlocks(text);
-  if (blocks.length === 0) return null;
-  return (
-    <div className="answer-markdown">
-      {blocks.map((block: MarkdownBlock, index: number) => {
-        if (block.type === "code") {
-          return (
-            <pre className="answer-code" data-language={block.language || undefined} key={index}>
-              <code>{block.code}</code>
-            </pre>
-          );
-        }
-        if (block.type === "formula") return <FormulaView latex={block.latex} key={index} />;
-        if (block.type === "table") {
-          return (
-            <div className="answer-table-wrap" key={index}>
-              <table className="answer-table">
-                <thead>
-                  <tr>{block.headers.map((header, cellIndex) => <th key={cellIndex}>{renderInlineAnswerText(header, refsByKey, selectedReferenceId, onSelectReference)}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {block.rows.map((row, rowIndex) => (
-                    <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{renderInlineAnswerText(cell, refsByKey, selectedReferenceId, onSelectReference)}</td>)}</tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        }
-        if (block.type === "unordered-list") {
-          return <ul key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineAnswerText(item, refsByKey, selectedReferenceId, onSelectReference)}</li>)}</ul>;
-        }
-        if (block.type === "ordered-list") {
-          return <ol key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineAnswerText(item, refsByKey, selectedReferenceId, onSelectReference)}</li>)}</ol>;
-        }
-        return <p key={index}>{renderInlineAnswerText(block.text, refsByKey, selectedReferenceId, onSelectReference)}</p>;
-      })}
-    </div>
-  );
-}
 
 async function copyTextToClipboard(text: string) {
   if (navigator.clipboard?.writeText) {
@@ -4038,10 +3945,11 @@ function AnswerView({
         return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
       })()}
       <AnswerMarkdown
-        text={answerText}
-        references={references}
+        answer={answerText}
+        anchors={answer.anchors}
+        citations={answer.citations}
         selectedReferenceId={selectedReferenceId}
-        onSelectReference={(reference) => setSelectedReferenceId((current) => current === reference.id ? null : reference.id)}
+        onReferenceClick={(reference) => setSelectedReferenceId((current) => current === reference.id ? null : reference.id)}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />
