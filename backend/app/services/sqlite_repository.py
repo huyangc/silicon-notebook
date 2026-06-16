@@ -109,7 +109,6 @@ from app.services.retrieval import (
     score_elements,
     type_weight,
     tier_weight,
-    is_process_query,
     ensure_procedure_quota,
     classify_evidence,
 )
@@ -1118,11 +1117,7 @@ class SQLiteRepository:
     def _notebook_has_kg(self, notebook_id: str) -> bool:
         """True iff this notebook has any knowledge_objects row."""
         with self._connect() as db:
-            row = db.execute(
-                "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
-                (notebook_id,),
-            ).fetchone()
-        return bool(row[0])
+            return self._has_kg(db, notebook_id)
 
     def _should_extract_kg(self, notebook_id: str) -> bool:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
@@ -4358,7 +4353,10 @@ class SQLiteRepository:
 
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
-    # "chunk"，不会触发 422。被这两个方法调用的 helper 有意保留（部分被其他 ask_* 共用）。
+    # "chunk"，不会触发 422。
+    # 随之删除的还有：is_process_query import（原 ask_fast 独占调用）。
+    # 保留的 helper（_rrf_scored / _rerank_hits / _answer_kg 等）仍被其他 ask_* 路径
+    # 或测试直接调用，尚未可删。
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
         """Canonical unified-cluster id for a concept `object_id`, reusing the
@@ -4758,14 +4756,16 @@ class SQLiteRepository:
                   seed_ids: Optional[List[str]] = None) -> AskResponse:
         """Multi-hop graph reasoning mode.
 
-        1. Retrieve top seeds via _retrieve_scored (same as fast path).
-        2. Build the rx graph for this notebook (version-cached _rx_graph).
+        1. Retrieve top seeds via federated_retrieve (active + base-tier notebooks).
+        2. Build the federated rx graph via _federated_rx_graph.
         3. BFS from seed object_ids along DEFAULT_REASONING_EDGES.
         4. Render subgraph → (context_block, id_map) via render_subgraph_context.
         5. Feed context_block to the existing answer LLM + grounding path.
 
-        The [k] anchor markers, _parse_answer_anchors, classify_evidence, and
-        AskResponse assembly are all reused verbatim from the fast path.
+        The [k] anchor markers, _parse_answer_anchors, and classify_evidence are
+        shared helpers reused across ask modes. There is no longer a "fast path" —
+        ask_fast was retired in P4-5; the former fast-path helpers (_rrf_scored,
+        _rerank_hits, _answer_kg) remain in place because other callers reference them.
         """
         from app.services.kg.graph_reason import (
             DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,

@@ -85,9 +85,9 @@ def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
     # P4-5: ask_fast retired; verify ask() (default=chunk) handles an empty notebook gracefully.
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}))
-    # chunk mode on empty notebook: no crash, returns a response
+    # chunk mode on empty notebook: no crash, response is explicitly ungrounded
     assert resp is not None
-    assert resp.conclusion  # has some fallback message
+    assert resp.grounded is False  # chunk path with no hits must not claim grounding
 
 def test_concept_dedup_degrades_gracefully_without_clusters(repo):
     # No concept_clusters rows populated -> _concept_cluster_id returns object_id

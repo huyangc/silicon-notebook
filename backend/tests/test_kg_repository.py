@@ -313,10 +313,9 @@ def test_ask_returns_kg_knowledge(repo):
     assert any("Engram" in (h.payload.get("name") or "") for h in hits)
 
 
-def test_ask_1hop_expansion(repo):
-    """1-hop graph expansion: a concept linked by 'about' to a matching claim
-    must be reachable from the claim via knowledge_relations.
-    P4-5: ask_fast retired; verify the relation is stored and retrievable directly."""
+def test_1hop_relation_is_stored(repo):
+    """A concept linked by 'about' to a claim must have a knowledge_relations row,
+    and the claim must be retrievable via _retrieve_scored."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
     # Claim that matches the query by name.

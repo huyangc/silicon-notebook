@@ -241,6 +241,9 @@ class ReasoningRetriever:
                                      detail={"object_id": oid, "reason": "empty_or_visited"}))
                 else:
                     visited.add(oid)
+                    # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
+                    # neighbors live in the base notebook, so deep cross-tier graph walks are
+                    # graph mode's job (_federated_rx_graph), not reasoning mode (P4 spec §F).
                     neigh = self.neighbors(notebook_id, oid,
                                            decision.expand_edge_type, decision.expand_direction)
                     for h in neigh:
