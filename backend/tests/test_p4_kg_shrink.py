@@ -1,6 +1,6 @@
 import pytest
 from app.core.config import Settings
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 
@@ -53,3 +53,53 @@ def test_should_extract_true_when_notebook_already_has_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="n"))
     _seed_concept(repo, nb.id)
     assert repo._should_extract_kg(nb.id) is True
+
+
+# ---------------------------------------------------------------------------
+# P4-3: build_notebook_kg
+# ---------------------------------------------------------------------------
+
+def _make_source(repo, nb_id, sid, status="extracted"):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,'markdown',?,'parsed','a.md','',0,'','','academic_paper',?,?)",
+            (sid, nb_id, "Doc", status, _now(), _now()))
+    return sid
+
+
+def _configure_llm(repo):
+    repo.llm_client = type("C", (), {"configured": True})()
+
+
+def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
+    _configure_llm(repo)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    s1 = _make_source(repo, nb.id, "s1")
+    s2 = _make_source(repo, nb.id, "s2")
+    calls = []
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: calls.append(sid))
+    repo.build_notebook_kg(nb.id)
+    assert set(calls) == {"s1", "s2"}
+
+
+def test_build_notebook_kg_skips_sources_with_kg(repo, monkeypatch):
+    _configure_llm(repo)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    s1 = _make_source(repo, nb.id, "s1")
+    repo.store_kg(nb.id, "s1", [
+        {"local_id": "K1", "object_type": "concept",
+         "payload": {"name": "X"}, "evidence": []}], [])   # s1 already has KG
+    s2 = _make_source(repo, nb.id, "s2")
+    calls = []
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: calls.append(sid))
+    repo.build_notebook_kg(nb.id)
+    assert calls == ["s2"]                                  # idempotent: skip s1
+
+
+def test_build_notebook_kg_requires_llm(repo):
+    repo.llm_client = type("C", (), {"configured": False})()
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    with pytest.raises(RuntimeError):
+        repo.build_notebook_kg(nb.id)

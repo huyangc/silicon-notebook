@@ -1119,6 +1119,37 @@ class SQLiteRepository:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
         return self.settings.kg_auto_extract or self._notebook_has_kg(notebook_id)
 
+    def build_notebook_kg(self, notebook_id: str) -> dict:
+        """按需对该 notebook 下"尚无 KG"的 source 逐个抽取(复用 _run_extraction)。
+        幂等:已有 knowledge_objects 的 source 跳过。无 LLM → RuntimeError。
+        单 source 失败隔离,不连累其余、不回退其终态,错误入 event log。"""
+        self.get_notebook(notebook_id)  # KeyError if missing
+        if not getattr(self.llm_client, "configured", False):
+            raise RuntimeError("LLM not configured; cannot build KG")
+        with self._connect() as db:
+            src_ids = [r["id"] for r in db.execute(
+                "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)).fetchall()]
+            # source_id is NOT NULL DEFAULT '' — use != '' to find sources that truly have KG
+            kgful = {r["source_id"] for r in db.execute(
+                "SELECT DISTINCT source_id FROM knowledge_objects "
+                "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)).fetchall()}
+        targets = [sid for sid in src_ids if sid not in kgful]
+        done, failed = [], []
+        for sid in targets:
+            try:
+                self._set_source_status(sid, "extracting")
+                self._run_extraction(sid)
+                self._set_source_status(sid, "extracted")
+                done.append(sid)
+            except Exception:  # noqa: BLE001 — 隔离单 source 失败
+                failed.append(sid)
+                self.event_log.logger.exception("build_notebook_kg failed for %s", sid)
+        try:
+            self._mark_unified_kg_dirty(notebook_id)
+        except Exception:
+            self.event_log.logger.exception("unified-KG dirty mark failed for %s", notebook_id)
+        return {"built": done, "failed": failed, "skipped": sorted(kgful)}
+
     def process_source(self, source_id: str) -> SourceSummary:
         """Run the full parse -> embed -> extract pipeline with a status machine.
 
