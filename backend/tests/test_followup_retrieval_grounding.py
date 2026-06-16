@@ -2,29 +2,20 @@ import json
 import pytest
 
 
-def test_settings_have_followup_and_evidence_knobs(monkeypatch):
+def test_settings_have_rewrite_and_evidence_knobs(monkeypatch):
     from app.core.config import Settings
     s = Settings()
-    assert s.followup_max_len == 12
     assert s.evidence_tau_low == 0.18
     assert s.evidence_tau_high == 0.35
     assert s.proc_min == 2
+    # 专用快改写模型:默认未配 → False
+    assert s.rewrite_llm_configured is False
 
     monkeypatch.setenv("EVIDENCE_TAU_HIGH", "0.5")
     assert Settings().evidence_tau_high == 0.5
-
-
-def test_looks_like_followup():
-    from app.services.followup import looks_like_followup
-    assert looks_like_followup("把这个流程按阶段画成流程图", 12) is True
-    assert looks_like_followup("展开讲讲这个流程", 12) is True
-    assert looks_like_followup("draw that flow as stages please now", 12) is True
-    assert looks_like_followup("那 ECO 呢", 12) is True  # length-triggered (len<12)
-    # marker path: long enough that the length shortcut can't fire (上面/那个)
-    assert looks_like_followup("请把上面那个完整流程再展开讲讲细节谢谢", 12) is True
-    assert looks_like_followup("innovus中有哪些常见flow", 12) is False
-    assert looks_like_followup("innovus是什么工具", 12) is False
-    assert looks_like_followup("", 12) is False
+    # 设了 REWRITE_LLM_MODEL → 启用(base_url/api_key 缺省复用主端点)
+    monkeypatch.setenv("REWRITE_LLM_MODEL", "deepseek-v4-fast")
+    assert Settings().rewrite_llm_configured is True
 
 
 def test_is_process_query_and_type_weight():
@@ -187,3 +178,26 @@ def test_ask_sets_evidence_level_field(repo2):
     resp = repo2.ask(nb.id, AskRequest(question="RTL到GDSII流程"))
     assert hasattr(resp, "evidence_level") and resp.evidence_level
     assert resp.top_relevance >= 0.0
+
+
+def test_additive_followup_always_rewritten(repo2):
+    # 去掉 looks_like_followup 闸门后:此前漏判的「加上…」式追问现在也会触发改写。
+    nb = _seed_flow(repo2)
+    t1 = repo2.ask(nb.id, AskRequest(question="innovus中有哪些常见flow"))
+    assert repo2.llm_client.rewrite_calls == []  # 首轮无 history → 不改写
+    repo2.ask(nb.id, AskRequest(question="加上Qwen系列模型和GLM系列模型的对比",
+                                conversation_id=t1.conversation_id))
+    assert len(repo2.llm_client.rewrite_calls) == 1  # 旧逻辑(闸门漏判)会是 0
+    assert "加上Qwen" in repo2.llm_client.rewrite_calls[0]
+
+
+def test_followup_rewrite_uses_dedicated_rewrite_client(repo2):
+    # 配了专用快改写 client → 改写走它,不走主 client(答案仍走主 client)。
+    fast = RecordingLLM()
+    repo2._rewrite_llm_client = fast
+    nb = _seed_flow(repo2)
+    t1 = repo2.ask(nb.id, AskRequest(question="innovus中有哪些常见flow"))
+    repo2.ask(nb.id, AskRequest(question="加上Qwen系列的对比",
+                                conversation_id=t1.conversation_id))
+    assert len(fast.rewrite_calls) == 1          # 改写落在专用快 client
+    assert repo2.llm_client.rewrite_calls == []  # 主 client 未收到改写

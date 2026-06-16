@@ -113,7 +113,6 @@ from app.services.retrieval import (
     ensure_procedure_quota,
     classify_evidence,
 )
-from app.services.followup import looks_like_followup
 
 
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
@@ -179,6 +178,18 @@ class SQLiteRepository:
             if settings.reasoning_llm_configured
             else None
         )
+        # 查询改写/扩展专用 client(DeepSeek v4-fast 之类快模型)：设了 REWRITE_LLM_MODEL
+        # 即启用(base_url/api_key 缺省复用主端点)；否则 None，由 rewrite_llm_client 回退。
+        self._rewrite_llm_client = (
+            OpenAICompatibleClient(
+                settings,
+                base_url=settings.rewrite_llm_base_url or settings.openai_compat_base_url,
+                api_key=settings.rewrite_llm_api_key or settings.openai_compat_api_key,
+                model=settings.rewrite_llm_model,
+            )
+            if settings.rewrite_llm_configured
+            else None
+        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
@@ -201,6 +212,14 @@ class SQLiteRepository:
         当前 self.llm_client（含测试运行时替换的 fake），未配置时与全局行为完全一致。"""
         if self._reasoning_llm_client is not None:
             return self._reasoning_llm_client
+        return self.llm_client
+
+    @property
+    def rewrite_llm_client(self):
+        """查询改写/扩展专用 LLM client(快模型)。设了 REWRITE_LLM_MODEL → 独立实例；
+        否则动态回退到当前 self.llm_client(含测试替换的 fake)，与全局行为一致。"""
+        if self._rewrite_llm_client is not None:
+            return self._rewrite_llm_client
         return self.llm_client
 
     def _resolve_path(self, value: str) -> Path:
@@ -4210,7 +4229,7 @@ class SQLiteRepository:
         from app.services.query_rewrite import expand_query
         from app.services.retrieval import quota_fuse
         if self.settings.query_rewrite_enabled:
-            ex = expand_query(self.llm_client, retrieval_query, history,
+            ex = expand_query(self.rewrite_llm_client, retrieval_query, history,
                               max_subqueries=self.settings.chunk_max_subqueries)
             sub_queries = [s.query for s in ex.sub_queries]
         else:
@@ -4889,17 +4908,19 @@ class SQLiteRepository:
         return ("\n".join(lines) if lines else "(none)"), id_map
 
     def _rewrite_followup_query(self, history: str, question: str) -> str:
-        """Resolve an elliptical follow-up into a standalone retrieval query
-        using prior turns. Gated (only when it looks like a follow-up and we
-        have history + a configured LLM); always falls back to the raw question."""
+        """Resolve an elliptical follow-up into a standalone retrieval query using
+        prior turns. Runs whenever there IS history (any non-first turn) — the
+        rewrite model itself returns the question unchanged when it's already
+        standalone, so we no longer pre-gate with a brittle keyword heuristic.
+        Uses the dedicated fast rewrite model (rewrite_llm_client); always falls
+        back to the raw question on any failure."""
         if not history.strip():
             return question
-        if not looks_like_followup(question, self.settings.followup_max_len):
-            return question
-        if not self.llm_client.configured:
+        client = self.rewrite_llm_client
+        if not getattr(client, "configured", False):
             return question
         try:
-            raw = self.llm_client.chat_json(
+            raw = client.chat_json(
                 [{"role": "user", "content": followup_rewrite_prompt(history, question)}],
                 FOLLOWUP_REWRITE_SCHEMA_HINT,
             )
