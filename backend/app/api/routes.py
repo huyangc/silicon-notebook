@@ -56,6 +56,7 @@ from app.models.schemas import (
     UnifiedKgStatus,
     UserProfile,
 )
+from app.services.ask_modes import resolve_mode, user_facing_mode_ids, UnknownAskMode, ASK_MODES
 from app.services.kg import scheduler as kg_scheduler
 from app.services.repository import NotebookRepository, UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
@@ -396,8 +397,22 @@ def search_notebook(
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     try:
         return repository().ask(notebook_id, payload)
+    except UnknownAskMode as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/ask-modes")
+def ask_modes() -> list[dict[str, Any]]:
+    """User-facing ask modes (single source: app/services/ask_modes.py).
+    Copy/labels live in the frontend; this exposes ids + behavioural flags."""
+    return [
+        {"id": m.id, "group": m.group,
+         "requires_kg": m.requires_kg, "streaming": m.streaming}
+        for m in ASK_MODES.values() if m.user_facing
+    ]
 
 
 def _ndjson_line(payload: dict[str, Any]) -> str:
@@ -411,29 +426,28 @@ def ask_stream(notebook_id: str, payload: AskRequest) -> StreamingResponse:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        spec = resolve_mode(payload.mode)
+    except UnknownAskMode as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
 
     def stream_events():
         events: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        events.put({
-            "event": "progress",
-            "step": {
-                "step_type": "start",
-                "summary": "启动推理 agent",
-                "detail": {"mode": getattr(payload, "mode", "fast")},
-            },
-        })
+        events.put({"event": "progress", "step": {
+            "step_type": "start", "summary": "启动检索",
+            "detail": {"mode": payload.mode}}})
 
         def on_trace(step) -> None:
             events.put({"event": "progress", "step": step.model_dump()})
 
         def worker() -> None:
             try:
-                if getattr(payload, "mode", "fast") == "reasoning" and hasattr(repo, "ask_reasoning"):
-                    response = repo.ask_reasoning(notebook_id, payload, on_trace=on_trace)
-                else:
-                    response = repo.ask(notebook_id, payload)
+                handler = getattr(repo, spec.handler)
+                response = handler(notebook_id, payload, on_trace=on_trace) \
+                    if spec.streaming else handler(notebook_id, payload)
                 events.put({"event": "final", "response": response.model_dump()})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
             finally:
                 events.put(None)
