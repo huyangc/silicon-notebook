@@ -22,6 +22,12 @@ def test_looks_like_followup():
     assert looks_like_followup("那 ECO 呢", 12) is True  # length-triggered (len<12)
     # marker path: long enough that the length shortcut can't fire (上面/那个)
     assert looks_like_followup("请把上面那个完整流程再展开讲讲细节谢谢", 12) is True
+    # 追加/延续式 follow-up:基线在历史里、问句本身省略(本次修复——此前漏判致丢引用)
+    assert looks_like_followup("加上Qwen系列模型和GLM系列模型的对比", 12) is True
+    assert looks_like_followup("此外再补充推理成本与训练成本的横向对比数据", 12) is True
+    assert looks_like_followup("also include the Qwen and GLM series in the comparison", 12) is True
+    # 不过度触发:无指代/无追加标记的独立长问题仍判 False(如本轮对话第一问)
+    assert looks_like_followup("对比一下deepseek各系列的模型用表格的形式呈现", 12) is False
     assert looks_like_followup("innovus中有哪些常见flow", 12) is False
     assert looks_like_followup("innovus是什么工具", 12) is False
     assert looks_like_followup("", 12) is False
