@@ -4222,6 +4222,7 @@ class SQLiteRepository:
             evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
             citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
             retrieval_query=retrieval_query, top_relevance=top_relevance)
+        response.mode = "chunk"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         ask_stage("total", ask_started)
@@ -4514,6 +4515,7 @@ class SQLiteRepository:
             retrieval_query=retrieval_query,
             top_relevance=top_relevance,
         )
+        response.mode = "fast"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id
         )
@@ -4550,6 +4552,7 @@ class SQLiteRepository:
                 retrieval_query=question,
                 top_relevance=0.0,
             )
+            resp.mode = "global"
             resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
             return resp
 
@@ -4629,6 +4632,7 @@ class SQLiteRepository:
             retrieval_query=question,
             top_relevance=0.0,
         )
+        response.mode = "global"
         response.answer_id = self._save_answer(notebook_id, question, response, conversation_id)
         return response
 
@@ -5006,6 +5010,7 @@ class SQLiteRepository:
             retrieval_query=question, top_relevance=top_relevance,
             reasoning_trace=trace or None,
         )
+        response.mode = "reasoning"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
@@ -5044,6 +5049,7 @@ class SQLiteRepository:
                 conversation_id=conversation_id, retrieval_query=question,
                 llm_mode="deterministic",
             )
+            response.mode = "graph"
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id)
             return response
@@ -5162,6 +5168,7 @@ class SQLiteRepository:
             conversation_id=conversation_id, retrieval_query=question,
             top_relevance=top_relevance, reasoning_trace=graph_trace,
         )
+        response.mode = "graph"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
