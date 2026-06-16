@@ -4228,17 +4228,18 @@ class SQLiteRepository:
         return response
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
-        """KG-native ask: retrieves over the 4 KG object types (claim/formula/
-        procedure/concept), performs 1-hop relation expansion, and synthesises
-        a conclusion via the LLM (or deterministic fallback)."""
-        if getattr(payload, "mode", "chunk") == "reasoning":
-            return self.ask_reasoning(notebook_id, payload)
-        if getattr(payload, "mode", "chunk") == "graph":
-            return self.ask_graph(notebook_id, payload)
-        if getattr(payload, "mode", "chunk") == "global":
-            return self._ask_global(notebook_id, payload)
-        if getattr(payload, "mode", "chunk") == "chunk":
-            return self.ask_chunk(notebook_id, payload)
+        """Dispatch to the retrieval handler named by payload.mode, resolved
+        through the ask_modes registry. Unknown modes raise UnknownAskMode (the
+        API layer returns 422) — never a silent fall-through to the legacy path."""
+        from app.services.ask_modes import resolve_mode
+        spec = resolve_mode(getattr(payload, "mode", None))
+        return getattr(self, spec.handler)(notebook_id, payload)
+
+    def ask_fast(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """Legacy KG-native ask over the 4 KG object types (claim/formula/
+        procedure/concept) + 1-hop relation expansion. Non-default; reachable
+        only via explicit mode="fast" (eval/back-compat). See ask_chunk for the
+        default path."""
         import time
         ask_started = time.perf_counter()
 

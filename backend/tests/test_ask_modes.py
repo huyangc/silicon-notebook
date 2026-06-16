@@ -5,6 +5,33 @@ from app.services.ask_modes import (
 )
 
 
+def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    from app.models.schemas import AskRequest, AskResponse, NotebookCreate
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    repo = SQLiteRepository(Settings())
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+
+    calls = {}
+    for mid in ("ask_chunk", "ask_reasoning", "ask_graph", "ask_fast", "_ask_global"):
+        def make(mid):
+            return lambda notebook_id, payload: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
+        monkeypatch.setattr(repo, mid, make(mid))
+
+    assert repo.ask(nb.id, AskRequest(question="q")).conclusion == "ask_chunk"       # 缺省
+    assert repo.ask(nb.id, AskRequest(question="q", mode="graph")).conclusion == "ask_graph"
+    assert repo.ask(nb.id, AskRequest(question="q", mode="fast")).conclusion == "ask_fast"
+
+    from app.services.ask_modes import UnknownAskMode
+    with pytest.raises(UnknownAskMode):
+        repo.ask(nb.id, AskRequest(question="q", mode="bogus"))
+
+
 def test_registry_has_expected_modes_and_flags():
     assert set(ASK_MODES) == {"chunk", "reasoning", "graph", "fast", "global"}
     assert ASK_MODES["chunk"].handler == "ask_chunk"
