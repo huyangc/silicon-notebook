@@ -107,6 +107,9 @@ class NotebookSummary(BaseModel):
     # 'personal' = user notes (default). Drives tier-weighted relevance + conflict
     # precedence in ask().
     tier: str = "personal"
+    # 该 notebook 是否已构建知识图谱（有任意 knowledge_objects）。
+    # 驱动前端严格推理(reasoning/graph)的可用门控。
+    kg_ready: bool = False
 
 
 class NotebookTemplate(BaseModel):

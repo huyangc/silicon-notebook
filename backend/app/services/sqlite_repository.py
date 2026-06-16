@@ -678,6 +678,13 @@ class SQLiteRepository:
         ).fetchone()
         return int(row["count"])
 
+    def _has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row[0])
+
     def _clear_source_extraction_state(
         self,
         db: sqlite3.Connection,
@@ -5877,6 +5884,7 @@ class SQLiteRepository:
             taxonomy=_list("taxonomy"),
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
+            kg_ready=self._has_kg(db, row["id"]),
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
