@@ -110,6 +110,9 @@ class NotebookSummary(BaseModel):
     # 该 notebook 是否已构建知识图谱（有任意 knowledge_objects）。
     # 驱动前端严格推理(reasoning/graph)的可用门控。
     kg_ready: bool = False
+    # 系统中是否存在已建 KG 的 tier='base' 笔记本。即便本 notebook 无图,有 base 也可
+    # 进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或 base_kg_available)。
+    base_kg_available: bool = False
 
 
 class NotebookTemplate(BaseModel):

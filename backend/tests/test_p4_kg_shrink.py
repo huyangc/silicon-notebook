@@ -103,3 +103,35 @@ def test_build_notebook_kg_requires_llm(repo):
     nb = repo.create_notebook(NotebookCreate(name="n"))
     with pytest.raises(RuntimeError):
         repo.build_notebook_kg(nb.id)
+
+
+# ---------------------------------------------------------------------------
+# P4-4: base_kg_available signal
+# ---------------------------------------------------------------------------
+
+def test_any_base_notebook_has_kg(repo):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    assert repo._any_base_notebook_has_kg() is False
+    # personal notebook with KG must NOT count as base:
+    pers = repo.create_notebook(NotebookCreate(name="p"))
+    repo.store_kg(pers.id, None, [
+        {"local_id": "P1", "object_type": "concept",
+         "payload": {"name": "P"}, "evidence": []}], [])
+    assert repo._any_base_notebook_has_kg() is False
+    # now give the BASE notebook KG:
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "B"}, "evidence": []}], [])
+    assert repo._any_base_notebook_has_kg() is True
+
+
+def test_base_kg_available_on_notebook_summary(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    assert repo.get_notebook(nb.id).base_kg_available is False
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "B"}, "evidence": []}], [])
+    assert repo.get_notebook(nb.id).base_kg_available is True

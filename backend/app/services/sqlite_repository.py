@@ -704,6 +704,15 @@ class SQLiteRepository:
         ).fetchone()
         return bool(row[0])
 
+    def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
+        """True iff some tier='base' notebook has any knowledge_objects."""
+        sql = ("SELECT EXISTS(SELECT 1 FROM knowledge_objects ko "
+               "JOIN notebooks nb ON nb.id = ko.notebook_id WHERE nb.tier = 'base')")
+        if db is not None:
+            return bool(db.execute(sql).fetchone()[0])
+        with self._connect() as conn:
+            return bool(conn.execute(sql).fetchone()[0])
+
     def _clear_source_extraction_state(
         self,
         db: sqlite3.Connection,
@@ -5991,6 +6000,7 @@ class SQLiteRepository:
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
             kg_ready=self._has_kg(db, row["id"]),
+            base_kg_available=self._any_base_notebook_has_kg(db),
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
