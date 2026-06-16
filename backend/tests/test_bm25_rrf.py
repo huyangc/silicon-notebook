@@ -52,7 +52,8 @@ def repo(tmp_path, monkeypatch):
 
 
 def test_rrf_path_ask_returns_relevant_hit(repo):
-    """ask() 在 retrieval_rrf_enabled=True 下走 RRF 分支不崩,且命中 cascode 相关 claim。"""
+    """_retrieve_scored 在 retrieval_rrf_enabled=True 下走 RRF 分支不崩,且命中 cascode 相关 claim。
+    P4-5: ask_fast 已退役,改为直接调 _retrieve_scored 验证 RRF 路径。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, None, [
         {"local_id": "A", "object_type": "claim",
@@ -64,15 +65,13 @@ def test_rrf_path_ask_returns_relevant_hit(repo):
     ], [])
 
     repo.settings.retrieval_rrf_enabled = True
-    resp = repo.ask(nb.id, AskRequest(question="cascode output resistance", mode="fast"))
-    # 返回正常 AskResponse,不崩
-    assert resp is not None
+    hits = repo._retrieve_scored(nb.id, "cascode output resistance")
+    # 返回正常结果,不崩
+    assert hits is not None
     # 命中了与 cascode 相关的 claim A
-    all_ids = {c.object_id for c in resp.citations}
-    # 由于 LLM 未配置,citations 可能为空;但 related_knowledge 里应包含 A (KnowledgeRecord.id)
-    obj_ids_in_knowledge = {k.id for k in resp.related_knowledge}
-    assert any("A" in oid or oid.endswith("A") for oid in obj_ids_in_knowledge | all_ids) or \
-        any("cascode" in k.headline.lower() for k in resp.related_knowledge)
+    assert any(
+        "cascode" in (h.payload.get("name") or "").lower() for h in hits
+    ), "RRF path must surface the cascode claim"
 
 
 def test_rrf_path_disabled_by_default(repo):

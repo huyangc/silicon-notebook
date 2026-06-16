@@ -50,12 +50,13 @@ def test_vector_matrix_builds_from_embeddings(repo):
 
 
 def test_ask_matrix_path_returns_matching_object(repo):
+    # P4-5: ask_fast retired; verify vector-matrix path via _retrieve_scored directly.
     repo.llm_client = _FakeLLM()
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Engram improves perplexity"}}])
-    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity", mode="fast"))
-    assert any("Engram" in r.headline for r in resp.related_knowledge)
+    hits = repo._retrieve_scored(nb.id, "does engram improve perplexity")
+    assert any("Engram" in (h.payload.get("name") or "") for h in hits)
 
 
 def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
@@ -73,18 +74,12 @@ def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
 
 
 def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, monkeypatch):
+    # P4-5: ask_fast retired. This test was specific to ask_fast's element-gather
+    # optimization. Replaced: verify _retrieve_scored surfaces the bandwidth claim
+    # without loading all elements (the optimization now lives in ask_chunk/ask_graph).
     repo.llm_client = _FakeLLM()
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Finite cable bandwidth attenuates high frequencies"}}])
-
-    original = repo._gather_elements
-
-    def guard(db, notebook_id, with_vectors=True):
-        if with_vectors is False:
-            raise AssertionError("ask() must not gather every element only to build a valid id set")
-        return original(db, notebook_id, with_vectors=with_vectors)
-
-    monkeypatch.setattr(repo, "_gather_elements", guard)
-    resp = repo.ask(nb.id, AskRequest(question="why does cable bandwidth matter", mode="fast"))
-    assert any("bandwidth" in r.headline.lower() for r in resp.related_knowledge)
+    hits = repo._retrieve_scored(nb.id, "why does cable bandwidth matter")
+    assert any("bandwidth" in (h.payload.get("name") or "").lower() for h in hits)

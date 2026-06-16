@@ -88,11 +88,11 @@ class TestTask2:
             assert 0.0 <= h.relevance <= 1.0, f"relevance {h.relevance!r} out of [0,1]"
 
     def test_ask_uses_federated_retrieve_when_base_exists(self, repo):
-        """ask() on a personal notebook surfaces hits from the base notebook."""
+        """federated_retrieve() on a personal notebook surfaces hits from the base notebook.
+        P4-5: ask_fast (which called federated_retrieve) retired; test now calls it directly."""
         base_nb, personal_nb = self._seed_two_notebooks(repo)
-        resp = repo.ask(personal_nb.id, AskRequest(question="capacitance", mode="fast"))
-        all_ids = {a.object_id for a in resp.anchors}
-        all_ids |= {r.id for r in resp.related_knowledge}
+        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
+        all_ids = {h.object_id for h in hits}
         # At least one object from the base notebook must appear.
         with repo._connect() as db:
             base_ids = {r["id"] for r in db.execute(
@@ -176,13 +176,14 @@ class TestTask5:
         return nb
 
     def test_single_notebook_ask_returns_same_hit(self, repo):
-        """Without any base notebook, ask() on a personal notebook returns
-        the personal hit — identical to pre-federation behavior."""
+        """Without any base notebook, _retrieve_scored() on a personal notebook returns
+        the personal hit — identical to pre-federation behavior.
+        P4-5: ask_fast retired; test now calls _retrieve_scored directly."""
         nb = self._seed_single(repo)
-        resp = repo.ask(nb.id, AskRequest(question="oxide breakdown", mode="fast"))
-        # Must find the single object
-        rk_ids = {r.id for r in resp.related_knowledge}
-        assert "S1" in rk_ids or any("oxide" in r.headline.lower() for r in resp.related_knowledge)
+        hits = repo._retrieve_scored(nb.id, "oxide breakdown")
+        hit_payloads = [h.payload.get("name", "") for h in hits]
+        assert any("oxide" in p.lower() for p in hit_payloads), \
+            "personal KG object must be returned by _retrieve_scored"
 
     def test_single_notebook_federated_retrieve_returns_only_its_hits(self, repo):
         nb = self._seed_single(repo)

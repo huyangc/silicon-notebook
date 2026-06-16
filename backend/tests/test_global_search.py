@@ -48,25 +48,13 @@ def _prep_reports(repo):
     return nb
 
 
-def test_global_ask_synthesizes_from_reports(repo):
-    nb = _prep_reports(repo)
-    resp = repo.ask(nb.id, AskRequest(question="how does cascode affect output resistance?", mode="global"))
-    assert "output resistance" in (resp.answer or resp.conclusion)
-    assert repo.llm_client.map_calls >= 1 and repo.llm_client.reduce_calls == 1
-
-
-def test_global_ask_no_reports_graceful(repo):
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.llm_client = _GlobalLLM()
-    resp = repo.ask(nb.id, AskRequest(question="anything?", mode="global"))
-    # no community reports -> graceful fallback, no crash, no reduce call
-    assert resp is not None and (resp.answer or resp.conclusion)
-    assert repo.llm_client.reduce_calls == 0
-
+# P4-5: test_global_ask_synthesizes_from_reports and test_global_ask_no_reports_graceful
+# deleted — they tested _ask_global (GraphRAG map-reduce) which was retired in P4-5.
+# get_community_reports / rebuild_communities / summarize_communities are kept dormant.
 
 def test_global_ask_missing_notebook_raises(repo):
-    # missing notebook must raise KeyError (route -> 404), like fast/reasoning,
-    # not an uncaught IntegrityError -> 500.
+    # P4-5: mode="global" now aliases to "chunk" via _RETIRED_MODES.
+    # chunk on a missing notebook should raise KeyError (route -> 404).
     repo.llm_client = _GlobalLLM()
     with pytest.raises(KeyError):
         repo.ask("nb-does-not-exist", AskRequest(question="x", mode="global"))

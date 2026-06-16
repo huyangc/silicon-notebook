@@ -433,8 +433,9 @@ class TestBaseReviewGateEdgeCases:
         assert _status_of(repo, oid) == "approved"
 
     def test_ask_surfaces_base_reviewed_objects(self, repo):
-        """ask() on a personal notebook surfaces base objects at status='reviewed'.
-        Regression guard for USABLE_STATUSES inclusion."""
+        """federated_retrieve() on a personal notebook surfaces base objects at status='reviewed'.
+        Regression guard for USABLE_STATUSES inclusion.
+        P4-5: ask_fast retired; test now calls federated_retrieve directly."""
         from app.models.schemas import AskRequest
 
         base = _make_base_nb(repo)
@@ -443,15 +444,15 @@ class TestBaseReviewGateEdgeCases:
         _store_claim(repo, personal.id, "personal note on capacitance")
         # All base claims are 'reviewed' (the gate); confirm before asking.
         assert all(r["status"] == "reviewed" for r in _objects_in(repo, base.id, "claim"))
-        resp = repo.ask(personal.id, AskRequest(question="capacitance", mode="fast"))
-        all_ids = {a.object_id for a in resp.anchors}
-        all_ids |= {r.id for r in resp.related_knowledge}
+        hits = repo.federated_retrieve(personal.id, "capacitance")
+        all_ids = {h.object_id for h in hits}
         base_ids = {r["id"] for r in _objects_in(repo, base.id, "claim")}
         assert all_ids & base_ids, "reviewed base object did not reach the answer"
 
     def test_reject_promotion_does_not_affect_personal_retrieval(self, repo):
         """After rejection the personal object is still retrievable from its
-        personal notebook (no side effects on the personal corpus)."""
+        personal notebook (no side effects on the personal corpus).
+        P4-5: ask_fast retired; test now calls _retrieve_scored directly."""
         from app.models.schemas import AskRequest
 
         _make_base_nb(repo)
@@ -460,9 +461,8 @@ class TestBaseReviewGateEdgeCases:
         oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, oid)
         repo.reject_promotion(cand["id"], reason="not canonical")
-        resp = repo.ask(personal.id, AskRequest(question="miller effect", mode="fast"))
-        all_ids = {a.object_id for a in resp.anchors}
-        all_ids |= {r.id for r in resp.related_knowledge}
+        hits = repo._retrieve_scored(personal.id, "miller effect")
+        all_ids = {h.object_id for h in hits}
         assert oid in all_ids, "rejected personal object vanished from its own notebook"
 
     def test_rejected_object_does_not_leak_into_base_only_ask(self, repo):

@@ -135,3 +135,31 @@ def test_base_kg_available_on_notebook_summary(repo):
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "B"}, "evidence": []}], [])
     assert repo.get_notebook(nb.id).base_kg_available is True
+
+
+# ---------------------------------------------------------------------------
+# P4-5: 退役 fast/global 模式
+# ---------------------------------------------------------------------------
+
+from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
+
+
+def test_fast_global_removed_from_registry():
+    assert "fast" not in ASK_MODES
+    assert "global" not in ASK_MODES
+
+
+def test_retired_modes_alias_to_chunk():
+    assert resolve_mode("fast").id == "chunk"
+    assert resolve_mode("global").id == "chunk"
+
+
+def test_strict_modes_and_default_intact():
+    assert resolve_mode("reasoning").id == "reasoning"
+    assert resolve_mode("graph").id == "graph"
+    assert resolve_mode(None).id == "chunk"
+
+
+def test_unknown_mode_still_raises():
+    with pytest.raises(UnknownAskMode):
+        resolve_mode("bogus")
