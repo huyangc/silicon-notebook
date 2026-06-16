@@ -18,6 +18,7 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/core/config.py" \
   "$ROOT_DIR/backend/app/core/llm.py" \
   "$ROOT_DIR/backend/app/models/schemas.py" \
+  "$ROOT_DIR/backend/app/services/ask_modes.py" \
   "$ROOT_DIR/backend/app/services/extraction_profiles.py" \
   "$ROOT_DIR/backend/app/services/kg/extract.py" \
   "$ROOT_DIR/backend/app/services/kg/models.py" \

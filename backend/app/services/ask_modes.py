@@ -1,0 +1,57 @@
+"""Canonical registry of ask() retrieval modes — the single source of truth for
+which modes exist, where each dispatches, and how the API/UI must treat them.
+
+SQLiteRepository.ask() (dispatch) and the API layer (validation + /ask-modes)
+both read this module, so a mode is added/renamed in exactly one place; the
+cross-stack check scripts/check_ask_modes_contract.py keeps the frontend mode
+list (frontend/app/ask-modes.ts) in lock-step.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+class UnknownAskMode(ValueError):
+    """An ask() mode string not in the registry. The API layer maps this to HTTP
+    422 — there is no silent fall-through to the legacy KG path."""
+
+    def __init__(self, mode: str) -> None:
+        super().__init__(mode)
+        self.mode = mode
+
+
+@dataclass(frozen=True)
+class AskMode:
+    id: str
+    handler: str        # method name on SQLiteRepository
+    group: str          # "general" | "strict" | "legacy" | "global"
+    streaming: bool     # handler accepts on_trace + emits progress over the stream
+    requires_kg: bool
+    user_facing: bool
+
+
+# Insertion order = display order for user_facing modes.
+ASK_MODES: dict[str, AskMode] = {
+    "chunk":     AskMode("chunk",     "ask_chunk",     "general", False, False, True),
+    "reasoning": AskMode("reasoning", "ask_reasoning", "strict",  True,  True,  True),
+    "graph":     AskMode("graph",     "ask_graph",     "strict",  False, True,  True),
+    "fast":      AskMode("fast",      "ask_fast",      "legacy",  False, True,  False),
+    "global":    AskMode("global",    "_ask_global",   "global",  False, True,  False),
+}
+
+DEFAULT_MODE = "chunk"
+
+
+def resolve_mode(mode: str | None) -> AskMode:
+    """Return the AskMode for `mode` (DEFAULT_MODE when None/empty).
+    Raise UnknownAskMode for anything not registered."""
+    key = mode or DEFAULT_MODE
+    try:
+        return ASK_MODES[key]
+    except KeyError as exc:
+        raise UnknownAskMode(key) from exc
+
+
+def user_facing_mode_ids() -> list[str]:
+    """Mode ids the UI may expose, in registry order."""
+    return [m.id for m in ASK_MODES.values() if m.user_facing]
