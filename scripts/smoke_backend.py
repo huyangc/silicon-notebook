@@ -36,6 +36,9 @@ def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Setti
         openai_compat_model="",
         embed_provider="",
         event_log_dir=str(event_log_dir or (root / "logs")),
+        # P4: 摄取默认不抽 KG;冒烟脚本要端到端验证 KG 抽取/存储/检索全管线,
+        # 故显式开启自动抽取(offline 下产出 'no-llm' extraction run,正是各断言所期)。
+        kg_auto_extract=True,
     )
 
 
@@ -470,7 +473,7 @@ def check_kg_store_ask_and_conversations() -> None:
 
         answer = repo.ask(
             nb.id,
-            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
+            AskRequest(question="What is Engram conditional memory module?", mode="reasoning"),
         )
         assert answer.answer_id
         assert answer.conversation_id
@@ -495,7 +498,7 @@ def check_kg_store_ask_and_conversations() -> None:
             AskRequest(
                 question="Does it separate storage and computation?",
                 conversation_id=answer.conversation_id,
-                mode="fast",
+                mode="reasoning",
             ),
         )
         assert second.conversation_id == answer.conversation_id
@@ -508,7 +511,7 @@ def check_kg_store_ask_and_conversations() -> None:
         assert all(node.id != claim_id for node in repo.knowledge_graph(nb.id).nodes)
         dep_answer = repo.ask(
             nb.id,
-            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
+            AskRequest(question="What is Engram conditional memory module?", mode="reasoning"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
         repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="reviewed"))
@@ -1055,7 +1058,7 @@ def main() -> None:
 
         answer = repository.ask(
             notebook.id,
-            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
+            AskRequest(question="What is Engram conditional memory module?", mode="reasoning"),
         )
         assert answer.answer_id
         assert answer.related_knowledge
@@ -1073,7 +1076,7 @@ def main() -> None:
         repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator-a"))
         dep_answer = repository.ask(
             notebook.id,
-            AskRequest(question="What is Engram conditional memory module?", mode="fast"),
+            AskRequest(question="What is Engram conditional memory module?", mode="reasoning"),
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
         repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="reviewed"))
