@@ -323,3 +323,33 @@ def evidence_refine_prompt(question: str, evidence_block: str) -> str:
         "none are relevant, return an empty list. Return JSON only with 'relevant'.\n\n"
         f"Question: {question}\n\nRetrieved items:\n{evidence_block}"
     )
+
+
+EXPAND_SCHEMA_HINT = '{"query_en":"","sub_queries":[{"query":"","types":[],"prefer":"balanced","reason":""}]}'
+
+
+def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False) -> str:
+    history_section = (
+        "Prior conversation (resolve pronouns/ellipsis against it):\n"
+        f"{history_block}\n\n" if history_block else "")
+    types_line = (
+        "- types: which KG node types to search (subset of concept/claim/formula/"
+        "procedure; omit/empty = all). prefer: keyword|semantic|balanced.\n"
+        if want_types else "")
+    types_schema = ',"types":[],"prefer":"balanced"' if want_types else ""
+    return (
+        "You prepare an engineer's question for retrieval over an ENGLISH document "
+        "corpus. Produce:\n"
+        "1. query_en: the question rewritten in clear English (translate if needed; "
+        "spell entity/version names canonically, e.g. 'deepseekv2' -> 'DeepSeek-V2').\n"
+        "2. sub_queries: 1-4 focused, standalone ENGLISH search queries that together "
+        "cover the question. For a COMPARISON, emit ONE sub-query per entity (e.g. "
+        "'DeepSeek-V2 architecture and features', 'DeepSeek-V3 improvements'). For a "
+        "BROAD/overview question, emit one per distinct dimension. For a simple "
+        "single-topic question, ONE sub-query is fine. Use canonical entity names.\n"
+        f"{types_line}"
+        "Keep sub-queries non-redundant.\n\n"
+        f"{history_section}"
+        f"Question: {question}\n\n"
+        'Return JSON only: {"query_en":"","sub_queries":[{"query":""' + types_schema + "}]}"
+    )

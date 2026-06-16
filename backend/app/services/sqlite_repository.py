@@ -4102,6 +4102,32 @@ class SQLiteRepository:
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
         return scored, ids, mat
 
+    def _retrieve_chunks_multi(self, notebook_id, sub_queries):
+        """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
+        ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _one(q):
+            try:
+                return self._retrieve_chunks(notebook_id, q)
+            except Exception:
+                return ([], [], None)
+
+        results = []
+        if sub_queries:
+            with ThreadPoolExecutor(max_workers=min(len(sub_queries), 8)) as ex:
+                results = list(ex.map(_one, sub_queries))
+        per_query, collected, ids, mat = [], {}, [], None
+        for scored, qids, qmat in results:
+            per_query.append({c.chunk_id: c for c in scored})
+            for c in scored:
+                cur = collected.get(c.chunk_id)
+                if cur is None or c.relevance > cur.relevance:
+                    collected[c.chunk_id] = c
+            if mat is None and len(qids):
+                ids, mat = qids, qmat
+        return collected, per_query, ids, mat
+
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
         """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
         from app.services.mmr import mmr_rerank
@@ -4181,13 +4207,27 @@ class SQLiteRepository:
         retrieval_query = self._rewrite_followup_query(history, question)
 
         _t = time.perf_counter()
-        scored, ids, mat = self._retrieve_chunks(notebook_id, retrieval_query)
-        ask_stage("retrieve_chunks", _t, recall=len(scored))
+        from app.services.query_rewrite import expand_query
+        from app.services.retrieval import quota_fuse
+        if self.settings.query_rewrite_enabled:
+            ex = expand_query(self.llm_client, retrieval_query, history,
+                              max_subqueries=self.settings.chunk_max_subqueries)
+            sub_queries = [s.query for s in ex.sub_queries]
+        else:
+            sub_queries = [retrieval_query]
+        ask_stage("expand_query", _t, n=len(sub_queries))
 
         _t = time.perf_counter()
-        selected = self._mmr_select_chunks(
-            scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
-        ask_stage("mmr", _t, selected=len(selected))
+        if len(sub_queries) >= 2:
+            collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
+            selected, _counts = quota_fuse(collected, per_query, self.settings.chunk_mmr_k,
+                                           relevance=lambda c: c.relevance)
+            ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
+        else:
+            scored, ids, mat = self._retrieve_chunks(notebook_id, sub_queries[0])
+            selected = self._mmr_select_chunks(
+                scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
+            ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
         # 引用绑回 chunk:element_id 取 chunk 首个 element(前端既有 element 引用可解析)。
         citations: List[Citation] = []

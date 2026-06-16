@@ -138,6 +138,9 @@ class Settings(BaseSettings):
     chunk_mmr_k: int = Field(16, env="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, env="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, env="CHUNK_ANSWER_BUDGET_CHARS")
+    # P3 查询改写/扩展: 多子查询上限(0=禁用多子查询); 开关(false→单查询 MMR 原路径)。
+    chunk_max_subqueries: int = Field(4, env="CHUNK_MAX_SUBQUERIES")
+    query_rewrite_enabled: bool = Field(True, env="QUERY_REWRITE_ENABLED")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief

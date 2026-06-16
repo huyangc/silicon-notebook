@@ -127,3 +127,29 @@ def test_ask_routes_default_mode_to_chunk(repo, monkeypatch):
     # AskRequest() 默认 mode 应为 "chunk" → ask() 分发到 ask_chunk
     assert AskRequest(question="x").mode == "chunk"
     assert repo.ask("nb-irrelevant", AskRequest(question="x")) is sentinel
+
+
+def test_ask_chunk_comparison_balances_both_entities(repo, monkeypatch):
+    # 种两实体 chunk;假 expand 出 2 子查询;断言两实体都进 selected
+    nb, _ = _seed_chunks(repo, ["DeepSeek-V2 uses MLA attention " * 20,
+                                "DeepSeek-V2 dense baseline " * 20,
+                                "DeepSeek-V3 MoE 671B improvements " * 20,
+                                "DeepSeek-V3 MTP training " * 20])
+    import app.services.query_rewrite as qr
+    monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
+        query_en="V3 vs V2", sub_queries=[qr.SubQuerySpec("DeepSeek-V3 improvements"),
+                                          qr.SubQuerySpec("DeepSeek-V2 features")]))
+    repo.llm_client = _FakeLLM("V3 improves on V2 [k1][k2].")
+    resp = repo.ask_chunk(nb.id, AskRequest(question="deepseekv3相比deepseekv2有什么改进"))
+    srcs = " ".join((a.snippet or "") + (a.name or "") for a in resp.anchors).lower()
+    cites = " ".join(c.quoted_span.lower() for c in resp.citations)
+    assert "v2" in (srcs + cites) and "v3" in (srcs + cites)   # 两实体都被代表
+
+
+def test_ask_chunk_single_subquery_still_works(repo, monkeypatch):
+    nb, _ = _seed_chunks(repo, ["alpha topic " * 30, "beta topic " * 30])
+    import app.services.query_rewrite as qr
+    monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
+        query_en="alpha", sub_queries=[qr.SubQuerySpec("alpha topic")]))
+    resp = repo.ask_chunk(nb.id, AskRequest(question="alpha"))
+    assert resp.citations   # 单子查询走 MMR,正常返回
