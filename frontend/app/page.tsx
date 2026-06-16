@@ -17,8 +17,8 @@ import {
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
 import {
-  ASK_MODES, ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
-  groupOf, modesInGroup, defaultModeForGroup, requiresKg, canUseMode, modeFromTurn,
+  ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
+  groupOf, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
 } from "./ask-modes";
 import {
   approvePromotion,
