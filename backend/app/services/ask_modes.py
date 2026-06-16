@@ -35,17 +35,20 @@ ASK_MODES: dict[str, AskMode] = {
     "chunk":     AskMode("chunk",     "ask_chunk",     "general", False, False, True),
     "reasoning": AskMode("reasoning", "ask_reasoning", "strict",  True,  True,  True),
     "graph":     AskMode("graph",     "ask_graph",     "strict",  False, True,  True),
-    "fast":      AskMode("fast",      "ask_fast",      "legacy",  False, True,  False),
-    "global":    AskMode("global",    "_ask_global",   "global",  False, True,  False),
 }
 
 DEFAULT_MODE = "chunk"
+
+# 退役但曾合法的 mode id → 映射 chunk(保旧会话/书签持久化的 mode 不 422)。
+# 窄例外:仅这两个具名 id;其余未知 mode 仍 UnknownAskMode。
+_RETIRED_MODES = {"fast": "chunk", "global": "chunk"}
 
 
 def resolve_mode(mode: str | None) -> AskMode:
     """Return the AskMode for `mode` (DEFAULT_MODE when None/empty).
     Raise UnknownAskMode for anything not registered."""
     key = mode or DEFAULT_MODE
+    key = _RETIRED_MODES.get(key, key)
     try:
         return ASK_MODES[key]
     except KeyError as exc:

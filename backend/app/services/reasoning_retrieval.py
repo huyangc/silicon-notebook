@@ -72,8 +72,8 @@ class ReasoningRetriever:
     # --- KG 工具箱(薄封装 repo 原语) ---
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
-        return self.repo._retrieve_scored(notebook_id, query, types=types,
-                                          w_keyword=wk, w_semantic=ws)
+        return self.repo.federated_retrieve(notebook_id, query, types=types,
+                                            w_keyword=wk, w_semantic=ws)
 
     def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
         return self.repo._retrieve_neighbors(notebook_id, object_id, edge_type, direction)
@@ -241,6 +241,9 @@ class ReasoningRetriever:
                                      detail={"object_id": oid, "reason": "empty_or_visited"}))
                 else:
                     visited.add(oid)
+                    # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
+                    # neighbors live in the base notebook, so deep cross-tier graph walks are
+                    # graph mode's job (_federated_rx_graph), not reasoning mode (P4 spec §F).
                     neigh = self.neighbors(notebook_id, oid,
                                            decision.expand_edge_type, decision.expand_direction)
                     for h in neigh:

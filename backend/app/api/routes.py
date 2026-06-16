@@ -607,6 +607,22 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest) -> NotebookSumm
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
+@router.post("/notebooks/{notebook_id}/kg/build")
+def build_kg(notebook_id: str) -> dict:
+    """按需触发该 notebook 的 KG 建图(后台线程,幂等)。
+    已有 knowledge_objects 的 source 会跳过。需 LLM 已配置,否则 409。"""
+    repo = repository()
+    if not getattr(repo.llm_client, "configured", False):
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    threading.Thread(target=repo.build_notebook_kg, args=(notebook_id,),
+                     name=f"buildkg-{notebook_id}", daemon=True).start()
+    return {"status": "building", "notebook_id": notebook_id}
+
+
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
 def submit_feedback(answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
     try:

@@ -18,14 +18,16 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
     calls = {}
-    for mid in ("ask_chunk", "ask_reasoning", "ask_graph", "ask_fast", "_ask_global"):
+    for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
         def make(mid):
             return lambda notebook_id, payload: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
         monkeypatch.setattr(repo, mid, make(mid))
 
     assert repo.ask(nb.id, AskRequest(question="q")).conclusion == "ask_chunk"       # 缺省
     assert repo.ask(nb.id, AskRequest(question="q", mode="graph")).conclusion == "ask_graph"
-    assert repo.ask(nb.id, AskRequest(question="q", mode="fast")).conclusion == "ask_fast"
+    # P4-5: retired ids "fast"/"global" alias to chunk (保旧会话/书签不 422)
+    assert repo.ask(nb.id, AskRequest(question="q", mode="fast")).conclusion == "ask_chunk"
+    assert repo.ask(nb.id, AskRequest(question="q", mode="global")).conclusion == "ask_chunk"
 
     from app.services.ask_modes import UnknownAskMode
     with pytest.raises(UnknownAskMode):
@@ -33,7 +35,8 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
 
 
 def test_registry_has_expected_modes_and_flags():
-    assert set(ASK_MODES) == {"chunk", "reasoning", "graph", "fast", "global"}
+    # P4-5: fast/global 已从注册表移除
+    assert set(ASK_MODES) == {"chunk", "reasoning", "graph"}
     assert ASK_MODES["chunk"].handler == "ask_chunk"
     assert ASK_MODES["chunk"].requires_kg is False
     assert ASK_MODES["reasoning"].handler == "ask_reasoning"
@@ -41,13 +44,10 @@ def test_registry_has_expected_modes_and_flags():
     assert ASK_MODES["reasoning"].requires_kg is True
     assert ASK_MODES["graph"].handler == "ask_graph"
     assert ASK_MODES["graph"].streaming is False        # ask_graph 暂无 on_trace
-    assert ASK_MODES["fast"].handler == "ask_fast"
 
 
 def test_user_facing_subset_is_chunk_and_strict_engines():
     assert user_facing_mode_ids() == ["chunk", "reasoning", "graph"]
-    assert ASK_MODES["fast"].user_facing is False
-    assert ASK_MODES["global"].user_facing is False
 
 
 def test_resolve_known_default_and_unknown():

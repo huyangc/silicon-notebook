@@ -109,7 +109,6 @@ from app.services.retrieval import (
     score_elements,
     type_weight,
     tier_weight,
-    is_process_query,
     ensure_procedure_quota,
     classify_evidence,
 )
@@ -704,6 +703,15 @@ class SQLiteRepository:
         ).fetchone()
         return bool(row[0])
 
+    def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
+        """True iff some tier='base' notebook has any knowledge_objects."""
+        sql = ("SELECT EXISTS(SELECT 1 FROM knowledge_objects ko "
+               "JOIN notebooks nb ON nb.id = ko.notebook_id WHERE nb.tier = 'base')")
+        if db is not None:
+            return bool(db.execute(sql).fetchone()[0])
+        with self._connect() as conn:
+            return bool(conn.execute(sql).fetchone()[0])
+
     def _clear_source_extraction_state(
         self,
         db: sqlite3.Connection,
@@ -1106,6 +1114,46 @@ class SQLiteRepository:
             }
         )
 
+    def _notebook_has_kg(self, notebook_id: str) -> bool:
+        """True iff this notebook has any knowledge_objects row."""
+        with self._connect() as db:
+            return self._has_kg(db, notebook_id)
+
+    def _should_extract_kg(self, notebook_id: str) -> bool:
+        """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
+        return self.settings.kg_auto_extract or self._notebook_has_kg(notebook_id)
+
+    def build_notebook_kg(self, notebook_id: str) -> dict:
+        """按需对该 notebook 下"尚无 KG"的 source 逐个抽取(复用 _run_extraction)。
+        幂等:已有 knowledge_objects 的 source 跳过。无 LLM → RuntimeError。
+        单 source 失败隔离,不连累其余、不回退其终态,错误入 event log。"""
+        self.get_notebook(notebook_id)  # KeyError if missing
+        if not getattr(self.llm_client, "configured", False):
+            raise RuntimeError("LLM not configured; cannot build KG")
+        with self._connect() as db:
+            src_ids = [r["id"] for r in db.execute(
+                "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)).fetchall()]
+            # source_id is NOT NULL DEFAULT '' — use != '' to find sources that truly have KG
+            kgful = {r["source_id"] for r in db.execute(
+                "SELECT DISTINCT source_id FROM knowledge_objects "
+                "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)).fetchall()}
+        targets = [sid for sid in src_ids if sid not in kgful]
+        done, failed = [], []
+        for sid in targets:
+            try:
+                self._set_source_status(sid, "extracting")
+                self._run_extraction(sid)
+                self._set_source_status(sid, "extracted")
+                done.append(sid)
+            except Exception:  # noqa: BLE001 — 隔离单 source 失败
+                failed.append(sid)
+                self.event_log.logger.exception("build_notebook_kg failed for %s", sid)
+        try:
+            self._mark_unified_kg_dirty(notebook_id)
+        except Exception:
+            self.event_log.logger.exception("unified-KG dirty mark failed for %s", notebook_id)
+        return {"built": done, "failed": failed, "skipped": sorted(kgful)}
+
     def process_source(self, source_id: str) -> SourceSummary:
         """Run the full parse -> embed -> extract pipeline with a status machine.
 
@@ -1219,15 +1267,16 @@ class SQLiteRepository:
             )
             embed_thread.start()
 
-            self._set_source_status(source_id, "extracting")
-            t = time.perf_counter()
-            stage("extract", "start", t)
-            self._run_extraction(source_id)
-            stage("extract", "done", t)
-            try:
-                self._mark_unified_kg_dirty(source.notebook_id)
-            except Exception:
-                self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
+            if self._should_extract_kg(notebook_id):
+                self._set_source_status(source_id, "extracting")
+                t = time.perf_counter()
+                stage("extract", "start", t)
+                self._run_extraction(source_id)
+                stage("extract", "done", t)
+                try:
+                    self._mark_unified_kg_dirty(source.notebook_id)
+                except Exception:
+                    self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             empty_hint = ""
@@ -4302,405 +4351,12 @@ class SQLiteRepository:
         spec = resolve_mode(getattr(payload, "mode", None))
         return getattr(self, spec.handler)(notebook_id, payload)
 
-    def ask_fast(self, notebook_id: str, payload: AskRequest) -> AskResponse:
-        """Legacy KG-native ask over the 4 KG object types (claim/formula/
-        procedure/concept) + 1-hop relation expansion. Non-default; reachable
-        only via explicit mode="fast" (eval/back-compat). See ask_chunk for the
-        default path."""
-        import time
-        ask_started = time.perf_counter()
-
-        def ask_stage(name: str, started: float, **extra) -> None:
-            self.event_log.emit({
-                "kind": "ask_stage", "notebook_id": notebook_id, "stage": name,
-                "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
-            })
-
-        self.get_notebook(notebook_id)
-        question = payload.question.strip()
-        # Legacy `scenario` is accepted for frontend back-compat but no longer
-        # woven into retrieval or the answer prompt.
-
-        # Resolve (create-or-append) the conversation and load prior turns FIRST,
-        # so an elliptical follow-up can be rewritten against it before retrieval.
-        with self._write() as db:
-            conversation_id = self._ensure_conversation(
-                db, notebook_id, payload.conversation_id, question
-            )
-            history = self._conversation_history(db, conversation_id)
-
-        # Coreference-resolve follow-ups into a standalone retrieval query
-        # (gated; falls back to the raw question). Retrieval uses this; the
-        # answer prompt still gets the user's original wording.
-        retrieval_query = self._rewrite_followup_query(history, question)
-        query = retrieval_query
-        process_intent = is_process_query(question)
-
-        _t = time.perf_counter()
-        with self._connect() as db:
-            kg_objs: Dict[str, List[dict]] = {
-                kgt: self._knowledge_objects(db, notebook_id, kgt) for kgt in _KG_TYPES
-            }
-            query_vector = self._embed_query(query)
-            elem_ids, elem_mat = self._vector_matrix(
-                db, notebook_id, "element_embeddings", "element_id")
-            kn_ids, kn_mat = self._vector_matrix(
-                db, notebook_id, "knowledge_embeddings", "object_id")
-        ask_stage("load_indexes", _t)
-
-        from app.services.vector_index import query_sims
-        element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
-        knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
-
-        # Score each KG type, pool, then rank by relevance * intent-aware type
-        # weight (process/flow questions stop burying procedures).
-        _t = time.perf_counter()
-        if self.settings.retrieval_rrf_enabled:
-            scored_all = self._rrf_scored(query, kg_objs, knowledge_sims,
-                                          element_sims=element_sims)
-        else:
-            token_sets = {}
-            all_kg_objs = [o for objs in kg_objs.values() for o in objs]
-            with self._connect() as db:
-                token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
-            scored_all: List[RetrievedKnowledge] = []
-            for t in _KG_TYPES:
-                objs = kg_objs[t]
-                if not objs:
-                    continue
-                scored_all.extend(
-                    score_knowledge(
-                        query, objs, t, query_vector, None, None,
-                        element_sims=element_sims, knowledge_sims=knowledge_sims,
-                        keyword_token_sets=token_sets,
-                    )
-                )
-        # Two-tier federation (additive scope expansion): tag the active
-        # notebook's hits with their tier, then fold in candidates from any
-        # tier='base' notebook. The active-notebook scoring above is left
-        # byte-identical (incl. the RRF branch); base hits are scored by the SAME
-        # _retrieve_scored path on their OWN embedding matrices, so [0,1]/tau and
-        # dual-index best-of hold per notebook. No cross-notebook normalisation.
-        with self._connect() as db:
-            arow = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
-            active_tier = arow["tier"] if arow else "personal"
-            base_rows = db.execute(
-                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
-                (notebook_id,),
-            ).fetchall()
-        for it in scored_all:
-            it.notebook_id = notebook_id
-            it.tier = active_tier
-        for brow in base_rows:
-            base_hits = self._retrieve_scored(brow["id"], query)
-            for bh in base_hits:
-                bh.notebook_id = brow["id"]
-                bh.tier = brow["tier"]
-            scored_all.extend(base_hits)
-        # Tier authority composes at the SAME level as type_weight (multiplies
-        # score for ranking), NEVER inside _fuse — so relevance/tau are untouched.
-        rank_key = lambda it: (
-            it.score
-            * type_weight(it.object_type, process_intent)
-            * tier_weight(getattr(it, "tier", "personal"))
-        )
-        scored_all.sort(key=rank_key, reverse=True)
-        top_n = self.settings.retrieval_top_n
-        pool = scored_all[: max(top_n, self.settings.rerank_candidates)]
-        pool = self._rerank_hits(query, pool)
-        # NOTE: for process queries, ensure_procedure_quota re-imposes the
-        # type-weighted (rank_key) order when it back-fills procedures — so rerank
-        # refines pool *membership* there, not the final order.
-        if process_intent:
-            top_hits: List[RetrievedKnowledge] = ensure_procedure_quota(
-                pool, top_n, self.settings.proc_min, rank_key)
-        else:
-            top_hits = pool[:top_n]
-        ask_stage("score", _t)
-
-        # 1-hop expansion: for each top-hit object, pull its graph neighbours.
-        # Federation-aware: scope each hit's expansion to ITS OWN notebook so a
-        # base hit expands within the base KG, not the active notebook. Single
-        # notebook → exactly one group keyed by notebook_id (identical to before).
-        _t = time.perf_counter()
-        hit_ids = {item.object_id for item in top_hits}
-        # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
-        # instead of loading every notebook edge: O(touching edges), not O(E).
-        hit_ids_by_nb: Dict[str, set] = {}
-        for item in top_hits:
-            hit_ids_by_nb.setdefault(item.notebook_id or notebook_id, set()).add(item.object_id)
-        neighbour_ids: set = set()
-        for nb_id, ids in hit_ids_by_nb.items():
-            hit_list = list(ids)
-            ph = ",".join("?" for _ in hit_list)
-            with self._connect() as db:
-                for r in db.execute(
-                    f"SELECT target_object_id FROM knowledge_relations "
-                    f"WHERE notebook_id=? AND source_object_id IN ({ph})",
-                    [nb_id, *hit_list],
-                ).fetchall():
-                    if r["target_object_id"] not in hit_ids:
-                        neighbour_ids.add(r["target_object_id"])
-                for r in db.execute(
-                    f"SELECT source_object_id FROM knowledge_relations "
-                    f"WHERE notebook_id=? AND target_object_id IN ({ph})",
-                    [nb_id, *hit_list],
-                ).fetchall():
-                    if r["source_object_id"] not in hit_ids:
-                        neighbour_ids.add(r["source_object_id"])
-
-        # Fetch neighbour objects if any.
-        neighbour_objs: List[dict] = []
-        if neighbour_ids:
-            with self._connect() as db:
-                placeholders = ",".join("?" for _ in neighbour_ids)
-                status_placeholders = ",".join("?" for _ in USABLE_STATUSES)
-                rows = db.execute(
-                    f"SELECT * FROM knowledge_objects "
-                    f"WHERE id IN ({placeholders}) "
-                    f"AND status IN ({status_placeholders})",
-                    [*neighbour_ids, *USABLE_STATUSES],
-                ).fetchall()
-            for row in rows:
-                keys = row.keys()
-                neighbour_objs.append({
-                    "id": row["id"],
-                    "object_type": row["object_type"],
-                    "payload": json.loads(row["payload"] or "{}"),
-                    "evidence": [
-                        Evidence(**item)
-                        for item in json.loads(row["evidence"] or "[]")
-                    ],
-                    "status": row["status"],
-                    "owner": row["owner"],
-                    "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
-                })
-        ask_stage("expand", _t)
-
-        # Build related_knowledge from hits + neighbours (hits first, no dups).
-        registry = self.effective_schemas()
-        seen_ids: set = set()
-        related_knowledge: List[KnowledgeRecord] = []
-
-        for item in top_hits:
-            if item.object_id in seen_ids:
-                continue
-            seen_ids.add(item.object_id)
-            obj = {
-                "id": item.object_id,
-                "payload": item.payload,
-                "status": item.status,
-                "owner": getattr(item, "owner", ""),
-                "last_reviewed": getattr(item, "last_reviewed", ""),
-                "evidence": item.evidence,
-            }
-            related_knowledge.append(
-                self._knowledge_record(item.object_type, obj, registry.get(item.object_type))
-            )
-
-        for nobj in neighbour_objs:
-            if nobj["id"] in seen_ids:
-                continue
-            seen_ids.add(nobj["id"])
-            related_knowledge.append(
-                self._knowledge_record(
-                    nobj["object_type"], nobj, registry.get(nobj["object_type"])
-                )
-            )
-
-        related_knowledge = related_knowledge[:12]
-
-        # Citations from top hits — use only the element ids already referenced
-        # by the retrieved evidence (no full-table scan required).
-        cited_element_ids = {
-            evidence.element_id
-            for item in top_hits
-            for evidence in item.evidence
-            if evidence.element_id
-        }
-        citations: List[Citation] = []
-        citations.extend(self._citations_from(top_hits, cited_element_ids, "KG evidence"))
-
-        # related_knowledge is always derived from top_hits (hits + 1-hop
-        # neighbours), so top_hits being non-empty implies related_knowledge is
-        # non-empty; the converse is also true — no need to check both.
-        has_knowledge = bool(top_hits)
-        llm_mode = "deterministic"
-        conclusion = ""
-        answer = ""
-        llm_grounded = False
-        anchors: List[AnswerAnchor] = []
-
-        _t = time.perf_counter()
-        if self.llm_client.configured:
-            try:
-                answer, llm_grounded, anchors = self._answer_kg(
-                    notebook_id, question, top_hits, history
-                )
-            except Exception:
-                answer, llm_grounded, anchors = "", False, []
-        ask_stage("answer_llm", _t)
-
-        # Relevance-aware grounding (no longer LLM self-report alone).
-        evidence_level, top_relevance = classify_evidence(
-            top_hits, anchors, llm_grounded,
-            self.settings.evidence_tau_low, self.settings.evidence_tau_high,
-        )
-        grounded = evidence_level == "grounded"
-
-        if answer:
-            conclusion = _MARKER_RE.sub("", answer).strip()
-            llm_mode = "grounded" if grounded else "ungrounded"
-        else:
-            llm_mode = "deterministic"
-            if has_knowledge:
-                n = len(top_hits)
-                conclusion = (
-                    f"Found {n} relevant KG knowledge object(s) for this question."
-                    if n
-                    else "Relevant notebook knowledge was retrieved for this question."
-                )
-            else:
-                conclusion = (
-                    "The notebook does not yet contain approved knowledge that "
-                    "matches this question. Upload and review sources to build coverage."
-                )
-
-        response = AskResponse(
-            answer_id="",
-            conclusion=conclusion,
-            answer=answer,
-            grounded=grounded,
-            evidence_level=evidence_level,
-            anchors=anchors,
-            related_knowledge=related_knowledge,
-            citations=citations,
-            llm_mode=llm_mode,
-            conversation_id=conversation_id,
-            retrieval_query=retrieval_query,
-            top_relevance=top_relevance,
-        )
-        response.mode = "fast"
-        response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id
-        )
-        ask_stage("total", ask_started)
-        return response
-
-    # ------------------------------------------------------------------
-    # Global map-reduce 问答 (R4, GraphRAG-style)
-    # ------------------------------------------------------------------
-
-    def _ask_global(self, notebook_id: str, payload) -> "AskResponse":
-        """GraphRAG-style global map-reduce over community reports."""
-        self.get_notebook(notebook_id)   # KeyError->404 on missing nb (match fast/reasoning)
-        question = payload.question.strip()
-
-        # Resolve / create conversation (same as fast path).
-        with self._write() as db:
-            conversation_id = self._ensure_conversation(
-                db, notebook_id, payload.conversation_id, question
-            )
-
-        def _fallback(msg: str) -> AskResponse:
-            resp = AskResponse(
-                answer_id="",
-                conclusion=msg,
-                answer=msg,
-                grounded=False,
-                evidence_level="inferred",
-                anchors=[],
-                related_knowledge=[],
-                citations=[],
-                llm_mode="global-fallback",
-                conversation_id=conversation_id,
-                retrieval_query=question,
-                top_relevance=0.0,
-            )
-            resp.mode = "global"
-            resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
-            return resp
-
-        reports = self.get_community_reports(notebook_id)[: self.settings.global_max_communities]
-        if not reports or not getattr(self.llm_client, "configured", False):
-            return _fallback(
-                "No community reports available. Run community "
-                "summarization (kg_community_summary_enabled) or use fast mode."
-            )
-
-        from app.services.prompts import (
-            global_map_prompt, GLOBAL_MAP_SCHEMA_HINT,
-            global_reduce_prompt, GLOBAL_REDUCE_SCHEMA_HINT,
-        )
-
-        scored = []
-        for rep in reports:
-            block = (
-                f"Title: {rep.get('title', '')}\nSummary: {rep.get('summary', '')}\n"
-                "Findings:\n" + "\n".join(f"- {f}" for f in (rep.get("findings") or []))
-            )
-            try:
-                raw = self.llm_client.chat_json(
-                    [{"role": "user", "content": global_map_prompt(question, block)}],
-                    GLOBAL_MAP_SCHEMA_HINT,
-                    timeout=self.settings.reasoning_timeout_seconds,
-                    max_retries=self.settings.reasoning_max_retries,
-                )
-                pts = json.loads(raw).get("points") or []
-            except Exception:
-                continue
-            for p in pts:
-                if not isinstance(p, dict):
-                    continue
-                try:
-                    sc = float(p.get("score", 0))
-                except (TypeError, ValueError):
-                    sc = 0.0
-                desc = str(p.get("description", "")).strip()
-                if desc and sc > 0:
-                    scored.append((sc, desc))
-
-        if not scored:
-            return _fallback("No relevant community information was found for this question.")
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        points_block = "\n".join(f"- ({int(s)}) {d}" for s, d in scored[:50])
-
-        try:
-            raw = self.llm_client.chat_json(
-                [{"role": "user", "content": global_reduce_prompt(question, points_block)}],
-                GLOBAL_REDUCE_SCHEMA_HINT,
-                timeout=self.settings.reasoning_timeout_seconds,
-                max_retries=self.settings.reasoning_max_retries,
-            )
-            data = json.loads(raw)
-            answer = str(data.get("answer", "")).strip()
-            grounded = bool(data.get("grounded", True))
-        except Exception:
-            return _fallback("Failed to synthesize a global answer.")
-
-        if not answer:
-            return _fallback("No global answer could be produced.")
-
-        evidence_level = "overview" if grounded else "inferred"
-        response = AskResponse(
-            answer_id="",
-            conclusion=answer,
-            answer=answer,
-            grounded=grounded,
-            evidence_level=evidence_level,
-            anchors=[],
-            related_knowledge=[],
-            citations=[],
-            llm_mode="global" if grounded else "global-ungrounded",
-            conversation_id=conversation_id,
-            retrieval_query=question,
-            top_relevance=0.0,
-        )
-        response.mode = "global"
-        response.answer_id = self._save_answer(notebook_id, question, response, conversation_id)
-        return response
+    # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
+    # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
+    # "chunk"，不会触发 422。
+    # 随之删除的还有：is_process_query import（原 ask_fast 独占调用）。
+    # 保留的 helper（_rrf_scored / _rerank_hits / _answer_kg 等）仍被其他 ask_* 路径
+    # 或测试直接调用，尚未可删。
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
         """Canonical unified-cluster id for a concept `object_id`, reusing the
@@ -5019,6 +4675,19 @@ class SQLiteRepository:
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
 
+        if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
+            response = AskResponse(
+                answer_id="",
+                conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
+                           "请先点『构建知识图谱』,或把一个已建图的笔记本设为底层"
+                           "(POST /notebooks/{id}/tier)。",
+                conversation_id=conversation_id, retrieval_query=question,
+                llm_mode="deterministic", kg_required=True)
+            response.mode = "reasoning"
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id)
+            return response
+
         try:
             result = ReasoningRetriever(self, self.settings).run(
                 notebook_id, question, history, on_step=on_trace)
@@ -5087,14 +4756,16 @@ class SQLiteRepository:
                   seed_ids: Optional[List[str]] = None) -> AskResponse:
         """Multi-hop graph reasoning mode.
 
-        1. Retrieve top seeds via _retrieve_scored (same as fast path).
-        2. Build the rx graph for this notebook (version-cached _rx_graph).
+        1. Retrieve top seeds via federated_retrieve (active + base-tier notebooks).
+        2. Build the federated rx graph via _federated_rx_graph.
         3. BFS from seed object_ids along DEFAULT_REASONING_EDGES.
         4. Render subgraph → (context_block, id_map) via render_subgraph_context.
         5. Feed context_block to the existing answer LLM + grounding path.
 
-        The [k] anchor markers, _parse_answer_anchors, classify_evidence, and
-        AskResponse assembly are all reused verbatim from the fast path.
+        The [k] anchor markers, _parse_answer_anchors, and classify_evidence are
+        shared helpers reused across ask modes. There is no longer a "fast path" —
+        ask_fast was retired in P4-5; the former fast-path helpers (_rrf_scored,
+        _rerank_hits, _answer_kg) remain in place because other callers reference them.
         """
         from app.services.kg.graph_reason import (
             DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,
@@ -5106,8 +4777,21 @@ class SQLiteRepository:
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
 
-        # Seed: top-N by relevance (reuse existing scored-retrieval path).
-        top_hits = self._retrieve_scored(notebook_id, question)[:self.settings.retrieval_top_n]
+        if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
+            response = AskResponse(
+                answer_id="",
+                conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
+                           "请先点『构建知识图谱』,或把一个已建图的笔记本设为底层"
+                           "(POST /notebooks/{id}/tier)。",
+                conversation_id=conversation_id, retrieval_query=question,
+                llm_mode="deterministic", kg_required=True)
+            response.mode = "graph"
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id)
+            return response
+
+        # Seed: top-N by relevance (federated across base notebooks).
+        top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
         if not top_hits and not seed_ids:
             response = AskResponse(
                 answer_id="",
@@ -5946,6 +5630,7 @@ class SQLiteRepository:
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
             kg_ready=self._has_kg(db, row["id"]),
+            base_kg_available=self._any_base_notebook_has_kg(db),
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:

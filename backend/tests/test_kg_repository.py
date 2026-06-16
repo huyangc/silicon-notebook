@@ -306,20 +306,16 @@ def test_kg_type_weights():
 
 
 def test_ask_returns_kg_knowledge(repo):
-    from app.models.schemas import AskRequest
-    repo.llm_client = _FakeLLM("{}")   # _FakeLLM already defined in this file
+    # P4-5: ask_fast retired; verify KG retrieval via _retrieve_scored directly.
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
-    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?", mode="fast"))
-    assert any("Engram" in r.headline for r in resp.related_knowledge)
+    hits = repo._retrieve_scored(nb.id, "does engram improve perplexity?")
+    assert any("Engram" in (h.payload.get("name") or "") for h in hits)
 
 
-def test_ask_1hop_expansion(repo):
-    """1-hop graph expansion: a concept linked by 'about' to a matching claim
-    must appear in related_knowledge even though the concept name doesn't match
-    the query at all."""
-    from app.models.schemas import AskRequest
-    repo.llm_client = _FakeLLM("{}")
+def test_1hop_relation_is_stored(repo):
+    """A concept linked by 'about' to a claim must have a knowledge_relations row,
+    and the claim must be retrievable via _retrieve_scored."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
     # Claim that matches the query by name.
@@ -337,13 +333,20 @@ def test_ask_1hop_expansion(repo):
          "edge_type": "about", "evidence": [{"quote": "Engram improves perplexity"}]},
     ])
 
-    resp = repo.ask(nb.id, AskRequest(question="does engram improve perplexity?", mode="fast"))
+    # Verify the claim is retrieved by _retrieve_scored (direct scoring path).
+    hits = repo._retrieve_scored(nb.id, "does engram improve perplexity?")
+    assert any("Engram" in (h.payload.get("name") or "") for h in hits), \
+        "matching claim must be in results"
 
-    headlines = [r.headline for r in resp.related_knowledge]
-    assert any("Engram" in h for h in headlines), "matching claim must be in results"
-    assert any("XyZzY_unrelated_concept" in h for h in headlines), (
-        "concept reachable via 1-hop relation must be pulled in by graph expansion"
-    )
+    # Verify the 1-hop relation is stored (concept reachable from claim via DB).
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT target_object_id FROM knowledge_relations "
+            "WHERE notebook_id=? AND source_object_id=?",
+            (nb.id, claim_id),
+        ).fetchone()
+    assert row is not None, "knowledge_relations must link claim -> concept"
+    assert row["target_object_id"] == concept_id
 
 
 def test_only_kg_profiles_and_schemas():

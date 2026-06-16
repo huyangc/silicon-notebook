@@ -168,8 +168,8 @@ def render_subgraph_context(
 ) -> Tuple[str, dict]:
     """Render the (node, edge, src_oid) subgraph into (context_block_str, id_map).
 
-    The format mirrors _answer_context (sqlite_repository.py:3682-3757) so that
-    _answer_kg, _parse_answer_anchors, and _MARKER_RE all work unchanged:
+    The format mirrors _answer_context (sqlite_repository.py) so that
+    _parse_answer_anchors and _MARKER_RE all work unchanged:
 
         k1: [Formula] Node A
         k2: [Claim] Node B  — ev: "A derives B"
@@ -186,7 +186,7 @@ def render_subgraph_context(
                     "location_label": ""}
 
     id_offset lets the caller start numbering after an existing context block
-    (e.g., if fast-mode hits were already assigned k1..k5, graph nodes begin k6).
+    (e.g., so graph nodes can begin at k{n+1} to avoid key collisions).
     """
     lines: List[str] = []
     id_map: Dict[str, dict] = {}

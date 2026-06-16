@@ -144,6 +144,9 @@ class Settings(BaseSettings):
     # P3 查询改写/扩展: 多子查询上限(0=禁用多子查询); 开关(false→单查询 MMR 原路径)。
     chunk_max_subqueries: int = Field(4, env="CHUNK_MAX_SUBQUERIES")
     query_rewrite_enabled: bool = Field(True, env="QUERY_REWRITE_ENABLED")
+    # P4: 摄取默认不抽 KG(只建 chunk);要严格推理时经"建图"端点/离线 CLI 按需构建。
+    # True 恢复旧"每次摄取整库自动抽"行为(迁移/测试逃生口)。base 库复用 tier='base'。
+    kg_auto_extract: bool = Field(False, env="KG_AUTO_EXTRACT")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief
