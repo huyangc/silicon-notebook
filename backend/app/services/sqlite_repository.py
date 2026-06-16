@@ -1106,6 +1106,19 @@ class SQLiteRepository:
             }
         )
 
+    def _notebook_has_kg(self, notebook_id: str) -> bool:
+        """True iff this notebook has any knowledge_objects row."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
+                (notebook_id,),
+            ).fetchone()
+        return bool(row[0])
+
+    def _should_extract_kg(self, notebook_id: str) -> bool:
+        """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
+        return self.settings.kg_auto_extract or self._notebook_has_kg(notebook_id)
+
     def process_source(self, source_id: str) -> SourceSummary:
         """Run the full parse -> embed -> extract pipeline with a status machine.
 
@@ -1219,15 +1232,16 @@ class SQLiteRepository:
             )
             embed_thread.start()
 
-            self._set_source_status(source_id, "extracting")
-            t = time.perf_counter()
-            stage("extract", "start", t)
-            self._run_extraction(source_id)
-            stage("extract", "done", t)
-            try:
-                self._mark_unified_kg_dirty(source.notebook_id)
-            except Exception:
-                self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
+            if self._should_extract_kg(notebook_id):
+                self._set_source_status(source_id, "extracting")
+                t = time.perf_counter()
+                stage("extract", "start", t)
+                self._run_extraction(source_id)
+                stage("extract", "done", t)
+                try:
+                    self._mark_unified_kg_dirty(source.notebook_id)
+                except Exception:
+                    self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             empty_hint = ""
