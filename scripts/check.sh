@@ -40,6 +40,8 @@ PY
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_backend.py"
 
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ask_modes_contract.py"
+
 if [[ -d "$ROOT_DIR/frontend/node_modules" ]]; then
   cd "$ROOT_DIR/frontend"
   npm run test
