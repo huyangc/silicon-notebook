@@ -678,6 +678,13 @@ class SQLiteRepository:
         ).fetchone()
         return int(row["count"])
 
+    def _has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row[0])
+
     def _clear_source_extraction_state(
         self,
         db: sqlite3.Connection,
@@ -4262,23 +4269,25 @@ class SQLiteRepository:
             evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
             citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
             retrieval_query=retrieval_query, top_relevance=top_relevance)
+        response.mode = "chunk"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         ask_stage("total", ask_started)
         return response
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
-        """KG-native ask: retrieves over the 4 KG object types (claim/formula/
-        procedure/concept), performs 1-hop relation expansion, and synthesises
-        a conclusion via the LLM (or deterministic fallback)."""
-        if getattr(payload, "mode", "chunk") == "reasoning":
-            return self.ask_reasoning(notebook_id, payload)
-        if getattr(payload, "mode", "chunk") == "graph":
-            return self.ask_graph(notebook_id, payload)
-        if getattr(payload, "mode", "chunk") == "global":
-            return self._ask_global(notebook_id, payload)
-        if getattr(payload, "mode", "chunk") == "chunk":
-            return self.ask_chunk(notebook_id, payload)
+        """Dispatch to the retrieval handler named by payload.mode, resolved
+        through the ask_modes registry. Unknown modes raise UnknownAskMode (the
+        API layer returns 422) — never a silent fall-through to the legacy path."""
+        from app.services.ask_modes import resolve_mode
+        spec = resolve_mode(getattr(payload, "mode", None))
+        return getattr(self, spec.handler)(notebook_id, payload)
+
+    def ask_fast(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        """Legacy KG-native ask over the 4 KG object types (claim/formula/
+        procedure/concept) + 1-hop relation expansion. Non-default; reachable
+        only via explicit mode="fast" (eval/back-compat). See ask_chunk for the
+        default path."""
         import time
         ask_started = time.perf_counter()
 
@@ -4553,6 +4562,7 @@ class SQLiteRepository:
             retrieval_query=retrieval_query,
             top_relevance=top_relevance,
         )
+        response.mode = "fast"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id
         )
@@ -4589,6 +4599,7 @@ class SQLiteRepository:
                 retrieval_query=question,
                 top_relevance=0.0,
             )
+            resp.mode = "global"
             resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
             return resp
 
@@ -4668,6 +4679,7 @@ class SQLiteRepository:
             retrieval_query=question,
             top_relevance=0.0,
         )
+        response.mode = "global"
         response.answer_id = self._save_answer(notebook_id, question, response, conversation_id)
         return response
 
@@ -5045,6 +5057,7 @@ class SQLiteRepository:
             retrieval_query=question, top_relevance=top_relevance,
             reasoning_trace=trace or None,
         )
+        response.mode = "reasoning"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
@@ -5083,6 +5096,7 @@ class SQLiteRepository:
                 conversation_id=conversation_id, retrieval_query=question,
                 llm_mode="deterministic",
             )
+            response.mode = "graph"
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id)
             return response
@@ -5201,6 +5215,7 @@ class SQLiteRepository:
             conversation_id=conversation_id, retrieval_query=question,
             top_relevance=top_relevance, reasoning_trace=graph_trace,
         )
+        response.mode = "graph"
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
@@ -5909,6 +5924,7 @@ class SQLiteRepository:
             taxonomy=_list("taxonomy"),
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
+            kg_ready=self._has_kg(db, row["id"]),
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:

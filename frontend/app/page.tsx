@@ -14,7 +14,10 @@ import {
 import { AnswerMarkdown } from "./answer-markdown";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
-import { lastTurnUsedReasoning } from "./session-reasoning";
+import {
+  ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
+  groupOf, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
+} from "./ask-modes";
 import {
   approvePromotion,
   fetchPromotionQueue,
@@ -43,6 +46,7 @@ type NotebookSummary = {
   taxonomy?: string[];
   access_scope?: string;
   tier?: string;
+  kg_ready?: boolean;
 };
 
 type SourceSummary = {
@@ -128,6 +132,7 @@ type AskResponse = {
   retrieval_query?: string;
   top_relevance?: number;
   reasoning_trace?: ReasoningTraceStep[];
+  mode?: AskModeId;
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -770,7 +775,7 @@ export default function Home() {
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [asking, setAsking] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
-  const [pendingReasoning, setPendingReasoning] = useState(false);
+  const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
   const [filter, setFilter] = useState("mine");
   const [viewMode, setViewMode] = useState("grid");
@@ -803,7 +808,7 @@ export default function Home() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
-  const [reasoningMode, setReasoningMode] = useState(false);
+  const [askMode, setAskMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
@@ -1326,7 +1331,7 @@ export default function Home() {
     setSessions([]);
     setAsking(false);
     setPendingQuestion("");
-    setPendingReasoning(false);
+    setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     window.scrollTo(0, 0);
@@ -1540,25 +1545,23 @@ export default function Home() {
     if (!currentNotebookId) return;
     const q = nextQuestion.trim();
     if (!q) return;
-    const useReasoning = reasoningMode;
+    if (requiresKg(askMode) && !currentNotebook?.kg_ready) {
+      setToast("严格推理需先为该 notebook 构建知识图谱");
+      return;
+    }
     setChatMode("ask");
     setQuestion("");
     setPendingQuestion(q);
-    setPendingReasoning(useReasoning);
+    setPendingMode(askMode);
     setPendingTrace([]);
     setAsking(true);
     try {
-      const payload = { question: q, conversation_id: conversationId ?? undefined, mode: useReasoning ? "reasoning" : "chunk" };
-      const response = useReasoning
-        ? await readAskStream<AskResponse>(
-          `/notebooks/${currentNotebookId}/ask/stream`,
-          payload,
-          (step) => setPendingTrace((previous) => [...previous, step]),
-        )
-        : await api<AskResponse>(`/notebooks/${currentNotebookId}/ask`, {
-          method: "POST",
-          body: JSON.stringify(payload)
-        });
+      const payload = { question: q, conversation_id: conversationId ?? undefined, mode: askMode };
+      const response = await readAskStream<AskResponse>(
+        `/notebooks/${currentNotebookId}/ask/stream`,
+        payload,
+        (step) => setPendingTrace((previous) => [...previous, step]),
+      );
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
@@ -1566,7 +1569,7 @@ export default function Home() {
       reportError(error);
     } finally {
       setPendingQuestion("");
-      setPendingReasoning(false);
+      setPendingMode(DEFAULT_ASK_MODE);
       setPendingTrace([]);
       setAsking(false);
     }
@@ -1582,10 +1585,10 @@ export default function Home() {
   async function openSession(id: string) {
     const detail = await api<ConversationDetail>(`/conversations/${id}`);
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
-    setReasoningMode(lastTurnUsedReasoning(detail.turns));
+    setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
     setPendingQuestion("");
-    setPendingReasoning(false);
+    setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
     setChatMode("ask");
     setSessionPanelOpen(false);
@@ -1595,9 +1598,9 @@ export default function Home() {
   function startNewSession() {
     setTurns([]);
     setConversationId(null);
-    setReasoningMode(false);
+    setAskMode(DEFAULT_ASK_MODE);
     setPendingQuestion("");
-    setPendingReasoning(false);
+    setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
     setChatMode("ask");
     setSessionPanelOpen(false);
@@ -1610,7 +1613,7 @@ export default function Home() {
       setTurns([]);
       setConversationId(null);
       setPendingQuestion("");
-      setPendingReasoning(false);
+      setPendingMode(DEFAULT_ASK_MODE);
       setPendingTrace([]);
     }
     await loadSessions(currentNotebookId);
@@ -2436,7 +2439,7 @@ export default function Home() {
                       <div className="chat-turn">
                         {pendingQuestion && <div className="chat-user">{pendingQuestion}</div>}
                         <div className="chat-assistant chat-thinking">
-                          {pendingReasoning ? (
+                          {groupOf(pendingMode) === "strict" ? (
                             <ReasoningTracePanel steps={pendingTrace} live />
                           ) : "思考中…"}
                         </div>
@@ -2469,13 +2472,36 @@ export default function Home() {
                 <div className="chat-input-bar">
                   <textarea className="chat-input" rows={1} placeholder={askHint} value={question} onChange={(event) => setQuestion(event.target.value)} />
                   <span>{sources.length} 个来源</span>
-                  <button
-                    className={`reasoning-toggle${reasoningMode ? " active" : ""}`}
-                    onClick={() => setReasoningMode((v) => !v)}
-                    title={reasoningMode ? "推理模式已开启（点击关闭）" : "开启推理模式"}
-                  >
-                    ✦ 推理
-                  </button>
+                  <div className="ask-mode-control" role="group" aria-label="问答模式">
+                    {ASK_MODE_GROUPS.map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
+                        onClick={() => setAskMode(defaultModeForGroup(g.id))}
+                      >
+                        {g.label}
+                      </button>
+                    ))}
+                    {groupOf(askMode) === "strict" && (
+                      <span className="mode-engines">
+                        {modesInGroup("strict").map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            className={`mode-engine${askMode === m.id ? " active" : ""}`}
+                            title={m.desc}
+                            onClick={() => setAskMode(m.id)}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                    {groupOf(askMode) === "strict" && !currentNotebook?.kg_ready && (
+                      <span className="mode-hint">该 notebook 尚无知识图谱，严格推理需先构建</span>
+                    )}
+                  </div>
                   <button className="send-button" onClick={() => runAsk().catch(reportError)}>→</button>
                 </div>
               )}

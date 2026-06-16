@@ -107,6 +107,9 @@ class NotebookSummary(BaseModel):
     # 'personal' = user notes (default). Drives tier-weighted relevance + conflict
     # precedence in ask().
     tier: str = "personal"
+    # 该 notebook 是否已构建知识图谱（有任意 knowledge_objects）。
+    # 驱动前端严格推理(reasoning/graph)的可用门控。
+    kg_ready: bool = False
 
 
 class NotebookTemplate(BaseModel):
@@ -182,6 +185,9 @@ class AskResponse(BaseModel):
     related_knowledge: List["KnowledgeRecord"] = Field(default_factory=list)
     citations: List[Citation] = Field(default_factory=list)
     llm_mode: str = ""
+    # 本轮实际使用的检索 mode（chunk/reasoning/graph/fast/global）。
+    # 落库供 openSession 精确恢复引擎，替代旧的 reasoning_trace 猜测。
+    mode: str = ""
     conversation_id: str = ""
     # 实际用于检索的 query（原问或改写后）+ 最高命中相关度，供排错/二期标定。
     retrieval_query: str = ""
