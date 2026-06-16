@@ -7,13 +7,11 @@
 "use client";
 
 import { MouseEvent } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { visit } from "unist-util-visit";
-import type { Root, Text, Link, PhrasingContent } from "mdast";
 import {
   buildAnswerReferences,
   referenceByAnchorKey,
@@ -21,74 +19,10 @@ import {
   type CitationLike,
   type AnswerReference,
 } from "./answer-formatting";
+import { remarkCitations } from "./answer-citations";
 
 // Re-export types for external callers (page.tsx uses these).
 export type { AnswerReference };
-
-// ---------------------------------------------------------------------------
-// remarkCitations — remark 插件：把 [k\d+] 替换为 cite: 链接节点
-// ---------------------------------------------------------------------------
-
-/**
- * 创建 remark 插件，将 text 节点中的 [k\d+] 标记替换为 `link` 节点，
- * `url` 设置为 `cite:<key>`，供后续 <a> 组件识别为引用徽章。
- *
- * @param refsByKey key→AnswerReference 的映射，用于取显示编号；
- *                  未命中的 key 原样保留为文本节点。
- */
-function remarkCitations(refsByKey: Record<string, AnswerReference>) {
-  return () => (tree: Root) => {
-    visit(tree, "text", (node: Text, index, parent) => {
-      if (!parent || index === undefined) return;
-      const pattern = /\[(k\d+)\]/g;
-      const text = node.value;
-      if (!pattern.test(text)) return;
-
-      // 重置 lastIndex（test() 会改变它）
-      pattern.lastIndex = 0;
-
-      const newChildren: PhrasingContent[] = [];
-      let last = 0;
-      let match: RegExpExecArray | null;
-
-      while ((match = pattern.exec(text)) !== null) {
-        const key = match[1];
-        const ref = refsByKey[key];
-
-        // 前面的纯文本
-        if (match.index > last) {
-          newChildren.push({ type: "text", value: text.slice(last, match.index) });
-        }
-
-        if (ref) {
-          // 替换为 link 节点，url = "cite:<key>"
-          const linkNode: Link = {
-            type: "link",
-            url: `cite:${key}`,
-            children: [{ type: "text", value: ref.displayLabel }],
-          };
-          newChildren.push(linkNode);
-        } else {
-          // key 不在引用映射里 → 原样保留文本
-          newChildren.push({ type: "text", value: match[0] });
-        }
-
-        last = match.index + match[0].length;
-      }
-
-      // 尾部剩余文本
-      if (last < text.length) {
-        newChildren.push({ type: "text", value: text.slice(last) });
-      }
-
-      if (newChildren.length > 0) {
-        parent.children.splice(index, 1, ...newChildren);
-        // 返回跳过偏移，避免重复访问新插入的节点
-        return [undefined, index + newChildren.length] as const;
-      }
-    });
-  };
-}
 
 // ---------------------------------------------------------------------------
 // AnswerMarkdown component
@@ -175,6 +109,9 @@ export function AnswerMarkdown({
           [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
         ]}
         rehypePlugins={[rehypeKatex]}
+        // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
+        // 放行 cite:，其余 URL 仍走默认清洗（防 javascript: 等不安全协议）。
+        urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
         components={components}
       >
         {answer}
