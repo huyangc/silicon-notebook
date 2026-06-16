@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     reasoning_llm_base_url: str = Field("", env="REASONING_LLM_BASE_URL")
     reasoning_llm_api_key: str = Field("", env="REASONING_LLM_API_KEY")
     reasoning_llm_model: str = Field("", env="REASONING_LLM_MODEL")
+    # 查询改写/扩展专用快模型(如 DeepSeek v4-fast)。只填 MODEL 即启用,base_url/api_key
+    # 缺省则复用主 OPENAI_COMPAT_* 端点;未填则改写/扩展回退到主模型。
+    rewrite_llm_base_url: str = Field("", env="REWRITE_LLM_BASE_URL")
+    rewrite_llm_api_key: str = Field("", env="REWRITE_LLM_API_KEY")
+    rewrite_llm_model: str = Field("", env="REWRITE_LLM_MODEL")
 
     embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""(off) | dashscope
     embed_model: str = Field("", env="EMBED_MODEL")
@@ -101,8 +106,6 @@ class Settings(BaseSettings):
     rerank_timeout_seconds: int = Field(20, env="RERANK_TIMEOUT_SECONDS")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
-    # 追问改写：问题长度 ≤ 此值（或含指代标记）才触发轻量 LLM 改写。
-    followup_max_len: int = Field(12, env="FOLLOWUP_MAX_LEN")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
     # 注意：现有 grounded 测试要求 tau_high ≤ 0.4（纯关键词命中融合分=0.4）。
     evidence_tau_low: float = Field(0.18, env="EVIDENCE_TAU_LOW")
@@ -221,6 +224,11 @@ class Settings(BaseSettings):
         """有些 REASONING_LLM_* 填了但非全填（疑似配漏，将整体回退全局）。"""
         vals = [self.reasoning_llm_base_url, self.reasoning_llm_api_key, self.reasoning_llm_model]
         return any(vals) and not all(vals)
+
+    @property
+    def rewrite_llm_configured(self) -> bool:
+        """设了 REWRITE_LLM_MODEL 即启用专用快改写模型(base_url/api_key 缺省复用主端点)。"""
+        return bool(self.rewrite_llm_model)
 
     @property
     def embedder_configured(self) -> bool:
