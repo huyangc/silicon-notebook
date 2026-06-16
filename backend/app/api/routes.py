@@ -56,7 +56,7 @@ from app.models.schemas import (
     UnifiedKgStatus,
     UserProfile,
 )
-from app.services.ask_modes import resolve_mode, user_facing_mode_ids, UnknownAskMode, ASK_MODES
+from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.kg import scheduler as kg_scheduler
 from app.services.repository import NotebookRepository, UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
@@ -436,7 +436,7 @@ def ask_stream(notebook_id: str, payload: AskRequest) -> StreamingResponse:
         events: queue.Queue[dict[str, Any] | None] = queue.Queue()
         events.put({"event": "progress", "step": {
             "step_type": "start", "summary": "启动检索",
-            "detail": {"mode": payload.mode}}})
+            "detail": {"mode": spec.id}}})
 
         def on_trace(step) -> None:
             events.put({"event": "progress", "step": step.model_dump()})
