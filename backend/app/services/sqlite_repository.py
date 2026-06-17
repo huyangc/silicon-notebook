@@ -4040,6 +4040,8 @@ class SQLiteRepository:
         from app.services.vector_index import query_sims
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
         knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+        if self.settings.retrieval_rrf_enabled:
+            return self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
         scored: List[RetrievedKnowledge] = []
         for t in type_list:
             objs = kg_objs.get(t) or []
