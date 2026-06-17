@@ -1,4 +1,4 @@
-from app.services.remote_sources import probe_pdf, PdfProbe, FetchResult
+from app.services.remote_sources import probe_pdf, PdfProbe, FetchResult, _total_length
 
 
 def _fetch(result):
@@ -46,3 +46,16 @@ def test_fetch_exception_rejected():
 def test_non_http_scheme_rejected():
     p = probe_pdf("ftp://a/x.pdf")
     assert not p.ok and "http" in p.reason
+
+
+def test_total_length_prefers_content_range_total():
+    assert _total_length({"Content-Range": "bytes 0-1023/12345"}) == 12345
+
+
+def test_total_length_falls_back_to_content_length():
+    assert _total_length({"Content-Length": "777"}) == 777
+
+
+def test_total_length_unknown_or_wildcard_returns_zero():
+    assert _total_length({}) == 0
+    assert _total_length({"Content-Range": "bytes 0-1023/*"}) == 0

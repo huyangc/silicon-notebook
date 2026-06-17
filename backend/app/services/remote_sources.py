@@ -9,7 +9,7 @@ import os
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, ParseResult
 
 MAX_PDF_BYTES = 200 * 1024 * 1024  # 与 mineru.net 单文件上限一致
 
@@ -58,7 +58,7 @@ def probe_pdf(
     return PdfProbe(True, "", result.content_length, display)
 
 
-def _display_name(parsed) -> str:
+def _display_name(parsed: ParseResult) -> str:
     base = os.path.basename(parsed.path) or parsed.netloc or "source"
     if not base.lower().endswith(".pdf"):
         base = f"{base}.pdf"
