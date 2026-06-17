@@ -2799,8 +2799,6 @@ class SQLiteRepository:
             }
 
         # 2. Load objects + relations
-        OBJECT_TYPES = ("Concept", "Claim", "concept", "claim",
-                        "Formula", "formula", "Procedure", "procedure")
         with self._connect() as db:
             # Fetch all non-deprecated objects for this notebook
             obj_rows = db.execute(
