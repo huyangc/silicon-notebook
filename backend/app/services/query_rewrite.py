@@ -31,6 +31,8 @@ class SubQuerySpec:
 class ExpandedQuery:
     query_en: str
     sub_queries: List[SubQuerySpec]
+    high_level_keywords: List[str] = field(default_factory=list)
+    low_level_keywords: List[str] = field(default_factory=list)
 
 
 def expand_query(client, question: str, history: str = "", *,
@@ -77,7 +79,16 @@ def expand_query(client, question: str, history: str = "", *,
                 break
         if not out:
             return fallback
+        def _kw_list(v):
+            if isinstance(v, str):
+                return [x.strip() for x in re.split(r"[,;\n]", v) if x.strip()]
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            return []
+        hl = _kw_list(data.get("high_level_keywords"))
+        ll = _kw_list(data.get("low_level_keywords"))
         query_en = str(data.get("query_en", "")).strip() or question
-        return ExpandedQuery(query_en=query_en, sub_queries=out)
+        return ExpandedQuery(query_en=query_en, sub_queries=out,
+                             high_level_keywords=hl, low_level_keywords=ll)
     except Exception:
         return fallback
