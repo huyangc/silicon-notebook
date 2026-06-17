@@ -299,6 +299,51 @@ class TestMalformedOutput:
 
 
 # ---------------------------------------------------------------------------
+# Per-item resilience — one transient LLM error must not abort the batch
+# ---------------------------------------------------------------------------
+
+class _RaisingOnceLLM:
+    """Raises on the first chat_json call, succeeds on subsequent calls."""
+    configured = True
+
+    def __init__(self, success_response: str):
+        self._success = success_response
+        self.calls = 0
+
+    def chat_json(self, messages, response_schema_hint):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient LLM error")
+        return self._success
+
+
+def test_transient_llm_error_does_not_abort_batch():
+    """A chat_json exception on one item yields a safe fallback for that item
+    and the batch still processes the remaining items."""
+    success = json.dumps({
+        "conflict_type": "mutual",
+        "resolution": "discard",
+        "winner_ref": "r3",     # item 1 has refs r3/r4
+        "resolved_payload": None,
+        "confidence": 0.9,
+        "rationale": "ok",
+    })
+    llm = _RaisingOnceLLM(success)
+    items = [_item(), _item(left_ref="r3", right_ref="r4")]
+    verdicts = review_conflict_candidates(llm, items)
+
+    assert llm.calls == 2                       # both items attempted, no early abort
+    assert len(verdicts) == 2
+    # item 0 raised → safe fallback
+    assert verdicts[0]["conflict_type"] == "none"
+    assert verdicts[0]["resolution"] == "keep"
+    assert verdicts[0]["confidence"] == 0.0
+    # item 1 parsed normally
+    assert verdicts[1]["conflict_type"] == "mutual"
+    assert verdicts[1]["winner_ref"] == "r3"
+
+
+# ---------------------------------------------------------------------------
 # Unconfigured / empty inputs
 # ---------------------------------------------------------------------------
 
