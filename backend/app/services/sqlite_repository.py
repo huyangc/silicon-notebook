@@ -4178,6 +4178,20 @@ class SQLiteRepository:
             })
         return out
 
+    def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
+        """对 notebook 关系按 query 打分(关键词 + 关系索引语义)。镜像 _retrieve_scored;
+        关系矩阵是独立索引(dual-index 分离)。"""
+        from app.services.retrieval import score_relations
+        from app.services.vector_index import query_sims
+        with self._connect() as db:
+            relations = self._relations_with_names(db, notebook_id)
+            query_vector = self._embed_query(query)
+            rel_ids, rel_mat = self._vector_matrix(
+                db, notebook_id, "relation_embeddings", "relation_id")
+        relation_sims = query_sims(query_vector, rel_ids, rel_mat) if query_vector else None
+        return score_relations(query, relations, query_vector=query_vector,
+                               relation_sims=relation_sims)
+
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,
