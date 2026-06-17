@@ -17,6 +17,7 @@ from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import OpenAICompatibleClient
 from app.models.schemas import (
+    AddUrlSourcesResult,
     AnswerAnchor,
     ArticleCreate,
     ArticleResearchBrief,
@@ -47,6 +48,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    RejectedUrl,
     RuleCard,
     SearchHit,
     SourceDetail,
@@ -74,6 +76,8 @@ def _normalize_doc_type(doc_type: str) -> str:
     value = (doc_type or "").strip().lower()
     return value if value in PROFILES else ""
 from app.services.mineru_client import MinerUClient
+from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
+from app.services import remote_sources
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 from app.services.parsers import parse_source_file
 from app.services.prompts import (
@@ -192,6 +196,7 @@ class SQLiteRepository:
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
+        self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = EventLogger(settings, channel="events")
         if settings.reasoning_llm_partially_configured:
             self.event_log.logger.warning(
@@ -1032,6 +1037,51 @@ class SQLiteRepository:
                 )
                 source_ids.append(source_id)
         return [self.get_source(source_id) for source_id in source_ids]
+
+    def add_url_sources(
+        self,
+        notebook_id: str,
+        urls: Iterable[str],
+        scheduler: Optional[Callable[[str], None]] = None,
+    ) -> AddUrlSourcesResult:
+        """逐 URL 初筛(非 PDF/不可达/超限→rejected,不建来源);通过的建 source_url
+        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。"""
+        self.get_notebook(notebook_id)  # KeyError if missing
+        if not self.mineru_cloud_client.configured:
+            raise MinerUCloudNotConfigured("未配置 MinerU 云端凭证 (MINERU_API_TOKEN)")
+        created: List[SourceSummary] = []
+        rejected: List[RejectedUrl] = []
+        for raw in urls:
+            url = (raw or "").strip()
+            if not url:
+                continue
+            probe = remote_sources.probe_pdf(url)
+            if not probe.ok:
+                rejected.append(RejectedUrl(url=url, reason=probe.reason))
+                continue
+            source_id = f"src-{uuid4().hex[:10]}"
+            now = _now()
+            with self._write() as db:
+                db.execute(
+                    """
+                    INSERT INTO sources
+                    (id, notebook_id, title, source_type, status, parse_status,
+                     file_name, file_path, source_url, file_size, file_hash, summary,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_id, notebook_id, probe.display_name, "pdf",
+                        "queued", "queued", probe.display_name, "", url,
+                        probe.content_length, "", "链接已添加，解析排队中。", now, now,
+                    ),
+                )
+            if scheduler is not None:
+                scheduler(source_id)
+            else:
+                self.process_source(source_id)
+            created.append(self.get_source(source_id))
+        return AddUrlSourcesResult(created=created, rejected=rejected)
 
     def upload_sources(
         self,

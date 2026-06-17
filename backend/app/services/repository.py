@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional, Protocol
 
 from app.models.schemas import (
+    AddUrlSourcesResult,
     ArticleCreate,
     ArticleResearchBrief,
     ArticleSummary,
@@ -68,6 +69,13 @@ class NotebookRepository(Protocol):
     def list_sources(self, notebook_id: str) -> List[SourceSummary]: ...
 
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]: ...
+
+    def add_url_sources(
+        self,
+        notebook_id: str,
+        urls: Iterable[str],
+        scheduler: Optional[Callable[[str], None]] = None,
+    ) -> "AddUrlSourcesResult": ...
 
     def upload_sources(
         self,
