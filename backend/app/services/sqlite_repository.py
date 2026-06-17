@@ -1231,6 +1231,15 @@ class SQLiteRepository:
             self._mark_unified_kg_dirty(notebook_id)
         except Exception:
             self.event_log.logger.exception("unified-KG dirty mark failed for %s", notebook_id)
+        # Conflict resolution pass — runs after ALL sources are extracted.
+        # Fail-safe: any exception is logged but never breaks the build.
+        if self.settings.kg_conflict_resolution_enabled:
+            try:
+                self.resolve_notebook_conflicts(notebook_id)
+            except Exception:  # noqa: BLE001
+                self.event_log.logger.exception(
+                    "build_notebook_kg: conflict resolution failed for %s", notebook_id
+                )
         return {"built": done, "failed": failed, "skipped": sorted(kgful)}
 
     def process_source(self, source_id: str) -> SourceSummary:
@@ -2751,6 +2760,279 @@ class SQLiteRepository:
         # update_knowledge already calls _invalidate_unified_cache; mark dirty too.
         self._mark_unified_kg_dirty(notebook_id)
         return {"action": "modify", "target": target}
+
+    # ------------------------------------------------------------------
+    # resolve_notebook_conflicts — Task T5: orchestration
+    # Ties detection (T2) → adjudication (T3) → write-back (T4) and
+    # records everything in the queue (T1).
+    # ------------------------------------------------------------------
+
+    def resolve_notebook_conflicts(self, notebook_id: str) -> dict:
+        """Detect, adjudicate, and (optionally) auto-apply KG conflicts for a notebook.
+
+        Steps
+        -----
+        1. Guard: if LLM is not configured, return a summary noting skipped.
+        2. Load objects + relations; build lookup dicts.
+        3. Build an {object_id: vector} embeddings dict for the semantic strategy
+           (reads knowledge_embeddings; passes None if unavailable).
+        4. Run detect_conflict_candidates.
+        5. Materialise T3 input items (text / source_text / object_type / tier).
+        6. Call review_conflict_candidates (LLM adjudicator).
+        7. For each verdict: record in queue; auto-apply when
+           conflict_type != "none" AND resolution != "keep" AND
+           confidence >= kg_conflict_auto_apply_threshold.
+        8. Return summary dict.
+
+        Cross-tier base-wins (base-notebook overrides personal-notebook claims)
+        is FUTURE WORK — it belongs when cross-notebook / federated candidate
+        recall is added.  In v1, all sides share one tier within the notebook
+        so the LLM's winner_ref is trusted directly.
+        """
+        # 1. Guard — no LLM, skip gracefully
+        if not getattr(self.llm_client, "configured", False):
+            return {
+                "detected": 0,
+                "auto_applied": 0,
+                "queued": 0,
+                "skipped_llm": True,
+            }
+
+        # 2. Load objects + relations
+        OBJECT_TYPES = ("Concept", "Claim", "concept", "claim",
+                        "Formula", "formula", "Procedure", "procedure")
+        with self._connect() as db:
+            # Fetch all non-deprecated objects for this notebook
+            obj_rows = db.execute(
+                "SELECT id, object_type, payload, evidence, status "
+                "FROM knowledge_objects "
+                "WHERE notebook_id=? AND status != 'deprecated'",
+                (notebook_id,),
+            ).fetchall()
+
+            # Fetch embeddings for the semantic strategy
+            vec_rows = db.execute(
+                "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+
+            # Fetch the notebook tier (same for all objects in v1)
+            nb_row = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()
+
+        # Build objects list in detect_conflict_candidates format
+        objects = []
+        object_map: dict = {}  # object_id → row dict
+        for row in obj_rows:
+            payload = json.loads(row["payload"] or "{}")
+            obj = {
+                "id": row["id"],
+                "object_type": row["object_type"],
+                "payload": payload,
+                "evidence": json.loads(row["evidence"] or "[]"),
+                "status": row["status"],
+            }
+            objects.append(obj)
+            object_map[row["id"]] = obj
+
+        relations = self.relations_for_notebook(notebook_id)
+
+        # Build name lookup for edge-text rendering: object_id → name
+        obj_name_map: dict = {
+            obj["id"]: (obj["payload"].get("name", "") if isinstance(obj["payload"], dict) else "")
+            for obj in objects
+        }
+
+        # 3. Build embeddings dict; log + skip on any error
+        embeddings: dict | None = None
+        if vec_rows:
+            try:
+                embeddings = {
+                    r["object_id"]: json.loads(r["vector"])
+                    for r in vec_rows
+                    if r["vector"]
+                }
+            except Exception:  # noqa: BLE001
+                self.event_log.logger.debug(
+                    "resolve_notebook_conflicts: failed to load embeddings for %s; "
+                    "semantic strategy will be skipped",
+                    notebook_id,
+                )
+                embeddings = None
+
+        # 4. Detect candidates
+        from app.services.kg.conflict_detect import detect_conflict_candidates
+        notebook_tier = (nb_row["tier"] if nb_row else "personal")
+
+        candidates = detect_conflict_candidates(
+            objects,
+            relations,
+            embeddings=embeddings,
+            sim_threshold=self.settings.kg_conflict_sim_threshold,
+        )
+
+        if not candidates:
+            return {
+                "detected": 0,
+                "auto_applied": 0,
+                "queued": 0,
+                "skipped_llm": False,
+            }
+
+        # 5. Materialise T3 input items
+        # Build relation lookup: rel_id → relation dict
+        rel_map: dict = {r["id"]: r for r in relations}
+
+        items = []
+        for cand in candidates:
+            kind = cand["kind"]
+            left_ref = cand["left_ref"]
+            right_ref = cand["right_ref"]
+
+            if kind == "edge":
+                # text: "src_name —edge_type→ tgt_name"
+                left_rel = rel_map.get(left_ref, {})
+                right_rel = rel_map.get(right_ref, {})
+
+                def _edge_text(rel: dict) -> str:
+                    src_name = obj_name_map.get(rel.get("source_object_id", ""), "")
+                    tgt_name = obj_name_map.get(rel.get("target_object_id", ""), "")
+                    etype = rel.get("edge_type", "")
+                    return f"{src_name} —{etype}→ {tgt_name}"
+
+                def _edge_source(rel: dict) -> str:
+                    ev = rel.get("evidence") or []
+                    if ev and isinstance(ev, list):
+                        first = ev[0]
+                        return (first.get("quoted_span") or "")[:400] if isinstance(first, dict) else ""
+                    return ""
+
+                left_item = {
+                    "text": _edge_text(left_rel),
+                    "source_text": _edge_source(left_rel),
+                    "object_type": None,
+                    "tier": notebook_tier,
+                }
+                right_item = {
+                    "text": _edge_text(right_rel),
+                    "source_text": _edge_source(right_rel),
+                    "object_type": None,
+                    "tier": notebook_tier,
+                }
+            else:
+                # kind == "node"
+                left_obj = object_map.get(left_ref, {})
+                right_obj = object_map.get(right_ref, {})
+
+                def _node_text(obj: dict) -> str:
+                    payload = obj.get("payload") or {}
+                    name = payload.get("name", "") if isinstance(payload, dict) else ""
+                    statement = (
+                        payload.get("statement", "") or payload.get("definition", "")
+                        if isinstance(payload, dict) else ""
+                    )
+                    return f"{name}: {statement}" if statement else name
+
+                def _node_source(obj: dict) -> str:
+                    ev_list = obj.get("evidence") or []
+                    if ev_list and isinstance(ev_list, list):
+                        first = ev_list[0]
+                        if isinstance(first, dict):
+                            return (first.get("quoted_span") or "")[:400]
+                        # Evidence may be Evidence namedtuple / dataclass
+                        return (getattr(first, "quoted_span", None) or "")[:400]
+                    return ""
+
+                left_item = {
+                    "text": _node_text(left_obj),
+                    "source_text": _node_source(left_obj),
+                    "object_type": left_obj.get("object_type"),
+                    "tier": notebook_tier,
+                }
+                right_item = {
+                    "text": _node_text(right_obj),
+                    "source_text": _node_source(right_obj),
+                    "object_type": right_obj.get("object_type"),
+                    "tier": notebook_tier,
+                }
+
+            items.append({
+                "candidate": cand,
+                "left": left_item,
+                "right": right_item,
+            })
+
+        # 6. Adjudicate
+        from app.services.kg.conflict_review import review_conflict_candidates
+        verdicts = review_conflict_candidates(self.llm_client, items)
+
+        # 7. Record + (optionally) auto-apply
+        auto_applied = 0
+        queued = 0
+        threshold = self.settings.kg_conflict_auto_apply_threshold
+
+        for cand, verdict in zip(candidates, verdicts):
+            kind = cand["kind"]
+            conflict_type = verdict["conflict_type"]
+            resolution = verdict["resolution"]
+            winner_ref = verdict["winner_ref"]
+            resolved_payload = verdict["resolved_payload"]
+            confidence = verdict["confidence"]
+            rationale = verdict["rationale"]
+
+            # Record in queue
+            candidate_id = self.write_conflict_candidate(
+                notebook_id,
+                kind=kind,
+                left_ref=cand["left_ref"],
+                right_ref=cand["right_ref"],
+                conflict_type=conflict_type,
+                resolution=resolution,
+                winner_ref=winner_ref,
+                resolved_payload=(
+                    json.dumps(resolved_payload) if resolved_payload is not None else None
+                ),
+                confidence=confidence,
+                rationale=rationale,
+            )
+
+            # Auto-apply?  Only for genuine conflicts with a non-trivial resolution.
+            should_apply = (
+                conflict_type != "none"
+                and resolution != "keep"
+                and confidence >= threshold
+            )
+            if should_apply:
+                try:
+                    self.apply_conflict_resolution(
+                        notebook_id,
+                        kind=kind,
+                        left_ref=cand["left_ref"],
+                        right_ref=cand["right_ref"],
+                        resolution=resolution,
+                        winner_ref=winner_ref,
+                        resolved_payload=resolved_payload,
+                    )
+                    self.set_conflict_status(candidate_id, "applied")
+                    auto_applied += 1
+                except Exception:  # noqa: BLE001
+                    self.event_log.logger.exception(
+                        "resolve_notebook_conflicts: auto-apply failed for candidate %s "
+                        "(notebook %s, kind=%s, left=%r, right=%r)",
+                        candidate_id, notebook_id, kind,
+                        cand["left_ref"], cand["right_ref"],
+                    )
+                    queued += 1
+            else:
+                queued += 1
+
+        return {
+            "detected": len(candidates),
+            "auto_applied": auto_applied,
+            "queued": queued,
+            "skipped_llm": False,
+        }
 
     def review_pending_merges(self, notebook_id: str, limit: int = 50, auto_confirm_threshold: float = 0.95) -> dict:
         self.get_notebook(notebook_id)
