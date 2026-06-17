@@ -2761,6 +2761,56 @@ class SQLiteRepository:
         self._mark_unified_kg_dirty(notebook_id)
         return {"action": "modify", "target": target}
 
+    def confirm_conflict(self, notebook_id: str, candidate_id: str) -> dict:
+        """Apply a pending conflict candidate and mark it as 'applied'.
+
+        Composes existing T1/T4 primitives — no new detection or adjudication
+        logic.  Raises KeyError if the candidate does not exist; raises
+        ValueError if it is already decided (not 'pending').
+        """
+        row = self.get_conflict_candidate(candidate_id)
+        if row is None:
+            raise KeyError(f"conflict candidate {candidate_id!r} not found")
+        if row["status"] != "pending":
+            raise ValueError(
+                f"conflict candidate {candidate_id!r} is already decided "
+                f"(status={row['status']!r})"
+            )
+        resolved_payload: Optional[dict] = None
+        if row.get("resolved_payload") is not None:
+            try:
+                resolved_payload = json.loads(row["resolved_payload"])
+            except (TypeError, ValueError):
+                resolved_payload = None
+
+        apply_result = self.apply_conflict_resolution(
+            notebook_id,
+            kind=row["kind"],
+            left_ref=row["left_ref"],
+            right_ref=row["right_ref"],
+            resolution=row["resolution"],
+            winner_ref=row["winner_ref"],
+            resolved_payload=resolved_payload,
+        )
+        self.set_conflict_status(candidate_id, "applied")
+        return {**apply_result, "status": "applied", "candidate_id": candidate_id}
+
+    def reject_conflict(self, notebook_id: str, candidate_id: str) -> None:
+        """Reject a pending conflict candidate (no KG mutation).
+
+        Raises KeyError if the candidate does not exist; raises ValueError if
+        it is already decided.
+        """
+        row = self.get_conflict_candidate(candidate_id)
+        if row is None:
+            raise KeyError(f"conflict candidate {candidate_id!r} not found")
+        if row["status"] != "pending":
+            raise ValueError(
+                f"conflict candidate {candidate_id!r} is already decided "
+                f"(status={row['status']!r})"
+            )
+        self.set_conflict_status(candidate_id, "rejected")
+
     # ------------------------------------------------------------------
     # resolve_notebook_conflicts — Task T5: orchestration
     # Ties detection (T2) → adjudication (T3) → write-back (T4) and

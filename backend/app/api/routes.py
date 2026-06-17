@@ -726,6 +726,67 @@ def reject_merge(notebook_id: str, candidate_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Merge candidate not found")
 
 
+# ---------------------------------------------------------------------------
+# KG conflict resolve/review endpoints (Task T6)
+# Mirrors the kg/build + concept-merge review patterns above.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/notebooks/{notebook_id}/kg/conflicts/resolve")
+def resolve_conflicts(notebook_id: str) -> dict:
+    """Trigger background conflict resolution for a notebook's KG.
+
+    Mirrors kg/build: 409 if LLM not configured, 404 if notebook missing,
+    otherwise starts a daemon thread and returns immediately.
+    """
+    repo = repository()
+    if not getattr(repo.llm_client, "configured", False):
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    threading.Thread(
+        target=repo.resolve_notebook_conflicts,
+        args=(notebook_id,),
+        name=f"conflictresolve-{notebook_id}",
+        daemon=True,
+    ).start()
+    return {"status": "resolving", "notebook_id": notebook_id}
+
+
+@router.get("/notebooks/{notebook_id}/kg/conflicts/pending")
+def get_pending_conflicts(notebook_id: str) -> list:
+    """Return all pending conflict candidates for a notebook."""
+    try:
+        return repository().pending_conflicts(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/kg/conflicts/{candidate_id}/confirm")
+def confirm_conflict(notebook_id: str, candidate_id: str) -> dict:
+    """Apply a pending conflict candidate and mark it as 'applied'."""
+    try:
+        return repository().confirm_conflict(notebook_id, candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conflict candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/notebooks/{notebook_id}/kg/conflicts/{candidate_id}/reject")
+def reject_conflict(notebook_id: str, candidate_id: str) -> dict:
+    """Reject a pending conflict candidate (no KG mutation)."""
+    try:
+        repository().reject_conflict(notebook_id, candidate_id)
+        return {"status": "rejected", "candidate_id": candidate_id}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conflict candidate not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @router.get("/kg/concept-whitelist", response_model=List[ConceptWhitelistEntry])
 def list_concept_whitelist() -> List[ConceptWhitelistEntry]:
     return [ConceptWhitelistEntry(**e) for e in repository().concept_whitelist_list()]
