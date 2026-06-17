@@ -2598,7 +2598,12 @@ class SQLiteRepository:
         confidence: Optional[float] = None,
         rationale: Optional[str] = None,
     ) -> str:
-        """Insert one conflict candidate into the queue and return its id."""
+        """Insert one conflict candidate into the queue and return its id.
+
+        resolution, winner_ref, resolved_payload, confidence, and rationale
+        are normally NULL at detection time and only populated after
+        adjudication (set_conflict_status / write-back in later tasks).
+        """
         now = _now()
         cid = f"kcc-{uuid4().hex[:10]}"
         with self._write() as db:
@@ -2618,6 +2623,7 @@ class SQLiteRepository:
 
     def pending_conflicts(self, notebook_id: str) -> List[dict]:
         """Return all conflict candidates with status='pending' for a notebook."""
+        self.get_notebook(notebook_id)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM kg_conflict_candidates WHERE notebook_id=? AND status='pending'",
@@ -2626,14 +2632,21 @@ class SQLiteRepository:
         return [dict(r) for r in rows]
 
     def set_conflict_status(self, candidate_id: str, status: str) -> None:
-        """Update status to 'applied' or 'rejected' (+ updated_at)."""
+        """Update status to 'applied' or 'rejected' (+ updated_at).
+
+        No notebook_id scoping here: candidate_id is a globally-unique
+        'kcc-' uuid, so a wrong id surfaces immediately via the not-found
+        guard below rather than silently updating the wrong row.
+        """
         if status not in ("applied", "rejected"):
             raise ValueError(f"invalid conflict status: {status!r}")
         with self._write() as db:
-            db.execute(
+            cur = db.execute(
                 "UPDATE kg_conflict_candidates SET status=?, updated_at=? WHERE id=?",
                 (status, _now(), candidate_id),
             )
+            if cur.rowcount == 0:
+                raise KeyError(f"conflict candidate {candidate_id!r} not found")
 
     def get_conflict_candidate(self, candidate_id: str) -> Optional[dict]:
         """Fetch one conflict candidate by id; returns None if not found."""

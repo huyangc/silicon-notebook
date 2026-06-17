@@ -5,8 +5,10 @@ pattern from test_unified_kg_repository.py.
 """
 import json
 import pytest
+from datetime import datetime
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
+from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 
 
@@ -20,7 +22,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_API_KEY", "test-key")
     monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
-    return SQLiteRepository(Settings())
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)               # inject; no real model loads (lazy)
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +135,8 @@ def test_get_conflict_candidate_full_fields(repo):
     assert abs(row["confidence"] - 0.87) < 1e-6
     assert row["rationale"] == "left is more specific"
     assert row["status"] == "pending"
-    assert row["created_at"]
-    assert row["updated_at"]
+    datetime.fromisoformat(row["created_at"])   # validates ISO format produced by _now()
+    datetime.fromisoformat(row["updated_at"])
 
 
 def test_get_conflict_candidate_nullable_fields_default_none(repo):
@@ -164,3 +168,19 @@ def test_pending_conflicts_isolated_per_notebook(repo):
     assert len(repo.pending_conflicts(nb2.id)) == 1
     assert repo.pending_conflicts(nb1.id)[0]["left_ref"] == "A"
     assert repo.pending_conflicts(nb2.id)[0]["left_ref"] == "C"
+
+
+# ---------------------------------------------------------------------------
+# not-found guards (review issues #1 and #3)
+# ---------------------------------------------------------------------------
+
+def test_set_conflict_status_raises_keyerror_for_missing_id(repo):
+    """set_conflict_status must raise KeyError (not silently no-op) on unknown id."""
+    with pytest.raises(KeyError):
+        repo.set_conflict_status("nonexistent", "applied")
+
+
+def test_pending_conflicts_raises_for_nonexistent_notebook(repo):
+    """pending_conflicts must raise KeyError when the notebook does not exist."""
+    with pytest.raises(KeyError):
+        repo.pending_conflicts("nonexistent-notebook-id")
