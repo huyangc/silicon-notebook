@@ -102,3 +102,51 @@ def test_rrf_scored_relevance_on_fused_scale_not_rrf(repo):
     assert h.relevance >= 0.35     # full keyword match -> crosses tau_high (grounded-capable)
     assert h.score < 0.1          # RRF micro-score, used only for ordering
     assert h.relevance != h.score
+
+
+# --- _retrieve_scored RRF 分支(spy)测试 ---
+
+def _seed_cascode_notebook(repo):
+    """Seed a notebook with cascode/current-mirror claims and return its id."""
+    nb = repo.create_notebook(NotebookCreate(name="spy-nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "cascode raises output resistance", "section_path": "1"},
+         "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "current mirror copies current", "section_path": "1"},
+         "evidence": []},
+    ], [])
+    return nb.id
+
+
+def test_retrieve_scored_uses_rrf_when_enabled(repo, monkeypatch):
+    """_retrieve_scored 在 retrieval_rrf_enabled=True 时必须委托给 _rrf_scored,
+    且所有命中的 relevance 在 [0,1]。"""
+    nb_id = _seed_cascode_notebook(repo)
+    monkeypatch.setattr(repo.settings, "retrieval_rrf_enabled", True)
+    calls = {}
+    orig = repo._rrf_scored
+
+    def _spy(query, kg_objs, knowledge_sims, element_sims=None):
+        calls["hit"] = True
+        return orig(query, kg_objs, knowledge_sims, element_sims)
+
+    monkeypatch.setattr(repo, "_rrf_scored", _spy)
+    hits = repo._retrieve_scored(nb_id, "cascode output resistance")
+    assert calls.get("hit") is True, "_rrf_scored must be called when retrieval_rrf_enabled=True"
+    assert all(0.0 <= h.relevance <= 1.0 for h in hits), "all relevance values must be in [0,1]"
+
+
+def test_retrieve_scored_skips_rrf_when_disabled(repo, monkeypatch):
+    """默认 retrieval_rrf_enabled=False 时,_rrf_scored 不应被调用。"""
+    nb_id = _seed_cascode_notebook(repo)
+    calls = {}
+
+    def _spy(*a, **k):
+        calls["hit"] = True
+        return []
+
+    monkeypatch.setattr(repo, "_rrf_scored", _spy)
+    repo._retrieve_scored(nb_id, "cascode output resistance")  # default: retrieval_rrf_enabled=False
+    assert "hit" not in calls, "_rrf_scored must NOT be called when retrieval_rrf_enabled=False"

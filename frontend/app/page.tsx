@@ -47,6 +47,7 @@ type NotebookSummary = {
   access_scope?: string;
   tier?: string;
   kg_ready?: boolean;
+  base_kg_available?: boolean;
 };
 
 type SourceSummary = {
@@ -562,6 +563,7 @@ async function readAskStream<TResponse>(
 }
 
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
+const buildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/build`, { method: "POST" });
 
 function formatRelativeTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -834,6 +836,7 @@ export default function Home() {
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
+  const [buildingKg, setBuildingKg] = useState(false);
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
@@ -1039,6 +1042,7 @@ export default function Home() {
   // so a new notebook never shows demo examples.
   const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources), [currentNotebook, sources]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
+  const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === conversationId) ?? null,
     [conversationId, sessions],
@@ -1545,7 +1549,7 @@ export default function Home() {
     if (!currentNotebookId) return;
     const q = nextQuestion.trim();
     if (!q) return;
-    if (requiresKg(askMode) && !currentNotebook?.kg_ready) {
+    if (requiresKg(askMode) && !kgAvailable) {
       setToast("严格推理需先为该 notebook 构建知识图谱");
       return;
     }
@@ -2498,8 +2502,35 @@ export default function Home() {
                         ))}
                       </span>
                     )}
-                    {groupOf(askMode) === "strict" && !currentNotebook?.kg_ready && (
-                      <span className="mode-hint">该 notebook 尚无知识图谱，严格推理需先构建</span>
+                    {groupOf(askMode) === "strict" && !kgAvailable && (
+                      <span className="mode-hint">
+                        该 notebook 尚无知识图谱，严格推理需先构建
+                        <button
+                          type="button"
+                          className="mode-engine"
+                          style={{ marginLeft: 6 }}
+                          disabled={buildingKg}
+                          onClick={() => {
+                            if (!currentNotebookId) return;
+                            setBuildingKg(true);
+                            buildKg(currentNotebookId)
+                              .then(() => {
+                                setToast("已开始构建知识图谱，构建完成后刷新即可用严格推理");
+                                setTimeout(() => {
+                                  api<NotebookSummary>(`/notebooks/${currentNotebookId}`)
+                                    .then((refreshed) => { setCurrentNotebook(refreshed); setBuildingKg(false); })
+                                    .catch(() => setBuildingKg(false));
+                                }, 4000);
+                              })
+                              .catch((e) => { reportError(e); setBuildingKg(false); });
+                          }}
+                        >
+                          {buildingKg ? "构建中…" : "构建知识图谱"}
+                        </button>
+                      </span>
+                    )}
+                    {groupOf(askMode) === "strict" && kgAvailable && currentNotebook?.base_kg_available && !currentNotebook?.kg_ready && (
+                      <span className="mode-hint">本笔记本无图，将使用底层库（base）推理</span>
                     )}
                   </div>
                   <button className="send-button" onClick={() => runAsk().catch(reportError)}>→</button>
