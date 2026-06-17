@@ -105,7 +105,7 @@ class TestSharedHead:
         assert not any(c["signal"] == "shared_head" for c in cands)
 
     def test_three_way_shared_head_capped_sparsely(self):
-        """Three edges sharing same head+type → should emit pairs but remain sparse."""
+        """Three edges sharing same head+type → exactly 3 pairs (C(3,2)=3)."""
         objs = [_obj("A", "X"), _obj("B", "Y"), _obj("C", "Z"), _obj("D", "W")]
         rels = [
             _rel("r1", "A", "B", "defines"),
@@ -114,8 +114,8 @@ class TestSharedHead:
         ]
         cands = detect_conflict_candidates(objs, rels)
         sh_cands = [c for c in cands if c["signal"] == "shared_head"]
-        # At least 1 candidate but bounded — current impl emits all pairs (3 here = C(3,2))
-        assert len(sh_cands) >= 1
+        # Three distinct tail groups → C(3,2) = 3 representative pairs
+        assert len(sh_cands) == 3
 
 
 class TestSharedTail:
@@ -151,6 +151,35 @@ class TestDeduplication:
         # Unordered dedup: frozenset pairs should all be unique
         fp = [frozenset(p) for p in pairs]
         assert len(fp) == len(set(fp)), "Duplicate unordered pairs emitted"
+
+
+# ---------------------------------------------------------------------------
+# Output schema contract
+# ---------------------------------------------------------------------------
+
+class TestOutputSchema:
+    """Every output dict must have EXACTLY the four required keys."""
+
+    def test_output_keys_exact(self):
+        """All candidate dicts must have exactly {kind, left_ref, right_ref, signal}."""
+        objs = [
+            _obj("A", "NMOS"), _obj("B", "gain"),
+            _obj("c1", "NMOS increases gain", "Claim"),
+            _obj("c2", "PMOS increases gain", "Claim"),
+        ]
+        rels = [
+            _rel("r1", "A", "B", "supports"),
+            _rel("r2", "A", "B", "contrasts_with"),
+        ]
+        v1 = [1.0, 0.1, 0.0]
+        v2 = [1.0, 0.1, 0.0]
+        embeddings = {"c1": v1, "c2": v2}
+        cands = detect_conflict_candidates(objs, rels, embeddings=embeddings)
+        required_keys = {"kind", "left_ref", "right_ref", "signal"}
+        for c in cands:
+            assert set(c.keys()) == required_keys, (
+                f"Candidate has unexpected keys: {set(c.keys())} (expected {required_keys})"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -207,13 +236,25 @@ class TestDiscriminative:
         cands = detect_conflict_candidates(objs, [])
         assert not any(c["signal"] == "discriminative" for c in cands)
 
+    def test_discriminative_no_embeddings(self):
+        """Discriminative pair with NO embeddings still emits signal='discriminative'."""
+        objs = [
+            _obj("c1", "NMOS increases gain", "Claim"),
+            _obj("c2", "PMOS increases gain", "Claim"),
+        ]
+        # Explicitly pass no embeddings
+        cands = detect_conflict_candidates(objs, [], embeddings=None)
+        disc = [c for c in cands if c["signal"] == "discriminative"]
+        assert len(disc) == 1
+        assert frozenset([disc[0]["left_ref"], disc[0]["right_ref"]]) == frozenset(["c1", "c2"])
+
 
 # ---------------------------------------------------------------------------
 # Node candidates — semantic (embeddings)
 # ---------------------------------------------------------------------------
 
 class TestSemantic:
-    """When embeddings provided, near-duplicate-but-opposite node pairs get semantic signal."""
+    """When embeddings provided, near-duplicate node pairs get semantic signal."""
 
     def _unit(self, n: int, i: int) -> list[float]:
         """A unit vector of dimension n with value 1.0 at index i, rest 0.0."""
@@ -229,8 +270,8 @@ class TestSemantic:
         return dot / (na * nb) if na and nb else 0.0
 
     def test_semantic_signal_with_high_cosine_discriminative(self):
-        """Objects that are near-identical vectors AND discriminative → semantic candidate."""
-        # Make two nearly-identical 4D vectors (cosine ≈ 0.999)
+        """Objects that are near-identical vectors AND discriminative → semantic (not discriminative)."""
+        # Make two nearly-identical 4D vectors (cosine ≈ 1.0)
         v1 = [1.0, 0.1, 0.0, 0.0]
         v2 = [1.0, 0.1, 0.0, 0.0]  # identical direction
         objs = [
@@ -242,6 +283,8 @@ class TestSemantic:
         sem = [c for c in cands if c["signal"] == "semantic"]
         assert len(sem) == 1
         assert frozenset([sem[0]["left_ref"], sem[0]["right_ref"]]) == frozenset(["n1", "n2"])
+        # Must NOT also appear as discriminative (deduped as semantic)
+        assert not any(c["signal"] == "discriminative" for c in cands)
 
     def test_semantic_skipped_when_no_embeddings(self):
         """Without embeddings, semantic strategy is skipped entirely."""
@@ -252,8 +295,8 @@ class TestSemantic:
         cands = detect_conflict_candidates(objs, [], embeddings=None)
         assert not any(c["signal"] == "semantic" for c in cands)
 
-    def test_semantic_no_candidate_when_cosine_below_threshold(self):
-        """Low-cosine pairs even if discriminative → no semantic signal."""
+    def test_semantic_low_cosine_no_semantic_signal(self):
+        """Low-cosine discriminative pair → no semantic signal, still gets discriminative."""
         # Orthogonal vectors: cosine = 0.0
         v1 = [1.0, 0.0]
         v2 = [0.0, 1.0]
@@ -263,10 +306,14 @@ class TestSemantic:
         ]
         embeddings = {"n1": v1, "n2": v2}
         cands = detect_conflict_candidates(objs, [], embeddings=embeddings, sim_threshold=0.8)
+        # Not a semantic candidate (cosine too low)
         assert not any(c["signal"] == "semantic" for c in cands)
+        # But still a discriminative candidate
+        disc = [c for c in cands if c["signal"] == "discriminative"]
+        assert len(disc) == 1
 
-    def test_semantic_no_candidate_when_not_discriminative(self):
-        """High cosine but NOT discriminative → no semantic signal."""
+    def test_semantic_non_discriminative_high_cosine_emits_semantic(self):
+        """High cosine but NOT discriminative → still emits semantic signal (independent strategy)."""
         v1 = [1.0, 0.1]
         v2 = [1.0, 0.1]
         objs = [
@@ -275,7 +322,39 @@ class TestSemantic:
         ]
         embeddings = {"n1": v1, "n2": v2}
         cands = detect_conflict_candidates(objs, [], embeddings=embeddings, sim_threshold=0.8)
-        assert not any(c["signal"] == "semantic" for c in cands)
+        # Must emit semantic candidate even though not discriminative
+        sem = [c for c in cands if c["signal"] == "semantic"]
+        assert len(sem) == 1
+        assert frozenset([sem[0]["left_ref"], sem[0]["right_ref"]]) == frozenset(["n1", "n2"])
+
+    def test_semantic_same_object_type_only(self):
+        """Semantic pairs must only span same object_type Concept/Claim pairs."""
+        # Make a Concept and a Claim with high cosine — must NOT be paired
+        v_high = [1.0, 0.0]
+        objs = [
+            _obj("concept1", "voltage amplifier", "Concept"),
+            _obj("claim1", "voltage amplifier claim", "Claim"),
+            _obj("concept2", "voltage regulator", "Concept"),
+        ]
+        embeddings = {
+            "concept1": v_high,
+            "claim1": v_high,    # same vector but different type
+            "concept2": v_high,
+        }
+        cands = detect_conflict_candidates(objs, [], embeddings=embeddings, sim_threshold=0.8)
+        sem = [c for c in cands if c["signal"] == "semantic"]
+        # Only concept1 vs concept2 is valid (same Concept type)
+        # concept1 vs claim1 must NOT appear (cross-type)
+        for s in sem:
+            left = s["left_ref"]
+            right = s["right_ref"]
+            # Neither should be a cross-type pair
+            assert not (
+                ("concept1" in (left, right) and "claim1" in (left, right))
+            ), "Cross-type semantic pair emitted"
+            assert not (
+                ("concept2" in (left, right) and "claim1" in (left, right))
+            ), "Cross-type semantic pair emitted"
 
 
 # ---------------------------------------------------------------------------
@@ -354,8 +433,9 @@ class TestSparsity:
         rels = [_rel(f"r{i}", "HEAD", f"T{i}", "defines") for i in range(N)]
         cands = detect_conflict_candidates(objs, rels)
         sh = [c for c in cands if c["signal"] == "shared_head"]
-        # Must not be O(N^2) = 1225; should be capped well below that
-        assert len(sh) < 200, f"Too many candidates: {len(sh)}"
+        # With _MAX_GROUP_REPS=10, max pairs = C(10,2)=45; must not be O(N^2)=1225
+        assert len(sh) <= 45, f"Too many candidates: {len(sh)}"
+        assert len(sh) > 0, "Expected at least some shared_head candidates"
 
     def test_large_discriminative_group_is_bounded(self):
         """Many pairwise-discriminative objects should not produce O(N^2) candidates."""

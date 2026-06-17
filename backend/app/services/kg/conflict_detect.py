@@ -16,12 +16,32 @@ Output contract (downstream tasks depend on this — keep it stable):
                  "discriminative", "semantic"}
     - Unordered pairs are deduplicated (A,B == B,A).
 
+Node strategies:
+
+    ``discriminative``
+        Two Concept/Claim objects of the SAME ``object_type`` whose names differ
+        by exactly one token belonging to a contrast group (e.g. nmos/pmos,
+        positive/negative, input/output …).  Works with or without embeddings.
+
+    ``semantic``  ← **independent recall strategy**
+        Two Concept/Claim objects of the SAME ``object_type`` whose embeddings
+        have cosine ≥ ``sim_threshold``.  Surfaced so the LLM adjudicator can
+        check whether they agree or conflict — near-duplicate embeddings mean the
+        objects discuss the same subject, which is a precondition for conflict.
+        **Precision tradeoff**: many semantic pairs will be mere agreements; the
+        LLM stage filters those out.
+        Skipped entirely when ``embeddings`` is None.
+
+    If a pair qualifies for BOTH strategies, it is emitted ONCE with
+    ``signal="semantic"`` (semantic is the stronger same-subject evidence).
+
 Reuse:
     - _norm from edge_trust.py  (name normalisation for triple-identity matching)
     - _discriminative_conflict from kg_merge.py  (contrast-group token check)
 """
 from __future__ import annotations
 
+import logging
 import math
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -29,15 +49,18 @@ from typing import Dict, List, Optional
 # Reuse the canonical name-normaliser from edge_trust — avoids re-implementing.
 from app.services.kg.edge_trust import _norm
 
-# Reuse the discriminative-conflict guard from kg_merge — checks whether two
-# names differ by exactly one token that belongs to a contrast group
-# (e.g. nmos/pmos, positive/negative, input/output …).
+# Intentional reuse of a private helper from kg_merge — coupling note: if
+# _discriminative_conflict is renamed or moved in kg_merge.py, update this import.
 from app.services.kg_merge import _discriminative_conflict
 
-# Per-group fan-out cap for shared_head / shared_tail to keep the list sparse.
-_MAX_GROUP_PAIRS = 10
+_log = logging.getLogger(__name__)
 
-# Object types whose node-level discriminative check is meaningful.
+# Cap on the number of representative relations taken from each tail/head group for
+# shared_head / shared_tail strategies.  Exactly 10 groups are taken; pairs are
+# emitted from these representatives only (C(10,2)=45 max per group-key).
+_MAX_GROUP_REPS = 10
+
+# Object types whose node-level conflict checks are meaningful.
 _NODE_CONFLICT_TYPES = {"Concept", "Claim"}
 
 
@@ -154,8 +177,14 @@ def detect_conflict_candidates(
             # All rels under this (head, edge_type) go to the same normalised tail
             # → they are corroborating, not conflicting.
             continue
-        # One representative per distinct tail-group (first rel id in each group)
-        reps = [rids[0] for _norm_tgt, rids in list(tail_groups.items())[:_MAX_GROUP_PAIRS + 1]]
+        all_groups = list(tail_groups.items())
+        if len(all_groups) > _MAX_GROUP_REPS:
+            _log.debug(
+                "shared_head cap: (%s, %s) has %d tail groups, truncating to %d reps",
+                src_oid, edge_type, len(all_groups), _MAX_GROUP_REPS,
+            )
+        # Take exactly _MAX_GROUP_REPS groups (no +1 overshoot)
+        reps = [rids[0] for _norm_tgt, rids in all_groups[:_MAX_GROUP_REPS]]
         for i in range(len(reps)):
             for j in range(i + 1, len(reps)):
                 _add("edge", reps[i], reps[j], "shared_head")
@@ -164,12 +193,18 @@ def detect_conflict_candidates(
     for (edge_type, tgt_oid), head_groups in tail_type_heads.items():
         if len(head_groups) < 2:
             continue
-        reps = [rids[0] for _norm_src, rids in list(head_groups.items())[:_MAX_GROUP_PAIRS + 1]]
+        all_groups = list(head_groups.items())
+        if len(all_groups) > _MAX_GROUP_REPS:
+            _log.debug(
+                "shared_tail cap: (%s, %s) has %d head groups, truncating to %d reps",
+                edge_type, tgt_oid, len(all_groups), _MAX_GROUP_REPS,
+            )
+        reps = [rids[0] for _norm_src, rids in all_groups[:_MAX_GROUP_REPS]]
         for i in range(len(reps)):
             for j in range(i + 1, len(reps)):
                 _add("edge", reps[i], reps[j], "shared_tail")
 
-    # ── Strategy 3 & 4: Node candidates ──────────────────────────────────────
+    # ── Strategy 3: Node candidates — discriminative ──────────────────────────
     # Filter to Concept/Claim only; check pairs via _discriminative_conflict.
     # _discriminative_conflict uses kg_merge._norm internally (slightly different
     # from edge_trust._norm — intentional, each module has its own normaliser).
@@ -177,12 +212,16 @@ def detect_conflict_candidates(
         o for o in objects if o.get("object_type") in _NODE_CONFLICT_TYPES
     ]
 
-    # Cap overall emitted node pairs to keep the list sparse.
+    # Cap overall emitted node pairs for the discriminative pass to keep it sparse.
     _MAX_DISC_PAIRS = 200  # sparsity cap for discriminative
     disc_count = 0
 
     for i in range(len(node_objects)):
         if disc_count >= _MAX_DISC_PAIRS:
+            _log.debug(
+                "discriminative cap reached (%d); skipping remaining node pairs",
+                _MAX_DISC_PAIRS,
+            )
             break
         oi = node_objects[i]
         pi = oi.get("payload") or {}
@@ -196,18 +235,71 @@ def detect_conflict_candidates(
             if not _discriminative_conflict(name_i, name_j):
                 continue
 
-            # Decide signal: if embeddings present for both AND cosine ≥ threshold
-            # → "semantic" (embedding-confirmed discriminative); otherwise "discriminative".
-            signal = "discriminative"
-            if embeddings is not None:
-                vi = embeddings.get(oi["id"])
-                vj = embeddings.get(oj["id"])
-                if vi is not None and vj is not None:
-                    if _cosine_sim(vi, vj) >= sim_threshold:
-                        signal = "semantic"
-
-            _add("node", oi["id"], oj["id"], signal)
+            _add("node", oi["id"], oj["id"], "discriminative")
             disc_count += 1
+
+    # ── Strategy 4: Node candidates — semantic (independent) ─────────────────
+    # Emit a candidate for any same-object_type Concept/Claim pair whose
+    # embeddings have cosine ≥ sim_threshold — regardless of _discriminative_conflict.
+    # Near-identical embeddings mean both objects discuss the same subject, which is
+    # a necessary precondition for conflict.  The LLM adjudicator will filter mere
+    # agreements.
+    #
+    # Dedup note: _add() already tracks seen pairs.  If a pair was already emitted
+    # as "discriminative", we need to upgrade it to "semantic" (stronger evidence).
+    # We handle this by tracking which discriminative pairs also qualify semantically
+    # and re-emitting them with the "semantic" signal — _add() deduplicates by
+    # frozenset, so we must check the seen set ourselves for the upgrade path.
+    #
+    # Performance note (brute-force O(n^2) cosine): fine for typical notebook KG
+    # sizes (hundreds of nodes).  For very large KGs, the upgrade path is hnswlib
+    # ANN via `_ann_candidates` in kg_merge.py.
+    if embeddings is not None:
+        _MAX_SEM_PAIRS = 500  # sparsity cap for semantic pass
+        sem_count = 0
+
+        # Group nodes by object_type so we only compare same-type pairs.
+        by_type: Dict[str, List[dict]] = defaultdict(list)
+        for o in node_objects:
+            by_type[o.get("object_type", "")].append(o)
+
+        for _otype, type_nodes in by_type.items():
+            if sem_count >= _MAX_SEM_PAIRS:
+                break
+            for i in range(len(type_nodes)):
+                if sem_count >= _MAX_SEM_PAIRS:
+                    _log.debug(
+                        "semantic cap reached (%d); skipping remaining pairs",
+                        _MAX_SEM_PAIRS,
+                    )
+                    break
+                oi = type_nodes[i]
+                vi = embeddings.get(oi["id"])
+                if vi is None:
+                    continue
+                for j in range(i + 1, len(type_nodes)):
+                    if sem_count >= _MAX_SEM_PAIRS:
+                        break
+                    oj = type_nodes[j]
+                    vj = embeddings.get(oj["id"])
+                    if vj is None:
+                        continue
+                    if _cosine_sim(vi, vj) < sim_threshold:
+                        continue
+
+                    # This pair qualifies for semantic.  If already emitted as
+                    # discriminative, upgrade the signal to "semantic".
+                    key = frozenset([oi["id"], oj["id"]])
+                    if key in seen:
+                        # Find the existing entry and upgrade its signal.
+                        for c in candidates:
+                            if (frozenset([c["left_ref"], c["right_ref"]]) == key
+                                    and c["signal"] == "discriminative"):
+                                c["signal"] = "semantic"
+                                break
+                    else:
+                        _add("node", oi["id"], oj["id"], "semantic")
+                    sem_count += 1
 
     return candidates
 
