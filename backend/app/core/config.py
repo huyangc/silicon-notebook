@@ -152,6 +152,15 @@ class Settings(BaseSettings):
     # P4: 摄取默认不抽 KG(只建 chunk);要严格推理时经"建图"端点/离线 CLI 按需构建。
     # True 恢复旧"每次摄取整库自动抽"行为(迁移/测试逃生口)。base 库复用 tier='base'。
     kg_auto_extract: bool = Field(False, env="KG_AUTO_EXTRACT")
+    # 冲突消解(conflict resolution): 默认关闭(opt-in)。开启后建图末尾跑一遍 KG
+    # 矛盾三元组检测+LLM裁决+写回(keep/discard/modify)。设计见
+    # docs/superpowers/specs/2026-06-17-kg-conflict-resolution-design.md。
+    kg_conflict_resolution_enabled: bool = Field(False, env="KG_CONFLICT_RESOLUTION_ENABLED")
+    # 自动应用阈值: 裁决 confidence ≥ 此值才自动写回; 低于则入评审队列等人工确认。
+    # 设 1.0 = 纯评审模式(只检测不自动改图)。
+    kg_conflict_auto_apply_threshold: float = Field(0.95, env="KG_CONFLICT_AUTO_APPLY_THRESHOLD")
+    # 语义候选阈值: 端点对象 embedding 余弦 ≥ 此值才作为 semantic 冲突候选(高=更稀疏)。
+    kg_conflict_sim_threshold: float = Field(0.8, env="KG_CONFLICT_SIM_THRESHOLD")
     # chunk×graph mix: 叠加 KG 子图 block 和源 chunk 进候选池(默认开)。关闭后退化为纯 chunk 检索。
     chunk_kg_overlay_enabled: bool = Field(True, env="CHUNK_KG_OVERLAY_ENABLED")
     # chunk×graph mix token 预算(照 LightRAG 6000/8000/30000)。
