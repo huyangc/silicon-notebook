@@ -4271,6 +4271,31 @@ class SQLiteRepository:
         all_hits.sort(key=lambda it: it.score, reverse=True)
         return all_hits
 
+    def federated_retrieve_relations(self, active_notebook_id: str,
+                                     query: str) -> List["RetrievedRelation"]:
+        """跨 {base notebook(s)} ∪ {active} 检索关系,逐本 .notebook_id/.tier 标注。
+        每本走 _retrieve_relations_scored(同尺),合并按 score 降序。"""
+        notebook_ids: List[str] = [active_notebook_id]
+        with self._connect() as db:
+            base_rows = db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                (active_notebook_id,)).fetchall()
+            notebook_ids.extend(r["id"] for r in base_rows)
+            tier_map: Dict[str, str] = {}
+            for nid in notebook_ids:
+                row = db.execute("SELECT tier FROM notebooks WHERE id=?", (nid,)).fetchone()
+                tier_map[nid] = (row["tier"] if row else "personal")
+        all_hits: List["RetrievedRelation"] = []
+        for nid in notebook_ids:
+            hits = self._retrieve_relations_scored(nid, query)
+            tier = tier_map.get(nid, "personal")
+            for h in hits:
+                h.notebook_id = nid
+                h.tier = tier
+            all_hits.extend(hits)
+        all_hits.sort(key=lambda it: it.score, reverse=True)
+        return all_hits
+
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
                             direction: str = "both") -> List[RetrievedKnowledge]:
