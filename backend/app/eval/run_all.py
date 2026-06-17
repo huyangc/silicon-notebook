@@ -62,15 +62,17 @@ def main() -> int:
         print("[eval] inference_report.md done")
 
     if "recall" in only:
+        import yaml, pathlib as _pl
         from app.core.config import Settings
-        from app.eval.inference import load_questions
         from app.eval.retrieval_metrics import run_recall
         from app.services.sqlite_repository import SQLiteRepository
+        gold_path = _pl.Path(__file__).resolve().parent / "recall_gold.yaml"
+        gold = yaml.safe_load(open(gold_path, encoding="utf-8")) or []
         repo = SQLiteRepository(Settings())
-        rows = run_recall(repo, a.notebook, load_questions())
+        rows = run_recall(repo, a.notebook, gold)
         (out / "recall_report.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[eval] recall_report.json done ({len(rows)} annotated questions)")
+        print(f"[eval] recall_report.json done ({len(rows)} graded)")
 
     print(f"[eval] all done -> {out}")
     return 0

@@ -1,0 +1,4 @@
+# KG 检索 gold 集(双轨)。track: reverse(KG 反向出题) | anchor(人工锚点)。
+# bucket: node | bridge。gold_object_ids / gold_relation_ids 至少一项。
+- {id: a01, track: anchor, bucket: node, question: "什么是 regulated cascode?", gold_object_ids: []}
+- {id: a02, track: anchor, bucket: bridge, question: "regulated cascode 与 standard cascode 的关系?", gold_relation_ids: []}
