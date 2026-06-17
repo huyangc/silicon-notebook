@@ -291,6 +291,7 @@ class SQLiteRepository:
                   parse_status TEXT NOT NULL DEFAULT 'uploaded',
                   file_name TEXT NOT NULL DEFAULT '',
                   file_path TEXT NOT NULL DEFAULT '',
+                  source_url TEXT NOT NULL DEFAULT '',
                   file_size INTEGER NOT NULL DEFAULT 0,
                   file_hash TEXT NOT NULL DEFAULT '',
                   summary TEXT NOT NULL DEFAULT '',
@@ -582,6 +583,8 @@ class SQLiteRepository:
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
                 db.execute("ALTER TABLE sources ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
+            if "source_url" not in src_cols:
+                db.execute("ALTER TABLE sources ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
             # LLM review metadata columns for concept_merge_candidates.
             cm_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_merge_candidates)").fetchall()}
             if "confidence" not in cm_cols:
@@ -5634,6 +5637,7 @@ class SQLiteRepository:
             parse_status=row["parse_status"],
             created_label=_created_label(row["created_at"]),
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
+            source_url=row["source_url"] if "source_url" in row.keys() else "",
             extraction_warning=self._extraction_warning(db, row["id"]),
         )
 
