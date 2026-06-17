@@ -373,6 +373,14 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS relation_embeddings (
+                  relation_id TEXT PRIMARY KEY REFERENCES knowledge_relations(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL,
+                  vector TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_relation_embeddings_nb ON relation_embeddings(notebook_id);
+
                 CREATE TABLE IF NOT EXISTS knowledge_objects (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
