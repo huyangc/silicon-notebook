@@ -71,3 +71,17 @@ def test_retrieve_relations_scored_keyword_path(repo):
     hits = repo._retrieve_relations_scored(nb.id, "regulated cascode")
     assert hits, "应至少命中一条关系"
     assert "Regulated Cascode" in hits[0].text  # 含 'Regulated Cascode' 的边排第一(关键词)
+
+
+def test_federated_retrieve_relations_spans_base(repo):
+    base = repo.create_notebook(NotebookCreate(name="textbook"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None,
+        [{"local_id": "a", "object_type": "concept", "payload": {"name": "Bandgap Reference"}, "evidence": []},
+         {"local_id": "b", "object_type": "concept", "payload": {"name": "PTAT Current"}, "evidence": []}],
+        [{"source_local_id": "a", "target_local_id": "b", "edge_type": "depends_on", "evidence": []}])
+    personal = repo.create_notebook(NotebookCreate(name="my notes"))
+    hits = repo.federated_retrieve_relations(personal.id, "bandgap reference ptat")
+    assert hits, "个人本应能联邦检索到 base 库的关系"
+    assert hits[0].tier == "base"
+    assert hits[0].notebook_id == base.id
