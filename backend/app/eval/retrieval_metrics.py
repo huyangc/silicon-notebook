@@ -25,6 +25,17 @@ def mrr(retrieved_ids: Sequence[str], gold_ids: Sequence[str]) -> Optional[float
     return 0.0
 
 
+def leakage_ratio(question: str, source_text: str) -> float:
+    """问题与源文本的字面 token 重合占问题 token 的比例(0..1)。用于 KG 反向出题
+    防泄漏体检:过高说明问题复用了源文本原话,召回会虚高,应剔除或要求改写。"""
+    from app.services.retrieval import _tokens, _STOPWORDS
+    q = {t for t in _tokens(question) if t not in _STOPWORDS}
+    if not q:
+        return 0.0
+    src = set(_tokens(source_text))
+    return sum(1 for t in q if t in src) / len(q)
+
+
 def run_recall(repo: Any, notebook_id: str, questions: List[Dict[str, Any]],
                k: int = 12) -> List[Dict[str, Any]]:
     """对带 gold_object_ids 或 gold_relation_ids 的题分别跑节点/关系检索,
