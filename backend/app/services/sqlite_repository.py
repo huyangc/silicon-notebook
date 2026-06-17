@@ -4676,6 +4676,34 @@ class SQLiteRepository:
         order = sorted(range(len(hits)), key=lambda i: scores.get(i, -1.0), reverse=True)
         return [hits[i] for i in order]
 
+    def _graph_seed_fusion(self, notebook_id: str, question: str,
+                           base_seeds: List[str]) -> List[str]:
+        """flag 关 → 原样返回 base_seeds(等价护栏:node recall 不降由「只增不减」保证)。
+        flag 开 → 用 high-level keywords 查关系索引,两端 object 并入;low-level
+        keywords 额外查节点并入。去重保序,cap 到 base + relation_seed_top_n。"""
+        if not self.settings.relation_retrieval_enabled:
+            return base_seeds
+        from app.services.query_rewrite import expand_query
+        exp = expand_query(self.rewrite_llm_client, question,
+                           timeout=getattr(self.settings, "rewrite_timeout_seconds", None))
+        hl = " ".join(exp.high_level_keywords) or exp.query_en or question
+        ll = " ".join(exp.low_level_keywords)
+        extra: List[str] = []
+        rel_hits = self.federated_retrieve_relations(notebook_id, hl)[
+            : self.settings.relation_seed_top_n]
+        for h in rel_hits:
+            extra.extend((h.source_object_id, h.target_object_id))
+        if ll:
+            node_hits = self.federated_retrieve(notebook_id, ll)[
+                : self.settings.relation_seed_top_n]
+            extra.extend(h.object_id for h in node_hits)
+        seen, fused = set(), []
+        for oid in list(base_seeds) + extra:   # base 优先保序,只增不减
+            if oid and oid not in seen:
+                seen.add(oid)
+                fused.append(oid)
+        return fused
+
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
@@ -4986,7 +5014,8 @@ class SQLiteRepository:
                 notebook_id, question, response, conversation_id)
             return response
 
-        use_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+        base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+        use_seeds = self._graph_seed_fusion(notebook_id, question, base_seeds)
 
         G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         subgraph = multihop_subgraph(

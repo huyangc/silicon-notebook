@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     rerank_candidates: int = Field(20, env="RERANK_CANDIDATES")
     # 候选池 LLM 重排的专用短超时(秒): 廉价重排须快速降级,不沿用更长的全局/推理超时。
     rerank_timeout_seconds: int = Field(20, env="RERANK_TIMEOUT_SECONDS")
+    relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
+    relation_seed_top_n: int = Field(8, env="RELATION_SEED_TOP_N")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
