@@ -2707,7 +2707,7 @@ export default function Home() {
                 </div>
               )}
               <div className="tag-row">
-                <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources()}>
+                <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources().catch(reportError)}>
                   {urlBusy ? "添加中…" : "添加并解析"}
                 </button>
                 <button className="sort-button" onClick={() => setUrlModalOpen(false)}>取消</button>
