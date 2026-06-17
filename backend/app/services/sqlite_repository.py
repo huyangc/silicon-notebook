@@ -4775,6 +4775,7 @@ class SQLiteRepository:
 
         # Seed: top-N by relevance (federated across base notebooks).
         top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
+        top_hits = self._rerank_hits(question, top_hits)        # no-op when rerank_enabled off
         if not top_hits and not seed_ids:
             response = AskResponse(
                 answer_id="",
