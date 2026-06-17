@@ -1,5 +1,26 @@
 from app.services.retrieval import score_relations, RELEVANCE_FLOOR
 
+import pytest
+from app.core.config import Settings
+from app.services.sqlite_repository import SQLiteRepository
+from app.services.embedding import FakeEmbedder
+from app.models.schemas import NotebookCreate
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    # embedder_configured needs all four vars set so embed paths activate
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "http://fake-embed")
+    monkeypatch.setenv("EMBED_API_KEY", "fake-key")
+    monkeypatch.setenv("EMBED_MODEL", "fake-model")
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)
+    return r
+
 
 def _rel(rid, text):
     return {"id": rid, "source_object_id": "s", "target_object_id": "t",
@@ -33,3 +54,20 @@ def test_score_relations_sorted_desc():
     scores = [h.relevance for h in hits]
     assert scores == sorted(scores, reverse=True)
     assert hits[0].relation_id == "r2"  # 更全匹配 query 的边排前
+
+
+def test_retrieve_relations_scored_keyword_path(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    objects = [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "Regulated Cascode"}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "Cascode"}, "evidence": []},
+        {"local_id": "c", "object_type": "concept", "payload": {"name": "Current Mirror"}, "evidence": []},
+    ]
+    relations = [
+        {"source_local_id": "a", "target_local_id": "b", "edge_type": "derived_from", "evidence": []},
+        {"source_local_id": "c", "target_local_id": "b", "edge_type": "about", "evidence": []},
+    ]
+    repo.store_kg(nb.id, None, objects, relations)
+    hits = repo._retrieve_relations_scored(nb.id, "regulated cascode")
+    assert hits, "应至少命中一条关系"
+    assert "Regulated Cascode" in hits[0].text  # 含 'Regulated Cascode' 的边排第一(关键词)
