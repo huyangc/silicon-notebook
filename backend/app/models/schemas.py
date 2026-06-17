@@ -42,6 +42,7 @@ class SourceSummary(BaseModel):
     file_name: str = ""
     file_size: int = 0
     file_hash: str = ""
+    source_url: str = ""  # 非空表示这是「在线 URL」来源，由 mineru.net 云端解析
     parse_status: str = ""
     created_label: str = ""
     doc_type: str = ""  # "" = auto-detect; else an extraction profile id
@@ -59,6 +60,20 @@ class SourceImportFile(BaseModel):
 
 class SourceImportRequest(BaseModel):
     files: List[SourceImportFile]
+
+
+class AddUrlSourcesRequest(BaseModel):
+    urls: List[str]
+
+
+class RejectedUrl(BaseModel):
+    url: str
+    reason: str
+
+
+class AddUrlSourcesResult(BaseModel):
+    created: List[SourceSummary]
+    rejected: List[RejectedUrl]
 
 
 class SourceDetail(SourceSummary):
