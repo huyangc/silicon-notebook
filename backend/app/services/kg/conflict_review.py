@@ -122,10 +122,16 @@ def review_conflict_candidates(llm_client: Any, items: List[dict]) -> List[dict]
         cand = item["candidate"]
         verdict = _fallback(item)
 
-        raw = llm_client.chat_json(
-            [{"role": "user", "content": _prompt(item)}],
-            _SCHEMA,
-        )
+        try:
+            raw = llm_client.chat_json(
+                [{"role": "user", "content": _prompt(item)}],
+                _SCHEMA,
+            )
+        except Exception:
+            # A transient LLM error on one item must not abort the rest of the
+            # batch (this runs as a background pass over many candidates).
+            results.append(verdict)
+            continue
 
         try:
             data = json.loads(raw)
