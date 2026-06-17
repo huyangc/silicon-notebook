@@ -61,7 +61,10 @@ _log = logging.getLogger(__name__)
 _MAX_GROUP_REPS = 10
 
 # Object types whose node-level conflict checks are meaningful.
-_NODE_CONFLICT_TYPES = {"Concept", "Claim"}
+# Stored lowercase in production (kg_ingest stores node.type.lower()); kept as
+# lowercase here and matched case-folded so both legacy capitalized synthetic data
+# and production lowercase data work.
+_NODE_CONFLICT_TYPES = {"concept", "claim"}
 
 
 def detect_conflict_candidates(
@@ -208,8 +211,11 @@ def detect_conflict_candidates(
     # Filter to Concept/Claim only; check pairs via _discriminative_conflict.
     # _discriminative_conflict uses kg_merge._norm internally (slightly different
     # from edge_trust._norm — intentional, each module has its own normaliser).
+    # Case-fold so both production lowercase ("concept"/"claim") and legacy
+    # capitalized synthetic test data ("Concept"/"Claim") pass the filter.
     node_objects = [
-        o for o in objects if o.get("object_type") in _NODE_CONFLICT_TYPES
+        o for o in objects
+        if (o.get("object_type") or "").lower() in _NODE_CONFLICT_TYPES
     ]
 
     # Cap overall emitted node pairs for the discriminative pass to keep it sparse.
@@ -259,9 +265,10 @@ def detect_conflict_candidates(
         sem_count = 0
 
         # Group nodes by object_type so we only compare same-type pairs.
+        # Case-fold the key so "Claim" and "claim" land in the same group.
         by_type: Dict[str, List[dict]] = defaultdict(list)
         for o in node_objects:
-            by_type[o.get("object_type", "")].append(o)
+            by_type[(o.get("object_type") or "").lower()].append(o)
 
         for _otype, type_nodes in by_type.items():
             if sem_count >= _MAX_SEM_PAIRS:

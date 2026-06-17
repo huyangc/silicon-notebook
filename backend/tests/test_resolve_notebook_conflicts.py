@@ -215,10 +215,6 @@ def test_high_confidence_discard_applies_and_marks_applied(repo):
     )
 
     # The candidate row should be 'applied'
-    pending = repo.pending_conflicts(nb_id)
-    # There may be other candidates; check that at least one is applied
-    all_cands = repo.pending_conflicts(nb_id)
-    # Candidates for this pair should not be pending (they got applied)
     # Verify by checking the candidates table directly
     with repo._connect() as db:
         rows = db.execute(
@@ -378,3 +374,226 @@ def test_summary_dict_has_expected_keys(repo):
     assert "auto_applied" in result
     assert "queued" in result
     assert "skipped_llm" in result
+
+
+# ---------------------------------------------------------------------------
+# Seeding helper — two claim objects whose names differ by one contrast token
+# ---------------------------------------------------------------------------
+
+def _make_evidence(quoted_span: str) -> dict:
+    """Build a minimal but schema-valid Evidence dict for seeding."""
+    return {
+        "source_id": "src-test",
+        "source_title": "Test Source",
+        "element_id": "el-test",
+        "element_type": "text",
+        "location_label": "p.1",
+        "quoted_span": quoted_span,
+        "confidence": 1.0,
+    }
+
+
+def _seed_notebook_with_node_claims(repo: SQLiteRepository):
+    """Create a notebook with two lowercase 'claim' objects whose names differ
+    by exactly one contrast-group token (positive/negative) so the discriminative
+    node strategy fires.
+
+    Returns (notebook_id, oid_pos, oid_neg).
+    """
+    nb = repo.create_notebook(NotebookCreate(name="node-conflict-test"))
+    repo.store_kg(nb.id, None, [
+        {
+            "local_id": "POS",
+            "object_type": "claim",
+            "payload": {"name": "positive feedback dominates"},
+            "evidence": [_make_evidence("Positive feedback dominates the loop.")],
+        },
+        {
+            "local_id": "NEG",
+            "object_type": "claim",
+            "payload": {"name": "negative feedback dominates"},
+            "evidence": [_make_evidence("Negative feedback dominates the loop.")],
+        },
+    ], [])
+    with repo._connect() as db:
+        objs = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=? ORDER BY created_at, id",
+            (nb.id,),
+        ).fetchall()
+    oid_pos, oid_neg = objs[0]["id"], objs[1]["id"]
+    return nb.id, oid_pos, oid_neg
+
+
+class RefAwareFakeLLM:
+    """FakeLLM that inspects the prompt to extract left_ref / right_ref and
+    returns a canned verdict with winner_ref resolved to the actual ref value.
+
+    The conflict_review prompt always includes:
+        Left ref:  <value>
+        Right ref: <value>
+    so we parse those lines to get the real dynamic ids.
+    """
+
+    configured = True
+
+    def __init__(self, conflict_type: str, resolution: str,
+                 pick: str = "left",
+                 resolved_payload: dict | None = None,
+                 confidence: float = 0.98):
+        self._conflict_type = conflict_type
+        self._resolution = resolution
+        self._pick = pick  # "left" or "right"
+        self._resolved_payload = resolved_payload
+        self._confidence = confidence
+        self.calls: list[list[dict]] = []
+
+    def chat_json(self, messages, schema_hint=None) -> str:
+        import json as _json
+        import re
+        self.calls.append(messages)
+        prompt = messages[0]["content"] if messages else ""
+        left_ref = right_ref = None
+        for line in prompt.splitlines():
+            m = re.match(r"Left ref:\s+(\S+)", line)
+            if m:
+                left_ref = m.group(1)
+            m = re.match(r"Right ref:\s+(\S+)", line)
+            if m:
+                right_ref = m.group(1)
+        winner_ref = left_ref if self._pick == "left" else right_ref
+        return _json.dumps({
+            "conflict_type": self._conflict_type,
+            "resolution": self._resolution,
+            "winner_ref": winner_ref,
+            "resolved_payload": self._resolved_payload,
+            "confidence": self._confidence,
+            "rationale": "test verdict",
+        })
+
+
+# ---------------------------------------------------------------------------
+# Test: node discriminative path — discard (loser gets status='conflict')
+# ---------------------------------------------------------------------------
+
+def test_node_discriminative_discard_applies(repo):
+    """Node conflict (discriminative) with lowercase 'claim' objects → auto-applied.
+
+    This test would have failed before the casing fix because production stores
+    object_type as lowercase, so _NODE_CONFLICT_TYPES = {"Concept","Claim"}
+    would have missed both objects and the discriminative path never fired.
+    """
+    nb_id, oid_pos, oid_neg = _seed_notebook_with_node_claims(repo)
+
+    # First verify detection fires (the core regression check)
+    from app.services.kg.conflict_detect import detect_conflict_candidates
+    with repo._connect() as db:
+        obj_rows = db.execute(
+            "SELECT id, object_type, payload FROM knowledge_objects WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchall()
+    import json
+    objects = [
+        {"id": r["id"], "object_type": r["object_type"],
+         "payload": json.loads(r["payload"] or "{}")}
+        for r in obj_rows
+    ]
+    cands = detect_conflict_candidates(objects, [])
+    disc = [c for c in cands if c["signal"] == "discriminative"]
+    assert len(disc) >= 1, (
+        "discriminative node candidate not produced for lowercase 'claim' objects — "
+        "casing fix may not have taken effect"
+    )
+
+    # Now run full orchestration: FakeLLM picks left as winner (discard right)
+    repo.llm_client = RefAwareFakeLLM(
+        conflict_type="mutual",
+        resolution="discard",
+        pick="left",
+        confidence=0.98,
+    )
+    repo.settings.kg_conflict_auto_apply_threshold = 0.95
+
+    result = repo.resolve_notebook_conflicts(nb_id)
+
+    assert result["auto_applied"] >= 1, (
+        f"Expected auto_applied >= 1 for node discard; got {result}"
+    )
+
+    # Determine winner/loser from canonical ordering (smaller id goes left)
+    left_ref, right_ref = (oid_pos, oid_neg) if oid_pos < oid_neg else (oid_neg, oid_pos)
+    loser_ref = right_ref  # FakeLLM picks "left" as winner
+
+    # Loser object should have status='conflict'
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT status FROM knowledge_objects WHERE id=?",
+            (loser_ref,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "conflict", (
+        f"Expected loser node {loser_ref!r} to have status='conflict', got {row['status']!r}"
+    )
+
+    # Candidate row should be 'applied'
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT status FROM kg_conflict_candidates "
+            "WHERE notebook_id=? AND left_ref=? AND right_ref=?",
+            (nb_id, left_ref, right_ref),
+        ).fetchall()
+    assert any(r["status"] == "applied" for r in rows), (
+        f"Expected at least one node candidate row to be 'applied', got {[r['status'] for r in rows]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: node discriminative path — modify (payload updated via update_knowledge)
+# ---------------------------------------------------------------------------
+
+def test_node_discriminative_modify_applies(repo):
+    """Node conflict with resolution=modify → payload updated, candidate 'applied'."""
+    nb_id, oid_pos, oid_neg = _seed_notebook_with_node_claims(repo)
+
+    new_payload = {"name": "positive feedback dominates", "statement": "Reconciled claim [modified]"}
+
+    repo.llm_client = RefAwareFakeLLM(
+        conflict_type="granularity",
+        resolution="modify",
+        pick="left",
+        resolved_payload=new_payload,
+        confidence=0.97,
+    )
+    repo.settings.kg_conflict_auto_apply_threshold = 0.95
+
+    result = repo.resolve_notebook_conflicts(nb_id)
+
+    assert result["auto_applied"] >= 1, (
+        f"Expected auto_applied >= 1 for node modify; got {result}"
+    )
+
+    # Canonical left ref (smaller id) is the modify target
+    left_ref, right_ref = (oid_pos, oid_neg) if oid_pos < oid_neg else (oid_neg, oid_pos)
+
+    # Target object payload should have been updated
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT payload FROM knowledge_objects WHERE id=?",
+            (left_ref,),
+        ).fetchone()
+    assert row is not None
+    import json
+    payload = json.loads(row["payload"])
+    assert payload.get("statement") == "Reconciled claim [modified]", (
+        f"Expected payload to contain updated statement, got {payload!r}"
+    )
+
+    # Candidate row should be 'applied'
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT status FROM kg_conflict_candidates "
+            "WHERE notebook_id=? AND left_ref=? AND right_ref=?",
+            (nb_id, left_ref, right_ref),
+        ).fetchall()
+    assert any(r["status"] == "applied" for r in rows), (
+        f"Expected at least one node candidate row to be 'applied', got {[r['status'] for r in rows]}"
+    )

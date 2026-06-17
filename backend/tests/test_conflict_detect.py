@@ -450,3 +450,76 @@ class TestSparsity:
         disc = [c for c in cands if c["signal"] == "discriminative"]
         # Should be bounded, not N^2 = 400
         assert len(disc) < 100, f"Too many discriminative candidates: {len(disc)}"
+
+
+# ---------------------------------------------------------------------------
+# Production casing — lowercase object_type (fixes dead-path bug)
+# ---------------------------------------------------------------------------
+
+class TestProductionCasing:
+    """Production stores object_type lowercase; node-conflict path must work.
+
+    Before the casing fix, _NODE_CONFLICT_TYPES = {"Concept","Claim"} (capitalized)
+    caused ALL production node objects (stored as "concept"/"claim") to be
+    silently skipped.  These tests lock the fix.
+    """
+
+    def test_lowercase_claim_discriminative(self):
+        """Two lowercase 'claim' objects differing by one contrast token → discriminative."""
+        # positive/negative is a valid _CONTRAST_GROUPS pair in kg_merge.py
+        objs = [
+            _obj("c1", "positive feedback dominates", "claim"),
+            _obj("c2", "negative feedback dominates", "claim"),
+        ]
+        cands = detect_conflict_candidates(objs, [])
+        disc = [c for c in cands if c["signal"] == "discriminative"]
+        assert len(disc) == 1, (
+            f"Expected 1 discriminative candidate for lowercase 'claim' objects, got {len(disc)}: {disc}"
+        )
+        c = disc[0]
+        assert c["kind"] == "node"
+        assert frozenset([c["left_ref"], c["right_ref"]]) == frozenset(["c1", "c2"])
+
+    def test_lowercase_concept_discriminative(self):
+        """Two lowercase 'concept' objects differing by nmos/pmos → discriminative."""
+        objs = [
+            _obj("o1", "nmos amplifier bias", "concept"),
+            _obj("o2", "pmos amplifier bias", "concept"),
+        ]
+        cands = detect_conflict_candidates(objs, [])
+        disc = [c for c in cands if c["signal"] == "discriminative"]
+        assert len(disc) == 1, (
+            f"Expected 1 discriminative candidate for lowercase 'concept' objects, got {len(disc)}"
+        )
+
+    def test_lowercase_claim_semantic(self):
+        """Two lowercase 'claim' objects with high cosine → semantic signal."""
+        v_high = [1.0, 0.0, 0.0]
+        objs = [
+            _obj("s1", "voltage amplifier output", "claim"),
+            _obj("s2", "voltage amplifier stage", "claim"),
+        ]
+        embeddings = {"s1": v_high, "s2": v_high}
+        cands = detect_conflict_candidates(objs, [], embeddings=embeddings, sim_threshold=0.8)
+        sem = [c for c in cands if c["signal"] in ("semantic", "discriminative")]
+        assert len(sem) >= 1, (
+            f"Expected at least one node candidate for lowercase 'claim' objects with high cosine, "
+            f"got {cands}"
+        )
+        # All emitted candidates are node kind
+        for c in sem:
+            assert c["kind"] == "node"
+
+    def test_mixed_casing_same_type_grouped(self):
+        """'Claim' (capitalized) and 'claim' (lowercase) with same names are treated as same type."""
+        # One capitalized, one lowercase — both should end up in the same group and be compared
+        objs = [
+            _obj("m1", "input signal strong", "Claim"),
+            _obj("m2", "output signal strong", "claim"),
+        ]
+        cands = detect_conflict_candidates(objs, [])
+        disc = [c for c in cands if c["signal"] == "discriminative"]
+        # input/output is a valid contrast group — should fire regardless of mixed casing
+        assert len(disc) == 1, (
+            f"Expected discriminative candidate for mixed-case Claim/claim, got {disc}"
+        )
