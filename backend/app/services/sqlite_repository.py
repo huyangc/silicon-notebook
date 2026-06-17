@@ -79,7 +79,7 @@ from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
-from app.services.parsers import parse_source_file
+from app.services.parsers import parse_source_file, mineru_content_list_to_elements
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
@@ -1239,10 +1239,17 @@ class SQLiteRepository:
         try:
             t = time.perf_counter()
             stage("parse", "start", t)
-            elements = parse_source_file(
-                source_id, source.file_path, source.file_name, self.mineru_client
-            )
-            mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
+            if source.source_url:
+                content_list = self.mineru_cloud_client.parse_url(
+                    source.source_url, data_id=source_id
+                )
+                elements = mineru_content_list_to_elements(source_id, content_list)
+                mineru_error = str(getattr(self.mineru_cloud_client, "last_error", "") or "")
+            else:
+                elements = parse_source_file(
+                    source_id, source.file_path, source.file_name, self.mineru_client
+                )
+                mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
             element_parsers = sorted(
                 {
                     str(element.metadata.get("parser", ""))

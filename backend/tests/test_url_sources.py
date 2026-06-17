@@ -60,3 +60,39 @@ def test_add_url_sources_requires_token(notoken_repo):
 def test_add_url_sources_unknown_notebook_raises_keyerror(cloud_repo):
     with pytest.raises(KeyError):
         cloud_repo.add_url_sources("nb-missing", ["https://a/doc.pdf"])
+
+
+def _make_url_source(repo, monkeypatch, nb_id):
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf",
+        lambda url, **kw: PdfProbe(True, "", 10, "doc.pdf"),
+    )
+    res = repo.add_url_sources(nb_id, ["https://a/doc.pdf"], scheduler=lambda sid: None)
+    return res.created[0].id
+
+
+def test_process_source_url_branch_parses_via_cloud(cloud_repo, monkeypatch):
+    nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
+    sid = _make_url_source(cloud_repo, monkeypatch, nb.id)
+    monkeypatch.setattr(
+        cloud_repo.mineru_cloud_client, "parse_url",
+        lambda url, **kw: [{"type": "text", "text": "Hello world", "page_idx": 0}],
+    )
+    cloud_repo.process_source(sid)
+    detail = cloud_repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert any("Hello world" in e.text for e in cloud_repo.source_elements(sid))
+
+
+def test_process_source_url_branch_failure_marks_failed(cloud_repo, monkeypatch):
+    nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
+    sid = _make_url_source(cloud_repo, monkeypatch, nb.id)
+
+    def boom(url, **kw):
+        raise RuntimeError("MinerU 云端解析失败: 超过页数")
+
+    monkeypatch.setattr(cloud_repo.mineru_cloud_client, "parse_url", boom)
+    cloud_repo.process_source(sid)
+    detail = cloud_repo.get_source(sid)
+    assert detail.parse_status == "failed"
+    assert "超过页数" in detail.error_message
