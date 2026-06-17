@@ -44,4 +44,5 @@ def test_seed_fusion_on_adds_relation_endpoints(tmp_path, monkeypatch):
     base = ["ko-seed"]
     fused = repo._graph_seed_fusion(nb.id, "regulated cascode", base)
     assert "ko-seed" in fused                       # 不丢原种子(只增不减)
+    assert fused[0] == "ko-seed"                    # base 种子保序在前
     assert row["source_object_id"] in fused or row["target_object_id"] in fused

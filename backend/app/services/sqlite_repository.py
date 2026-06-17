@@ -4680,12 +4680,13 @@ class SQLiteRepository:
                            base_seeds: List[str]) -> List[str]:
         """flag 关 → 原样返回 base_seeds(等价护栏:node recall 不降由「只增不减」保证)。
         flag 开 → 用 high-level keywords 查关系索引,两端 object 并入;low-level
-        keywords 额外查节点并入。去重保序,cap 到 base + relation_seed_top_n。"""
+        keywords 额外查节点并入。去重保序:base 在前(只增不减),其后并入关系两端
+        (≤2·relation_seed_top_n)与 low-level 节点命中(≤relation_seed_top_n);
+        multihop 自身有 max_depth/max_fan_out 兜底,此处不再硬截。"""
         if not self.settings.relation_retrieval_enabled:
             return base_seeds
         from app.services.query_rewrite import expand_query
-        exp = expand_query(self.rewrite_llm_client, question,
-                           timeout=getattr(self.settings, "rewrite_timeout_seconds", None))
+        exp = expand_query(self.rewrite_llm_client, question)
         hl = " ".join(exp.high_level_keywords) or exp.query_en or question
         ll = " ".join(exp.low_level_keywords)
         extra: List[str] = []
