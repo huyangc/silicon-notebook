@@ -250,6 +250,8 @@ RERANK_TIMEOUT_SECONDS       # dedicated short timeout for rerank (default 20)
 KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)
 QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
 GLOBAL_MAX_COMMUNITIES       # max community reports for Global QA, ask mode="global" (default 20)
+RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning seeds (default false, opt-in pending eval)
+RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
 ```
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
