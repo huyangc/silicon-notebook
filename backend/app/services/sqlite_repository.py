@@ -1239,6 +1239,7 @@ class SQLiteRepository:
         try:
             t = time.perf_counter()
             stage("parse", "start", t)
+            # URL 来源走 mineru.net 云端解析；本地文件来源走 MinerU(http/cli)/pypdf。
             if source.source_url:
                 content_list = self.mineru_cloud_client.parse_url(
                     source.source_url, data_id=source_id
@@ -1262,7 +1263,7 @@ class SQLiteRepository:
                 "done",
                 t,
                 elements=len(elements),
-                parser_mode=str(getattr(self.mineru_client, "mode", "")),
+                parser_mode=("mineru_cloud" if source.source_url else str(getattr(self.mineru_client, "mode", ""))),
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
