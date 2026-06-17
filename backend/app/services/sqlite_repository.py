@@ -1758,6 +1758,12 @@ class SQLiteRepository:
         import concurrent.futures as _cf
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+        ensure = getattr(self.embedder, "_ensure", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # noqa: BLE001 — warm-up only
+                pass
 
         def _embed_only(batch) -> list:
             try:
