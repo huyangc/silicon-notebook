@@ -4,7 +4,7 @@ PYTHONPATH=backend python -m app.scripts.gen_recall_gold --notebook nb-xxx --n-o
 每个采样的对象/关系让 LLM 写一道自然问题(强制改写、禁逐字引用),gold=源 id;
 leakage_ratio > 0.6 的题剔除(泄漏)。生成后人工抽检并入 recall_gold.yaml。"""
 import argparse, json, yaml, random
-from app.core.config import Settings
+from app.core.config import get_settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.retrieval import _payload_text
 from app.eval.retrieval_metrics import leakage_ratio
@@ -33,7 +33,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    repo = SQLiteRepository(Settings())
+    repo = SQLiteRepository(get_settings())
     assert repo.llm_client.configured, "LLM 未配置(.env)"
     out, dropped = [], 0
     with repo._connect() as db:
