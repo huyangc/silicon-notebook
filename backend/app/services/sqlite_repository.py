@@ -1747,6 +1747,41 @@ class SQLiteRepository:
                 [(oid, notebook_id, json.dumps(vec), now) for oid, vec in rows],
             )
 
+    def _embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
+        """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
+        rel_items: [{"_rid": str, "text": str}]。best-effort,失败跳过。"""
+        if not self.settings.embedder_configured:
+            return
+        pending = [(it["_rid"], it["text"][:2000]) for it in rel_items if it.get("text", "").strip()]
+        if not pending:
+            return
+        import concurrent.futures as _cf
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+
+        def _embed_only(batch) -> list:
+            try:
+                vectors = self.embedder.embed_texts([t for _, t in batch])
+            except Exception as exc:  # noqa: BLE001 — best-effort per batch
+                self.event_log.logger.warning(
+                    "embed kg-relations batch failed (%d) for %s: %s",
+                    len(batch), notebook_id, exc)
+                return []
+            return [(rid, vec) for (rid, _), vec in zip(batch, vectors)]
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        rows = []
+        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-rel") as pool:
+            for part in pool.map(_embed_only, batches):
+                rows.extend(part)
+        if not rows:
+            return
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO relation_embeddings (relation_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+                [(rid, notebook_id, json.dumps(vec), now) for rid, vec in rows])
+
     def _build_chunks_for_source(self, source_id: str) -> None:
         """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
         幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。元素 id 形如
@@ -1903,6 +1938,20 @@ class SQLiteRepository:
         ]
         if missing:
             self._embed_objects_batch(notebook_id, missing)
+
+    def _backfill_relation_embeddings(self, notebook_id: str) -> None:
+        """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。无 embedder 则 no-op。"""
+        if not self.settings.embedder_configured:
+            return
+        with self._connect() as db:
+            relations = self._relations_with_names(db, notebook_id)
+            have = {r["relation_id"] for r in db.execute(
+                "SELECT relation_id FROM relation_embeddings WHERE notebook_id=?",
+                (notebook_id,)).fetchall()}
+        missing = [{"_rid": r["id"], "text": r["text"]} for r in relations
+                   if r["id"] not in have]
+        if missing:
+            self._embed_relations_batch(notebook_id, missing)
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         """All object types present in this notebook with non-deprecated counts,
@@ -2253,15 +2302,23 @@ class SQLiteRepository:
         for obj in objects:
             local_to_id[obj["local_id"]] = f"ko-{uuid4().hex[:10]}"
             obj["_oid"] = local_to_id[obj["local_id"]]   # _embed_objects_batch 依赖
+        from app.services.retrieval import relation_embed_text, _payload_text
+        local_to_name = {o["local_id"]: _payload_text(o["payload"])[:80] for o in objects}
         db_relations = []
         for rel in relations:
             s = local_to_id.get(rel["source_local_id"])
             t = local_to_id.get(rel["target_local_id"])
             if not s or not t:
                 continue
+            spans = [e.get("quoted_span", "") for e in rel.get("evidence", [])
+                     if isinstance(e, dict)]
             db_relations.append({
+                "_rid": f"rel-{uuid4().hex[:10]}",
                 "source_object_id": s, "target_object_id": t,
                 "edge_type": rel["edge_type"], "evidence": rel.get("evidence", []),
+                "text": relation_embed_text(
+                    local_to_name.get(rel["source_local_id"], "?"), rel["edge_type"],
+                    local_to_name.get(rel["target_local_id"], "?"), spans),
             })
 
         # Base strong-review gate (Track F): objects written directly to a base
@@ -2295,11 +2352,12 @@ class SQLiteRepository:
                     "INSERT INTO knowledge_relations "
                     "(id, notebook_id, source_id, source_object_id, target_object_id, "
                     "edge_type, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [(f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
+                    [(r["_rid"], notebook_id, source_id,
                       r["source_object_id"], r["target_object_id"], r["edge_type"],
                       json.dumps(r["evidence"], ensure_ascii=False), now) for r in chunk],
                 )
         self._embed_objects_batch(notebook_id, objects)
+        self._embed_relations_batch(notebook_id, db_relations)
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)
@@ -4089,6 +4147,30 @@ class SQLiteRepository:
                     continue
                 citations.append(_citation(label, evidence))
         return citations
+
+    def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+        """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
+        (端点不在 knowledge_objects),与图节点过滤一致。"""
+        from app.services.retrieval import relation_embed_text, _payload_text
+        rows = db.execute(
+            "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
+            "r.edge_type AS et, r.evidence AS ev, so.payload AS sp, tp.payload AS tpl "
+            "FROM knowledge_relations r "
+            "JOIN knowledge_objects so ON so.id = r.source_object_id "
+            "JOIN knowledge_objects tp ON tp.id = r.target_object_id "
+            "WHERE r.notebook_id = ?", (notebook_id,)).fetchall()
+        out = []
+        for r in rows:
+            spans = [e.get("quoted_span", "") for e in json.loads(r["ev"] or "[]")
+                     if isinstance(e, dict)]
+            src_name = _payload_text(json.loads(r["sp"] or "{}"))[:80]
+            tgt_name = _payload_text(json.loads(r["tpl"] or "{}"))[:80]
+            out.append({
+                "id": r["id"], "source_object_id": r["s"], "target_object_id": r["t"],
+                "edge_type": r["et"],
+                "text": relation_embed_text(src_name, r["et"], tgt_name, spans),
+            })
+        return out
 
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,

@@ -11,6 +11,11 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    # embedder_configured needs all four vars set so embed paths activate
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "http://fake-embed")
+    monkeypatch.setenv("EMBED_API_KEY", "fake-key")
+    monkeypatch.setenv("EMBED_MODEL", "fake-model")
     r = SQLiteRepository(Settings())
     r.embedder = FakeEmbedder(dim=16)
     return r
@@ -47,3 +52,39 @@ def test_relation_embeddings_idempotent_reinit(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     SQLiteRepository(Settings())
     SQLiteRepository(Settings())  # 第二次 init 同库不应抛错(CREATE TABLE IF NOT EXISTS)
+
+
+def _seed_two_node_relation(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    objects = [
+        {"local_id": "a", "object_type": "concept",
+         "payload": {"name": "Regulated Cascode"}, "evidence": []},
+        {"local_id": "b", "object_type": "concept",
+         "payload": {"name": "Cascode"}, "evidence": []},
+    ]
+    relations = [{"source_local_id": "a", "target_local_id": "b",
+                  "edge_type": "derived_from",
+                  "evidence": [{"quoted_span": "regulated cascode adds a gain stage"}]}]
+    repo.store_kg(nb.id, None, objects, relations)
+    return nb
+
+
+def test_store_kg_embeds_relations(repo):
+    nb = _seed_two_node_relation(repo)
+    with repo._connect() as db:
+        n = db.execute(
+            "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
+            (nb.id,)).fetchone()["c"]
+    assert n == 1  # FakeEmbedder configured → 关系被 embed
+
+
+def test_backfill_relation_embeddings_fills_missing(repo):
+    nb = _seed_two_node_relation(repo)
+    with repo._write() as db:
+        db.execute("DELETE FROM relation_embeddings WHERE notebook_id=?", (nb.id,))
+    repo._backfill_relation_embeddings(nb.id)
+    with repo._connect() as db:
+        n = db.execute(
+            "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
+            (nb.id,)).fetchone()["c"]
+    assert n == 1
