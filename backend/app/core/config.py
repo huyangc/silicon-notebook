@@ -184,6 +184,17 @@ class Settings(BaseSettings):
     mineru_formula_enable: bool = Field(True, env="MINERU_FORMULA_ENABLE")
     mineru_table_enable: bool = Field(True, env="MINERU_TABLE_ENABLE")
 
+    # MinerU.net cloud (v4) — parse a public PDF URL via the hosted service.
+    # 独立于上面的 MINERU_MODE(off/http/cli)；仅用于 URL 来源的 PDF。
+    mineru_api_token: str = Field("", env="MINERU_API_TOKEN")
+    mineru_api_base: str = Field("https://mineru.net", env="MINERU_API_BASE")
+    mineru_cloud_model_version: str = Field("vlm", env="MINERU_CLOUD_MODEL_VERSION")
+    mineru_cloud_language: str = Field("ch", env="MINERU_CLOUD_LANGUAGE")
+    mineru_cloud_formula_enable: bool = Field(True, env="MINERU_CLOUD_FORMULA_ENABLE")
+    mineru_cloud_table_enable: bool = Field(True, env="MINERU_CLOUD_TABLE_ENABLE")
+    mineru_cloud_timeout_seconds: int = Field(600, env="MINERU_CLOUD_TIMEOUT_SECONDS")
+    mineru_cloud_poll_interval_seconds: int = Field(5, env="MINERU_CLOUD_POLL_INTERVAL_SECONDS")
+
     database_url: str = Field(
         "sqlite:///.local/silicon_notebook.db",
         env="DATABASE_URL",
@@ -250,6 +261,10 @@ class Settings(BaseSettings):
         if mode == "cli":
             return True
         return False
+
+    @property
+    def mineru_cloud_enabled(self) -> bool:
+        return bool(self.mineru_api_token)
 
     @property
     def sqlite_path(self) -> str:
