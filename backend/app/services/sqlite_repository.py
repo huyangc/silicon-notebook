@@ -2657,6 +2657,101 @@ class SQLiteRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def apply_conflict_resolution(
+        self,
+        notebook_id: str,
+        *,
+        kind: str,
+        left_ref: str,
+        right_ref: str,
+        resolution: str,
+        winner_ref: Optional[str] = None,
+        resolved_payload: Optional[dict] = None,
+    ) -> dict:
+        """Execute ONE adjudicated conflict resolution against the KG.
+
+        Mechanics only — policy (which side wins) is decided by the caller and
+        passed in via ``winner_ref``.  This method just executes the decided
+        outcome and keeps caches consistent.
+
+        Parameters
+        ----------
+        notebook_id:
+            The notebook that owns the conflicting objects / relations.
+        kind:
+            ``"edge"`` (refs are relation ids) or ``"node"`` (refs are
+            knowledge_object ids).
+        left_ref / right_ref:
+            The two competing entity ids.
+        resolution:
+            ``"keep"`` | ``"discard"`` | ``"modify"``.
+        winner_ref:
+            For ``"discard"``: the ref that survives; the other is the loser.
+            For ``"modify"``/``"node"``: the target object to update (falls back
+            to ``left_ref`` when None or not in {left_ref, right_ref}).
+            Ignored for ``"keep"``.
+        resolved_payload:
+            For ``"modify"``/``"node"``: the new payload dict to write.
+        """
+        if kind not in ("edge", "node"):
+            raise ValueError(f"kind must be 'edge' or 'node', got {kind!r}")
+        if resolution not in ("keep", "discard", "modify"):
+            raise ValueError(
+                f"resolution must be 'keep', 'discard', or 'modify', got {resolution!r}")
+
+        # ── keep ────────────────────────────────────────────────────────────
+        if resolution == "keep":
+            return {"action": "keep"}
+
+        # ── discard ─────────────────────────────────────────────────────────
+        if resolution == "discard":
+            if winner_ref not in (left_ref, right_ref):
+                self.event_log.logger.warning(
+                    "apply_conflict_resolution: discard skipped — winner_ref %r is not one of "
+                    "(%r, %r) in notebook %s",
+                    winner_ref, left_ref, right_ref, notebook_id,
+                )
+                return {"action": "skipped", "reason": "no valid winner_ref for discard"}
+            loser_ref = right_ref if winner_ref == left_ref else left_ref
+            if kind == "edge":
+                self.set_edge_review(notebook_id, loser_ref, "rejected")
+                # set_edge_review already calls _invalidate_unified_cache; mark dirty too.
+                self._mark_unified_kg_dirty(notebook_id)
+            else:  # kind == "node"
+                self.update_knowledge(
+                    notebook_id, loser_ref, KnowledgeUpdate(status="conflict")
+                )
+                # update_knowledge already calls _invalidate_unified_cache; mark dirty too.
+                self._mark_unified_kg_dirty(notebook_id)
+            return {"action": "discard", "loser": loser_ref}
+
+        # ── modify ──────────────────────────────────────────────────────────
+        # resolution == "modify"
+        if kind == "edge":
+            self.event_log.logger.warning(
+                "apply_conflict_resolution: edge modify is unsupported in v1 "
+                "(notebook %s, left=%r, right=%r) — no-op",
+                notebook_id, left_ref, right_ref,
+            )
+            return {"action": "skipped", "reason": "edge modify unsupported in v1"}
+
+        # kind == "node"
+        if not isinstance(resolved_payload, dict):
+            self.event_log.logger.warning(
+                "apply_conflict_resolution: modify skipped — resolved_payload is not a dict "
+                "(got %r) in notebook %s",
+                type(resolved_payload).__name__, notebook_id,
+            )
+            return {"action": "skipped", "reason": "modify without payload"}
+
+        target = winner_ref if winner_ref in (left_ref, right_ref) else left_ref
+        self.update_knowledge(
+            notebook_id, target, KnowledgeUpdate(payload=resolved_payload)
+        )
+        # update_knowledge already calls _invalidate_unified_cache; mark dirty too.
+        self._mark_unified_kg_dirty(notebook_id)
+        return {"action": "modify", "target": target}
+
     def review_pending_merges(self, notebook_id: str, limit: int = 50, auto_confirm_threshold: float = 0.95) -> dict:
         self.get_notebook(notebook_id)
         pending = self.pending_merges(notebook_id)[: max(1, min(limit, 200))]
