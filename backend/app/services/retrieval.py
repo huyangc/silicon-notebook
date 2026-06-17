@@ -451,6 +451,18 @@ def _payload_text(payload: Dict[str, object]) -> str:
     return " ".join(parts)
 
 
+def relation_embed_text(src_name: str, edge_type: str, tgt_name: str,
+                        evidence_spans: Sequence[str],
+                        max_evidence_chars: int = 400) -> str:
+    """关系的 embedding/关键词文本。纯检索:只用已有边字段(不依赖抽取改动)。
+    格式 '<src> —<edge_type>→ <tgt>. <evidence...>';evidence 截断到上限。"""
+    ev = " ".join(s.strip() for s in evidence_spans if s and s.strip())
+    if len(ev) > max_evidence_chars:
+        ev = ev[:max_evidence_chars]
+    head = f"{src_name} —{edge_type}→ {tgt_name}."
+    return f"{head} {ev}".strip()
+
+
 def score_elements(
     query: str,
     elements: List[dict],
