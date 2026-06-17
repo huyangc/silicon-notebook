@@ -2589,9 +2589,11 @@ class SQLiteRepository:
         self._mark_unified_kg_dirty(notebook_id)
 
     # ------------------------------------------------------------------
-    # kg_conflict_candidates — storage primitives (Task T1)
+    # kg_conflict_candidates — storage primitives (T1)
     # Mirrors the concept_merge_candidates pattern above.
-    # Detection, adjudication, and write-back live in separate later tasks.
+    # Detection lives in conflict_detect.py (T2); adjudication in
+    # conflict_review.py (T3); write-back in apply_conflict_resolution (T4);
+    # orchestration in resolve_notebook_conflicts (T5).
     # ------------------------------------------------------------------
 
     def write_conflict_candidate(
@@ -2611,7 +2613,7 @@ class SQLiteRepository:
 
         resolution, winner_ref, resolved_payload, confidence, and rationale
         are normally NULL at detection time and only populated after
-        adjudication (set_conflict_status / write-back in later tasks).
+        adjudication (set_conflict_status in T1, write-back in apply_conflict_resolution T4).
         """
         now = _now()
         cid = f"kcc-{uuid4().hex[:10]}"
@@ -2754,8 +2756,19 @@ class SQLiteRepository:
             return {"action": "skipped", "reason": "modify without payload"}
 
         target = winner_ref if winner_ref in (left_ref, right_ref) else left_ref
+        # Fetch the current payload so we can merge rather than replace.
+        # update_knowledge replaces the entire payload column, so we must
+        # preserve fields (section_path, validity_scope, steps, …) not
+        # included in the adjudicator's resolved_payload.
+        with self._connect() as _db:
+            _row = _db.execute(
+                "SELECT payload FROM knowledge_objects WHERE id=? AND notebook_id=?",
+                (target, notebook_id),
+            ).fetchone()
+        existing_payload: dict = json.loads(_row["payload"] or "{}") if _row else {}
+        merged_payload = {**existing_payload, **resolved_payload}
         self.update_knowledge(
-            notebook_id, target, KnowledgeUpdate(payload=resolved_payload)
+            notebook_id, target, KnowledgeUpdate(payload=merged_payload)
         )
         # update_knowledge already calls _invalidate_unified_cache; mark dirty too.
         self._mark_unified_kg_dirty(notebook_id)
@@ -2960,7 +2973,12 @@ class SQLiteRepository:
                     ev = rel.get("evidence") or []
                     if ev and isinstance(ev, list):
                         first = ev[0]
-                        return (first.get("quoted_span") or "")[:400] if isinstance(first, dict) else ""
+                        if not isinstance(first, dict):
+                            return ""
+                        # Relations store evidence as {"quote": ...} (kg_ingest.py);
+                        # nodes store evidence as {"quoted_span": ...}.  Accept both.
+                        text = (first.get("quoted_span") or first.get("quote") or "")
+                        return text[:400]
                     return ""
 
                 left_item = {
@@ -2983,11 +3001,7 @@ class SQLiteRepository:
                 def _node_text(obj: dict) -> str:
                     payload = obj.get("payload") or {}
                     name = payload.get("name", "") if isinstance(payload, dict) else ""
-                    statement = (
-                        payload.get("statement", "") or payload.get("definition", "")
-                        if isinstance(payload, dict) else ""
-                    )
-                    return f"{name}: {statement}" if statement else name
+                    return name
 
                 def _node_source(obj: dict) -> str:
                     ev_list = obj.get("evidence") or []

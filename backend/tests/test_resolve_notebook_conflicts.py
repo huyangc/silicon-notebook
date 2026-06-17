@@ -597,3 +597,90 @@ def test_node_discriminative_modify_applies(repo):
     assert any(r["status"] == "applied" for r in rows), (
         f"Expected at least one node candidate row to be 'applied', got {[r['status'] for r in rows]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: edge evidence ({"quote": ...} shape) reaches the adjudicator prompt
+# ---------------------------------------------------------------------------
+
+class PromptRecordingLLM:
+    """Fake LLM that records every prompt it receives and returns a no-op verdict."""
+
+    configured = True
+
+    def __init__(self):
+        self.recorded_prompts: list[str] = []
+
+    def chat_json(self, messages, schema_hint=None) -> str:
+        import json as _json
+        for m in messages:
+            self.recorded_prompts.append(m.get("content", ""))
+        return _json.dumps({
+            "conflict_type": "none",
+            "resolution": "keep",
+            "winner_ref": None,
+            "resolved_payload": None,
+            "confidence": 0.0,
+            "rationale": "no conflict",
+        })
+
+
+def test_edge_evidence_quote_reaches_llm_prompt(repo):
+    """Regression: edge evidence stored as {"quote": ...} (production shape from
+    kg_ingest.py line 109) must appear in the adjudicator prompt.
+
+    Before the _edge_source fix, first.get("quoted_span") returned None on a
+    {"quote": ...} dict, so source_text was always "" and the evidence was
+    silently dropped.  After the fix the "quote" key is also consulted and the
+    text reaches the LLM.
+
+    This test would FAIL on the unfixed code (source_text would be "", so
+    "DISTINCTIVE_EDGE_QUOTE_XYZ" would not appear in any recorded prompt) and
+    PASSES after the fix.
+    """
+    nb = repo.create_notebook(NotebookCreate(name="edge-evidence-test"))
+    repo.store_kg(nb.id, None, [
+        {
+            "local_id": "X",
+            "object_type": "claim",
+            "payload": {"name": "Claim X"},
+            "evidence": [{"quoted_span": "X text.", "element_id": ""}],
+        },
+        {
+            "local_id": "Y",
+            "object_type": "claim",
+            "payload": {"name": "Claim Y"},
+            "evidence": [{"quoted_span": "Y text.", "element_id": ""}],
+        },
+    ], [
+        {
+            "source_local_id": "X",
+            "target_local_id": "Y",
+            "edge_type": "supports",
+            # Production evidence shape from kg_ingest.py: {"quote": ...}
+            "evidence": [{"quote": "DISTINCTIVE_EDGE_QUOTE_XYZ"}],
+        },
+        {
+            "source_local_id": "X",
+            "target_local_id": "Y",
+            "edge_type": "contradicts",
+            "evidence": [{"quote": "DISTINCTIVE_EDGE_QUOTE_XYZ"}],
+        },
+    ])
+
+    llm = PromptRecordingLLM()
+    repo.llm_client = llm
+    repo.settings.kg_conflict_auto_apply_threshold = 0.95
+
+    repo.resolve_notebook_conflicts(nb.id)
+
+    assert llm.recorded_prompts, (
+        "No LLM calls made — edge conflict was not detected or LLM was not reached"
+    )
+
+    all_prompts = "\n".join(llm.recorded_prompts)
+    assert "DISTINCTIVE_EDGE_QUOTE_XYZ" in all_prompts, (
+        "Edge evidence quote did not reach the LLM prompt — "
+        "_edge_source may still be reading 'quoted_span' instead of 'quote'.\n"
+        f"Recorded prompts (first 800 chars):\n{all_prompts[:800]}"
+    )
