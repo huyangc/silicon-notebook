@@ -495,6 +495,24 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
 
+                CREATE TABLE IF NOT EXISTS kg_conflict_candidates (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL,
+                  left_ref TEXT NOT NULL,
+                  right_ref TEXT NOT NULL,
+                  conflict_type TEXT,
+                  resolution TEXT,
+                  winner_ref TEXT,
+                  resolved_payload TEXT,
+                  confidence REAL,
+                  rationale TEXT,
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conflict_candidates_nb_status ON kg_conflict_candidates(notebook_id, status);
+
                 CREATE TABLE IF NOT EXISTS promotion_candidates (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -2560,6 +2578,71 @@ class SQLiteRepository:
         self.set_merge_decision(notebook_id, candidate_id, "rejected")
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
+
+    # ------------------------------------------------------------------
+    # kg_conflict_candidates — storage primitives (Task T1)
+    # Mirrors the concept_merge_candidates pattern above.
+    # Detection, adjudication, and write-back live in separate later tasks.
+    # ------------------------------------------------------------------
+
+    def write_conflict_candidate(
+        self,
+        notebook_id: str,
+        kind: str,
+        left_ref: str,
+        right_ref: str,
+        conflict_type: Optional[str] = None,
+        resolution: Optional[str] = None,
+        winner_ref: Optional[str] = None,
+        resolved_payload: Optional[str] = None,
+        confidence: Optional[float] = None,
+        rationale: Optional[str] = None,
+    ) -> str:
+        """Insert one conflict candidate into the queue and return its id."""
+        now = _now()
+        cid = f"kcc-{uuid4().hex[:10]}"
+        with self._write() as db:
+            db.execute(
+                """
+                INSERT INTO kg_conflict_candidates
+                  (id, notebook_id, kind, left_ref, right_ref,
+                   conflict_type, resolution, winner_ref, resolved_payload,
+                   confidence, rationale, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (cid, notebook_id, kind, left_ref, right_ref,
+                 conflict_type, resolution, winner_ref, resolved_payload,
+                 confidence, rationale, now, now),
+            )
+        return cid
+
+    def pending_conflicts(self, notebook_id: str) -> List[dict]:
+        """Return all conflict candidates with status='pending' for a notebook."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM kg_conflict_candidates WHERE notebook_id=? AND status='pending'",
+                (notebook_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_conflict_status(self, candidate_id: str, status: str) -> None:
+        """Update status to 'applied' or 'rejected' (+ updated_at)."""
+        if status not in ("applied", "rejected"):
+            raise ValueError(f"invalid conflict status: {status!r}")
+        with self._write() as db:
+            db.execute(
+                "UPDATE kg_conflict_candidates SET status=?, updated_at=? WHERE id=?",
+                (status, _now(), candidate_id),
+            )
+
+    def get_conflict_candidate(self, candidate_id: str) -> Optional[dict]:
+        """Fetch one conflict candidate by id; returns None if not found."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM kg_conflict_candidates WHERE id=?",
+                (candidate_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def review_pending_merges(self, notebook_id: str, limit: int = 50, auto_confirm_threshold: float = 0.95) -> dict:
         self.get_notebook(notebook_id)
