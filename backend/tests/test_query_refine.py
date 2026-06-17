@@ -66,22 +66,49 @@ def _seed_hit(repo):
     return nb, [hit]
 
 
-def test_answer_kg_refines_when_enabled(repo):
+def test_answer_reasoning_refines_when_enabled(repo):
+    """_answer_reasoning 应在 enabled 时通过 reasoning_llm_client 触发 refine。"""
     repo.llm_client = _RefineAnswerLLM()
     repo.settings.kg_query_refine_enabled = True
     nb, hits = _seed_hit(repo)
-    answer, grounded, anchors = repo._answer_kg(
-        nb.id, "how does cascode affect output resistance?", hits, []
+    # reasoning_llm_client 回退到 llm_client（未配 REASONING_LLM_*）
+    answer, grounded, anchors = repo._answer_reasoning(
+        nb.id, "how does cascode affect output resistance?", hits, [], ""
     )
     assert repo.llm_client.refine_calls == 1  # refinement happened before answering
     assert repo.llm_client.answer_calls == 1
     assert answer  # answer produced
 
 
-def test_answer_kg_no_refine_when_disabled(repo):
+def test_answer_reasoning_no_refine_when_disabled(repo):
+    """_answer_reasoning 在 refine disabled 时不触发 refine。"""
     repo.llm_client = _RefineAnswerLLM()
     repo.settings.kg_query_refine_enabled = False  # default is now True; disable explicitly
     nb, hits = _seed_hit(repo)
-    answer, grounded, anchors = repo._answer_kg(nb.id, "q?", hits, [])
+    answer, grounded, anchors = repo._answer_reasoning(nb.id, "q?", hits, [], "")
     assert repo.llm_client.refine_calls == 0  # no refinement
     assert repo.llm_client.answer_calls == 1
+
+
+def test_refine_context_prepends_focused_evidence(repo):
+    class _FakeRefineLLM:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            import json as _j
+            return _j.dumps({"relevant": ["Engram separates storage from computation"]})
+    out = repo._refine_context("What is Engram?",
+                               "k1: [concept][personal] Engram", _FakeRefineLLM())
+    assert out.startswith("Focused relevant evidence")
+    assert "k1: [concept][personal] Engram" in out
+
+def test_refine_context_noop_when_disabled(repo, monkeypatch):
+    monkeypatch.setattr(repo.settings, "kg_query_refine_enabled", False)
+    cb = "k1: [concept][personal] Engram"
+    class _C:
+        configured = True
+    assert repo._refine_context("q", cb, _C()) == cb
+
+def test_refine_context_noop_when_client_unconfigured(repo):
+    class _C:
+        configured = False
+    assert repo._refine_context("q", "k1: x", _C()) == "k1: x"

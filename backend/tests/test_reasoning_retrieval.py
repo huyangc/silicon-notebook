@@ -232,17 +232,19 @@ def test_answer_reasoning_passes_reasoning_timeout_and_retries(rrepo):
     assert llm.calls[0].get("max_retries") == 2
 
 
-def test_answer_kg_fast_path_does_not_pass_reasoning_overrides(rrepo):
-    """Boundary guard: the fast-path _answer_kg must keep using the global
-    default (no per-call timeout/max_retries), so extraction/fast paths are
-    unaffected."""
-    nb = _seed_two_nodes(rrepo)
+def test_refine_context_passes_reasoning_kwargs(rrepo):
+    """Boundary guard: _refine_context passes timeout+max_retries (from settings)
+    to the client — so the refine call inherits the same overrides as the
+    reasoning answer call, keeping the two tightly coupled."""
+    rrepo.settings.reasoning_timeout_seconds = 77
+    rrepo.settings.reasoning_max_retries = 3
+    rrepo.settings.kg_query_refine_enabled = True
     llm = _AnswerRecordingLLM()
-    rrepo.llm_client = llm
-    rrepo._answer_kg(nb.id, "问题", [], "")
-    assert llm.calls, "_answer_kg must call chat_json"
-    assert "timeout" not in llm.calls[0]
-    assert "max_retries" not in llm.calls[0]
+    # Call _refine_context directly with a non-empty context block.
+    result = rrepo._refine_context("问题", "k1: RTL到GDSII流程概述", llm)
+    assert llm.calls, "_refine_context must call chat_json"
+    assert llm.calls[0].get("timeout") == 77
+    assert llm.calls[0].get("max_retries") == 3
 
 
 def test_plan_passes_reasoning_timeout_and_retries(rrepo):

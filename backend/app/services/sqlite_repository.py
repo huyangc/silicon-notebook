@@ -4355,8 +4355,8 @@ class SQLiteRepository:
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
     # "chunk"，不会触发 422。
     # 随之删除的还有：is_process_query import（原 ask_fast 独占调用）。
-    # 保留的 helper（_rrf_scored / _rerank_hits / _answer_kg 等）仍被其他 ask_* 路径
-    # 或测试直接调用，尚未可删。
+    # 保留的 helper（_rrf_scored / _rerank_hits 等）仍被其他 ask_* 路径
+    # 或测试直接调用，尚未可删。_answer_kg 已删(P4-5死码)，query-refine 移入 _refine_context。
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
         """Canonical unified-cluster id for a concept `object_id`, reusing the
@@ -4588,54 +4588,34 @@ class SQLiteRepository:
         except Exception:
             return question
 
-    def _answer_kg(
-        self,
-        notebook_id: str,
-        question: str,
-        top_hits: List[RetrievedKnowledge],
-        history: str = "",
-    ) -> tuple:
-        """Synthesise a (possibly reasoned) answer from KG hits using the LLM.
-        Returns (answer_text, llm_grounded, anchors). Returns the LLM's raw
-        self-report; the relevance-aware grounding is decided by the caller via
-        classify_evidence. `history`
-        (prior conversation turns) shapes the wording but not the retrieval."""
-        context_block, id_map = self._answer_context(notebook_id, top_hits)
-        if (self.settings.kg_query_refine_enabled
-                and getattr(self.llm_client, "configured", False) and id_map):
-            from app.services.prompts import evidence_refine_prompt, EVIDENCE_REFINE_SCHEMA_HINT
-            ev_lines = []
-            for k, v in id_map.items():
-                txt = (v.get("definition") or v.get("snippet") or "").strip()
-                ev_lines.append(f"{k} {v.get('name','')}: {txt}".strip())
-            ev_block = "\n".join(ev_lines)[: self.settings.query_refine_max_chars]
-            try:
-                raw_refine = self.llm_client.chat_json(
-                    [{"role": "user", "content": evidence_refine_prompt(question, ev_block)}],
-                    EVIDENCE_REFINE_SCHEMA_HINT,
-                    timeout=self.settings.reasoning_timeout_seconds,
-                    max_retries=self.settings.reasoning_max_retries)
-                rel = json.loads(raw_refine).get("relevant")
-                if not isinstance(rel, list):   # guard: LLM may return a str/None
-                    rel = []
-                rel = [str(x).strip() for x in rel if str(x).strip()]
-            except Exception:
+    def _refine_context(self, question: str, context_block: str, client) -> str:
+        """问题感知证据精炼:把 context_block 喂给 evidence_refine LLM,抽"相关要点"
+        前置成聚焦上下文(参考性,不产生 [k] 锚点)。默认开(kg_query_refine_enabled);
+        client 未配/失败/无内容 → 原样返回。reasoning 传 reasoning_llm_client、graph
+        传 llm_client。"""
+        if not (self.settings.kg_query_refine_enabled
+                and getattr(client, "configured", False)
+                and context_block.strip() and context_block.strip() != "(none)"):
+            return context_block
+        from app.services.prompts import evidence_refine_prompt, EVIDENCE_REFINE_SCHEMA_HINT
+        ev_block = context_block[: self.settings.query_refine_max_chars]
+        try:
+            raw = client.chat_json(
+                [{"role": "user", "content": evidence_refine_prompt(question, ev_block)}],
+                EVIDENCE_REFINE_SCHEMA_HINT,
+                timeout=self.settings.reasoning_timeout_seconds,
+                max_retries=self.settings.reasoning_max_retries)
+            rel = json.loads(raw).get("relevant")
+            if not isinstance(rel, list):
                 rel = []
-            if rel:
-                context_block = ("Focused relevant evidence (for this question):\n"
-                                 + "\n".join(f"- {x}" for x in rel[:12])
-                                 + "\n\n" + context_block)
-        raw = self.llm_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
-            ANSWER_SCHEMA_HINT,
-        )
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("answer did not return a JSON object")
-        answer = str(data.get("answer", "")).strip()
-        llm_grounded = bool(data.get("grounded", False))
-        anchors = self._parse_answer_anchors(answer, id_map)
-        return answer, llm_grounded, anchors
+            rel = [str(x).strip() for x in rel if str(x).strip()]
+        except Exception:
+            rel = []
+        if rel:
+            context_block = ("Focused relevant evidence (for this question):\n"
+                             + "\n".join(f"- {x}" for x in rel[:12])
+                             + "\n\n" + context_block)
+        return context_block
 
     def _answer_reasoning(self, notebook_id, question, top_hits, elements, history=""):
         """Synthesise the reasoning-mode answer: reuse _answer_context for KG
@@ -4649,6 +4629,7 @@ class SQLiteRepository:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
+        context_block = self._refine_context(question, context_block, self.reasoning_llm_client)
         raw = self.reasoning_llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -4764,8 +4745,8 @@ class SQLiteRepository:
 
         The [k] anchor markers, _parse_answer_anchors, and classify_evidence are
         shared helpers reused across ask modes. There is no longer a "fast path" —
-        ask_fast was retired in P4-5; the former fast-path helpers (_rrf_scored,
-        _rerank_hits, _answer_kg) remain in place because other callers reference them.
+        ask_fast was retired in P4-5; _answer_kg also deleted (dead code). Context
+        is now query-refined via _refine_context before being fed to the answer LLM.
         """
         from app.services.kg.graph_reason import (
             DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,
@@ -4840,6 +4821,7 @@ class SQLiteRepository:
                 context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
 
         # Synthesise the answer through the existing LLM + grounding path.
+        context_block = self._refine_context(question, context_block, self.llm_client)
         answer, llm_grounded, anchors = "", False, []
         if getattr(self.llm_client, "configured", False) and id_map:
             try:
