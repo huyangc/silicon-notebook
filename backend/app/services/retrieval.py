@@ -63,6 +63,20 @@ class RetrievedElement:
     score: float = 0.0
 
 
+@dataclass
+class RetrievedRelation:
+    relation_id: str
+    source_object_id: str
+    target_object_id: str
+    edge_type: str
+    text: str = ""
+    evidence: List[Evidence] = field(default_factory=list)
+    score: float = 0.0
+    relevance: float = 0.0
+    notebook_id: str = ""
+    tier: str = "personal"
+
+
 # KG node-type authority weights: claim/formula are primary knowledge carriers;
 # procedure is process-oriented; concept is definitional/supporting.
 # Used for cross-type tie-breaking / grouping only, NOT multiplied into
@@ -380,6 +394,49 @@ def score_knowledge(
             )
         )
     scored.sort(key=lambda item: item.score, reverse=True)
+    return scored
+
+
+def score_relations(
+    query: str,
+    relations: List[dict],
+    query_vector: Optional[List[float]] = None,
+    relation_sims: Optional[Dict[str, float]] = None,
+    w_keyword: float = W_KEYWORD,
+    w_semantic: float = W_SEMANTIC,
+) -> List[RetrievedRelation]:
+    """关系打分:关键词(关系 text)+ 可选语义(query vs 关系自有向量,来自
+    relation_sims)。与 score_knowledge 同尺:max(0,cosine) 经 _fuse → relevance
+    ∈[0,1],低于 RELEVANCE_FLOOR 丢弃。relation_sims 是独立关系索引(dual-index
+    分离,不与节点矩阵合并)。每个 relations 项: {id, source_object_id,
+    target_object_id, edge_type, text}。"""
+    query_basis_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
+    scored: List[RetrievedRelation] = []
+    for rel in relations:
+        rid = rel["id"]
+        text = rel.get("text", "")
+        keyword = keyword_score_tokens(query_basis_tokens, set(_tokens(text)))
+        semantic = 0.0
+        has_vector = False
+        if query_vector and relation_sims is not None:
+            s = relation_sims.get(rid)
+            if s is not None:
+                has_vector = True
+                semantic = max(semantic, s)
+        relevance = _fuse(keyword, semantic, has_vector, w_keyword, w_semantic)
+        if relevance < RELEVANCE_FLOOR:
+            continue
+        scored.append(RetrievedRelation(
+            relation_id=rid,
+            source_object_id=rel["source_object_id"],
+            target_object_id=rel["target_object_id"],
+            edge_type=rel["edge_type"],
+            text=text,
+            evidence=rel.get("evidence", []),
+            score=relevance,
+            relevance=relevance,
+        ))
+    scored.sort(key=lambda it: it.score, reverse=True)
     return scored
 
 
