@@ -2776,6 +2776,13 @@ class SQLiteRepository:
                 f"conflict candidate {candidate_id!r} is already decided "
                 f"(status={row['status']!r})"
             )
+        if not row.get("resolution"):
+            # Detected but not yet adjudicated — nothing to apply. Clearer than
+            # letting apply_conflict_resolution raise a generic ValueError.
+            raise ValueError(
+                f"conflict candidate {candidate_id!r} has no resolution "
+                f"(not yet adjudicated)"
+            )
         resolved_payload: Optional[dict] = None
         if row.get("resolved_payload") is not None:
             try:
