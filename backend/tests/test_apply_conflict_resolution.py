@@ -317,3 +317,61 @@ def test_unknown_kind_raises_value_error(seeded):
             nb_id, kind="graph", left_ref=oid_a, right_ref=oid_b,
             resolution="keep",
         )
+
+
+# ---------------------------------------------------------------------------
+# node modify → pre-existing payload fields NOT in resolved_payload survive
+# ---------------------------------------------------------------------------
+
+def test_node_modify_preserves_pre_existing_payload_fields(seeded):
+    """Fix 2 regression: apply_conflict_resolution modify must MERGE resolved_payload
+    onto the existing payload, not replace it wholesale.
+
+    update_knowledge replaces the entire payload column.  Without the merge step a
+    resolved_payload like {"name": "..."} would silently drop pre-existing fields
+    (section_path, validity_scope, steps, …).
+
+    This test:
+    - Seeds an object whose payload already contains section_path="§2.3".
+    - Calls apply_conflict_resolution with resolved_payload={"name": "Updated name"}
+      which intentionally omits section_path.
+    - Asserts section_path="§2.3" still survives AND name was updated.
+    """
+    repo, nb_id, oid_a, oid_b, rel_a, rel_b = seeded
+
+    # First, enrich Claim A's payload with an extra field (section_path)
+    # that will NOT appear in the adjudicator's resolved_payload.
+    import json as _json
+    with repo._write() as db:
+        db.execute(
+            "UPDATE knowledge_objects SET payload=? WHERE id=? AND notebook_id=?",
+            (
+                _json.dumps({"name": "Claim A", "statement": "A is true", "section_path": "§2.3"}),
+                oid_a,
+                nb_id,
+            ),
+        )
+
+    # Adjudicator only returns a modified name — section_path is absent
+    resolved_payload = {"name": "Claim A (reconciled)"}
+
+    result = repo.apply_conflict_resolution(
+        nb_id, kind="node", left_ref=oid_a, right_ref=oid_b,
+        resolution="modify", winner_ref=oid_a, resolved_payload=resolved_payload,
+    )
+    assert result == {"action": "modify", "target": oid_a}
+
+    stored = _get_object_payload(repo, nb_id, oid_a)
+    # Modified field must be updated
+    assert stored["name"] == "Claim A (reconciled)", (
+        f"Expected name to be updated, got {stored!r}"
+    )
+    # Pre-existing field must survive
+    assert stored.get("section_path") == "§2.3", (
+        f"section_path was dropped — modify replaced rather than merged the payload. "
+        f"Got {stored!r}"
+    )
+    # Other original field not in resolved_payload must also survive
+    assert stored.get("statement") == "A is true", (
+        f"statement was dropped unexpectedly. Got {stored!r}"
+    )

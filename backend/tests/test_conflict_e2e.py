@@ -118,13 +118,13 @@ def _seed_conflict(repo: SQLiteRepository, nb_id: str, source_id: str):
             "source_local_id": "A",
             "target_local_id": "B",
             "edge_type": "supports",
-            "evidence": [{"quoted_span": "Voltage supports current stability.", "element_id": ""}],
+            "evidence": [{"quote": "Voltage supports current stability."}],
         },
         {
             "source_local_id": "A",
             "target_local_id": "B",
             "edge_type": "contradicts",
-            "evidence": [{"quoted_span": "Voltage contradicts current stability.", "element_id": ""}],
+            "evidence": [{"quote": "Voltage contradicts current stability."}],
         },
     ])
     with repo._connect() as db:
