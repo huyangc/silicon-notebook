@@ -26,6 +26,7 @@ import {
   type PromotionCandidate,
 } from "./promotion-queue";
 import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
+import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -61,6 +62,7 @@ type SourceSummary = {
   element_count: number;
   file_name: string;
   file_size: number;
+  source_url?: string;
   created_label: string;
   error_message?: string;
   extraction_warning?: string | null;
@@ -789,6 +791,10 @@ export default function Home() {
   const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
   const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  const [urlModalOpen, setUrlModalOpen] = useState(false);
+  const [urlText, setUrlText] = useState("");
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [urlRejected, setUrlRejected] = useState<Array<{ url: string; reason: string }>>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDesc, setCreateDesc] = useState("");
@@ -1477,6 +1483,40 @@ export default function Home() {
     setStagedDocTypes([]);
     setSourceModalOpen(false);
     setToast(`已上传 ${uploaded.length} 个来源`);
+  }
+
+  async function submitUrlSources() {
+    if (!currentNotebookId) return;
+    const urls = parseUrlLines(urlText);
+    if (urls.length === 0) {
+      setToast("请粘贴至少一个 http/https 链接");
+      return;
+    }
+    setUrlBusy(true);
+    setUrlRejected([]);
+    try {
+      const result = await api<{ created: SourceSummary[]; rejected: Array<{ url: string; reason: string }> }>(
+        `/notebooks/${currentNotebookId}/sources/url`,
+        { method: "POST", body: JSON.stringify({ urls }) }
+      );
+      if (result.created.length > 0) {
+        setSources((previous) => [
+          ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
+          ...result.created,
+        ]);
+        await loadNotebookCollection();
+      }
+      setUrlRejected(result.rejected);
+      setToast(`已添加 ${result.created.length} 个，被拒 ${result.rejected.length} 个`);
+      if (result.rejected.length === 0) {
+        setUrlText("");
+        setUrlModalOpen(false);
+      }
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setUrlBusy(false);
+    }
   }
 
   async function openSourceDetail(source: SourceSummary) {
@@ -2267,6 +2307,9 @@ export default function Home() {
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
                   <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={stageFiles} />
                 </label>
+                <button type="button" className="add-source-button" onClick={() => { setUrlRejected([]); setUrlModalOpen(true); }}>
+                  <ExternalLink size={20} strokeWidth={2.7} /> 添加链接
+                </button>
                 <div className="future-search">
                   <strong>Network source scout</strong>
                   <p>后续开放从网络环境中检索并添加来源。</p>
@@ -2294,6 +2337,11 @@ export default function Home() {
                           <span className={`source-status-dot status-${source.parse_status || source.status}`} />
                           {source.extraction_warning && <span title={source.extraction_warning} style={{cursor:"help",marginLeft:2}}>⚠</span>}
                         </button>
+                        {source.source_url ? (
+                          <a href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} onClick={(e) => e.stopPropagation()} style={{ marginLeft: 6 }}>
+                            <ExternalLink size={13} />
+                          </a>
+                        ) : null}
                         <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
                           <Trash2 size={15} />
                         </button>
@@ -2626,6 +2674,45 @@ export default function Home() {
                 </div>
               </div>
             )}
+          </div>
+        </section>
+      )}
+
+      {urlModalOpen && (
+        <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUrlModalOpen(false); }}>
+          <div className="source-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>添加链接</h2>
+                <p>每行一个公开可直链的 PDF；非 PDF 会被直接拒绝。由 mineru.net 云端解析。</p>
+              </div>
+              <button className="icon-button" onClick={() => setUrlModalOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <textarea
+                rows={6}
+                value={urlText}
+                placeholder={"https://arxiv.org/pdf/2401.00001\nhttps://example.com/paper.pdf"}
+                onChange={(event) => setUrlText(event.target.value)}
+              />
+              {urlRejected.length > 0 && (
+                <div className="stack" style={{ marginTop: 8 }}>
+                  <span className="section-title">被拒链接</span>
+                  {urlRejected.map((item, index) => (
+                    <div className="checklist-row" key={`${item.url}-${index}`}>
+                      <span style={{ flex: 1, wordBreak: "break-all" }}>{item.url}</span>
+                      <small style={{ color: "var(--danger, #c0392b)" }}>{item.reason}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="tag-row">
+                <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources().catch(reportError)}>
+                  {urlBusy ? "添加中…" : "添加并解析"}
+                </button>
+                <button className="sort-button" onClick={() => setUrlModalOpen(false)}>取消</button>
+              </div>
+            </div>
           </div>
         </section>
       )}

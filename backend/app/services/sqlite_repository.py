@@ -17,6 +17,7 @@ from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import OpenAICompatibleClient
 from app.models.schemas import (
+    AddUrlSourcesResult,
     AnswerAnchor,
     ArticleCreate,
     ArticleResearchBrief,
@@ -47,6 +48,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    RejectedUrl,
     RuleCard,
     SearchHit,
     SourceDetail,
@@ -74,8 +76,10 @@ def _normalize_doc_type(doc_type: str) -> str:
     value = (doc_type or "").strip().lower()
     return value if value in PROFILES else ""
 from app.services.mineru_client import MinerUClient
+from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
+from app.services import remote_sources
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
-from app.services.parsers import parse_source_file
+from app.services.parsers import parse_source_file, mineru_content_list_to_elements
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     ARTICLE_SCHEMA_HINT,
@@ -192,6 +196,7 @@ class SQLiteRepository:
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
+        self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = EventLogger(settings, channel="events")
         if settings.reasoning_llm_partially_configured:
             self.event_log.logger.warning(
@@ -291,6 +296,7 @@ class SQLiteRepository:
                   parse_status TEXT NOT NULL DEFAULT 'uploaded',
                   file_name TEXT NOT NULL DEFAULT '',
                   file_path TEXT NOT NULL DEFAULT '',
+                  source_url TEXT NOT NULL DEFAULT '',
                   file_size INTEGER NOT NULL DEFAULT 0,
                   file_hash TEXT NOT NULL DEFAULT '',
                   summary TEXT NOT NULL DEFAULT '',
@@ -582,6 +588,8 @@ class SQLiteRepository:
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
                 db.execute("ALTER TABLE sources ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
+            if "source_url" not in src_cols:
+                db.execute("ALTER TABLE sources ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
             # LLM review metadata columns for concept_merge_candidates.
             cm_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_merge_candidates)").fetchall()}
             if "confidence" not in cm_cols:
@@ -1030,6 +1038,51 @@ class SQLiteRepository:
                 source_ids.append(source_id)
         return [self.get_source(source_id) for source_id in source_ids]
 
+    def add_url_sources(
+        self,
+        notebook_id: str,
+        urls: Iterable[str],
+        scheduler: Optional[Callable[[str], None]] = None,
+    ) -> AddUrlSourcesResult:
+        """逐 URL 初筛(非 PDF/不可达/超限→rejected,不建来源);通过的建 source_url
+        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。"""
+        self.get_notebook(notebook_id)  # KeyError if missing
+        if not self.mineru_cloud_client.configured:
+            raise MinerUCloudNotConfigured("未配置 MinerU 云端凭证 (MINERU_API_TOKEN)")
+        created: List[SourceSummary] = []
+        rejected: List[RejectedUrl] = []
+        for raw in urls:
+            url = (raw or "").strip()
+            if not url:
+                continue
+            probe = remote_sources.probe_pdf(url)
+            if not probe.ok:
+                rejected.append(RejectedUrl(url=url, reason=probe.reason))
+                continue
+            source_id = f"src-{uuid4().hex[:10]}"
+            now = _now()
+            with self._write() as db:
+                db.execute(
+                    """
+                    INSERT INTO sources
+                    (id, notebook_id, title, source_type, status, parse_status,
+                     file_name, file_path, source_url, file_size, file_hash, summary,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_id, notebook_id, probe.display_name, "pdf",
+                        "queued", "queued", probe.display_name, "", url,
+                        probe.content_length, "", "链接已添加，解析排队中。", now, now,
+                    ),
+                )
+            if scheduler is not None:
+                scheduler(source_id)
+            else:
+                self.process_source(source_id)
+            created.append(self.get_source(source_id))
+        return AddUrlSourcesResult(created=created, rejected=rejected)
+
     def upload_sources(
         self,
         notebook_id: str,
@@ -1186,10 +1239,18 @@ class SQLiteRepository:
         try:
             t = time.perf_counter()
             stage("parse", "start", t)
-            elements = parse_source_file(
-                source_id, source.file_path, source.file_name, self.mineru_client
-            )
-            mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
+            # URL 来源走 mineru.net 云端解析；本地文件来源走 MinerU(http/cli)/pypdf。
+            if source.source_url:
+                content_list = self.mineru_cloud_client.parse_url(
+                    source.source_url, data_id=source_id
+                )
+                elements = mineru_content_list_to_elements(source_id, content_list)
+                mineru_error = str(getattr(self.mineru_cloud_client, "last_error", "") or "")
+            else:
+                elements = parse_source_file(
+                    source_id, source.file_path, source.file_name, self.mineru_client
+                )
+                mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
             element_parsers = sorted(
                 {
                     str(element.metadata.get("parser", ""))
@@ -1202,7 +1263,7 @@ class SQLiteRepository:
                 "done",
                 t,
                 elements=len(elements),
-                parser_mode=str(getattr(self.mineru_client, "mode", "")),
+                parser_mode=("mineru_cloud" if source.source_url else str(getattr(self.mineru_client, "mode", ""))),
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
@@ -5634,6 +5695,7 @@ class SQLiteRepository:
             parse_status=row["parse_status"],
             created_label=_created_label(row["created_at"]),
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
+            source_url=row["source_url"] if "source_url" in row.keys() else "",
             extraction_warning=self._extraction_warning(db, row["id"]),
         )
 

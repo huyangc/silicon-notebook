@@ -50,6 +50,8 @@ from app.models.schemas import (
     RuleCard,
     SourceDetail,
     SourceElement,
+    AddUrlSourcesRequest,
+    AddUrlSourcesResult,
     SetTierRequest,
     SourceImportRequest,
     SourceSummary,
@@ -58,6 +60,7 @@ from app.models.schemas import (
 )
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.kg import scheduler as kg_scheduler
+from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.repository import NotebookRepository, UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -194,6 +197,24 @@ def import_sources(
         for file in payload.files:
             _validate_source_file(file.file_name)
         return repository().import_sources(notebook_id, payload)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/sources/url", response_model=AddUrlSourcesResult)
+def add_url_sources(
+    notebook_id: str,
+    payload: AddUrlSourcesRequest,
+) -> AddUrlSourcesResult:
+    repo = repository()
+    try:
+        return repo.add_url_sources(
+            notebook_id,
+            payload.urls,
+            scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
+        )
+    except MinerUCloudNotConfigured as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
