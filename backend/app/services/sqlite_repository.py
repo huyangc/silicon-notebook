@@ -4710,6 +4710,32 @@ class SQLiteRepository:
                 fused.append(oid)
         return fused
 
+    _MIX_NODE_SEEDS = 20
+    _MIX_REL_SEEDS = 10
+    _MIX_FANOUT = 8
+
+    def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
+        """种子(节点∪关系端点)→1-hop 子图→渲染。返回 (block, id_map, kg_hits)。
+        kg_hits=种子命中(带 .relevance),供 grounding。无 KG/种子 → ("", {}, [])。"""
+        from app.services.kg.graph_reason import multihop_subgraph, render_subgraph_context
+        node_hits = self.federated_retrieve(notebook_id, query)[: self._MIX_NODE_SEEDS]
+        rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[: self._MIX_REL_SEEDS]
+        seeds = [h.object_id for h in node_hits]
+        for r in rel_hits:
+            seeds.extend((r.source_object_id, r.target_object_id))
+        seeds = list(dict.fromkeys(s for s in seeds if s))
+        if not seeds:
+            return "", {}, []
+        G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
+        if G is None or G.num_nodes() == 0:
+            return "", {}, []
+        subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
+                                     edge_types=None, max_depth=1, max_fan_out=self._MIX_FANOUT)
+        if not subgraph:
+            return "", {}, []
+        block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
+        return block, id_map, node_hits
+
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
