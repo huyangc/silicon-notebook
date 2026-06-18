@@ -251,6 +251,15 @@ RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning see
 RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
 KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
+CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
+CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: 叠加 KG 局部结构+源 chunk (default true; 需配 qwen3-rerank 才生效)
+RERANK_MODEL                 # qwen3-rerank model name; 空=关 mix 回退 MMR (default empty)
+RERANK_BASE_URL              # DashScope text-rerank endpoint (default dashscope compatible-api/v1)
+RERANK_API_KEY               # DashScope key for rerank (required to enable mix rerank)
+RERANK_MAX_DOCS              # max docs per rerank request, auto-batched beyond (default 500)
+MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
+MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
+MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
 ```
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
