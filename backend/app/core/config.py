@@ -66,13 +66,13 @@ class Settings(BaseSettings):
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
-    # 抽取自校验: 默认关闭; 开启后每个窗口抽取完再做一次 LLM refine pass 剔除幻觉节点。
-    kg_refine_enabled: bool = Field(False, env="KG_REFINE_ENABLED")
-    # gleaning 补抽: 默认关闭; 开启后每窗口首抽完再多轮让 LLM 补"遗漏的节点"。
-    kg_gleaning_enabled: bool = Field(False, env="KG_GLEANING_ENABLED")
+    # 抽取自校验: 默认开启(2026-06-18,攻 KG 内容质量瓶颈); 每窗口抽取完再做一次 LLM refine pass 剔幻觉。仅建图时生效。
+    kg_refine_enabled: bool = Field(True, env="KG_REFINE_ENABLED")
+    # gleaning 补抽: 默认开启(2026-06-18); 每窗口首抽完再多轮让 LLM 补"遗漏的节点"(提 recall)。仅建图时生效。
+    kg_gleaning_enabled: bool = Field(True, env="KG_GLEANING_ENABLED")
     kg_gleaning_rounds: int = Field(1, env="KG_GLEANING_ROUNDS")
-    # 概念簇描述融合: 默认关闭; 开启后对 ≥2 成员的概念簇用 LLM 融合证据成一段描述。
-    kg_concept_desc_enabled: bool = Field(False, env="KG_CONCEPT_DESC_ENABLED")
+    # 概念簇描述融合: 默认开启(2026-06-18); 对 ≥2 成员的概念簇用 LLM 融合证据成一段描述。仅 rebuild_unified 时生效。
+    kg_concept_desc_enabled: bool = Field(True, env="KG_CONCEPT_DESC_ENABLED")
     # 社区摘要: 默认关闭; 开启后对每个社区用 LLM 生成 title/summary/findings 报告。
     kg_community_summary_enabled: bool = Field(False, env="KG_COMMUNITY_SUMMARY_ENABLED")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。

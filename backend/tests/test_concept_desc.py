@@ -53,9 +53,10 @@ def test_concept_desc_generated_for_merged_cluster(repo):
     assert repo.llm_client.calls >= 1
 
 
-def test_concept_desc_off_by_default(repo):
+def test_concept_desc_off_when_disabled(repo):
     repo.llm_client = _DescLLM()
-    nb = _seed_two_doc_concept(repo)         # kg_concept_desc_enabled defaults False
+    repo.settings.kg_concept_desc_enabled = False   # 默认已改为开(2026-06-18),这里显式关以测 off 路径
+    nb = _seed_two_doc_concept(repo)
     repo.rebuild_unified_kg(nb.id)
     assert repo.llm_client.calls == 0        # no LLM calls when disabled
     with repo._connect() as db:
