@@ -132,6 +132,22 @@ def tier_weight(tier: str) -> float:
     return _TIER_WEIGHT.get(tier, 1.00)
 
 
+def est_tokens(text: str) -> int:
+    """粗估 token(无 tiktoken):中英混排约 3.5 字符/token,向上取整。仅用于预算截断。"""
+    return math.ceil(len(text or "") / 3.5)
+
+
+def truncate_by_tokens(items, key, max_tokens):
+    """按序累加 est_tokens(key(item)),首次超 max_tokens 即停(保留之前的);镜像 LightRAG。"""
+    out, used = [], 0
+    for it in items:
+        used += est_tokens(key(it))
+        if used > max_tokens and out:
+            break
+        out.append(it)
+    return out
+
+
 def ensure_procedure_quota(scored_all, top_n, min_proc, key):
     """Take the top_n of an already-sorted `scored_all`, but guarantee at least
     `min_proc` procedures when the pool has them — back-fill from the remainder
