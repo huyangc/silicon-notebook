@@ -4767,6 +4767,43 @@ class SQLiteRepository:
                     element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
         return out
 
+    # ── chunk×graph mix ──────────────────────────────────────────────────────
+
+    _MIX_KG_KEY_BASE = 1000
+
+    def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
+        """向量 chunk 候选(多子查询合并去重;单查询直接 scored)。返回 List[RetrievedChunk]。"""
+        if len(sub_queries) >= 2:
+            collected, _per, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
+            seen, out = set(), []
+            for c in collected:
+                if c.chunk_id not in seen:
+                    seen.add(c.chunk_id)
+                    out.append(c)
+            return out
+        scored, _ids, _mat = self._retrieve_chunks(notebook_id, sub_queries[0])
+        return scored
+
+    def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
+        """三路 mix。KG 只检索一次(高 key-base):种子→子图(结构 block+id_map)+源 chunk;
+        与向量 chunk round-robin 并池。返回 (candidates, kg_block, kg_id_map, kg_hits)。"""
+        vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
+        kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
+        overlay_on = self.settings.chunk_kg_overlay_enabled and (
+            self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg())
+        if overlay_on:
+            kg_block, kg_id_map, kg_hits = self._chunk_kg_overlay(
+                notebook_id, query, hl, id_offset=self._MIX_KG_KEY_BASE)
+            kg_chunks = self._kg_source_chunks(
+                notebook_id, [v["object_id"] for v in kg_id_map.values()])
+        merged, seen = [], set()
+        for i in range(max(len(vector_chunks), len(kg_chunks))):
+            for src in (vector_chunks, kg_chunks):
+                if i < len(src) and src[i].chunk_id not in seen:
+                    seen.add(src[i].chunk_id)
+                    merged.append(src[i])
+        return merged, kg_block, kg_id_map, kg_hits
+
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
