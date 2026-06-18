@@ -231,9 +231,6 @@ ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000�
 ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
-RERANK_ENABLED               # 对 top 候选池做 LLM 重排（默认 false）
-RERANK_CANDIDATES            # 交给 LLM 重排的候选数（默认 20）
-RERANK_TIMEOUT_SECONDS       # 重排专用短超时（默认 20）
 KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
 QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
 GLOBAL_MAX_COMMUNITIES       # Global 问答(ask mode="global")考虑的社区报告上限（默认 20）
@@ -241,6 +238,16 @@ RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 fa
 RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
 KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
+CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
+CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
+CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；需配 qwen3-rerank 才生效）
+RERANK_MODEL                 # qwen3-rerank 模型名；留空=关，mix 回退 MMR（默认空）
+RERANK_BASE_URL              # DashScope text-rerank 端点（默认 dashscope compatible-api/v1）
+RERANK_API_KEY               # rerank 用 DashScope key（启用 mix rerank 必填）
+RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）
+MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
+MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
+MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 ```
 
 **两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`

@@ -252,6 +252,7 @@ RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when en
 KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
+CHUNK_MMR_K                  # MMR-selected chunks when rerank is off (default 16)
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: 叠加 KG 局部结构+源 chunk (default true; 需配 qwen3-rerank 才生效)
 RERANK_MODEL                 # qwen3-rerank model name; 空=关 mix 回退 MMR (default empty)
 RERANK_BASE_URL              # DashScope text-rerank endpoint (default dashscope compatible-api/v1)
