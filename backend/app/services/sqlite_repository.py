@@ -4225,6 +4225,9 @@ class SQLiteRepository:
                 keyword_token_sets=token_sets,
             ))
         scored.sort(key=lambda it: it.score, reverse=True)
+        if self.settings.kg_canonical_fold_enabled:
+            from app.services.retrieval import fold_by_canonical
+            scored = fold_by_canonical(scored, self.cluster_map(notebook_id))
         return scored
 
     def federated_retrieve(
