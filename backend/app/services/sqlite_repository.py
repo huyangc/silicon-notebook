@@ -4190,7 +4190,8 @@ class SQLiteRepository:
                 db, notebook_id, "relation_embeddings", "relation_id")
         relation_sims = query_sims(query_vector, rel_ids, rel_mat) if query_vector else None
         return score_relations(query, relations, query_vector=query_vector,
-                               relation_sims=relation_sims)
+                               relation_sims=relation_sims,
+                               downweight_edges=self.settings.kg_about_downweight_enabled)
 
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,

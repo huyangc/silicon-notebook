@@ -63,3 +63,18 @@ def test_retrieve_scored_fold_flag(repo, monkeypatch):
     on = repo._retrieve_scored(nb.id, "KV cache")
     assert len([h for h in off if h.object_id in ids]) == 2     # 关:两碎节点都在
     assert len([h for h in on if h.object_id in ids]) == 1      # 开:折成一个
+
+
+def test_score_relations_about_downweight_rank_only():
+    from app.services.retrieval import score_relations
+    rels = [
+        {"id": "r1", "source_object_id": "s", "target_object_id": "t", "edge_type": "about", "text": "cascode output resistance"},
+        {"id": "r2", "source_object_id": "s", "target_object_id": "t", "edge_type": "supports", "text": "cascode output resistance"},
+    ]
+    # 不降权:关键词相同 → relevance 相同
+    base = {h.relation_id: h for h in score_relations("cascode output resistance", rels)}
+    assert abs(base["r1"].relevance - base["r2"].relevance) < 1e-9
+    # 降权:about 的 score(排序用)被压低,但 relevance(tau 用)不变
+    dw = {h.relation_id: h for h in score_relations("cascode output resistance", rels, downweight_edges=True)}
+    assert abs(dw["r1"].relevance - base["r1"].relevance) < 1e-9    # relevance 不动
+    assert dw["r1"].score < dw["r2"].score                         # about 排序被压
