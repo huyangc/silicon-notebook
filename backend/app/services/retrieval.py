@@ -496,10 +496,14 @@ def rrf_fuse(rankings: Sequence[Dict[str, float]], k: int = 60) -> Dict[str, flo
     return fused
 
 
+# 非语义元数据字段:仅用于显示/引用,绝不进检索文本(否则污染 embedding/关键词)。
+_PAYLOAD_SKIP_KEYS = frozenset({"section_path"})
+
+
 def _payload_text(payload: Dict[str, object]) -> str:
     parts: List[str] = []
     for key, value in payload.items():
-        if str(key).startswith("_"):
+        if str(key).startswith("_") or key in _PAYLOAD_SKIP_KEYS:
             continue
         if isinstance(value, str):
             parts.append(value)
