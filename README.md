@@ -252,6 +252,8 @@ QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 
 GLOBAL_MAX_COMMUNITIES       # max community reports for Global QA, ask mode="global" (default 20)
 RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning seeds (default false, opt-in pending eval)
 RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
+KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)
+KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 ```
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
