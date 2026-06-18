@@ -239,6 +239,8 @@ QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 400
 GLOBAL_MAX_COMMUNITIES       # Global 问答(ask mode="global")考虑的社区报告上限（默认 20）
 RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
 RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
+KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
+KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 ```
 
 **两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
