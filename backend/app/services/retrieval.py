@@ -397,6 +397,15 @@ def score_knowledge(
     return scored
 
 
+# 边类型 rank 乘子:about 是弱结构边(本语料占 ~57%),降权仅作用于排序(score),
+# 绝不进 relevance(守 [0,1]/tau)。推理边保持 1.0。
+_EDGE_TYPE_RANK_WEIGHT = {"about": 0.5}
+
+
+def edge_type_rank_weight(edge_type: str) -> float:
+    return _EDGE_TYPE_RANK_WEIGHT.get(edge_type, 1.0)
+
+
 def score_relations(
     query: str,
     relations: List[dict],
@@ -404,6 +413,7 @@ def score_relations(
     relation_sims: Optional[Dict[str, float]] = None,
     w_keyword: float = W_KEYWORD,
     w_semantic: float = W_SEMANTIC,
+    downweight_edges: bool = False,
 ) -> List[RetrievedRelation]:
     """关系打分:关键词(关系 text)+ 可选语义(query vs 关系自有向量,来自
     relation_sims)。与 score_knowledge 同尺:max(0,cosine) 经 _fuse → relevance
@@ -426,6 +436,7 @@ def score_relations(
         relevance = _fuse(keyword, semantic, has_vector, w_keyword, w_semantic)
         if relevance < RELEVANCE_FLOOR:
             continue
+        rank_mult = edge_type_rank_weight(rel["edge_type"]) if downweight_edges else 1.0
         scored.append(RetrievedRelation(
             relation_id=rid,
             source_object_id=rel["source_object_id"],
@@ -433,7 +444,7 @@ def score_relations(
             edge_type=rel["edge_type"],
             text=text,
             evidence=rel.get("evidence", []),
-            score=relevance,
+            score=relevance * rank_mult,
             relevance=relevance,
         ))
     scored.sort(key=lambda it: it.score, reverse=True)
