@@ -31,3 +31,23 @@ def test_run_recall_reports_relation_metrics(repo):
     rows = run_recall(repo, nb.id, questions)
     assert rows and rows[0]["id"] == "g1"
     assert rows[0]["relation_recall_at_k"] == 1.0   # 关系被检索到
+
+
+class _FakeRepo:
+    def __init__(self, hits, cmap):
+        self._hits, self._cmap = hits, cmap
+    def _retrieve_scored(self, nb, q):
+        class H:
+            def __init__(s, oid): s.object_id = oid
+        return [H(o) for o in self._hits]
+    def _retrieve_relations_scored(self, nb, q): return []
+    def cluster_map(self, nb): return self._cmap
+
+
+def test_run_recall_maps_object_ids_to_canonical():
+    from app.eval.retrieval_metrics import run_recall
+    # 检索到代表 oA;gold 是被折掉的同簇成员 oB。canonical 映射后应判命中。
+    repo = _FakeRepo(hits=["oA", "x", "y"], cmap={"oA": "K", "oB": "K"})
+    q = [{"id": "g1", "question": "?", "gold_object_ids": ["oB"]}]
+    rows = run_recall(repo, "nb", q, k=12)
+    assert rows[0]["recall_at_k"] == 1.0   # oB→K,oA→K,canonical 层命中
