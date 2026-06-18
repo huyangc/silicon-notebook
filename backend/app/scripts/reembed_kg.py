@@ -1,6 +1,7 @@
 """在干净 _payload_text(已去 section_path)上强制重嵌一个 notebook 的知识/关系向量。
 用法: PYTHONPATH=backend python -m app.scripts.reembed_kg <notebook_id>
-先清空该 nb 的 knowledge_embeddings/relation_embeddings,再全量重嵌(故用 _payload_text 新文本)。"""
+先清空该 nb 的 knowledge_embeddings/relation_embeddings,再全量重嵌(故用 _payload_text 新文本)。
+完成后建议再跑 `python -m app.scripts.recluster_kg <nb>`,在干净向量上刷新 canonical 簇。"""
 import json, sys
 from app.core.config import get_settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -11,6 +12,9 @@ def main() -> int:
         print("usage: reembed_kg <notebook_id>"); return 2
     nb = sys.argv[1]
     repo = SQLiteRepository(get_settings())
+    if not repo.settings.embedder_configured:
+        print("[reembed] ABORT: embedder 未配置 — 不清空向量(否则退化为关键词检索)。配置 EMBED_* 后重试。")
+        return 2
     with repo._write() as db:
         db.execute("DELETE FROM knowledge_embeddings WHERE notebook_id=?", (nb,))
         db.execute("DELETE FROM relation_embeddings WHERE notebook_id=?", (nb,))

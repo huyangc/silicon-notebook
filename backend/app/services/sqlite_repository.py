@@ -4213,19 +4213,20 @@ class SQLiteRepository:
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
         knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
         if self.settings.retrieval_rrf_enabled:
-            return self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
-        scored: List[RetrievedKnowledge] = []
-        for t in type_list:
-            objs = kg_objs.get(t) or []
-            if not objs:
-                continue
-            scored.extend(score_knowledge(
-                query, objs, t, query_vector, None, None,
-                element_sims=element_sims, knowledge_sims=knowledge_sims,
-                w_keyword=w_keyword, w_semantic=w_semantic,
-                keyword_token_sets=token_sets,
-            ))
-        scored.sort(key=lambda it: it.score, reverse=True)
+            scored = self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
+        else:
+            scored = []
+            for t in type_list:
+                objs = kg_objs.get(t) or []
+                if not objs:
+                    continue
+                scored.extend(score_knowledge(
+                    query, objs, t, query_vector, None, None,
+                    element_sims=element_sims, knowledge_sims=knowledge_sims,
+                    w_keyword=w_keyword, w_semantic=w_semantic,
+                    keyword_token_sets=token_sets,
+                ))
+            scored.sort(key=lambda it: it.score, reverse=True)
         if self.settings.kg_canonical_fold_enabled:
             from app.services.retrieval import fold_by_canonical
             scored = fold_by_canonical(scored, self.cluster_map(notebook_id))
