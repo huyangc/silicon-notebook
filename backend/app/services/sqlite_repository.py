@@ -4462,6 +4462,9 @@ class SQLiteRepository:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
         返回 (answer, llm_grounded, anchors)。"""
+        # chunk 段编号 k1..kN,KG 段从 _MIX_KG_KEY_BASE 起;若 chunk 数逼近 base 会在
+        # 合并 id_map 时撞 KG key(静默覆盖)。按 base-1 硬截(token 预算下通常远不及此)。
+        chunks = chunks[: self._MIX_KG_KEY_BASE - 1]
         from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
         chunk_block, chunk_id_map = self._chunk_answer_context(chunks, budget_chars=10**9)
         if kg_block and kg_block != "(none)":

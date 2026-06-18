@@ -115,3 +115,19 @@ def test_ask_chunk_rerank_unconfigured_falls_back(repo):
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert resp.answer
     assert all(a.object_type == "chunk" for a in resp.anchors)
+
+
+def test_answer_mix_caps_chunks_below_kg_key_base(repo):
+    # 构造 >= _MIX_KG_KEY_BASE 个 chunk,确认被截到 base-1 之下,KG key 不被覆盖
+    repo.llm_client = _AnswerLLM("see [k1] and [k1001]")
+    n = repo._MIX_KG_KEY_BASE + 50
+    chunks = [RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="D",
+                             section_path="1", text="x", relevance=0.5) for i in range(n)]
+    kg_block = "k1001: [concept][personal] Cascode"
+    kg_id_map = {"k1001": {"object_id": "obj-a", "object_type": "concept",
+                           "name": "Cascode", "snippet": "", "definition": "",
+                           "source_title": "", "location_label": "", "tier": "personal"}}
+    _, _, anchors = repo._answer_mix("q", chunks, kg_block, kg_id_map, "")
+    # k1001 仍解析为 KG concept(未被 chunk 覆盖)
+    kg_anchor = [a for a in anchors if a.key == "k1001"]
+    assert kg_anchor and kg_anchor[0].object_type == "concept"
