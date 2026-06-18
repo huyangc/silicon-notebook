@@ -4736,6 +4736,37 @@ class SQLiteRepository:
         block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
         return block, id_map, node_hits
 
+    def _kg_source_chunks(self, notebook_id: str, object_ids: list) -> list:
+        """KG 对象 evidence 的 element_id → 含该 element 的 chunk(LightRAG 源 chunk)。
+        返回 List[RetrievedChunk](relevance 占位 0.3,后续 rerank 重排)。"""
+        from app.services.retrieval import RetrievedChunk
+        if not object_ids:
+            return []
+        with self._connect() as db:
+            ph = ",".join("?" * len(object_ids))
+            erows = db.execute(
+                f"SELECT evidence FROM knowledge_objects WHERE id IN ({ph})", list(object_ids)).fetchall()
+            elem_ids = set()
+            for r in erows:
+                for e in json.loads(r["evidence"] or "[]"):
+                    if isinstance(e, dict) and e.get("element_id"):
+                        elem_ids.add(e["element_id"])
+            if not elem_ids:
+                return []
+            crows = db.execute(
+                "SELECT id, source_id, text, section_path, element_ids FROM chunks WHERE notebook_id=?",
+                (notebook_id,)).fetchall()
+        out, seen = [], set()
+        for cr in crows:
+            cids = set(json.loads(cr["element_ids"] or "[]"))
+            if cids & elem_ids and cr["id"] not in seen:
+                seen.add(cr["id"])
+                out.append(RetrievedChunk(
+                    chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
+                    section_path=cr["section_path"], text=cr["text"],
+                    element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
+        return out
+
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
