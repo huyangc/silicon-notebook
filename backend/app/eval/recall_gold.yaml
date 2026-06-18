@@ -1,4 +1,374 @@
-# KG 检索 gold 集(双轨)。track: reverse(KG 反向出题) | anchor(人工锚点)。
-# bucket: node | bridge。gold_object_ids / gold_relation_ids 至少一项。
-- {id: a01, track: anchor, bucket: node, question: "什么是 regulated cascode?", gold_object_ids: []}
-- {id: a02, track: anchor, bucket: bridge, question: "regulated cascode 与 standard cascode 的关系?", gold_relation_ids: []}
+# KG 检索 gold 回归集(目标 notebook=nb-b37185f4ae「LLM Structure & Infra」)。
+# 来源:KG 反向出题(gen_recall_gold,leakage 体检)+ 人工 review 固化。
+# 45 题 = 22 bridge(关系) + 23 node;gold id 绑定该 notebook 当前 KG。
+# track: reverse|anchor; bucket: bridge|node; gold_object_ids/gold_relation_ids 至少一项。
+- id: r-obj-474199
+  track: reverse
+  bucket: node
+  question: What previous studies have explored techniques for enabling neural networks
+    to process sequences longer than those seen during training?
+  gold_object_ids:
+  - ko-085f474199
+- id: r-obj-9e9cd3
+  track: reverse
+  bucket: node
+  question: 在长上下文语言模型评估标准中，应当查阅哪个主要版本及子章节来获取具体的评估流程说明？
+  gold_object_ids:
+  - ko-e8959e9cd3
+- id: r-obj-851904
+  track: reverse
+  bucket: node
+  question: How many stages does the distillation procedure consist of?
+  gold_object_ids:
+  - ko-27be851904
+- id: r-obj-1a965d
+  track: reverse
+  bucket: node
+  question: How can I find the technique that reduces memory footprint in the KV cache,
+    and what is its designated location in the documentation tree?
+  gold_object_ids:
+  - ko-fb9b1a965d
+- id: r-obj-9670f7
+  track: reverse
+  bucket: node
+  question: 在评估模型性能时，为什么基于输入数据动态调整的旋转累积指标需要超过3.2，而实测值只有3会导致什么后果？
+  gold_object_ids:
+  - ko-1ca29670f7
+- id: r-obj-0af993
+  track: reverse
+  bucket: node
+  question: 在技术报告的后半部分，有一个核心结论的证明过程，它依赖了前面哪个已经证明的辅助结果？
+  gold_object_ids:
+  - ko-c7190af993
+- id: r-obj-7bdc66
+  track: reverse
+  bucket: node
+  question: What is a likely explanation for a model's failure to correctly evaluate
+    basic numerical comparisons, such as asserting that 6 > 6.5?
+  gold_object_ids:
+  - ko-fc1e7bdc66
+- id: r-obj-88a36b
+  track: reverse
+  bucket: node
+  question: We're training a model for static scene classification and need a well-established
+    dataset. Which one should we look into that has a version 1 release?
+  gold_object_ids:
+  - ko-e06788a36b
+- id: r-obj-8ff214
+  track: reverse
+  bucket: node
+  question: How did you obtain vector representations for the text in your pipeline?
+  gold_object_ids:
+  - ko-33458ff214
+- id: r-obj-5dc74e
+  track: reverse
+  bucket: node
+  question: What should an AI system prioritize to be practical for everyday use by
+    non-English speakers in areas with poor connectivity?
+  gold_object_ids:
+  - ko-da4d5dc74e
+- id: r-obj-30ab06
+  track: reverse
+  bucket: node
+  question: We're assessing the safety of different reasoning models for our deployment.
+    How does DeepSeek-R1's inherent safety measure up against GPT-4o's?
+  gold_object_ids:
+  - ko-7d2630ab06
+- id: r-obj-a8a4a0
+  track: reverse
+  bucket: node
+  question: 在训练过程中，若要分阶段逐步提升模型支持的上下文窗口大小，通常会如何设定各阶段的序列长度目标，并怎样控制每个阶段数据集中长序列与短序列的比例？
+  gold_object_ids:
+  - ko-4c98a8a4a0
+- id: r-obj-d5c34b
+  track: reverse
+  bucket: node
+  question: 听说有个720亿参数的多模态模型表现不俗，与另一个700亿参数的知名多模态模型旗鼓相当，而且有人提到一个指标上6分胜过6.3分，这是怎样的对比？
+  gold_object_ids:
+  - ko-e2cfd5c34b
+- id: r-obj-ce9194
+  track: reverse
+  bucket: node
+  question: 在长上下文基准测试中，哪种压缩方法取得了最高的平均分数？这个分数是多少？
+  gold_object_ids:
+  - ko-8155ce9194
+- id: r-obj-cc1cad
+  track: reverse
+  bucket: node
+  question: Is the aging process of the latest iteration more stable and predictable
+    than that of the prior release?
+  gold_object_ids:
+  - ko-51accc1cad
+- id: r-obj-64dab5
+  track: reverse
+  bucket: node
+  question: Where can I find the explanation for the symbolic representation of the
+    set that enumerates the selected memory blocks?
+  gold_object_ids:
+  - ko-0dda64dab5
+- id: r-obj-946968
+  track: reverse
+  bucket: node
+  question: Why might sequences of extracted representations display more consistent
+    patterns than the original input streams from which they are derived?
+  gold_object_ids:
+  - ko-d33c946968
+- id: r-obj-0b012c
+  track: reverse
+  bucket: node
+  question: 在调整神经网络架构时，若扩大某个影响模型规模的超参数，会如何影响模型的表达能力和硬件资源消耗？
+  gold_object_ids:
+  - ko-6dea0b012c
+- id: r-obj-8ae0e3
+  track: reverse
+  bucket: node
+  question: I want to train an AI to do software engineering by having it interact
+    with codebases in parallel and getting feedback from test runs. What kind of infrastructure
+    setup would you recommend, and are there any specific version constraints I should
+    consider?
+  gold_object_ids:
+  - ko-45368ae0e3
+- id: r-obj-a2b07c
+  track: reverse
+  bucket: node
+  question: 在语言模型序列推理过程中，哪一类标记通常负责构建确定性高、细节丰富的推理环节？
+  gold_object_ids:
+  - ko-d25ca2b07c
+- id: r-obj-de58ef
+  track: reverse
+  bucket: node
+  question: 在优化一个多层级系统的目标时，若要寻找一个输入配置，使得各层输出经过某种距离度量后的累计值达到全局最低，这个最优解通常怎么表示？
+  gold_object_ids:
+  - ko-2582de58ef
+- id: r-obj-af1e6f
+  track: reverse
+  bucket: node
+  question: What is the essential requirement for a secondary model to accelerate
+    a primary large language model's token generation through parallel guessing?
+  gold_object_ids:
+  - ko-b0fcaf1e6f
+- id: r-obj-dbd99e
+  track: reverse
+  bucket: node
+  question: What is the exact hierarchical path to the section on agentic programming
+    in the Wikidata knowledge graph documentation?
+  gold_object_ids:
+  - ko-fb7adbd99e
+- id: r-rel-8b4cef
+  track: reverse
+  bucket: bridge
+  question: 在通过强化学习训练语言模型的过程中，模型表现出的自我检查和反思行为是怎样形成的？
+  gold_relation_ids:
+  - rel-1e2d8b4cef
+  gold_object_ids:
+  - ko-d41ed5a8de
+  - ko-5262c01446
+- id: r-rel-eda518
+  track: reverse
+  bucket: bridge
+  question: Why do vision-language models trained on extensive web-harvested image-caption
+    pairs often produce captions that lack diversity in phrasing?
+  gold_relation_ids:
+  - rel-a821eda518
+  gold_object_ids:
+  - ko-97c3535072
+  - ko-7f3e9f69d2
+- id: r-rel-d3e264
+  track: reverse
+  bucket: bridge
+  question: 那个声称在不同语言中都维持着可靠的最低安全水平，并且试图在模型规模和多语言能力之间搭建桥梁的轻量级模型，具体是指哪一个？
+  gold_relation_ids:
+  - rel-2099d3e264
+  gold_object_ids:
+  - ko-9d3d451fee
+  - ko-26f30d04c1
+- id: r-rel-3d6e7b
+  track: reverse
+  bucket: bridge
+  question: 哪种技术通过将文本生成过程拆分为快速提案与后续验证两个阶段来解决生成速度慢的问题？
+  gold_relation_ids:
+  - rel-c6333d6e7b
+  gold_object_ids:
+  - ko-24b55d1f29
+  - ko-229868f4f3
+- id: r-rel-24046c
+  track: reverse
+  bucket: bridge
+  question: 在近期评估的小型Transformer语言模型中，参数规模从4B增加到8B时，整体准确性是否有显著提升？
+  gold_relation_ids:
+  - rel-301724046c
+  gold_object_ids:
+  - ko-4cbc88995d
+  - ko-87c87ea8c5
+- id: r-rel-9fef77
+  track: reverse
+  bucket: bridge
+  question: Describe the key behavioral difference between a token that bypasses intermediate
+    layers but may later rejoin the network and a token that terminates its computation
+    early.
+  gold_relation_ids:
+  - rel-6efd9fef77
+  gold_object_ids:
+  - ko-124d72ed10
+  - ko-8287d4a2aa
+- id: r-rel-ec9905
+  track: reverse
+  bucket: bridge
+  question: Under what conditions does the technique that allows a language model
+    to anticipate the most relevant context before text generation become impractical?
+  gold_relation_ids:
+  - rel-f3a5ec9905
+  gold_object_ids:
+  - ko-a949ed02d8
+  - ko-e6cb4cf6d9
+- id: r-rel-25bd19
+  track: reverse
+  bucket: bridge
+  question: I'm looking for a benchmark that can evaluate performance on a per-instance
+    basis. Do we have any?
+  gold_relation_ids:
+  - rel-01a725bd19
+  gold_object_ids:
+  - ko-dbd7644cf4
+  - ko-106f551b06
+- id: r-rel-b7674f
+  track: reverse
+  bucket: bridge
+  question: When implementing a cache compression system under a hardware-enforced
+    bit limit, how can we jointly decide which entries to evict and how many bits
+    to assign to the quantized entries, in order to minimize the overall reconstruction
+    distortion?
+  gold_relation_ids:
+  - rel-b1e2b7674f
+  gold_object_ids:
+  - ko-710b3ad983
+  - ko-ae4bf27a29
+- id: r-rel-8ef7d5
+  track: reverse
+  bucket: bridge
+  question: 为了扩大语言模型能有效处理的上下文长度，除了优化位置编码方案，通常还需要配合哪种训练策略？
+  gold_relation_ids:
+  - rel-dd7d8ef7d5
+  gold_object_ids:
+  - ko-9460709537
+  - ko-c977934053
+- id: r-rel-304438
+  track: reverse
+  bucket: bridge
+  question: 该图分析方法如何精准评估文本中每个词元的上下文表示与图结构之间的对应关系？
+  gold_relation_ids:
+  - rel-3864304438
+  gold_object_ids:
+  - ko-f0e5b45f96
+  - ko-2fbb5e7791
+- id: r-rel-9ff680
+  track: reverse
+  bucket: bridge
+  question: Why might a language model with excellent perplexity still struggle with
+    generative reasoning, and what comparative insight do we have from different versions
+    of a reasoning evaluation metric?
+  gold_relation_ids:
+  - rel-f7499ff680
+  gold_object_ids:
+  - ko-8af78520e5
+  - ko-d1ec36b9c2
+- id: r-rel-c1247b
+  track: reverse
+  bucket: bridge
+  question: What is the key requirement for implementing low-cost automated fault
+    detection solutions?
+  gold_relation_ids:
+  - rel-9a59c1247b
+  gold_object_ids:
+  - ko-6fa1e91fde
+  - ko-706eaef7a5
+- id: r-rel-71aff8
+  track: reverse
+  bucket: bridge
+  question: 为了确保日志和报告的一致性，系统里的前置校验和降级策略应该怎样被评估？
+  gold_relation_ids:
+  - rel-3c3571aff8
+  gold_object_ids:
+  - ko-b745abdf4d
+  - ko-f0092af08d
+- id: r-rel-9c0bcb
+  track: reverse
+  bucket: bridge
+  question: What is the arithmetic intensity of the SISO kernel, and does it depend
+    on the values of N and P?
+  gold_relation_ids:
+  - rel-81809c0bcb
+  gold_object_ids:
+  - ko-66a536e0d3
+  - ko-ec86459454
+- id: r-rel-226979
+  track: reverse
+  bucket: bridge
+  question: What allows the Hawk architecture to remain competitive with multi-query
+    attention transformers?
+  gold_relation_ids:
+  - rel-814d226979
+  gold_object_ids:
+  - ko-1f4497346a
+  - ko-dd22a64965
+- id: r-rel-25fa2d
+  track: reverse
+  bucket: bridge
+  question: What is the mathematical expression for combining several distance measures
+    into one robust score when interpreting model decisions across multiple targets?
+  gold_relation_ids:
+  - rel-6e8125fa2d
+  gold_object_ids:
+  - ko-e4e1729248
+  - ko-191fe5f5c6
+- id: r-rel-034223
+  track: reverse
+  bucket: bridge
+  question: In a key-value store, how can we architect the system to handle a subset
+    of data that requires unique, low-latency access, while also enabling flexible
+    scaling of different hardware resources?
+  gold_relation_ids:
+  - rel-ef3b034223
+  gold_object_ids:
+  - ko-81a487cdd8
+  - ko-11c48a56ee
+- id: r-rel-7ea49a
+  track: reverse
+  bucket: bridge
+  question: Which recent architecture integrates gated linear recurrences with local
+    attention as a replacement for the widely used memory-efficient attention method
+    that shares key-value projections across heads?
+  gold_relation_ids:
+  - rel-76ac7ea49a
+  gold_object_ids:
+  - ko-4079ce3f3d
+  - ko-57735627c5
+- id: r-rel-7c5b2e
+  track: reverse
+  bucket: bridge
+  question: 在实时数据流处理场景下，如何既能快速又能自动化地对各个输入项的显著程度进行打分和排序？
+  gold_relation_ids:
+  - rel-705b7c5b2e
+  gold_object_ids:
+  - ko-6cfdce69eb
+  - ko-6f5a2ef8e7
+- id: r-rel-ee58cf
+  track: reverse
+  bucket: bridge
+  question: How can we fulfill the k-major alignment requirement for FP8 WGMMA in
+    the second matrix multiply of attention when working with the value matrix?
+  gold_relation_ids:
+  - rel-2965ee58cf
+  gold_object_ids:
+  - ko-be2f910499
+  - ko-1da959b44f
+- id: r-rel-55157e
+  track: reverse
+  bucket: bridge
+  question: Which new form of recurrent layer has been introduced in the sequential
+    processing module, and what earlier linear recurrent model was its inspiration?
+  gold_relation_ids:
+  - rel-018a55157e
+  gold_object_ids:
+  - ko-fbe0ab9527
+  - ko-59afb929d0
