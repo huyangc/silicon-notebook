@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     rerank_candidates: int = Field(20, env="RERANK_CANDIDATES")
     # 候选池 LLM 重排的专用短超时(秒): 廉价重排须快速降级,不沿用更长的全局/推理超时。
     rerank_timeout_seconds: int = Field(20, env="RERANK_TIMEOUT_SECONDS")
+    # qwen3-rerank (DashScope text-rerank) 配置
+    rerank_model: str = Field("", env="RERANK_MODEL")
+    rerank_base_url: str = Field("https://dashscope.aliyuncs.com/compatible-api/v1", env="RERANK_BASE_URL")
+    rerank_api_key: str = Field("", env="RERANK_API_KEY")
+    rerank_max_docs: int = Field(500, env="RERANK_MAX_DOCS")
     relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, env="RELATION_SEED_TOP_N")
     kg_canonical_fold_enabled: bool = Field(False, env="KG_CANONICAL_FOLD_ENABLED")
