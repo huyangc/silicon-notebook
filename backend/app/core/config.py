@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     # P4: 摄取默认不抽 KG(只建 chunk);要严格推理时经"建图"端点/离线 CLI 按需构建。
     # True 恢复旧"每次摄取整库自动抽"行为(迁移/测试逃生口)。base 库复用 tier='base'。
     kg_auto_extract: bool = Field(False, env="KG_AUTO_EXTRACT")
+    # chunk×graph mix token 预算(照 LightRAG 6000/8000/30000)。
+    max_entity_tokens: int = Field(6000, env="MAX_ENTITY_TOKENS")
+    max_relation_tokens: int = Field(8000, env="MAX_RELATION_TOKENS")
+    max_total_tokens: int = Field(30000, env="MAX_TOTAL_TOKENS")
 
     # LLM interaction logging. Records every chat/embedding call (request,
     # response, latency, token usage, errors) to a JSONL file plus a brief
