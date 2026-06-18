@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from app.models.schemas import AskRequest
+from app.services.retrieval import RetrievedChunk
 
 
 @pytest.fixture
@@ -43,3 +45,73 @@ def test_mix_retrieve_merges_vector_and_kg_source_chunks(repo):
     assert isinstance(block, str) and isinstance(id_map, dict)
     # KG key 用高 base(≥1001),不与 chunk key 撞
     assert all(int(k[1:]) >= 1001 for k in id_map) if id_map else True
+
+
+class _AnswerLLM:
+    configured = True
+    def __init__(self, text): self.text = text; self.calls = 0
+    def chat_json(self, messages, schema_hint, **kw):
+        self.calls += 1
+        return _j.dumps({"answer": self.text, "grounded": True})
+
+
+class _FakeRerank:
+    def __init__(self, configured=True): self._c = configured
+    @property
+    def configured(self): return self._c
+    def rerank(self, query, documents): return list(range(len(documents)))
+
+
+def test_chunk_answer_context_budget_override(repo):
+    chunks = [RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="D",
+                             section_path="1", text="x" * 500, relevance=0.5)
+              for i in range(10)]
+    _, idmap_small = repo._chunk_answer_context(chunks, budget_chars=100)
+    _, idmap_big = repo._chunk_answer_context(chunks, budget_chars=10**9)
+    assert len(idmap_big) == 10
+    assert len(idmap_small) < 10
+
+
+def test_answer_mix_resolves_chunk_and_kg_anchors(repo):
+    repo.llm_client = _AnswerLLM("Cascode raises rout [k1]. Related: [k1001].")
+    chunks = [RetrievedChunk(chunk_id="c1", source_id="s", source_title="D",
+                             section_path="1", text="cascode raises rout", relevance=0.8)]
+    kg_block = "k1001: [concept][personal] Cascode"
+    kg_id_map = {"k1001": {"object_id": "obj-a", "object_type": "concept",
+                           "name": "Cascode", "snippet": "", "definition": "",
+                           "source_title": "", "location_label": "", "tier": "personal"}}
+    answer, grounded, anchors = repo._answer_mix("q", chunks, kg_block, kg_id_map, "")
+    keys = {a.key for a in anchors}
+    assert "k1" in keys and "k1001" in keys
+    types = {a.object_type for a in anchors}
+    assert "chunk" in types and "concept" in types
+
+
+def test_ask_chunk_overlay_off_is_chunk_only(repo):
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    repo.llm_client = _AnswerLLM("answer [k1]")
+    nb = _seed_chunks_and_kg(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    assert all(a.object_type == "chunk" for a in resp.anchors)
+
+
+def test_ask_chunk_mix_runs_end_to_end(repo):
+    repo.settings.query_rewrite_enabled = False
+    repo.llm_client = _AnswerLLM("Cascode raises rout [k1]")
+    repo.rerank_client = _FakeRerank(configured=True)
+    nb = _seed_chunks_and_kg(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    assert resp.answer
+    assert resp.mode == "chunk"
+    assert isinstance(resp.grounded, bool)
+
+
+def test_ask_chunk_rerank_unconfigured_falls_back(repo):
+    repo.settings.query_rewrite_enabled = False
+    repo.llm_client = _AnswerLLM("answer [k1]")
+    repo.rerank_client = _FakeRerank(configured=False)
+    nb = _seed_chunks_and_kg(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    assert resp.answer
+    assert all(a.object_type == "chunk" for a in resp.anchors)

@@ -195,6 +195,8 @@ class SQLiteRepository:
         )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
+        from app.services.rerank_client import RerankClient
+        self.rerank_client = RerankClient(settings)
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = EventLogger(settings, channel="events")
@@ -4417,11 +4419,11 @@ class SQLiteRepository:
         by_id = {c.chunk_id: c for c in scored}
         return [by_id[cid] for cid in chosen]
 
-    def _chunk_answer_context(self, chunks) -> tuple:
+    def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None) -> tuple:
         """产出长上下文综合用的 id 标注块 + id_map。chunk.text 已含 [section] 前缀
         (P1 build_chunks),故每行直接 `k_i: <text>`。id_map 形状与 KG 版一致,
         使 _parse_answer_anchors 原样复用(object_id=chunk_id, object_type=chunk)。"""
-        budget = self.settings.chunk_answer_budget_chars
+        budget = self.settings.chunk_answer_budget_chars if budget_chars is None else budget_chars
         lines, id_map = [], {}
         used = 0
         for i, c in enumerate(chunks, 1):
@@ -4444,6 +4446,29 @@ class SQLiteRepository:
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。"""
         from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
         context_block, id_map = self._chunk_answer_context(chunks)
+        raw = self.llm_client.chat_json(
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            ANSWER_SCHEMA_HINT,
+        )
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("answer did not return a JSON object")
+        answer = str(data.get("answer", "")).strip()
+        llm_grounded = bool(data.get("grounded", False))
+        anchors = self._parse_answer_anchors(answer, id_map)
+        return answer, llm_grounded, anchors
+
+    def _answer_mix(self, question, chunks, kg_block, kg_id_map, history="") -> tuple:
+        """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
+        chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
+        返回 (answer, llm_grounded, anchors)。"""
+        from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
+        chunk_block, chunk_id_map = self._chunk_answer_context(chunks, budget_chars=10**9)
+        if kg_block and kg_block != "(none)":
+            context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
+        else:
+            context_block = chunk_block
+        id_map = {**chunk_id_map, **kg_id_map}
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -4479,17 +4504,39 @@ class SQLiteRepository:
 
         _t = time.perf_counter()
         from app.services.query_rewrite import expand_query
-        from app.services.retrieval import quota_fuse
+        from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
+        ex = None
         if self.settings.query_rewrite_enabled:
             ex = expand_query(self.rewrite_llm_client, retrieval_query, history,
                               max_subqueries=self.settings.chunk_max_subqueries)
             sub_queries = [s.query for s in ex.sub_queries]
         else:
             sub_queries = [retrieval_query]
+        hl = " ".join(ex.high_level_keywords) if ex else ""
         ask_stage("expand_query", _t, n=len(sub_queries))
 
+        # ── 检索 + 选择 ──
+        # mix(overlay 开 + rerank 配齐 + 有 KG):三路并池 → rerank 排序 → token 预算截。
+        # 否则走现状 chunk-only(MMR / quota_fuse),与历史字节等价。
+        overlay_on = (self.settings.chunk_kg_overlay_enabled
+                      and self.rerank_client.configured
+                      and (self._notebook_has_kg(notebook_id)
+                           or self._any_base_notebook_has_kg()))
+        kg_block, kg_id_map, kg_hits = "", {}, []
         _t = time.perf_counter()
-        if len(sub_queries) >= 2:
+        if overlay_on:
+            candidates, kg_block, kg_id_map, kg_hits = self._mix_retrieve(
+                notebook_id, retrieval_query, hl, sub_queries)
+            order = self.rerank_client.rerank(retrieval_query, [c.text for c in candidates])
+            ranked = [candidates[i] for i in order]
+            kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
+            kg_block = self._truncate_kg_block(kg_block, kg_budget)
+            chunk_budget = max(0, self.settings.max_total_tokens
+                               - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
+            selected = truncate_by_tokens(ranked, lambda c: c.text, chunk_budget)
+            ask_stage("mix_rerank", _t, recall=len(candidates),
+                      selected=len(selected), kg_nodes=len(kg_id_map))
+        elif len(sub_queries) >= 2:
             collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
             selected, _counts = quota_fuse(collected, per_query, self.settings.chunk_mmr_k,
                                            relevance=lambda c: c.relevance)
@@ -4500,28 +4547,46 @@ class SQLiteRepository:
                 scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
             ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
-        # 引用绑回 chunk:element_id 取 chunk 首个 element(前端既有 element 引用可解析)。
-        citations: List[Citation] = []
-        for c in selected:
-            eid = c.element_ids[0] if c.element_ids else ""
-            citations.append(Citation(
-                label=f"{c.source_title} · {c.section_path}".strip(" ·"),
-                source_id=c.source_id, element_id=eid,
-                location_label=c.section_path, quoted_span=c.text[:200]))
-
         answer, llm_grounded, anchors = "", False, []
         _t = time.perf_counter()
-        if self.llm_client.configured and selected:
+        if self.llm_client.configured and (selected or kg_id_map):
             try:
-                answer, llm_grounded, anchors = self._answer_chunks(
-                    question, selected, history)
+                if overlay_on:
+                    answer, llm_grounded, anchors = self._answer_mix(
+                        question, selected, kg_block, kg_id_map, history)
+                else:
+                    answer, llm_grounded, anchors = self._answer_chunks(
+                        question, selected, history)
             except Exception:
-                self.event_log.logger.exception("_answer_chunks failed for %s", notebook_id)
+                self.event_log.logger.exception("answer failed for %s", notebook_id)
                 answer, llm_grounded, anchors = "", False, []
         ask_stage("answer_llm", _t)
 
+        # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
+        # 非 mix:每个精选 chunk 一条(字节等价于历史)。
+        citations: List[Citation] = []
+        if overlay_on:
+            by_id = {c.chunk_id: c for c in selected}
+            for a in anchors:
+                if a.object_type == "chunk" and a.object_id in by_id:
+                    c = by_id[a.object_id]
+                    eid = c.element_ids[0] if c.element_ids else ""
+                    citations.append(Citation(
+                        label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                        source_id=c.source_id, element_id=eid,
+                        location_label=c.section_path, quoted_span=c.text[:200]))
+        else:
+            for c in selected:
+                eid = c.element_ids[0] if c.element_ids else ""
+                citations.append(Citation(
+                    label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                    source_id=c.source_id, element_id=eid,
+                    location_label=c.section_path, quoted_span=c.text[:200]))
+
+        # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
+        combined_hits = list(selected) + list(kg_hits)
         evidence_level, top_relevance = classify_evidence(
-            selected, anchors, llm_grounded,
+            combined_hits, anchors, llm_grounded,
             self.settings.evidence_tau_low, self.settings.evidence_tau_high)
         grounded = evidence_level == "grounded"
 
@@ -4770,6 +4835,21 @@ class SQLiteRepository:
     # ── chunk×graph mix ──────────────────────────────────────────────────────
 
     _MIX_KG_KEY_BASE = 1000
+    _MIX_PROMPT_BUFFER_TOKENS = 2000
+
+    def _truncate_kg_block(self, block: str, max_tokens: int) -> str:
+        """按行截断 KG block 至 token 预算(整行保留)。被截掉的行其 [k] 仍留在 id_map,
+        _parse_answer_anchors 解析无害(只损失上下文,不破坏引用)。镜像 truncate_by_tokens。"""
+        from app.services.retrieval import est_tokens
+        if not block or est_tokens(block) <= max_tokens:
+            return block
+        out, used = [], 0
+        for ln in block.split("\n"):
+            used += est_tokens(ln)
+            if used > max_tokens and out:
+                break
+            out.append(ln)
+        return "\n".join(out)
 
     def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
         """向量 chunk 候选(多子查询合并去重;单查询直接 scored)。返回 List[RetrievedChunk]。"""
