@@ -100,10 +100,6 @@ class Settings(BaseSettings):
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
-    rerank_enabled: bool = Field(False, env="RERANK_ENABLED")
-    rerank_candidates: int = Field(20, env="RERANK_CANDIDATES")
-    # 候选池 LLM 重排的专用短超时(秒): 廉价重排须快速降级,不沿用更长的全局/推理超时。
-    rerank_timeout_seconds: int = Field(20, env="RERANK_TIMEOUT_SECONDS")
     # qwen3-rerank (DashScope text-rerank) 配置
     rerank_model: str = Field("", env="RERANK_MODEL")
     rerank_base_url: str = Field("https://dashscope.aliyuncs.com/compatible-api/v1", env="RERANK_BASE_URL")
