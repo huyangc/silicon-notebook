@@ -36,7 +36,8 @@ LightRAG 对比里最大的未实现项是 **mix**:把 chunk 向量 + KG(实体 
 ### 5.1 qwen3-rerank 客户端(新)
 - `RerankClient`(`app/services/rerank_client.py`):`POST {base}/reranks`,`Authorization: Bearer {key}`,body `{model, query, documents:[text...], top_n}`,resp `results:[{index, relevance_score}]`。
 - config:`RERANK_MODEL`(默认 ""=关→回退 MMR)、`RERANK_BASE_URL`(默认 `https://dashscope.aliyuncs.com/compatible-api/v1`)、`RERANK_API_KEY`(缺省复用 embedder/DashScope key)、`RERANK_TOP_N`(可选)。`configured` = MODEL 非空。
-- 约束:≤500 文档/请求 ≤120k token(我们召回 150 远在内);query ≤4000 token。失败/超时 → 返回原序(降级)。
+- 约束:≤500 文档/请求 ≤120k token;query ≤4000 token。失败/超时 → 返回原序(降级)。
+- **并发**:一次 ask 的候选(~150–200 块,≈22–80k token)**一次批量调用即可**,无需拆分——单 ask 内并发不会加速(本就是一个批量请求)。**仅当候选超限**(>500 文档 或 >~100k token,即召回被大幅拉高时)才**自动切 batch + 线程池并发调用 + 按 relevance_score 合并**(并发数复用 `EMBED_CONCURRENCY` 范式;score 跨 batch 同尺可比)。跨 ask 的并发由 ask 级线程池/服务天然提供,rerank 客户端无需处理。
 
 ### 5.2 三路检索(`_mix_retrieve`,在 ask_chunk 内)
 复用现有原语,**不新建检索**:
