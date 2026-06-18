@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     chunk_target_chars: int = Field(600, env="CHUNK_TARGET_CHARS")
     chunk_overlap_chars: int = Field(0, env="CHUNK_OVERLAP_CHARS")
     # chunk-native 检索: 大召回候选数 / MMR 精选数 / MMR λ / 答案上下文预算(长上下文综合)。
-    chunk_recall: int = Field(150, env="CHUNK_RECALL")
+    chunk_recall: int = Field(200, env="CHUNK_RECALL")   # mix 候选池/MMR 候选;LightRAG 风格猛召回
     chunk_mmr_k: int = Field(16, env="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, env="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, env="CHUNK_ANSWER_BUDGET_CHARS")

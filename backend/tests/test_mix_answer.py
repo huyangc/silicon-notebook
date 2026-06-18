@@ -131,3 +131,16 @@ def test_answer_mix_caps_chunks_below_kg_key_base(repo):
     # k1001 仍解析为 KG concept(未被 chunk 覆盖)
     kg_anchor = [a for a in anchors if a.key == "k1001"]
     assert kg_anchor and kg_anchor[0].object_type == "concept"
+
+
+def test_ask_chunk_byte_equivalent_when_overlay_and_rerank_off(repo):
+    """等价护栏:overlay 关 + rerank 未配 → 纯 chunk(MMR/quota),不注入 KG,
+    引用为每个精选 chunk 一条(历史行为)。"""
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    assert not repo.rerank_client.configured        # fixture 未配 RERANK_MODEL
+    repo.llm_client = _AnswerLLM("answer [k1]")
+    nb = _seed_chunks_and_kg(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    assert all(a.object_type == "chunk" for a in resp.anchors)   # 无 KG anchor
+    assert len(resp.citations) >= 1                              # 每精选 chunk 一条
