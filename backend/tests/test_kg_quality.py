@@ -78,3 +78,12 @@ def test_score_relations_about_downweight_rank_only():
     dw = {h.relation_id: h for h in score_relations("cascode output resistance", rels, downweight_edges=True)}
     assert abs(dw["r1"].relevance - base["r1"].relevance) < 1e-9    # relevance 不动
     assert dw["r1"].score < dw["r2"].score                         # about 排序被压
+
+
+import ast, pathlib
+
+
+def test_offline_clis_parse():
+    for f in ("reembed_kg.py", "recluster_kg.py"):
+        p = pathlib.Path("app/scripts") / f
+        ast.parse(p.read_text(encoding="utf-8"))
