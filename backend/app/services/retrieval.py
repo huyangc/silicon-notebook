@@ -440,6 +440,19 @@ def score_relations(
     return scored
 
 
+def fold_by_canonical(hits, cluster_map):
+    """非销毁折叠:同一 canonical_id 只保留打分最高的成员(输入须已按 score 降序),
+    其余 drop。无映射的 hit 按自身 object_id(不折)。不改 hit 内容,只去重候选。"""
+    seen, out = set(), []
+    for h in hits:
+        c = cluster_map.get(h.object_id, h.object_id)
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(h)
+    return out
+
+
 def bm25_scores(query: str, docs: Sequence[tuple], k1: float = 1.5,
                 b: float = 0.75) -> Dict[str, float]:
     """BM25 Okapi over (id, text) docs, using the CJK-aware `_tokens` tokenizer.
