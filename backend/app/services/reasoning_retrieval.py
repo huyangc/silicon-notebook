@@ -317,7 +317,6 @@ class ReasoningRetriever:
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[: self.settings.retrieval_top_n]
-        top_hits = self.repo._rerank_hits(question, top_hits)   # no-op when rerank_enabled off
         answer_detail["kg"] = len(top_hits)
         record(TraceStep(step_type="answer",
                          summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",

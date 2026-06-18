@@ -226,19 +226,6 @@ def plan_prompt(question: str, history_block: str = "") -> str:
     )
 
 
-RERANK_SCHEMA_HINT = '{"items":[{"index":0,"score":0.0}]}'
-
-
-def rerank_prompt(query: str, candidates_block: str) -> str:
-    return (
-        "Score how relevant each candidate knowledge item is to the user question "
-        "on a 0.0-1.0 scale (1.0 = directly answers it, 0.0 = irrelevant). "
-        "Return JSON only: one entry per candidate index.\n\n"
-        f"Question: {query}\n\n"
-        f"Candidates:\n{candidates_block}"
-    )
-
-
 REFLECT_SCHEMA_HINT = (
     '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
     'search_elements","expand":{"object_id":"","edge_type":null,'

@@ -86,14 +86,12 @@ from app.services.prompts import (
     DESCRIPTION_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
     NOTEBOOK_META_SCHEMA_HINT,
-    RERANK_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
     article_prompt,
     followup_rewrite_prompt,
     notebook_description_prompt,
     notebook_meta_prompt,
-    rerank_prompt,
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
@@ -4626,8 +4624,9 @@ class SQLiteRepository:
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
     # "chunk"，不会触发 422。
     # 随之删除的还有：is_process_query import（原 ask_fast 独占调用）。
-    # 保留的 helper（_rrf_scored / _rerank_hits 等）仍被其他 ask_* 路径
-    # 或测试直接调用，尚未可删。_answer_kg 已删(P4-5死码)，query-refine 移入 _refine_context。
+    # 保留的 helper（_rrf_scored 等）仍被其他 ask_* 路径或测试直接调用，尚未可删。
+    # 旧 LLM 打分重排 helper 已删——被 qwen3-rerank(RerankClient)取代。
+    # _answer_kg 已删(P4-5死码)，query-refine 移入 _refine_context。
 
     def _concept_cluster_id(self, notebook_id: str, object_id: str) -> str:
         """Canonical unified-cluster id for a concept `object_id`, reusing the
@@ -4717,37 +4716,6 @@ class SQLiteRepository:
             )
         result.sort(key=lambda it: it.score, reverse=True)
         return result
-
-    def _rerank_hits(self, query: str, hits: List[RetrievedKnowledge]) -> List[RetrievedKnowledge]:
-        """LLM relevance rerank over a candidate pool. No-op when disabled, the
-        client is unconfigured, or the response is unusable (keeps input order)."""
-        if not hits or not self.settings.rerank_enabled \
-                or not getattr(self.llm_client, "configured", False):
-            return hits
-        block = "\n".join(
-            f"[{i}] [{h.object_type}] {str(h.payload.get('name', ''))[:200]}"
-            for i, h in enumerate(hits)
-        )
-        try:
-            raw = self.llm_client.chat_json(
-                [{"role": "user", "content": rerank_prompt(query, block)}],
-                RERANK_SCHEMA_HINT,
-                timeout=self.settings.rerank_timeout_seconds, max_retries=0,
-            )
-            data = json.loads(raw)
-        except Exception:
-            return hits
-        scores: Dict[int, float] = {}
-        for it in (data.get("items") if isinstance(data, dict) else None) or []:
-            if isinstance(it, dict) and isinstance(it.get("index"), int):
-                try:
-                    scores[it["index"]] = float(it.get("score", 0.0))
-                except (TypeError, ValueError):
-                    pass
-        if not scores:
-            return hits
-        order = sorted(range(len(hits)), key=lambda i: scores.get(i, -1.0), reverse=True)
-        return [hits[i] for i in order]
 
     def _graph_seed_fusion(self, notebook_id: str, question: str,
                            base_seeds: List[str]) -> List[str]:
@@ -5182,7 +5150,6 @@ class SQLiteRepository:
 
         # Seed: top-N by relevance (federated across base notebooks).
         top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
-        top_hits = self._rerank_hits(question, top_hits)        # no-op when rerank_enabled off
         if not top_hits and not seed_ids:
             response = AskResponse(
                 answer_id="",
