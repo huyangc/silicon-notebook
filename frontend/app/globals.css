@@ -2170,6 +2170,18 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+.answer-model-error {
+  display: block;
+  background: #fff7ed;
+  border: 1px solid #f97316;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  color: #9a3412;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .answer-ungrounded {
   justify-self: start;
   color: #6b7280;
