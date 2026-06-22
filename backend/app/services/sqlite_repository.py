@@ -5374,6 +5374,33 @@ class SQLiteRepository:
                     element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
         return out
 
+    def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
+        """{object_id: set(chunk_id)} — KG 实体出现在哪些 chunk 里。
+        口径同 _kg_source_chunks:evidence[].element_id ∈ chunks.element_ids[]。
+        用于 PPR 的 membership 边 + (P2) specificity 权重分母。"""
+        with self._connect() as db:
+            obj_rows = db.execute(
+                "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+            chunk_rows = db.execute(
+                "SELECT id, element_ids FROM chunks WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+        elem_to_chunks: Dict[str, set] = {}
+        for cr in chunk_rows:
+            for el in json.loads(cr["element_ids"] or "[]"):
+                elem_to_chunks.setdefault(el, set()).add(cr["id"])
+        out: Dict[str, set] = {}
+        for orow in obj_rows:
+            chunks: set = set()
+            for e in json.loads(orow["evidence"] or "[]"):
+                if isinstance(e, dict) and e.get("element_id"):
+                    chunks |= elem_to_chunks.get(e["element_id"], set())
+            if chunks:
+                out[orow["id"]] = chunks
+        return out
+
     # ── chunk×graph mix ──────────────────────────────────────────────────────
 
     _MIX_KG_KEY_BASE = 1000
