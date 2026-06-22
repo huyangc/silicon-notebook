@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     rerank_max_docs: int = Field(500, env="RERANK_MAX_DOCS")
     relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, env="RELATION_SEED_TOP_N")
+    # HippoRAG 式 PPR 跨文档检索(graph 模式;默认关,opt-in)
+    graph_ppr_enabled: bool = Field(False, env="GRAPH_PPR_ENABLED")
+    ppr_damping: float = Field(0.5, env="PPR_DAMPING")               # rx.pagerank alpha
+    ppr_passage_node_weight: float = Field(0.05, env="PPR_PASSAGE_NODE_WEIGHT")
+    ppr_top_chunks: int = Field(20, env="PPR_TOP_CHUNKS")            # 最终喂答案的 chunk 数
+    ppr_kg_seed_top_n: int = Field(20, env="PPR_KG_SEED_TOP_N")      # reset 向量里的 KG 种子数
+    ppr_chunk_seed_top_n: int = Field(30, env="PPR_CHUNK_SEED_TOP_N")  # reset 向量里的 chunk 种子数
     kg_canonical_fold_enabled: bool = Field(False, env="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, env="KG_ABOUT_DOWNWEIGHT_ENABLED")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
