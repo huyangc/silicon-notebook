@@ -73,3 +73,18 @@ def test_ppr_graph_has_cross_doc_bridge(repo):
     assert "cluster:K-moe" in key_to_idx
     router = key_to_idx["cluster:K-moe"]
     assert set(G.successor_indices(router)) == {key_to_idx["e1"], key_to_idx["e2"]}
+
+
+def test_ppr_retrieve_surfaces_other_document(repo):
+    """问 DeepSeek 的 MoE,PPR 应经同概念簇把 GLM 那篇的 chunk(cB)也召回。"""
+    nb = _seed_two_doc_moe(repo)
+    chunks = repo._ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts architecture")
+    ids = [c.chunk_id for c in chunks]
+    assert "cA" in ids
+    assert "cB" in ids                     # 关键:别的文档也进来了(桥接成功)
+    assert all(0.0 <= c.relevance <= 1.0 for c in chunks)
+
+
+def test_ppr_retrieve_empty_when_no_kg(repo):
+    nb = repo.create_notebook(NotebookCreate(name="empty"))
+    assert repo._ppr_retrieve(nb.id, "anything") == []

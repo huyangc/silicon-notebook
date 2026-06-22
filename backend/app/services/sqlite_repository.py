@@ -4717,6 +4717,51 @@ class SQLiteRepository:
 
         return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
 
+    def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
+        """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → rx PPR →
+        取 chunk 节点分数。返回前 ppr_top_chunks 的 RetrievedChunk(relevance=
+        归一 PPR 分,守 [0,1])。无 KG/无 chunk 时返回 []。"""
+        from app.services.kg.ppr import run_ppr
+        G, key_to_idx, chunk_idx_to_id = self._ppr_graph(notebook_id)
+        if G.num_nodes() == 0 or not chunk_idx_to_id:
+            return []
+
+        reset: Dict[int, float] = {}
+        kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
+        for h in kg_hits:
+            idx = key_to_idx.get(h.object_id)
+            if idx is not None and h.relevance > 0:
+                reset[idx] = reset.get(idx, 0.0) + float(h.relevance)
+        scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
+        pw = self.settings.ppr_passage_node_weight
+        for c in scored[: self.settings.ppr_chunk_seed_top_n]:
+            idx = key_to_idx.get(f"chunk:{c.chunk_id}")
+            if idx is not None and c.relevance > 0:
+                reset[idx] = reset.get(idx, 0.0) + float(c.relevance) * pw
+        if not reset:
+            return []
+
+        ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
+        ranked = ranked[: self.settings.ppr_top_chunks]
+        if not ranked:
+            return []
+
+        score_map = dict(ranked)
+        with self._connect() as db:
+            ph = ",".join("?" for _ in score_map)
+            rows = db.execute(
+                f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
+                f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+                f"WHERE c.id IN ({ph})", list(score_map)).fetchall()
+        from app.services.retrieval import RetrievedChunk
+        out = [RetrievedChunk(
+            chunk_id=r["id"], source_id=r["source_id"], source_title=r["source_title"],
+            section_path=r["section_path"], text=r["text"],
+            element_ids=json.loads(r["element_ids"] or "[]"),
+            relevance=score_map[r["id"]]) for r in rows]
+        out.sort(key=lambda c: c.relevance, reverse=True)
+        return out
+
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
         applies_to = payload.get("applies_to")
