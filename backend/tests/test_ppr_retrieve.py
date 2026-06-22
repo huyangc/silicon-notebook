@@ -64,3 +64,12 @@ def test_ent_chunk_map(repo):
     m = repo._ent_chunk_map(nb.id)
     assert m["e1"] == {"cA"}
     assert m["e2"] == {"cB"}
+
+
+def test_ppr_graph_has_cross_doc_bridge(repo):
+    nb = _seed_two_doc_moe(repo)
+    G, key_to_idx, chunk_idx_to_id = repo._ppr_graph(nb.id)
+    assert set(chunk_idx_to_id.values()) == {"cA", "cB"}
+    assert "cluster:K-moe" in key_to_idx
+    router = key_to_idx["cluster:K-moe"]
+    assert set(G.successor_indices(router)) == {key_to_idx["e1"], key_to_idx["e2"]}
