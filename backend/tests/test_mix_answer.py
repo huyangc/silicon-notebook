@@ -14,7 +14,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("CHUNK_KG_OVERLAY_ENABLED", "true")
-    r = SQLiteRepository(Settings()); r.embedder = FakeEmbedder(dim=16); return r
+    for _k in ("RERANK_MODEL", "RERANK_BASE_URL", "RERANK_API_KEY"):
+        monkeypatch.delenv(_k, raising=False)
+    r = SQLiteRepository(Settings(_env_file=None)); r.embedder = FakeEmbedder(dim=16); return r
 
 
 def _seed_chunks_and_kg(repo):
@@ -45,6 +47,14 @@ def test_mix_retrieve_merges_vector_and_kg_source_chunks(repo):
     assert isinstance(block, str) and isinstance(id_map, dict)
     # KG key 用高 base(≥1001),不与 chunk key 撞
     assert all(int(k[1:]) >= 1001 for k in id_map) if id_map else True
+
+
+def test_mix_retrieve_handles_multiple_vector_subqueries(repo):
+    nb = _seed_chunks_and_kg(repo)
+    cand, _block, _id_map, _kg_hits = repo._mix_retrieve(
+        nb.id, "cascode", "", ["cascode", "output resistance"])
+    assert cand
+    assert all(isinstance(c, RetrievedChunk) for c in cand)
 
 
 class _AnswerLLM:
