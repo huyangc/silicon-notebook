@@ -3196,6 +3196,9 @@ class SQLiteRepository:
         # same-second in-place edits that leave the version tuple unchanged.
         for key in [k for k in self._vector_cache._store if k.endswith(":fed_rxgraph")]:
             self._vector_cache.invalidate(key)
+        # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph) —
+        # evict so a same-second KG edit with an unchanged version tuple cannot serve stale.
+        self._vector_cache.invalidate(f"{notebook_id}:ppr_graph")
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()

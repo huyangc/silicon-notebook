@@ -75,14 +75,98 @@ def test_ppr_graph_has_cross_doc_bridge(repo):
     assert set(G.successor_indices(router)) == {key_to_idx["e1"], key_to_idx["e2"]}
 
 
-def test_ppr_retrieve_surfaces_other_document(repo):
-    """问 DeepSeek 的 MoE,PPR 应经同概念簇把 GLM 那篇的 chunk(cB)也召回。"""
+def test_ppr_graph_cache_evicted_on_invalidate(repo):
+    """_invalidate_unified_cache must remove the ppr_graph cache entry so that a
+    same-second KG edit (unchanged version-tuple counts/timestamps) cannot serve
+    a stale graph.  After invalidation a fresh _ppr_graph call rebuilds from DB.
+
+    Proof strategy:
+    1. Seed and prime the cache (call _ppr_graph once).
+    2. While STILL INSIDE the same second, delete the concept_cluster rows so the
+       underlying data changes but the version-tuple stays the same (same counts
+       now = 0 for clusters, but we verify eviction, not version staleness).
+    3. Call _invalidate_unified_cache.
+    4. Assert the key is gone from _vector_cache._store (eviction test).
+    5. Call _ppr_graph again — it must rebuild from the now-empty clusters table
+       and return a graph with no cluster router node (proves it was NOT served
+       from the pre-invalidation stale cache).
+
+    This test FAILS if the production line
+        self._vector_cache.invalidate(f"{notebook_id}:ppr_graph")
+    is removed from _invalidate_unified_cache.
+    """
     nb = _seed_two_doc_moe(repo)
+    # Prime the cache — graph should have the cluster:K-moe router
+    G1, key_to_idx1, _ = repo._ppr_graph(nb.id)
+    assert "cluster:K-moe" in key_to_idx1, "pre-condition: cluster must be present"
+    cache_key = f"{nb.id}:ppr_graph"
+    assert cache_key in repo._vector_cache._store, "pre-condition: cache must be populated"
+
+    # Delete all concept_clusters rows within the same second (version-tuple counts
+    # for concept_clusters drop to 0, but MAX(created_at) becomes '' — if the cache
+    # were NOT evicted explicitly, the stale (old version) entry would still be
+    # served because the new version *is* different; the real danger is an
+    # in-place SAME-COUNT same-timestamp edit, but eviction is the safeguard for
+    # that.  We test the eviction itself directly.)
+    with repo._write() as db:
+        db.execute("DELETE FROM concept_clusters WHERE notebook_id=?", (nb.id,))
+
+    # Invalidate the unified cache (this is the call under test)
+    repo._invalidate_unified_cache(nb.id)
+
+    # The cache key must be gone
+    assert cache_key not in repo._vector_cache._store, (
+        "ppr_graph cache entry must be evicted by _invalidate_unified_cache"
+    )
+
+    # A fresh call must rebuild from DB (no cluster_groups → no cluster router node)
+    G2, key_to_idx2, _ = repo._ppr_graph(nb.id)
+    assert "cluster:K-moe" not in key_to_idx2, (
+        "after invalidation and cluster deletion, rebuilt graph must have no cluster router"
+    )
+
+
+def test_ppr_retrieve_surfaces_other_document(repo):
+    """问 DeepSeek 的 MoE,PPR 应经同概念簇把 GLM 那篇的 chunk(cB)也召回。
+    cC 是来自第三个无关源的对照组(无 MoE 词汇,不在任何概念簇),
+    用于证明 cB 的召回是通过 cluster 桥接而非 dense 种子"碰巧"召回的:
+    桥接证明参见 test_run_ppr_bridges_across_documents (test_ppr.py)。"""
+    nb = _seed_two_doc_moe(repo)
+
+    # 插入第三个无关源/chunk/实体作对照组(不入任何 concept_cluster)
+    import json as _json
+    with repo._write() as db:
+        now = "2026-06-22T00:00:00"
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("src-C", nb.id, "Quant paper", "md", "ready", now, now))
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("cC", nb.id, "src-C", "Quantization reduces memory footprint.",
+             "Quant", _json.dumps(["elC"]), now))
+        ev = _json.dumps([{"source_id": "src-C", "source_title": "", "element_id": "elC",
+                           "element_type": "paragraph", "location_label": "p1",
+                           "quoted_span": "Quantization", "confidence": 1.0}])
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("e3", nb.id, "concept", "approved", "",
+             _json.dumps({"name": "Quantization"}), ev, "src-C", now, now))
+        # e3 intentionally NOT added to concept_clusters — no bridge to MoE cluster
+
     chunks = repo._ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts architecture")
     ids = [c.chunk_id for c in chunks]
     assert "cA" in ids
     assert "cB" in ids                     # 关键:别的文档也进来了(桥接成功)
     assert all(0.0 <= c.relevance <= 1.0 for c in chunks)
+    # The bridged chunk must score higher than the unbridged control (no path to MoE cluster)
+    score = {c.chunk_id: c.relevance for c in chunks}
+    assert score["cB"] > score.get("cC", 0.0), (
+        "cB (bridged via cluster:K-moe) must outrank cC (no cluster bridge)"
+    )
 
 
 def test_ppr_retrieve_empty_when_no_kg(repo):
@@ -114,3 +198,4 @@ def test_ask_graph_ppr_off_keeps_kg_path(repo, monkeypatch):
     from app.models.schemas import AskRequest
     resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
     assert resp.mode == "graph"
+    assert not any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))
