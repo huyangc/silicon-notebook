@@ -88,3 +88,29 @@ def test_ppr_retrieve_surfaces_other_document(repo):
 def test_ppr_retrieve_empty_when_no_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     assert repo._ppr_retrieve(nb.id, "anything") == []
+
+
+class _StubAnswerLLM:
+    configured = True
+    def chat_json(self, *a, **k):
+        return '{"answer": "DeepSeek 与 GLM 都用 MoE [k1][k2].", "grounded": true}'
+
+
+def test_ask_graph_ppr_cites_multiple_documents(repo, monkeypatch):
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
+    repo.llm_client = _StubAnswerLLM()
+    repo._reasoning_llm_client = _StubAnswerLLM()
+    from app.models.schemas import AskRequest
+    resp = repo.ask_graph(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="graph"))
+    assert resp.mode == "graph"
+    src_ids = {c.source_id for c in resp.citations}
+    assert "src-A" in src_ids and "src-B" in src_ids
+
+
+def test_ask_graph_ppr_off_keeps_kg_path(repo, monkeypatch):
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
+    from app.models.schemas import AskRequest
+    resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
+    assert resp.mode == "graph"
