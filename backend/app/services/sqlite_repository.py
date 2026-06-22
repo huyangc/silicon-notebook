@@ -5398,7 +5398,7 @@ class SQLiteRepository:
         if len(sub_queries) >= 2:
             collected, _per, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
             seen, out = set(), []
-            for c in collected:
+            for c in collected.values():
                 if c.chunk_id not in seen:
                     seen.add(c.chunk_id)
                     out.append(c)
