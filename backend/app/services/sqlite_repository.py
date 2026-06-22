@@ -5873,6 +5873,54 @@ class SQLiteRepository:
                     notebook_id, question, response, conversation_id)
                 return response
 
+            # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
+            # 别的文档相关 chunk 也召回,_answer_chunks 出 chunk 引用(跨多篇)。
+            if self.settings.graph_ppr_enabled:
+                ppr_chunks = self._ppr_retrieve(notebook_id, question)
+                if ppr_chunks:
+                    answer, llm_grounded, anchors = "", False, []
+                    if getattr(self.llm_client, "configured", False):
+                        try:
+                            answer, llm_grounded, anchors = self._answer_chunks(
+                                question, ppr_chunks, history)
+                        except Exception as exc:
+                            self._note_model_error("answer", self.settings.openai_compat_model, exc)
+                            answer, llm_grounded, anchors = "", False, []
+                    citations: List[Citation] = []
+                    by_id = {c.chunk_id: c for c in ppr_chunks}
+                    for a in anchors:
+                        if a.object_type == "chunk" and a.object_id in by_id:
+                            c = by_id[a.object_id]
+                            eid = c.element_ids[0] if c.element_ids else ""
+                            citations.append(Citation(
+                                label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                                source_id=c.source_id, element_id=eid,
+                                location_label=c.section_path, quoted_span=c.text[:200]))
+                    evidence_level, top_relevance = classify_evidence(
+                        ppr_chunks, anchors, llm_grounded,
+                        self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+                    grounded = evidence_level == "grounded"
+                    if answer:
+                        conclusion = _MARKER_RE.sub("", answer).strip()
+                        llm_mode = "grounded" if grounded else "ungrounded"
+                    else:
+                        conclusion = f"PPR retrieved {len(ppr_chunks)} cross-document passage(s)."
+                        llm_mode = "deterministic"
+                    from app.models.schemas import TraceStep
+                    resp = AskResponse(
+                        answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+                        evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+                        citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
+                        retrieval_query=question, top_relevance=top_relevance,
+                        reasoning_trace=[TraceStep(step_type="ppr",
+                            summary=f"PPR 跨文档召回 {len(ppr_chunks)} 个 chunk",
+                            detail={"chunks": len(ppr_chunks),
+                                    "sources": len({c.source_id for c in ppr_chunks})})])
+                    resp.mode = "graph"
+                    resp.model_errors = [ModelError(**e) for e in _err_sink]
+                    resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
+                    return resp
+
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
             use_seeds = self._graph_seed_fusion(notebook_id, question, base_seeds)
 
