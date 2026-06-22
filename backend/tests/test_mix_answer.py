@@ -59,7 +59,7 @@ class _FakeRerank:
     def __init__(self, configured=True): self._c = configured
     @property
     def configured(self): return self._c
-    def rerank(self, query, documents): return list(range(len(documents)))
+    def rerank(self, query, documents, on_error=None): return list(range(len(documents)))
 
 
 def test_chunk_answer_context_budget_override(repo):

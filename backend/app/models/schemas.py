@@ -192,6 +192,12 @@ class AnswerAnchor(BaseModel):
     tier: str = "personal"
 
 
+class ModelError(BaseModel):
+    stage: str       # "embed" | "rerank" | "answer" | "rewrite"
+    model: str = ""
+    message: str
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     conclusion: str
@@ -214,6 +220,7 @@ class AskResponse(BaseModel):
     reasoning_trace: Optional[List["TraceStep"]] = None
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False
+    model_errors: List[ModelError] = Field(default_factory=list)
 
 
 class ConversationRenameRequest(BaseModel):
