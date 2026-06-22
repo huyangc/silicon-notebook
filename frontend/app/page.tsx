@@ -136,6 +136,7 @@ type AskResponse = {
   top_relevance?: number;
   reasoning_trace?: ReasoningTraceStep[];
   mode?: AskModeId;
+  model_errors?: { stage: string; model: string; message: string }[];
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -4078,6 +4079,16 @@ function AnswerView({
 
   return (
     <div className="chat-answer">
+      {answer.model_errors && answer.model_errors.length > 0 && (() => {
+        const labelOf = (s: string) =>
+          ({ embed: "向量模型", rerank: "重排模型", answer: "答案模型", rewrite: "改写模型" } as Record<string, string>)[s] ?? s;
+        const names = Array.from(new Set(answer.model_errors.map((e) => labelOf(e.stage)))).join("、");
+        return (
+          <div className="answer-model-error" title={answer.model_errors[0]?.message ?? ""}>
+            ⚠️ 部分模型调用失败（{names}），本次为降级输出，可能不完整或未接地。请检查 API key / 模型服务可用性。
+          </div>
+        );
+      })()}
       {(() => {
         const lvl = answer.evidence_level ?? (answer.grounded ? "grounded" : "inferred");
         const meta =
