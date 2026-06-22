@@ -136,11 +136,31 @@ The outer page is a notebook collection/library (KG-native pipeline):
 Inside a notebook:
 
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
-- Main column: two tabs — **Ask** (KG-native grounded Q&A with `[k_i]` sentence citations, multi-turn conversation list, live collapsed reasoning trace with expandable details, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection). The inactive Studio right sidebar is not shown in the primary workspace, so the Ask panel can use the freed width.
+- Main column: two tabs — **Ask** (grounded Q&A with `[k_i]` sentence citations across three retrieval modes — see [Retrieval modes](#retrieval-modes-ask) — multi-turn conversation list, live collapsed reasoning trace with expandable details, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection). The inactive Studio right sidebar is not shown in the primary workspace, so the Ask panel can use the freed width.
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection. The side panel renders source excerpts as structured evidence cards so long titles, locations, formulas, and mixed Chinese/English text wrap inside the panel.
 - Studio-style article research, mind map / infographic generation, derived-rule review, the governance **promotion queue** (propose a personal-KG node for promotion to the base corpus, then approve/reject pending requests), the **mark-base / mark-personal** tier toggle, and the **edge-review queue** (confirm / reject relations ranked by high-centrality × low-trust; rejected edges are excluded from graph reasoning) remain reachable from the top analysis toolbar and show their output in dialogs rather than a fixed right column.
 
 The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
+
+## Retrieval modes (Ask)
+
+`POST /ask` dispatches on `mode` — the registry `backend/app/services/ask_modes.py` is the single source of truth (default `chunk`). Every mode federates retrieval across `tier=base` ∪ the active personal notebook, emits sentence-level `[k_i]` anchors, and grades grounding identically: `classify_evidence` → `grounded` / `overview` / `inferred` against the calibrated `EVIDENCE_TAU_*` thresholds. **Ranking signals (rerank / RRF / tier weights) only reorder candidates — they never feed the grounding threshold** (which reads each item's fused keyword+semantic relevance).
+
+| Mode | Group | Needs KG | One-liner |
+|------|-------|----------|-----------|
+| **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |
+| **`graph`** | strict | yes | Single-pass multi-hop reasoning over the knowledge graph. |
+| **`reasoning`** | strict | yes | Agentic, iterative plan → retrieve → reflect → answer (streams a live trace). |
+
+**`chunk` — chunk-native, with optional chunk×graph mix.**
+- *Baseline:* large chunk recall (`CHUNK_RECALL`) → MMR / multi-sub-query quota diversity selection (`CHUNK_MMR_K`) → long-context synthesis. The KG is not touched.
+- *Mix* (active only when `CHUNK_KG_OVERLAY_ENABLED=true` **and** qwen3-rerank is configured **and** a KG is available): three sources are pooled — (a) vector chunks, (b) the KG local structure around the query seeds (entities + their 1-hop relations, retrieved once), (c) the source chunks behind those KG objects — round-robin merged, reranked by a qwen3 cross-encoder, then packed to a token budget (`MAX_ENTITY_TOKENS` / `MAX_RELATION_TOKENS` / `MAX_TOTAL_TOKENS`). The answer cites chunks and KG items in one unified `[k]` map, and grounding spans chunk ∪ KG. When rerank is unconfigured or no KG exists, it falls back byte-for-byte to the baseline. (Faithful to LightRAG's `mix` mode.)
+
+**`graph` — multi-hop graph reasoning.** Seeds via `federated_retrieve` (optionally fused with relation-index hits when `RELATION_RETRIEVAL_ENABLED=true`) → BFS along reasoning edges to build a local subgraph → query-refined context → grounded answer whose `[k]` anchors point at KG objects/relations.
+
+**`reasoning` — agentic deep retrieval.** Delegates to `ReasoningRetriever`: it decomposes the question, retrieves, reflects on sufficiency, and expands the graph / adds sub-queries until it can answer — emitting a `reasoning_trace` over the NDJSON stream (`/ask/stream`). Strict / KG-grounded.
+
+Retired ids `fast` and `global` are transparently remapped to `chunk` (old sessions/bookmarks never 422); any other unknown mode is rejected with HTTP 422.
 
 ## APIs
 
@@ -153,7 +173,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
-- `POST /api/notebooks/{id}/ask` — KG-native grounded Q&A with `[k_i]` citations (`mode`: `fast` default | `reasoning` | `graph` | `global`; tier-aware, federates across base + active personal)
+- `POST /api/notebooks/{id}/ask` — grounded Q&A with `[k_i]` citations (`mode`: `chunk` default | `graph` | `reasoning`, see [Retrieval modes](#retrieval-modes-ask); tier-aware, federates across base + active personal)
 - `POST /api/notebooks/{id}/ask/stream` — NDJSON stream for reasoning-mode Ask progress (`progress` trace events rendered as a live collapsed trace row, then final `AskResponse`)
 - `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`

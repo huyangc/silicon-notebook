@@ -128,11 +128,31 @@ npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 进入单个 notebook 后：
 
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
-- 主栏：两个 tab——**问答**（KG-native 接地问答，逐句 `[k_i]` 引用，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
+- 主栏：两个 tab——**问答**（接地问答，逐句 `[k_i]` 引用，三种检索模式见下方「检索模式（问答）」一节，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
 - Studio 类文章研究、思维导图/信息图生成、派生规则审核、治理**晋升队列**（把个人 KG 节点申请晋升到基准语料，并批准/拒绝待审请求）、**基准库/个人层切换**，以及**边审查队列**（按「高中心性 × 低可信」排序确认/拒绝关系，被拒边从图推理中排除）仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
 
 notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
+
+## 检索模式（问答）
+
+`POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。所有模式都跨 `tier=base` ∪ 当前 personal 笔记本联合检索，产出逐句 `[k_i]` 锚点，并用同一口径判接地：`classify_evidence` → `grounded` / `overview` / `inferred`，对比校准过的 `EVIDENCE_TAU_*` 阈值。**排序信号（rerank / RRF / tier 权重）只重排候选，绝不进接地阈值**（阈值读每项的「关键词+语义」融合相关度）。
+
+| 模式 | 分组 | 需 KG | 一句话 |
+|------|------|-------|--------|
+| **`chunk`**（默认） | general | 否 | chunk-native 通用问答：大召回 → 选择 → 长上下文综合 → 引用绑回源 chunk。 |
+| **`graph`** | strict | 是 | 对知识图谱做单轮多跳推理。 |
+| **`reasoning`** | strict | 是 | agentic 迭代 plan → retrieve → reflect → answer（流式输出实时轨迹）。 |
+
+**`chunk` —— chunk-native，含可选 chunk×graph mix。**
+- *基线：* chunk 大召回（`CHUNK_RECALL`）→ MMR / 多子查询配额多样性选择（`CHUNK_MMR_K`）→ 长上下文综合，不碰 KG。
+- *mix*（仅当 `CHUNK_KG_OVERLAY_ENABLED=true` **且** 配齐 qwen3-rerank **且** 有 KG 时生效）：三路并池——(a) 向量 chunk、(b) query 种子周围的 KG 局部结构（实体 + 其 1-hop 关系，只检索一次）、(c) 这些 KG 对象背后的源 chunk——round-robin 合并 → qwen3 cross-encoder rerank → 按 token 预算装填（`MAX_ENTITY_TOKENS` / `MAX_RELATION_TOKENS` / `MAX_TOTAL_TOKENS`）。答案在同一套 `[k]` 映射里同时引用 chunk 与 KG 项，接地跨 chunk ∪ KG。未配 rerank 或无 KG 时**字节等价回退**到基线。（忠实 LightRAG 的 `mix` 模式。）
+
+**`graph` —— 多跳图推理。** 经 `federated_retrieve` 取种子（`RELATION_RETRIEVAL_ENABLED=true` 时再融合关系索引命中）→ 沿推理边 BFS 构建局部子图 → query-refine 上下文 → 接地答案，`[k]` 锚点指向 KG 对象/关系。
+
+**`reasoning` —— agentic 深挖检索。** 委托 `ReasoningRetriever`：拆解问题、检索、反思是否充分，按需扩图/加子查询直到能回答——经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。严格 / KG 接地。
+
+退役 id `fast`、`global` 透明映射到 `chunk`（旧会话/书签不会 422）；其余未知 mode 返回 HTTP 422。
 
 ## API
 
@@ -145,7 +165,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
-- `POST /api/notebooks/{id}/ask` — KG-native 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `fast` | `reasoning` | `graph` | `global`；tier 感知，跨 base + 当前 personal 联合检索）
+- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`，见上文「检索模式（问答）」；tier 感知，跨 base + 当前 personal 联合检索）
 - `POST /api/notebooks/{id}/ask/stream` — 推理模式问答进度的 NDJSON stream（先发 `progress` 轨迹事件并渲染为实时折叠摘要行，最后发完整 `AskResponse`）
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
