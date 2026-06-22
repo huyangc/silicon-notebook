@@ -18,9 +18,13 @@ def _prompt(candidates: List[dict]) -> str:
             f"  B: {item['canonical_b']}"
         )
     return (
-        "Review candidate concept merges for an analog/RF/CMOS IC design knowledge graph.\n"
-        "Merge only when the two names denote the same technical concept, including acronym/full-name pairs.\n"
-        "Keep separate when one is a subtype, related circuit, parameter, cause/effect, or broader/narrower term.\n"
+        "Review candidate concept merges for a technical/scientific knowledge graph.\n"
+        "Merge only when the two names denote the SAME concept, including "
+        "acronym/full-name pairs (e.g. 'MoE' and 'Mixture-of-Experts') and trivial "
+        "spelling/plural variants.\n"
+        "Keep separate when one is a subtype, a different version/size/variant "
+        "(e.g. 'V2' vs 'V3', '7B' vs '72B'), a related-but-distinct method, a "
+        "parameter, a cause/effect, or a broader/narrower term.\n"
         "Return JSON only.\n\n"
         "Candidates:\n" + "\n".join(lines)
     )
