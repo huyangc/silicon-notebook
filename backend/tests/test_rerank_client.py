@@ -25,3 +25,29 @@ def test_failure_identity(monkeypatch):
     rc = RerankClient(_S())
     monkeypatch.setattr(rc, "_rerank_batch", lambda q, d: (_ for _ in ()).throw(RuntimeError()))
     assert rc.rerank("q", ["a", "b"]) == [0, 1]
+
+
+def test_native_dashscope_request_shape(monkeypatch):
+    """锁定原生 DashScope text-rerank 形状:URL=/services/rerank/text-rerank/text-rerank,
+    body=input{query,documents}+parameters,响应解析 output.results。"""
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"output": {"results": [
+                {"index": 1, "relevance_score": 0.7}, {"index": 0, "relevance_score": 0.2}]}}
+
+    def _post(url, headers=None, json=None, timeout=None):
+        captured.update(url=url, headers=headers, json=json)
+        return _Resp()
+
+    monkeypatch.setattr("app.services.rerank_client.requests.post", _post)
+    rc = RerankClient(_S())   # base_url = http://fake/v1
+    order = rc.rerank("q", ["a", "b"])
+    assert captured["url"] == "http://fake/v1/services/rerank/text-rerank/text-rerank"
+    assert captured["json"]["model"] == "qwen3-rerank"
+    assert captured["json"]["input"] == {"query": "q", "documents": ["a", "b"]}
+    assert "parameters" in captured["json"]
+    assert captured["headers"]["Authorization"] == "Bearer k"
+    assert order == [1, 0]   # 由 output.results 的 relevance_score 重排

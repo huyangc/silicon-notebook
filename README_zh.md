@@ -262,7 +262,7 @@ CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 /
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；需配 qwen3-rerank 才生效）
 RERANK_MODEL                 # qwen3-rerank 模型名；留空=关，mix 回退 MMR（默认空）
-RERANK_BASE_URL              # DashScope text-rerank 端点（默认 dashscope compatible-api/v1）
+RERANK_BASE_URL              # DashScope 原生 text-rerank 基址（默认 dashscope api/v1；非 compatible-mode）
 RERANK_API_KEY               # rerank 用 DashScope key（启用 mix rerank 必填）
 RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）
 MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
