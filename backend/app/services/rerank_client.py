@@ -35,13 +35,18 @@ class RerankClient:
             return list(range(len(documents)))
 
     def _rerank_batch(self, query: str, documents: List[str]) -> List[dict]:
+        # DashScope text-rerank(原生):POST {base}/services/rerank/text-rerank/text-rerank,
+        # body {model, input:{query,documents}, parameters};结果在 output.results[].{index,relevance_score}。
+        # 注:DashScope 无 OpenAI-compatible /reranks 端点(compatible-mode 下 404),故走原生服务路径。
         resp = requests.post(
-            f"{self.base_url}/reranks",
+            f"{self.base_url}/services/rerank/text-rerank/text-rerank",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json={"model": self.model, "query": query, "documents": documents},
+            json={"model": self.model,
+                  "input": {"query": query, "documents": documents},
+                  "parameters": {"return_documents": False, "top_n": len(documents)}},
             timeout=getattr(self.settings, "openai_compat_timeout_seconds", 30))
         resp.raise_for_status()
-        return resp.json()["results"]
+        return resp.json()["output"]["results"]
 
     def _rerank_split(self, query: str, documents: List[str]) -> List[dict]:
         batches = [(i, documents[i:i + self.max_docs]) for i in range(0, len(documents), self.max_docs)]

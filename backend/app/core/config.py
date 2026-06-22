@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
     # qwen3-rerank (DashScope text-rerank) 配置
     rerank_model: str = Field("", env="RERANK_MODEL")
-    rerank_base_url: str = Field("https://dashscope.aliyuncs.com/compatible-api/v1", env="RERANK_BASE_URL")
+    rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", env="RERANK_BASE_URL")
     rerank_api_key: str = Field("", env="RERANK_API_KEY")
     rerank_max_docs: int = Field(500, env="RERANK_MAX_DOCS")
     relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
