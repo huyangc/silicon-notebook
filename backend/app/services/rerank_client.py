@@ -2,8 +2,11 @@
 线程池并发 + 按 relevance_score 合并。失败/未配置 → 原序下标(降级)。"""
 from __future__ import annotations
 import concurrent.futures as _cf
+import logging
 from typing import List
 import requests
+
+logger = logging.getLogger("silicon_notebook.rerank")
 
 
 class RerankClient:
@@ -18,7 +21,7 @@ class RerankClient:
     def configured(self) -> bool:
         return bool(self.model and self.base_url and self.api_key)
 
-    def rerank(self, query: str, documents: List[str]) -> List[int]:
+    def rerank(self, query: str, documents: List[str], on_error=None) -> List[int]:
         if not self.configured or not documents:
             return list(range(len(documents)))
         try:
@@ -31,7 +34,10 @@ class RerankClient:
                     seen.add(i); order.append(i)
             order += [i for i in range(len(documents)) if i not in seen]
             return order
-        except Exception:
+        except Exception as exc:
+            logger.warning("rerank failed, fallback to identity: %s", exc)
+            if on_error is not None:
+                on_error(exc)
             return list(range(len(documents)))
 
     def _rerank_batch(self, query: str, documents: List[str]) -> List[dict]:

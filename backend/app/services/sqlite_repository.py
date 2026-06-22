@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -38,6 +39,7 @@ from app.models.schemas import (
     KnowledgeRef,
     KnowledgeTypeCount,
     KnowledgeUpdate,
+    ModelError,
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,
@@ -158,6 +160,11 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     # A stripped marker between words leaves "word  word"; normalise to one space
     # without disturbing newlines / other whitespace runs the model intended.
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
+# 每次 ask 的模型错误收集槽(请求级;仓库是单例,不能用实例状态)。None = 不在 ask 上下文。
+_ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
+    "ask_model_errors", default=None)
 
 
 class SQLiteRepository:
@@ -4382,12 +4389,23 @@ class SQLiteRepository:
             )
         return NotebookSearchResponse(query=query, hits=hits[:20])
 
+    def _note_model_error(self, stage: str, model: str, exc: Exception) -> None:
+        """记录一次模型调用失败:始终 emit model_error 事件(L1);若在 ask 上下文
+        (ContextVar 有 sink)则追加到 sink,供 AskResponse.model_errors 回传前端(L2)。"""
+        msg = f"{type(exc).__name__}: {exc}"
+        self.event_log.emit({"kind": "model_error", "stage": stage, "model": model or "",
+                             "error": msg[:300], "status": "error"})
+        sink = _ASK_MODEL_ERRORS.get()
+        if sink is not None:
+            sink.append({"stage": stage, "model": model or "", "message": msg[:200]})
+
     def _embed_query(self, query: str) -> Optional[List[float]]:
         if not self.settings.embedder_configured:
             return None
         try:
             return self.embedder.embed_query(query[:2000])
-        except Exception:
+        except Exception as exc:
+            self._note_model_error("embed", self.settings.embed_model, exc)
             return None
 
     def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
@@ -4920,9 +4938,11 @@ class SQLiteRepository:
         ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
         from concurrent.futures import ThreadPoolExecutor
 
+        import contextvars as _cv
+        _ctx = _cv.copy_context()
         def _one(q):
             try:
-                return self._retrieve_chunks(notebook_id, q)
+                return _ctx.run(self._retrieve_chunks, notebook_id, q)
             except Exception:
                 return ([], [], None)
 
@@ -5045,110 +5065,119 @@ class SQLiteRepository:
             history = self._conversation_history(db, conversation_id)
         retrieval_query = self._rewrite_followup_query(history, question)
 
-        _t = time.perf_counter()
-        from app.services.query_rewrite import expand_query
-        from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
-        ex = None
-        if self.settings.query_rewrite_enabled:
-            ex = expand_query(self.rewrite_llm_client, retrieval_query, history,
-                              max_subqueries=self.settings.chunk_max_subqueries)
-            sub_queries = [s.query for s in ex.sub_queries]
-        else:
-            sub_queries = [retrieval_query]
-        hl = " ".join(ex.high_level_keywords) if ex else ""
-        ask_stage("expand_query", _t, n=len(sub_queries))
+        _err_sink: list = []
+        _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
+        try:
+            _t = time.perf_counter()
+            from app.services.query_rewrite import expand_query
+            from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
+            ex = None
+            if self.settings.query_rewrite_enabled:
+                ex = expand_query(self.rewrite_llm_client, retrieval_query, history,
+                                  max_subqueries=self.settings.chunk_max_subqueries)
+                sub_queries = [s.query for s in ex.sub_queries]
+            else:
+                sub_queries = [retrieval_query]
+            hl = " ".join(ex.high_level_keywords) if ex else ""
+            ask_stage("expand_query", _t, n=len(sub_queries))
 
-        # ── 检索 + 选择 ──
-        # mix(overlay 开 + rerank 配齐 + 有 KG):三路并池 → rerank 排序 → token 预算截。
-        # 否则走现状 chunk-only(MMR / quota_fuse),与历史字节等价。
-        overlay_on = (self.settings.chunk_kg_overlay_enabled
-                      and self.rerank_client.configured
-                      and (self._notebook_has_kg(notebook_id)
-                           or self._any_base_notebook_has_kg()))
-        kg_block, kg_id_map, kg_hits = "", {}, []
-        _t = time.perf_counter()
-        if overlay_on:
-            candidates, kg_block, kg_id_map, kg_hits = self._mix_retrieve(
-                notebook_id, retrieval_query, hl, sub_queries)
-            order = self.rerank_client.rerank(retrieval_query, [c.text for c in candidates])
-            ranked = [candidates[i] for i in order]
-            kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
-            kg_block = self._truncate_kg_block(kg_block, kg_budget)
-            chunk_budget = max(0, self.settings.max_total_tokens
-                               - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
-            selected = truncate_by_tokens(ranked, lambda c: c.text, chunk_budget)
-            ask_stage("mix_rerank", _t, recall=len(candidates),
-                      selected=len(selected), kg_nodes=len(kg_id_map))
-        elif len(sub_queries) >= 2:
-            collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
-            selected, _counts = quota_fuse(collected, per_query, self.settings.chunk_mmr_k,
-                                           relevance=lambda c: c.relevance)
-            ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
-        else:
-            scored, ids, mat = self._retrieve_chunks(notebook_id, sub_queries[0])
-            selected = self._mmr_select_chunks(
-                scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
-            ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
+            # ── 检索 + 选择 ──
+            # mix(overlay 开 + rerank 配齐 + 有 KG):三路并池 → rerank 排序 → token 预算截。
+            # 否则走现状 chunk-only(MMR / quota_fuse),与历史字节等价。
+            overlay_on = (self.settings.chunk_kg_overlay_enabled
+                          and self.rerank_client.configured
+                          and (self._notebook_has_kg(notebook_id)
+                               or self._any_base_notebook_has_kg()))
+            kg_block, kg_id_map, kg_hits = "", {}, []
+            _t = time.perf_counter()
+            if overlay_on:
+                candidates, kg_block, kg_id_map, kg_hits = self._mix_retrieve(
+                    notebook_id, retrieval_query, hl, sub_queries)
+                order = self.rerank_client.rerank(
+                    retrieval_query, [c.text for c in candidates],
+                    on_error=lambda e: self._note_model_error("rerank", self.settings.rerank_model, e))
+                ranked = [candidates[i] for i in order]
+                kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
+                kg_block = self._truncate_kg_block(kg_block, kg_budget)
+                chunk_budget = max(0, self.settings.max_total_tokens
+                                   - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
+                selected = truncate_by_tokens(ranked, lambda c: c.text, chunk_budget)
+                ask_stage("mix_rerank", _t, recall=len(candidates),
+                          selected=len(selected), kg_nodes=len(kg_id_map))
+            elif len(sub_queries) >= 2:
+                collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
+                selected, _counts = quota_fuse(collected, per_query, self.settings.chunk_mmr_k,
+                                               relevance=lambda c: c.relevance)
+                ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
+            else:
+                scored, ids, mat = self._retrieve_chunks(notebook_id, sub_queries[0])
+                selected = self._mmr_select_chunks(
+                    scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
+                ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
-        answer, llm_grounded, anchors = "", False, []
-        _t = time.perf_counter()
-        if self.llm_client.configured and (selected or kg_id_map):
-            try:
-                if overlay_on:
-                    answer, llm_grounded, anchors = self._answer_mix(
-                        question, selected, kg_block, kg_id_map, history)
-                else:
-                    answer, llm_grounded, anchors = self._answer_chunks(
-                        question, selected, history)
-            except Exception:
-                self.event_log.logger.exception("answer failed for %s", notebook_id)
-                answer, llm_grounded, anchors = "", False, []
-        ask_stage("answer_llm", _t)
+            answer, llm_grounded, anchors = "", False, []
+            _t = time.perf_counter()
+            if self.llm_client.configured and (selected or kg_id_map):
+                try:
+                    if overlay_on:
+                        answer, llm_grounded, anchors = self._answer_mix(
+                            question, selected, kg_block, kg_id_map, history)
+                    else:
+                        answer, llm_grounded, anchors = self._answer_chunks(
+                            question, selected, history)
+                except Exception as exc:
+                    self.event_log.logger.exception("answer failed for %s", notebook_id)
+                    self._note_model_error("answer", self.settings.openai_compat_model, exc)
+                    answer, llm_grounded, anchors = "", False, []
+            ask_stage("answer_llm", _t)
 
-        # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
-        # 非 mix:每个精选 chunk 一条(字节等价于历史)。
-        citations: List[Citation] = []
-        if overlay_on:
-            by_id = {c.chunk_id: c for c in selected}
-            for a in anchors:
-                if a.object_type == "chunk" and a.object_id in by_id:
-                    c = by_id[a.object_id]
+            # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
+            # 非 mix:每个精选 chunk 一条(字节等价于历史)。
+            citations: List[Citation] = []
+            if overlay_on:
+                by_id = {c.chunk_id: c for c in selected}
+                for a in anchors:
+                    if a.object_type == "chunk" and a.object_id in by_id:
+                        c = by_id[a.object_id]
+                        eid = c.element_ids[0] if c.element_ids else ""
+                        citations.append(Citation(
+                            label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                            source_id=c.source_id, element_id=eid,
+                            location_label=c.section_path, quoted_span=c.text[:200]))
+            else:
+                for c in selected:
                     eid = c.element_ids[0] if c.element_ids else ""
                     citations.append(Citation(
                         label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200]))
-        else:
-            for c in selected:
-                eid = c.element_ids[0] if c.element_ids else ""
-                citations.append(Citation(
-                    label=f"{c.source_title} · {c.section_path}".strip(" ·"),
-                    source_id=c.source_id, element_id=eid,
-                    location_label=c.section_path, quoted_span=c.text[:200]))
 
-        # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
-        combined_hits = list(selected) + list(kg_hits)
-        evidence_level, top_relevance = classify_evidence(
-            combined_hits, anchors, llm_grounded,
-            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
-        grounded = evidence_level == "grounded"
+            # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
+            combined_hits = list(selected) + list(kg_hits)
+            evidence_level, top_relevance = classify_evidence(
+                combined_hits, anchors, llm_grounded,
+                self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+            grounded = evidence_level == "grounded"
 
-        if answer:
-            conclusion = _MARKER_RE.sub("", answer).strip()
-            llm_mode = "grounded" if grounded else "ungrounded"
-        else:
-            llm_mode = "deterministic"
-            conclusion = (
-                f"Retrieved {len(selected)} relevant passage(s) for this question."
-                if selected else
-                "No indexed content matches this question yet. Upload sources or build chunks.")
+            if answer:
+                conclusion = _MARKER_RE.sub("", answer).strip()
+                llm_mode = "grounded" if grounded else "ungrounded"
+            else:
+                llm_mode = "deterministic"
+                conclusion = (
+                    f"Retrieved {len(selected)} relevant passage(s) for this question."
+                    if selected else
+                    "No indexed content matches this question yet. Upload sources or build chunks.")
 
-        response = AskResponse(
-            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-            evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
-            citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
-            retrieval_query=retrieval_query, top_relevance=top_relevance)
+            response = AskResponse(
+                answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+                evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+                citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
+                retrieval_query=retrieval_query, top_relevance=top_relevance)
+        finally:
+            _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "chunk"
+        response.model_errors = [ModelError(**e) for e in _err_sink]
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         ask_stage("total", ask_started)
@@ -5588,66 +5617,76 @@ class SQLiteRepository:
                 notebook_id, question, response, conversation_id)
             return response
 
+        _err_sink: list = []
+        _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
         try:
-            result = ReasoningRetriever(self, self.settings).run(
-                notebook_id, question, history, on_step=on_trace)
-            top_hits, elements, trace = result.top_hits, result.elements, result.trace
-        except Exception:
-            top_hits, elements, trace = [], [], []
-
-        registry = self.effective_schemas()
-        seen_ids: set = set()
-        related_knowledge: List[KnowledgeRecord] = []
-        for item in top_hits:
-            if item.object_id in seen_ids:
-                continue
-            seen_ids.add(item.object_id)
-            related_knowledge.append(self._knowledge_record(
-                item.object_type,
-                {"id": item.object_id, "payload": item.payload, "status": item.status,
-                 "owner": getattr(item, "owner", ""),
-                 "last_reviewed": getattr(item, "last_reviewed", ""),
-                 "evidence": item.evidence},
-                registry.get(item.object_type)))
-        related_knowledge = related_knowledge[:12]
-
-        cited_element_ids = {ev.element_id for item in top_hits
-                             for ev in item.evidence if ev.element_id}
-        citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
-
-        answer, llm_grounded, anchors = "", False, []
-        if self.reasoning_llm_client.configured and (top_hits or elements):
             try:
-                answer, llm_grounded, anchors = self._answer_reasoning(
-                    notebook_id, question, top_hits, elements, history)
+                result = ReasoningRetriever(self, self.settings).run(
+                    notebook_id, question, history, on_step=on_trace)
+                top_hits, elements, trace = result.top_hits, result.elements, result.trace
             except Exception:
-                answer, llm_grounded, anchors = "", False, []
+                top_hits, elements, trace = [], [], []
 
-        evidence_level, top_relevance = classify_evidence(
-            top_hits, anchors, llm_grounded,
-            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
-        grounded = evidence_level == "grounded"
+            registry = self.effective_schemas()
+            seen_ids: set = set()
+            related_knowledge: List[KnowledgeRecord] = []
+            for item in top_hits:
+                if item.object_id in seen_ids:
+                    continue
+                seen_ids.add(item.object_id)
+                related_knowledge.append(self._knowledge_record(
+                    item.object_type,
+                    {"id": item.object_id, "payload": item.payload, "status": item.status,
+                     "owner": getattr(item, "owner", ""),
+                     "last_reviewed": getattr(item, "last_reviewed", ""),
+                     "evidence": item.evidence},
+                    registry.get(item.object_type)))
+            related_knowledge = related_knowledge[:12]
 
-        if answer:
-            conclusion = _MARKER_RE.sub("", answer).strip()
-            llm_mode = "grounded" if grounded else "ungrounded"
-        else:
-            llm_mode = "deterministic"
-            conclusion = (
-                f"Found {len(top_hits)} relevant KG object(s) for this question."
-                if top_hits else
-                "The notebook does not yet contain approved knowledge that matches "
-                "this question. Upload and review sources to build coverage.")
+            cited_element_ids = {ev.element_id for item in top_hits
+                                 for ev in item.evidence if ev.element_id}
+            citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
 
-        response = AskResponse(
-            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-            evidence_level=evidence_level, anchors=anchors,
-            related_knowledge=related_knowledge, citations=citations,
-            llm_mode=llm_mode, conversation_id=conversation_id,
-            retrieval_query=question, top_relevance=top_relevance,
-            reasoning_trace=trace or None,
-        )
+            answer, llm_grounded, anchors = "", False, []
+            if self.reasoning_llm_client.configured and (top_hits or elements):
+                try:
+                    answer, llm_grounded, anchors = self._answer_reasoning(
+                        notebook_id, question, top_hits, elements, history)
+                except Exception as exc:
+                    self._note_model_error(
+                        "answer",
+                        self.settings.reasoning_llm_model or self.settings.openai_compat_model,
+                        exc)
+                    answer, llm_grounded, anchors = "", False, []
+
+            evidence_level, top_relevance = classify_evidence(
+                top_hits, anchors, llm_grounded,
+                self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+            grounded = evidence_level == "grounded"
+
+            if answer:
+                conclusion = _MARKER_RE.sub("", answer).strip()
+                llm_mode = "grounded" if grounded else "ungrounded"
+            else:
+                llm_mode = "deterministic"
+                conclusion = (
+                    f"Found {len(top_hits)} relevant KG object(s) for this question."
+                    if top_hits else
+                    "The notebook does not yet contain approved knowledge that matches "
+                    "this question. Upload and review sources to build coverage.")
+
+            response = AskResponse(
+                answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+                evidence_level=evidence_level, anchors=anchors,
+                related_knowledge=related_knowledge, citations=citations,
+                llm_mode=llm_mode, conversation_id=conversation_id,
+                retrieval_query=question, top_relevance=top_relevance,
+                reasoning_trace=trace or None,
+            )
+        finally:
+            _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "reasoning"
+        response.model_errors = [ModelError(**e) for e in _err_sink]
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
@@ -5690,139 +5729,147 @@ class SQLiteRepository:
                 notebook_id, question, response, conversation_id)
             return response
 
-        # Seed: top-N by relevance (federated across base notebooks).
-        top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
-        if not top_hits and not seed_ids:
-            response = AskResponse(
-                answer_id="",
-                conclusion="The notebook does not yet contain approved knowledge "
-                           "that matches this question. Upload and review sources "
-                           "to build coverage.",
-                conversation_id=conversation_id, retrieval_query=question,
-                llm_mode="deterministic",
-            )
-            response.mode = "graph"
-            response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id)
-            return response
-
-        base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
-        use_seeds = self._graph_seed_fusion(notebook_id, question, base_seeds)
-
-        G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
-        subgraph = multihop_subgraph(
-            G, oid_to_idx, idx_to_oid,
-            seed_ids=use_seeds,
-            edge_types=DEFAULT_REASONING_EDGES,
-            max_depth=getattr(self.settings, "graph_max_depth", 3),
-            max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
-        )
-        # Render subgraph into (context_block, id_map) — same k{i} format as
-        # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
-        context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
-
-        # Answer-time chain verification: an adversarial LLM check per chain edge.
-        # Flagged edges get their confidence demoted to 0.05; the context is then
-        # re-rendered so the demotion is visible to the answer LLM. chain_trust is
-        # the weakest-link confidence over all edges (1.0 when there are no edges).
-        verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
-                         "authority_notes": []}
-        if getattr(self.reasoning_llm_client, "configured", False):
-            from app.services.kg.graph_reason import verify_chain_edges
-            verify_result = verify_chain_edges(
-                subgraph, self.reasoning_llm_client,
-                votes=1, timeout=self.settings.reasoning_timeout_seconds,
-            )
-            if verify_result["flagged"]:
-                flagged_types = {f["edge_type"] for f in verify_result["flagged"]}
-                for _node, edge, _src in subgraph:
-                    if edge and edge.get("edge_type") in flagged_types:
-                        edge["confidence"] = 0.05
-                context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
-
-        # Synthesise the answer through the existing LLM + grounding path.
-        context_block = self._refine_context(question, context_block, self.llm_client)
-        answer, llm_grounded, anchors = "", False, []
-        if getattr(self.llm_client, "configured", False) and id_map:
-            try:
-                raw = self.llm_client.chat_json(
-                    [{"role": "user",
-                      "content": answer_prompt(question, context_block, history)}],
-                    ANSWER_SCHEMA_HINT,
+        _err_sink: list = []
+        _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
+        try:
+            # Seed: top-N by relevance (federated across base notebooks).
+            top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
+            if not top_hits and not seed_ids:
+                response = AskResponse(
+                    answer_id="",
+                    conclusion="The notebook does not yet contain approved knowledge "
+                               "that matches this question. Upload and review sources "
+                               "to build coverage.",
+                    conversation_id=conversation_id, retrieval_query=question,
+                    llm_mode="deterministic",
                 )
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    answer = str(data.get("answer", "")).strip()
-                    llm_grounded = bool(data.get("grounded", False))
-                    anchors = self._parse_answer_anchors(answer, id_map)
-                    # Scrub citation-shaped tokens that did NOT bind to a real
-                    # id_map entry (out-of-map ids like [k99], malformed [ k1]).
-                    # Unlike the fast path — whose id_map IS top_hits, so the LLM
-                    # rarely invents ids — graph mode shows a wider subgraph and
-                    # the answer LLM occasionally emits markers the strict
-                    # _MARKER_RE can't bind; left in place they read as fabricated
-                    # citations. Strip them so only resolved [k] markers ship.
-                    answer = _strip_unbound_markers(answer, {a.key for a in anchors})
-            except Exception:
-                answer, llm_grounded, anchors = "", False, []
+                response.mode = "graph"
+                response.model_errors = [ModelError(**e) for e in _err_sink]
+                response.answer_id = self._save_answer(
+                    notebook_id, question, response, conversation_id)
+                return response
 
-        # classify_evidence keys "grounded" off the relevance of the CITED hit.
-        # In the fast path id_map IS built from top_hits, so every anchor is a
-        # scored hit. In graph mode the cited node can be a multi-hop NEIGHBOUR
-        # that is in id_map but NOT in top_hits → its relevance would read 0 and
-        # the answer would be demoted to "overview" even though it cites a real,
-        # chain-connected node (the q17/q18 "overview while citing specifics"
-        # contradiction). Mirror the fast-path invariant: give each cited
-        # neighbour a relevance inherited from the strongest seed, discounted by
-        # chain_trust (the verifier's weakest-link confidence), so a trusted
-        # chain can reach "grounded" while a flagged/weak one still falls back.
-        hits_for_classify = list(top_hits)
-        if anchors:
-            scored_oids = {h.object_id for h in top_hits}
-            seed_rel = max((h.relevance for h in top_hits), default=0.0)
-            neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
-            for a in anchors:
-                if a.object_id in scored_oids:
-                    continue
-                scored_oids.add(a.object_id)
-                hits_for_classify.append(RetrievedKnowledge(
-                    object_id=a.object_id, object_type=a.object_type,
-                    payload={"name": a.name}, relevance=neighbour_rel,
-                    tier=getattr(a, "tier", "personal"), notebook_id=notebook_id))
+            base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+            use_seeds = self._graph_seed_fusion(notebook_id, question, base_seeds)
 
-        evidence_level, top_relevance = classify_evidence(
-            hits_for_classify, anchors, llm_grounded,
-            self.settings.evidence_tau_low, self.settings.evidence_tau_high)
-        # Report the genuine seed relevance, not the synthetic neighbour value.
-        top_relevance = max((h.relevance for h in top_hits), default=top_relevance)
-        grounded = evidence_level == "grounded"
-        if answer:
-            conclusion = _MARKER_RE.sub("", answer).strip()
-            llm_mode = "grounded" if grounded else "ungrounded"
-        else:
-            conclusion = (
-                f"Graph traversal found {len(subgraph)} node(s) across "
-                f"{len(use_seeds)} seed(s).")
-            llm_mode = "deterministic"
+            G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
+            subgraph = multihop_subgraph(
+                G, oid_to_idx, idx_to_oid,
+                seed_ids=use_seeds,
+                edge_types=DEFAULT_REASONING_EDGES,
+                max_depth=getattr(self.settings, "graph_max_depth", 3),
+                max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
+            )
+            # Render subgraph into (context_block, id_map) — same k{i} format as
+            # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
+            context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
 
-        from app.models.schemas import TraceStep
-        graph_trace = [TraceStep(
-            step_type="graph_verify",
-            summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
-                     f"{len(verify_result['flagged'])} edge(s) flagged; "
-                     f"{len(subgraph)} node(s) traversed"),
-            detail={**verify_result,
-                    "authority_notes": verify_result.get("authority_notes", [])},
-        )]
+            # Answer-time chain verification: an adversarial LLM check per chain edge.
+            # Flagged edges get their confidence demoted to 0.05; the context is then
+            # re-rendered so the demotion is visible to the answer LLM. chain_trust is
+            # the weakest-link confidence over all edges (1.0 when there are no edges).
+            verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
+                             "authority_notes": []}
+            if getattr(self.reasoning_llm_client, "configured", False):
+                from app.services.kg.graph_reason import verify_chain_edges
+                verify_result = verify_chain_edges(
+                    subgraph, self.reasoning_llm_client,
+                    votes=1, timeout=self.settings.reasoning_timeout_seconds,
+                )
+                if verify_result["flagged"]:
+                    flagged_types = {f["edge_type"] for f in verify_result["flagged"]}
+                    for _node, edge, _src in subgraph:
+                        if edge and edge.get("edge_type") in flagged_types:
+                            edge["confidence"] = 0.05
+                    context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
 
-        response = AskResponse(
-            answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
-            evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
-            citations=[], llm_mode=llm_mode,
-            conversation_id=conversation_id, retrieval_query=question,
-            top_relevance=top_relevance, reasoning_trace=graph_trace,
-        )
+            # Synthesise the answer through the existing LLM + grounding path.
+            context_block = self._refine_context(question, context_block, self.llm_client)
+            answer, llm_grounded, anchors = "", False, []
+            if getattr(self.llm_client, "configured", False) and id_map:
+                try:
+                    raw = self.llm_client.chat_json(
+                        [{"role": "user",
+                          "content": answer_prompt(question, context_block, history)}],
+                        ANSWER_SCHEMA_HINT,
+                    )
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        answer = str(data.get("answer", "")).strip()
+                        llm_grounded = bool(data.get("grounded", False))
+                        anchors = self._parse_answer_anchors(answer, id_map)
+                        # Scrub citation-shaped tokens that did NOT bind to a real
+                        # id_map entry (out-of-map ids like [k99], malformed [ k1]).
+                        # Unlike the fast path — whose id_map IS top_hits, so the LLM
+                        # rarely invents ids — graph mode shows a wider subgraph and
+                        # the answer LLM occasionally emits markers the strict
+                        # _MARKER_RE can't bind; left in place they read as fabricated
+                        # citations. Strip them so only resolved [k] markers ship.
+                        answer = _strip_unbound_markers(answer, {a.key for a in anchors})
+                except Exception as exc:
+                    self._note_model_error("answer", self.settings.openai_compat_model, exc)
+                    answer, llm_grounded, anchors = "", False, []
+
+            # classify_evidence keys "grounded" off the relevance of the CITED hit.
+            # In the fast path id_map IS built from top_hits, so every anchor is a
+            # scored hit. In graph mode the cited node can be a multi-hop NEIGHBOUR
+            # that is in id_map but NOT in top_hits → its relevance would read 0 and
+            # the answer would be demoted to "overview" even though it cites a real,
+            # chain-connected node (the q17/q18 "overview while citing specifics"
+            # contradiction). Mirror the fast-path invariant: give each cited
+            # neighbour a relevance inherited from the strongest seed, discounted by
+            # chain_trust (the verifier's weakest-link confidence), so a trusted
+            # chain can reach "grounded" while a flagged/weak one still falls back.
+            hits_for_classify = list(top_hits)
+            if anchors:
+                scored_oids = {h.object_id for h in top_hits}
+                seed_rel = max((h.relevance for h in top_hits), default=0.0)
+                neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
+                for a in anchors:
+                    if a.object_id in scored_oids:
+                        continue
+                    scored_oids.add(a.object_id)
+                    hits_for_classify.append(RetrievedKnowledge(
+                        object_id=a.object_id, object_type=a.object_type,
+                        payload={"name": a.name}, relevance=neighbour_rel,
+                        tier=getattr(a, "tier", "personal"), notebook_id=notebook_id))
+
+            evidence_level, top_relevance = classify_evidence(
+                hits_for_classify, anchors, llm_grounded,
+                self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+            # Report the genuine seed relevance, not the synthetic neighbour value.
+            top_relevance = max((h.relevance for h in top_hits), default=top_relevance)
+            grounded = evidence_level == "grounded"
+            if answer:
+                conclusion = _MARKER_RE.sub("", answer).strip()
+                llm_mode = "grounded" if grounded else "ungrounded"
+            else:
+                conclusion = (
+                    f"Graph traversal found {len(subgraph)} node(s) across "
+                    f"{len(use_seeds)} seed(s).")
+                llm_mode = "deterministic"
+
+            from app.models.schemas import TraceStep
+            graph_trace = [TraceStep(
+                step_type="graph_verify",
+                summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "
+                         f"{len(verify_result['flagged'])} edge(s) flagged; "
+                         f"{len(subgraph)} node(s) traversed"),
+                detail={**verify_result,
+                        "authority_notes": verify_result.get("authority_notes", [])},
+            )]
+
+            response = AskResponse(
+                answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+                evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+                citations=[], llm_mode=llm_mode,
+                conversation_id=conversation_id, retrieval_query=question,
+                top_relevance=top_relevance, reasoning_trace=graph_trace,
+            )
+        finally:
+            _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "graph"
+        response.model_errors = [ModelError(**e) for e in _err_sink]
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
