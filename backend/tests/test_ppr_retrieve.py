@@ -310,3 +310,16 @@ def test_fact_rerank_fail_open_when_no_llm(repo, monkeypatch):
     reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
     assert key_to_idx["ekeep"] in reset
     assert key_to_idx["edrop"] in reset
+
+
+def test_precision_changes_do_not_touch_chunk_or_reasoning(repo):
+    """specificity/fact-rerank 默认值正确,且 chunk(通用问答)与 reasoning
+    模式不引用 PPR 路径 —— 隔离回归护栏。"""
+    s = repo.settings
+    assert s.ppr_specificity_enabled is True and s.ppr_fact_rerank_enabled is False
+    import inspect
+    from app.services.sqlite_repository import SQLiteRepository
+    csrc = inspect.getsource(SQLiteRepository.ask_chunk)
+    assert "_ppr_retrieve" not in csrc and "_ppr_reset_vector" not in csrc
+    rsrc = inspect.getsource(SQLiteRepository.ask_reasoning)
+    assert "_ppr_retrieve" not in rsrc and "_ppr_reset_vector" not in rsrc
