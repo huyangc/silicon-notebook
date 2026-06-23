@@ -14,6 +14,7 @@ different documents (N edges per cluster, not N^2).
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Tuple
 
 import rustworkx as rx
@@ -103,6 +104,36 @@ def build_ppr_graph(
             _edge(a, b, float(weight))
 
     return G, key_to_idx, chunk_idx_to_id
+
+
+_VARIANT_TOKEN = re.compile(r'[\s\-_]*\b(v?\d+(?:\.\d+)*|\d+\.?\d*\s*[bBmM])\b', re.IGNORECASE)
+
+
+def _variant_base(name: str) -> Optional[str]:
+    """Strip version (v3, 2.5) and size (7B, 70B) tokens → base model name.
+    Returns None if no such token was present (so plain concepts are excluded)."""
+    stripped = _VARIANT_TOKEN.sub(' ', name)
+    base = re.sub(r'[\s\-_]+', ' ', stripped).strip().lower()
+    if base == re.sub(r'[\s\-_]+', ' ', name).strip().lower():
+        return None  # nothing stripped → not a versioned/sized entity
+    return base if len(base) >= 3 else None
+
+
+def variant_edge_pairs(kg_nodes: Dict[str, dict], weight: float) -> List[Tuple[str, str, float]]:
+    """Group entities by version/size-stripped base name; connect distinct members
+    pairwise with `weight`. Only entities that HAD a version/size token participate."""
+    groups: Dict[str, list] = {}
+    for oid, meta in kg_nodes.items():
+        base = _variant_base(str(meta.get("name", "")))
+        if base:
+            groups.setdefault(base, []).append(oid)
+    out: List[Tuple[str, str, float]] = []
+    for members in groups.values():
+        uniq = sorted(set(members))
+        for i in range(len(uniq)):
+            for j in range(i + 1, len(uniq)):
+                out.append((uniq[i], uniq[j], float(weight)))
+    return out
 
 
 def run_ppr(

@@ -88,3 +88,23 @@ def test_build_ppr_graph_extra_edges_default_none():
     from app.services.kg.ppr import build_ppr_graph
     G, _, _ = build_ppr_graph({"a": {"type": "c", "name": "A"}}, [], [], [], {})
     assert G.num_edges() == 0   # no extra_edges → unchanged
+
+
+def test_variant_edge_pairs_groups_version_siblings():
+    from app.services.kg.ppr import variant_edge_pairs
+    kg = {
+        "v2": {"type": "concept", "name": "DeepSeek-V2"},
+        "v3": {"type": "concept", "name": "DeepSeek-V3"},
+        "q7": {"type": "concept", "name": "Qwen2-7B"},
+        "q72": {"type": "concept", "name": "Qwen2-72B"},
+        "att": {"type": "concept", "name": "Attention"},   # no version → excluded
+    }
+    pairs = variant_edge_pairs(kg, weight=0.5)
+    s = {frozenset((a, b)) for a, b, _ in pairs}
+    assert frozenset(("v2", "v3")) in s      # DeepSeek V2↔V3
+    assert frozenset(("q7", "q72")) in s     # Qwen2 7B↔72B
+    assert all(w == 0.5 for _, _, w in pairs)
+    # 'Attention' has no version/size token → not connected to anything
+    assert not any("att" in (a, b) for a, b, _ in pairs)
+    # different base models NOT cross-connected
+    assert frozenset(("v2", "q7")) not in s

@@ -4688,7 +4688,8 @@ class SQLiteRepository:
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
         version = ("ppr_graph", obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
-                   chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"])
+                   chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"],
+                   self.settings.ppr_variant_edges_enabled, self.settings.ppr_variant_edge_weight)
 
         def _load():
             ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -4716,7 +4717,11 @@ class SQLiteRepository:
             cluster_groups: Dict[str, list] = {}
             for r in clu_rows:
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-            return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups)
+            extra_edges = []
+            if self.settings.ppr_variant_edges_enabled:
+                from app.services.kg.ppr import variant_edge_pairs
+                extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
+            return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
 
         return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
 

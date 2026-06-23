@@ -323,3 +323,20 @@ def test_precision_changes_do_not_touch_chunk_or_reasoning(repo):
     assert "_ppr_retrieve" not in csrc and "_ppr_reset_vector" not in csrc
     rsrc = inspect.getsource(SQLiteRepository.ask_reasoning)
     assert "_ppr_retrieve" not in rsrc and "_ppr_reset_vector" not in rsrc
+
+
+def test_ppr_graph_variant_edges(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="ver"))
+    with repo._write() as db:
+        now = "2026-06-24T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                   ("s", nb.id, "p", "md", "ready", now, now))
+        for oid, nm in [("v2", "DeepSeek-V2"), ("v3", "DeepSeek-V3")]:
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name": nm}), "[]", "s", now, now))
+            db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb.id, f"K-{oid}", oid, nm, "concept", now))
+    monkeypatch.setattr(repo.settings, "ppr_variant_edges_enabled", True)
+    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    assert key_to_idx["v3"] in set(G.successor_indices(key_to_idx["v2"]))  # variant edge built
