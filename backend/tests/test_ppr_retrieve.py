@@ -340,3 +340,32 @@ def test_ppr_graph_variant_edges(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "ppr_variant_edges_enabled", True)
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     assert key_to_idx["v3"] in set(G.successor_indices(key_to_idx["v2"]))  # variant edge built
+
+
+def test_ppr_graph_federates_base_tier(repo, monkeypatch):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    active = repo.create_notebook(NotebookCreate(name="active"))
+    with repo._write() as db:
+        now = "2026-06-24T00:00:00"
+        for nb_id, oid, sid, cid, el in [(base.id, "eb", "sb", "cb", "elb"),
+                                         (active.id, "ea", "sa", "ca", "ela")]:
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb_id, "p", "md", "ready", now, now))
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (cid, nb_id, sid, "MoE", "S", json.dumps([el]), now))
+            ev = json.dumps([{"source_id": sid, "source_title": "", "element_id": el,
+                              "element_type": "paragraph", "location_label": "p",
+                              "quoted_span": "MoE", "confidence": 1.0}])
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb_id, "concept", "approved", "", json.dumps({"name": "Mixture-of-Experts (MoE)"}), ev, sid, now, now))
+            db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb_id, "K-moe", oid, "MoE", "concept", now))
+    G_off, idx_off, _ = repo._ppr_graph(active.id)
+    assert "eb" not in idx_off and "chunk:cb" not in idx_off       # flag off → no base nodes
+    monkeypatch.setattr(repo.settings, "ppr_federated_enabled", True)
+    G_on, idx_on, _ = repo._ppr_graph(active.id)
+    assert "eb" in idx_on and "chunk:cb" in idx_on and "ea" in idx_on   # base federated in
+    router = idx_on["cluster:K-moe"]
+    assert {idx_on["ea"], idx_on["eb"]} <= set(G_on.successor_indices(router))  # shared cluster bridges active↔base
