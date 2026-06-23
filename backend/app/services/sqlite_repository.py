@@ -5965,6 +5965,15 @@ class SQLiteRepository:
             if self.settings.graph_ppr_enabled:
                 ppr_chunks = self._ppr_retrieve(notebook_id, question)
                 if ppr_chunks:
+                    if self.settings.ppr_community_context_enabled:
+                        from app.services.retrieval import RetrievedChunk
+                        reports = self.get_community_reports(notebook_id)[: self.settings.ppr_community_context_top_n]
+                        community_chunks = [RetrievedChunk(
+                            chunk_id=f"community:{i}", source_id="",
+                            source_title="Knowledge base theme", section_path=r["title"],
+                            text=f"{r['title']}. {r['summary']}", element_ids=[], relevance=1.0)
+                            for i, r in enumerate(reports)]
+                        ppr_chunks = community_chunks + ppr_chunks
                     answer, llm_grounded, anchors = "", False, []
                     if getattr(self.llm_client, "configured", False):
                         try:

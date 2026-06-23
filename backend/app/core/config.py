@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     ppr_emb_synonym_threshold: float = Field(0.8, env="PPR_EMB_SYNONYM_THRESHOLD")
     ppr_emb_synonym_topk: int = Field(20, env="PPR_EMB_SYNONYM_TOPK")
     ppr_emb_synonym_max_entities: int = Field(50000, env="PPR_EMB_SYNONYM_MAX_ENTITIES")  # cost guard
+    ppr_community_context_enabled: bool = Field(False, env="PPR_COMMUNITY_CONTEXT_ENABLED")
+    ppr_community_context_top_n: int = Field(3, env="PPR_COMMUNITY_CONTEXT_TOP_N")
     kg_canonical_fold_enabled: bool = Field(False, env="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, env="KG_ABOUT_DOWNWEIGHT_ENABLED")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")

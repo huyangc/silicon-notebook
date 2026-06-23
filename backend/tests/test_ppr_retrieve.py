@@ -390,3 +390,35 @@ def test_ppr_graph_emb_synonym_edges(repo, monkeypatch):
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     assert key_to_idx["e1"] in set(G.successor_indices(key_to_idx["e0"]))   # e0≈e1 → emb edge
     assert key_to_idx["e2"] not in set(G.successor_indices(key_to_idx["e0"]))  # orthogonal → none
+
+
+def test_ask_graph_ppr_community_context(repo, monkeypatch):
+    nb = _seed_two_doc_moe(repo)
+    with repo._write() as db:
+        db.execute("INSERT INTO communities (id,notebook_id,level,member_ids,size,title,summary,findings,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?)",
+                   ("cm1", nb.id, 0, json.dumps(["e1", "e2"]), 2, "MoE models",
+                    "DeepSeek and GLM both use Mixture-of-Experts.", "[]", "2026-06-24T00:00:00"))
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
+    monkeypatch.setattr(repo.settings, "ppr_community_context_enabled", True)
+    repo.llm_client = _StubAnswerLLM()
+    repo._reasoning_llm_client = _StubAnswerLLM()
+    from app.models.schemas import AskRequest
+    resp = repo.ask_graph(nb.id, AskRequest(question="MoE comparison across models", mode="graph"))
+    assert resp.mode == "graph"
+    assert any("Knowledge base theme" in c.label for c in resp.citations)  # community report cited
+
+
+def test_ask_graph_ppr_community_context_off(repo, monkeypatch):
+    nb = _seed_two_doc_moe(repo)
+    with repo._write() as db:
+        db.execute("INSERT INTO communities (id,notebook_id,level,member_ids,size,title,summary,findings,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?)",
+                   ("cm1", nb.id, 0, json.dumps(["e1"]), 1, "MoE models", "summary", "[]", "2026-06-24T00:00:00"))
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
+    monkeypatch.setattr(repo.settings, "ppr_community_context_enabled", False)
+    repo.llm_client = _StubAnswerLLM()
+    repo._reasoning_llm_client = _StubAnswerLLM()
+    from app.models.schemas import AskRequest
+    resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
+    assert not any("Knowledge base theme" in c.label for c in resp.citations)  # off → no community context
