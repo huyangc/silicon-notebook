@@ -108,3 +108,21 @@ def test_variant_edge_pairs_groups_version_siblings():
     assert not any("att" in (a, b) for a, b, _ in pairs)
     # different base models NOT cross-connected
     assert frozenset(("v2", "q7")) not in s
+
+
+def test_emb_synonym_edges_connects_similar():
+    import numpy as np
+    from app.services.kg.ppr import emb_synonym_edges
+    M = np.array([[1.0, 0.0, 0.0], [0.99, 0.01, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    pairs = emb_synonym_edges(["e0", "e1", "e2"], M, threshold=0.8, top_k=5, max_entities=1000)
+    s = {frozenset((a, b)) for a, b, _ in pairs}
+    assert frozenset(("e0", "e1")) in s        # near-identical → edge
+    assert frozenset(("e0", "e2")) not in s    # orthogonal → no edge
+    assert all(0.8 <= w <= 1.0001 for _, _, w in pairs)
+
+
+def test_emb_synonym_edges_guard_skips_large():
+    import numpy as np
+    from app.services.kg.ppr import emb_synonym_edges
+    M = np.ones((5, 3), dtype=np.float32)
+    assert emb_synonym_edges(["a", "b", "c", "d", "e"], M, 0.8, 5, max_entities=3) == []

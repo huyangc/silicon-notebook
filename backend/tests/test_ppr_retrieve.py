@@ -369,3 +369,24 @@ def test_ppr_graph_federates_base_tier(repo, monkeypatch):
     assert "eb" in idx_on and "chunk:cb" in idx_on and "ea" in idx_on   # base federated in
     router = idx_on["cluster:K-moe"]
     assert {idx_on["ea"], idx_on["eb"]} <= set(G_on.successor_indices(router))  # shared cluster bridges active↔base
+
+
+def test_ppr_graph_emb_synonym_edges(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="emb"))
+    with repo._write() as db:
+        now = "2026-06-24T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s", nb.id, "p", "md", "ready", now, now))
+        vecs = {"e0": [1.0] + [0.0]*15, "e1": [1.0] + [0.0]*15, "e2": [0.0, 1.0] + [0.0]*14}
+        for oid in ("e0", "e1", "e2"):
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name": oid}), "[]", "s", now, now))
+            db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                       (oid, nb.id, json.dumps(vecs[oid]), now))
+            db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb.id, f"K-{oid}", oid, oid, "concept", now))
+    monkeypatch.setattr(repo.settings, "ppr_emb_synonym_enabled", True)
+    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    assert key_to_idx["e1"] in set(G.successor_indices(key_to_idx["e0"]))   # e0≈e1 → emb edge
+    assert key_to_idx["e2"] not in set(G.successor_indices(key_to_idx["e0"]))  # orthogonal → none

@@ -136,6 +136,44 @@ def variant_edge_pairs(kg_nodes: Dict[str, dict], weight: float) -> List[Tuple[s
     return out
 
 
+def emb_synonym_edges(ids, matrix, threshold: float = 0.8, top_k: int = 20,
+                      max_entities: int = 50000):
+    """Batched cosine-KNN over entity embeddings → synonym edges (id_a,id_b,cosine).
+    Each node keeps its top_k neighbors with cosine ≥ threshold. Returns [] when
+    n>max_entities (cost guard). `matrix` is an (n, d) float array (rows aligned to
+    `ids`); re-normalized defensively."""
+    import numpy as np
+    n = len(ids)
+    if n < 2 or matrix is None:
+        return []
+    M = np.asarray(matrix, dtype=np.float32)
+    if M.ndim != 2 or M.shape[0] != n:
+        return []
+    if n > max_entities:
+        return []
+    norms = np.linalg.norm(M, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    M = M / norms
+    out, seen = [], set()
+    k = min(top_k, n - 1)
+    bs = 512
+    for start in range(0, n, bs):
+        block = M[start:start + bs] @ M.T
+        for bi in range(block.shape[0]):
+            i = start + bi
+            row = block[bi]
+            row[i] = -1.0
+            cand = np.argpartition(-row, k - 1)[:k]
+            for j in cand:
+                j = int(j)
+                if row[j] >= threshold:
+                    a, b = (i, j) if i < j else (j, i)
+                    if (a, b) not in seen:
+                        seen.add((a, b))
+                        out.append((ids[a], ids[b], float(row[j])))
+    return out
+
+
 def run_ppr(
     G: rx.PyDiGraph,
     chunk_idx_to_id: Dict[int, str],
