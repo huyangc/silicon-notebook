@@ -4759,11 +4759,17 @@ class SQLiteRepository:
         """构造 PPR 的 reset/personalization 向量:KG 实体种子(federated_retrieve)
         + chunk 种子(dense)。返回 {vertex_idx: weight}。仅 graph 模式 PPR 路径调用。"""
         reset: Dict[int, float] = {}
+        ent_chunk_map = (self._ent_chunk_map(notebook_id)
+                         if self.settings.ppr_specificity_enabled else {})
         kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
         for h in kg_hits:
             idx = key_to_idx.get(h.object_id)
             if idx is not None and h.relevance > 0:
-                reset[idx] = reset.get(idx, 0.0) + float(h.relevance)
+                w = float(h.relevance)
+                if self.settings.ppr_specificity_enabled:
+                    # 大众概念(出现在很多 chunk)降权,避免 Transformer/KV cache 灌满 PPR。
+                    w /= max(1, len(ent_chunk_map.get(h.object_id) or ()))
+                reset[idx] = reset.get(idx, 0.0) + w
         scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
         pw = self.settings.ppr_passage_node_weight
         for c in scored[: self.settings.ppr_chunk_seed_top_n]:

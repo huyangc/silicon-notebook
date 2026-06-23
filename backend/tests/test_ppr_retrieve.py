@@ -218,3 +218,45 @@ def test_ppr_reset_vector_seeds_entities_and_chunks(repo):
     chunk_idxs = {key_to_idx["chunk:cA"], key_to_idx["chunk:cB"]}
     assert ent_idxs & set(reset)
     assert chunk_idxs & set(reset)
+
+
+def _seed_hub_vs_rare(repo):
+    """eH 出现在 3 个 chunk,e1 出现在 1 个;二者都含 query 关键词 'Attention'。"""
+    nb = repo.create_notebook(NotebookCreate(name="hub"))
+    with repo._write() as db:
+        now = "2026-06-23T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("src-H", nb.id, "paper", "md", "ready", now, now))
+        for cid, el in [("h1", "eh1"), ("h2", "eh2"), ("h3", "eh3"), ("r1", "er1")]:
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (cid, nb.id, "src-H", "Attention mechanism.", "S", json.dumps([el]), now))
+        def _ev(els):
+            return json.dumps([{"source_id": "src-H", "source_title": "", "element_id": e,
+                                "element_type": "paragraph", "location_label": "p",
+                                "quoted_span": "Attention", "confidence": 1.0} for e in els])
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("eH", nb.id, "concept", "approved", "", json.dumps({"name": "Attention"}),
+                    _ev(["eh1", "eh2", "eh3"]), "src-H", now, now))
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("e1", nb.id, "concept", "approved", "", json.dumps({"name": "Attention"}),
+                    _ev(["er1"]), "src-H", now, now))
+        for oid in ("eH", "e1"):
+            db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (f"cl-{oid}", nb.id, f"K-{oid}", oid, "Attention", "concept", now))
+    return nb
+
+
+def test_specificity_divides_hub_entity_by_chunk_count(repo, monkeypatch):
+    nb = _seed_hub_vs_rare(repo)
+    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    q = "Attention"
+    monkeypatch.setattr(repo.settings, "ppr_specificity_enabled", False)
+    off = repo._ppr_reset_vector(nb.id, q, key_to_idx)
+    monkeypatch.setattr(repo.settings, "ppr_specificity_enabled", True)
+    on = repo._ppr_reset_vector(nb.id, q, key_to_idx)
+    iH, i1 = key_to_idx["eH"], key_to_idx["e1"]
+    assert on[iH] == off[iH] / 3     # eH 在 3 chunk → 降权 1/3
+    assert on[i1] == off[i1]          # e1 在 1 chunk → 不变
