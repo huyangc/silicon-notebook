@@ -4669,54 +4669,61 @@ class SQLiteRepository:
                 f"{active_notebook_id}:fed_rxgraph", version, _load)
 
     def _ppr_graph(self, notebook_id: str):
-        """Build (and version-cache) the undirected PPR graph for `notebook_id`:
-        KG nodes + chunk nodes + relation/membership/synonym edges. Synonym
-        groups come from concept_clusters (members of one canonical_id). P1 是单
-        notebook(联邦留 P2)。返回 (G, key_to_idx, chunk_idx_to_id)。"""
+        """Build (and version-cache) the graph-mode PPR graph: KG nodes + chunk
+        nodes + relation/membership/synonym(+variant) edges. When
+        ppr_federated_enabled, spans active + base-tier notebooks (object_ids /
+        chunk_ids are globally unique; concept_clusters share name-derived
+        canonical_ids so a concept in active and base bridges naturally).
+        返回 (G, key_to_idx, chunk_idx_to_id)。"""
         from app.services.kg.ppr import build_ppr_graph
         with self._connect() as db:
-            rel_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM knowledge_relations WHERE notebook_id=?", (notebook_id,)).fetchone()
-            obj_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-                "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)).fetchone()
-            chunk_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
-            clu_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
-        version = ("ppr_graph", obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
-                   chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"],
-                   self.settings.ppr_variant_edges_enabled, self.settings.ppr_variant_edge_weight)
+            participants = [notebook_id]
+            if self.settings.ppr_federated_enabled:
+                participants += [r["id"] for r in db.execute(
+                    "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                    (notebook_id,)).fetchall()]
+            version_parts = []
+            for nb in participants:
+                rel_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                                     "FROM knowledge_relations WHERE notebook_id=?", (nb,)).fetchone()
+                obj_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
+                                     "FROM knowledge_objects WHERE notebook_id=?", (nb,)).fetchone()
+                chunk_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                                       "FROM chunks WHERE notebook_id=?", (nb,)).fetchone()
+                clu_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                                     "FROM concept_clusters WHERE notebook_id=?", (nb,)).fetchone()
+                version_parts.append((nb, obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
+                                      chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"]))
+        version = ("ppr_graph", tuple(version_parts),
+                   self.settings.ppr_variant_edges_enabled, self.settings.ppr_variant_edge_weight,
+                   self.settings.ppr_federated_enabled)
 
         def _load():
             ph = ",".join("?" for _ in USABLE_STATUSES)
-            with self._connect() as db:
-                obj_rows = db.execute(
-                    f"SELECT id, object_type, payload FROM knowledge_objects "
-                    f"WHERE notebook_id=? AND status IN ({ph})",
-                    (notebook_id, *USABLE_STATUSES)).fetchall()
-                rel_rows = db.execute(
-                    "SELECT source_object_id, target_object_id FROM knowledge_relations "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall()
-                chunk_rows = db.execute(
-                    "SELECT id FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchall()
-                clu_rows = db.execute(
-                    "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall()
-            kg_nodes = {r["id"]: {"type": r["object_type"],
-                                  "name": json.loads(r["payload"] or "{}").get("name", "")}
-                        for r in obj_rows}
-            chunk_ids = [r["id"] for r in chunk_rows]
-            relations = [dict(r) for r in rel_rows]
-            memberships = [(oid, cid)
-                           for oid, cids in self._ent_chunk_map(notebook_id).items()
-                           for cid in cids]
+            kg_nodes: Dict[str, dict] = {}
+            chunk_ids: list = []
+            relations: list = []
             cluster_groups: Dict[str, list] = {}
-            for r in clu_rows:
-                cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+            with self._connect() as db:
+                for nb in participants:
+                    for r in db.execute(
+                            f"SELECT id, object_type, payload FROM knowledge_objects "
+                            f"WHERE notebook_id=? AND status IN ({ph})",
+                            (nb, *USABLE_STATUSES)).fetchall():
+                        kg_nodes[r["id"]] = {"type": r["object_type"],
+                                             "name": json.loads(r["payload"] or "{}").get("name", "")}
+                    for r in db.execute("SELECT source_object_id, target_object_id FROM knowledge_relations "
+                                        "WHERE notebook_id=?", (nb,)).fetchall():
+                        relations.append(dict(r))
+                    for r in db.execute("SELECT id FROM chunks WHERE notebook_id=?", (nb,)).fetchall():
+                        chunk_ids.append(r["id"])
+                    for r in db.execute("SELECT canonical_id, member_object_id FROM concept_clusters "
+                                        "WHERE notebook_id=?", (nb,)).fetchall():
+                        cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+            memberships = [(oid, cid)
+                           for nb in participants
+                           for oid, cids in self._ent_chunk_map(nb).items()
+                           for cid in cids]
             extra_edges = []
             if self.settings.ppr_variant_edges_enabled:
                 from app.services.kg.ppr import variant_edge_pairs
