@@ -4762,6 +4762,8 @@ class SQLiteRepository:
         ent_chunk_map = (self._ent_chunk_map(notebook_id)
                          if self.settings.ppr_specificity_enabled else {})
         kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
+        if self.settings.ppr_fact_rerank_enabled:
+            kg_hits = self._ppr_fact_rerank(question, kg_hits)
         for h in kg_hits:
             idx = key_to_idx.get(h.object_id)
             if idx is not None and h.relevance > 0:
@@ -4777,6 +4779,45 @@ class SQLiteRepository:
             if idx is not None and c.relevance > 0:
                 reset[idx] = reset.get(idx, 0.0) + float(c.relevance) * pw
         return reset
+
+    _PPR_RERANK_SCHEMA = '{"relevant_ids": ["..."]}'
+
+    def _ppr_fact_rerank(self, question: str, kg_hits: list) -> list:
+        """Recognition memory:LLM 过滤候选 KG 种子,只留与 question 相关的。
+        fail-open:LLM 未配/报错/非法返回/过滤后为空 → 原样返回 kg_hits(绝不因
+        rerank 失败而清空种子)。复用 reasoning_llm_client。"""
+        client = self.reasoning_llm_client
+        if not kg_hits or not getattr(client, "configured", False):
+            return kg_hits
+        lines = []
+        for h in kg_hits:
+            name = str(h.payload.get("name", "")).strip()
+            snippet = h.evidence[0].quoted_span[:80] if h.evidence else ""
+            lines.append(f"{h.object_id} - {name} - {snippet}")
+        prompt = (
+            "You are filtering knowledge-graph entries for relevance to a user question "
+            "(recognition memory). Keep an entry only if it could help answer the question; "
+            "when unsure, KEEP it.\n\n"
+            f"Question: {question}\n\nCandidates (id - name - snippet):\n"
+            + "\n".join(lines)
+            + '\n\nReturn JSON only: {"relevant_ids": [ids to keep]}.'
+        )
+        try:
+            raw = client.chat_json(
+                [{"role": "user", "content": prompt}], self._PPR_RERANK_SCHEMA,
+                timeout=self.settings.reasoning_timeout_seconds, max_retries=1)
+            data = json.loads(raw)
+            ids = data.get("relevant_ids") if isinstance(data, dict) else None
+            if not isinstance(ids, list):
+                return kg_hits
+            keep = {str(i) for i in ids}
+            kept = [h for h in kg_hits if h.object_id in keep]
+            return kept or kg_hits   # 过滤后为空 → fail-open(LLM 过度过滤)
+        except Exception as exc:
+            self._note_model_error(
+                "ppr_fact_rerank",
+                self.settings.reasoning_llm_model or self.settings.openai_compat_model, exc)
+            return kg_hits
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload

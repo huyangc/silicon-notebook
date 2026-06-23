@@ -260,3 +260,53 @@ def test_specificity_divides_hub_entity_by_chunk_count(repo, monkeypatch):
     iH, i1 = key_to_idx["eH"], key_to_idx["e1"]
     assert on[iH] == off[iH] / 3     # eH 在 3 chunk → 降权 1/3
     assert on[i1] == off[i1]          # e1 在 1 chunk → 不变
+
+
+class _FilterLLM:
+    """recognition-memory stub:固定只保留 'ekeep'(模拟 LLM 判定 edrop 无关)。"""
+    configured = True
+    def chat_json(self, messages, schema_hint, **kw):
+        return '{"relevant_ids": ["ekeep"]}'
+
+
+def _seed_relevant_irrelevant(repo):
+    nb = repo.create_notebook(NotebookCreate(name="rr"))
+    with repo._write() as db:
+        now = "2026-06-23T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("src-R", nb.id, "p", "md", "ready", now, now))
+        for cid, el in [("ck", "elk"), ("cd", "eld")]:
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, "src-R", "topic", "S", json.dumps([el]), now))
+        def _ev(e): return json.dumps([{"source_id": "src-R", "source_title": "", "element_id": e,
+                                        "element_type": "paragraph", "location_label": "p",
+                                        "quoted_span": "topic", "confidence": 1.0}])
+        for oid, nm, el in [("ekeep", "topic keep", "elk"), ("edrop", "topic drop", "eld")]:
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name": nm}), _ev(el), "src-R", now, now))
+        for oid in ("ekeep", "edrop"):
+            db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (f"cl-{oid}", nb.id, f"K-{oid}", oid, "topic", "concept", now))
+    return nb
+
+
+def test_fact_rerank_filters_irrelevant_seed(repo, monkeypatch):
+    nb = _seed_relevant_irrelevant(repo)
+    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    monkeypatch.setattr(repo.settings, "ppr_fact_rerank_enabled", True)
+    repo._reasoning_llm_client = _FilterLLM()
+    reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
+    assert key_to_idx["ekeep"] in reset
+    assert key_to_idx["edrop"] not in reset
+
+
+def test_fact_rerank_fail_open_when_no_llm(repo, monkeypatch):
+    nb = _seed_relevant_irrelevant(repo)
+    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    monkeypatch.setattr(repo.settings, "ppr_fact_rerank_enabled", True)
+    class _Down: configured = False
+    repo._reasoning_llm_client = _Down()
+    reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
+    assert key_to_idx["ekeep"] in reset
+    assert key_to_idx["edrop"] in reset
