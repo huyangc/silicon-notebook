@@ -437,17 +437,18 @@ function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary
 }
 
 function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[]): WelcomeCopy {
+  const notebookPurpose = notebook?.purpose?.trim();
   if (sources.length === 0) {
     return {
       title: "导入来源后开始提问",
-      description: "添加 PDF、Markdown、DOCX 或 PPTX 后，这里会根据来源内容生成可追溯的问题建议。",
+      description: notebookPurpose || "添加 PDF、Markdown、DOCX 或 PPTX 后，这里会根据来源内容生成可追溯的问题建议。",
       prompts: promptChipsFor(notebook, sources),
     };
   }
   const topic = sourceTopicLabel(notebook, sources);
   return {
     title: `围绕 ${topic} 提问`,
-    description: `已导入 ${sources.length} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
+    description: notebookPurpose || `已导入 ${sources.length} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
     prompts: promptChipsFor(notebook, sources),
   };
 }
@@ -2222,7 +2223,7 @@ export default function Home() {
           <section className="workspace-header">
             <div className="workspace-title">
               <button className="notebook-home" onClick={showCollection}>SN</button>
-              <div>
+              <div className="workspace-title-main">
                 <input
                   className="notebook-title-input"
                   value={titleDraft}
@@ -2239,7 +2240,6 @@ export default function Home() {
                     }
                   }}
                 />
-                <p>{currentNotebook.purpose || "This notebook has not defined a purpose yet."}</p>
               </div>
             </div>
             <div className="workspace-toolbar" aria-label="Notebook actions">

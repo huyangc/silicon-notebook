@@ -69,6 +69,7 @@ Inside a notebook:
 - Keep visible `silicon-notebook` differences with a more engineering-console feel rather than a direct NotebookLM copy.
 - Reset scroll to the top when switching into or back from the notebook workspace.
 - The upper-left notebook title should be editable in place and save through the notebook update API.
+- Keep the notebook header compact: do not render the notebook description under the title; show that description in the Ask welcome state when no conversation is active. Top toolbar actions must keep their labels intact across desktop widths.
 - Left column: user-imported source files only.
   - Show how many sources are in the current notebook.
   - Keep source cards compact and readable for long mixed Chinese/English titles and summaries.

@@ -563,20 +563,23 @@ button {
 }
 
 .workspace-title {
-  flex: 1 1 auto;
+  flex: 1 1 260px;
+  max-width: min(48vw, 720px);
   display: flex;
   align-items: center;
   gap: 16px;
   min-width: 0;
 }
 
-.workspace-title > div {
+.workspace-title-main {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
 .notebook-title-input {
-  width: clamp(220px, 34vw, 620px);
-  min-width: 220px;
+  width: 100%;
+  max-width: 620px;
+  min-width: 0;
   margin: 0;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -600,12 +603,6 @@ button {
   box-shadow: 0 0 0 3px rgba(15, 109, 122, 0.12);
 }
 
-.workspace-title p {
-  margin: 3px 0 0;
-  color: #667085;
-  font-size: 13px;
-}
-
 .notebook-home {
   width: 46px;
   height: 46px;
@@ -618,15 +615,19 @@ button {
 }
 
 .workspace-toolbar {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
+  max-width: calc(100% - 300px);
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 12px;
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .workspace-primary-action {
+  flex: 0 0 auto;
   min-height: 46px;
   display: inline-flex;
   align-items: center;
@@ -649,6 +650,7 @@ button {
 }
 
 .workspace-nav-group {
+  flex: 0 0 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -661,6 +663,7 @@ button {
 }
 
 .workspace-nav-button {
+  flex: 0 0 auto;
   min-height: 38px;
   display: inline-flex;
   align-items: center;
@@ -2818,12 +2821,17 @@ button.chat-session-card {
     display: grid;
   }
 
+  .workspace-title {
+    max-width: 100%;
+  }
+
   .notebook-title-input {
     width: 100%;
     min-width: 0;
   }
 
   .workspace-toolbar {
+    max-width: 100%;
     flex-wrap: wrap;
   }
 
