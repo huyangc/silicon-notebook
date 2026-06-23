@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     ppr_variant_edges_enabled: bool = Field(False, env="PPR_VARIANT_EDGES_ENABLED")
     ppr_variant_edge_weight: float = Field(0.5, env="PPR_VARIANT_EDGE_WEIGHT")
     ppr_federated_enabled: bool = Field(False, env="PPR_FEDERATED_ENABLED")  # PPR 图纳入 base-tier
+    ppr_emb_synonym_enabled: bool = Field(False, env="PPR_EMB_SYNONYM_ENABLED")
+    ppr_emb_synonym_threshold: float = Field(0.8, env="PPR_EMB_SYNONYM_THRESHOLD")
+    ppr_emb_synonym_topk: int = Field(20, env="PPR_EMB_SYNONYM_TOPK")
+    ppr_emb_synonym_max_entities: int = Field(50000, env="PPR_EMB_SYNONYM_MAX_ENTITIES")  # cost guard
     kg_canonical_fold_enabled: bool = Field(False, env="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, env="KG_ABOUT_DOWNWEIGHT_ENABLED")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")

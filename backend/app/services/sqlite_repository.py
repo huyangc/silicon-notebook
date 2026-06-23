@@ -4696,7 +4696,9 @@ class SQLiteRepository:
                                       chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"]))
         version = ("ppr_graph", tuple(version_parts),
                    self.settings.ppr_variant_edges_enabled, self.settings.ppr_variant_edge_weight,
-                   self.settings.ppr_federated_enabled)
+                   self.settings.ppr_federated_enabled,
+                   self.settings.ppr_emb_synonym_enabled, self.settings.ppr_emb_synonym_threshold,
+                   self.settings.ppr_emb_synonym_topk,)
 
         def _load():
             ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -4728,6 +4730,22 @@ class SQLiteRepository:
             if self.settings.ppr_variant_edges_enabled:
                 from app.services.kg.ppr import variant_edge_pairs
                 extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
+            if self.settings.ppr_emb_synonym_enabled:
+                from app.services.kg.ppr import emb_synonym_edges
+                import numpy as np
+                all_ids, mats = [], []
+                with self._connect() as db:
+                    for nb in participants:
+                        ids, mat = self._vector_matrix(db, nb, "knowledge_embeddings", "object_id")
+                        if ids and mat is not None and len(mat):
+                            all_ids.extend(ids)
+                            mats.append(np.asarray(mat))
+                if mats:
+                    extra_edges = extra_edges + emb_synonym_edges(
+                        all_ids, np.vstack(mats),
+                        self.settings.ppr_emb_synonym_threshold,
+                        self.settings.ppr_emb_synonym_topk,
+                        self.settings.ppr_emb_synonym_max_entities)
             return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
 
         return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
