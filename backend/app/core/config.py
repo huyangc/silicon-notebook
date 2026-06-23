@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     ppr_chunk_seed_top_n: int = Field(30, env="PPR_CHUNK_SEED_TOP_N")  # reset 向量里的 chunk 种子数
     ppr_specificity_enabled: bool = Field(True, env="PPR_SPECIFICITY_ENABLED")   # 种子 ÷ 实体出现chunk数
     ppr_fact_rerank_enabled: bool = Field(False, env="PPR_FACT_RERANK_ENABLED")  # LLM 过滤候选种子(每查一次 LLM)
+    ppr_variant_edges_enabled: bool = Field(False, env="PPR_VARIANT_EDGES_ENABLED")
+    ppr_variant_edge_weight: float = Field(0.5, env="PPR_VARIANT_EDGE_WEIGHT")
     kg_canonical_fold_enabled: bool = Field(False, env="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, env="KG_ABOUT_DOWNWEIGHT_ENABLED")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
