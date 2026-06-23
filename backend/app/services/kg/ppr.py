@@ -14,7 +14,7 @@ different documents (N edges per cluster, not N^2).
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import rustworkx as rx
 
@@ -25,6 +25,7 @@ def build_ppr_graph(
     relations: List[dict],
     memberships: List[Tuple[str, str]],
     cluster_groups: Dict[str, List[str]],
+    extra_edges: Optional[List[Tuple[str, str, float]]] = None,
 ) -> Tuple[rx.PyDiGraph, Dict[str, int], Dict[int, str]]:
     """Build the reciprocal-edge PPR digraph.
 
@@ -94,6 +95,12 @@ def build_ppr_graph(
                                                   "canonical_id": canonical_id})
         for m in present:
             _edge(router, m, 1.0)
+
+    for a_oid, b_oid, weight in (extra_edges or []):
+        a = key_to_idx.get(a_oid)
+        b = key_to_idx.get(b_oid)
+        if a is not None and b is not None:
+            _edge(a, b, float(weight))
 
     return G, key_to_idx, chunk_idx_to_id
 

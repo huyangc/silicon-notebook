@@ -73,3 +73,18 @@ def test_run_ppr_empty_reset_returns_empty():
         {"e1": {"type": "concept", "name": "x"}}, ["cA"], [],
         [("e1", "cA")], {})
     assert run_ppr(G, chunk_idx_to_id, {}, damping=0.5) == []
+
+
+def test_build_ppr_graph_extra_edges():
+    from app.services.kg.ppr import build_ppr_graph
+    kg = {"a": {"type": "concept", "name": "A"}, "b": {"type": "concept", "name": "B"}}
+    G, key_to_idx, _ = build_ppr_graph(kg, [], [], [], {}, extra_edges=[("a", "b", 0.5)])
+    ai, bi = key_to_idx["a"], key_to_idx["b"]
+    assert bi in set(G.successor_indices(ai)) and ai in set(G.successor_indices(bi))  # reciprocal
+    # weight stored on the edge payload
+    assert G.get_edge_data(ai, bi)["weight"] == 0.5
+
+def test_build_ppr_graph_extra_edges_default_none():
+    from app.services.kg.ppr import build_ppr_graph
+    G, _, _ = build_ppr_graph({"a": {"type": "c", "name": "A"}}, [], [], [], {})
+    assert G.num_edges() == 0   # no extra_edges → unchanged
