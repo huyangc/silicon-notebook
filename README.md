@@ -135,6 +135,7 @@ The outer page is a notebook collection/library (KG-native pipeline):
 
 Inside a notebook:
 
+- Header: the editable notebook title stays compact by itself; the notebook description is shown in the Ask welcome state when no conversation is active, and toolbar actions keep their labels intact across desktop widths.
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
 - Main column: two tabs — **Ask** (grounded Q&A with `[k_i]` sentence citations across three retrieval modes — see [Retrieval modes](#retrieval-modes-ask) — multi-turn conversation list, live collapsed reasoning trace with expandable details, 👍/👎 feedback) and **Knowledge** (browse any object type dynamically from `/knowledge-types`, with status lifecycle, duplicate detection, and conflict detection). The inactive Studio right sidebar is not shown in the primary workspace, so the Ask panel can use the freed width.
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection. The side panel renders source excerpts as structured evidence cards so long titles, locations, formulas, and mixed Chinese/English text wrap inside the panel.
