@@ -199,3 +199,10 @@ def test_ask_graph_ppr_off_keeps_kg_path(repo, monkeypatch):
     resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
     assert resp.mode == "graph"
     assert not any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))
+
+
+def test_ppr_precision_flag_defaults():
+    from app.core.config import Settings
+    s = Settings(_env_file=None)
+    assert s.ppr_specificity_enabled is True
+    assert s.ppr_fact_rerank_enabled is False
