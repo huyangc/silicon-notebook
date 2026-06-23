@@ -4729,18 +4729,7 @@ class SQLiteRepository:
         if G.num_nodes() == 0 or not chunk_idx_to_id:
             return []
 
-        reset: Dict[int, float] = {}
-        kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
-        for h in kg_hits:
-            idx = key_to_idx.get(h.object_id)
-            if idx is not None and h.relevance > 0:
-                reset[idx] = reset.get(idx, 0.0) + float(h.relevance)
-        scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
-        pw = self.settings.ppr_passage_node_weight
-        for c in scored[: self.settings.ppr_chunk_seed_top_n]:
-            idx = key_to_idx.get(f"chunk:{c.chunk_id}")
-            if idx is not None and c.relevance > 0:
-                reset[idx] = reset.get(idx, 0.0) + float(c.relevance) * pw
+        reset = self._ppr_reset_vector(notebook_id, question, key_to_idx)
         if not reset:
             return []
 
@@ -4764,6 +4753,24 @@ class SQLiteRepository:
             relevance=score_map[r["id"]]) for r in rows]
         out.sort(key=lambda c: c.relevance, reverse=True)
         return out
+
+    def _ppr_reset_vector(self, notebook_id: str, question: str,
+                          key_to_idx: Dict[str, int]) -> Dict[int, float]:
+        """构造 PPR 的 reset/personalization 向量:KG 实体种子(federated_retrieve)
+        + chunk 种子(dense)。返回 {vertex_idx: weight}。仅 graph 模式 PPR 路径调用。"""
+        reset: Dict[int, float] = {}
+        kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
+        for h in kg_hits:
+            idx = key_to_idx.get(h.object_id)
+            if idx is not None and h.relevance > 0:
+                reset[idx] = reset.get(idx, 0.0) + float(h.relevance)
+        scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
+        pw = self.settings.ppr_passage_node_weight
+        for c in scored[: self.settings.ppr_chunk_seed_top_n]:
+            idx = key_to_idx.get(f"chunk:{c.chunk_id}")
+            if idx is not None and c.relevance > 0:
+                reset[idx] = reset.get(idx, 0.0) + float(c.relevance) * pw
+        return reset
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload

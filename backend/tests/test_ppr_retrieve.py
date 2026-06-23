@@ -206,3 +206,15 @@ def test_ppr_precision_flag_defaults():
     s = Settings(_env_file=None)
     assert s.ppr_specificity_enabled is True
     assert s.ppr_fact_rerank_enabled is False
+
+
+def test_ppr_reset_vector_seeds_entities_and_chunks(repo):
+    nb = _seed_two_doc_moe(repo)
+    G, key_to_idx, chunk_idx_to_id = repo._ppr_graph(nb.id)
+    reset = repo._ppr_reset_vector(nb.id, "Mixture-of-Experts (MoE)", key_to_idx)
+    assert isinstance(reset, dict) and reset
+    assert all(w > 0 for w in reset.values())
+    ent_idxs = {key_to_idx["e1"], key_to_idx["e2"]}
+    chunk_idxs = {key_to_idx["chunk:cA"], key_to_idx["chunk:cB"]}
+    assert ent_idxs & set(reset)
+    assert chunk_idxs & set(reset)
