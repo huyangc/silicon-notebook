@@ -106,3 +106,29 @@ def test_tier2_bridge_enqueues_candidate_not_merge(repo):
     cmap = repo.cluster_map(nb.id)
     assert n >= 1                                   # 桥接候选入队
     assert cmap["ko-new"] != cmap["ko-old"]         # 未自动并(各属自己名种子簇)
+
+
+def test_incremental_fuse_idempotent(repo):
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-06-22T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ko-B", nb.id, "concept", "approved", "", json.dumps({"name":"X"}), "[]", "src-B", now, now))
+    repo.incremental_fuse_source(nb.id, "src-B")
+    repo.incremental_fuse_source(nb.id, "src-B")   # 二次
+    with repo._connect() as db:
+        n = db.execute("SELECT count(*) c FROM concept_clusters WHERE notebook_id=? AND member_object_id='ko-B'", (nb.id,)).fetchone()["c"]
+    assert n == 1                                   # 幂等,不重复成员
+
+
+def test_rebuild_unified_kg_still_works(repo):
+    """全量逃生口不受影响:rebuild 后所有 concept 入簇。"""
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-06-22T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ko-A", nb.id, "concept", "approved", "", json.dumps({"name":"MoE"}), "[]", "src-A", now, now))
+    repo.rebuild_unified_kg(nb.id)
+    assert "ko-A" in repo.cluster_map(nb.id)
