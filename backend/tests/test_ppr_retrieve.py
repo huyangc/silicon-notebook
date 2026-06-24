@@ -12,6 +12,7 @@ def test_ppr_settings_defaults_off():
     assert s.ppr_damping == 0.5
     assert s.ppr_passage_node_weight == 0.05
     assert s.ppr_top_chunks == 20
+    assert s.ppr_fact_rerank_enabled is False
 
 
 @pytest.fixture
@@ -201,13 +202,6 @@ def test_ask_graph_ppr_off_keeps_kg_path(repo, monkeypatch):
     assert not any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))
 
 
-def test_ppr_precision_flag_defaults():
-    from app.core.config import Settings
-    s = Settings(_env_file=None)
-    assert s.ppr_specificity_enabled is True
-    assert s.ppr_fact_rerank_enabled is False
-
-
 def test_ppr_reset_vector_seeds_entities_and_chunks(repo):
     nb = _seed_two_doc_moe(repo)
     G, key_to_idx, chunk_idx_to_id = repo._ppr_graph(nb.id)
@@ -249,17 +243,15 @@ def _seed_hub_vs_rare(repo):
     return nb
 
 
-def test_specificity_divides_hub_entity_by_chunk_count(repo, monkeypatch):
+def test_specificity_divides_hub_entity_by_chunk_count(repo):
     nb = _seed_hub_vs_rare(repo)
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     q = "Attention"
-    monkeypatch.setattr(repo.settings, "ppr_specificity_enabled", False)
-    off = repo._ppr_reset_vector(nb.id, q, key_to_idx)
-    monkeypatch.setattr(repo.settings, "ppr_specificity_enabled", True)
-    on = repo._ppr_reset_vector(nb.id, q, key_to_idx)
+    rel = {h.object_id: h.relevance for h in repo.federated_retrieve(nb.id, q)}
+    reset = repo._ppr_reset_vector(nb.id, q, key_to_idx)
     iH, i1 = key_to_idx["eH"], key_to_idx["e1"]
-    assert on[iH] == off[iH] / 3     # eH 在 3 chunk → 降权 1/3
-    assert on[i1] == off[i1]          # e1 在 1 chunk → 不变
+    assert reset[iH] == rel["eH"] / 3      # eH 在 3 chunk → 降权
+    assert reset[i1] == rel["e1"]           # e1 在 1 chunk → 不变
 
 
 class _FilterLLM:
@@ -313,10 +305,10 @@ def test_fact_rerank_fail_open_when_no_llm(repo, monkeypatch):
 
 
 def test_precision_changes_do_not_touch_chunk_or_reasoning(repo):
-    """specificity/fact-rerank 默认值正确,且 chunk(通用问答)与 reasoning
+    """fact-rerank 默认值正确,且 chunk(通用问答)与 reasoning
     模式不引用 PPR 路径 —— 隔离回归护栏。"""
     s = repo.settings
-    assert s.ppr_specificity_enabled is True and s.ppr_fact_rerank_enabled is False
+    assert s.ppr_fact_rerank_enabled is False
     import inspect
     from app.services.sqlite_repository import SQLiteRepository
     csrc = inspect.getsource(SQLiteRepository.ask_chunk)
@@ -325,7 +317,7 @@ def test_precision_changes_do_not_touch_chunk_or_reasoning(repo):
     assert "_ppr_retrieve" not in rsrc and "_ppr_reset_vector" not in rsrc
 
 
-def test_ppr_graph_variant_edges(repo, monkeypatch):
+def test_ppr_graph_variant_edges(repo):
     nb = repo.create_notebook(NotebookCreate(name="ver"))
     with repo._write() as db:
         now = "2026-06-24T00:00:00"
@@ -337,12 +329,11 @@ def test_ppr_graph_variant_edges(repo, monkeypatch):
                        (oid, nb.id, "concept", "approved", "", json.dumps({"name": nm}), "[]", "s", now, now))
             db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
                        "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb.id, f"K-{oid}", oid, nm, "concept", now))
-    monkeypatch.setattr(repo.settings, "ppr_variant_edges_enabled", True)
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     assert key_to_idx["v3"] in set(G.successor_indices(key_to_idx["v2"]))  # variant edge built
 
 
-def test_ppr_graph_federates_base_tier(repo, monkeypatch):
+def test_ppr_graph_federates_base_tier(repo):
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
     active = repo.create_notebook(NotebookCreate(name="active"))
@@ -362,13 +353,10 @@ def test_ppr_graph_federates_base_tier(repo, monkeypatch):
                        (oid, nb_id, "concept", "approved", "", json.dumps({"name": "Mixture-of-Experts (MoE)"}), ev, sid, now, now))
             db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
                        "VALUES (?,?,?,?,?,?,?)", (f"c{oid}", nb_id, "K-moe", oid, "MoE", "concept", now))
-    G_off, idx_off, _ = repo._ppr_graph(active.id)
-    assert "eb" not in idx_off and "chunk:cb" not in idx_off       # flag off → no base nodes
-    monkeypatch.setattr(repo.settings, "ppr_federated_enabled", True)
     G_on, idx_on, _ = repo._ppr_graph(active.id)
-    assert "eb" in idx_on and "chunk:cb" in idx_on and "ea" in idx_on   # base federated in
+    assert "eb" in idx_on and "chunk:cb" in idx_on and "ea" in idx_on
     router = idx_on["cluster:K-moe"]
-    assert {idx_on["ea"], idx_on["eb"]} <= set(G_on.successor_indices(router))  # shared cluster bridges active↔base
+    assert {idx_on["ea"], idx_on["eb"]} <= set(G_on.successor_indices(router))
 
 
 def test_ppr_graph_emb_synonym_edges(repo, monkeypatch):
@@ -400,7 +388,6 @@ def test_ask_graph_ppr_community_context(repo, monkeypatch):
                    ("cm1", nb.id, 0, json.dumps(["e1", "e2"]), 2, "MoE models",
                     "DeepSeek and GLM both use Mixture-of-Experts.", "[]", "2026-06-24T00:00:00"))
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    monkeypatch.setattr(repo.settings, "ppr_community_context_enabled", True)
     repo.llm_client = _StubAnswerLLM()
     repo._reasoning_llm_client = _StubAnswerLLM()
     from app.models.schemas import AskRequest
@@ -409,16 +396,11 @@ def test_ask_graph_ppr_community_context(repo, monkeypatch):
     assert any("Knowledge base theme" in c.label for c in resp.citations)  # community report cited
 
 
-def test_ask_graph_ppr_community_context_off(repo, monkeypatch):
-    nb = _seed_two_doc_moe(repo)
-    with repo._write() as db:
-        db.execute("INSERT INTO communities (id,notebook_id,level,member_ids,size,title,summary,findings,created_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?)",
-                   ("cm1", nb.id, 0, json.dumps(["e1"]), 1, "MoE models", "summary", "[]", "2026-06-24T00:00:00"))
+def test_ask_graph_ppr_no_community_when_none(repo, monkeypatch):
+    nb = _seed_two_doc_moe(repo)   # no communities seeded
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    monkeypatch.setattr(repo.settings, "ppr_community_context_enabled", False)
     repo.llm_client = _StubAnswerLLM()
     repo._reasoning_llm_client = _StubAnswerLLM()
     from app.models.schemas import AskRequest
     resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
-    assert not any("Knowledge base theme" in c.label for c in resp.citations)  # off → no community context
+    assert not any("Knowledge base theme" in c.label for c in resp.citations)

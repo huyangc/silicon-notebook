@@ -114,16 +114,12 @@ class Settings(BaseSettings):
     ppr_top_chunks: int = Field(20, env="PPR_TOP_CHUNKS")            # 最终喂答案的 chunk 数
     ppr_kg_seed_top_n: int = Field(20, env="PPR_KG_SEED_TOP_N")      # reset 向量里的 KG 种子数
     ppr_chunk_seed_top_n: int = Field(30, env="PPR_CHUNK_SEED_TOP_N")  # reset 向量里的 chunk 种子数
-    ppr_specificity_enabled: bool = Field(True, env="PPR_SPECIFICITY_ENABLED")   # 种子 ÷ 实体出现chunk数
     ppr_fact_rerank_enabled: bool = Field(False, env="PPR_FACT_RERANK_ENABLED")  # LLM 过滤候选种子(每查一次 LLM)
-    ppr_variant_edges_enabled: bool = Field(False, env="PPR_VARIANT_EDGES_ENABLED")
     ppr_variant_edge_weight: float = Field(0.5, env="PPR_VARIANT_EDGE_WEIGHT")
-    ppr_federated_enabled: bool = Field(False, env="PPR_FEDERATED_ENABLED")  # PPR 图纳入 base-tier
     ppr_emb_synonym_enabled: bool = Field(False, env="PPR_EMB_SYNONYM_ENABLED")
     ppr_emb_synonym_threshold: float = Field(0.8, env="PPR_EMB_SYNONYM_THRESHOLD")
     ppr_emb_synonym_topk: int = Field(20, env="PPR_EMB_SYNONYM_TOPK")
     ppr_emb_synonym_max_entities: int = Field(50000, env="PPR_EMB_SYNONYM_MAX_ENTITIES")  # cost guard
-    ppr_community_context_enabled: bool = Field(False, env="PPR_COMMUNITY_CONTEXT_ENABLED")
     ppr_community_context_top_n: int = Field(3, env="PPR_COMMUNITY_CONTEXT_TOP_N")
     kg_canonical_fold_enabled: bool = Field(False, env="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, env="KG_ABOUT_DOWNWEIGHT_ENABLED")

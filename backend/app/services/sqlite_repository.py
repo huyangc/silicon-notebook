@@ -4670,18 +4670,16 @@ class SQLiteRepository:
 
     def _ppr_graph(self, notebook_id: str):
         """Build (and version-cache) the graph-mode PPR graph: KG nodes + chunk
-        nodes + relation/membership/synonym(+variant) edges. When
-        ppr_federated_enabled, spans active + base-tier notebooks (object_ids /
-        chunk_ids are globally unique; concept_clusters share name-derived
-        canonical_ids so a concept in active and base bridges naturally).
+        nodes + relation/membership/synonym(+variant) edges. Always spans active
+        + base-tier notebooks (object_ids / chunk_ids are globally unique;
+        concept_clusters share name-derived canonical_ids so a concept in active
+        and base bridges naturally).
         返回 (G, key_to_idx, chunk_idx_to_id)。"""
         from app.services.kg.ppr import build_ppr_graph
         with self._connect() as db:
-            participants = [notebook_id]
-            if self.settings.ppr_federated_enabled:
-                participants += [r["id"] for r in db.execute(
-                    "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                    (notebook_id,)).fetchall()]
+            participants = [notebook_id] + [r["id"] for r in db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                (notebook_id,)).fetchall()]
             version_parts = []
             for nb in participants:
                 rel_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
@@ -4695,8 +4693,7 @@ class SQLiteRepository:
                 version_parts.append((nb, obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
                                       chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"]))
         version = ("ppr_graph", tuple(version_parts),
-                   self.settings.ppr_variant_edges_enabled, self.settings.ppr_variant_edge_weight,
-                   self.settings.ppr_federated_enabled,
+                   self.settings.ppr_variant_edge_weight,
                    self.settings.ppr_emb_synonym_enabled, self.settings.ppr_emb_synonym_threshold,
                    self.settings.ppr_emb_synonym_topk,)
 
@@ -4726,10 +4723,8 @@ class SQLiteRepository:
                            for nb in participants
                            for oid, cids in self._ent_chunk_map(nb).items()
                            for cid in cids]
-            extra_edges = []
-            if self.settings.ppr_variant_edges_enabled:
-                from app.services.kg.ppr import variant_edge_pairs
-                extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
+            from app.services.kg.ppr import variant_edge_pairs
+            extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
             if self.settings.ppr_emb_synonym_enabled:
                 from app.services.kg.ppr import emb_synonym_edges
                 import numpy as np
@@ -4789,18 +4784,15 @@ class SQLiteRepository:
         """构造 PPR 的 reset/personalization 向量:KG 实体种子(federated_retrieve)
         + chunk 种子(dense)。返回 {vertex_idx: weight}。仅 graph 模式 PPR 路径调用。"""
         reset: Dict[int, float] = {}
-        ent_chunk_map = (self._ent_chunk_map(notebook_id)
-                         if self.settings.ppr_specificity_enabled else {})
+        ent_chunk_map = self._ent_chunk_map(notebook_id)
         kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
         if self.settings.ppr_fact_rerank_enabled:
             kg_hits = self._ppr_fact_rerank(question, kg_hits)
         for h in kg_hits:
             idx = key_to_idx.get(h.object_id)
             if idx is not None and h.relevance > 0:
-                w = float(h.relevance)
-                if self.settings.ppr_specificity_enabled:
-                    # 大众概念(出现在很多 chunk)降权,避免 Transformer/KV cache 灌满 PPR。
-                    w /= max(1, len(ent_chunk_map.get(h.object_id) or ()))
+                # 大众概念(出现在很多 chunk)降权,避免 Transformer/KV cache 灌满 PPR。
+                w = float(h.relevance) / max(1, len(ent_chunk_map.get(h.object_id) or ()))
                 reset[idx] = reset.get(idx, 0.0) + w
         scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
         pw = self.settings.ppr_passage_node_weight
@@ -5965,15 +5957,14 @@ class SQLiteRepository:
             if self.settings.graph_ppr_enabled:
                 ppr_chunks = self._ppr_retrieve(notebook_id, question)
                 if ppr_chunks:
-                    if self.settings.ppr_community_context_enabled:
-                        from app.services.retrieval import RetrievedChunk
-                        reports = self.get_community_reports(notebook_id)[: self.settings.ppr_community_context_top_n]
-                        community_chunks = [RetrievedChunk(
-                            chunk_id=f"community:{i}", source_id="",
-                            source_title="Knowledge base theme", section_path=r["title"],
-                            text=f"{r['title']}. {r['summary']}", element_ids=[], relevance=1.0)
-                            for i, r in enumerate(reports)]
-                        ppr_chunks = community_chunks + ppr_chunks
+                    from app.services.retrieval import RetrievedChunk
+                    reports = self.get_community_reports(notebook_id)[: self.settings.ppr_community_context_top_n]
+                    community_chunks = [RetrievedChunk(
+                        chunk_id=f"community:{i}", source_id="",
+                        source_title="Knowledge base theme", section_path=r["title"],
+                        text=f"{r['title']}. {r['summary']}", element_ids=[], relevance=1.0)
+                        for i, r in enumerate(reports)]
+                    ppr_chunks = community_chunks + ppr_chunks
                     answer, llm_grounded, anchors = "", False, []
                     if getattr(self.llm_client, "configured", False):
                         try:
