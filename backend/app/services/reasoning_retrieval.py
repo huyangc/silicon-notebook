@@ -174,13 +174,15 @@ class ReasoningRetriever:
                 per_q.append({})
         return quota_fuse(collected, per_q, top_n)
 
-    def _summarize(self, collected, elements):
+    def _summarize(self, collected, elements, chunks):
         lines = []
         for rk in list(collected.values())[:30]:
             name = str(rk.payload.get("name", "")).strip() or rk.object_id
             lines.append(f"- [{rk.object_type}] {name} (id={rk.object_id})")
         for el in elements[:10]:
             lines.append(f"- [element] {el.source_title} · {el.location_label}: {el.text[:80]}")
+        for c in chunks[:10]:
+            lines.append(f"- [chunk] {c.source_title} · {c.section_path}: {c.text[:80]}")
         return "\n".join(lines) if lines else "(no candidates yet)"
 
     def run(self, notebook_id, question, history="", on_step=None):
@@ -188,6 +190,8 @@ class ReasoningRetriever:
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
+        chunks: List[RetrievedChunk] = []
+        seen_chunks: set = set()
         visited: set = set()
 
         def record(step: TraceStep) -> None:
@@ -230,6 +234,19 @@ class ReasoningRetriever:
                          summary=f"初检索得到 {len(collected)} 个候选节点",
                          detail={"count": len(collected)}))
 
+        # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
+        # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
+        if self.settings.graph_ppr_enabled:
+            raise_if_cancelled(self.cancel_event)
+            seeded = [c for c in self.ppr_retrieve(notebook_id, question)
+                      if c.chunk_id not in seen_chunks]
+            for c in seeded:
+                seen_chunks.add(c.chunk_id)
+            chunks.extend(seeded)
+            record(TraceStep(step_type="ppr",
+                             summary=f"PPR 跨文档兜底检索,得到 {len(seeded)} 段原文",
+                             detail={"found": len(seeded), "phase": "seed"}))
+
         # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
         used_queries = list(dict.fromkeys(s.query for s in subqueries))
 
@@ -245,7 +262,7 @@ class ReasoningRetriever:
         while steps < self.settings.reasoning_max_steps:
             raise_if_cancelled(self.cancel_event)
             steps += 1
-            summary = self._summarize(collected, elements)
+            summary = self._summarize(collected, elements, chunks)
             if no_progress:
                 summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
             # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -263,7 +280,7 @@ class ReasoningRetriever:
                                      "no_progress": no_progress, "stale": stale}))
             if decision.next_action == "answer" or decision.sufficient:
                 break
-            before = len(collected) + len(elements)
+            before = len(collected) + len(elements) + len(chunks)
             if decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
                 if not oid or oid in visited:
@@ -329,7 +346,7 @@ class ReasoningRetriever:
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
-            no_progress = (len(collected) + len(elements)) == before
+            no_progress = (len(collected) + len(elements) + len(chunks)) == before
             stale = stale + 1 if no_progress else 0
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if stale >= self.settings.reasoning_stale_limit:
@@ -357,4 +374,5 @@ class ReasoningRetriever:
         record(TraceStep(step_type="answer",
                          summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
                          detail=answer_detail))
-        return ReasoningResult(top_hits=top_hits, elements=elements, trace=trace)
+        return ReasoningResult(top_hits=top_hits, elements=elements,
+                               trace=trace, chunks=chunks)

@@ -100,3 +100,35 @@ def test_reflect_parses_ppr_retrieve_decision():
     d = rr.reflect("对比题", "候选摘要")
     assert d.next_action == "ppr_retrieve"
     assert d.ppr_query == "DeepSeek vs GLM MoE"
+
+
+class _AnswerOnlyLLM:
+    """plan 出单子查询;reflect 永远 answer(不选 ppr_retrieve)→ 只靠 seed pass。"""
+    configured = True
+    def chat_json(self, messages, schema_hint, **kw):
+        if "sub_queries" in schema_hint:
+            return json.dumps({"sub_queries": [{"query": "DeepSeek MoE"}]})
+        if "next_action" in schema_hint:
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        return json.dumps({"answer": "都用 MoE [k1].", "grounded": True})
+
+
+def test_run_seed_pass_populates_cross_doc_chunks_when_flag_on(repo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_doc_moe(repo)
+    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    assert repo.settings.graph_ppr_enabled is True   # 默认开
+    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
+    ids = {c.chunk_id for c in result.chunks}
+    assert "cA" in ids and "cB" in ids               # seed pass 拉到跨文档 chunk
+    assert any(s.step_type == "ppr" for s in result.trace)
+
+
+def test_run_no_seed_when_flag_off(repo, monkeypatch):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_doc_moe(repo)
+    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
+    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
+    assert result.chunks == []
+    assert not any(s.step_type == "ppr" for s in result.trace)
