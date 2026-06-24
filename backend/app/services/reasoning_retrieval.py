@@ -17,7 +17,7 @@ from app.services.prompts import (
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.retrieval import (
-    RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
+    RetrievedChunk, RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
 )
 
 KG_TYPES = ("claim", "formula", "procedure", "concept")
@@ -27,6 +27,11 @@ PREFER_WEIGHTS = {
     "balanced": (W_KEYWORD, W_SEMANTIC),
 }
 _PER_QUERY_LIMIT = 8
+# agent 主动 ppr_retrieve 的累计次数上限。写死常量(非 env 开关):reasoning_max_steps=50
+# 且每次 ppr_retrieve 都拉到新 chunk=算"有进展"→ stale 熔断不跳,无此上限一次推理可触发
+# 多达 50 次全图 PageRank。镜像 search_elements 的 reasoning_max_element_searches。
+# 注:run() 初检索后的 seed pass 不计入此上限(它是保证基线、非 agent 动作)。
+_MAX_PPR_RETRIEVES = 3
 
 # Reflect 循环中,当上一步检索动作未带来任何新证据时,附加到候选摘要里的提示。
 # 目的:让模型"知道"重复检索已无收益,从而自主决定直接作答(而非被强制收尾),
@@ -55,6 +60,7 @@ class ReflectDecision:
     expand_direction: str = "both"
     new_sub_query: Optional[SubQuery] = None
     elements_query: str = ""
+    ppr_query: str = ""
     reason: str = ""
 
 
@@ -63,6 +69,7 @@ class ReasoningResult:
     top_hits: List[RetrievedKnowledge] = field(default_factory=list)
     elements: List[RetrievedElement] = field(default_factory=list)
     trace: List[TraceStep] = field(default_factory=list)
+    chunks: List[RetrievedChunk] = field(default_factory=list)
 
 
 class ReasoningRetriever:
@@ -88,6 +95,9 @@ class ReasoningRetriever:
 
     def search_elements(self, notebook_id, query):
         return self.repo._retrieve_elements(notebook_id, query)
+
+    def ppr_retrieve(self, notebook_id, query):
+        return self.repo._ppr_retrieve(notebook_id, query)
 
     # --- LLM 决策点 ---
     def plan(self, question, history=""):
