@@ -180,3 +180,49 @@ def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
     assert any(s.step_type == "skip" and s.detail.get("reason") == "ppr_disabled"
                for s in result.trace)
     assert result.chunks == []
+
+
+def test_answer_context_id_offset_shifts_keys(repo):
+    """加 id_offset 后 KG 键从 k1001 起(与 chunk 段 k1..N 不撞)。"""
+    nb = _seed_two_doc_moe(repo)
+    hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:2]
+    assert hits
+    block, id_map = repo._answer_context(nb.id, hits, id_offset=repo._MIX_KG_KEY_BASE)
+    assert all(int(k[1:]) > repo._MIX_KG_KEY_BASE for k in id_map)   # k1001+
+    # 默认 offset=0 保持旧行为
+    _b0, id0 = repo._answer_context(nb.id, hits)
+    assert "k1" in id0
+
+
+def test_answer_reasoning_mixes_chunks_as_citable(repo):
+    """chunks 非空 → 上下文含 chunk 段、id_map 含 chunk 锚(object_type=chunk)、
+    答案 [k1] 解析为 chunk 锚。"""
+    nb = _seed_two_doc_moe(repo)
+    hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:2]
+    chunks = repo._ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts")
+    assert chunks
+
+    class _Echo:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            return json.dumps({"answer": "跨文档证据 [k1].", "grounded": True})
+    repo._reasoning_llm_client = _Echo()
+
+    answer, grounded, anchors = repo._answer_reasoning(
+        nb.id, "对比 MoE", hits, [], chunks=chunks)
+    assert anchors and anchors[0].object_type == "chunk"   # k1 = chunk 段一等引用
+
+
+def test_answer_reasoning_empty_chunks_unchanged(repo):
+    """chunks 为空 → 走旧 KG-only 路径,k1 是 KG 锚。"""
+    nb = _seed_two_doc_moe(repo)
+    hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:2]
+
+    class _Echo:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            return json.dumps({"answer": "KG 证据 [k1].", "grounded": True})
+    repo._reasoning_llm_client = _Echo()
+
+    answer, grounded, anchors = repo._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
+    assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
