@@ -2395,14 +2395,16 @@ export default function Home() {
                           <span className={`source-status-dot status-${source.parse_status || source.status}`} />
                           {source.extraction_warning && <span title={source.extraction_warning} style={{cursor:"help",marginLeft:2}}>⚠</span>}
                         </button>
-                        {source.source_url ? (
-                          <a href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} onClick={(e) => e.stopPropagation()} style={{ marginLeft: 6 }}>
-                            <ExternalLink size={13} />
-                          </a>
-                        ) : null}
-                        <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
-                          <Trash2 size={15} />
-                        </button>
+                        <div className="source-row-actions">
+                          {source.source_url ? (
+                            <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} onClick={(e) => e.stopPropagation()}>
+                              <ExternalLink size={13} />
+                            </a>
+                          ) : null}
+                          <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </div>
                     ))
                   )}

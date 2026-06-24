@@ -2182,6 +2182,33 @@ button.chat-session-card {
   color: #2f6df6;
 }
 
+.source-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.source-row-actions .source-link-button,
+.source-row-actions .source-delete-button {
+  flex: 0 0 30px;
+}
+
+.source-link-button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.source-link-button:hover {
+  background: #eef3ff;
+}
+
 .source-title-short {
   min-width: 0;
   overflow: hidden;
