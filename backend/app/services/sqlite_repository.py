@@ -6166,6 +6166,75 @@ class SQLiteRepository:
                             edge["confidence"] = 0.05
                     context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
 
+            # 原文增强:子图 KG 节点的源 chunk 整段也喂模型(复用 chunk overlay 的 mix)。
+            # 有源 chunk → 走 _answer_mix(KG 段 k1001+ / chunk 段 k1..N)、出 chunk 引用、直接 return;
+            # 无源 chunk → 落到下方现状 KG-only 答案,行为不变。
+            from app.services.retrieval import est_tokens, truncate_by_tokens
+            src_chunks = self._kg_source_chunks(
+                notebook_id, [n["object_id"] for n, _e, _s in subgraph])
+            if src_chunks:
+                mix_kg_block, mix_id_map = render_subgraph_context(
+                    subgraph, id_offset=self._MIX_KG_KEY_BASE)
+                mix_kg_block = self._truncate_kg_block(
+                    mix_kg_block,
+                    self.settings.max_entity_tokens + self.settings.max_relation_tokens)
+                chunk_budget = max(0, self.settings.max_total_tokens
+                                   - est_tokens(mix_kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
+                src_chunks = truncate_by_tokens(src_chunks, lambda c: c.text, chunk_budget)
+                # 源 chunk 的 source_title 补全(供引用标签;_kg_source_chunks 留空)
+                with self._connect() as _db:
+                    _sids = list({c.source_id for c in src_chunks})
+                    _titles = {r["id"]: r["title"] for r in _db.execute(
+                        f"SELECT id, title FROM sources WHERE id IN ({','.join('?' for _ in _sids)})",
+                        _sids).fetchall()} if _sids else {}
+                for c in src_chunks:
+                    c.source_title = _titles.get(c.source_id, "")
+                answer, llm_grounded, anchors = "", False, []
+                if getattr(self.llm_client, "configured", False):
+                    try:
+                        answer, llm_grounded, anchors = self._answer_mix(
+                            question, src_chunks, mix_kg_block, mix_id_map, history,
+                            cancel_event=cancel_event)
+                    except AskCancelled:
+                        raise
+                    except Exception as exc:
+                        self._note_model_error("answer", self.settings.openai_compat_model, exc)
+                        answer, llm_grounded, anchors = "", False, []
+                citations: List[Citation] = []
+                by_id = {c.chunk_id: c for c in src_chunks}
+                for a in anchors:
+                    if a.object_type == "chunk" and a.object_id in by_id:
+                        c = by_id[a.object_id]
+                        eid = c.element_ids[0] if c.element_ids else ""
+                        citations.append(Citation(
+                            label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                            source_id=c.source_id, element_id=eid,
+                            location_label=c.section_path, quoted_span=c.text[:200]))
+                evidence_level, top_relevance = classify_evidence(
+                    src_chunks, anchors, llm_grounded,
+                    self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+                grounded = evidence_level == "grounded"
+                if answer:
+                    conclusion = _MARKER_RE.sub("", answer).strip()
+                    llm_mode = "grounded" if grounded else "ungrounded"
+                else:
+                    conclusion = f"Graph retrieved {len(src_chunks)} source passage(s) for this question."
+                    llm_mode = "deterministic"
+                from app.models.schemas import TraceStep
+                resp = AskResponse(
+                    answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
+                    evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
+                    citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
+                    retrieval_query=question, top_relevance=top_relevance,
+                    reasoning_trace=[TraceStep(step_type="graph_src_chunks",
+                        summary=f"BFS 子图 + {len(src_chunks)} 段源原文",
+                        detail={"chunks": len(src_chunks),
+                                "sources": len({c.source_id for c in src_chunks})})])
+                resp.mode = "graph"
+                resp.model_errors = [ModelError(**e) for e in _err_sink]
+                resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
+                return resp
+
             # Synthesise the answer through the existing LLM + grounding path.
             context_block = self._refine_context(
                 question, context_block, self.llm_client, cancel_event)
