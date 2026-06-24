@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
@@ -6542,6 +6542,28 @@ class SQLiteRepository:
             if cur.rowcount == 0:
                 raise KeyError(conversation_id)
             db.execute("DELETE FROM answers WHERE conversation_id=?", (conversation_id,))
+
+    def bulk_delete_conversations(self, notebook_id: str, older_than_days: int) -> int:
+        """Delete the current user's conversations in `notebook_id` whose last
+        activity (`updated_at`) is strictly older than `older_than_days` days,
+        cascading to their answers. Returns the number deleted. Raises KeyError
+        if the notebook does not exist."""
+        if older_than_days < 1:
+            raise ValueError("older_than_days must be >= 1")
+        self.get_notebook(notebook_id)
+        cutoff = (datetime.now() - timedelta(days=older_than_days)).replace(microsecond=0).isoformat()
+        with self._write() as db:
+            ids = [
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM conversations "
+                    "WHERE notebook_id = ? AND created_by = ? AND updated_at < ?",
+                    (notebook_id, self.current_user().id, cutoff),
+                ).fetchall()
+            ]
+            db.executemany("DELETE FROM answers WHERE conversation_id = ?", [(cid,) for cid in ids])
+            db.executemany("DELETE FROM conversations WHERE id = ?", [(cid,) for cid in ids])
+        return len(ids)
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         if payload.rating not in {"useful", "not_useful"}:

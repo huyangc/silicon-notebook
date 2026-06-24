@@ -1,6 +1,6 @@
 import json, pytest
 from app.core.config import Settings
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
 
@@ -220,3 +220,52 @@ def test_get_conversation_used_reasoning_reflects_last_turn(repo):
         conversation_id=cid,
     )
     assert repo.get_conversation(cid).used_reasoning is True    # 末轮推理
+
+
+def test_bulk_delete_conversations_by_last_activity(repo):
+    nb = _seed(repo)
+    other = repo.create_notebook(NotebookCreate(name="other"))
+    me = repo.current_user().id
+
+    def add_conv(cid, notebook_id, updated_at, *, created_by=None, created_at="2000-01-01T00:00:00"):
+        with repo._connect() as db:
+            db.execute(
+                "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (cid, notebook_id, cid, created_by or me, created_at, updated_at),
+            )
+            db.execute(
+                "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
+                "VALUES (?,?,?,?,?,?)",
+                (f"ans-{cid}", notebook_id, "q", "{}", updated_at, cid),
+            )
+
+    add_conv("conv-old", nb.id, "2000-01-01T00:00:00")                          # stale -> delete
+    add_conv("conv-new", nb.id, _now())                                         # active today -> keep
+    add_conv("conv-revived", nb.id, _now(), created_at="2000-01-01T00:00:00")   # old created, recent activity -> keep
+    add_conv("conv-otnb", other.id, "2000-01-01T00:00:00")                      # other notebook -> untouched
+    add_conv("conv-other-user", nb.id, "2000-01-01T00:00:00", created_by="someone-else")  # other user -> untouched
+
+    deleted = repo.bulk_delete_conversations(nb.id, older_than_days=3)
+    assert deleted == 1                                                         # only conv-old matched
+
+    survivors = {c.id for c in repo.list_conversations(nb.id)}
+    assert survivors == {"conv-new", "conv-revived"}                           # keyed on updated_at, not created_at
+
+    with repo._connect() as db:
+        assert db.execute("SELECT count(*) FROM answers WHERE conversation_id='conv-old'").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM answers WHERE conversation_id='conv-new'").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM conversations WHERE id='conv-otnb'").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM conversations WHERE id='conv-other-user'").fetchone()[0] == 1
+
+
+def test_bulk_delete_conversations_missing_notebook(repo):
+    with pytest.raises(KeyError):
+        repo.bulk_delete_conversations("nb-bogus", older_than_days=3)
+
+
+def test_bulk_delete_conversations_rejects_nonpositive_days(repo):
+    nb = _seed(repo)
+    for bad in (0, -1):
+        with pytest.raises(ValueError):
+            repo.bulk_delete_conversations(nb.id, older_than_days=bad)
