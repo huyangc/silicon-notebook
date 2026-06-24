@@ -2627,31 +2627,37 @@ class SQLiteRepository:
                     "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
                     "AND object_type='concept' AND status!='deprecated' AND source_id!=?",
                     (notebook_id, source_id)).fetchall()
-                vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
-                                   (notebook_id,)).fetchall()
-            # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量,
-            # 而非从首条推断——推断会在混维库里误留旧维)。
-            dim = self.settings.embed_dim
-            vecs = {}
-            for r in vrows:
-                v = json.loads(r["vector"])
-                if len(v) == dim:
-                    vecs[r["object_id"]] = v
-            existing_items = [{"object_id": r["id"],
-                               "name": json.loads(r["payload"] or "{}").get("name", "")} for r in ex]
-            new_vecs = {o["object_id"]: vecs[o["object_id"]] for o in new_objs if o["object_id"] in vecs}
-            decided = self.decided_pairs(notebook_id)   # 键 (canonical_a, canonical_b),concept 为 "K-<seed>"
-            rejected = {frozenset((a, b)) for (a, b), s in decided.items() if s == "rejected"}
-            from app.services.kg_merge import detect_bridge_candidates
-            cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, rejected)
-            if cands:
-                now = _now()
-                with self._write() as db:
-                    for c in cands:
-                        db.execute(
-                            "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
-                            "VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                            (f"cm-{uuid4().hex[:10]}", notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
+            # Tier2 成本护栏:已有 concept 过多则跳过桥接检测(Tier1 已 append),镜像 emb_synonym 的 max_entities。
+            if len(ex) <= self.settings.kg_incremental_tier2_max_entities:
+                with self._connect() as db:
+                    vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+                                       (notebook_id,)).fetchall()
+                    pend = db.execute(
+                        "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+                        "WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
+                # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量)。
+                dim = self.settings.embed_dim
+                vecs = {}
+                for r in vrows:
+                    v = json.loads(r["vector"])
+                    if len(v) == dim:
+                        vecs[r["object_id"]] = v
+                existing_items = [{"object_id": r["id"],
+                                   "name": json.loads(r["payload"] or "{}").get("name", "")} for r in ex]
+                new_vecs = {o["object_id"]: vecs[o["object_id"]] for o in new_objs if o["object_id"] in vecs}
+                # 排除全部已决(confirmed+rejected)+ 已 pending,避免重复入队。
+                exclude = {frozenset((a, b)) for (a, b) in self.decided_pairs(notebook_id)}
+                exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
+                from app.services.kg_merge import detect_bridge_candidates
+                cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, exclude)
+                if cands:
+                    now = _now()
+                    with self._write() as db:
+                        for c in cands:
+                            db.execute(
+                                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+                                "VALUES (?,?,?,?,?, 'pending', ?, ?)",
+                                (f"cm-{uuid4().hex[:10]}", notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
         from app.services.kg_merge import seed_claim, seed_formula, seed_procedure
         _TYPES = {"claim": (seed_claim, "KL-"), "formula": (seed_formula, "KF-"),
                   "procedure": (seed_procedure, "KP-")}
@@ -2668,7 +2674,7 @@ class SQLiteRepository:
                 continue
             tcanon = {r["canonical_id"]: r["canonical_name"] for r in tcn}
             trows_w = place_new_concepts(tnew, self.cluster_map(notebook_id), tcanon,
-                                         seed_fn=lambda o, _s=sfn: _s(o["payload"]), id_prefix=prefix)
+                                         seed_fn=lambda o, _s=sfn: _s(o), id_prefix=prefix)
             self.append_clusters(notebook_id, trows_w, object_type=t)
         self._invalidate_unified_cache(notebook_id)
 
@@ -3561,7 +3567,7 @@ class SQLiteRepository:
         row. No-op (returns 0) when disabled or LLM unconfigured. Returns the
         number of communities summarized."""
         self.get_notebook(notebook_id)
-        if not self.settings.kg_community_summary_enabled or not getattr(self.llm_client, "configured", False):
+        if not self.settings.kg_community_summary_enabled or not getattr(self.kg_llm_client, "configured", False):
             return 0
         from app.services.prompts import community_report_prompt, COMMUNITY_REPORT_SCHEMA_HINT
         with self._connect() as db:
@@ -3592,7 +3598,7 @@ class SQLiteRepository:
             members_block = "\n".join(mlines)
             relations_block = "\n".join(rlines) if rlines else "(none)"
             try:
-                raw = self.llm_client.chat_json(
+                raw = self.kg_llm_client.chat_json(
                     [{"role": "user", "content": community_report_prompt(members_block, relations_block)}],
                     COMMUNITY_REPORT_SCHEMA_HINT)
                 data = json.loads(raw)

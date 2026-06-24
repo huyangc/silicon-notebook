@@ -132,3 +132,45 @@ def test_rebuild_unified_kg_still_works(repo):
                    ("ko-A", nb.id, "concept", "approved", "", json.dumps({"name":"MoE"}), "[]", "src-A", now, now))
     repo.rebuild_unified_kg(nb.id)
     assert "ko-A" in repo.cluster_map(nb.id)
+
+
+def test_incremental_procedure_seed_matches_rebuild(repo):
+    """#1 回归:procedure 增量 canonical 含 steps 签名,且与 rebuild 一致
+    (place_new_concepts 必须收到含 payload 的 o,而非裸 payload)。"""
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-06-22T00:00:00"
+    payload = {"name": "calibrate ADC", "steps": [{"name": "sample"}, {"name": "set ref"}]}
+    with repo._write() as db:
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("kp-B", nb.id, "procedure", "approved", "", json.dumps(payload), "[]", "src-B", now, now))
+    repo.incremental_fuse_source(nb.id, "src-B")
+    inc_cid = repo.cluster_map(nb.id).get("kp-B")
+    repo.rebuild_unified_kg(nb.id)
+    reb_cid = repo.cluster_map(nb.id).get("kp-B")
+    assert "#" in (inc_cid or "")        # steps 签名被纳入(传 o 含 payload 才有)
+    assert inc_cid == reb_cid            # 增量与全量 canonical 一致
+
+
+def test_tier2_no_duplicate_candidates_on_refuse(repo):
+    """#2:同一桥接对重复增量不重复入队(去重已 pending)。"""
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-06-22T00:00:00"
+    v_old = json.dumps([1.0] + [0.0]*15); v_new = json.dumps([0.99] + [0.0]*15)
+    from app.services.kg_merge import _norm
+    with repo._write() as db:
+        for oid, nm, src in [("ko-old", "Expert Routing", "src-A"), ("ko-new", "MoE Gating", "src-B")]:
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name":nm}), "[]", src, now, now))
+        db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)",
+                   ("cc-old", nb.id, "K-"+_norm("Expert Routing"), "ko-old", "Expert Routing", "concept", "", now))
+        for oid, vec in [("ko-old", v_old), ("ko-new", v_new)]:
+            db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                       (oid, nb.id, vec, now))
+    repo.incremental_fuse_source(nb.id, "src-B")
+    repo.incremental_fuse_source(nb.id, "src-B")   # 二次:同一对不再入队
+    with repo._connect() as db:
+        n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
+    assert n == 1
