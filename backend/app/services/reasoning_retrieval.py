@@ -130,7 +130,8 @@ class ReasoningRetriever:
             if not isinstance(data, dict):
                 return answer_decision
             action = str(data.get("next_action", "answer"))
-            if action not in ("answer", "expand_graph", "add_subquery", "search_elements"):
+            if action not in ("answer", "expand_graph", "add_subquery",
+                               "search_elements", "ppr_retrieve"):
                 action = "answer"
             d = ReflectDecision(
                 sufficient=bool(data.get("sufficient", False)),
@@ -151,6 +152,7 @@ class ReasoningRetriever:
                                            types=types, prefer=prefer,
                                            reason=str(nsq.get("reason", "")))
             d.elements_query = str(data.get("elements_query", "")).strip()
+            d.ppr_query = str(data.get("ppr_query", "")).strip()
             return d
         except AskCancelled:
             raise

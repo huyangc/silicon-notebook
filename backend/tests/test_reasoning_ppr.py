@@ -70,3 +70,33 @@ def test_ppr_retrieve_wrapper_delegates_cross_doc(repo):
     ids = {c.chunk_id for c in chunks}
     assert "cA" in ids and "cB" in ids
     assert all(0.0 <= c.relevance <= 1.0 for c in chunks)
+
+
+def test_reflect_prompt_and_schema_expose_ppr():
+    from app.services.prompts import reflect_prompt, REFLECT_SCHEMA_HINT
+    assert "ppr_retrieve" in REFLECT_SCHEMA_HINT
+    assert "ppr_query" in REFLECT_SCHEMA_HINT
+    p = reflect_prompt("对比 DeepSeek 与 GLM", "- [concept] MoE (id=k1)")
+    assert "ppr_retrieve" in p
+    # 既有 4 动作不丢
+    for a in ("answer", "expand_graph", "add_subquery", "search_elements"):
+        assert a in REFLECT_SCHEMA_HINT
+
+
+def test_reflect_parses_ppr_retrieve_decision():
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.core.config import Settings
+
+    class _LLM:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            return json.dumps({"next_action": "ppr_retrieve",
+                               "ppr_query": "DeepSeek vs GLM MoE", "reason": "需跨文档对比"})
+
+    class _Repo:
+        def __init__(self): self.reasoning_llm_client = _LLM()
+
+    rr = ReasoningRetriever(_Repo(), Settings(_env_file=None))
+    d = rr.reflect("对比题", "候选摘要")
+    assert d.next_action == "ppr_retrieve"
+    assert d.ppr_query == "DeepSeek vs GLM MoE"
