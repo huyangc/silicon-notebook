@@ -1647,6 +1647,10 @@ class SQLiteRepository:
                 )
             objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
             n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
+            try:
+                self.incremental_fuse_source(source.notebook_id, source.id)
+            except Exception:
+                self.event_log.logger.exception("incremental_fuse_source failed for %s", source_id)
             fw, tw = graph.failed_windows, graph.total_windows
             with self._write() as db:
                 db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
@@ -2577,6 +2581,50 @@ class SQLiteRepository:
                     (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
                      r["member_object_id"], r["canonical_name"], object_type,
                      r.get("canonical_description", ""), now))
+
+    def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept") -> int:
+        """追加写 concept_clusters(不 DELETE);member_object_id 幂等(已在则跳过)。返回新增数。"""
+        now = _now()
+        added = 0
+        with self._write() as db:
+            existing = {r["member_object_id"] for r in db.execute(
+                "SELECT member_object_id FROM concept_clusters WHERE notebook_id=? AND object_type=?",
+                (notebook_id, object_type)).fetchall()}
+            for r in rows:
+                if r["member_object_id"] in existing:
+                    continue
+                db.execute(
+                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"],
+                     r["canonical_name"], object_type, "", now))
+                added += 1
+        return added
+
+    def incremental_fuse_source(self, notebook_id: str, source_id: str) -> None:
+        """上传后增量融合该源 concept 进 concept_clusters。Tier1 名种子 append(无 LLM)。"""
+        if not self.settings.kg_incremental_fusion_enabled:
+            return
+        from app.services.kg_merge import place_new_concepts, _norm
+        with self._connect() as db:
+            new = db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
+                "AND object_type='concept' AND status!='deprecated'",
+                (notebook_id, source_id)).fetchall()
+            cn = db.execute(
+                "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
+                "WHERE notebook_id=? AND object_type='concept'", (notebook_id,)).fetchall()
+        new_objs = [{"object_id": r["id"],
+                     "name": json.loads(r["payload"] or "{}").get("name", "")} for r in new]
+        if not new_objs:
+            return
+        cmap = self.cluster_map(notebook_id)
+        canon_names = {r["canonical_id"]: r["canonical_name"] for r in cn}
+        rows = place_new_concepts(new_objs, cmap, canon_names,
+                                  seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
+        self.append_clusters(notebook_id, rows, object_type="concept")
+        # >>> Tier2(后续任务)在此插入桥接检测 + 入队 <<<
+        self._invalidate_unified_cache(notebook_id)
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         with self._connect() as db:

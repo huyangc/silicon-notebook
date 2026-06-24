@@ -283,6 +283,23 @@ def cluster_concepts(
     )
 
 
+def place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
+                       *, seed_fn, id_prefix="K-"):
+    """Tier-1 名种子放置:每个新对象按 seed_fn → canonical_id 追加到已有簇或建新簇。
+    不重排任何已有对象(已有 canonical_id 不变 → 无簇分布漂移)。
+    existing_cluster_map: {existing_object_id: canonical_id};existing_canon_names: {canonical_id: name}。
+    返回 [{canonical_id, member_object_id, canonical_name}]。"""
+    existing_cids = set(existing_cluster_map.values())
+    rows = []
+    for o in new_objects:
+        cid = f"{id_prefix}{seed_fn(o)}"
+        name = o.get("name", "")
+        canon_name = existing_canon_names.get(cid, name) if cid in existing_cids else name
+        rows.append({"canonical_id": cid, "member_object_id": o["object_id"],
+                     "canonical_name": canon_name})
+    return rows
+
+
 def derive_unified_graph(nodes: List[dict], edges: List[dict], cluster_map: Dict[str, str]) -> dict:
     """Rewire member-Concept endpoints to canonical ids; dedup edges. O(V+E).
 
