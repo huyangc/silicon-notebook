@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections import namedtuple
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -162,6 +163,10 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     # without disturbing newlines / other whitespace runs the model intended.
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
+
+# classify_evidence 只读 .object_id/.relevance;PPR chunk 用 chunk_id 充当 object_id,
+# 使跨文档 chunk 引用也能进证据分档(否则纯 chunk 引用的答案会被误判 inferred)。
+_ChunkEvHit = namedtuple("_ChunkEvHit", "object_id relevance")
 
 # 每次 ask 的模型错误收集槽(请求级;仓库是单例,不能用实例状态)。None = 不在 ask 上下文。
 _ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
@@ -5678,7 +5683,8 @@ class SQLiteRepository:
                     merged.append(src[i])
         return merged, kg_block, kg_id_map, kg_hits
 
-    def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge]) -> tuple:
+    def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
+                        id_offset: int = 0) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
         LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
         first-occurrence snippet / procedure steps) is pulled via node_context.
@@ -5711,7 +5717,7 @@ class SQLiteRepository:
             if used >= budget and len(lines) >= min_items:
                 break
             i += 1
-            key = f"k{i}"
+            key = f"k{i + id_offset}"
             name = str(hit.payload.get("name", "")).strip()
             occ = ctx.get("occurrences") or []
             snippet = occ[0].get("element_text") if occ else ""
@@ -5844,13 +5850,29 @@ class SQLiteRepository:
         elements,
         history="",
         cancel_event: CancelEvent = None,
+        chunks=None,
     ):
-        """Synthesise the reasoning-mode answer: reuse _answer_context for KG
-        hits (so [k] anchors/citations stay identical to fast mode), then append
-        fallback document passages as reference-only context (no [k] id, so they
-        never become anchors). Returns (answer, llm_grounded, anchors)."""
+        """Synthesise the reasoning-mode answer. When PPR chunks are present they
+        become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
+        chain segment k1001+ (mirrors _answer_mix's keying), still via the reasoning
+        client. Otherwise KG-only (legacy). search_elements passages stay
+        reference-only (no [k] id). Returns (answer, llm_grounded, anchors)."""
         raise_if_cancelled(cancel_event)
-        context_block, id_map = self._answer_context(notebook_id, top_hits)
+        chunks = chunks or []
+        if chunks:
+            # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关);
+            # chunk 段 k1..N + KG 段 k1001+,合并 id_map,两段都可 [k] 引用。
+            ordered = sorted(chunks, key=lambda c: (-c.relevance, c.chunk_id))
+            chunk_block, chunk_id_map = self._chunk_answer_context(ordered)
+            kg_block, kg_id_map = self._answer_context(
+                notebook_id, top_hits, id_offset=self._MIX_KG_KEY_BASE)
+            if kg_block and kg_block != "(none)":
+                context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
+            else:
+                context_block = chunk_block
+            id_map = {**chunk_id_map, **kg_id_map}
+        else:
+            context_block, id_map = self._answer_context(notebook_id, top_hits)
         if elements:
             extra = "\n".join(
                 f"(原文 {i+1}) {el.source_title} · {el.location_label}: {el.text[:200]}"
@@ -5920,11 +5942,12 @@ class SQLiteRepository:
             try:
                 result = ReasoningRetriever(self, self.settings, cancel_event).run(
                     notebook_id, question, history, on_step=checked_trace)
-                top_hits, elements, trace = result.top_hits, result.elements, result.trace
+                top_hits, elements, trace, chunks = (
+                    result.top_hits, result.elements, result.trace, result.chunks)
             except AskCancelled:
                 raise
             except Exception:
-                top_hits, elements, trace = [], [], []
+                top_hits, elements, trace, chunks = [], [], [], []
 
             registry = self.effective_schemas()
             seen_ids: set = set()
@@ -5949,11 +5972,11 @@ class SQLiteRepository:
 
             answer, llm_grounded, anchors = "", False, []
             raise_if_cancelled(cancel_event)
-            if self.reasoning_llm_client.configured and (top_hits or elements):
+            if self.reasoning_llm_client.configured and (top_hits or elements or chunks):
                 try:
                     answer, llm_grounded, anchors = self._answer_reasoning(
                         notebook_id, question, top_hits, elements, history,
-                        cancel_event=cancel_event)
+                        cancel_event=cancel_event, chunks=chunks)
                 except AskCancelled:
                     raise
                 except Exception as exc:
@@ -5963,8 +5986,10 @@ class SQLiteRepository:
                         exc)
                     answer, llm_grounded, anchors = "", False, []
 
+            evidence_pool = list(top_hits) + [
+                _ChunkEvHit(c.chunk_id, c.relevance) for c in chunks]
             evidence_level, top_relevance = classify_evidence(
-                top_hits, anchors, llm_grounded,
+                evidence_pool, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
             grounded = evidence_level == "grounded"
 
