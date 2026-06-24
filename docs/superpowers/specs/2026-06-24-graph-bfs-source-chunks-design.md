@@ -26,8 +26,9 @@ ask_graph (graph_ppr_enabled=False)
   verify_chain_edges(subgraph)            # 边对抗校验/降权,保留
   ── 新增 ──
   oids = [子图里 KG 节点 object_id]
-  chunks = self._kg_source_chunks(notebook_id, oids)     # 节点 evidence.element_id ∈ chunks.element_ids
-  chunks = 去重(按子图顺序,seed 优先) + 截断(_GRAPH_SRC_CHUNK_CAP=12)
+  chunks = self._kg_source_chunks(notebook_id, oids)     # 节点 evidence.element_id ∈ chunks.element_ids(已去重,按子图/seed 优先顺序)
+  chunk_budget = max(0, max_total_tokens - est_tokens(kg_block) - buffer)
+  chunks = truncate_by_tokens(chunks, lambda c: c.text, chunk_budget)   # 与 chunk overlay 同口径,seed 优先塞满即止
   if chunks:
       kg_block, kg_id_map = render_subgraph_context(subgraph, id_offset=_MIX_KG_KEY_BASE)  # KG 用 k1001+
       answer, grounded, anchors = self._answer_mix(question, chunks, kg_block, kg_id_map, history)
@@ -40,14 +41,14 @@ ask_graph (graph_ppr_enabled=False)
 ## 关键设计点
 
 1. **键位对齐**:`_answer_mix` 约定 chunk 段用 `k1..kN`、KG 段用 `k(_MIX_KG_KEY_BASE)+`(=1001+,`_MIX_KG_KEY_BASE=1000`)。故 KG 块必须 `render_subgraph_context(subgraph, id_offset=_MIX_KG_KEY_BASE)`(现状 BFS 用 id_offset=0,回退分支保持 0)。chunk 段由 `_answer_mix` 内部 `_chunk_answer_context` 编号,`_answer_mix` 已硬截 `chunks[:_MIX_KG_KEY_BASE-1]` 防撞键。
-2. **取哪些节点的 chunk**:子图全部 KG 节点(seed + 多跳邻居)的 object_id 一起喂 `_kg_source_chunks`;它按 evidence.element_id ∩ chunks.element_ids 回拉、自带去重。再加节点对应 chunk 数上限 `_GRAPH_SRC_CHUNK_CAP=12` 避免上下文爆(`_answer_mix` 本身也有 token 预算兜底)。
+2. **取哪些 + 截多少**:子图全部 KG 节点(seed + 多跳邻居)的 object_id 一起喂 `_kg_source_chunks`(按 evidence.element_id ∩ chunks.element_ids 回拉、自带去重、子图/seed 优先)。**不设数量帽**,按 **token 预算** `truncate_by_tokens` 截(见数据流)。注意 `_answer_mix` 自身**不**二次预算(`budget_chars=10**9`,明确指望调用方先截好),所以预算必须在 BFS 分支这里做——和 chunk overlay 同一套口径。
 3. **引用**:`_answer_mix` 的 anchor 含 chunk 与 KG 两类。chunk 锚点 → 建 `Citation(source_id, element_id, section, quoted_span)`(BFS 答案从此带 chunk 引用);KG 锚点 → related_knowledge(沿用现状)。
 4. **verify_chain_edges 保留**:仍在取 chunk / render 之前跑,降权后的边体现在 kg_block 里。
 5. **回退零副作用**:`_kg_source_chunks` 空(节点无 chunk 证据,或 notebook 无 chunk)→ 完全走现状 KG-only 答案。
 
-## 常量
+## 预算(无新常量/无新开关)
 
-- `_GRAPH_SRC_CHUNK_CAP = 12`(新增类常量):子图节点对应 chunk 的数量上限。非 env flag(用户不想要更多开关),代码常量。
+- chunk **不设数量帽**,按 token 预算截:`chunk_budget = max(0, max_total_tokens − est_tokens(kg_block) − buffer)`,`truncate_by_tokens(chunks, lambda c: c.text, chunk_budget)`——与 chunk overlay(`sqlite_repository.py:5311-5313`)同一套。上限即模型上下文预算,无魔法数字。(对照:HippoRAG 用 `qa_top_k=5` 数量帽;我们 `_answer_mix` 本就 token-预算设计,用预算更顺。)
 
 ## 测试
 
