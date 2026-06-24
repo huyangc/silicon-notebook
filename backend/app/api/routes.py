@@ -554,6 +554,14 @@ def delete_conversation(conversation_id: str):
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
+@router.delete("/notebooks/{notebook_id}/conversations")
+def bulk_delete_conversations(notebook_id: str, older_than_days: int = Query(..., ge=1)):
+    try:
+        deleted = repository().bulk_delete_conversations(notebook_id, older_than_days)
+        return {"deleted": deleted}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
 
 @router.get("/notebooks/{notebook_id}/articles", response_model=List[ArticleSummary])
 def list_articles(notebook_id: str) -> List[ArticleSummary]:
