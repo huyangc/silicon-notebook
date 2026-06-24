@@ -73,7 +73,7 @@ PPR(HippoRAG 式跨文档传播)已在 **graph 模式**落地并默认开(`_ppr_
   - `search_elements` 的 `elements` 继续作「供参考、无编号」二级段,与 PPR chunk **并存**(两种能力互补)。
 - **chunks 为空**时:**维持现状**(`_answer_context` KG-only + 供参考 elements)。
 - 实现取向:**在 `_answer_reasoning` 内联 mix 组装**(复用 `_chunk_answer_context` + offset 化 KG block),而非直接调 `_answer_mix`——因为 [`_answer_mix`:5207](backend/app/services/sqlite_repository.py:5207) 写死 `self.llm_client`(fast 模型);`_answer_reasoning` 已自带 reasoning client 调用,只需升级 context/id_map 组装即可。
-- 锚点:返回的 `anchors` 含 **chunk 锚(`object_type=passage`)+ KG 锚**;reasoning 答案首次出现 chunk 引用(graph BFS mix 已验证前端 UI 支持 chunk 锚)。
+- 锚点:返回的 `anchors` 含 **chunk 锚(`object_type=chunk`,沿用 graph-mix 约定)+ KG 锚**;reasoning 答案首次出现 chunk 引用(graph BFS mix 已验证前端 UI 支持 chunk 锚)。
 
 ### F. 开关 / 不变量
 
