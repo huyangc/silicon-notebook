@@ -282,6 +282,7 @@ http://localhost:3000
 
 ## Git And File Safety
 
+- For every new feature development task, create a new git worktree by default and do the work there on a new feature branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, continue there; otherwise create a worktree first, then branch, develop, verify, and open the PR from that branch.
 - Do not revert user changes.
 - Do not remove generated or user-provided files unless the user explicitly asks.
 - Keep changes scoped to the requested product or engineering task.
