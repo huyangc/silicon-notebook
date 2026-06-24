@@ -269,3 +269,31 @@ def test_bulk_delete_conversations_rejects_nonpositive_days(repo):
     for bad in (0, -1):
         with pytest.raises(ValueError):
             repo.bulk_delete_conversations(nb.id, older_than_days=bad)
+
+
+def test_bulk_delete_conversations_route(tmp_path, monkeypatch):
+    import sqlite3
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+    from app.api.routes import repository
+    client = TestClient(app)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]
+
+    # age the conversation's last activity to long ago (external connection, no concurrent write)
+    # use repository().db_path so we connect to whichever DB the cached repo actually uses
+    con = sqlite3.connect(repository().db_path)
+    con.execute("UPDATE conversations SET updated_at='2000-01-01T00:00:00' WHERE id=?", (cid,))
+    con.commit(); con.close()
+
+    # invalid threshold -> 422 (Query ge=1)
+    assert client.delete(f"/api/notebooks/{nb}/conversations", params={"older_than_days": 0}).status_code == 422
+    # missing notebook -> 404
+    assert client.delete("/api/notebooks/bogus/conversations", params={"older_than_days": 3}).status_code == 404
+    # happy path -> deletes the aged conversation
+    resp = client.delete(f"/api/notebooks/{nb}/conversations", params={"older_than_days": 3})
+    assert resp.status_code == 200 and resp.json()["deleted"] == 1
+    assert client.get(f"/api/notebooks/{nb}/conversations").json() == []
