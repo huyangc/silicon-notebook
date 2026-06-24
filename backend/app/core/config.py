@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     rewrite_llm_base_url: str = Field("", env="REWRITE_LLM_BASE_URL")
     rewrite_llm_api_key: str = Field("", env="REWRITE_LLM_API_KEY")
     rewrite_llm_model: str = Field("", env="REWRITE_LLM_MODEL")
+    # KG 构建/融合专用 LLM 端点（可选，批量离线任务）。三项全部非空时 KG 路径改用此
+    # 模型（重抽取/融合/冲突消解/概念描述）；任一为空 → 整体回退全局主模型。
+    kg_llm_base_url: str = Field("", env="KG_LLM_BASE_URL")
+    kg_llm_api_key: str = Field("", env="KG_LLM_API_KEY")
+    kg_llm_model: str = Field("", env="KG_LLM_MODEL")
 
     embed_provider: str = Field("", env="EMBED_PROVIDER")          # ""(off) | dashscope
     embed_model: str = Field("", env="EMBED_MODEL")
@@ -75,6 +80,8 @@ class Settings(BaseSettings):
     kg_concept_desc_enabled: bool = Field(True, env="KG_CONCEPT_DESC_ENABLED")
     # 社区摘要: 默认关闭; 开启后对每个社区用 LLM 生成 title/summary/findings 报告。
     kg_community_summary_enabled: bool = Field(False, env="KG_COMMUNITY_SUMMARY_ENABLED")
+    # 增量融合: 默认开启; 每次文档抽取后立即将新子图与全局 KG 增量融合（无需手动 rebuild）。
+    kg_incremental_fusion_enabled: bool = Field(True, env="KG_INCREMENTAL_FUSION_ENABLED")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。
@@ -277,6 +284,10 @@ class Settings(BaseSettings):
     def rewrite_llm_configured(self) -> bool:
         """设了 REWRITE_LLM_MODEL 即启用专用快改写模型(base_url/api_key 缺省复用主端点)。"""
         return bool(self.rewrite_llm_model)
+
+    @property
+    def kg_llm_configured(self) -> bool:
+        return bool(self.kg_llm_base_url and self.kg_llm_api_key and self.kg_llm_model)
 
     @property
     def embedder_configured(self) -> bool:

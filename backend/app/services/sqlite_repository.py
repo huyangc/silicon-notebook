@@ -199,6 +199,16 @@ class SQLiteRepository:
             if settings.rewrite_llm_configured
             else None
         )
+        self._kg_llm_client = (
+            OpenAICompatibleClient(
+                settings,
+                base_url=settings.kg_llm_base_url,
+                api_key=settings.kg_llm_api_key,
+                model=settings.kg_llm_model,
+            )
+            if settings.kg_llm_configured
+            else None
+        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         from app.services.rerank_client import RerankClient
@@ -232,6 +242,14 @@ class SQLiteRepository:
         否则动态回退到当前 self.llm_client(含测试替换的 fake)，与全局行为一致。"""
         if self._rewrite_llm_client is not None:
             return self._rewrite_llm_client
+        return self.llm_client
+
+    @property
+    def kg_llm_client(self):
+        """KG 构建/融合专用 LLM(批量离线)。配齐 KG_LLM_* → 独立模型;否则动态回退
+        到当前 self.llm_client(含测试替身),未配置时与今天行为完全一致。"""
+        if self._kg_llm_client is not None:
+            return self._kg_llm_client
         return self.llm_client
 
     def _resolve_path(self, value: str) -> Path:
@@ -1595,7 +1613,7 @@ class SQLiteRepository:
                    VALUES (?, ?, ?, 'kg', 'running', '', ?, ?)""",
                 (run_id, source.notebook_id, source_id, now, now))
         try:
-            if not getattr(self.llm_client, "configured", False):
+            if not getattr(self.kg_llm_client, "configured", False):
                 with self._write() as db:
                     db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
                 return
@@ -1612,7 +1630,7 @@ class SQLiteRepository:
                 ).fetchone()
             base_filter = bool(_nb and _nb["tier"] == "base")
             graph = kg_ingest.extract_graph(
-                self.llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
+                self.kg_llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
                 n=n_chars,
                 m=self.settings.kg_window_overlap_chars,
                 whitelist=whitelist,
@@ -3042,7 +3060,7 @@ class SQLiteRepository:
 
         # 6. Adjudicate
         from app.services.kg.conflict_review import review_conflict_candidates
-        verdicts = review_conflict_candidates(self.llm_client, items)
+        verdicts = review_conflict_candidates(self.kg_llm_client, items)
 
         # 7. Record + (optionally) auto-apply
         auto_applied = 0
@@ -3281,10 +3299,10 @@ class SQLiteRepository:
         # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
         from app.services.concept_merge_review import review_merge_candidates
         autoc = res.get("auto_candidates", [])
-        if autoc and getattr(self.llm_client, "configured", False):
+        if autoc and getattr(self.kg_llm_client, "configured", False):
             cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
                           for i, (a, b, s) in enumerate(autoc)]
-            decisions = review_merge_candidates(self.llm_client, cand_dicts)
+            decisions = review_merge_candidates(self.kg_llm_client, cand_dicts)
             by_id = {d["candidate_id"]: d for d in decisions}
             extra = set()
             for i, (a, b, s) in enumerate(autoc):
@@ -3297,7 +3315,7 @@ class SQLiteRepository:
                 res = cluster_concepts(concepts, vectors, confirmed, rejected)
         rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
                  "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
-        if self.settings.kg_concept_desc_enabled and getattr(self.llm_client, "configured", False):
+        if self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False):
             from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
             # members per canonical cluster
             members_by_cid: Dict[str, List[str]] = {}
@@ -3324,7 +3342,7 @@ class SQLiteRepository:
                 name = next((r["canonical_name"] for r in rows if r["canonical_id"] == cid), "")
                 block = "\n".join(f"- {q}" for q in quotes)
                 try:
-                    raw = self.llm_client.chat_json(
+                    raw = self.kg_llm_client.chat_json(
                         [{"role": "user", "content": concept_description_prompt(name, block)}],
                         CONCEPT_DESC_SCHEMA_HINT)
                     desc = (json.loads(raw).get("description") or "").strip()
