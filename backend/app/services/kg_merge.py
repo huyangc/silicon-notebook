@@ -283,6 +283,44 @@ def cluster_concepts(
     )
 
 
+def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_vectors,
+                             existing_cluster_map, rejected, *, hi=0.94, lo=0.82, top_k=5):
+    """新对象 embedding 对已有对象做余弦,命中 ≥lo 且落在不同 canonical 簇、且对未被 rejected →
+    桥接候选。返回 [{canonical_a, canonical_b, score}](a<b 去序)。new-vs-existing 分块 numpy,
+    不动已有。new_items/existing_items: [{'object_id','name'}];vectors: {object_id: [float]}。"""
+    import numpy as np
+    if not new_vectors or not existing_vectors:
+        return []
+    ex_ids = [i["object_id"] for i in existing_items if i["object_id"] in existing_vectors]
+    if not ex_ids:
+        return []
+    EX = np.asarray([existing_vectors[i] for i in ex_ids], dtype="float32")
+    EX /= (np.linalg.norm(EX, axis=1, keepdims=True) + 1e-9)
+    ex_cid = {i["object_id"]: existing_cluster_map.get(i["object_id"]) for i in existing_items}
+    out, seen = [], set()
+    for it in new_items:
+        v = new_vectors.get(it["object_id"])
+        if v is None:
+            continue
+        q = np.asarray(v, dtype="float32"); q /= (np.linalg.norm(q) + 1e-9)
+        sims = EX @ q
+        idx = np.argsort(-sims)[:top_k]
+        my_cid = "K-" + _norm(it.get("name", ""))
+        for j in idx:
+            s = float(sims[j])
+            if s < lo:
+                break
+            other_cid = ex_cid.get(ex_ids[j])
+            if not other_cid or other_cid == my_cid:
+                continue
+            a, b = sorted((my_cid, other_cid))
+            if frozenset((a, b)) in rejected or (a, b) in seen:
+                continue
+            seen.add((a, b))
+            out.append({"canonical_a": a, "canonical_b": b, "score": s})
+    return out
+
+
 def place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
                        *, seed_fn, id_prefix="K-"):
     """Tier-1 名种子放置:每个新对象按 seed_fn → canonical_id 追加到已有簇或建新簇。
