@@ -462,6 +462,10 @@ function askPlaceholder(notebook: NotebookSummary | null): string {
   return domain ? `基于来源提问，例如：${domain} 场景下需要注意什么？` : "基于已导入的来源提问…";
 }
 
+function isAbortError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "name" in error && error.name === "AbortError");
+}
+
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || "GET").toUpperCase();
@@ -496,12 +500,14 @@ async function readAskStream<TResponse>(
   path: string,
   payload: unknown,
   onProgress: (step: ReasoningTraceStep) => void | Promise<void>,
+  signal?: AbortSignal,
 ): Promise<TResponse> {
   const started = performance.now();
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    signal,
   });
   const elapsed = Math.round(performance.now() - started);
   const requestId = response.headers.get("X-Request-Id") || "";
@@ -856,6 +862,7 @@ export default function Home() {
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  const askAbortRef = useRef<AbortController | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
@@ -1589,6 +1596,7 @@ export default function Home() {
 
   async function runAsk(nextQuestion = question) {
     if (!currentNotebookId) return;
+    if (asking) return;
     const q = nextQuestion.trim();
     if (!q) return;
     if (requiresKg(askMode) && !kgAvailable) {
@@ -1601,25 +1609,44 @@ export default function Home() {
     setPendingMode(askMode);
     setPendingTrace([]);
     setAsking(true);
+    const controller = new AbortController();
+    askAbortRef.current = controller;
     try {
       const payload = { question: q, conversation_id: conversationId ?? undefined, mode: askMode };
       const response = await readAskStream<AskResponse>(
         `/notebooks/${currentNotebookId}/ask/stream`,
         payload,
         (step) => setPendingTrace((previous) => [...previous, step]),
+        controller.signal,
       );
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
       setQuestion(q);
+      if (isAbortError(error)) {
+        setToast("已中断回答");
+        return;
+      }
       reportError(error);
     } finally {
+      if (askAbortRef.current === controller) askAbortRef.current = null;
       setPendingQuestion("");
       setPendingMode(DEFAULT_ASK_MODE);
       setPendingTrace([]);
       setAsking(false);
     }
     await loadSessions(currentNotebookId);
+  }
+
+  function abortAsk() {
+    askAbortRef.current?.abort();
+  }
+
+  function handleAskInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      runAsk().catch(reportError);
+    }
   }
 
   async function loadSessions(notebookId: string | null = currentNotebookId) {
@@ -2523,7 +2550,15 @@ export default function Home() {
               </div>
               {chatMode === "ask" && (
                 <div className="chat-input-bar">
-                  <textarea className="chat-input" rows={1} placeholder={askHint} value={question} onChange={(event) => setQuestion(event.target.value)} />
+                  <textarea
+                    className="chat-input"
+                    rows={1}
+                    placeholder={askHint}
+                    value={question}
+                    disabled={asking}
+                    onChange={(event) => setQuestion(event.target.value)}
+                    onKeyDown={handleAskInputKeyDown}
+                  />
                   <span>{sources.length} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
@@ -2531,6 +2566,7 @@ export default function Home() {
                         key={g.id}
                         type="button"
                         className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
+                        disabled={asking}
                         onClick={() => setAskMode(defaultModeForGroup(g.id))}
                       >
                         {g.label}
@@ -2544,6 +2580,7 @@ export default function Home() {
                             type="button"
                             className={`mode-engine${askMode === m.id ? " active" : ""}`}
                             title={m.desc}
+                            disabled={asking}
                             onClick={() => setAskMode(m.id)}
                           >
                             {m.label}
@@ -2558,7 +2595,7 @@ export default function Home() {
                           type="button"
                           className="mode-engine"
                           style={{ marginLeft: 6 }}
-                          disabled={buildingKg}
+                          disabled={buildingKg || asking}
                           onClick={() => {
                             if (!currentNotebookId) return;
                             setBuildingKg(true);
@@ -2582,7 +2619,16 @@ export default function Home() {
                       <span className="mode-hint">本笔记本无图，将使用底层库（base）推理</span>
                     )}
                   </div>
-                  <button className="send-button" onClick={() => runAsk().catch(reportError)}>→</button>
+                  <button
+                    className={`send-button ${asking ? "stop" : ""}`}
+                    type="button"
+                    aria-label={asking ? "中断生成" : "发送"}
+                    title={asking ? "中断生成" : "发送"}
+                    disabled={!asking && !question.trim()}
+                    onClick={() => asking ? abortAsk() : runAsk().catch(reportError)}
+                  >
+                    {asking ? <X size={18} strokeWidth={3} /> : "→"}
+                  </button>
                 </div>
               )}
             </section>

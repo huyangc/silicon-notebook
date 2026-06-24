@@ -40,3 +40,28 @@ test("workspace toolbar has overflow protection so action labels are not clipped
   assert.match(css, /\.workspace-toolbar\s*{[^}]*overflow-x:\s*auto;/s);
   assert.match(css, /\.workspace-nav-button\s*{[^}]*flex:\s*0 0 auto;/s);
 });
+
+test("ask input submits with Enter while preserving Shift+Enter for new lines", () => {
+  assert.ok(page.includes("function handleAskInputKeyDown"));
+  assert.match(page, /event\.key === "Enter"[\s\S]*!event\.shiftKey/);
+  assert.match(page, /event\.preventDefault\(\);[\s\S]*runAsk\(\)\.catch\(reportError\)/);
+  assert.match(page, /onKeyDown=\{handleAskInputKeyDown\}/);
+});
+
+test("ask streaming exposes an abort path through the send button", () => {
+  assert.ok(page.includes("const askAbortRef = useRef<AbortController | null>(null);"));
+  assert.ok(page.includes("function abortAsk()"));
+  assert.match(page, /readAskStream<AskResponse>\([\s\S]*controller\.signal/);
+  assert.match(page, /asking \? abortAsk\(\) : runAsk\(\)\.catch\(reportError\)/);
+  assert.match(page, /aria-label=\{asking \? "中断生成" : "发送"\}/);
+});
+
+test("ask controls lock input and prevent resend while the model is running", () => {
+  assert.match(page, /async function runAsk[\s\S]*if \(asking\) return;/);
+  assert.match(page, /className="chat-input"[\s\S]*disabled=\{asking\}/);
+  assert.match(page, /disabled=\{!asking && !question\.trim\(\)\}/);
+  assert.ok((page.match(/disabled=\{asking\}/g) ?? []).length >= 3);
+  assert.match(css, /\.chat-input:disabled\s*{/);
+  assert.match(css, /\.mode-tab:disabled,[\s\S]*\.mode-engine:disabled/);
+  assert.match(css, /\.send-button\.stop\s*{/);
+});

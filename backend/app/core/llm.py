@@ -10,6 +10,7 @@ from openai import APIConnectionError, APITimeoutError, OpenAI
 from app.core.config import Settings
 from app.core.llm_cache import CacheBackend, cache_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
 
 
 def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
@@ -98,6 +99,36 @@ class OpenAICompatibleClient:
             )
         return self._client
 
+    def _stream_chat_content(
+        self,
+        kwargs: Dict[str, Any],
+        req_kwargs: Dict[str, Any],
+        *,
+        json_mode: bool,
+        cancel_event: CancelEvent,
+    ) -> str:
+        raise_if_cancelled(cancel_event)
+        call_kwargs: Dict[str, Any] = {**kwargs, **req_kwargs, "stream": True}
+        if json_mode:
+            call_kwargs["response_format"] = {"type": "json_object"}
+        stream = self.client().chat.completions.create(**call_kwargs)
+        parts: List[str] = []
+        try:
+            for chunk in stream:
+                raise_if_cancelled(cancel_event)
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = getattr(chunk.choices[0], "delta", None)
+                content = getattr(delta, "content", None) if delta is not None else None
+                if content:
+                    parts.append(content)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        raise_if_cancelled(cancel_event)
+        return "".join(parts)
+
     def chat_json(
         self,
         messages: List[Dict[str, str]],
@@ -108,9 +139,11 @@ class OpenAICompatibleClient:
         # DeepSeek-V4 官方推荐本地部署采样参数: temperature=1.0, top_p=1.0
         temperature: float = 1.0,
         top_p: float = 1.0,
+        cancel_event: CancelEvent = None,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
+        raise_if_cancelled(cancel_event)
         full_messages = [
             {
                 "role": "system",
@@ -169,25 +202,39 @@ class OpenAICompatibleClient:
                 else self.max_retries
             )
             response = None
+            streamed_content: Optional[str] = None
             for attempt in range(attempts):
+                raise_if_cancelled(cancel_event)
                 try:
                     # Prefer native JSON mode; fall back if the server rejects
                     # the param.
                     try:
-                        response = self.client().chat.completions.create(
-                            **kwargs, **req_kwargs, response_format={"type": "json_object"}
-                        )
+                        if cancel_event is not None:
+                            streamed_content = self._stream_chat_content(
+                                kwargs, req_kwargs, json_mode=True, cancel_event=cancel_event)
+                        else:
+                            response = self.client().chat.completions.create(
+                                **kwargs, **req_kwargs, response_format={"type": "json_object"}
+                            )
                     except (APIConnectionError, APITimeoutError):
                         # Network stall/timeout: do NOT retry the whole request
                         # without JSON mode (that would double the wait). Re-raise
                         # so the connection-retry loop below handles it.
                         raise
+                    except AskCancelled:
+                        raise
                     except Exception:
                         # Server rejected response_format (param unsupported):
                         # retry once in plain mode. NOT a connection error, so it
                         # never enters the bounded connection-retry loop.
-                        response = self.client().chat.completions.create(**kwargs, **req_kwargs)
+                        if cancel_event is not None:
+                            streamed_content = self._stream_chat_content(
+                                kwargs, req_kwargs, json_mode=False, cancel_event=cancel_event)
+                        else:
+                            response = self.client().chat.completions.create(**kwargs, **req_kwargs)
                     break
+                except AskCancelled:
+                    raise
                 except (APIConnectionError, APITimeoutError) as exc:
                     if attempt + 1 >= attempts:
                         # Exhausted: propagate so the outer handler logs an error.
@@ -204,8 +251,11 @@ class OpenAICompatibleClient:
                     # of rejected calls must NOT retry in lockstep, or it re-storms
                     # the endpoint and gets mass-rejected again.
                     backoff = min(2 ** attempt, 30)
-                    time.sleep(backoff + random.uniform(0, backoff))
-            content = strip_json_fences(response.choices[0].message.content or "") or "{}"
+                    sleep_or_cancel(backoff + random.uniform(0, backoff), cancel_event)
+            if streamed_content is not None:
+                content = strip_json_fences(streamed_content) or "{}"
+            else:
+                content = strip_json_fences(response.choices[0].message.content or "") or "{}"
             # Best-effort write; never cache the empty "{}" fallback so a transient
             # empty/garbage response isn't frozen in for this prompt.
             if cache and ckey and content != "{}":
@@ -221,6 +271,11 @@ class OpenAICompatibleClient:
             record["response"] = {"content": logger.clip(content)}
             logger.log(record)
             return content
+        except AskCancelled:
+            record["status"] = "cancelled"
+            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            logger.log(record)
+            raise
         except Exception as exc:
             record["status"] = "error"
             record["latency_ms"] = round((time.perf_counter() - start) * 1000)

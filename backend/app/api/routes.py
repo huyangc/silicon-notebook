@@ -1,3 +1,4 @@
+import asyncio
 import json
 import queue
 import threading
@@ -5,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, List
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.config import get_settings
@@ -59,6 +60,7 @@ from app.models.schemas import (
     UserProfile,
 )
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
+from app.services.cancellation import AskCancelled
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.repository import NotebookRepository, UploadedSourceFile
@@ -440,8 +442,68 @@ def _ndjson_line(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
+async def _stream_ask_events(
+    repo: NotebookRepository,
+    notebook_id: str,
+    payload: AskRequest,
+    spec,
+    request: Request,
+):
+    events: queue.Queue[dict[str, Any] | None] = queue.Queue()
+    cancel_event = threading.Event()
+    events.put({"event": "progress", "step": {
+        "step_type": "start", "summary": "启动检索",
+        "detail": {"mode": spec.id}}})
+
+    def on_trace(step) -> None:
+        if not cancel_event.is_set():
+            events.put({"event": "progress", "step": step.model_dump()})
+
+    def worker() -> None:
+        try:
+            handler = getattr(repo, spec.handler)
+            response = handler(
+                notebook_id,
+                payload,
+                on_trace=on_trace,
+                cancel_event=cancel_event,
+            ) if spec.streaming else handler(
+                notebook_id,
+                payload,
+                cancel_event=cancel_event,
+            )
+            if not cancel_event.is_set():
+                events.put({"event": "final", "response": response.model_dump()})
+        except AskCancelled:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            if not cancel_event.is_set():
+                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+    try:
+        while True:
+            try:
+                event = events.get_nowait()
+            except queue.Empty:
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    break
+                try:
+                    event = await asyncio.to_thread(events.get, True, 0.1)
+                except queue.Empty:
+                    continue
+            if event is None:
+                break
+            yield _ndjson_line(event)
+    finally:
+        cancel_event.set()
+
+
 @router.post("/notebooks/{notebook_id}/ask/stream")
-def ask_stream(notebook_id: str, payload: AskRequest) -> StreamingResponse:
+async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
     repo = repository()
     try:
         repo.get_notebook(notebook_id)
@@ -452,35 +514,10 @@ def ask_stream(notebook_id: str, payload: AskRequest) -> StreamingResponse:
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
-
-    def stream_events():
-        events: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        events.put({"event": "progress", "step": {
-            "step_type": "start", "summary": "启动检索",
-            "detail": {"mode": spec.id}}})
-
-        def on_trace(step) -> None:
-            events.put({"event": "progress", "step": step.model_dump()})
-
-        def worker() -> None:
-            try:
-                handler = getattr(repo, spec.handler)
-                response = handler(notebook_id, payload, on_trace=on_trace) \
-                    if spec.streaming else handler(notebook_id, payload)
-                events.put({"event": "final", "response": response.model_dump()})
-            except Exception as exc:  # noqa: BLE001
-                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
-            finally:
-                events.put(None)
-
-        threading.Thread(target=worker, daemon=True).start()
-        while True:
-            event = events.get()
-            if event is None:
-                break
-            yield _ndjson_line(event)
-
-    return StreamingResponse(stream_events(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _stream_ask_events(repo, notebook_id, payload, spec, request),
+        media_type="application/x-ndjson",
+    )
 
 
 @router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary])

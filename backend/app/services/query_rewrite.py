@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from app.services.cancellation import AskCancelled, CancelEvent
+
 # 在字母↔数字边界插空格,让 "gpt4" 这类连写匹配上语料 "GPT-4"→tokens "gpt","4"。
 # 注意:无法把 "deepseekv2" 拆成 "deepseek v2"(中间无边界)——那类靠 expand_query 的
 # LLM 改写写出规范名(DeepSeek-V2)。此处只做边界明确的廉价补充(也惠及无 LLM 回退)。
@@ -37,7 +39,8 @@ class ExpandedQuery:
 
 def expand_query(client, question: str, history: str = "", *,
                  timeout: Optional[float] = None, max_retries: Optional[int] = None,
-                 max_subqueries: int = 4, want_types: bool = False) -> ExpandedQuery:
+                 max_subqueries: int = 4, want_types: bool = False,
+                 cancel_event: CancelEvent = None) -> ExpandedQuery:
     """一次 LLM 调用:问题(任意语言)→ 英文改写 + 1..max_subqueries 个具体英文子查询。
     want_types=True 时每个子查询附 KG types/prefer(供 reasoning)。
     任何失败/未配置/空 → 回退 [normalize_terms(question)] 单子查询。始终 >=1。"""
@@ -52,7 +55,7 @@ def expand_query(client, question: str, history: str = "", *,
     try:
         raw = client.chat_json(
             [{"role": "user", "content": expand_query_prompt(question, history, want_types)}],
-            EXPAND_SCHEMA_HINT, **kw)
+            EXPAND_SCHEMA_HINT, cancel_event=cancel_event, **kw)
         data = json.loads(raw)
         if not isinstance(data, dict):
             return fallback
@@ -90,5 +93,7 @@ def expand_query(client, question: str, history: str = "", *,
         query_en = str(data.get("query_en", "")).strip() or question
         return ExpandedQuery(query_en=query_en, sub_queries=out,
                              high_level_keywords=hl, low_level_keywords=ll)
+    except AskCancelled:
+        raise
     except Exception:
         return fallback

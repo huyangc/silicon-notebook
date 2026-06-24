@@ -60,6 +60,7 @@ from app.models.schemas import (
     UserProfile,
 )
 from app.services import kg_ingest
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.vector_cache import VectorCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
@@ -5177,15 +5178,24 @@ class SQLiteRepository:
             }
         return ("\n".join(lines) if lines else "(none)"), id_map
 
-    def _answer_chunks(self, question, chunks, history="") -> tuple:
+    def _answer_chunks(
+        self,
+        question,
+        chunks,
+        history="",
+        cancel_event: CancelEvent = None,
+    ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。"""
         from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
+        raise_if_cancelled(cancel_event)
         context_block, id_map = self._chunk_answer_context(chunks)
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
+            cancel_event=cancel_event,
         )
+        raise_if_cancelled(cancel_event)
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
@@ -5194,7 +5204,15 @@ class SQLiteRepository:
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
-    def _answer_mix(self, question, chunks, kg_block, kg_id_map, history="") -> tuple:
+    def _answer_mix(
+        self,
+        question,
+        chunks,
+        kg_block,
+        kg_id_map,
+        history="",
+        cancel_event: CancelEvent = None,
+    ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
         返回 (answer, llm_grounded, anchors)。"""
@@ -5202,6 +5220,7 @@ class SQLiteRepository:
         # 合并 id_map 时撞 KG key(静默覆盖)。按 base-1 硬截(token 预算下通常远不及此)。
         chunks = chunks[: self._MIX_KG_KEY_BASE - 1]
         from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
+        raise_if_cancelled(cancel_event)
         chunk_block, chunk_id_map = self._chunk_answer_context(chunks, budget_chars=10**9)
         if kg_block and kg_block != "(none)":
             context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
@@ -5211,7 +5230,9 @@ class SQLiteRepository:
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
+            cancel_event=cancel_event,
         )
+        raise_if_cancelled(cancel_event)
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
@@ -5220,7 +5241,12 @@ class SQLiteRepository:
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
-    def ask_chunk(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+    def ask_chunk(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        cancel_event: CancelEvent = None,
+    ) -> AskResponse:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
         引用绑回 chunk。KG 不参与(严格推理走 ask_reasoning)。"""
         import time
@@ -5235,11 +5261,13 @@ class SQLiteRepository:
 
         self.get_notebook(notebook_id)
         question = payload.question.strip()
+        raise_if_cancelled(cancel_event)
         with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
-        retrieval_query = self._rewrite_followup_query(history, question)
+        raise_if_cancelled(cancel_event)
+        retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
 
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
@@ -5248,9 +5276,11 @@ class SQLiteRepository:
             from app.services.query_rewrite import expand_query
             from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
             ex = None
+            raise_if_cancelled(cancel_event)
             if self.settings.query_rewrite_enabled:
                 ex = expand_query(self.rewrite_llm_client, retrieval_query, history,
-                                  max_subqueries=self.settings.chunk_max_subqueries)
+                                  max_subqueries=self.settings.chunk_max_subqueries,
+                                  cancel_event=cancel_event)
                 sub_queries = [s.query for s in ex.sub_queries]
             else:
                 sub_queries = [retrieval_query]
@@ -5266,12 +5296,15 @@ class SQLiteRepository:
                                or self._any_base_notebook_has_kg()))
             kg_block, kg_id_map, kg_hits = "", {}, []
             _t = time.perf_counter()
+            raise_if_cancelled(cancel_event)
             if overlay_on:
                 candidates, kg_block, kg_id_map, kg_hits = self._mix_retrieve(
                     notebook_id, retrieval_query, hl, sub_queries)
+                raise_if_cancelled(cancel_event)
                 order = self.rerank_client.rerank(
                     retrieval_query, [c.text for c in candidates],
                     on_error=lambda e: self._note_model_error("rerank", self.settings.rerank_model, e))
+                raise_if_cancelled(cancel_event)
                 ranked = [candidates[i] for i in order]
                 kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
                 kg_block = self._truncate_kg_block(kg_block, kg_budget)
@@ -5282,25 +5315,31 @@ class SQLiteRepository:
                           selected=len(selected), kg_nodes=len(kg_id_map))
             elif len(sub_queries) >= 2:
                 collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
+                raise_if_cancelled(cancel_event)
                 selected, _counts = quota_fuse(collected, per_query, self.settings.chunk_mmr_k,
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
                 scored, ids, mat = self._retrieve_chunks(notebook_id, sub_queries[0])
+                raise_if_cancelled(cancel_event)
                 selected = self._mmr_select_chunks(
                     scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
                 ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
             answer, llm_grounded, anchors = "", False, []
             _t = time.perf_counter()
+            raise_if_cancelled(cancel_event)
             if self.llm_client.configured and (selected or kg_id_map):
                 try:
                     if overlay_on:
                         answer, llm_grounded, anchors = self._answer_mix(
-                            question, selected, kg_block, kg_id_map, history)
+                            question, selected, kg_block, kg_id_map, history,
+                            cancel_event=cancel_event)
                     else:
                         answer, llm_grounded, anchors = self._answer_chunks(
-                            question, selected, history)
+                            question, selected, history, cancel_event=cancel_event)
+                except AskCancelled:
+                    raise
                 except Exception as exc:
                     self.event_log.logger.exception("answer failed for %s", notebook_id)
                     self._note_model_error("answer", self.settings.openai_compat_model, exc)
@@ -5310,6 +5349,7 @@ class SQLiteRepository:
             # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
             # 非 mix:每个精选 chunk 一条(字节等价于历史)。
             citations: List[Citation] = []
+            raise_if_cancelled(cancel_event)
             if overlay_on:
                 by_id = {c.chunk_id: c for c in selected}
                 for a in anchors:
@@ -5354,6 +5394,7 @@ class SQLiteRepository:
             _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "chunk"
         response.model_errors = [ModelError(**e) for e in _err_sink]
+        raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         ask_stage("total", ask_started)
@@ -5464,8 +5505,13 @@ class SQLiteRepository:
         result.sort(key=lambda it: it.score, reverse=True)
         return result
 
-    def _graph_seed_fusion(self, notebook_id: str, question: str,
-                           base_seeds: List[str]) -> List[str]:
+    def _graph_seed_fusion(
+        self,
+        notebook_id: str,
+        question: str,
+        base_seeds: List[str],
+        cancel_event: CancelEvent = None,
+    ) -> List[str]:
         """flag 关 → 原样返回 base_seeds(等价护栏:node recall 不降由「只增不减」保证)。
         flag 开 → 用 high-level keywords 查关系索引,两端 object 并入;low-level
         keywords 额外查节点并入。去重保序:base 在前(只增不减),其后并入关系两端
@@ -5474,17 +5520,20 @@ class SQLiteRepository:
         if not self.settings.relation_retrieval_enabled:
             return base_seeds
         from app.services.query_rewrite import expand_query
-        exp = expand_query(self.rewrite_llm_client, question)
+        raise_if_cancelled(cancel_event)
+        exp = expand_query(self.rewrite_llm_client, question, cancel_event=cancel_event)
         hl = " ".join(exp.high_level_keywords) or exp.query_en or question
         ll = " ".join(exp.low_level_keywords)
         extra: List[str] = []
         rel_hits = self.federated_retrieve_relations(notebook_id, hl)[
             : self.settings.relation_seed_top_n]
+        raise_if_cancelled(cancel_event)
         for h in rel_hits:
             extra.extend((h.source_object_id, h.target_object_id))
         if ll:
             node_hits = self.federated_retrieve(notebook_id, ll)[
                 : self.settings.relation_seed_top_n]
+            raise_if_cancelled(cancel_event)
             extra.extend(h.object_id for h in node_hits)
         seen, fused = set(), []
         for oid in list(base_seeds) + extra:   # base 优先保序,只增不减
@@ -5714,7 +5763,12 @@ class SQLiteRepository:
                 lines.append("relations: " + "; ".join(rel_lines[:30]))
         return ("\n".join(lines) if lines else "(none)"), id_map
 
-    def _rewrite_followup_query(self, history: str, question: str) -> str:
+    def _rewrite_followup_query(
+        self,
+        history: str,
+        question: str,
+        cancel_event: CancelEvent = None,
+    ) -> str:
         """Resolve an elliptical follow-up into a standalone retrieval query using
         prior turns. Runs whenever there IS history (any non-first turn) — the
         rewrite model itself returns the question unchanged when it's already
@@ -5726,20 +5780,30 @@ class SQLiteRepository:
         client = self.rewrite_llm_client
         if not getattr(client, "configured", False):
             return question
+        raise_if_cancelled(cancel_event)
         try:
             raw = client.chat_json(
                 [{"role": "user", "content": followup_rewrite_prompt(history, question)}],
                 FOLLOWUP_REWRITE_SCHEMA_HINT,
+                cancel_event=cancel_event,
             )
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return question
             rewritten = str(data.get("query", "")).strip()
             return rewritten or question
+        except AskCancelled:
+            raise
         except Exception:
             return question
 
-    def _refine_context(self, question: str, context_block: str, client) -> str:
+    def _refine_context(
+        self,
+        question: str,
+        context_block: str,
+        client,
+        cancel_event: CancelEvent = None,
+    ) -> str:
         """问题感知证据精炼:把 context_block 喂给 evidence_refine LLM,抽"相关要点"
         前置成聚焦上下文(参考性,不产生 [k] 锚点)。默认开(kg_query_refine_enabled);
         client 未配/失败/无内容 → 原样返回。reasoning 传 reasoning_llm_client、graph
@@ -5748,6 +5812,7 @@ class SQLiteRepository:
                 and getattr(client, "configured", False)
                 and context_block.strip() and context_block.strip() != "(none)"):
             return context_block
+        raise_if_cancelled(cancel_event)
         from app.services.prompts import evidence_refine_prompt, EVIDENCE_REFINE_SCHEMA_HINT
         ev_block = context_block[: self.settings.query_refine_max_chars]
         try:
@@ -5755,11 +5820,14 @@ class SQLiteRepository:
                 [{"role": "user", "content": evidence_refine_prompt(question, ev_block)}],
                 EVIDENCE_REFINE_SCHEMA_HINT,
                 timeout=self.settings.reasoning_timeout_seconds,
-                max_retries=self.settings.reasoning_max_retries)
+                max_retries=self.settings.reasoning_max_retries,
+                cancel_event=cancel_event)
             rel = json.loads(raw).get("relevant")
             if not isinstance(rel, list):
                 rel = []
             rel = [str(x).strip() for x in rel if str(x).strip()]
+        except AskCancelled:
+            raise
         except Exception:
             rel = []
         if rel:
@@ -5768,11 +5836,20 @@ class SQLiteRepository:
                              + "\n\n" + context_block)
         return context_block
 
-    def _answer_reasoning(self, notebook_id, question, top_hits, elements, history=""):
+    def _answer_reasoning(
+        self,
+        notebook_id,
+        question,
+        top_hits,
+        elements,
+        history="",
+        cancel_event: CancelEvent = None,
+    ):
         """Synthesise the reasoning-mode answer: reuse _answer_context for KG
         hits (so [k] anchors/citations stay identical to fast mode), then append
         fallback document passages as reference-only context (no [k] id, so they
         never become anchors). Returns (answer, llm_grounded, anchors)."""
+        raise_if_cancelled(cancel_event)
         context_block, id_map = self._answer_context(notebook_id, top_hits)
         if elements:
             extra = "\n".join(
@@ -5780,13 +5857,16 @@ class SQLiteRepository:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
-        context_block = self._refine_context(question, context_block, self.reasoning_llm_client)
+        context_block = self._refine_context(
+            question, context_block, self.reasoning_llm_client, cancel_event)
         raw = self.reasoning_llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
             max_retries=self.settings.reasoning_max_retries,
+            cancel_event=cancel_event,
         )
+        raise_if_cancelled(cancel_event)
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
@@ -5795,17 +5875,25 @@ class SQLiteRepository:
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
-    def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace=None) -> AskResponse:
+    def ask_reasoning(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        on_trace=None,
+        cancel_event: CancelEvent = None,
+    ) -> AskResponse:
         """Reasoning-mode ask: agentic plan→retrieve→reflect(自由深挖)→answer。
         检索委托 ReasoningRetriever;答案/证据分档复用 fast 路径口径;响应携带
         reasoning_trace。任何阶段异常不向用户抛出(逐层容错 + 兜底空候选)。"""
         from app.services.reasoning_retrieval import ReasoningRetriever
         self.get_notebook(notebook_id)
         question = payload.question.strip()
+        raise_if_cancelled(cancel_event)
         with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
+        raise_if_cancelled(cancel_event)
 
         if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
             response = AskResponse(
@@ -5816,6 +5904,7 @@ class SQLiteRepository:
                 conversation_id=conversation_id, retrieval_query=question,
                 llm_mode="deterministic", kg_required=True)
             response.mode = "reasoning"
+            raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id)
             return response
@@ -5823,16 +5912,24 @@ class SQLiteRepository:
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
         try:
+            def checked_trace(step):
+                raise_if_cancelled(cancel_event)
+                if on_trace:
+                    on_trace(step)
+
             try:
-                result = ReasoningRetriever(self, self.settings).run(
-                    notebook_id, question, history, on_step=on_trace)
+                result = ReasoningRetriever(self, self.settings, cancel_event).run(
+                    notebook_id, question, history, on_step=checked_trace)
                 top_hits, elements, trace = result.top_hits, result.elements, result.trace
+            except AskCancelled:
+                raise
             except Exception:
                 top_hits, elements, trace = [], [], []
 
             registry = self.effective_schemas()
             seen_ids: set = set()
             related_knowledge: List[KnowledgeRecord] = []
+            raise_if_cancelled(cancel_event)
             for item in top_hits:
                 if item.object_id in seen_ids:
                     continue
@@ -5851,10 +5948,14 @@ class SQLiteRepository:
             citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
 
             answer, llm_grounded, anchors = "", False, []
+            raise_if_cancelled(cancel_event)
             if self.reasoning_llm_client.configured and (top_hits or elements):
                 try:
                     answer, llm_grounded, anchors = self._answer_reasoning(
-                        notebook_id, question, top_hits, elements, history)
+                        notebook_id, question, top_hits, elements, history,
+                        cancel_event=cancel_event)
+                except AskCancelled:
+                    raise
                 except Exception as exc:
                     self._note_model_error(
                         "answer",
@@ -5890,12 +5991,18 @@ class SQLiteRepository:
             _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "reasoning"
         response.model_errors = [ModelError(**e) for e in _err_sink]
+        raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response
 
-    def ask_graph(self, notebook_id: str, payload: "AskRequest",
-                  seed_ids: Optional[List[str]] = None) -> AskResponse:
+    def ask_graph(
+        self,
+        notebook_id: str,
+        payload: "AskRequest",
+        seed_ids: Optional[List[str]] = None,
+        cancel_event: CancelEvent = None,
+    ) -> AskResponse:
         """Multi-hop graph reasoning mode.
 
         1. Retrieve top seeds via federated_retrieve (active + base-tier notebooks).
@@ -5914,10 +6021,12 @@ class SQLiteRepository:
         )
         self.get_notebook(notebook_id)
         question = payload.question.strip()
+        raise_if_cancelled(cancel_event)
         with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
+        raise_if_cancelled(cancel_event)
 
         if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
             response = AskResponse(
@@ -5928,6 +6037,7 @@ class SQLiteRepository:
                 conversation_id=conversation_id, retrieval_query=question,
                 llm_mode="deterministic", kg_required=True)
             response.mode = "graph"
+            raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id)
             return response
@@ -5936,7 +6046,9 @@ class SQLiteRepository:
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
         try:
             # Seed: top-N by relevance (federated across base notebooks).
+            raise_if_cancelled(cancel_event)
             top_hits = self.federated_retrieve(notebook_id, question)[:self.settings.retrieval_top_n]
+            raise_if_cancelled(cancel_event)
             if not top_hits and not seed_ids:
                 response = AskResponse(
                     answer_id="",
@@ -5948,6 +6060,7 @@ class SQLiteRepository:
                 )
                 response.mode = "graph"
                 response.model_errors = [ModelError(**e) for e in _err_sink]
+                raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
                     notebook_id, question, response, conversation_id)
                 return response
@@ -5955,7 +6068,9 @@ class SQLiteRepository:
             # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
             # 别的文档相关 chunk 也召回,_answer_chunks 出 chunk 引用(跨多篇)。
             if self.settings.graph_ppr_enabled:
+                raise_if_cancelled(cancel_event)
                 ppr_chunks = self._ppr_retrieve(notebook_id, question)
+                raise_if_cancelled(cancel_event)
                 if ppr_chunks:
                     from app.services.retrieval import RetrievedChunk
                     reports = self.get_community_reports(notebook_id)[: self.settings.ppr_community_context_top_n]
@@ -5969,7 +6084,9 @@ class SQLiteRepository:
                     if getattr(self.llm_client, "configured", False):
                         try:
                             answer, llm_grounded, anchors = self._answer_chunks(
-                                question, ppr_chunks, history)
+                                question, ppr_chunks, history, cancel_event=cancel_event)
+                        except AskCancelled:
+                            raise
                         except Exception as exc:
                             self._note_model_error("answer", self.settings.openai_compat_model, exc)
                             answer, llm_grounded, anchors = "", False, []
@@ -6005,13 +6122,17 @@ class SQLiteRepository:
                                     "sources": len({c.source_id for c in ppr_chunks})})])
                     resp.mode = "graph"
                     resp.model_errors = [ModelError(**e) for e in _err_sink]
+                    raise_if_cancelled(cancel_event)
                     resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
                     return resp
 
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
-            use_seeds = self._graph_seed_fusion(notebook_id, question, base_seeds)
+            raise_if_cancelled(cancel_event)
+            use_seeds = self._graph_seed_fusion(
+                notebook_id, question, base_seeds, cancel_event)
 
             G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
+            raise_if_cancelled(cancel_event)
             subgraph = multihop_subgraph(
                 G, oid_to_idx, idx_to_oid,
                 seed_ids=use_seeds,
@@ -6022,6 +6143,7 @@ class SQLiteRepository:
             # Render subgraph into (context_block, id_map) — same k{i} format as
             # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
             context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
+            raise_if_cancelled(cancel_event)
 
             # Answer-time chain verification: an adversarial LLM check per chain edge.
             # Flagged edges get their confidence demoted to 0.05; the context is then
@@ -6034,7 +6156,9 @@ class SQLiteRepository:
                 verify_result = verify_chain_edges(
                     subgraph, self.reasoning_llm_client,
                     votes=1, timeout=self.settings.reasoning_timeout_seconds,
+                    cancel_event=cancel_event,
                 )
+                raise_if_cancelled(cancel_event)
                 if verify_result["flagged"]:
                     flagged_types = {f["edge_type"] for f in verify_result["flagged"]}
                     for _node, edge, _src in subgraph:
@@ -6043,15 +6167,19 @@ class SQLiteRepository:
                     context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
 
             # Synthesise the answer through the existing LLM + grounding path.
-            context_block = self._refine_context(question, context_block, self.llm_client)
+            context_block = self._refine_context(
+                question, context_block, self.llm_client, cancel_event)
             answer, llm_grounded, anchors = "", False, []
+            raise_if_cancelled(cancel_event)
             if getattr(self.llm_client, "configured", False) and id_map:
                 try:
                     raw = self.llm_client.chat_json(
                         [{"role": "user",
                           "content": answer_prompt(question, context_block, history)}],
                         ANSWER_SCHEMA_HINT,
+                        cancel_event=cancel_event,
                     )
+                    raise_if_cancelled(cancel_event)
                     data = json.loads(raw)
                     if isinstance(data, dict):
                         answer = str(data.get("answer", "")).strip()
@@ -6065,6 +6193,8 @@ class SQLiteRepository:
                         # _MARKER_RE can't bind; left in place they read as fabricated
                         # citations. Strip them so only resolved [k] markers ship.
                         answer = _strip_unbound_markers(answer, {a.key for a in anchors})
+                except AskCancelled:
+                    raise
                 except Exception as exc:
                     self._note_model_error("answer", self.settings.openai_compat_model, exc)
                     answer, llm_grounded, anchors = "", False, []
@@ -6080,6 +6210,7 @@ class SQLiteRepository:
             # chain_trust (the verifier's weakest-link confidence), so a trusted
             # chain can reach "grounded" while a flagged/weak one still falls back.
             hits_for_classify = list(top_hits)
+            raise_if_cancelled(cancel_event)
             if anchors:
                 scored_oids = {h.object_id for h in top_hits}
                 seed_rel = max((h.relevance for h in top_hits), default=0.0)
@@ -6129,6 +6260,7 @@ class SQLiteRepository:
             _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "graph"
         response.model_errors = [ModelError(**e) for e in _err_sink]
+        raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id)
         return response

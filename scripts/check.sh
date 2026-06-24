@@ -19,8 +19,10 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/core/llm.py" \
   "$ROOT_DIR/backend/app/models/schemas.py" \
   "$ROOT_DIR/backend/app/services/ask_modes.py" \
+  "$ROOT_DIR/backend/app/services/cancellation.py" \
   "$ROOT_DIR/backend/app/services/extraction_profiles.py" \
   "$ROOT_DIR/backend/app/services/kg/extract.py" \
+  "$ROOT_DIR/backend/app/services/kg/graph_reason.py" \
   "$ROOT_DIR/backend/app/services/kg/models.py" \
   "$ROOT_DIR/backend/app/services/kg/canonicalize.py" \
   "$ROOT_DIR/backend/app/services/kg_ingest.py" \
@@ -29,6 +31,8 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/services/notebook_templates.py" \
   "$ROOT_DIR/backend/app/services/parsers.py" \
   "$ROOT_DIR/backend/app/services/prompts.py" \
+  "$ROOT_DIR/backend/app/services/query_rewrite.py" \
+  "$ROOT_DIR/backend/app/services/reasoning_retrieval.py" \
   "$ROOT_DIR/backend/app/services/repository.py" \
   "$ROOT_DIR/backend/app/services/retrieval.py" \
   "$ROOT_DIR/backend/app/services/sqlite_repository.py"
