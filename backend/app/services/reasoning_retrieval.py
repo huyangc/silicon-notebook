@@ -244,7 +244,7 @@ class ReasoningRetriever:
                 seen_chunks.add(c.chunk_id)
             chunks.extend(seeded)
             record(TraceStep(step_type="ppr",
-                             summary=f"PPR 跨文档兜底检索,得到 {len(seeded)} 段原文",
+                             summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
                              detail={"found": len(seeded), "phase": "seed"}))
 
         # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
@@ -347,7 +347,7 @@ class ReasoningRetriever:
             elif decision.next_action == "ppr_retrieve":
                 if not self.settings.graph_ppr_enabled:
                     record(TraceStep(step_type="skip",
-                                     summary="跳过 ppr_retrieve(PPR 未启用)",
+                                     summary="跳过概念漫游(未启用)",
                                      detail={"reason": "ppr_disabled"}))
                 elif ppr_searches >= _MAX_PPR_RETRIEVES:
                     record(TraceStep(step_type="skip",
@@ -362,7 +362,7 @@ class ReasoningRetriever:
                         seen_chunks.add(c.chunk_id)
                     chunks.extend(new)
                     record(TraceStep(step_type="ppr",
-                                     summary=f"PPR 跨文档检索: {pq},新增 {len(new)} 段",
+                                     summary=f"概念漫游:{pq},新增 {len(new)} 段",
                                      detail={"query": pq, "found": len(new), "phase": "action"}))
             else:
                 break
