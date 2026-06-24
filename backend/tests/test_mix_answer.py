@@ -41,7 +41,7 @@ def _seed_chunks_and_kg(repo):
 
 def test_mix_retrieve_merges_vector_and_kg_source_chunks(repo):
     nb = _seed_chunks_and_kg(repo)
-    cand, block, id_map, kg_hits = repo._mix_retrieve(nb.id, "cascode", "", ["cascode"])
+    cand, block, id_map, kg_hits, _ppr_n = repo._mix_retrieve(nb.id, "cascode", "", ["cascode"])
     ids = {c.chunk_id for c in cand}
     assert "ck-kg" in ids                       # KG 源 chunk 进了候选池
     assert isinstance(block, str) and isinstance(id_map, dict)
@@ -51,7 +51,7 @@ def test_mix_retrieve_merges_vector_and_kg_source_chunks(repo):
 
 def test_mix_retrieve_handles_multiple_vector_subqueries(repo):
     nb = _seed_chunks_and_kg(repo)
-    cand, _block, _id_map, _kg_hits = repo._mix_retrieve(
+    cand, _block, _id_map, _kg_hits, _ppr_n = repo._mix_retrieve(
         nb.id, "cascode", "", ["cascode", "output resistance"])
     assert cand
     assert all(isinstance(c, RetrievedChunk) for c in cand)
