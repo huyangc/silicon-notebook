@@ -259,6 +259,7 @@ class ReasoningRetriever:
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
         stale = 1 if no_progress else 0
         elements_searches = 0
+        ppr_searches = 0
         while steps < self.settings.reasoning_max_steps:
             raise_if_cancelled(self.cancel_event)
             steps += 1
@@ -343,6 +344,26 @@ class ReasoningRetriever:
                     record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
                                      detail={"query": eq, "found": len(els)}))
+            elif decision.next_action == "ppr_retrieve":
+                if not self.settings.graph_ppr_enabled:
+                    record(TraceStep(step_type="skip",
+                                     summary="跳过 ppr_retrieve(PPR 未启用)",
+                                     detail={"reason": "ppr_disabled"}))
+                elif ppr_searches >= _MAX_PPR_RETRIEVES:
+                    record(TraceStep(step_type="skip",
+                                     summary=f"跳过 ppr_retrieve(已达次数上限 {_MAX_PPR_RETRIEVES})",
+                                     detail={"reason": "ppr_retrieve_cap"}))
+                else:
+                    ppr_searches += 1
+                    pq = decision.ppr_query or question
+                    new = [c for c in self.ppr_retrieve(notebook_id, pq)
+                           if c.chunk_id not in seen_chunks]
+                    for c in new:
+                        seen_chunks.add(c.chunk_id)
+                    chunks.extend(new)
+                    record(TraceStep(step_type="ppr",
+                                     summary=f"PPR 跨文档检索: {pq},新增 {len(new)} 段",
+                                     detail={"query": pq, "found": len(new), "phase": "action"}))
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
