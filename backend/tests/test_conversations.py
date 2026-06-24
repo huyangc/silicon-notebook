@@ -6,7 +6,7 @@ from app.models.schemas import NotebookCreate, AskRequest
 
 class FakeLLM:
     configured = True
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, **kwargs):
         return json.dumps({"answer": "ok.", "grounded": False})
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def test_ask_creates_then_appends_conversation(repo):
 def test_ask_feeds_prior_turns_into_prompt(repo, monkeypatch):
     nb = _seed(repo)
     captured = {}
-    def cap(messages, schema_hint):
+    def cap(messages, schema_hint, **kwargs):
         captured["p"] = messages[0]["content"]
         return json.dumps({"answer": "ok.", "grounded": False})
     repo.llm_client.chat_json = cap
