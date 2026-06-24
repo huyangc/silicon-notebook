@@ -65,3 +65,9 @@ test("ask controls lock input and prevent resend while the model is running", ()
   assert.match(css, /\.mode-tab:disabled,[\s\S]*\.mode-engine:disabled/);
   assert.match(css, /\.send-button\.stop\s*{/);
 });
+
+test("source row keeps link and delete actions in the right action column", () => {
+  assert.match(page, /<div className="source-row-actions">[\s\S]*source\.source_url[\s\S]*source-delete-button[\s\S]*<\/div>/);
+  assert.match(css, /\.source-row-actions\s*{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*flex-end;/s);
+  assert.match(css, /\.source-row-actions\s+\.source-link-button,\s*\.source-row-actions\s+\.source-delete-button\s*{[^}]*flex:\s*0 0 30px;/s);
+});
