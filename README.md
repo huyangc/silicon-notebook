@@ -428,6 +428,10 @@ bash scripts/check.sh
 
 This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — `mineru_mode=off`, no real LLM/embedding keys) covering upload/parse, structural Markdown parsing, KG windowing, concurrent embedding with per-batch DB writes, float32 vector matrix build and cache, hybrid retrieval (keyword/vector/None modes), multi-turn `ask`, status machine (`extracted` = green), article research, feedback, JSON fence cleanup, and restart persistence. Also runs frontend `node --test app/*.test.mjs` and Next.js `tsc --noEmit` when `frontend/node_modules` is present.
 
+## Development Workflow
+
+For every new feature development task, create a new git worktree by default, start a new feature branch inside that worktree, complete the work there, and open a PR from that branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, keep working there.
+
 ## Documentation Maintenance
 
 When product behavior, setup, architecture, or development constraints change, update all of these files together:

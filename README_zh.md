@@ -399,6 +399,10 @@ bash scripts/check.sh
 
 该脚本进行后端语法检查（`py_compile`）和离线 hermetic smoke（`smoke_backend.py`——钉死 `mineru_mode=off`，不读真实 LLM/embedding 密钥），覆盖：上传/解析、结构化 Markdown 解析、KG 窗口化、并发 embedding 逐批落库、float32 向量矩阵构建与缓存、混合检索（关键词/向量/None 三态）、多轮 ask、状态机（`extracted` = 绿）、文章研究、反馈、JSON fence 清理、重启持久化。依赖已安装时同步运行前端 `node --test app/*.test.mjs` 和 `tsc --noEmit`。
 
+## 开发流程
+
+每开始一个新的特性开发任务，默认先新建 git worktree，并在该 worktree 内基于新 feature 分支开发；完成后从该分支提交 PR。不要为了特性开发直接在本地主 checkout 里切分支。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。
+
 ## 文档维护
 
 后续只要产品行为、启动方式、架构或开发约束发生变化，需要同步更新：
