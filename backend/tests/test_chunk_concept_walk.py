@@ -128,3 +128,21 @@ def test_ask_chunk_concept_walk_off_unchanged(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="MoE", mode="chunk"))
     assert resp.mode == "chunk" and resp.answer
+
+
+def test_no_user_facing_ppr_string_remains():
+    """改名守卫:服务层 summary 文案不再有用户可见的『PPR』。覆盖 reasoning 的
+    seed/action/cap-skip 与 graph 的召回 summary,防漏改回归。机器 token 不算:
+    先剔除变量名 _MAX_PPR_RETRIEVES(含 PPR 但仅出现在插值里、不进用户文案)。"""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "app" / "services"
+    offenders = []
+    for fname in ("sqlite_repository.py", "reasoning_retrieval.py"):
+        f = root / fname
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if "summary=" not in line:
+                continue
+            probe = line.replace("_MAX_PPR_RETRIEVES", "")   # 机器变量名不算
+            if "PPR" in probe or "ppr_retrieve" in probe:
+                offenders.append(f"{fname}:{i}: {line.strip()}")
+    assert not offenders, "用户可见 PPR 文案残留:\n" + "\n".join(offenders)

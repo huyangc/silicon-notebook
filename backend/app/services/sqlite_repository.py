@@ -6144,7 +6144,7 @@ class SQLiteRepository:
                         citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
                         retrieval_query=question, top_relevance=top_relevance,
                         reasoning_trace=[TraceStep(step_type="ppr",
-                            summary=f"PPR 跨文档召回 {len(ppr_chunks)} 个 chunk",
+                            summary=f"概念漫游:跨文档召回 {len(ppr_chunks)} 个 chunk",
                             detail={"chunks": len(ppr_chunks),
                                     "sources": len({c.source_id for c in ppr_chunks})})])
                     resp.mode = "graph"
