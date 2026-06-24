@@ -226,3 +226,34 @@ def test_answer_reasoning_empty_chunks_unchanged(repo):
 
     answer, grounded, anchors = repo._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
     assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
+
+
+def test_reasoning_ask_seed_grounds_in_cross_doc_chunk_end_to_end(repo):
+    """端到端:flag 开 + reflect 只 answer(纯靠 seed pass)→ 跨文档 chunk 被升为可引用证据
+    ([k1] 落在 chunk 段 → resp.anchors 含 chunk 锚),且 seed pass 在轨迹里。"""
+    nb = _seed_two_doc_moe(repo)
+    repo.llm_client = _AnswerOnlyLLM()
+    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    resp = repo.ask(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="reasoning"))
+    assert resp.mode == "reasoning"
+    assert any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))   # seed pass 跑了
+    assert any(a.object_type == "chunk" for a in resp.anchors)               # 跨文档 chunk 成了可引用证据
+
+
+def test_reasoning_ask_flag_off_no_ppr(repo, monkeypatch):
+    """flag 关 → 无 ppr 轨迹,回到今天行为(无跨文档 chunk 注入)。"""
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
+    repo.llm_client = _AnswerOnlyLLM()
+    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    resp = repo.ask(nb.id, AskRequest(question="MoE", mode="reasoning"))
+    assert not any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))
+
+
+def test_chunk_relevance_within_unit_interval(repo):
+    """守 [0,1]:reasoning 累积的 chunk relevance 全在单位区间。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_doc_moe(repo)
+    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "MoE 对比")
+    assert all(0.0 <= c.relevance <= 1.0 for c in result.chunks)
