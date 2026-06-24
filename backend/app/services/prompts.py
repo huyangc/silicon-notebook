@@ -228,9 +228,9 @@ def plan_prompt(question: str, history_block: str = "") -> str:
 
 REFLECT_SCHEMA_HINT = (
     '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
-    'search_elements","expand":{"object_id":"","edge_type":null,'
+    'search_elements|ppr_retrieve","expand":{"object_id":"","edge_type":null,'
     '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
-    '"prefer":"balanced","reason":""},"elements_query":"","reason":""}'
+    '"prefer":"balanced","reason":""},"elements_query":"","ppr_query":"","reason":""}'
 )
 
 
@@ -247,6 +247,10 @@ def reflect_prompt(question: str, candidates_summary: str) -> str:
         "sub-query (set new_sub_query).\n"
         "- search_elements: the KG is too thin; fall back to raw document "
         "passages (set elements_query).\n"
+        "- ppr_retrieve: the question compares across models/sources or needs "
+        "breadth across documents; pull cross-document source passages via PPR "
+        "(set ppr_query). Prefer this for comparison / cross-paper questions where "
+        "single-document evidence isn't enough.\n"
         "Set sufficient=true only when you can answer well. reason: one line.\n\n"
         f"Question: {question}\n\n"
         f"Candidates so far:\n{candidates_summary}\n\n"
