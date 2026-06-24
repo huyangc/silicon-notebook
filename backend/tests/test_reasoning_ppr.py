@@ -132,3 +132,51 @@ def test_run_no_seed_when_flag_off(repo, monkeypatch):
     result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     assert result.chunks == []
     assert not any(s.step_type == "ppr" for s in result.trace)
+
+
+class _ScriptedReflectLLM:
+    """plan 单子查询;reflect 按 reflects 列表逐轮弹出;其余=answer。"""
+    configured = True
+    def __init__(self, reflects):
+        self._reflects = list(reflects)
+    def chat_json(self, messages, schema_hint, **kw):
+        if "sub_queries" in schema_hint:
+            return json.dumps({"sub_queries": [{"query": "DeepSeek MoE"}]})
+        if "next_action" in schema_hint:
+            return json.dumps(self._reflects.pop(0) if self._reflects
+                              else {"next_action": "answer", "sufficient": True})
+        return json.dumps({"answer": "ok [k1].", "grounded": True})
+
+
+def test_ppr_retrieve_action_caps_at_max(repo, monkeypatch):
+    """连发 4 次 ppr_retrieve 决策 → 仅前 3 次执行(phase=action),第 4 次写 skip
+    (ppr_retrieve_cap)。flag 保持默认开(seed 跑,但 seed 是 phase=seed,按 phase 过滤
+    不污染动作计数)。抬高 stale_limit 防『动作 0 新增→stale 早熔断』掩盖 cap。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "reasoning_stale_limit", 99)
+    repo._reasoning_llm_client = _ScriptedReflectLLM(
+        reflects=[{"next_action": "ppr_retrieve", "ppr_query": f"q{i}"} for i in range(4)]
+        + [{"next_action": "answer", "sufficient": True}])
+    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "对比题")
+    ppr_actions = [s for s in result.trace
+                   if s.step_type == "ppr" and s.detail.get("phase") == "action"]
+    caps = [s for s in result.trace
+            if s.step_type == "skip" and s.detail.get("reason") == "ppr_retrieve_cap"]
+    assert len(ppr_actions) == 3       # 上限 _MAX_PPR_RETRIEVES=3
+    assert len(caps) >= 1              # 第 4 次被 cap
+
+
+def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
+    """flag 关 → 即便 agent 显式选 ppr_retrieve 也被 skip(ppr_disabled),不跑 PPR。
+    honors GRAPH_PPR_ENABLED 作为 reasoning 的 PPR 总开关(off=零 PageRank)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
+    repo._reasoning_llm_client = _ScriptedReflectLLM(
+        reflects=[{"next_action": "ppr_retrieve", "ppr_query": "q"},
+                  {"next_action": "answer", "sufficient": True}])
+    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "对比题")
+    assert any(s.step_type == "skip" and s.detail.get("reason") == "ppr_disabled"
+               for s in result.trace)
+    assert result.chunks == []
