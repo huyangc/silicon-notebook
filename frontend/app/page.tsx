@@ -28,6 +28,7 @@ import {
 import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
 import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
+import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -1704,6 +1705,35 @@ export default function Home() {
     });
   }
 
+  function requestBulkCleanup(days: number) {
+    const victims = conversationsOlderThan(sessions, days);
+    if (victims.length === 0) return;
+    setInfoModal({
+      title: "批量清理会话",
+      message: `将删除 ${victims.length} 条最近 ${days} 天内无活动的会话，对应的历史问答会一起移除。`,
+      actions: [
+        { label: "取消", action: () => undefined },
+        { label: "删除", danger: true, action: () => { bulkCleanup(days, victims).catch(reportError); } },
+      ],
+    });
+  }
+
+  async function bulkCleanup(days: number, victims: ConversationSummary[]) {
+    const { deleted } = await api<{ deleted: number }>(
+      `/notebooks/${currentNotebookId}/conversations?older_than_days=${days}`,
+      { method: "DELETE" },
+    );
+    if (conversationId && victims.some((s) => s.id === conversationId)) {
+      setTurns([]);
+      setConversationId(null);
+      setPendingQuestion("");
+      setPendingMode(DEFAULT_ASK_MODE);
+      setPendingTrace([]);
+    }
+    await loadSessions(currentNotebookId);
+    setToast(`已删除 ${deleted} 条会话`);
+  }
+
   function beginRenameSession(session: ConversationSummary) {
     setRenamingSessionId(session.id);
     setSessionTitleDraft(session.title || "未命名会话");
@@ -2444,6 +2474,26 @@ export default function Home() {
                       <X size={15} />
                     </button>
                   </div>
+                  {sessions.length > 0 && (
+                    <div className="chat-session-cleanup">
+                      <span>批量清理</span>
+                      {CLEANUP_PRESETS.map((days) => {
+                        const n = conversationsOlderThan(sessions, days).length;
+                        return (
+                          <button
+                            key={days}
+                            type="button"
+                            className="chat-session-cleanup-btn"
+                            disabled={n === 0}
+                            title={`删除最近 ${days} 天内无活动的会话`}
+                            onClick={() => requestBulkCleanup(days)}
+                          >
+                            {days} 天前{n > 0 ? ` (${n})` : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <div className="chat-session-list">
                     <button className={`chat-session-card new ${conversationId == null ? "active" : ""}`} type="button" onClick={startNewSession}>
                       <Plus size={16} />

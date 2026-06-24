@@ -977,6 +977,35 @@ button {
   color: var(--muted);
 }
 
+.chat-session-cleanup {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-session-cleanup-btn {
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-session-cleanup-btn:hover:not(:disabled) {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.chat-session-cleanup-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .chat-session-list {
   min-height: 0;
   overflow: auto;
