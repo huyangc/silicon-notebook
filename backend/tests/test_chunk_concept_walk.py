@@ -104,3 +104,27 @@ def test_reasoning_trace_uses_concept_walk_name(repo):
     assert ppr_steps                                            # 机器键不变
     assert any("概念漫游" in s.summary for s in ppr_steps)      # 文案已改名
     assert not any("PPR 跨文档" in s.summary for s in result.trace)
+
+
+def test_ask_chunk_concept_walk_end_to_end(repo):
+    """overlay 路 + flag 开:概念漫游把跨文档 chunk 并入候选 → rerank → _answer_mix,
+    答案出 chunk 引用。"""
+    repo.settings.query_rewrite_enabled = False
+    repo.llm_client = _AnswerLLM("DeepSeek 与 GLM 都用 MoE [k1].")
+    repo.rerank_client = _FakeRerank(configured=True)
+    nb = _seed_two_doc_moe(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="chunk"))
+    assert resp.mode == "chunk"
+    assert resp.answer
+    assert any(a.object_type == "chunk" for a in resp.anchors)   # 跨文档 chunk 成了可引用证据
+
+
+def test_ask_chunk_concept_walk_off_unchanged(repo, monkeypatch):
+    """flag 关 → 不并入 PPR 路,overlay 仍按今天行为出 chunk 答案。"""
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
+    repo.settings.query_rewrite_enabled = False
+    repo.llm_client = _AnswerLLM("答案 [k1].")
+    repo.rerank_client = _FakeRerank(configured=True)
+    nb = _seed_two_doc_moe(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="MoE", mode="chunk"))
+    assert resp.mode == "chunk" and resp.answer
