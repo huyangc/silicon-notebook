@@ -59,12 +59,12 @@ PPR 跨文档 chunk 作 `_mix_retrieve` 的第 3 路候选,gated `GRAPH_PPR_ENAB
 `ask_chunk` 的 `ask_stage("mix_rerank", ...)`([:5314](backend/app/services/sqlite_repository.py:5314))detail 增 `concept_walk=ppr_count`(用 B 的 5-tuple 透出的 `ppr_count`)。落 events.jsonl 供真机排查(对齐 [[model-error-observability]]:调试奇怪问答先看 events.jsonl)。
 
 ### D. 命名:概念漫游(用户可见串)
-- **reasoning 轨迹**(master 现成,本 PR 改):
-  - [reasoning_retrieval.py:247](backend/app/services/reasoning_retrieval.py:247) `"PPR 跨文档兜底检索,得到 {n} 段原文"` → `"概念漫游:跨文档检索,得到 {n} 段原文"`
-  - [:350](backend/app/services/reasoning_retrieval.py:350) `"跳过 ppr_retrieve(PPR 未启用)"` → `"跳过概念漫游(未启用)"`
-  - [:365](backend/app/services/reasoning_retrieval.py:365) `"PPR 跨文档检索: {pq},新增 {n} 段"` → `"概念漫游:{pq},新增 {n} 段"`
-- **chunk**:C 的 `concept_walk` 标记(诊断)。
-- 内部 `GRAPH_PPR_ENABLED` / `_ppr_*` / `step_type="ppr"`(机器键)**不动**——只改人读 `summary` 文案。
+**用户可见 `summary=` 文案全改**(master 现成,本 PR 一并改;machine 键不动):
+- **reasoning**(`reasoning_retrieval.py`):247 seed 兜底、350 未启用 skip、354 上限 skip、365 action —— 四处 `"PPR/ppr_retrieve …"` → `"概念漫游 …"`。
+- **graph**(`sqlite_repository.py`):6147 `"PPR 跨文档召回 {n} 个 chunk"` → `"概念漫游:跨文档召回 {n} 个 chunk"`。
+- **chunk**:C 的 `concept_walk` 标记(诊断,非 summary)。
+- 守卫:`test_no_user_facing_ppr_string_remains` grep 服务层 `summary=` 行无残留「PPR」/「ppr_retrieve」(剔除机器变量名 `_MAX_PPR_RETRIEVES`)。
+- 内部 `GRAPH_PPR_ENABLED` / `_ppr_*` / `step_type="ppr"` / `detail` 键(机器键)**不动**——只改人读 `summary`。
 
 ### E. 隔离 / 不变量
 - `_mix_retrieve` **仅 `ask_chunk` 调用**(已 grep 核)→ 改它只影响 chunk。朴素路径(`elif len(sub_queries)>=2` / `else` 两支)、reasoning、graph **零改**;`_answer_mix` 不动。

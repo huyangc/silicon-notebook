@@ -351,7 +351,7 @@ class ReasoningRetriever:
                                      detail={"reason": "ppr_disabled"}))
                 elif ppr_searches >= _MAX_PPR_RETRIEVES:
                     record(TraceStep(step_type="skip",
-                                     summary=f"跳过 ppr_retrieve(已达次数上限 {_MAX_PPR_RETRIEVES})",
+                                     summary=f"跳过概念漫游(已达次数上限 {_MAX_PPR_RETRIEVES})",
                                      detail={"reason": "ppr_retrieve_cap"}))
                 else:
                     ppr_searches += 1
