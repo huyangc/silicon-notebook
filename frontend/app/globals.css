@@ -1494,6 +1494,12 @@ button.chat-session-card {
   border-color: #101820;
 }
 
+.mode-tab:disabled,
+.mode-engine:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
 .mode-engines {
   display: flex;
   align-items: center;
@@ -1533,6 +1539,12 @@ button.chat-session-card {
   border: 0;
   outline: 0;
   color: #20242a;
+}
+
+.chat-input:disabled {
+  background: transparent;
+  color: #98a2b3;
+  cursor: not-allowed;
 }
 
 .chat-input-bar span {
@@ -1711,7 +1723,23 @@ button.chat-session-card {
   border-radius: 50%;
   background: #101820;
   color: #fff;
+  display: grid;
+  place-items: center;
   font-size: 28px;
+}
+
+.send-button:disabled {
+  background: #cbd5e1;
+  color: #fff;
+  cursor: not-allowed;
+}
+
+.send-button.stop {
+  background: #ba2d2d;
+}
+
+.send-button.stop:hover {
+  background: #9f2424;
 }
 
 .studio-panel {

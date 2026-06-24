@@ -273,6 +273,7 @@ def verify_chain_edges(
     llm_client,
     votes: int = 1,
     timeout: int = 30,
+    cancel_event=None,
 ) -> dict:
     """Adversarial LLM check for each edge in the chain.
 
@@ -302,6 +303,7 @@ def verify_chain_edges(
         }
     """
     import json as _json
+    from app.services.cancellation import AskCancelled, raise_if_cancelled
 
     edge_results = []
     flagged = []
@@ -309,6 +311,7 @@ def verify_chain_edges(
     confidences = []
 
     for node, edge, src_oid in subgraph:
+        raise_if_cancelled(cancel_event)
         if not edge:
             continue
         tgt_name = node.get("name", node.get("object_id", "?"))
@@ -331,17 +334,21 @@ def verify_chain_edges(
                 quote=quote, schema=_VERIFY_SCHEMA_HINT,
             )
             for _ in range(votes):
+                raise_if_cancelled(cancel_event)
                 try:
                     raw = llm_client.chat_json(
                         [{"role": "user", "content": prompt}],
                         _VERIFY_SCHEMA_HINT,
                         timeout=timeout,
                         max_retries=1,
+                        cancel_event=cancel_event,
                     )
                     data = _json.loads(raw)
                     if isinstance(data, dict) and data.get("valid", True):
                         valid_votes += 1
                     last_reason = str(data.get("reason", "")) if isinstance(data, dict) else ""
+                except AskCancelled:
+                    raise
                 except Exception:
                     valid_votes += 1   # on error, assume valid (fail-open)
 

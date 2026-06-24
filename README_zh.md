@@ -129,7 +129,7 @@ npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
 
 - 顶栏：左上角只保留可编辑 notebook 标题；notebook 描述在没有对话时显示到问答欢迎态里，顶部工具栏在桌面宽度下保持各动作标签完整。
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
-- 主栏：两个 tab——**问答**（接地问答，逐句 `[k_i]` 引用，三种检索模式见下方「检索模式（问答）」一节，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
+- 主栏：两个 tab——**问答**（接地问答，逐句 `[k_i]` 引用，三种检索模式见下方「检索模式（问答）」一节，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。中断会 abort `/ask/stream` 请求，并把取消信号传给后端，使正在执行的 Ask worker / LLM 路径停止，且不保存被中断的最终回答。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
 - Studio 类文章研究、思维导图/信息图生成、派生规则审核、治理**晋升队列**（把个人 KG 节点申请晋升到基准语料，并批准/拒绝待审请求）、**基准库/个人层切换**，以及**边审查队列**（按「高中心性 × 低可信」排序确认/拒绝关系，被拒边从图推理中排除）仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
 
@@ -167,7 +167,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`，见上文「检索模式（问答）」；tier 感知，跨 base + 当前 personal 联合检索）
-- `POST /api/notebooks/{id}/ask/stream` — 推理模式问答进度的 NDJSON stream（先发 `progress` 轨迹事件并渲染为实时折叠摘要行，最后发完整 `AskResponse`）
+- `POST /api/notebooks/{id}/ask/stream` — 推理模式问答进度的 NDJSON stream（先发 `progress` 轨迹事件并渲染为实时折叠摘要行，最后发完整 `AskResponse`）；客户端断开 / abort 会设置后端取消事件，使正在进行的 Ask 路径在写入最终答案前停止
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - `GET|POST /api/notebooks/{id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`

@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-06-06
+更新日期：2026-06-24
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）与 `implementation_plan.md`（实现计划）。
 
@@ -63,10 +63,11 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - 两列工作区：左 Source Stack / 右侧主 Ask + Knowledge 工作区；固定 Studio 右栏已移除，主问答面板使用释放出的宽度。
 - 左上角 notebook 名称可编辑保存；左栏显示来源数量、仅显示用户导入文件；网络来源检索保留为 disabled affordance。
+- Notebook 顶栏保持紧凑：标题下不再渲染 description，description 在没有对话时进入问答欢迎态；顶部分析工具栏具备横向 overflow 保护，桌面宽度下动作标签不会被截断。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
 - **中栏 knowhow 工具 tab**：问答 / 场景查询 / 案例检索 / Checklist / 知识库。
-  - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。
+  - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题。
   - 场景查询：9 字段结构化表单走 `/scenario-query`，复用统一 AnswerView。
   - 案例检索 / Checklist：分别走 `/case-search`、`/checklist`，渲染 CaseCard / ChecklistItem。
   - **知识库（多类型浏览）**：前端从 `/knowledge-types` 动态获取对象类型，再用 `/knowledge?type=...` 浏览任意类型（Concept / Claim / Formula / Procedure 以及 legacy/custom 类型）；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
@@ -150,7 +151,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - `scenario_query()`：`ScenarioQueryRequest` 扩展 signal_type / constraint / process_or_node / application 等字段，构造 scenario 后走 ask。
 - `case_search()`：对 cases 知识对象 + element 相似检索，删除写死案例。
 - `checklist()`：从匹配的 rules / risks 生成 checklist item，删除写死 3 条。
-- **推理模式 agentic search 实时进度（§6.5 / §11）**：新增 `POST /api/notebooks/{id}/ask/stream` NDJSON 流；后端先发 `start`，再把 `ReasoningRetriever` 的 plan / retrieve / reflect / expand / fallback / answer trace step 逐行推给前端，最后发送完整 `AskResponse`。前端推理按钮开启时走 stream，在 pending answer 中实时显示一行 agent 轨迹摘要，按最新 progress 事件刷新，点击后展开完整步骤；最终回答中保留默认折叠的 `reasoning_trace` 供回看；普通 `/ask` 仍作为兼容非流式路径。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
+- **推理模式 agentic search 实时进度（§6.5 / §11）**：新增 `POST /api/notebooks/{id}/ask/stream` NDJSON 流；后端先发 `start`，再把 `ReasoningRetriever` 的 plan / retrieve / reflect / expand / fallback / answer trace step 逐行推给前端，最后发送完整 `AskResponse`。前端推理按钮开启时走 stream，在 pending answer 中实时显示一行 agent 轨迹摘要，按最新 progress 事件刷新，点击后展开完整步骤；最终回答中保留默认折叠的 `reasoning_trace` 供回看；普通 `/ask` 仍作为兼容非流式路径。中断链路已全栈接通：前端 abort / 客户端断开会让 `/ask/stream` 设置后端 cancellation event，`ask_chunk` / `ask_reasoning` / `ask_graph` 与 LLM 流式读取路径在关键阶段停止，且不会保存被取消的最终回答。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
 
 ## 13. 真实 Article Studio
 

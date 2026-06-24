@@ -15,6 +15,7 @@ from app.models.schemas import TraceStep
 from app.services.prompts import (
     PLAN_SCHEMA_HINT, REFLECT_SCHEMA_HINT, plan_prompt, reflect_prompt,
 )
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.retrieval import (
     RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
 )
@@ -65,9 +66,10 @@ class ReasoningResult:
 
 
 class ReasoningRetriever:
-    def __init__(self, repo, settings):
+    def __init__(self, repo, settings, cancel_event: CancelEvent = None):
         self.repo = repo
         self.settings = settings
+        self.cancel_event = cancel_event
 
     # --- KG 工具箱(薄封装 repo 原语) ---
     def search(self, notebook_id, query, types=None, prefer="balanced"):
@@ -89,18 +91,21 @@ class ReasoningRetriever:
 
     # --- LLM 决策点 ---
     def plan(self, question, history=""):
+        raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
         ex = expand_query(self.repo.reasoning_llm_client, question, history,
                           timeout=self.settings.reasoning_timeout_seconds,
                           max_retries=self.settings.reasoning_max_retries,
                           max_subqueries=self.settings.reasoning_max_subqueries,
-                          want_types=True)
+                          want_types=True,
+                          cancel_event=self.cancel_event)
         out = [SubQuery(query=s.query, types=s.types, prefer=s.prefer, reason=s.reason)
                for s in ex.sub_queries]
         return out or fallback
 
     def reflect(self, question, candidates_summary):
+        raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
         if not getattr(self.repo.reasoning_llm_client, "configured", False):
             return answer_decision
@@ -109,7 +114,8 @@ class ReasoningRetriever:
                 [{"role": "user", "content": reflect_prompt(question, candidates_summary)}],
                 REFLECT_SCHEMA_HINT,
                 timeout=self.settings.reasoning_timeout_seconds,
-                max_retries=self.settings.reasoning_max_retries)
+                max_retries=self.settings.reasoning_max_retries,
+                cancel_event=self.cancel_event)
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return answer_decision
@@ -136,6 +142,8 @@ class ReasoningRetriever:
                                            reason=str(nsq.get("reason", "")))
             d.elements_query = str(data.get("elements_query", "")).strip()
             return d
+        except AskCancelled:
+            raise
         except Exception:
             return answer_decision
 
@@ -164,17 +172,20 @@ class ReasoningRetriever:
         return "\n".join(lines) if lines else "(no candidates yet)"
 
     def run(self, notebook_id, question, history="", on_step=None):
+        raise_if_cancelled(self.cancel_event)
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
         visited: set = set()
 
         def record(step: TraceStep) -> None:
+            raise_if_cancelled(self.cancel_event)
             trace.append(step)
             if on_step:
                 on_step(step)
 
         subqueries = self.plan(question, history)
+        raise_if_cancelled(self.cancel_event)
         record(TraceStep(
             step_type="plan", summary=f"规划了 {len(subqueries)} 个子查询",
             detail={"sub_queries": [{"query": s.query, "types": s.types,
@@ -186,8 +197,13 @@ class ReasoningRetriever:
         # (每个 object_id 保留按"子查询顺序 + 查询内顺序"的第一个版本)。
         # 单个子查询失败被吞掉(记空结果),不拖垮整个 run。
         def _run_search(sq: SubQuery) -> List[RetrievedKnowledge]:
+            raise_if_cancelled(self.cancel_event)
             try:
-                return self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]
+                hits = self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]
+                raise_if_cancelled(self.cancel_event)
+                return hits
+            except AskCancelled:
+                raise
             except Exception:
                 return []
 
@@ -195,6 +211,7 @@ class ReasoningRetriever:
             with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
                 # map 保序:第 i 个结果对应第 i 个子查询,与提交顺序一致。
                 for hits in ex.map(_run_search, subqueries):
+                    raise_if_cancelled(self.cancel_event)
                     for h in hits:
                         collected.setdefault(h.object_id, h)
         record(TraceStep(step_type="retrieve",
@@ -214,6 +231,7 @@ class ReasoningRetriever:
         stale = 1 if no_progress else 0
         elements_searches = 0
         while steps < self.settings.reasoning_max_steps:
+            raise_if_cancelled(self.cancel_event)
             steps += 1
             summary = self._summarize(collected, elements)
             if no_progress:
@@ -225,6 +243,7 @@ class ReasoningRetriever:
                     for o in visited)
                 summary = f"{summary}\n\n（已展开过的节点，勿重复 expand_graph 请求它们: {vis}）"
             decision = self.reflect(question, summary)
+            raise_if_cancelled(self.cancel_event)
             record(TraceStep(step_type="reflect",
                              summary=decision.reason or decision.next_action,
                              detail={"next_action": decision.next_action,
@@ -246,6 +265,7 @@ class ReasoningRetriever:
                     # graph mode's job (_federated_rx_graph), not reasoning mode (P4 spec §F).
                     neigh = self.neighbors(notebook_id, oid,
                                            decision.expand_edge_type, decision.expand_direction)
+                    raise_if_cancelled(self.cancel_event)
                     for h in neigh:
                         collected.setdefault(h.object_id, h)
                     # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
@@ -270,6 +290,7 @@ class ReasoningRetriever:
                 else:
                     sq = decision.new_sub_query
                     for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
+                        raise_if_cancelled(self.cancel_event)
                         collected.setdefault(h.object_id, h)
                     if sq.query not in used_queries:
                         used_queries.append(sq.query)
@@ -288,6 +309,7 @@ class ReasoningRetriever:
                     seen_el = {e.element_id for e in elements}
                     els = [e for e in self.search_elements(notebook_id, eq)
                            if e.element_id not in seen_el]
+                    raise_if_cancelled(self.cancel_event)
                     elements.extend(els)
                     record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
@@ -305,6 +327,7 @@ class ReasoningRetriever:
                 break
 
         answer_detail = {"elements": len(elements)}
+        raise_if_cancelled(self.cancel_event)
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
             top_hits, counts = self._quota_rerank(
@@ -317,6 +340,7 @@ class ReasoningRetriever:
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[: self.settings.retrieval_top_n]
+        raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         record(TraceStep(step_type="answer",
                          summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
