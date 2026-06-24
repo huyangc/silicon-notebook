@@ -8,7 +8,6 @@ import shutil
 import sqlite3
 import threading
 import time
-from collections import namedtuple
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -163,10 +162,6 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     # without disturbing newlines / other whitespace runs the model intended.
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
-
-# classify_evidence 只读 .object_id/.relevance;PPR chunk 用 chunk_id 充当 object_id,
-# 使跨文档 chunk 引用也能进证据分档(否则纯 chunk 引用的答案会被误判 inferred)。
-_ChunkEvHit = namedtuple("_ChunkEvHit", "object_id relevance")
 
 # 每次 ask 的模型错误收集槽(请求级;仓库是单例,不能用实例状态)。None = 不在 ask 上下文。
 _ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
@@ -5860,8 +5855,10 @@ class SQLiteRepository:
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         if chunks:
-            # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关);
-            # chunk 段 k1..N + KG 段 k1001+,合并 id_map,两段都可 [k] 引用。
+            # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关;跨 PPR run
+            # 的归一分仅大致可比,只影响预算边缘取舍,不破坏 [0,1]);chunk 段 k1..N + KG 段
+            # k1001+,合并 id_map,两段都可 [k] 引用。无需 _answer_mix 的 base-1 截断:chunk
+            # 数 ≤ ppr_top_chunks×(1 seed + _MAX_PPR_RETRIEVES) ≪ _MIX_KG_KEY_BASE(1000)。
             ordered = sorted(chunks, key=lambda c: (-c.relevance, c.chunk_id))
             chunk_block, chunk_id_map = self._chunk_answer_context(ordered)
             kg_block, kg_id_map = self._answer_context(
@@ -5986,8 +5983,9 @@ class SQLiteRepository:
                         exc)
                     answer, llm_grounded, anchors = "", False, []
 
-            evidence_pool = list(top_hits) + [
-                _ChunkEvHit(c.chunk_id, c.relevance) for c in chunks]
+            # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
+            # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
+            evidence_pool = list(top_hits) + list(chunks)
             evidence_level, top_relevance = classify_evidence(
                 evidence_pool, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
