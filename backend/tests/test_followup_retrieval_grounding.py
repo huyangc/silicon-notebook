@@ -120,7 +120,7 @@ class RecordingLLM:
     def __init__(self):
         self.rewrite_calls = []
         self.answer_calls = []
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, **kwargs):
         content = messages[0]["content"]
         if schema_hint == '{"query":""}':
             self.rewrite_calls.append(content)
