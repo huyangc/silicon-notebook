@@ -2623,7 +2623,36 @@ class SQLiteRepository:
         rows = place_new_concepts(new_objs, cmap, canon_names,
                                   seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
         self.append_clusters(notebook_id, rows, object_type="concept")
-        # >>> Tier2(后续任务)在此插入桥接检测 + 入队 <<<
+        with self._connect() as db:
+            ex = db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
+                "AND object_type='concept' AND status!='deprecated' AND source_id!=?",
+                (notebook_id, source_id)).fetchall()
+            vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+                               (notebook_id,)).fetchall()
+        # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量,
+        # 而非从首条推断——推断会在混维库里误留旧维)。
+        dim = self.settings.embed_dim
+        vecs = {}
+        for r in vrows:
+            v = json.loads(r["vector"])
+            if len(v) == dim:
+                vecs[r["object_id"]] = v
+        existing_items = [{"object_id": r["id"],
+                           "name": json.loads(r["payload"] or "{}").get("name", "")} for r in ex]
+        new_vecs = {o["object_id"]: vecs[o["object_id"]] for o in new_objs if o["object_id"] in vecs}
+        decided = self.decided_pairs(notebook_id)   # 键 (canonical_a, canonical_b),concept 为 "K-<seed>"
+        rejected = {frozenset((a, b)) for (a, b), s in decided.items() if s == "rejected"}
+        from app.services.kg_merge import detect_bridge_candidates
+        cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, rejected)
+        if cands:
+            now = _now()
+            with self._write() as db:
+                for c in cands:
+                    db.execute(
+                        "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+                        "VALUES (?,?,?,?,?, 'pending', ?, ?)",
+                        (f"cm-{uuid4().hex[:10]}", notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
         self._invalidate_unified_cache(notebook_id)
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
