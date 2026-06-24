@@ -81,3 +81,26 @@ def test_mix_retrieve_no_concept_walk_when_flag_off(repo, monkeypatch):
         nb.id, "DeepSeek-V3 Mixture-of-Experts", "", ["DeepSeek-V3 Mixture-of-Experts"])
     assert ppr_n == 0                                      # flag 关 → 不跑 PPR
     assert len(set(c.chunk_id for c in cand)) == len(cand) # 仍去重
+
+
+class _AnswerOnlyReasoningLLM:
+    """plan 单子查询;reflect 永远 answer → reasoning 只靠 seed pass 跑出 ppr 轨迹。"""
+    configured = True
+    def chat_json(self, messages, schema_hint, **kw):
+        if "sub_queries" in schema_hint:
+            return json.dumps({"sub_queries": [{"query": "DeepSeek MoE"}]})
+        if "next_action" in schema_hint:
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        return json.dumps({"answer": "都用 MoE [k1].", "grounded": True})
+
+
+def test_reasoning_trace_uses_concept_walk_name(repo):
+    """reasoning 的 ppr 轨迹 summary 改叫「概念漫游」,机器键 step_type 仍 'ppr'。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_doc_moe(repo)
+    repo._reasoning_llm_client = _AnswerOnlyReasoningLLM()
+    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
+    ppr_steps = [s for s in result.trace if s.step_type == "ppr"]
+    assert ppr_steps                                            # 机器键不变
+    assert any("概念漫游" in s.summary for s in ppr_steps)      # 文案已改名
+    assert not any("PPR 跨文档" in s.summary for s in result.trace)
