@@ -62,6 +62,26 @@ def test_incremental_fuse_flag_off(repo, monkeypatch):
     assert repo.cluster_map(nb.id).get("ko-B") is None   # flag 关→不融合
 
 
+def test_incremental_fuse_claim_by_name(repo):
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-06-22T00:00:00"
+    from app.services.kg_merge import seed_claim
+    cid = "KL-" + seed_claim({"name": "MoE raises capacity"})
+    with repo._write() as db:
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("kl-A", nb.id, "claim", "approved", "", json.dumps({"name":"MoE raises capacity"}), "[]", "src-A", now, now))
+        db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)",
+                   ("ccl-A", nb.id, cid, "kl-A", "MoE raises capacity", "claim", "", now))
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("kl-B", nb.id, "claim", "approved", "", json.dumps({"name":"MoE raises capacity"}), "[]", "src-B", now, now))
+    repo.incremental_fuse_source(nb.id, "src-B")
+    cmap = repo.cluster_map(nb.id)
+    assert cmap.get("kl-B") == cmap.get("kl-A")   # 新 claim 进同一名种子簇
+
+
 def test_tier2_bridge_enqueues_candidate_not_merge(repo):
     """新 concept 向量近一个异名异簇已有 concept → 入 concept_merge_candidates,不自动并簇。"""
     nb = repo.create_notebook(NotebookCreate(name="kb"))
