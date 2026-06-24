@@ -5298,7 +5298,7 @@ class SQLiteRepository:
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
             if overlay_on:
-                candidates, kg_block, kg_id_map, kg_hits = self._mix_retrieve(
+                candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = self._mix_retrieve(
                     notebook_id, retrieval_query, hl, sub_queries)
                 raise_if_cancelled(cancel_event)
                 order = self.rerank_client.rerank(
@@ -5312,7 +5312,8 @@ class SQLiteRepository:
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
                 selected = truncate_by_tokens(ranked, lambda c: c.text, chunk_budget)
                 ask_stage("mix_rerank", _t, recall=len(candidates),
-                          selected=len(selected), kg_nodes=len(kg_id_map))
+                          selected=len(selected), kg_nodes=len(kg_id_map),
+                          concept_walk=concept_walk_n)
             elif len(sub_queries) >= 2:
                 collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
                 raise_if_cancelled(cancel_event)
@@ -5659,8 +5660,9 @@ class SQLiteRepository:
         return scored
 
     def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
-        """三路 mix。KG 只检索一次(高 key-base):种子→子图(结构 block+id_map)+源 chunk;
-        与向量 chunk round-robin 并池。返回 (candidates, kg_block, kg_id_map, kg_hits)。"""
+        """三路 mix:向量 chunk + KG-overlay 源 chunk + 概念漫游(PPR)跨文档 chunk,
+        round-robin 并池去重。返回 (candidates, kg_block, kg_id_map, kg_hits, ppr_count)。
+        PPR 跨文档扩散的噪声由 ask_chunk 侧现成 rerank 免费压低。"""
         vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
         kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
         overlay_on = self.settings.chunk_kg_overlay_enabled and (
@@ -5670,13 +5672,15 @@ class SQLiteRepository:
                 notebook_id, query, hl, id_offset=self._MIX_KG_KEY_BASE)
             kg_chunks = self._kg_source_chunks(
                 notebook_id, [v["object_id"] for v in kg_id_map.values()])
+        # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
+        ppr_chunks = self._ppr_retrieve(notebook_id, query) if self.settings.graph_ppr_enabled else []
         merged, seen = [], set()
-        for i in range(max(len(vector_chunks), len(kg_chunks))):
-            for src in (vector_chunks, kg_chunks):
+        for i in range(max(len(vector_chunks), len(kg_chunks), len(ppr_chunks))):
+            for src in (vector_chunks, kg_chunks, ppr_chunks):
                 if i < len(src) and src[i].chunk_id not in seen:
                     seen.add(src[i].chunk_id)
                     merged.append(src[i])
-        return merged, kg_block, kg_id_map, kg_hits
+        return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0) -> tuple:
@@ -6140,7 +6144,7 @@ class SQLiteRepository:
                         citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
                         retrieval_query=question, top_relevance=top_relevance,
                         reasoning_trace=[TraceStep(step_type="ppr",
-                            summary=f"PPR 跨文档召回 {len(ppr_chunks)} 个 chunk",
+                            summary=f"概念漫游:跨文档召回 {len(ppr_chunks)} 个 chunk",
                             detail={"chunks": len(ppr_chunks),
                                     "sources": len({c.source_id for c in ppr_chunks})})])
                     resp.mode = "graph"
