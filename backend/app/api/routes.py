@@ -319,7 +319,9 @@ def list_object_schemas() -> List[ObjectSchemaModel]:
 
 
 @router.post("/object-schemas", response_model=ObjectSchemaModel)
-def create_object_schema(payload: ObjectSchemaCreate) -> ObjectSchemaModel:
+def create_object_schema(payload: ObjectSchemaCreate, user: UserProfile = Depends(get_current_user)) -> ObjectSchemaModel:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
     try:
         return repository().create_object_schema(payload)
     except ValueError as exc:
@@ -328,8 +330,10 @@ def create_object_schema(payload: ObjectSchemaCreate) -> ObjectSchemaModel:
 
 @router.patch("/object-schemas/{object_type}", response_model=ObjectSchemaModel)
 def update_object_schema(
-    object_type: str, payload: ObjectSchemaUpdate
+    object_type: str, payload: ObjectSchemaUpdate, user: UserProfile = Depends(get_current_user)
 ) -> ObjectSchemaModel:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
     try:
         return repository().update_object_schema(object_type, payload)
     except KeyError:
@@ -339,7 +343,9 @@ def update_object_schema(
 
 
 @router.delete("/object-schemas/{object_type}")
-def delete_object_schema(object_type: str):
+def delete_object_schema(object_type: str, user: UserProfile = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
     try:
         repository().delete_object_schema(object_type)
         return {"status": "deleted", "object_type": object_type}
@@ -592,7 +598,9 @@ def create_article(notebook_id: str, payload: ArticleCreate) -> ArticleSummary:
 
 
 @router.delete("/articles/{article_id}", status_code=204)
-def delete_article(article_id: str) -> None:
+def delete_article(article_id: str, user: UserProfile = Depends(get_current_user)) -> None:
+    if repository().article_owner(article_id) != user.id:
+        raise HTTPException(status_code=404, detail="Article not found")
     try:
         repository().delete_article(article_id)
     except KeyError:
@@ -600,7 +608,9 @@ def delete_article(article_id: str) -> None:
 
 
 @router.post("/articles/{article_id}/research", response_model=ArticleResearchBrief)
-def research_article(article_id: str) -> ArticleResearchBrief:
+def research_article(article_id: str, user: UserProfile = Depends(get_current_user)) -> ArticleResearchBrief:
+    if repository().article_owner(article_id) != user.id:
+        raise HTTPException(status_code=404, detail="Article not found")
     try:
         return repository().research_article(article_id)
     except KeyError:
@@ -852,7 +862,9 @@ def list_concept_whitelist() -> List[ConceptWhitelistEntry]:
 
 
 @router.post("/kg/concept-whitelist", response_model=ConceptWhitelistEntry)
-def add_concept_whitelist(payload: ConceptWhitelistAdd) -> ConceptWhitelistEntry:
+def add_concept_whitelist(payload: ConceptWhitelistAdd, user: UserProfile = Depends(get_current_user)) -> ConceptWhitelistEntry:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
     try:
         return ConceptWhitelistEntry(**repository().concept_whitelist_add(payload.term, payload.note))
     except ValueError:
@@ -860,7 +872,9 @@ def add_concept_whitelist(payload: ConceptWhitelistAdd) -> ConceptWhitelistEntry
 
 
 @router.delete("/kg/concept-whitelist/{term}", status_code=204)
-def delete_concept_whitelist(term: str) -> None:
+def delete_concept_whitelist(term: str, user: UserProfile = Depends(get_current_user)) -> None:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
     repository().concept_whitelist_remove(term)
 
 
@@ -895,7 +909,9 @@ def propose_promotion(notebook_id: str, knowledge_id: str) -> PromotionCandidate
 
 
 @router.get("/promotion-queue", response_model=List[PromotionCandidate])
-def list_promotion_queue(status: str = Query(None)) -> List[PromotionCandidate]:
+def list_promotion_queue(status: str = Query(None), user: UserProfile = Depends(get_current_user)) -> List[PromotionCandidate]:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     return [
         PromotionCandidate(**c)
         for c in repository().list_promotion_queue(status_filter=status)
@@ -906,7 +922,9 @@ def list_promotion_queue(status: str = Query(None)) -> List[PromotionCandidate]:
     "/promotion-queue/{candidate_id}/approve",
     response_model=PromotionApproveResult,
 )
-def approve_promotion(candidate_id: str) -> PromotionApproveResult:
+def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current_user)) -> PromotionApproveResult:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     try:
         return PromotionApproveResult(**repository().approve_promotion(candidate_id))
     except KeyError:
@@ -919,7 +937,9 @@ def approve_promotion(candidate_id: str) -> PromotionApproveResult:
     "/promotion-queue/{candidate_id}/reject",
     response_model=PromotionCandidate,
 )
-def reject_promotion(candidate_id: str, payload: PromotionRejectRequest) -> PromotionCandidate:
+def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: UserProfile = Depends(get_current_user)) -> PromotionCandidate:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     try:
         return PromotionCandidate(
             **repository().reject_promotion(candidate_id, reason=payload.reason)
