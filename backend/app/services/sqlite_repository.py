@@ -752,6 +752,16 @@ class SQLiteRepository:
                     now,
                 ),
             )
+            # 把内置 user-local 升级为 admin（id 不变=现有 notebook 零迁移）：
+            # 每次启动据 settings.admin_password 重置 admin 密码（改密=改环境变量后重启）。
+            from app.services.auth_utils import hash_password
+            pw_hash, pw_salt, pw_iters = hash_password(self.settings.admin_password)
+            db.execute(
+                "UPDATE users SET role='admin', username='admin', "
+                "password_hash=?, password_salt=?, password_iterations=?, updated_at=? "
+                "WHERE id='user-local'",
+                (pw_hash, pw_salt, pw_iters, now),
+            )
             from app.services.kg.filters import _norm as _wl_norm
             builtin_whitelist = [
                 "VCO", "PLL", "LNA", "BJT", "MOS", "MOSFET", "CMOS", "FET",
