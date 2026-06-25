@@ -144,35 +144,36 @@ Confirmed scope:
 
 ## Python Environment
 
-Use the existing Miniconda Python environment for all backend development:
+Run all backend work with an isolated Python environment that has
+`backend/requirements.txt` installed. Activate it — or point `PYTHON_BIN` at its
+interpreter — so the helper scripts (`scripts/dev.sh`, `scripts/backend.sh`) and the
+root `package.json` use it; they fall back to `python3` when `PYTHON_BIN` is unset.
 
-```bash
-/opt/homebrew/Caskroom/miniconda/base/bin/python
-```
-
-Do not create a new virtual environment, Conda environment, or project-local Python environment unless the user explicitly asks for it.
-
-The temporary `.venv` created during early exploration was removed. Do not recreate it as the default workflow.
+Keep **machine-specific** details — absolute interpreter paths, which local port a
+service happens to occupy, and similar per-developer facts — in that machine's local
+config / memory, **not** in committed files (this file, the READMEs, etc.). Committed
+docs describe the generic procedure only; `README.md` → "Deployment" is the canonical
+setup runbook.
 
 ## Backend Commands
 
-Run backend commands with the shared Python interpreter:
+Run backend commands with the active environment's interpreter:
 
 ```bash
 cd backend
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 For dependency checks or installs, use the same interpreter:
 
 ```bash
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m pip install -r backend/requirements.txt
+python -m pip install -r backend/requirements.txt
 ```
 
-Prefer setting `PYTHON_BIN` when a script supports it:
+Set `PYTHON_BIN` for the helper scripts that support it:
 
 ```bash
-PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 
 ## Frontend/UI
@@ -188,21 +189,21 @@ npm run dev
 
 Do not add Docker or Docker Compose as the default first-version workflow.
 
-Local beta should run directly on the shared Miniconda Python environment and the local Next.js frontend.
+Local beta should run directly on a local Python environment and the local Next.js frontend.
 
 Docker can be introduced later only when the user asks for deployment packaging or when the project moves beyond the local beta workflow.
 
 ## Dependency Policy
 
-- Treat the Miniconda base environment as the canonical local Python environment.
-- Keep backend dependencies compatible with Python 3.13.
+- Treat the project's isolated Python environment (with `backend/requirements.txt` installed) as canonical; activate it or set `PYTHON_BIN`.
+- Keep backend dependencies compatible with Python 3.11+.
 - Default backend requirements should not require PostgreSQL, pgvector, or SQLAlchemy while SQLite is the local baseline.
-- Do not add `.venv/`, `venv/`, or new Conda environment setup as the default workflow.
+- Keep dependency setup reproducible from `backend/requirements.txt`.
 - Ask for approval before installing new packages when network or environment mutation is required.
 
 ## Current Backend Baseline
 
-The Miniconda environment has been used for:
+The backend has been exercised on:
 
 ```text
 Python 3.13.11
@@ -218,7 +219,7 @@ numpy            # float32 向量矩阵检索
 openpyxl         # XLSX 解析
 ```
 
-If any dependency is missing, install `backend/requirements.txt` into the shared Miniconda environment.
+If any dependency is missing, install `backend/requirements.txt` into the active environment.
 
 ## LLM Configuration
 
@@ -259,7 +260,7 @@ bash scripts/check.sh
 
 This checks:
 
-- Backend Python syntax with the shared Miniconda Python.
+- Backend Python syntax.
 - SQLite initialization and persistence smoke path.
 - Markdown, DOCX, PPTX, and PDF upload/parse smoke path (sync and async-scheduler paths).
 - KG extraction boundary (`no-llm` offline), explicit KG/rule knowledge storage, delete → ask → feedback (with comment) → conversation APIs → article research smoke path, plus retrieval scoring (keyword/vector, CJK tokenization, hybrid fusion, scenario boost, payload-level embeddings), derived-rule persistence, and stale-source knowledge invalidation assertions. Fresh DB must still have no demo notebook.

@@ -29,97 +29,94 @@ This repository targets a local real-team beta loop built around a KG-native pip
 
 PostgreSQL + pgvector remain the future production/team-beta direction; local development does not require them.
 
-## Local Setup
+## Deployment
 
-Copy the environment template:
+silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend — over
+a local SQLite database. It requires **no GPU, no database server, and no local model
+server**: every model (LLM, embeddings, rerank, MinerU) is reached over a URL endpoint,
+and the pipeline runs offline with deterministic fallbacks when none are configured.
+
+### Prerequisites
+
+- **Python ≥ 3.11**
+- **Node.js ≥ 20** and npm
+- **git**
+- A C/C++ toolchain is needed *only as a fallback* — `numpy`, `rustworkx`, and `hnswlib`
+  ship prebuilt wheels for common platforms; install Xcode Command Line Tools (macOS) or
+  `build-essential` (Debian/Ubuntu) only if pip has to build one from source.
+
+### 1 · Install
+
+```bash
+git clone <repo-url> silicon-notebook
+cd silicon-notebook
+
+# Backend — into an isolated Python environment
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt
+
+# Frontend
+( cd frontend && npm install )
+```
+
+### 2 · Configure
 
 ```bash
 cp .env.example .env
 ```
 
-The default local database is:
+The service boots with every value blank — deterministic offline mode (keyword-only
+retrieval, no LLM extraction or answers). To enable full functionality, set at minimum:
 
-```text
-DATABASE_URL=sqlite:///.local/silicon_notebook.db
-```
+- **LLM** (extraction, answers, article research) — `OPENAI_COMPAT_BASE_URL` /
+  `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL`; any OpenAI-compatible endpoint.
+- **Embeddings** (semantic retrieval; otherwise keyword-only) — `EMBED_PROVIDER=dashscope`
+  plus `EMBED_MODEL` / `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM` (must equal the
+  model's output dimension).
+- **PDF fidelity** (optional) — a MinerU endpoint, see [PDF parsing with MinerU](#pdf-parsing-with-mineru);
+  leave `MINERU_MODE=off` for the pypdf text fallback.
 
-Default CORS origins include `localhost:3000` and `localhost:3001`, because Next.js may move to `3001` when `3000` is already occupied.
+`.env.example` is the authoritative, fully-commented list of every variable;
+[Configuration](#configuration) groups the common ones.
 
-Use the Miniconda Python that is already available on this machine:
-
-```bash
-/opt/homebrew/Caskroom/miniconda/base/bin/python --version
-```
-
-Install backend dependencies into that shared environment:
-
-```bash
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m pip install -r backend/requirements.txt
-```
-
-Install frontend dependencies:
+When the frontend and backend are **not** co-located on `127.0.0.1`, set the frontend's
+API base at build time and allow its origin on the backend:
 
 ```bash
-cd frontend
-npm install
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api    # frontend build-time env
+SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000  # backend .env
 ```
 
-### Manual startup (recommended for agents / real processing)
+### 3 · Run
 
-Start the backend **without `--reload`** so async ingestion (parse → embed → extract)
-runs to completion. With `--reload`, any file change restarts the worker and **kills
-in-flight `BackgroundTask`s**, leaving uploaded sources stuck at `parse_status=extracting`.
-
-```bash
-# Backend (no --reload): foreground, or use `&` / nohup to background it
-cd backend
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+There is **no migration or seed step** — on first boot the backend creates the SQLite
+schema and the `.local/storage` and `.local/logs` directories, and seeds only the local
+user. Always run the backend **without `--reload`**: a reload restart kills in-flight
+ingestion background tasks and leaves uploads stuck at `extracting`. Start it from
+`backend/` so it loads `.env` and resolves the database to the repo-root `.local/`.
 
 ```bash
-# Frontend (separate terminal)
-cd frontend
+# Development — backend and frontend together
 npm run dev
 ```
 
-Run the backend in the background and capture logs (handy for agents):
-
 ```bash
-cd backend
-nohup /opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app \
-  --host 127.0.0.1 --port 8000 > /tmp/sn-backend.log 2>&1 &
+# Production
+( cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 )   # behind a reverse proxy
+( cd frontend && npm run build && npm run start )                              # serves the UI on :3000
 ```
 
-Health check / open the UI:
+### 4 · Verify
 
 ```bash
-curl -s http://127.0.0.1:8000/api/health      # {"status":"ok", "llm_configured":...}
-open http://localhost:3000
+curl -s http://127.0.0.1:8000/api/health   # {"status":"ok","llm_configured":...}
+bash scripts/check.sh                        # backend offline smoke + frontend tests + tsc
 ```
 
-The backend writes structured JSONL logs under `.local/logs/` (plus brief console lines),
-so you can see what the app is doing and where an upload is stuck:
-
-```bash
-tail -f .local/logs/requests.jsonl   # every HTTP request: method, path, status, latency, request_id (SLOW flagged)
-tail -f .local/logs/events.jsonl     # async pipeline stages (parse/embed/extract) + status transitions + failures
-tail -f .local/logs/llm.jsonl        # LLM calls: chat (prompt/response/tokens/latency) + embedding summaries + errors
-```
-
-The `X-Request-Id` response header correlates a browser action with its server log line; the
-DevTools console also prints `[api] METHOD /path -> status Nms (request_id)`. See "Observability"
-below for details.
-
-### Fast Path (dev iteration only)
-
-```bash
-npm run dev    # backend (no --reload) + Next.js frontend from repo root
-```
-
-Backend on `http://127.0.0.1:8000`, UI on `http://localhost:3000`. If you need
-backend auto-reload for code-only iteration, run `npm run dev:backend:reload` in a
-separate terminal and avoid it while processing uploads. If `frontend/node_modules`
-is missing, run `npm install` in `frontend/` first.
+The backend writes structured JSONL logs under `.local/logs/` (`requests` / `events` /
+`llm`); see [Observability](#observability) to follow an upload or diagnose a stuck source.
 
 ## Product Flow
 
@@ -385,7 +382,7 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 - **Apple Silicon local (MLX, offline)**: a Mac with Apple Silicon has no NVIDIA GPU but accelerates MinerU via MLX, so you can run the same high-fidelity parsing locally:
 
   ```bash
-  /opt/homebrew/Caskroom/miniconda/base/bin/python -m pip install -U "mineru[core]"
+  python -m pip install -U "mineru[core]"
   mineru-models-download -s huggingface -m vlm     # one-time (~GB); use -s modelscope if HF is slow
   ```
 

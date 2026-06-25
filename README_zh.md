@@ -29,89 +29,90 @@
 
 PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发不需要。
 
-## 本机设置
+## 部署
 
-复制环境变量模板：
+silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
+**无需 GPU、无需数据库服务、无需本地模型服务**:所有模型(LLM / 嵌入 / rerank /
+MinerU)都经 URL 端点接入;在未配置任何模型时,整条管线以确定性回退离线运行。
+
+### 前置条件
+
+- **Python ≥ 3.11**
+- **Node.js ≥ 20** 与 npm
+- **git**
+- C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
+  仅当 pip 不得不从源码编译时,才需装 Xcode Command Line Tools(macOS)或
+  `build-essential`(Debian/Ubuntu)。
+
+### 1 · 安装
+
+```bash
+git clone <repo-url> silicon-notebook
+cd silicon-notebook
+
+# 后端 —— 装进一个隔离的 Python 环境
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt
+
+# 前端
+( cd frontend && npm install )
+```
+
+### 2 · 配置
 
 ```bash
 cp .env.example .env
 ```
 
-默认本机数据库配置为：
+服务在全空配置下即可启动——确定性离线模式(仅关键词检索,无 LLM 抽取/作答)。要启用完整
+能力,至少填:
 
-```text
-DATABASE_URL=sqlite:///.local/silicon_notebook.db
-```
+- **LLM**(抽取、作答、文章研究)—— `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` /
+  `OPENAI_COMPAT_MODEL`;任意 OpenAI 兼容端点。
+- **嵌入**(语义检索;否则仅关键词)—— `EMBED_PROVIDER=dashscope` 加 `EMBED_MODEL` /
+  `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM`(必须等于模型输出维度)。
+- **PDF 高保真**(可选)—— 一个 MinerU 端点,见 [用 MinerU 解析 PDF](#用-mineru-解析-pdf);
+  保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
 
-默认 CORS 会放行 `localhost:3000` 和 `localhost:3001`，因为当 `3000` 被占用时 Next.js 会自动切到 `3001`。
+`.env.example` 是权威、逐项带注释的完整变量清单;[配置](#配置)按组列出常用项。
 
-后端统一使用本机已有的 Miniconda Python：
-
-```bash
-/opt/homebrew/Caskroom/miniconda/base/bin/python --version
-```
-
-安装后端依赖到这个共享环境：
-
-```bash
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m pip install -r backend/requirements.txt
-```
-
-安装前端依赖：
+当前端与后端**不在**同一台 `127.0.0.1` 上时,在构建期设置前端的 API 基址,并在后端放行
+其来源:
 
 ```bash
-cd frontend
-npm install
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api    # 前端构建期 env
+SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000  # 后端 .env
 ```
 
-### 手动启动（推荐给 agent / 真实处理）
+### 3 · 运行
 
-后端请**不要带 `--reload`**，否则文件一变动 uvicorn 就重启 worker，会**杀掉进行中的 `BackgroundTask`**，导致上传的 source 卡在 `parse_status=extracting`（解析→嵌入→抽取无法跑完）。
-
-```bash
-# 后端（不带 --reload）：前台运行，或用 & / nohup 放后台
-cd backend
-/opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+**没有迁移 / seed 步骤**——首次启动时后端会自建 SQLite 表结构,并创建 `.local/storage`
+与 `.local/logs` 目录,只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
+进行中的抽取后台任务,让上传卡在 `extracting`。从 `backend/` 启动,它才会加载 `.env`
+并把数据库解析到仓库根的 `.local/`。
 
 ```bash
-# 前端（另开一个终端）
-cd frontend
+# 开发 —— 前后端一起
 npm run dev
 ```
 
-放后台并记录日志（适合 agent 调用）：
-
 ```bash
-cd backend
-nohup /opt/homebrew/Caskroom/miniconda/base/bin/python -m uvicorn app.main:app \
-  --host 127.0.0.1 --port 8000 > /tmp/sn-backend.log 2>&1 &
+# 生产
+( cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 )   # 置于反向代理之后
+( cd frontend && npm run build && npm run start )                              # 在 :3000 提供 UI
 ```
 
-健康检查 / 打开 UI：
+### 4 · 验证
 
 ```bash
-curl -s http://127.0.0.1:8000/api/health      # {"status":"ok", "llm_configured":...}
-open http://localhost:3000
+curl -s http://127.0.0.1:8000/api/health   # {"status":"ok","llm_configured":...}
+bash scripts/check.sh                        # 后端离线 smoke + 前端测试 + tsc
 ```
 
-后端会把结构化日志写入 `.local/logs/`（同时输出控制台简要行），便于查看系统在做什么、上传卡在哪一步：
-
-```bash
-tail -f .local/logs/requests.jsonl   # 每个 HTTP 请求：方法/路径/状态码/耗时/request_id（慢请求标 SLOW）
-tail -f .local/logs/events.jsonl     # 异步管线阶段（parse/embed/extract）+ 状态机跃迁 + 失败原因
-tail -f .local/logs/llm.jsonl        # 大模型调用：chat（prompt/响应/token/耗时）+ embedding 摘要 + 错误
-```
-
-响应头 `X-Request-Id` 可把浏览器动作与服务端日志行关联；DevTools console 也会打印 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`。详见下方“可观测性 / 日志”。
-
-### 快速启动（仅用于开发迭代）
-
-```bash
-npm run dev    # 仓库根目录：后端（不带 --reload）+ Next.js 前端
-```
-
-后端 `http://127.0.0.1:8000`，UI `http://localhost:3000`。如果需要后端代码自动 reload，可另开终端运行 `npm run dev:backend:reload`，但处理上传时不要使用 reload。若 `frontend/node_modules` 不存在，请先在 `frontend/` 下 `npm install`。
+后端会把结构化 JSONL 日志写入 `.local/logs/`(`requests` / `events` / `llm`);跟踪一次
+上传或排查卡住的 source 见[可观测性 / 日志](#可观测性--日志)。
 
 ## 产品流程
 
@@ -356,7 +357,7 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 - **Apple Silicon 本地（MLX，离线）**：Apple Silicon 的 Mac 没有 NVIDIA GPU，但可用 MLX 加速 MinerU，因此本地也能跑同质的高保真解析：
 
   ```bash
-  /opt/homebrew/Caskroom/miniconda/base/bin/python -m pip install -U "mineru[core]"
+  python -m pip install -U "mineru[core]"
   mineru-models-download -s huggingface -m vlm     # 一次性(~GB)；HF 慢可用 -s modelscope
   ```
 
