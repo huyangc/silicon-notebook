@@ -892,6 +892,36 @@ export default function Home() {
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
+  // Kick off a KG build for `nb`; the effect below then polls until it's ready.
+  const startKgBuild = (nb: string) => {
+    setBuildingKg(true);
+    buildKg(nb)
+      .then(() => setToast("已开始构建知识图谱（后台进行，可能需要数分钟）；完成后会自动更新"))
+      .catch((e) => { reportError(e); setBuildingKg(false); });
+  };
+  // While a build runs, poll the notebook until kg_ready flips — the build can
+  // take minutes, so the button reflects real progress instead of a fixed guess.
+  useEffect(() => {
+    if (!buildingKg || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const refreshed = await api<NotebookSummary>(`/notebooks/${nb}`);
+        if (cancelled) return;
+        if (refreshed.kg_ready) {
+          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+          setBuildingKg(false);
+          setToast("知识图谱构建完成 ✓ 可用严格推理");
+        }
+      } catch { /* transient error; keep polling */ }
+    }, 6000);
+    // Safety cap so the button never spins forever (failed build / huge corpus).
+    const cap = window.setTimeout(() => {
+      if (!cancelled) { setBuildingKg(false); setToast("构建仍在后台进行，请稍后刷新查看状态"); }
+    }, 20 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+  }, [buildingKg, currentNotebookId]);
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
@@ -1357,6 +1387,7 @@ export default function Home() {
     setSources(notebookSources);
     setArticles(notebookArticles);
     setSelectedArticleId(notebookArticles[0]?.id ?? "");
+    setBuildingKg(false);
     setTurns([]);
     setConversationId(null);
     setAsking(false);
@@ -2558,20 +2589,7 @@ export default function Home() {
                         title={currentNotebook?.base_kg_available
                           ? "本库尚未建图，严格推理会借用底层库（base）；点击为本库单独构建知识图谱"
                           : "默认问答（通用）不需要；严格推理（推理 / 图谱）需先构建知识图谱"}
-                        onClick={() => {
-                          if (!currentNotebookId) return;
-                          setBuildingKg(true);
-                          buildKg(currentNotebookId)
-                            .then(() => {
-                              setToast("已开始构建知识图谱（后台进行，可能需要数分钟）；完成后刷新即可用严格推理");
-                              setTimeout(() => {
-                                api<NotebookSummary>(`/notebooks/${currentNotebookId}`)
-                                  .then((refreshed) => { setCurrentNotebook(refreshed); setBuildingKg(false); })
-                                  .catch(() => setBuildingKg(false));
-                              }, 4000);
-                            })
-                            .catch((e) => { reportError(e); setBuildingKg(false); });
-                        }}
+                        onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                       >
                         <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : "构建知识图谱"}
                       </button>
@@ -2865,20 +2883,7 @@ export default function Home() {
                           className="mode-engine"
                           style={{ marginLeft: 6 }}
                           disabled={buildingKg || asking}
-                          onClick={() => {
-                            if (!currentNotebookId) return;
-                            setBuildingKg(true);
-                            buildKg(currentNotebookId)
-                              .then(() => {
-                                setToast("已开始构建知识图谱，构建完成后刷新即可用严格推理");
-                                setTimeout(() => {
-                                  api<NotebookSummary>(`/notebooks/${currentNotebookId}`)
-                                    .then((refreshed) => { setCurrentNotebook(refreshed); setBuildingKg(false); })
-                                    .catch(() => setBuildingKg(false));
-                                }, 4000);
-                              })
-                              .catch((e) => { reportError(e); setBuildingKg(false); });
-                          }}
+                          onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
                           {buildingKg ? "构建中…" : "构建知识图谱"}
                         </button>
