@@ -2605,6 +2605,14 @@ class SQLiteRepository:
         """上传后增量融合该源 concept 进 concept_clusters。Tier1 名种子 append(无 LLM)。"""
         if not self.settings.kg_incremental_fusion_enabled:
             return
+        # 清理 re-extraction 留下的 orphan 簇行(member 指向已删 knowledge_objects):重抽取删旧
+        # ko- 以新 id 重建,旧簇成员行悬空。消费方(build_ppr_graph/unified_graph)虽已过滤,
+        # 仍清以防表无界增长 + unified_kg_status 的 canonical 计数虚高。id 是 PK,子查询走索引。
+        with self._write() as db:
+            db.execute(
+                "DELETE FROM concept_clusters WHERE notebook_id=? AND member_object_id NOT IN "
+                "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
+                (notebook_id, notebook_id))
         from app.services.kg_merge import place_new_concepts, _norm
         with self._connect() as db:
             new = db.execute(

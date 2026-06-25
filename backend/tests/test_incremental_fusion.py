@@ -174,3 +174,32 @@ def test_tier2_no_duplicate_candidates_on_refuse(repo):
     with repo._connect() as db:
         n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?", (nb.id,)).fetchone()["c"]
     assert n == 1
+
+
+def test_incremental_fuse_cleans_orphan_cluster_rows(repo):
+    """re-extraction 留下的 orphan 簇行(member 指向已删对象)被清理,活跃成员保留。"""
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    now = "2026-06-22T00:00:00"
+    with repo._write() as db:
+        # 活跃 concept + 簇行
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ko-live", nb.id, "concept", "approved", "", json.dumps({"name":"Live"}), "[]", "src-A", now, now))
+        db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)",
+                   ("cc-live", nb.id, "K-live", "ko-live", "Live", "concept", "", now))
+        # orphan 簇行:member 指向不存在的对象(模拟重抽取删旧 ko-)
+        db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)",
+                   ("cc-orphan", nb.id, "K-old", "ko-deleted", "Old", "concept", "", now))
+        # 新源 concept(触发增量融合)
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ko-new", nb.id, "concept", "approved", "", json.dumps({"name":"New"}), "[]", "src-B", now, now))
+    repo.incremental_fuse_source(nb.id, "src-B")
+    with repo._connect() as db:
+        members = {r["member_object_id"] for r in db.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?", (nb.id,)).fetchall()}
+    assert "ko-deleted" not in members   # orphan 已清
+    assert "ko-live" in members          # 活跃成员保留
+    assert "ko-new" in members           # 新成员加入
