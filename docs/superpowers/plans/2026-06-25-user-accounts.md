@@ -165,8 +165,8 @@ import hashlib
 import re
 import secrets
 
-# 1+ 字母 + 字面 "00" + 6 位数字，如 zhang00123456。
-USERNAME_RE = re.compile(r"^[A-Za-z]+00\d{6}$")
+# 单个字母 + 字面 "00" + 6 位数字，如 a00123456。
+USERNAME_RE = re.compile(r"^[A-Za-z]00\d{6}$")
 
 _PBKDF2_ITERATIONS = 200_000
 

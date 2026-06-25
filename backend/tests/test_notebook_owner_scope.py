@@ -11,8 +11,8 @@ def _repo(tmp_path):
 
 def test_list_and_create_scoped_to_current_user(tmp_path):
     repo = _repo(tmp_path)
-    zhang = repo.create_user("zhang00123456", "pw")
-    li = repo.create_user("li00000042", "pw")
+    zhang = repo.create_user("z00123456", "pw")
+    li = repo.create_user("l00000042", "pw")
 
     tok = set_request_user(zhang)
     try:
@@ -33,7 +33,7 @@ def test_list_and_create_scoped_to_current_user(tmp_path):
 
 def test_admin_does_not_see_user_notebooks(tmp_path):
     repo = _repo(tmp_path)
-    zhang = repo.create_user("zhang00123456", "pw")
+    zhang = repo.create_user("z00123456", "pw")
     tok = set_request_user(zhang)
     try:
         repo.create_notebook(NotebookCreate(name="private"))

@@ -13,7 +13,7 @@ export type AuthUser = {
   username: string;
 };
 
-const USERNAME_RE = /^[A-Za-z]+00\d{6}$/;
+const USERNAME_RE = /^[A-Za-z]00\d{6}$/;
 export function isValidUsername(username: string): boolean {
   return USERNAME_RE.test((username ?? "").trim().toLowerCase());
 }
