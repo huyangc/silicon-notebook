@@ -21,6 +21,10 @@ class Settings(BaseSettings):
         "Local Curator",
         env="SILICON_NOTEBOOK_SINGLE_USER_NAME",
     )
+    # 用户系统：admin 初始密码（每次启动据此重置 admin 密码；改密=改此变量后重启）。
+    admin_password: str = Field("admin", validation_alias="SILICON_NOTEBOOK_ADMIN_PASSWORD")
+    # True 时无 token 的请求回退为 seeded admin（仅本地/测试用）；生产保持 False=强制登录。
+    auth_optional: bool = Field(False, validation_alias="SILICON_NOTEBOOK_AUTH_OPTIONAL")
 
     openai_compat_base_url: str = Field("", env="OPENAI_COMPAT_BASE_URL")
     openai_compat_api_key: str = Field("", env="OPENAI_COMPAT_API_KEY")
