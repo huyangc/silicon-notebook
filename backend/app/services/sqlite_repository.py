@@ -243,7 +243,8 @@ class SQLiteRepository:
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         from app.services.rerank_client import RerankClient
-        self.rerank_client = RerankClient(settings)
+        self._system_rerank_client = RerankClient(settings)
+        self._user_rerank_clients: Dict[str, RerankClient] = {}
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = EventLogger(settings, channel="events")
@@ -306,6 +307,26 @@ class SQLiteRepository:
     @property
     def kg_llm_client(self):
         return self._llm_for_role("kg_llm")
+
+    @property
+    def rerank_client(self):
+        from app.services.rerank_client import RerankClient
+        cfg = self.resolve_model_config(self.current_user(), "rerank")
+        if cfg.source == "user":
+            fp = f"{cfg.base_url}|{cfg.api_key}|{cfg.model}"
+            client = self._user_rerank_clients.get(fp)
+            if client is None:
+                client = RerankClient(self.settings, model=cfg.model,
+                                      base_url=cfg.base_url, api_key=cfg.api_key)
+                self._user_rerank_clients[fp] = client
+            return client
+        if cfg.source == "none":
+            return RerankClient(self.settings, model="", base_url="", api_key="")  # configured=False → 原序
+        return self._system_rerank_client
+
+    @rerank_client.setter
+    def rerank_client(self, client):
+        self._system_rerank_client = client
 
     def _resolve_path(self, value: str) -> Path:
         path = Path(value)
