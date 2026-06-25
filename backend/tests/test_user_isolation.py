@@ -87,3 +87,15 @@ def test_global_config_write_admin_only(client):
     assert client.post("/api/kg/concept-whitelist", json={"term": "XYZ"}, headers=b).status_code == 403
     # reads stay open
     assert client.get("/api/object-schemas", headers=b).status_code == 200
+
+
+def test_streaming_ask_attributes_conversation_to_caller(client):
+    a = _auth(client, "zhang00123456")
+    nb = client.post("/api/notebooks", json={"name": "A"}, headers=a).json()["id"]
+    # stream an ask as user A; consume the response
+    r = client.post(f"/api/notebooks/{nb}/ask/stream",
+                    json={"question": "hello"}, headers=a)
+    assert r.status_code == 200, r.text
+    # the conversation created by the stream must be visible in A's own history
+    convs = client.get(f"/api/notebooks/{nb}/conversations", headers=a).json()
+    assert len(convs) >= 1, "streamed conversation should appear in caller's history"
