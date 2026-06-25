@@ -19,7 +19,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Hybrid retrieval: CJK-aware bi-gram keyword + float32 matrix semantic search with per-notebook cache
 - KG-native grounded Q&A: sentence-level `[k_i]` citations, multi-turn conversations, 1-hop KG neighbour expansion, and a live, expandable one-line agent trace for reasoning mode
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). `base` is the authoritative reference KG (e.g. an analog-design textbook); `personal` is the user's own notes. `federated_retrieve` gathers candidates across `base ∪ active personal`, tags each hit with its tier, applies a base-authority weight in ranking, and on a base↔personal contradiction the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor. The notebook actions menu ("分析") offers "设为基准库 / 取消基准库" to mark a notebook as the base KG and back (via `POST /api/notebooks/{id}/tier`)
-- Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `fast`)
+- Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
 - Edge trust & curation: per-edge trust signals (evidence / corroboration / type-validity) plus a curator review queue; reviewer-rejected edges are excluded from graph reasoning
 - Knowledge governance: browse by type via `/knowledge-types` + `/knowledge?type=...`, status lifecycle, duplicate detection & merge, conflict detection; `deprecated` objects excluded from retrieval and 1-hop expansion. Personal→base node promotion (propose → under review → approve/reject) with dedup-on-approve and a curator promotion queue
 - Unified KG: cross-document concept clustering (`concept_clusters`), pending-merges review
@@ -147,16 +147,16 @@ The notebook workspace hides the global collection top bar and keeps an engineer
 | Mode | Group | Needs KG | One-liner |
 |------|-------|----------|-----------|
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |
-| **`graph`** | strict | yes | Single-pass multi-hop reasoning over the knowledge graph. |
+| **`graph`** | strict | yes | Single-pass Personalized-PageRank propagation across the cross-document knowledge graph. |
 | **`reasoning`** | strict | yes | Agentic, iterative plan → retrieve → reflect → answer (streams a live trace). |
 
 **`chunk` — chunk-native, with optional chunk×graph mix.**
 - *Baseline:* large chunk recall (`CHUNK_RECALL`) → MMR / multi-sub-query quota diversity selection (`CHUNK_MMR_K`) → long-context synthesis. The KG is not touched.
 - *Mix* (active only when `CHUNK_KG_OVERLAY_ENABLED=true` **and** qwen3-rerank is configured **and** a KG is available): three sources are pooled — (a) vector chunks, (b) the KG local structure around the query seeds (entities + their 1-hop relations, retrieved once), (c) the source chunks behind those KG objects — round-robin merged, reranked by a qwen3 cross-encoder, then packed to a token budget (`MAX_ENTITY_TOKENS` / `MAX_RELATION_TOKENS` / `MAX_TOTAL_TOKENS`). The answer cites chunks and KG items in one unified `[k]` map, and grounding spans chunk ∪ KG. When rerank is unconfigured or no KG exists, it falls back byte-for-byte to the baseline. (Faithful to LightRAG's `mix` mode.)
 
-**`graph` — multi-hop graph reasoning.** Seeds via `federated_retrieve` (optionally fused with relation-index hits when `RELATION_RETRIEVAL_ENABLED=true`) → BFS along reasoning edges to build a local subgraph → query-refined context → grounded answer whose `[k]` anchors point at KG objects/relations.
+**`graph` — PPR over the cross-document KG.** Seeds via `federated_retrieve` (KG entities + their source chunks; optionally fused with relation-index hits when `RELATION_RETRIEVAL_ENABLED=true`) become the personalization vector for HippoRAG-style **Personalized PageRank** (`GRAPH_PPR_ENABLED`, on by default), which propagates relevance across documents through the shared knowledge graph; the top-ranked chunks feed a grounded answer whose `[k]` anchors point at KG objects/relations. With `GRAPH_PPR_ENABLED=false` it falls back to bounded BFS along reasoning edges.
 
-**`reasoning` — agentic deep retrieval.** Delegates to `ReasoningRetriever`: it decomposes the question, retrieves, reflects on sufficiency, and expands the graph / adds sub-queries until it can answer — emitting a `reasoning_trace` over the NDJSON stream (`/ask/stream`). Strict / KG-grounded.
+**`reasoning` — agentic deep retrieval.** Delegates to `ReasoningRetriever`: it decomposes the question, retrieves (via the same PPR propagation as `graph`), reflects on sufficiency, and expands the graph / adds sub-queries until it can answer — emitting a `reasoning_trace` over the NDJSON stream (`/ask/stream`). Strict / KG-grounded.
 
 Retired ids `fast` and `global` are transparently remapped to `chunk` (old sessions/bookmarks never 422); any other unknown mode is rejected with HTTP 422.
 
@@ -180,7 +180,7 @@ Key local beta APIs:
 - `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
-- `GET /api/notebooks/{id}/derived-rules`, `POST /api/derived-rules/{id}/approve|reject`
+- `GET /api/notebooks/{id}/derived-rules`, `POST /api/notebooks/{id}/derived-rules/{candidate_id}/approve|reject`
 - Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = authoritative reference KG, personal = default user notes).
 - Edge trust & curation: `GET /api/notebooks/{id}/edge-review-queue`, `POST /api/notebooks/{id}/relations/{rel_id}/review`
 - Governance / promotion: `POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`, `GET /api/promotion-queue`, `POST /api/promotion-queue/{candidate_id}/approve|reject`
@@ -210,7 +210,7 @@ EMBED_DIM               # must match model output dimension (default 1024)
 EMBED_TRUNCATE_CHARS    # max chars fed to embedder per text (default 2000)
 EMBED_BATCH_SIZE        # elements per embedding call (default 10)
 EMBED_PERSIST_CHUNK     # rows written to DB per batch (default 200)
-EMBED_CONCURRENCY       # concurrent embedding threads (default 50)
+EMBED_CONCURRENCY       # concurrent embedding threads (default 8; mild, avoids 429)
 ```
 
 **KG extraction concurrency & windowing:**
@@ -245,18 +245,19 @@ RETRIEVAL_TOP_N         # top-N hits before 1-hop expansion (default 12)
 
 **Retrieval / KG enhancements (GraphRAG + ToG-3 borrow, Phase 1+2):**
 
-Most are opt-in (default off); `ANSWER_CONTEXT_*` and `KG_QUERY_REFINE_ENABLED` are
-on by default. Enable extras **one at a time** and validate with the eval harness
-(`backend/app/eval`) — turning RRF + rerank + refinement on together regressed answer
-quality in eval.
+A mix of opt-in (default off) and on-by-default knobs. On by default: `ANSWER_CONTEXT_*`,
+`KG_QUERY_REFINE_ENABLED`, and the KG-quality passes `KG_REFINE` / `KG_GLEANING` /
+`KG_CONCEPT_DESC`. Enable other extras **one at a time** and validate with the eval
+harness (`backend/app/eval`) — turning RRF + rerank + refinement on together regressed
+answer quality in eval.
 
 ```text
 LLM_CACHE_ENABLED            # cache LLM responses in a separate sqlite (default false)
 LLM_CACHE_PATH               # cache DB path (default .local/llm_cache.db)
-KG_REFINE_ENABLED            # extraction self-verify: drop hallucinated nodes (default false)
-KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (default false)
+KG_REFINE_ENABLED            # extraction self-verify: drop hallucinated nodes (default true)
+KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (default true)
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
-KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default false)
+KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
 KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports; required for Global QA (default false)
 ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000)
 ANSWER_CONTEXT_MIN_ITEMS     # keep >= N items regardless of budget (default 3)
@@ -321,7 +322,7 @@ and an inline comment — the groups above highlight the common ones. Other docu
 knobs include the optional dedicated reasoning LLM (`REASONING_LLM_BASE_URL` /
 `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`) and its guardrails (`REASONING_MAX_STEPS`,
 `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, `REASONING_MAX_RETRIES`),
-retrieval/grounding tuning (`PROC_MIN`, `FOLLOWUP_MAX_LEN`, `EVIDENCE_TAU_LOW`,
+retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
 `EVIDENCE_TAU_HIGH`), the opt-in debug log viewer (`DEBUG_LOGS_ENABLED`), and runtime
 identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
 `SILICON_NOTEBOOK_SINGLE_USER_NAME`).
@@ -409,7 +410,7 @@ MinerU output maps to structured `SourceElement`s: formulas become `formula` ele
 - Unified KG rebuild is explicit and observable via `GET /notebooks/{id}/unified-kg/status`; ingesting a source marks the graph dirty instead of rebuilding synchronously, and opening the graph overlay no longer auto-rebuilds (refresh on demand).
 - Cross-document concept merge uses deterministic alias normalization plus bounded top-k vector candidates (scales past thousands of concepts); optional LLM pre-review (`POST /notebooks/{id}/unified-kg/merges/review`) confirms/rejects high-confidence near-synonym merges in small batches.
 - LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
-- Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `fast`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; tier-aware federation and the base-wins conflict rule activate automatically once a notebook is marked `base`.
+- Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; tier-aware federation and the base-wins conflict rule activate automatically once a notebook is marked `base`.
 - Article Studio works from title/abstract text and linked source elements; first-class article full-text upload and richer relation scoring are next (Tier 3).
 - PostgreSQL + pgvector are not required for the local beta and are deferred.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".

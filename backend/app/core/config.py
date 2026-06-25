@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     rerank_max_docs: int = Field(500, env="RERANK_MAX_DOCS")
     relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, env="RELATION_SEED_TOP_N")
-    # HippoRAG 式 PPR 跨文档检索(graph 模式;默认关,opt-in)
+    # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, env="GRAPH_PPR_ENABLED")
     ppr_damping: float = Field(0.5, env="PPR_DAMPING")               # rx.pagerank alpha
     ppr_passage_node_weight: float = Field(0.05, env="PPR_PASSAGE_NODE_WEIGHT")
