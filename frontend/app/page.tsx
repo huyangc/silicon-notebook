@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, MessageSquareText, Network, PanelRightClose, Plus, Search, Settings, Share2, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelRightClose, Plus, Search, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -2227,7 +2227,10 @@ export default function Home() {
           <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
           <div className="user-menu">
             <span className="user-name">{currentUser.username}{currentUser.role === "admin" ? "（管理员）" : ""}</span>
-            <button className="user-logout" onClick={async () => { await logoutUser(); setCurrentUser(null); }}>退出</button>
+            <button className="user-logout" onClick={async () => { await logoutUser(); setCurrentUser(null); }} title="退出登录">
+              <LogOut size={15} />
+              <span>退出</span>
+            </button>
           </div>
         </div>
       </header>
@@ -2734,7 +2737,7 @@ export default function Home() {
                     disabled={!asking && !question.trim()}
                     onClick={() => asking ? abortAsk() : runAsk().catch(reportError)}
                   >
-                    {asking ? <X size={18} strokeWidth={3} /> : "→"}
+                    {asking ? <Square size={16} strokeWidth={2.5} /> : "→"}
                   </button>
                 </div>
               )}

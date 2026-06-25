@@ -66,6 +66,23 @@ test("ask controls lock input and prevent resend while the model is running", ()
   assert.match(css, /\.send-button\.stop\s*{/);
 });
 
+test("topbar logout is a compact icon action instead of a bare text button", () => {
+  assert.match(page, /LogOut/);
+  assert.match(page, /className="user-logout"[\s\S]*<LogOut size=\{15\}/);
+  assert.equal(page.includes(">退出</button>"), false);
+  assert.match(css, /\.user-logout\s*{[^}]*display:\s*inline-flex;[^}]*border-radius:\s*999px;/s);
+  assert.match(css, /\.user-logout:hover\s*{/);
+});
+
+test("ask abort uses a square stop control while a response is running", () => {
+  assert.match(page, /Square/);
+  assert.match(page, /\{asking \? <Square size=\{16\}/);
+  assert.equal(page.includes("asking ? <X size={18} strokeWidth={3} />"), false);
+  assert.match(css, /\.send-button\.stop\s*{[^}]*border-radius:\s*14px;/s);
+  assert.match(css, /\.send-button\.stop\s*{[^}]*border:\s*1px solid/s);
+  assert.match(css, /\.send-button\.stop svg\s*{[^}]*fill:\s*currentColor;/s);
+});
+
 test("source row keeps link and delete actions in the right action column", () => {
   assert.match(page, /<div className="source-row-actions">[\s\S]*source\.source_url[\s\S]*source-delete-button[\s\S]*<\/div>/);
   assert.match(css, /\.source-row-actions\s*{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*flex-end;/s);
