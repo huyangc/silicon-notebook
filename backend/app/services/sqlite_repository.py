@@ -82,6 +82,7 @@ from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
+from app.services.model_config import resolve_effective_config, ResolvedModelConfig, ModelNotConfiguredError
 from app.services.parsers import parse_source_file, mineru_content_list_to_elements
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -946,6 +947,10 @@ class SQLiteRepository:
                 (json.dumps(settings, ensure_ascii=False), _now(), user_id),
             )
         self._user_model_cfg_cache.pop(user_id, None)
+
+    def resolve_model_config(self, user, role: str) -> ResolvedModelConfig:
+        return resolve_effective_config(
+            self.get_user_model_settings(user.id), role, self.settings.user_model_config_policy)
 
     def create_user(self, username: str, password: str) -> UserProfile:
         """注册：归一化 username、唯一校验、pbkdf2 哈希、建 user + profile。
