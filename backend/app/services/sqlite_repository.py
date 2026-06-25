@@ -167,6 +167,20 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
 _ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
     "ask_model_errors", default=None)
 
+# 请求级「当前用户」槽（单例仓库不能用实例态；由 get_current_user 依赖设/复位）。
+# None = 不在已认证请求上下文（离线脚本/直接测 repository）→ current_user() 回退 admin。
+_REQUEST_USER: "contextvars.ContextVar[UserProfile | None]" = contextvars.ContextVar(
+    "request_user", default=None)
+
+
+def set_request_user(user: "UserProfile | None"):
+    """设当前请求用户，返回 token 供 reset_request_user 复位。"""
+    return _REQUEST_USER.set(user)
+
+
+def reset_request_user(token) -> None:
+    _REQUEST_USER.reset(token)
+
 
 class SQLiteRepository:
     def __init__(self, settings: Settings):
@@ -879,17 +893,25 @@ class SQLiteRepository:
         return objects
 
     def current_user(self) -> UserProfile:
+        ctx_user = _REQUEST_USER.get()
+        if ctx_user is not None:
+            return ctx_user
         with self._connect() as db:
             user = db.execute("SELECT * FROM users WHERE id = ?", ("user-local",)).fetchone()
             profile = db.execute(
                 "SELECT * FROM user_profiles WHERE user_id = ?",
                 ("user-local",),
             ).fetchone()
+        return self._user_profile(user, profile)
+
+    def _user_profile(self, user, profile) -> UserProfile:
+        """从 users + user_profiles 行构造 UserProfile（DRY，多处复用）。"""
         return UserProfile(
             id=user["id"],
             email=user["email"],
             display_name=user["display_name"],
             role=user["role"],
+            username=user["username"] if "username" in user.keys() else "",
             memory_mode=profile["memory_mode"] if profile else "manual",
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
         )
