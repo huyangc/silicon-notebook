@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     admin_password: str = Field("admin", validation_alias="SILICON_NOTEBOOK_ADMIN_PASSWORD")
     # True 时无 token 的请求回退为 seeded admin（仅本地/测试用）；生产保持 False=强制登录。
     auth_optional: bool = Field(False, validation_alias="SILICON_NOTEBOOK_AUTH_OPTIONAL")
+    # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
+    # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
+    user_model_config_policy: str = Field("fallback", validation_alias="USER_MODEL_CONFIG_POLICY")
 
     openai_compat_base_url: str = Field("", env="OPENAI_COMPAT_BASE_URL")
     openai_compat_api_key: str = Field("", env="OPENAI_COMPAT_API_KEY")
