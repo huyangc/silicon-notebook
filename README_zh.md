@@ -19,7 +19,7 @@
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
 - KG-native 接地问答：逐句 `[k_i]` 引用、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
 - 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`base` 是权威参考 KG（如模拟设计教材），`personal` 是用户自己的笔记。`federated_retrieve` 跨 `base ∪ 当前 personal` 收集候选、给每条命中打 tier 标签，排序时施加 base 权威权重；当 base 与 personal 冲突时答案以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。notebook 操作菜单（「分析」）提供「设为基准库 / 取消基准库」以把某 notebook 标为基准 KG 并撤销（经 `POST /api/notebooks/{id}/tier`）
-- 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `fast`）
+- 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
 - 边可信与治理：每条边的可信信号（evidence / 同源佐证 / 类型合法性）+ 高风险边优先的审核队列；被审核拒绝的边从图推理中排除
 - 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除。个人→基准节点晋升（propose → under_review → approve/reject），批准时去重入库，配套策展晋升队列
 - 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
@@ -143,16 +143,16 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 | 模式 | 分组 | 需 KG | 一句话 |
 |------|------|-------|--------|
 | **`chunk`**（默认） | general | 否 | chunk-native 通用问答：大召回 → 选择 → 长上下文综合 → 引用绑回源 chunk。 |
-| **`graph`** | strict | 是 | 对知识图谱做单轮多跳推理。 |
+| **`graph`** | strict | 是 | 对跨文档知识图谱做单趟个性化 PageRank（PPR）传播。 |
 | **`reasoning`** | strict | 是 | agentic 迭代 plan → retrieve → reflect → answer（流式输出实时轨迹）。 |
 
 **`chunk` —— chunk-native，含可选 chunk×graph mix。**
 - *基线：* chunk 大召回（`CHUNK_RECALL`）→ MMR / 多子查询配额多样性选择（`CHUNK_MMR_K`）→ 长上下文综合，不碰 KG。
 - *mix*（仅当 `CHUNK_KG_OVERLAY_ENABLED=true` **且** 配齐 qwen3-rerank **且** 有 KG 时生效）：三路并池——(a) 向量 chunk、(b) query 种子周围的 KG 局部结构（实体 + 其 1-hop 关系，只检索一次）、(c) 这些 KG 对象背后的源 chunk——round-robin 合并 → qwen3 cross-encoder rerank → 按 token 预算装填（`MAX_ENTITY_TOKENS` / `MAX_RELATION_TOKENS` / `MAX_TOTAL_TOKENS`）。答案在同一套 `[k]` 映射里同时引用 chunk 与 KG 项，接地跨 chunk ∪ KG。未配 rerank 或无 KG 时**字节等价回退**到基线。（忠实 LightRAG 的 `mix` 模式。）
 
-**`graph` —— 多跳图推理。** 经 `federated_retrieve` 取种子（`RELATION_RETRIEVAL_ENABLED=true` 时再融合关系索引命中）→ 沿推理边 BFS 构建局部子图 → query-refine 上下文 → 接地答案，`[k]` 锚点指向 KG 对象/关系。
+**`graph` —— 跨文档 KG 上的 PPR。** 经 `federated_retrieve` 取种子（KG 实体 + 其源 chunk；`RELATION_RETRIEVAL_ENABLED=true` 时再融合关系索引命中）作为 HippoRAG 式**个性化 PageRank**（`GRAPH_PPR_ENABLED`，默认开）的个性化向量，通过共享知识图谱把相关度跨文档传播；排名靠前的 chunk 喂出接地答案，`[k]` 锚点指向 KG 对象/关系。`GRAPH_PPR_ENABLED=false` 时回退为沿推理边的有界 BFS。
 
-**`reasoning` —— agentic 深挖检索。** 委托 `ReasoningRetriever`：拆解问题、检索、反思是否充分，按需扩图/加子查询直到能回答——经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。严格 / KG 接地。
+**`reasoning` —— agentic 深挖检索。** 委托 `ReasoningRetriever`：拆解问题、检索（与 `graph` 同样走 PPR 传播）、反思是否充分，按需扩图/加子查询直到能回答——经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。严格 / KG 接地。
 
 退役 id `fast`、`global` 透明映射到 `chunk`（旧会话/书签不会 422）；其余未知 mode 返回 HTTP 422。
 
@@ -176,7 +176,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
-- `GET /api/notebooks/{id}/derived-rules`、`POST /api/derived-rules/{id}/approve|reject`
+- `GET /api/notebooks/{id}/derived-rules`、`POST /api/notebooks/{id}/derived-rules/{candidate_id}/approve|reject`
 - 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 权威参考 KG，personal = 默认用户笔记）。
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
@@ -206,7 +206,7 @@ EMBED_DIM               # 须与模型输出维度一致（默认 1024）
 EMBED_TRUNCATE_CHARS    # 每段文本喂给 embedder 的最大字符数（默认 2000）
 EMBED_BATCH_SIZE        # 每次嵌入调用的元素数（默认 10）
 EMBED_PERSIST_CHUNK     # 每批落库行数（默认 200）
-EMBED_CONCURRENCY       # 并发嵌入线程数（默认 50）
+EMBED_CONCURRENCY       # 并发嵌入线程数（默认 8；温和值，防 429）
 ```
 
 **KG 抽取并发与窗口化：**
@@ -238,16 +238,16 @@ RETRIEVAL_TOP_N         # 1-hop 扩展前的 top-N 命中数（默认 12）
 
 **检索 / KG 增强（GraphRAG + ToG-3 借鉴，Phase 1+2）：**
 
-大多默认关（opt-in）；`ANSWER_CONTEXT_*` 与 `KG_QUERY_REFINE_ENABLED` 默认开。请**逐个开启**并用
+opt-in（默认关）与默认开混合。默认开：`ANSWER_CONTEXT_*`、`KG_QUERY_REFINE_ENABLED`，以及 KG 质量增强 `KG_REFINE` / `KG_GLEANING` / `KG_CONCEPT_DESC`。其余请**逐个开启**并用
 评测脚本（`backend/app/eval`）验证——RRF + 重排 + 精炼三个全开会回归。
 
 ```text
 LLM_CACHE_ENABLED            # 把 LLM 响应缓存到独立 sqlite（默认 false）
 LLM_CACHE_PATH               # 缓存 DB 路径（默认 .local/llm_cache.db）
-KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 false）
-KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 false）
+KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 true）
+KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 true）
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
-KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 false）
+KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
 KG_COMMUNITY_SUMMARY_ENABLED # LLM 社区报告；Global 问答必需（默认 false）
 ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
 ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
@@ -304,7 +304,7 @@ SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000�
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` 是每个环境变量的权威完整清单（含默认值与逐行注释）——上面分组只列常用项。其余可调项还包括：可选的推理专用 LLM（`REASONING_LLM_BASE_URL` / `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`）及其护栏（`REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`）、检索/接地调参（`PROC_MIN`、`FOLLOWUP_MAX_LEN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`），以及运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+`.env.example` 是每个环境变量的权威完整清单（含默认值与逐行注释）——上面分组只列常用项。其余可调项还包括：可选的推理专用 LLM（`REASONING_LLM_BASE_URL` / `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`）及其护栏（`REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`）、检索/接地调参（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`），以及运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
 
 没有配置 LLM 时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
 
@@ -384,7 +384,7 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 - 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
-- 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `fast`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；一旦某 notebook 标为 `base`，tier 感知联合检索与 base 优先冲突规则自动生效。
+- 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；一旦某 notebook 标为 `base`，tier 感知联合检索与 base 优先冲突规则自动生效。
 - Article Studio 当前基于标题/摘要文本，并在存在关联 source 时使用其元素；一等文章全文上传与更丰富的关系打分是下一步（Tier 3）。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
