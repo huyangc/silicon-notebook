@@ -41,6 +41,8 @@ const SUPPORTED_SOURCE_EXTENSIONS: string[] = [
 ];
 const SUPPORTED_SOURCE_ACCEPT = SUPPORTED_SOURCE_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 const SUPPORTED_SOURCE_EXT_GROUP = SUPPORTED_SOURCE_EXTENSIONS.join("|");
+// 面向用户的支持列表描述（拒绝 toast 与拖拽区提示共用，避免文案漂移）。
+const SUPPORTED_SOURCE_USER_HINT = "PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV";
 // 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。
 const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt", "xls"];
 
@@ -1446,7 +1448,7 @@ export default function Home() {
       const hasLegacy = rejected.some((file) => LEGACY_OFFICE_EXTENSIONS.includes(fileExtension(file.name)));
       const hint = hasLegacy
         ? "旧版 Office 格式请另存为 .docx / .pptx / .xlsx"
-        : "支持：PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV";
+        : `支持：${SUPPORTED_SOURCE_USER_HINT}`;
       setToast(`已跳过不支持的文件：${names}。${hint}`);
     }
     if (picked.length === 0) {
@@ -2762,7 +2764,7 @@ export default function Home() {
               <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "选择来源文件"}</strong>
-              <small>支持 PDF / Markdown / DOCX / PPTX / CSV / Excel；图片与 OCR 暂不处理。</small>
+              <small>支持 {SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。</small>
             </label>
             {stagedFiles.length > 0 && (
               <div className="source-detail-body">

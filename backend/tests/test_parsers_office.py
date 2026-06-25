@@ -141,3 +141,10 @@ def test_pptx_falls_back_when_mineru_empty(tmp_path):
     client = FakeMineru(content_list=[])
     els = parse_pptx("s1", path, "a.pptx", client)
     assert all(e.metadata.get("parser") == "pptx" for e in els)
+
+
+def test_parse_source_file_forwards_client_to_pptx(tmp_path):
+    path = _make_pptx(tmp_path / "a.pptx", ["Slide one body"])
+    client = FakeMineru(content_list=[{"type": "text", "text": "From MinerU.", "page_idx": 0}])
+    els = parse_source_file("s1", str(path), "a.pptx", client)
+    assert any(e.metadata.get("parser") == "mineru" for e in els)
