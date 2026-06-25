@@ -538,3 +538,35 @@ class ConceptWhitelistEntry(BaseModel):
 class ConceptWhitelistAdd(BaseModel):
     term: str
     note: str = ""
+
+
+class ModelServiceView(BaseModel):
+    base_url: str = ""
+    model: str = ""
+    has_key: bool = False
+    key_hint: str = ""          # 打码尾段，如 "…t123"；绝不含完整 key
+    source: str = "system"      # user | system | none
+
+class ModelServiceUpdate(BaseModel):
+    # 三态：字段缺省=不变；""=清除；非空=设置。api_key 同理(缺省=保留原 key)。
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
+class ModelSettingsUpdate(BaseModel):
+    llm: Optional[ModelServiceUpdate] = None
+    reasoning_llm: Optional[ModelServiceUpdate] = None
+    rewrite_llm: Optional[ModelServiceUpdate] = None
+    kg_llm: Optional[ModelServiceUpdate] = None
+    rerank: Optional[ModelServiceUpdate] = None
+
+class ModelTestRequest(BaseModel):
+    service: str
+    base_url: str = ""
+    api_key: Optional[str] = None   # 省略 → 用已存 key
+    model: str = ""
+
+class ModelTestResult(BaseModel):
+    ok: bool
+    latency_ms: int = 0
+    error: str = ""
