@@ -77,7 +77,7 @@ token 30 天滑动过期（每次命中刷新 `last_seen_at`，临近到期顺�
 
 ## 5. 后端 API
 
-**免认证**（白名单：`/`、`/health`、`/ask-modes`、`/doc-types`、`/auth/*`）：
+**免认证**（白名单收敛为 `/`（存活探针）+ `/auth/*`；`/health`、`/ask-modes`、`/doc-types` 等改为需登录——它们都在登录后才被前端调用，用 **router 级依赖**一处收口、零逐路由遗漏，比更宽的白名单更安全）：
 - `POST /api/auth/register {username, password}` → 校验 U1 正则 + 唯一 + 密码非空 → 建 `user(role='user')` + `user_profiles` 行 → 自动登录，返回 `{token, user}`。用户名非法/已存在/密码空 → `400`（结构化 detail）。
 - `POST /api/auth/login {username, password}` → 校验 → 签发 session → `{token, user}`。失败 `401`。
 - `POST /api/auth/logout`（带 Bearer）→ 删当前 session，`204`。
@@ -90,7 +90,7 @@ token 30 天滑动过期（每次命中刷新 `last_seen_at`，临近到期顺�
   1. 读 `Authorization: Bearer <token>`；命中有效 session → 解析 user，写 ContextVar，返回。
   2. token 存在但无效/过期 → `401`。
   3. 无 token：若 `settings.auth_optional`（默认 **False**）→ 回退 seeded admin（写 ContextVar）；否则 `401`。
-- 用 `Depends(get_current_user)` 挂到除白名单外的全部用户面路由（routes.py 通过 router 级 `dependencies=` 或逐路由注入，具体在 plan 定）。
+- 装配：`auth_router` 公开挂载；主 `router` 用 **router 级** `dependencies=[Depends(get_current_user)]` 挂载（一处收口、零逐路由遗漏）。notebook 子资源再叠加 `require_notebook_access` 守卫（非 owner→404）。
 
 `change-password`：**本期不做**（原仅为「首登强制改密」而设，U3 已去掉强制；见 §9）。
 
