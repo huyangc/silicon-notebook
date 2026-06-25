@@ -183,13 +183,29 @@ def reset_request_user(token) -> None:
     _REQUEST_USER.reset(token)
 
 
+class _UnconfiguredLLMClient:
+    """policy=required 且用户未配置时的占位 client：configured=False 让调用点跳过；
+    若硬调 chat_json 则抛 ModelNotConfiguredError。"""
+    configured = False
+    base_url = ""
+    api_key = ""
+    model = ""
+
+    def chat_json(self, *a, **k):
+        raise ModelNotConfiguredError("请先在设置中配置你的模型服务")
+
+
+_UNCONFIGURED_LLM = _UnconfiguredLLMClient()
+
+
 class SQLiteRepository:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
         self.db_path = self._resolve_path(settings.sqlite_path)
         self.storage_dir = self._resolve_path(settings.storage_dir)
-        self.llm_client = OpenAICompatibleClient(settings)
+        self._system_llm_client = OpenAICompatibleClient(settings)
+        self._user_llm_clients: Dict[str, OpenAICompatibleClient] = {}
         # 推理搜索专用 client：配齐 REASONING_LLM_* → 独立模型实例；否则 None，
         # 由 reasoning_llm_client 属性动态回退到 self.llm_client。
         self._reasoning_llm_client = (
@@ -244,29 +260,52 @@ class SQLiteRepository:
         self._migrate()
         self._seed()
 
+    def _system_llm_for(self, role: str):
+        if role == "reasoning_llm":
+            return self._reasoning_llm_client or self._system_llm_client
+        if role == "rewrite_llm":
+            return self._rewrite_llm_client or self._system_llm_client
+        if role == "kg_llm":
+            return self._kg_llm_client or self._system_llm_client
+        return self._system_llm_client
+
+    def _user_llm_cached(self, cfg: ResolvedModelConfig):
+        fp = f"{cfg.base_url}|{cfg.api_key}|{cfg.model}"
+        client = self._user_llm_clients.get(fp)
+        if client is None:
+            client = OpenAICompatibleClient(
+                self.settings, base_url=cfg.base_url, api_key=cfg.api_key, model=cfg.model)
+            self._user_llm_clients[fp] = client
+        return client
+
+    def _llm_for_role(self, role: str):
+        cfg = self.resolve_model_config(self.current_user(), role)
+        if cfg.source == "user":
+            return self._user_llm_cached(cfg)
+        if cfg.source == "none":
+            return _UNCONFIGURED_LLM
+        return self._system_llm_for(role)
+
+    @property
+    def llm_client(self):
+        return self._llm_for_role("llm")
+
+    @llm_client.setter
+    def llm_client(self, client):
+        # 测试/运行时替换系统默认主 LLM(无用户配置时即此 client)。
+        self._system_llm_client = client
+
     @property
     def reasoning_llm_client(self):
-        """推理路径专用 LLM client。配齐 REASONING_LLM_* → 独立模型；否则动态回退到
-        当前 self.llm_client（含测试运行时替换的 fake），未配置时与全局行为完全一致。"""
-        if self._reasoning_llm_client is not None:
-            return self._reasoning_llm_client
-        return self.llm_client
+        return self._llm_for_role("reasoning_llm")
 
     @property
     def rewrite_llm_client(self):
-        """查询改写/扩展专用 LLM client(快模型)。设了 REWRITE_LLM_MODEL → 独立实例；
-        否则动态回退到当前 self.llm_client(含测试替换的 fake)，与全局行为一致。"""
-        if self._rewrite_llm_client is not None:
-            return self._rewrite_llm_client
-        return self.llm_client
+        return self._llm_for_role("rewrite_llm")
 
     @property
     def kg_llm_client(self):
-        """KG 构建/融合专用 LLM(批量离线)。配齐 KG_LLM_* → 独立模型;否则动态回退
-        到当前 self.llm_client(含测试替身),未配置时与今天行为完全一致。"""
-        if self._kg_llm_client is not None:
-            return self._kg_llm_client
-        return self.llm_client
+        return self._llm_for_role("kg_llm")
 
     def _resolve_path(self, value: str) -> Path:
         path = Path(value)
