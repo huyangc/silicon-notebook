@@ -2148,7 +2148,7 @@ button.chat-session-card {
 
 .source-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
   gap: 6px;
   width: 100%;
@@ -2187,7 +2187,7 @@ button.chat-session-card {
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  min-width: 0;
+  min-width: max-content;
 }
 
 .source-row-actions .source-link-button,
@@ -2966,7 +2966,7 @@ button.chat-session-card {
   }
 
   .source-row {
-    grid-template-columns: minmax(0, 1fr) 34px;
+    grid-template-columns: minmax(0, 1fr) max-content;
   }
 }
 

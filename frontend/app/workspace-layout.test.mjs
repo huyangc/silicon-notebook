@@ -71,3 +71,9 @@ test("source row keeps link and delete actions in the right action column", () =
   assert.match(css, /\.source-row-actions\s*{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*flex-end;/s);
   assert.match(css, /\.source-row-actions\s+\.source-link-button,\s*\.source-row-actions\s+\.source-delete-button\s*{[^}]*flex:\s*0 0 30px;/s);
 });
+
+test("source action column expands to fit both status-independent actions", () => {
+  assert.match(css, /\.source-row\s*{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+max-content;/s);
+  assert.match(css, /\.source-row-actions\s*{[^}]*min-width:\s*max-content;/s);
+  assert.equal(css.includes(".source-row {\n    grid-template-columns: minmax(0, 1fr) 34px;"), false);
+});
