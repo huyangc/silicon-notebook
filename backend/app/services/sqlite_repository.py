@@ -237,6 +237,7 @@ class SQLiteRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
+        self._user_model_cfg_cache: Dict[str, dict] = {}
         self._vector_cache = VectorCache()
         self._write_lock = threading.RLock()
         self._migrate()
@@ -707,6 +708,10 @@ class SQLiteRepository:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username "
                 "ON users(username) WHERE username != ''"
             )
+            # 每用户模型服务配置(JSON;明文存,API 层只写不回显)。
+            prof_cols = {r["name"] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()}
+            if "model_settings" not in prof_cols:
+                db.execute("ALTER TABLE user_profiles ADD COLUMN model_settings TEXT NOT NULL DEFAULT '{}'")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -915,6 +920,32 @@ class SQLiteRepository:
             memory_mode=profile["memory_mode"] if profile else "manual",
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
         )
+
+    def get_user_model_settings(self, user_id: str) -> dict:
+        """读用户的模型服务配置 JSON(含明文 key;仅供服务端解析,绝不回前端)。进程内缓存。"""
+        cached = self._user_model_cfg_cache.get(user_id)
+        if cached is not None:
+            return cached
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT model_settings FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
+        try:
+            parsed = json.loads(row["model_settings"]) if row and row["model_settings"] else {}
+        except (ValueError, TypeError):
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        self._user_model_cfg_cache[user_id] = parsed
+        return parsed
+
+    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
+        """覆盖写用户模型配置并失效缓存(下次解析重建 client)。"""
+        with self._write() as db:
+            db.execute(
+                "UPDATE user_profiles SET model_settings = ?, updated_at = ? WHERE user_id = ?",
+                (json.dumps(settings, ensure_ascii=False), _now(), user_id),
+            )
+        self._user_model_cfg_cache.pop(user_id, None)
 
     def create_user(self, username: str, password: str) -> UserProfile:
         """注册：归一化 username、唯一校验、pbkdf2 哈希、建 user + profile。
