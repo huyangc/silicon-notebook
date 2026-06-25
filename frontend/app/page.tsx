@@ -30,6 +30,10 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
+import {
+  MODEL_ROLES, type ModelRole, type ServiceForm,
+  buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
+} from "./model-settings.ts";
 import { AuthGate } from "./AuthGate";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -847,6 +851,9 @@ export default function Home() {
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   const [toast, setToast] = useState("");
+  const [modelPanelOpen, setModelPanelOpen] = useState(false);
+  const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
+  const [modelTesting, setModelTesting] = useState<Record<string, string>>({});
   const [statusText, setStatusText] = useState("connecting");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
@@ -2226,6 +2233,45 @@ export default function Home() {
     setCurrentUser(null);
   }
 
+  const ROLE_LABELS: Record<ModelRole, string> = {
+    llm: "主 LLM", reasoning_llm: "推理 LLM", rewrite_llm: "改写 LLM",
+    kg_llm: "构图 LLM", rerank: "重排 Rerank",
+  };
+
+  async function openModelPanel() {
+    setModelPanelOpen(true);
+    try {
+      const view = await fetchModelSettings();
+      const forms = Object.fromEntries(MODEL_ROLES.map((r) => [r, {
+        base_url: view[r].base_url, model: view[r].model,
+        api_key: "", keyDirty: false,
+      }])) as Record<ModelRole, ServiceForm>;
+      setModelForms(forms);
+    } catch (e) { reportError(e); }
+  }
+
+  async function saveModelPanel() {
+    if (!modelForms) return;
+    try {
+      await saveModelSettings(buildPutPayload(modelForms));
+      setModelPanelOpen(false);
+      setToast("模型服务配置已保存");
+    } catch (e) { reportError(e); }
+  }
+
+  async function runModelTest(role: ModelRole) {
+    if (!modelForms) return;
+    const f = modelForms[role];
+    setModelTesting((m) => ({ ...m, [role]: "测试中…" }));
+    try {
+      const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
+        f.keyDirty ? f.api_key : null);
+      setModelTesting((m) => ({ ...m, [role]: r.ok ? `通 ${r.latency_ms}ms` : `失败：${r.error}` }));
+    } catch (e) {
+      setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);
+    }
+  }
+
   function openNotebookMenu(notebookId: string, event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
@@ -2468,6 +2514,9 @@ export default function Home() {
                 })}>
                   <Share2 size={17} />
                   <span>分享</span>
+                </button>
+                <button className="workspace-nav-button" onClick={() => openModelPanel()}>
+                  <span>模型服务</span>
                 </button>
                 <button className="workspace-nav-button" onClick={() => setInfoModal({
                   title: "设置",
@@ -3608,6 +3657,46 @@ export default function Home() {
       )}
 
       {toast && <div className="toast">{toast}</div>}
+
+      {modelPanelOpen && modelForms && (
+        <section className="utility-modal" role="dialog" aria-modal="true"
+          onClick={(e) => { if (e.currentTarget === e.target) setModelPanelOpen(false); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div><h2>模型服务</h2><p>留空则使用系统默认；API Key 只写不回显</p></div>
+              <button className="icon-button" onClick={() => setModelPanelOpen(false)}>×</button>
+            </div>
+            <div className="source-detail-body">
+              {MODEL_ROLES.map((role) => (
+                <fieldset key={role} className="edit-form" style={{ marginBottom: 12 }}>
+                  <legend>{ROLE_LABELS[role]}</legend>
+                  <label>Base URL
+                    <input value={modelForms[role].base_url}
+                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], base_url: e.target.value } }))} />
+                  </label>
+                  <label>Model
+                    <input value={modelForms[role].model}
+                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], model: e.target.value } }))} />
+                  </label>
+                  <label>API Key
+                    <input type="password" placeholder="未改动则保留原 key"
+                      value={modelForms[role].api_key}
+                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], api_key: e.target.value, keyDirty: true } }))} />
+                  </label>
+                  <div className="modal-actions">
+                    <button type="button" className="sort-button" onClick={() => runModelTest(role)}>测试</button>
+                    <span style={{ fontSize: 12, opacity: 0.8 }}>{modelTesting[role] || ""}</span>
+                  </div>
+                </fieldset>
+              ))}
+              <div className="modal-actions">
+                <button className="sort-button" onClick={() => setModelPanelOpen(false)}>取消</button>
+                <button className="new-pill" onClick={() => saveModelPanel()}>保存</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
