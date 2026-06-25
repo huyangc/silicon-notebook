@@ -1002,9 +1002,11 @@ class SQLiteRepository:
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
 
     def list_notebooks(self) -> List[NotebookSummary]:
+        owner_id = self.current_user().id
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM notebooks ORDER BY created_at ASC"
+                "SELECT * FROM notebooks WHERE created_by = ? ORDER BY created_at ASC",
+                (owner_id,),
             ).fetchall()
             return [self._notebook_from_row(db, row) for row in rows]
 
@@ -1034,7 +1036,7 @@ class SQLiteRepository:
                     purpose,
                     "Semiconductor",
                     "draft",
-                    "user-local",
+                    self.current_user().id,
                     now,
                     now,
                     purpose_auto,
@@ -1049,6 +1051,40 @@ class SQLiteRepository:
             if row is None:
                 raise KeyError(notebook_id)
             return self._notebook_from_row(db, row)
+
+    def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """owner 即可访问；无 admin 全局越权（base 本 owner=admin，故仅 admin 能进）。"""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
+        return bool(row) and row["created_by"] == user_id
+
+    def source_owner(self, source_id: str) -> "str | None":
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT nb.created_by AS owner FROM sources s "
+                "JOIN notebooks nb ON nb.id = s.notebook_id WHERE s.id = ?",
+                (source_id,),
+            ).fetchone()
+        return row["owner"] if row else None
+
+    def conversation_owner(self, conversation_id: str) -> "str | None":
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT nb.created_by AS owner FROM conversations c "
+                "JOIN notebooks nb ON nb.id = c.notebook_id WHERE c.id = ?",
+                (conversation_id,),
+            ).fetchone()
+        return row["owner"] if row else None
+
+    def answer_owner(self, answer_id: str) -> "str | None":
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT nb.created_by AS owner FROM answers a "
+                "JOIN notebooks nb ON nb.id = a.notebook_id WHERE a.id = ?",
+                (answer_id,),
+            ).fetchone()
+        return row["owner"] if row else None
 
     def update_notebook(self, notebook_id: str, payload: NotebookUpdate) -> NotebookSummary:
         self.get_notebook(notebook_id)
