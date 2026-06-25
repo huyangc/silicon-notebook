@@ -128,6 +128,8 @@ class MinerUClient:
 
     def _office_cli_command(self, file_path: str, out_dir: str) -> List[str]:
         # MinerU CLI 原生解析 office：mineru -p <file> -o <dir> -l <lang> -b <backend>
+        # 注：本路径不传 formula/table/vlm_server_url；若依赖 vlm-http-client 后端，
+        # 请走 http 模式（mineru-api /file_parse 会代为转发 server_url）。
         return [
             "mineru",
             "-p", str(file_path),
