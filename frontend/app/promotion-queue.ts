@@ -3,6 +3,8 @@
 // can be exercised in isolation under `node --test` without importing the
 // React page module.
 
+import { authHeaders } from "./auth.ts";
+
 export type PromotionCandidate = {
   id: string;
   notebook_id: string;
@@ -35,7 +37,7 @@ const API_BASE =
 
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);

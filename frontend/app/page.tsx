@@ -2367,7 +2367,7 @@ export default function Home() {
                     { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
                     { label: "新建文章", action: () => setArticleModalOpen(true) },
                     { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
-                    { label: "晋升队列", action: () => openPromoQueue().catch(reportError) },
+                    ...(currentUser?.role === "admin" ? [{ label: "晋升队列", action: () => openPromoQueue().catch(reportError) }] : []),
                     ...(currentUser?.role === "admin" ? [{ label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) }] : []),
                     { label: "边审查队列", action: () => openEdgeReviewQueue().catch(reportError) }
                   ]
