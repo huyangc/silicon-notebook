@@ -66,12 +66,24 @@ test("ask controls lock input and prevent resend while the model is running", ()
   assert.match(css, /\.send-button\.stop\s*{/);
 });
 
-test("topbar logout is a compact icon action instead of a bare text button", () => {
-  assert.match(page, /LogOut/);
-  assert.match(page, /className="user-logout"[\s\S]*<LogOut size=\{15\}/);
-  assert.equal(page.includes(">退出</button>"), false);
-  assert.match(css, /\.user-logout\s*{[^}]*display:\s*inline-flex;[^}]*border-radius:\s*999px;/s);
-  assert.match(css, /\.user-logout:hover\s*{/);
+test("topbar keeps logout inside a click-to-open account popover", () => {
+  assert.match(page, /const \[accountMenuOpen, setAccountMenuOpen\] = useState\(false\);/);
+  assert.match(page, /const accountMenuRef = useRef<HTMLDivElement \| null>\(null\);/);
+  assert.match(page, /<div className="user-menu" ref=\{accountMenuRef\}>/);
+  assert.match(page, /className="user-menu-trigger"[\s\S]*aria-haspopup="menu"[\s\S]*aria-expanded=\{accountMenuOpen\}/);
+  assert.match(page, /\{accountMenuOpen && \(/);
+  assert.match(page, /className="user-menu-popover"[\s\S]*role="menu"[\s\S]*className="user-logout"/);
+
+  const userMenuStart = page.indexOf('<div className="user-menu" ref={accountMenuRef}>');
+  const userMenuEnd = page.indexOf("</header>", userMenuStart);
+  const userMenuMarkup = page.slice(userMenuStart, userMenuEnd);
+  assert.ok(userMenuMarkup.indexOf('className="user-menu-trigger"') < userMenuMarkup.indexOf("{accountMenuOpen && ("));
+  assert.ok(userMenuMarkup.indexOf('className="user-logout"') > userMenuMarkup.indexOf('className="user-menu-popover"'));
+
+  assert.match(css, /\.user-menu\s*{[^}]*position:\s*relative;/s);
+  assert.match(css, /\.user-menu-trigger\s*{[^}]*border-radius:\s*999px;/s);
+  assert.match(css, /\.user-menu-popover\s*{[^}]*position:\s*absolute;[^}]*right:\s*0;/s);
+  assert.match(css, /\.user-logout\s*{[^}]*width:\s*100%;/s);
 });
 
 test("ask abort uses a square stop control while a response is running", () => {
