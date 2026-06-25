@@ -90,25 +90,12 @@ class MinerUClient:
     # -- CLI mode (local MinerU Python API subprocess) -------------------------
 
     def _parse_cli(self, file_path: str, file_name: str) -> List[dict]:
+        suffix = Path(file_name).suffix.lower()
         with tempfile.TemporaryDirectory(prefix="mineru-") as out_dir:
-            config = {
-                "file_path": file_path,
-                "file_name": file_name,
-                "out_dir": out_dir,
-                "backend": self.settings.mineru_backend,
-                "parse_method": self.settings.mineru_parse_method or "auto",
-                "lang": self.settings.mineru_lang or "ch",
-                "formula_enable": self.settings.mineru_formula_enable,
-                "table_enable": self.settings.mineru_table_enable,
-                "model_source": self.settings.mineru_model_source,
-                "vlm_server_url": self.settings.mineru_vlm_server_url,
-            }
-            script_path = Path(out_dir) / "run_mineru_parse.py"
-            config_path = Path(out_dir) / "mineru_config.json"
-            script_path.write_text(_DO_PARSE_SCRIPT, encoding="utf-8")
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            command = [sys.executable, str(script_path), str(config_path)]
-            # MinerU reads model source from the process env, not our Settings.
+            if suffix in {".docx", ".pptx"}:
+                command = self._office_cli_command(file_path, out_dir)
+            else:
+                command = self._pdf_cli_command(file_path, file_name, out_dir)
             env = {**os.environ}
             if self.settings.mineru_model_source:
                 env["MINERU_MODEL_SOURCE"] = self.settings.mineru_model_source
@@ -126,10 +113,10 @@ class MinerUClient:
             except subprocess.TimeoutExpired as exc:
                 stdout, stderr = _terminate_process(process)
                 detail = _tail_process_output(stdout, stderr)
-                suffix = f": {detail}" if detail else ""
+                suffix_msg = f": {detail}" if detail else ""
                 raise RuntimeError(
                     f"MinerU Python API timed out after "
-                    f"{self.settings.mineru_timeout_seconds}s{suffix}"
+                    f"{self.settings.mineru_timeout_seconds}s{suffix_msg}"
                 ) from exc
             if process.returncode != 0:
                 detail = _tail_process_output(stdout, stderr)
@@ -138,6 +125,35 @@ class MinerUClient:
             if not matches:
                 raise RuntimeError("MinerU Python API produced no content_list.json")
             return json.loads(matches[0].read_text(encoding="utf-8"))
+
+    def _office_cli_command(self, file_path: str, out_dir: str) -> List[str]:
+        # MinerU CLI 原生解析 office：mineru -p <file> -o <dir> -l <lang> -b <backend>
+        return [
+            "mineru",
+            "-p", str(file_path),
+            "-o", str(out_dir),
+            "-l", self.settings.mineru_lang or "ch",
+            "-b", self.settings.mineru_backend or "pipeline",
+        ]
+
+    def _pdf_cli_command(self, file_path: str, file_name: str, out_dir: str) -> List[str]:
+        config = {
+            "file_path": file_path,
+            "file_name": file_name,
+            "out_dir": out_dir,
+            "backend": self.settings.mineru_backend,
+            "parse_method": self.settings.mineru_parse_method or "auto",
+            "lang": self.settings.mineru_lang or "ch",
+            "formula_enable": self.settings.mineru_formula_enable,
+            "table_enable": self.settings.mineru_table_enable,
+            "model_source": self.settings.mineru_model_source,
+            "vlm_server_url": self.settings.mineru_vlm_server_url,
+        }
+        script_path = Path(out_dir) / "run_mineru_parse.py"
+        config_path = Path(out_dir) / "mineru_config.json"
+        script_path.write_text(_DO_PARSE_SCRIPT, encoding="utf-8")
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        return [sys.executable, str(script_path), str(config_path)]
 
 
 _DO_PARSE_SCRIPT = r"""
