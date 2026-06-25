@@ -21,7 +21,7 @@ def parse_source_file(
     if suffix == ".docx":
         return parse_docx(source_id, Path(file_path), file_name, mineru_client)
     if suffix == ".pptx":
-        return parse_pptx(source_id, Path(file_path))
+        return parse_pptx(source_id, Path(file_path), file_name, mineru_client)
     if suffix == ".pdf":
         return parse_pdf(source_id, Path(file_path), file_name, mineru_client)
     if suffix == ".csv":
@@ -203,7 +203,38 @@ def parse_docx_basic(source_id: str, path: Path) -> List[SourceElement]:
     return elements
 
 
-def parse_pptx(source_id: str, path: Path) -> List[SourceElement]:
+def parse_pptx(
+    source_id: str,
+    path: Path,
+    file_name: str = "",
+    mineru_client: Any = None,
+) -> List[SourceElement]:
+    """Parse a PPTX via MinerU when configured, else fall back to XML extraction.
+
+    MinerU (3.0+) natively parses PPTX. When it is not configured or fails, we
+    degrade to the raw-XML slide/notes extractor so local/no-GPU dev works.
+    """
+    if mineru_client is not None and getattr(mineru_client, "configured", False):
+        try:
+            content_list = mineru_client.parse(str(path), file_name or path.name)
+            elements = mineru_content_list_to_elements(
+                source_id, content_list, label_prefix="PPTX"
+            )
+            if elements:
+                return elements
+            if hasattr(mineru_client, "last_error"):
+                mineru_client.last_error = "MinerU content_list mapped to zero source elements"
+        except Exception as exc:
+            if hasattr(mineru_client, "last_error") and not getattr(
+                mineru_client, "last_error", ""
+            ):
+                mineru_client.last_error = str(exc)
+            # Fall through to XML extraction so a MinerU outage never blocks ingestion.
+            pass
+    return parse_pptx_basic(source_id, path)
+
+
+def parse_pptx_basic(source_id: str, path: Path) -> List[SourceElement]:
     elements: List[SourceElement] = []
     namespace = {
         "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
