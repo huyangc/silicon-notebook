@@ -746,8 +746,8 @@ button {
 }
 
 .sources-body {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 14px;
   min-height: 0;
 }
@@ -812,6 +812,7 @@ button {
 }
 
 .source-list {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   display: grid;
