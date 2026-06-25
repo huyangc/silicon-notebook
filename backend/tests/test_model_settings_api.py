@@ -20,6 +20,15 @@ def _auth(client, username="z00123456"):
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_mask_key_never_exposes_full_short_key():
+    from app.api.routes import _mask_key
+    assert _mask_key("") == ""
+    assert _mask_key("abc") == "…"        # ≤4 位整体隐去
+    assert _mask_key("abcd") == "…"       # 恰好 4 位也不暴露
+    masked = _mask_key("sk-secret123")    # 长 key 只露尾 4 位
+    assert masked == "…t123" and "secret" not in masked
+
+
 def test_get_defaults_masked(client):
     h = _auth(client)
     r = client.get("/api/me/model-settings", headers=h)
