@@ -112,8 +112,9 @@ _MODEL_ROLES = ("llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank")
 
 
 def _mask_key(key: str) -> str:
+    # 只露尾 4 位且必须确有被截断的前缀(len>4)；≤4 位则整体隐去，绝不暴露完整短 key。
     key = key or ""
-    return f"…{key[-4:]}" if len(key) >= 4 else ("…" if key else "")
+    return f"…{key[-4:]}" if len(key) > 4 else ("…" if key else "")
 
 
 @router.get("/me/model-settings")
