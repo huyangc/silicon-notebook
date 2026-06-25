@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import queue
 import threading
@@ -492,7 +493,8 @@ async def _stream_ask_events(
         finally:
             events.put(None)
 
-    threading.Thread(target=worker, daemon=True).start()
+    ctx = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx.run(worker), daemon=True).start()
     try:
         while True:
             try:
