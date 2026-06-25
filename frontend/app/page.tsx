@@ -2491,35 +2491,37 @@ export default function Home() {
               )}
               {chatMode === "ask" && sessionPanelOpen && (
                 <div className="chat-session-popover" role="dialog" aria-label="会话管理">
-                  <div className="chat-session-popover-head">
-                    <div>
-                      <strong>会话</strong>
-                      <small>切换历史问答，不压缩当前回答区域。</small>
+                  <div className="chat-session-popover-top">
+                    <div className="chat-session-popover-head">
+                      <div>
+                        <strong>会话</strong>
+                        <small>切换历史问答，不压缩当前回答区域。</small>
+                      </div>
+                      <button className="icon-button compact" type="button" onClick={() => setSessionPanelOpen(false)} title="关闭">
+                        <X size={15} />
+                      </button>
                     </div>
-                    <button className="icon-button compact" type="button" onClick={() => setSessionPanelOpen(false)} title="关闭">
-                      <X size={15} />
-                    </button>
+                    {sessions.length > 0 && (
+                      <div className="chat-session-cleanup">
+                        <span>批量清理</span>
+                        {CLEANUP_PRESETS.map((days) => {
+                          const n = conversationsOlderThan(sessions, days).length;
+                          return (
+                            <button
+                              key={days}
+                              type="button"
+                              className="chat-session-cleanup-btn"
+                              disabled={n === 0}
+                              title={`删除最近 ${days} 天内无活动的会话`}
+                              onClick={() => requestBulkCleanup(days)}
+                            >
+                              {days} 天前{n > 0 ? ` (${n})` : ""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                  {sessions.length > 0 && (
-                    <div className="chat-session-cleanup">
-                      <span>批量清理</span>
-                      {CLEANUP_PRESETS.map((days) => {
-                        const n = conversationsOlderThan(sessions, days).length;
-                        return (
-                          <button
-                            key={days}
-                            type="button"
-                            className="chat-session-cleanup-btn"
-                            disabled={n === 0}
-                            title={`删除最近 ${days} 天内无活动的会话`}
-                            onClick={() => requestBulkCleanup(days)}
-                          >
-                            {days} 天前{n > 0 ? ` (${n})` : ""}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
                   <div className="chat-session-list">
                     <button className={`chat-session-card new ${conversationId == null ? "active" : ""}`} type="button" onClick={startNewSession}>
                       <Plus size={16} />

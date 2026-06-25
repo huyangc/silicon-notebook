@@ -77,3 +77,9 @@ test("source action column expands to fit both status-independent actions", () =
   assert.match(css, /\.source-row-actions\s*{[^}]*min-width:\s*max-content;/s);
   assert.equal(css.includes(".source-row {\n    grid-template-columns: minmax(0, 1fr) 34px;"), false);
 });
+
+test("session manager groups cleanup controls above the scrollable session list", () => {
+  assert.match(page, /<div className="chat-session-popover-top">[\s\S]*className="chat-session-popover-head"[\s\S]*className="chat-session-cleanup"[\s\S]*<\/div>\s*<div className="chat-session-list">/);
+  assert.match(css, /\.chat-session-popover\s*{[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\);/s);
+  assert.match(css, /\.chat-session-popover-top\s*{[^}]*display:\s*grid;[^}]*gap:\s*10px;/s);
+});
