@@ -6309,6 +6309,20 @@ class SQLiteRepository:
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
+    def _unconfigured_model_response(self, notebook_id: str, question: str,
+                                     conversation_id: str, mode: str) -> AskResponse:
+        """policy=required 且用户未配主 LLM 时的统一短路响应：携带 model_error 让前端
+        横幅提示「请先配置」。优先于"先建 KG"等其它提示——没模型连 KG 都建不了。"""
+        msg = "请先在设置中配置你的模型服务"
+        response = AskResponse(
+            answer_id="", conclusion=msg, conversation_id=conversation_id,
+            retrieval_query=question, llm_mode="deterministic")
+        response.mode = mode
+        response.model_errors = [ModelError(stage="answer", model="", message=msg)]
+        response.answer_id = self._save_answer(
+            notebook_id, question, response, conversation_id)
+        return response
+
     def ask_reasoning(
         self,
         notebook_id: str,
@@ -6328,6 +6342,10 @@ class SQLiteRepository:
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
         raise_if_cancelled(cancel_event)
+
+        if self.resolve_model_config(self.current_user(), "llm").source == "none":
+            return self._unconfigured_model_response(
+                notebook_id, question, conversation_id, "reasoning")
 
         if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
             response = AskResponse(
@@ -6465,6 +6483,10 @@ class SQLiteRepository:
                 db, notebook_id, payload.conversation_id, question)
             history = self._conversation_history(db, conversation_id)
         raise_if_cancelled(cancel_event)
+
+        if self.resolve_model_config(self.current_user(), "llm").source == "none":
+            return self._unconfigured_model_response(
+                notebook_id, question, conversation_id, "graph")
 
         if not (self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg()):
             response = AskResponse(

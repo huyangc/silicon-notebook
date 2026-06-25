@@ -20,3 +20,25 @@ def test_required_unconfigured_ask_surfaces_model_error(tmp_path):
         assert resp.answer == ""
     finally:
         reset_request_user(tok)
+
+
+def test_required_unconfigured_reasoning_surfaces_model_error(tmp_path):
+    repo = _repo(tmp_path, user_model_config_policy="required")
+    tok = set_request_user(repo.current_user())
+    try:
+        nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
+        resp = repo.ask(nb.id, AskRequest(question="hi", mode="reasoning"))
+        assert any(e.stage == "answer" for e in resp.model_errors)
+    finally:
+        reset_request_user(tok)
+
+
+def test_required_unconfigured_graph_surfaces_model_error(tmp_path):
+    repo = _repo(tmp_path, user_model_config_policy="required")
+    tok = set_request_user(repo.current_user())
+    try:
+        nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
+        resp = repo.ask(nb.id, AskRequest(question="hi", mode="graph"))
+        assert any(e.stage == "answer" for e in resp.model_errors)
+    finally:
+        reset_request_user(tok)
