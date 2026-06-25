@@ -800,6 +800,11 @@ function cardIcon(index: number, notebook: NotebookSummary): string {
   return ["◇", "📒", "📈", "▤", "▧"][index % 5];
 }
 
+function accountInitials(username: string): string {
+  const compact = username.trim().replace(/[^a-z0-9]/gi, "");
+  return (compact.slice(0, 2) || "SN").toUpperCase();
+}
+
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -822,6 +827,7 @@ export default function Home() {
   const [sortMode, setSortMode] = useState("recent");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOpen, setSortOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [menuNotebookId, setMenuNotebookId] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<NotebookMenuPosition | null>(null);
   const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
@@ -892,6 +898,7 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
   const kgGraphRef = useRef<any>(null);
@@ -1009,6 +1016,38 @@ export default function Home() {
       window.removeEventListener("scroll", closeMenu, true);
     };
   }, [menuNotebookId]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+
+    function closeAccountMenu() {
+      setAccountMenuOpen(false);
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        accountMenuRef.current?.contains(target)
+      ) {
+        return;
+      }
+      closeAccountMenu();
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") closeAccountMenu();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", closeAccountMenu);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", closeAccountMenu);
+    };
+  }, [accountMenuOpen]);
 
   // Poll non-terminal sources so the UI reflects queued→parsing→…→extracted live.
   useEffect(() => {
@@ -2181,6 +2220,12 @@ export default function Home() {
     setStatusText(`API error: ${message}`);
   }
 
+  async function handleLogout() {
+    setAccountMenuOpen(false);
+    await logoutUser();
+    setCurrentUser(null);
+  }
+
   function openNotebookMenu(notebookId: string, event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
@@ -2213,6 +2258,10 @@ export default function Home() {
     }} />;
   }
 
+  const accountName = currentUser.username;
+  const accountRole = currentUser.role === "admin" ? "管理员" : "用户";
+  const accountBadge = accountInitials(accountName);
+
   return (
     <div className={`app ${isWorkspace ? "workspace-mode" : ""}`}>
       <header className="topbar">
@@ -2225,12 +2274,34 @@ export default function Home() {
         </div>
         <div className="topbar-right">
           <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
-          <div className="user-menu">
-            <span className="user-name">{currentUser.username}{currentUser.role === "admin" ? "（管理员）" : ""}</span>
-            <button className="user-logout" onClick={async () => { await logoutUser(); setCurrentUser(null); }} title="退出登录">
-              <LogOut size={15} />
-              <span>退出</span>
+          <div className="user-menu" ref={accountMenuRef}>
+            <button
+              className="user-menu-trigger"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={accountMenuOpen}
+              title="账户菜单"
+              onClick={() => setAccountMenuOpen((open) => !open)}
+            >
+              <span className="user-avatar">{accountBadge}</span>
+              <span className="user-name">{accountName}{currentUser.role === "admin" ? "（管理员）" : ""}</span>
+              <ChevronDown size={14} className="user-menu-chevron" />
             </button>
+            {accountMenuOpen && (
+              <div className="user-menu-popover" role="menu" aria-label="账户菜单">
+                <div className="user-menu-profile">
+                  <span className="user-avatar large">{accountBadge}</span>
+                  <div>
+                    <strong>{accountName}</strong>
+                    <small>{accountRole}</small>
+                  </div>
+                </div>
+                <button className="user-logout" type="button" role="menuitem" onClick={() => handleLogout().catch(reportError)}>
+                  <LogOut size={16} />
+                  <span>退出登录</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
