@@ -1,9 +1,11 @@
 import time
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
+from app.api.deps import get_current_user
 from app.api.routes import router
 from app.core.config import get_settings
 from app.core.event_logging import EventLogger, new_id
@@ -77,7 +79,10 @@ def create_app() -> FastAPI:
             "api": "/api",
         }
 
-    app.include_router(router, prefix="/api")
+    app.include_router(auth_router, prefix="/api")  # 公开：注册/登录/登出
+    app.include_router(
+        router, prefix="/api", dependencies=[Depends(get_current_user)]
+    )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
     app.include_router(debug_logs_router, prefix="/api")
     return app
 

@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any, List
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import repository, require_notebook_access, get_current_user
@@ -99,8 +99,8 @@ def health() -> dict:
 
 
 @router.get("/me", response_model=UserProfile)
-def me() -> UserProfile:
-    return repository().current_user()
+def me(user: UserProfile = Depends(get_current_user)) -> UserProfile:
+    return user
 
 
 @router.get("/doc-types")
