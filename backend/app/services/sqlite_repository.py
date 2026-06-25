@@ -293,6 +293,15 @@ class SQLiteRepository:
                   updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                  token TEXT PRIMARY KEY,
+                  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  created_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  last_seen_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+
                 CREATE TABLE IF NOT EXISTS user_profiles (
                   id TEXT PRIMARY KEY,
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -669,6 +678,21 @@ class SQLiteRepository:
                     "ALTER TABLE knowledge_relations "
                     "ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'"
                 )
+            # 用户系统：username + 密码列（守卫式 ALTER 幂等）。
+            user_cols = {r["name"] for r in db.execute("PRAGMA table_info(users)").fetchall()}
+            if "username" not in user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+            if "password_hash" not in user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+            if "password_salt" not in user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN password_salt TEXT NOT NULL DEFAULT ''")
+            if "password_iterations" not in user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN password_iterations INTEGER NOT NULL DEFAULT 0")
+            # 小写 username 唯一（空串不算冲突：用部分索引排除空串）。
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username "
+                "ON users(username) WHERE username != ''"
+            )
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
