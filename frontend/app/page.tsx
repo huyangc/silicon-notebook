@@ -2424,6 +2424,45 @@ export default function Home() {
                 <button type="button" className="add-source-button" onClick={() => { setUrlRejected([]); setUrlModalOpen(true); }}>
                   <ExternalLink size={20} strokeWidth={2.7} /> 添加链接
                 </button>
+                {currentNotebookId && sources.length > 0 && (
+                  currentNotebook?.kg_ready ? (
+                    <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                      ✓ 知识图谱已构建 · 可用严格推理（推理 / 图谱）
+                    </p>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="add-source-button"
+                        disabled={buildingKg}
+                        title={currentNotebook?.base_kg_available
+                          ? "本库尚未建图，严格推理会借用底层库（base）；点击为本库单独构建知识图谱"
+                          : "默认问答（通用）不需要；严格推理（推理 / 图谱）需先构建知识图谱"}
+                        onClick={() => {
+                          if (!currentNotebookId) return;
+                          setBuildingKg(true);
+                          buildKg(currentNotebookId)
+                            .then(() => {
+                              setToast("已开始构建知识图谱（后台进行，可能需要数分钟）；完成后刷新即可用严格推理");
+                              setTimeout(() => {
+                                api<NotebookSummary>(`/notebooks/${currentNotebookId}`)
+                                  .then((refreshed) => { setCurrentNotebook(refreshed); setBuildingKg(false); })
+                                  .catch(() => setBuildingKg(false));
+                              }, 4000);
+                            })
+                            .catch((e) => { reportError(e); setBuildingKg(false); });
+                        }}
+                      >
+                        <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : "构建知识图谱"}
+                      </button>
+                      <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                        {currentNotebook?.base_kg_available
+                          ? "本库未建图，严格推理将借用底层库（base）"
+                          : "默认问答无需；严格推理（推理 / 图谱）需要先构建"}
+                      </p>
+                    </>
+                  )
+                )}
                 <div className="future-search">
                   <strong>Network source scout</strong>
                   <p>后续开放从网络环境中检索并添加来源。</p>
