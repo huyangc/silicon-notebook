@@ -37,6 +37,10 @@ from app.models.schemas import (
     MergeRequest,
     MergeReviewRequest,
     MergeReviewSummary,
+    ModelServiceView,
+    ModelSettingsUpdate,
+    ModelTestRequest,
+    ModelTestResult,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
@@ -102,6 +106,83 @@ def health() -> dict:
 @router.get("/me", response_model=UserProfile)
 def me(user: UserProfile = Depends(get_current_user)) -> UserProfile:
     return user
+
+
+_MODEL_ROLES = ("llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank")
+
+
+def _mask_key(key: str) -> str:
+    key = key or ""
+    return f"…{key[-4:]}" if len(key) >= 4 else ("…" if key else "")
+
+
+@router.get("/me/model-settings")
+def get_model_settings(user: UserProfile = Depends(get_current_user)):
+    repo = repository()
+    stored = repo.get_user_model_settings(user.id)
+    out = {}
+    for role in _MODEL_ROLES:
+        svc = stored.get(role) or {}
+        out[role] = ModelServiceView(
+            base_url=svc.get("base_url", ""),
+            model=svc.get("model", ""),
+            has_key=bool(svc.get("api_key")),
+            key_hint=_mask_key(svc.get("api_key", "")),
+            source=repo.resolve_model_config(user, role).source,
+        )
+    return out
+
+
+@router.put("/me/model-settings")
+def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
+    repo = repository()
+    stored = dict(repo.get_user_model_settings(user.id))
+    for role in _MODEL_ROLES:
+        upd = getattr(payload, role)
+        if upd is None:
+            continue
+        svc = dict(stored.get(role) or {})
+        for field in ("base_url", "api_key", "model"):
+            val = getattr(upd, field)
+            if val is None:          # 不变
+                continue
+            if val == "":            # 清除
+                svc.pop(field, None)
+            else:                    # 设置
+                svc[field] = val
+        if svc:
+            stored[role] = svc
+        else:
+            stored.pop(role, None)
+    repo.set_user_model_settings(user.id, stored)
+    return get_model_settings(user)
+
+
+@router.post("/me/model-settings/test", response_model=ModelTestResult)
+def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(get_current_user)):
+    import time
+    if payload.service not in _MODEL_ROLES:
+        return ModelTestResult(ok=False, error="未知服务")
+    repo = repository()
+    stored = repo.get_user_model_settings(user.id).get(payload.service) or {}
+    api_key = payload.api_key if payload.api_key else stored.get("api_key", "")
+    base_url, model = payload.base_url.strip(), payload.model.strip()
+    if not (base_url and model and api_key):
+        return ModelTestResult(ok=False, error="缺少 base_url / model / api_key")
+    started = time.perf_counter()
+    try:
+        if payload.service == "rerank":
+            from app.services.rerank_client import RerankClient
+            RerankClient(repo.settings, model=model, base_url=base_url, api_key=api_key)._rerank_batch(
+                "ping", ["a", "b"])
+        else:
+            from app.core.llm import OpenAICompatibleClient
+            OpenAICompatibleClient(repo.settings, base_url=base_url, api_key=api_key, model=model).chat_json(
+                [{"role": "user", "content": "ping"}], "{}", timeout=10, max_retries=0)
+        return ModelTestResult(ok=True, latency_ms=round((time.perf_counter() - started) * 1000))
+    except Exception as exc:
+        return ModelTestResult(ok=False, latency_ms=round((time.perf_counter() - started) * 1000),
+                               error=f"{type(exc).__name__}: {exc}"[:200])
 
 
 @router.get("/doc-types")
