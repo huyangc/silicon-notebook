@@ -34,6 +34,21 @@ const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false 
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
+// 上传支持的扩展名（单一事实来源）：accept 串、stageFiles 校验、标题/文本剥扩展名都从此派生。
+// 需与后端 backend/app/api/routes.py 的 SUPPORTED_SOURCE_SUFFIXES 保持一致。
+const SUPPORTED_SOURCE_EXTENSIONS: string[] = [
+  "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm",
+];
+const SUPPORTED_SOURCE_ACCEPT = SUPPORTED_SOURCE_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+const SUPPORTED_SOURCE_EXT_GROUP = SUPPORTED_SOURCE_EXTENSIONS.join("|");
+// 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。
+const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt", "xls"];
+
+function fileExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
 type NotebookSummary = {
   id: string;
   name: string;
@@ -376,7 +391,7 @@ function sourceTopicCandidates(notebook: NotebookSummary | null, sources: Source
   const counts = new Map<string, { label: string; count: number }>();
   const add = (text: string, weight: number) => {
     const normalized = text
-      .replace(/\.(pdf|md|markdown|docx|pptx|csv|xlsx)\b/gi, " ")
+      .replace(new RegExp(`\\.(${SUPPORTED_SOURCE_EXT_GROUP})\\b`, "gi"), " ")
       .replace(/[_/\\.:-]+/g, " ");
     for (const match of normalized.matchAll(/\b[A-Za-z][A-Za-z0-9+-]{2,}\b/g)) {
       const raw = match[0];
@@ -608,7 +623,7 @@ function formatFileSize(size: number): string {
 
 function compactSourceTitle(source: SourceSummary): string {
   const rawTitle = (source.title || source.file_name || "Untitled source").trim();
-  const withoutExtension = rawTitle.replace(/\.(pdf|md|markdown|docx|pptx|csv|xlsx|xlsm)$/i, "");
+  const withoutExtension = rawTitle.replace(new RegExp(`\\.(${SUPPORTED_SOURCE_EXT_GROUP})$`, "i"), "");
   return withoutExtension || rawTitle;
 }
 
@@ -1422,12 +1437,19 @@ export default function Home() {
   // Stage selected files so the user can pick a document type per file before
   // uploading (auto-detect by default).
   function stageFiles(event: ChangeEvent<HTMLInputElement>) {
-    const picked = Array.from(event.target.files || []).filter((file) =>
-      /\.(pdf|md|markdown|docx|pptx|csv|xlsx|xlsm)$/i.test(file.name)
-    );
+    const all = Array.from(event.target.files || []);
     event.target.value = "";
+    const picked = all.filter((file) => SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
+    const rejected = all.filter((file) => !SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
+    if (rejected.length > 0) {
+      const names = rejected.map((file) => file.name).join("、");
+      const hasLegacy = rejected.some((file) => LEGACY_OFFICE_EXTENSIONS.includes(fileExtension(file.name)));
+      const hint = hasLegacy
+        ? "旧版 Office 格式请另存为 .docx / .pptx / .xlsx"
+        : "支持：PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV";
+      setToast(`已跳过不支持的文件：${names}。${hint}`);
+    }
     if (picked.length === 0) {
-      setStatusText("Select PDF, Markdown, DOCX, PPTX, CSV or Excel files");
       return;
     }
     // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
@@ -2363,7 +2385,7 @@ export default function Home() {
               <div className="workspace-panel-body sources-body">
                 <label className="add-source-button">
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
-                  <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={stageFiles} />
+                  <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
                 </label>
                 <button type="button" className="add-source-button" onClick={() => { setUrlRejected([]); setUrlModalOpen(true); }}>
                   <ExternalLink size={20} strokeWidth={2.7} /> 添加链接
@@ -2737,7 +2759,7 @@ export default function Home() {
               <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             <label className="drop-zone">
-              <input type="file" multiple accept=".pdf,.md,.markdown,.docx,.pptx,.csv,.xlsx,.xlsm" onChange={stageFiles} />
+              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "选择来源文件"}</strong>
               <small>支持 PDF / Markdown / DOCX / PPTX / CSV / Excel；图片与 OCR 暂不处理。</small>
