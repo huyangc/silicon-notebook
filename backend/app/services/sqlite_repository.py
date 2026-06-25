@@ -916,6 +916,91 @@ class SQLiteRepository:
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
         )
 
+    def create_user(self, username: str, password: str) -> UserProfile:
+        """注册：归一化 username、唯一校验、pbkdf2 哈希、建 user + profile。
+        用户名非法/重复 → ValueError。role 固定 'user'。"""
+        from app.services.auth_utils import normalize_username, is_valid_username, hash_password
+        norm = normalize_username(username)
+        if not is_valid_username(norm):
+            raise ValueError("invalid username")
+        user_id = f"user-{uuid4().hex[:10]}"
+        now = _now()
+        pw_hash, pw_salt, pw_iters = hash_password(password)
+        email = f"{norm}@users.silicon-notebook.local"
+        with self._write() as db:
+            exists = db.execute(
+                "SELECT 1 FROM users WHERE username = ?", (norm,)).fetchone()
+            if exists:
+                raise ValueError("username already exists")
+            db.execute(
+                "INSERT INTO users (id, email, display_name, role, status, username, "
+                "password_hash, password_salt, password_iterations, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
+                (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
+            )
+            db.execute(
+                "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
+                "VALUES (?, ?, 'manual', '[]', ?, ?)",
+                (f"profile-{user_id}", user_id, now, now),
+            )
+            user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            profile = db.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+            return self._user_profile(user, profile)
+
+    def authenticate_user(self, username: str, password: str) -> "UserProfile | None":
+        from app.services.auth_utils import normalize_username, verify_password
+        norm = normalize_username(username)
+        with self._connect() as db:
+            user = db.execute("SELECT * FROM users WHERE username = ?", (norm,)).fetchone()
+            if user is None:
+                return None
+            if not verify_password(
+                password, user["password_hash"], user["password_salt"], user["password_iterations"]):
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)).fetchone()
+            return self._user_profile(user, profile)
+
+    def create_session(self, user_id: str) -> str:
+        import secrets
+        token = secrets.token_urlsafe(32)
+        now = _now()
+        with self._write() as db:
+            db.execute(
+                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (token, user_id, now, _session_expiry(), now),
+            )
+        return token
+
+    def resolve_session(self, token: str) -> "UserProfile | None":
+        """命中且未过期 → 滑动续期并返回 user；否则 None（过期行顺手删除）。"""
+        if not token:
+            return None
+        now = _now()
+        with self._write() as db:
+            row = db.execute(
+                "SELECT * FROM auth_sessions WHERE token = ?", (token,)).fetchone()
+            if row is None:
+                return None
+            if row["expires_at"] <= now:
+                db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+                return None
+            db.execute(
+                "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token = ?",
+                (now, _session_expiry(), token),
+            )
+            user = db.execute("SELECT * FROM users WHERE id = ?", (row["user_id"],)).fetchone()
+            if user is None:
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)).fetchone()
+            return self._user_profile(user, profile)
+
+    def delete_session(self, token: str) -> None:
+        with self._write() as db:
+            db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+
     def list_notebooks(self) -> List[NotebookSummary]:
         with self._connect() as db:
             rows = db.execute(
@@ -7363,6 +7448,10 @@ class SQLiteRepository:
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _session_expiry(days: int = 30) -> str:
+    return (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
 def _citation(label: str, evidence: Evidence) -> Citation:
