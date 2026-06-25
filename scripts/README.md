@@ -1,9 +1,7 @@
 # scripts/ 使用说明
 
-仓库运维 / 开发 / 评测脚本。**除非特别说明,都在仓库根目录运行**
-(`/Users/hzf/workspace/silicon_notebook`),Python 用带依赖的解释器
-(本机是 miniconda:`/opt/homebrew/Caskroom/miniconda/base/bin/python`;
-脚本里可用 `PYTHON_BIN=...` 覆盖)。
+仓库运维 / 开发 / 评测脚本。**除非特别说明,都在仓库根目录运行**,Python 用装好
+`backend/requirements.txt` 依赖的解释器(激活对应环境,或用 `PYTHON_BIN=...` 覆盖脚本默认)。
 
 ---
 
@@ -34,7 +32,7 @@ scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C
 
 ### `check.sh` —— 本地全量自检(提交/PR 前)
 ```bash
-PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 py_compile + 后端 hermetic smoke + 前端 tsc。EXIT=0 即过。
 

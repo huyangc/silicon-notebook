@@ -2,7 +2,7 @@
 
 更新日期：2026-06-24
 
-对照依据：`silicon_notebook_fangan.md`（产品方案）与 `implementation_plan.md`（实现计划）。
+对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
 ## 总体状态
 
