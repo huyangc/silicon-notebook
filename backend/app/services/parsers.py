@@ -369,6 +369,7 @@ def _segment_pdf_blocks(text: str) -> List[tuple[bool, str]]:
 def mineru_content_list_to_elements(
     source_id: str,
     content_list: List[dict],
+    label_prefix: str = "PDF",
 ) -> List[SourceElement]:
     """Map MinerU's content_list blocks into structured SourceElements.
 
@@ -396,9 +397,9 @@ def mineru_content_list_to_elements(
                 _element(
                     source_id,
                     element_type,
-                    f"PDF p.{page} block {ordinal}",
+                    f"{label_prefix} p.{page} block {ordinal}",
                     text,
-                    {"parser": "mineru", "page_number": page, "text_level": level},
+                    {"parser": "mineru", "page_number": page, "text_level": level, "source_format": label_prefix.lower()},
                 )
             )
         elif block_type == "equation":
@@ -409,12 +410,13 @@ def mineru_content_list_to_elements(
                 _element(
                     source_id,
                     "formula",
-                    f"PDF p.{page} formula {ordinal}",
+                    f"{label_prefix} p.{page} formula {ordinal}",
                     latex,
                     {
                         "parser": "mineru",
                         "page_number": page,
                         "text_format": str(block.get("text_format", "latex")),
+                        "source_format": label_prefix.lower(),
                     },
                 )
             )
@@ -429,13 +431,14 @@ def mineru_content_list_to_elements(
                 _element(
                     source_id,
                     "table",
-                    f"PDF p.{page} table {ordinal}",
+                    f"{label_prefix} p.{page} table {ordinal}",
                     text,
                     {
                         "parser": "mineru",
                         "page_number": page,
                         "table_html": html,
                         "caption": caption,
+                        "source_format": label_prefix.lower(),
                     },
                 )
             )
@@ -449,9 +452,9 @@ def mineru_content_list_to_elements(
                 _element(
                     source_id,
                     "image_caption",
-                    f"PDF p.{page} image {ordinal}",
+                    f"{label_prefix} p.{page} image {ordinal}",
                     caption,
-                    {"parser": "mineru", "page_number": page},
+                    {"parser": "mineru", "page_number": page, "source_format": label_prefix.lower()},
                 )
             )
         else:
@@ -463,9 +466,9 @@ def mineru_content_list_to_elements(
                 _element(
                     source_id,
                     "paragraph",
-                    f"PDF p.{page} block {ordinal}",
+                    f"{label_prefix} p.{page} block {ordinal}",
                     text,
-                    {"parser": "mineru", "page_number": page, "block_type": block_type},
+                    {"parser": "mineru", "page_number": page, "block_type": block_type, "source_format": label_prefix.lower()},
                 )
             )
     return elements
