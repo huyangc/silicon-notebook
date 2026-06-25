@@ -29,10 +29,10 @@ import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
 import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
+import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
+import { AuthGate } from "./AuthGate";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
 // 上传支持的扩展名（单一事实来源）：accept 串、stageFiles 校验、标题/文本剥扩展名都从此派生。
 // 需与后端 backend/app/api/routes.py 的 SUPPORTED_SOURCE_SUFFIXES 保持一致。
@@ -489,13 +489,17 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || "GET").toUpperCase();
   const started = performance.now();
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: options.body instanceof FormData ? options.headers : { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: options.body instanceof FormData ? { ...authHeaders(), ...(options.headers || {}) } : { "Content-Type": "application/json", ...authHeaders(), ...(options.headers || {}) },
     ...options
   });
   const elapsed = Math.round(performance.now() - started);
   const requestId = response.headers.get("X-Request-Id") || "";
   // Browser-side trace mirroring the backend request log (DevTools console).
   console.debug(`[api] ${method} ${path} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`);
+  if (response.status === 401 && getToken()) {
+    clearToken();
+    if (typeof window !== "undefined") window.location.reload();
+  }
   if (!response.ok) {
     // Surface the backend's error detail instead of an opaque status line.
     let detail = "";
@@ -523,13 +527,17 @@ async function readAskStream<TResponse>(
   const started = performance.now();
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
     signal,
   });
   const elapsed = Math.round(performance.now() - started);
   const requestId = response.headers.get("X-Request-Id") || "";
   console.debug(`[api] POST ${path} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`);
+  if (response.status === 401 && getToken()) {
+    clearToken();
+    if (typeof window !== "undefined") window.location.reload();
+  }
   if (!response.ok) {
     let detail = "";
     try {
@@ -793,6 +801,8 @@ function cardIcon(index: number, notebook: NotebookSummary): string {
 }
 
 export default function Home() {
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<Health | null>(null);
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
   const [searchHits, setSearchHits] = useState<Record<string, SearchHit[]>>({});
@@ -887,7 +897,11 @@ export default function Home() {
   const kgGraphRef = useRef<any>(null);
 
   useEffect(() => {
-    loadNotebookCollection().catch(reportError);
+    if (!getToken()) { setAuthChecked(true); return; }
+    fetchMe()
+      .then((u) => { setCurrentUser(u); return loadNotebookCollection(); })
+      .catch(() => { clearToken(); })
+      .finally(() => setAuthChecked(true));
   }, []);
 
   useEffect(() => {
@@ -2190,6 +2204,15 @@ export default function Home() {
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
 
+  if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
+  if (!currentUser) {
+    return <AuthGate onAuthenticated={(u) => {
+      setCurrentUser(u);
+      setStatusText("");
+      loadNotebookCollection().catch(reportError);
+    }} />;
+  }
+
   return (
     <div className={`app ${isWorkspace ? "workspace-mode" : ""}`}>
       <header className="topbar">
@@ -2200,7 +2223,13 @@ export default function Home() {
             <div className="brand-subtitle">{isWorkspace ? "Notebook workspace" : "Notebook collection"}</div>
           </div>
         </div>
-        <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
+        <div className="topbar-right">
+          <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
+          <div className="user-menu">
+            <span className="user-name">{currentUser.username}{currentUser.role === "admin" ? "（管理员）" : ""}</span>
+            <button className="user-logout" onClick={async () => { await logoutUser(); setCurrentUser(null); }}>退出</button>
+          </div>
+        </div>
       </header>
 
       {!isWorkspace && (
@@ -2339,7 +2368,7 @@ export default function Home() {
                     { label: "新建文章", action: () => setArticleModalOpen(true) },
                     { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
                     { label: "晋升队列", action: () => openPromoQueue().catch(reportError) },
-                    { label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) },
+                    ...(currentUser?.role === "admin" ? [{ label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) }] : []),
                     { label: "边审查队列", action: () => openEdgeReviewQueue().catch(reportError) }
                   ]
                 })}>
