@@ -26,8 +26,8 @@ def _auth_admin(client):
 
 
 def test_user_cannot_see_or_access_others_notebook(client):
-    a = _auth(client, "zhang00123456")
-    b = _auth(client, "li00000042")
+    a = _auth(client, "z00123456")
+    b = _auth(client, "l00000042")
     nb = client.post("/api/notebooks", json={"name": "A's"}, headers=a).json()
     nb_id = nb["id"]
     # B 列表看不到 A 的
@@ -40,7 +40,7 @@ def test_user_cannot_see_or_access_others_notebook(client):
 
 
 def test_regular_user_cannot_mark_base(client):
-    a = _auth(client, "zhang00123456")
+    a = _auth(client, "z00123456")
     nb_id = client.post("/api/notebooks", json={"name": "x"}, headers=a).json()["id"]
     r = client.post(f"/api/notebooks/{nb_id}/tier", json={"tier": "base"}, headers=a)
     assert r.status_code == 403
@@ -54,8 +54,8 @@ def test_admin_can_mark_base(client):
 
 
 def test_article_cross_user_blocked(client):
-    a = _auth(client, "zhang00123456")
-    b = _auth(client, "li00000042")
+    a = _auth(client, "z00123456")
+    b = _auth(client, "l00000042")
     nb = client.post("/api/notebooks", json={"name": "A"}, headers=a).json()["id"]
     create_resp = client.post(
         f"/api/notebooks/{nb}/articles",
@@ -72,7 +72,7 @@ def test_article_cross_user_blocked(client):
 
 
 def test_promotion_queue_admin_only(client):
-    b = _auth(client, "li00000042")
+    b = _auth(client, "l00000042")
     assert client.get("/api/promotion-queue", headers=b).status_code == 403
     assert client.post("/api/promotion-queue/bogus/approve", headers=b).status_code == 403
     assert client.post("/api/promotion-queue/bogus/reject", json={}, headers=b).status_code == 403
@@ -81,7 +81,7 @@ def test_promotion_queue_admin_only(client):
 
 
 def test_global_config_write_admin_only(client):
-    b = _auth(client, "li00000042")
+    b = _auth(client, "l00000042")
     # write attempts by a regular user are forbidden
     assert client.post("/api/object-schemas", json={"object_type": "TestType"}, headers=b).status_code == 403
     assert client.post("/api/kg/concept-whitelist", json={"term": "XYZ"}, headers=b).status_code == 403
@@ -90,7 +90,7 @@ def test_global_config_write_admin_only(client):
 
 
 def test_streaming_ask_attributes_conversation_to_caller(client):
-    a = _auth(client, "zhang00123456")
+    a = _auth(client, "z00123456")
     nb = client.post("/api/notebooks", json={"name": "A"}, headers=a).json()["id"]
     # stream an ask as user A; consume the response
     r = client.post(f"/api/notebooks/{nb}/ask/stream",

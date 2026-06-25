@@ -15,11 +15,11 @@ def client(tmp_path, monkeypatch):
 
 
 def test_register_returns_token_and_user(client):
-    r = client.post("/api/auth/register", json={"username": "Zhang00123456", "password": "pw"})
+    r = client.post("/api/auth/register", json={"username": "Z00123456", "password": "pw"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["token"]
-    assert body["user"]["username"] == "zhang00123456"
+    assert body["user"]["username"] == "z00123456"
     assert body["user"]["role"] == "user"
 
 
@@ -29,29 +29,29 @@ def test_register_invalid_username_400(client):
 
 
 def test_register_empty_password_400(client):
-    r = client.post("/api/auth/register", json={"username": "zhang00123456", "password": ""})
+    r = client.post("/api/auth/register", json={"username": "z00123456", "password": ""})
     assert r.status_code == 400
 
 
 def test_register_duplicate_400(client):
-    client.post("/api/auth/register", json={"username": "zhang00123456", "password": "pw"})
-    r = client.post("/api/auth/register", json={"username": "zhang00123456", "password": "x"})
+    client.post("/api/auth/register", json={"username": "z00123456", "password": "pw"})
+    r = client.post("/api/auth/register", json={"username": "z00123456", "password": "x"})
     assert r.status_code == 400
 
 
 def test_login_and_me(client):
-    client.post("/api/auth/register", json={"username": "zhang00123456", "password": "pw"})
-    r = client.post("/api/auth/login", json={"username": "ZHANG00123456", "password": "pw"})
+    client.post("/api/auth/register", json={"username": "z00123456", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "Z00123456", "password": "pw"})
     assert r.status_code == 200
     token = r.json()["token"]
     me = client.get("/api/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
-    assert me.json()["username"] == "zhang00123456"
+    assert me.json()["username"] == "z00123456"
 
 
 def test_login_wrong_password_401(client):
-    client.post("/api/auth/register", json={"username": "zhang00123456", "password": "pw"})
-    r = client.post("/api/auth/login", json={"username": "zhang00123456", "password": "nope"})
+    client.post("/api/auth/register", json={"username": "z00123456", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "z00123456", "password": "nope"})
     assert r.status_code == 401
 
 
@@ -60,8 +60,8 @@ def test_me_without_token_401_when_required(client):
 
 
 def test_logout_invalidates_token(client):
-    client.post("/api/auth/register", json={"username": "zhang00123456", "password": "pw"})
-    token = client.post("/api/auth/login", json={"username": "zhang00123456", "password": "pw"}).json()["token"]
+    client.post("/api/auth/register", json={"username": "z00123456", "password": "pw"})
+    token = client.post("/api/auth/login", json={"username": "z00123456", "password": "pw"}).json()["token"]
     h = {"Authorization": f"Bearer {token}"}
     assert client.post("/api/auth/logout", headers=h).status_code == 204
     assert client.get("/api/me", headers=h).status_code == 401

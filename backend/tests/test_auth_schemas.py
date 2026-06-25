@@ -7,8 +7,8 @@ def test_userprofile_has_username_default():
 
 
 def test_auth_request_and_result():
-    req = AuthRequest(username="zhang00123456", password="pw")
-    assert req.username == "zhang00123456" and req.password == "pw"
+    req = AuthRequest(username="z00123456", password="pw")
+    assert req.username == "z00123456" and req.password == "pw"
     res = AuthResult(token="tok", user=UserProfile(
-        id="u1", email="x@y.z", display_name="z", role="user", username="zhang00123456"))
-    assert res.token == "tok" and res.user.username == "zhang00123456"
+        id="u1", email="x@y.z", display_name="z", role="user", username="z00123456"))
+    assert res.token == "tok" and res.user.username == "z00123456"
