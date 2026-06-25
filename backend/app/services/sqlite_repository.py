@@ -920,9 +920,9 @@ class SQLiteRepository:
         """注册：归一化 username、唯一校验、pbkdf2 哈希、建 user + profile。
         用户名非法/重复 → ValueError。role 固定 'user'。"""
         from app.services.auth_utils import normalize_username, is_valid_username, hash_password
-        norm = normalize_username(username)
-        if not is_valid_username(norm):
+        if not is_valid_username(username):
             raise ValueError("invalid username")
+        norm = normalize_username(username)
         user_id = f"user-{uuid4().hex[:10]}"
         now = _now()
         pw_hash, pw_salt, pw_iters = hash_password(password)

@@ -15,7 +15,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_register_returns_token_and_user(client):
-    r = client.post("/api/auth/register", json={"username": "Z00123456", "password": "pw"})
+    r = client.post("/api/auth/register", json={"username": "z00123456", "password": "pw"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["token"]

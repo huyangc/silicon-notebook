@@ -5,8 +5,8 @@ import hashlib
 import re
 import secrets
 
-# 单个字母 + 字面 "00" + 6 位数字，如 a00123456。
-USERNAME_RE = re.compile(r"^[A-Za-z]00\d{6}$")
+# 单个小写字母 + 字面 "00" + 6 位数字，如 a00123456。
+USERNAME_RE = re.compile(r"^[a-z]00\d{6}$")
 
 _PBKDF2_ITERATIONS = 200_000
 
@@ -17,7 +17,7 @@ def normalize_username(username: str) -> str:
 
 
 def is_valid_username(username: str) -> bool:
-    return bool(USERNAME_RE.match(normalize_username(username)))
+    return bool(USERNAME_RE.match((username or "").strip()))
 
 
 def hash_password(
