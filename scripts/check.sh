@@ -35,7 +35,10 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/services/reasoning_retrieval.py" \
   "$ROOT_DIR/backend/app/services/repository.py" \
   "$ROOT_DIR/backend/app/services/retrieval.py" \
-  "$ROOT_DIR/backend/app/services/sqlite_repository.py"
+  "$ROOT_DIR/backend/app/services/sqlite_repository.py" \
+  "$ROOT_DIR/backend/app/api/deps.py" \
+  "$ROOT_DIR/backend/app/api/auth_routes.py" \
+  "$ROOT_DIR/backend/app/services/auth_utils.py"
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" - <<'PY'
 import markdown_it  # noqa: F401

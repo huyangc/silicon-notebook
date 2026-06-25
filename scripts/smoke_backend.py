@@ -535,6 +535,7 @@ def check_api_layer() -> None:
                 "SILICON_NOTEBOOK_STORAGE_DIR": f"{tmp}/storage",
                 "LLM_LOG_ENABLED": "false",
                 "EVENT_LOG_ENABLED": "false",
+                "SILICON_NOTEBOOK_AUTH_OPTIONAL": "true",
             }
         )
         from app.api.routes import repository as route_repository
