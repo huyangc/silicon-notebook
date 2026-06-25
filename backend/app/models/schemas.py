@@ -8,8 +8,19 @@ class UserProfile(BaseModel):
     email: str
     display_name: str
     role: str
+    username: str = ""
     memory_mode: str = "manual"
     domain_focus: List[str] = Field(default_factory=list)
+
+
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthResult(BaseModel):
+    token: str
+    user: UserProfile
 
 
 class Evidence(BaseModel):
