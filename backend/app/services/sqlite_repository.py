@@ -5680,6 +5680,9 @@ class SQLiteRepository:
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
         try:
+            if self.resolve_model_config(self.current_user(), "llm").source == "none":
+                self._note_model_error(
+                    "answer", "", ModelNotConfiguredError("请先在设置中配置你的模型服务"))
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
             from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
