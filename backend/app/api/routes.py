@@ -2,13 +2,13 @@ import asyncio
 import json
 import queue
 import threading
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, List
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+from app.api.deps import repository, require_notebook_access, get_current_user
 from app.core.config import get_settings
 from app.models.schemas import (
     ArticleCreate,
@@ -64,7 +64,6 @@ from app.services.cancellation import AskCancelled
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.repository import NotebookRepository, UploadedSourceFile
-from app.services.sqlite_repository import SQLiteRepository
 
 router = APIRouter()
 
@@ -85,11 +84,6 @@ def _validate_source_file(file_name: str, content_size: int | None = None) -> No
             raise HTTPException(status_code=400, detail="Uploaded source file is empty")
         if content_size > MAX_SOURCE_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="Uploaded source file is too large")
-
-
-@lru_cache
-def repository() -> NotebookRepository:
-    return SQLiteRepository(get_settings())
 
 
 @router.get("/health")
