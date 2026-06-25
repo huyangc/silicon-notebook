@@ -1086,6 +1086,15 @@ class SQLiteRepository:
             ).fetchone()
         return row["owner"] if row else None
 
+    def article_owner(self, article_id: str) -> "str | None":
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT nb.created_by AS owner FROM articles a "
+                "JOIN notebooks nb ON nb.id = a.notebook_id WHERE a.id = ?",
+                (article_id,),
+            ).fetchone()
+        return row["owner"] if row else None
+
     def update_notebook(self, notebook_id: str, payload: NotebookUpdate) -> NotebookSummary:
         self.get_notebook(notebook_id)
         updates: List[str] = []

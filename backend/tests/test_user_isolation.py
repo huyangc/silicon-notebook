@@ -51,3 +51,39 @@ def test_admin_can_mark_base(client):
     nb_id = client.post("/api/notebooks", json={"name": "ref"}, headers=admin).json()["id"]
     r = client.post(f"/api/notebooks/{nb_id}/tier", json={"tier": "base"}, headers=admin)
     assert r.status_code == 200
+
+
+def test_article_cross_user_blocked(client):
+    a = _auth(client, "zhang00123456")
+    b = _auth(client, "li00000042")
+    nb = client.post("/api/notebooks", json={"name": "A"}, headers=a).json()["id"]
+    create_resp = client.post(
+        f"/api/notebooks/{nb}/articles",
+        json={"title": "secret", "abstract": "s"},
+        headers=a,
+    )
+    assert create_resp.status_code == 200, f"Article create failed: {create_resp.text}"
+    art_id = create_resp.json()["id"]
+    # B cannot research or delete A's article
+    assert client.post(f"/api/articles/{art_id}/research", headers=b).status_code == 404
+    assert client.delete(f"/api/articles/{art_id}", headers=b).status_code == 404
+    # A can delete its own
+    assert client.delete(f"/api/articles/{art_id}", headers=a).status_code == 204
+
+
+def test_promotion_queue_admin_only(client):
+    b = _auth(client, "li00000042")
+    assert client.get("/api/promotion-queue", headers=b).status_code == 403
+    assert client.post("/api/promotion-queue/bogus/approve", headers=b).status_code == 403
+    assert client.post("/api/promotion-queue/bogus/reject", json={}, headers=b).status_code == 403
+    admin = _auth_admin(client)
+    assert client.get("/api/promotion-queue", headers=admin).status_code == 200
+
+
+def test_global_config_write_admin_only(client):
+    b = _auth(client, "li00000042")
+    # write attempts by a regular user are forbidden
+    assert client.post("/api/object-schemas", json={"object_type": "TestType"}, headers=b).status_code == 403
+    assert client.post("/api/kg/concept-whitelist", json={"term": "XYZ"}, headers=b).status_code == 403
+    # reads stay open
+    assert client.get("/api/object-schemas", headers=b).status_code == 200
