@@ -1761,6 +1761,8 @@ button.chat-session-card {
   display: grid;
   place-items: center;
   font-size: 28px;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, border-radius 0.18s ease;
 }
 
 .send-button:disabled {
@@ -1770,11 +1772,21 @@ button.chat-session-card {
 }
 
 .send-button.stop {
-  background: #ba2d2d;
+  border: 1px solid #efb4b4;
+  border-radius: 14px;
+  background: #fff7f7;
+  color: #b42318;
+  box-shadow: 0 6px 18px rgba(180, 35, 24, 0.14);
 }
 
 .send-button.stop:hover {
-  background: #9f2424;
+  border-color: #d64a4a;
+  background: #ffecec;
+}
+
+.send-button.stop svg {
+  fill: currentColor;
+  stroke: currentColor;
 }
 
 .studio-panel {
@@ -3551,7 +3563,49 @@ button.chat-session-card {
 .auth-error { font-size: 13px; color: #ef5350; }
 .auth-submit { margin-top: 6px; padding: 10px; border: 0; border-radius: 8px; background: #2f6df6; color: #fff; cursor: pointer; }
 .auth-submit:disabled { opacity: .6; cursor: default; }
-.topbar-right { display: flex; align-items: center; gap: 16px; }
-.user-menu { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.user-name { color: #9aa6b5; }
-.user-logout { padding: 4px 10px; border: 1px solid #2a3240; border-radius: 6px; background: transparent; color: #e7ecf3; cursor: pointer; }
+.topbar-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid #e1e6ee;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+  font-size: 13px;
+}
+.user-name {
+  max-width: 180px;
+  overflow: hidden;
+  color: #667085;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-logout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid #d4dbe8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+.user-logout:hover {
+  border-color: #b9c3d4;
+  background: #f8fafc;
+  color: #111827;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.06);
+}
+.user-logout:focus-visible {
+  outline: 2px solid rgba(31, 94, 255, 0.28);
+  outline-offset: 2px;
+}
