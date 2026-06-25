@@ -13,6 +13,7 @@ job threads are blocked the window pool keeps draining windows.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import contextvars
 import logging
 import threading
 from typing import Any, Callable
@@ -54,10 +55,11 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
 
 def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
     """Submit one document-extraction job to the job pool (fire-and-forget;
-    callee handles its own errors/status). A done-callback logs any unexpected
-    exception so it is never silently swallowed."""
+    callee handles its own errors/status). 在提交线程(请求线程)抓取 ContextVar
+    快照并在 worker 内重放，使后台 job 的 current_user() 拿到真实用户(每用户 KG_LLM)。"""
     _ensure()
-    fut = _job_pool.submit(fn, *args, **kwargs)
+    ctx = contextvars.copy_context()
+    fut = _job_pool.submit(ctx.run, fn, *args, **kwargs)
     fut.add_done_callback(_log_job_exception)
     return fut
 
