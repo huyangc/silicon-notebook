@@ -79,22 +79,31 @@ cp .env.example .env
 
 `.env.example` 是权威、逐项带注释的完整变量清单;[配置](#配置)按组列出常用项。
 
-当前端与后端**不在**同一台 `127.0.0.1` 上时（例如部署到别的机器按 IP/域名访问的服务器），
-把前端指向后端可达的 URL,并在后端放行前端来源。地址要用浏览器实际访问的 host——
-**别用 `localhost`/`127.0.0.1`**(那在每个访客自己机器上解析,连不到服务器)。
+**远程访问——浏览器在另一台机器上**(不是服务器),所以**不能用 `localhost`/`127.0.0.1`**
+(那在每个访客自己机器上解析,连不到服务器)。
+
+**单台同机部署推荐(同源反代):** Next.js 前端把 `/api/*` 转发到本机后端
+(`frontend/next.config.mjs`),浏览器只跟前端同源通信。前端用相对的 `/api` 即可——
+**免 CORS、后端无需对外暴露**:
 
 ```bash
-# 前端 — NEXT_PUBLIC_* 是构建期烘焙进包的。生产 `npm run build` 时放到
-# frontend/.env.local(或在 build 命令上传入);`npm run dev`(scripts/dev.sh)
-# 也会从仓库根 .env 读到。
-NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+# frontend/.env.local (NEXT_PUBLIC_* 构建期烘焙 → 改后要重新 build)
+NEXT_PUBLIC_API_BASE_URL=/api
+```
 
-# 后端(仓库根 .env)— 逗号分隔的允许来源列表。不能用 `*`(开了 credentials),
-# 必须写明确来源。
+后端可留在 `127.0.0.1:8000`(反代在本机转发),只需前端端口对外可达。后端不在
+`127.0.0.1:8000` 时用 `BACKEND_PROXY_TARGET` 覆盖。
+
+**另一种——前后端在不同 host(双 origin 直连):** 把前端指向后端可达 URL,并在后端放行前端来源:
+
+```bash
+# frontend/.env.local (构建期烘焙)
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+# 后端仓库根 .env — 逗号分隔的允许来源;不能用 `*`(开了 credentials)
 SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 ```
 
-要让 API 对外可达,uvicorn 加 `--host 0.0.0.0`(或 `BACKEND_HOST=0.0.0.0 npm run dev`)。
+再让 uvicorn 加 `--host 0.0.0.0`(或 `BACKEND_HOST=0.0.0.0 npm run dev`)使 API 对外可达。
 
 ### 3 · 运行
 
