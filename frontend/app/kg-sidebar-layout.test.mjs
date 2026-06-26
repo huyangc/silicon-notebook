@@ -20,3 +20,15 @@ test("KG evidence text has its own wrapping block instead of a narrow flex row",
   assert.match(css, /overflow-wrap:\s*anywhere;/);
   assert.doesNotMatch(css, /\.kg-evidence\s*{[^}]*display:\s*flex;/s);
 });
+
+test("KG merge decisions optimistically remove the decided pending row", () => {
+  assert.match(page, /function mergePairKey\(candidate: PendingMerge\): string/);
+  assert.match(page, /async function decideMerge\(candidate: PendingMerge, confirm: boolean\)/);
+  assert.match(page, /const decidedPairKey = mergePairKey\(candidate\);/);
+  assert.match(page, /confirmMergeApi\(currentNotebookId, candidate\.id\)/);
+  assert.match(page, /rejectMergeApi\(currentNotebookId, candidate\.id\)/);
+  assert.match(page, /setPendingMerges\(\(items\) =>\s*\n\s*items\.filter\(\(item\) => item\.id !== candidate\.id && mergePairKey\(item\) !== decidedPairKey\)\s*\n\s*\);/);
+  assert.match(page, /setPendingMerges\(\s*\n\s*pend\.filter\(\(item\) => item\.id !== candidate\.id && mergePairKey\(item\) !== decidedPairKey\)\s*\n\s*\);/);
+  assert.match(page, /onClick=\{\(\) => decideMerge\(m, true\)\}/);
+  assert.match(page, /onClick=\{\(\) => decideMerge\(m, false\)\}/);
+});
