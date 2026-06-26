@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", env="RERANK_BASE_URL")
     rerank_api_key: str = Field("", env="RERANK_API_KEY")
     rerank_max_docs: int = Field(500, env="RERANK_MAX_DOCS")
+    # rerank 接口风格:dashscope=DashScope 原生 text-rerank(嵌套 input/output);
+    # openai=OpenAI 兼容(vLLM/Cohere 等)的 {base}/rerank(扁平 body、顶层 results)。
+    rerank_api_style: str = Field("dashscope", env="RERANK_API_STYLE")
     relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, env="RELATION_SEED_TOP_N")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
