@@ -79,13 +79,22 @@ cp .env.example .env
 
 `.env.example` 是权威、逐项带注释的完整变量清单;[配置](#配置)按组列出常用项。
 
-当前端与后端**不在**同一台 `127.0.0.1` 上时,在构建期设置前端的 API 基址,并在后端放行
-其来源:
+当前端与后端**不在**同一台 `127.0.0.1` 上时（例如部署到别的机器按 IP/域名访问的服务器），
+把前端指向后端可达的 URL,并在后端放行前端来源。地址要用浏览器实际访问的 host——
+**别用 `localhost`/`127.0.0.1`**(那在每个访客自己机器上解析,连不到服务器)。
 
 ```bash
-NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api    # 前端构建期 env
-SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000  # 后端 .env
+# 前端 — NEXT_PUBLIC_* 是构建期烘焙进包的。生产 `npm run build` 时放到
+# frontend/.env.local(或在 build 命令上传入);`npm run dev`(scripts/dev.sh)
+# 也会从仓库根 .env 读到。
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+
+# 后端(仓库根 .env)— 逗号分隔的允许来源列表。不能用 `*`(开了 credentials),
+# 必须写明确来源。
+SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 ```
+
+要让 API 对外可达,uvicorn 加 `--host 0.0.0.0`(或 `BACKEND_HOST=0.0.0.0 npm run dev`)。
 
 ### 3 · 运行
 

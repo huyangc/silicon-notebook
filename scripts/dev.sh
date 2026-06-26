@@ -20,8 +20,19 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Load the repo-root .env so BOTH processes see the same vars. The backend reads
+# it via pydantic regardless, but the Next.js frontend only reads frontend/.env*
+# — without this, NEXT_PUBLIC_API_BASE_URL set in the root .env never reaches it.
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090,SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
+# BACKEND_HOST=0.0.0.0 to expose the API beyond localhost (e.g. server deploys).
 cd "$ROOT_DIR/backend"
-"$PYTHON_BIN" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+"$PYTHON_BIN" -m uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 &
 BACKEND_PID=$!
 
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
