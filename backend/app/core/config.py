@@ -12,14 +12,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    environment: str = Field("development", env="SILICON_NOTEBOOK_ENV")
+    environment: str = Field("development", validation_alias="SILICON_NOTEBOOK_ENV")
     single_user_email: str = Field(
         "local-user@silicon-notebook.dev",
-        env="SILICON_NOTEBOOK_SINGLE_USER_EMAIL",
+        validation_alias="SILICON_NOTEBOOK_SINGLE_USER_EMAIL",
     )
     single_user_name: str = Field(
         "Local Curator",
-        env="SILICON_NOTEBOOK_SINGLE_USER_NAME",
+        validation_alias="SILICON_NOTEBOOK_SINGLE_USER_NAME",
     )
     # 用户系统：admin 初始密码（每次启动据此重置 admin 密码；改密=改此变量后重启）。
     admin_password: str = Field("admin", validation_alias="SILICON_NOTEBOOK_ADMIN_PASSWORD")
@@ -249,7 +249,7 @@ class Settings(BaseSettings):
         "sqlite:///.local/silicon_notebook.db",
         env="DATABASE_URL",
     )
-    storage_dir: str = Field(".local/storage", env="SILICON_NOTEBOOK_STORAGE_DIR")
+    storage_dir: str = Field(".local/storage", validation_alias="SILICON_NOTEBOOK_STORAGE_DIR")
     # NoDecode 让 pydantic-settings 不把环境变量当 JSON 解析（否则逗号串会崩），
     # 改由下面的 split_cors_origins(mode="before") 处理逗号分隔；validation_alias
     # 才能真正读到 SILICON_NOTEBOOK_CORS_ORIGINS（v2 下 Field(env=...) 会被忽略）。
