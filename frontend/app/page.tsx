@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelRightClose, Plus, Search, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -2601,13 +2601,6 @@ export default function Home() {
                     </>
                   )
                 )}
-                <div className="future-search">
-                  <strong>Network source scout</strong>
-                  <p>后续开放从网络环境中检索并添加来源。</p>
-                  <button className="future-search-button" disabled title="Coming soon">
-                    <Search size={18} /> Web · Fast Research
-                  </button>
-                </div>
                 <div className="source-list">
                   {sources.length === 0 ? (
                     <article className="source-empty">
