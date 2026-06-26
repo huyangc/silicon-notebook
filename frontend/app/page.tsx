@@ -628,6 +628,10 @@ const reviewPendingMergesApi = (nb: string) =>
     body: JSON.stringify({ limit: 50, auto_confirm_threshold: 0.95 }),
   });
 
+function mergePairKey(candidate: PendingMerge): string {
+  return [candidate.canonical_a, candidate.canonical_b].sort().join("\u0000");
+}
+
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
   if (size < 1024) return `${size} B`;
@@ -2069,14 +2073,21 @@ export default function Home() {
     try { setNodeCtx(await fetchNodeContext(currentNotebookId, nodeId)); } catch { /* node context best-effort */ }
   }
 
-  async function decideMerge(candidateId: string, confirm: boolean) {
+  async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId) return;
     try {
-      if (confirm) await confirmMergeApi(currentNotebookId, candidateId);
-      else await rejectMergeApi(currentNotebookId, candidateId);
+      const decidedPairKey = mergePairKey(candidate);
+      if (confirm) await confirmMergeApi(currentNotebookId, candidate.id);
+      else await rejectMergeApi(currentNotebookId, candidate.id);
+      setPendingMerges((items) =>
+        items.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
+      );
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
-      setUGraph(g); setPendingMerges(pend);
+      setUGraph(g);
+      setPendingMerges(
+        pend.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
+      );
       const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
       if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(currentNotebookId, selected.id).catch(() => null));
       else setConceptDetail(null);
@@ -3369,8 +3380,8 @@ export default function Home() {
                   <div className="kg-merge-row" key={m.id}>
                     <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
                     <span className="kg-merge-actions">
-                      <button onClick={() => decideMerge(m.id, true)}>合并</button>
-                      <button onClick={() => decideMerge(m.id, false)}>拒绝</button>
+                      <button onClick={() => decideMerge(m, true)}>合并</button>
+                      <button onClick={() => decideMerge(m, false)}>拒绝</button>
                     </span>
                   </div>
                 ))}
