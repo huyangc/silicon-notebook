@@ -25,13 +25,24 @@ def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
     return out or None
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+# Reasoning models (e.g. MiniMax-M2.7) emit a chain-of-thought block before the
+# JSON, inline in `content`, even under response_format=json_object.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 def strip_json_fences(text: str) -> str:
-    """Remove ```json ... ``` / ``` ... ``` markdown fences some models add."""
+    """Normalize a model's JSON reply so json.loads won't choke:
+    strip <think>...</think> chain-of-thought, drop ```json ... ``` fences, and
+    fall back to the outermost {...} if anything still leads the JSON."""
     cleaned = (text or "").strip()
+    cleaned = _THINK_RE.sub("", cleaned).strip()
     if cleaned.startswith("```"):
         cleaned = _FENCE_RE.sub("", cleaned).strip()
+    # Trim anything outside the outermost JSON object (leading prose, trailing
+    # remarks). Reply schemas here are all objects, so locking onto {...} is safe.
+    i, j = cleaned.find("{"), cleaned.rfind("}")
+    if i != -1 and j > i:
+        cleaned = cleaned[i:j + 1]
     return cleaned
 
 

@@ -83,7 +83,14 @@ def make_client(env_prefix: str = "") -> KGClient:
 def safe_json(raw: str) -> dict:
     if not raw:
         return {}
-    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    t = raw.strip()
+    # Reasoning models (e.g. MiniMax) prepend a <think>...</think> block before
+    # the JSON, inline in `content`, even under response_format=json_object.
+    t = re.sub(r"<think>.*?</think>", "", t, flags=re.IGNORECASE | re.DOTALL).strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t).strip()
+    i, j = t.find("{"), t.rfind("}")
+    if i != -1 and j > i:
+        t = t[i:j + 1]
     try:
         out = json.loads(t)
         return out if isinstance(out, dict) else {}
