@@ -82,24 +82,35 @@ retrieval, no LLM extraction or answers). To enable full functionality, set at m
 `.env.example` is the authoritative, fully-commented list of every variable;
 [Configuration](#configuration) groups the common ones.
 
-When the frontend and backend are **not** co-located on `127.0.0.1` (e.g. a server other
-machines reach by IP or hostname), point the frontend at the backend's reachable URL and
-allow the frontend's origin on the backend. Use the host browsers actually use — never
-`localhost`/`127.0.0.1`, which resolve to each visitor's own machine.
+**Remote access — note the browser is on a *different* machine** than the server, so it
+cannot use `localhost`/`127.0.0.1` (those resolve to each visitor's own machine).
+
+**Recommended for a single co-located server (same-origin proxy):** the Next.js frontend
+proxies `/api/*` to the local backend (`frontend/next.config.mjs`), so browsers only ever
+talk to the frontend's origin. Point the frontend at a relative `/api` — then you need **no
+CORS config** and **don't expose the backend port**:
 
 ```bash
-# frontend — NEXT_PUBLIC_* is baked in at BUILD time. For a production `npm run build`,
-# put this in frontend/.env.local (or pass it on the build command). `npm run dev`
-# (scripts/dev.sh) also picks it up from the repo-root .env.
-NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+# frontend/.env.local  (NEXT_PUBLIC_* is baked at BUILD time → rebuild after changing)
+NEXT_PUBLIC_API_BASE_URL=/api
+```
 
-# backend (repo-root .env) — comma-separated list of allowed frontend origins.
-# `*` is NOT allowed (credentials are enabled); list the exact origin(s).
+The backend can stay on `127.0.0.1:8000` (the proxy reaches it locally); only the frontend
+port needs to be network-reachable. Set `BACKEND_PROXY_TARGET` if the backend isn't on
+`127.0.0.1:8000`.
+
+**Alternative — frontend and backend on different hosts (two-origin, direct):** point the
+frontend at the backend's reachable URL and allow its origin on the backend:
+
+```bash
+# frontend/.env.local  (baked at build time)
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+# backend repo-root .env — comma-separated allowed origins; `*` not allowed (credentials on)
 SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 ```
 
-To expose the API beyond localhost, run uvicorn with `--host 0.0.0.0` (or
-`BACKEND_HOST=0.0.0.0 npm run dev`).
+Then run uvicorn with `--host 0.0.0.0` (or `BACKEND_HOST=0.0.0.0 npm run dev`) so the API is
+reachable from other machines.
 
 ### 3 · Run
 
