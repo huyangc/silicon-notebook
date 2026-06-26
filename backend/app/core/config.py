@@ -1,8 +1,8 @@
 from functools import lru_cache
-from typing import List
+from typing import Annotated, List
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -250,14 +250,17 @@ class Settings(BaseSettings):
         env="DATABASE_URL",
     )
     storage_dir: str = Field(".local/storage", env="SILICON_NOTEBOOK_STORAGE_DIR")
-    cors_origins: List[str] = Field(
+    # NoDecode 让 pydantic-settings 不把环境变量当 JSON 解析（否则逗号串会崩），
+    # 改由下面的 split_cors_origins(mode="before") 处理逗号分隔；validation_alias
+    # 才能真正读到 SILICON_NOTEBOOK_CORS_ORIGINS（v2 下 Field(env=...) 会被忽略）。
+    cors_origins: Annotated[List[str], NoDecode] = Field(
         [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://localhost:3001",
             "http://127.0.0.1:3001",
         ],
-        env="SILICON_NOTEBOOK_CORS_ORIGINS",
+        validation_alias="SILICON_NOTEBOOK_CORS_ORIGINS",
     )
 
     @field_validator("cors_origins", mode="before")

@@ -82,13 +82,24 @@ retrieval, no LLM extraction or answers). To enable full functionality, set at m
 `.env.example` is the authoritative, fully-commented list of every variable;
 [Configuration](#configuration) groups the common ones.
 
-When the frontend and backend are **not** co-located on `127.0.0.1`, set the frontend's
-API base at build time and allow its origin on the backend:
+When the frontend and backend are **not** co-located on `127.0.0.1` (e.g. a server other
+machines reach by IP or hostname), point the frontend at the backend's reachable URL and
+allow the frontend's origin on the backend. Use the host browsers actually use — never
+`localhost`/`127.0.0.1`, which resolve to each visitor's own machine.
 
 ```bash
-NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api    # frontend build-time env
-SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000  # backend .env
+# frontend — NEXT_PUBLIC_* is baked in at BUILD time. For a production `npm run build`,
+# put this in frontend/.env.local (or pass it on the build command). `npm run dev`
+# (scripts/dev.sh) also picks it up from the repo-root .env.
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+
+# backend (repo-root .env) — comma-separated list of allowed frontend origins.
+# `*` is NOT allowed (credentials are enabled); list the exact origin(s).
+SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 ```
+
+To expose the API beyond localhost, run uvicorn with `--host 0.0.0.0` (or
+`BACKEND_HOST=0.0.0.0 npm run dev`).
 
 ### 3 · Run
 
