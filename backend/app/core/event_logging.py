@@ -35,7 +35,7 @@ def new_id(prefix: str = "ev") -> str:
 _log_owner: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
     "log_owner", default=None)
 
-_OWNER_RE = re.compile(r"^[a-z]00\d{6}$")
+_OWNER_RE = re.compile(r"^user-[a-z0-9]+$")
 
 
 def set_log_owner(owner: "str | None"):
@@ -51,14 +51,15 @@ def get_log_owner() -> "str | None":
 
 
 def is_safe_owner(owner: str) -> bool:
-    """owner 子目录名白名单：注册用户 id（^[a-z]00\\d{6}$）、内置 user-local、系统兜底
-    _system。用于读取侧防路径穿越。"""
-    return owner in ("user-local", "_system") or bool(_OWNER_RE.match(owner or ""))
+    """owner 子目录名白名单：owner = user.id，形如 user-local（seeded admin）或
+    user-<hex>（注册用户）；外加系统兜底 _system。禁 / 和 .. 防路径穿越。"""
+    return owner == "_system" or bool(_OWNER_RE.match(owner or ""))
 
 
 def owner_dir(owner: "str | None") -> str:
-    """把当前 owner 映射到日志子目录名。空/未设 → 'user-local'（离线/本地即 seeded
-    admin）；非法（理论不出现，owner 来自 user.id）→ '_system' 兜底。"""
+    """把当前 owner 映射到日志子目录名。owner 必须是 user.id（user-local 或 user-<hex>）。
+    空/未设 → 'user-local'（离线/本地即 seeded admin）；非法（username 等非 id 值）→
+    '_system' 兜底。"""
     if not owner:
         return "user-local"
     return owner if is_safe_owner(owner) else "_system"
