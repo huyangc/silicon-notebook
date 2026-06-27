@@ -24,20 +24,18 @@ def new_interaction_id() -> str:
 
 class LLMInteractionLogger:
     def __init__(self, settings: Settings):
-        # Reuse EventLogger's single write/console implementation, but honor the
-        # dedicated LLM settings (path + enable flag) for backward compatibility.
-        self._events = EventLogger(settings, channel="llm")
+        # Reuse EventLogger's single write/console implementation in per-user mode;
+        # honor the dedicated LLM settings (path + enable flag) for backward compat.
+        self._events = EventLogger(settings, channel="llm", per_user=True)
         self._events.enabled = settings.llm_log_enabled
         self._events.max_chars = max(0, int(settings.llm_log_max_chars))
         path = Path(settings.llm_log_path)
         if not path.is_absolute():
             path = _ROOT_DIR / path
-        self._events.path = path
-        if self._events.enabled:
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-            except Exception:  # pragma: no cover - never break startup
-                self._events.logger.warning("could not create llm log dir at %s", path.parent)
+        # per-user：base_dir + filename 取自 llm_log_path；owner 子目录在 emit 按需建。
+        self._events.log_dir = path.parent
+        self._events.filename = path.name
+        self._events.path = path  # 兼容属性（.path 仍被 smoke / llm.py 读取）
 
     # Backward-compatible surface used by the smoke tests and llm.py.
     @property

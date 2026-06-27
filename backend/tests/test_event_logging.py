@@ -74,3 +74,38 @@ def test_set_request_user_syncs_log_owner(tmp_path):
     finally:
         reset_request_user(tok)
     assert get_log_owner() is None
+
+
+def test_llm_logger_per_user(tmp_path):
+    from app.core.config import Settings
+    from app.core.llm_logging import LLMInteractionLogger
+    s = Settings(
+        llm_log_path=str(tmp_path / "logs" / "llm.jsonl"),
+        llm_log_enabled=True,
+    )
+    logger = LLMInteractionLogger(s)
+    tok = set_log_owner("user-3a8f9c2b1d")
+    try:
+        logger.log({"kind": "chat", "model": "m", "status": "ok", "latency_ms": 1})
+    finally:
+        reset_log_owner(tok)
+    assert (tmp_path / "logs" / "user-3a8f9c2b1d" / "llm.jsonl").exists()
+    assert not (tmp_path / "logs" / "llm.jsonl").exists()
+
+
+def test_repo_event_log_is_per_user(tmp_path):
+    from app.core.config import Settings
+    from app.services.sqlite_repository import (
+        SQLiteRepository, set_request_user, reset_request_user,
+    )
+    repo = SQLiteRepository(Settings(
+        database_url=f"sqlite:///{tmp_path}/t.db",
+        event_log_dir=str(tmp_path / "logs"),
+    ))
+    user = repo.create_user("a00123456", "pw")
+    tok = set_request_user(user)
+    try:
+        repo.event_log.emit({"kind": "k", "status": "ok"})
+    finally:
+        reset_request_user(tok)
+    assert (tmp_path / "logs" / user.id / "events.jsonl").exists()
