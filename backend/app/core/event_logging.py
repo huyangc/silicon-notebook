@@ -65,6 +65,19 @@ def owner_dir(owner: "str | None") -> str:
     return owner if is_safe_owner(owner) else "_system"
 
 
+def _anchor(p: "str | Path") -> Path:
+    """相对路径锚定到仓库根（与 EventLogger 解析 log_dir 的规则一致）。"""
+    p = Path(p)
+    return p if p.is_absolute() else _ROOT_DIR / p
+
+
+def llm_log_dir_aligned(llm_log_path: "str | Path", event_log_dir: "str | Path") -> bool:
+    """per-user llm 日志写在 dirname(llm_log_path)/<owner>/，而 debug_logs 按
+    event_log_dir/<owner>/ 读；两者锚定到仓库根后须指向同一目录，否则查看器读不到
+    per-user 的 llm 日志。相对/绝对混用时必须先锚定再比较（字符串比较会误报）。"""
+    return _anchor(llm_log_path).parent.resolve() == _anchor(event_log_dir).resolve()
+
+
 class EventLogger:
     def __init__(self, settings: Settings, channel: str = "events", *, per_user: bool = False):
         self.channel = channel
