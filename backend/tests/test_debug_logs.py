@@ -3,21 +3,30 @@ import json
 from fastapi.testclient import TestClient
 
 
-def _make_client(tmp_path, monkeypatch, *, enabled=True, lines=None, channel="llm"):
+def _make_client(tmp_path, monkeypatch, *, enabled=True, lines=None, channel="llm", owner="user-local"):
     logs = tmp_path / "logs"
-    logs.mkdir(exist_ok=True)
+    (logs / owner).mkdir(parents=True, exist_ok=True)
     if lines is not None:
-        (logs / f"{channel}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (logs / owner / f"{channel}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setenv("EVENT_LOG_DIR", str(logs))  # absolute -> used as-is
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")  # 隔离 DB（seeded admin=user-local）
     if enabled is not None:
         monkeypatch.setenv("DEBUG_LOGS_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     from app.core.config import get_settings
-
     get_settings.cache_clear()
+    from app.api import deps
+    deps.repository.cache_clear()
     from app.main import create_app
-
     return TestClient(create_app())
+
+
+def _login(username="a00123456"):
+    """在 client 的同一 tmp DB 单例里造用户并发 session token。返回 (user, token)。"""
+    from app.api import deps
+    repo = deps.repository()
+    user = repo.create_user(username, "pw")
+    return user, repo.create_session(user.id)
 
 
 CHAT = json.dumps({
@@ -116,3 +125,50 @@ def test_list_channels_count_excludes_malformed(tmp_path, monkeypatch):
     chans = {ch["name"]: ch for ch in c.get("/api/debug/logs").json()["channels"]}
     assert chans["llm"]["count"] == 2  # parsed records only; matches stats.total
     assert c.get("/api/debug/logs/llm").json()["stats"]["total"] == 2
+
+
+def test_normal_user_sees_only_own(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=None)
+    user, token = _login("a00123456")
+    (tmp_path / "logs" / user.id).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs" / user.id / "llm.jsonl").write_text(CHAT + "\n", encoding="utf-8")
+    h = {"Authorization": f"Bearer {token}"}
+    body = c.get("/api/debug/logs/llm", headers=h).json()
+    assert [r["id"] for r in body["records"]] == ["llm-a"]
+
+
+def test_normal_user_cannot_read_others_owner(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=None)
+    user, token = _login("a00123456")
+    h = {"Authorization": f"Bearer {token}"}
+    # 合法 id 形态但不是自己 → 403（非 admin）
+    assert c.get("/api/debug/logs/llm?owner=user-deadbeef01", headers=h).status_code == 403
+
+
+def test_admin_can_read_any_owner(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=None)  # 无 token → seeded admin
+    (tmp_path / "logs" / "user-deadbeef01").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs" / "user-deadbeef01" / "llm.jsonl").write_text(CHAT + "\n", encoding="utf-8")
+    body = c.get("/api/debug/logs/llm?owner=user-deadbeef01").json()
+    assert [r["id"] for r in body["records"]] == ["llm-a"]
+
+
+def test_requests_channel_admin_only(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=None)
+    user, token = _login("a00123456")
+    h = {"Authorization": f"Bearer {token}"}
+    assert c.get("/api/debug/logs/requests", headers=h).status_code == 403
+    assert c.get("/api/debug/logs/requests").status_code == 200  # admin（无 token）可读
+
+
+def test_admin_owner_traversal_rejected(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=None)
+    assert c.get("/api/debug/logs/llm?owner=../../etc").status_code == 404
+
+
+def test_requests_channel_hidden_from_normal_user_list(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, lines=None)
+    user, token = _login("a00123456")
+    h = {"Authorization": f"Bearer {token}"}
+    names = {ch["name"] for ch in c.get("/api/debug/logs", headers=h).json()["channels"]}
+    assert "requests" not in names and {"events", "llm"} <= names
