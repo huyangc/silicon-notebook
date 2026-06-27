@@ -45,6 +45,22 @@ def load_records(path: Path) -> Tuple[List[Dict[str, Any]], int]:
     return records, malformed
 
 
+def expand_channel_paths(channel_file: Path) -> List[Path]:
+    """给定全局 channel 文件路径（如 .../logs/events.jsonl），返回:
+      1) 该全局文件本身（若存在，兼容历史日志），
+      2) 所有 per-user 子目录的同名文件（.../logs/*/events.jsonl，按路径排序）。
+    供 eval / 离线聚合读取所有用户的日志。不递归、不混入其它 channel。"""
+    channel_file = Path(channel_file)
+    log_dir = channel_file.parent
+    name = channel_file.name
+    out: List[Path] = []
+    if channel_file.exists():
+        out.append(channel_file)
+    if log_dir.exists():
+        out.extend(sorted(log_dir.glob(f"*/{name}")))
+    return out
+
+
 def _text_blob(rec: Dict[str, Any]) -> str:
     parts: List[str] = []
     req = rec.get("request") or {}

@@ -109,3 +109,19 @@ def test_repo_event_log_is_per_user(tmp_path):
     finally:
         reset_request_user(tok)
     assert (tmp_path / "logs" / user.id / "events.jsonl").exists()
+
+
+def test_expand_channel_paths(tmp_path):
+    from app.services.log_reader import expand_channel_paths
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events.jsonl").write_text("legacy\n", encoding="utf-8")           # 旧全局
+    (logs / "user-3a8f9c2b1d").mkdir()
+    (logs / "user-3a8f9c2b1d" / "events.jsonl").write_text("u1\n", encoding="utf-8")
+    (logs / "user-local").mkdir()
+    (logs / "user-local" / "events.jsonl").write_text("u2\n", encoding="utf-8")
+    (logs / "user-3a8f9c2b1d" / "llm.jsonl").write_text("x\n", encoding="utf-8")  # 不应混入
+
+    paths = expand_channel_paths(logs / "events.jsonl")
+    rels = [str(p.relative_to(logs)) for p in paths]
+    assert rels == ["events.jsonl", "user-3a8f9c2b1d/events.jsonl", "user-local/events.jsonl"]
