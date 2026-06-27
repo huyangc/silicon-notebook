@@ -175,12 +175,19 @@ _REQUEST_USER: "contextvars.ContextVar[UserProfile | None]" = contextvars.Contex
 
 
 def set_request_user(user: "UserProfile | None"):
-    """设当前请求用户，返回 token 供 reset_request_user 复位。"""
-    return _REQUEST_USER.set(user)
+    """设当前请求用户，返回 token 供 reset_request_user 复位。
+    同步设置 core 层 _log_owner，使 per-user 日志写入对应用户子目录。"""
+    from app.core.event_logging import set_log_owner
+    tok_user = _REQUEST_USER.set(user)
+    tok_owner = set_log_owner(user.username if user is not None else None)
+    return (tok_user, tok_owner)
 
 
 def reset_request_user(token) -> None:
-    _REQUEST_USER.reset(token)
+    from app.core.event_logging import reset_log_owner
+    tok_user, tok_owner = token
+    _REQUEST_USER.reset(tok_user)
+    reset_log_owner(tok_owner)
 
 
 class _UnconfiguredLLMClient:
