@@ -56,3 +56,19 @@ def test_non_per_user_writes_global(tmp_path):
         reset_log_owner(tok)
     assert (tmp_path / "events.jsonl").exists()        # 全局,忽略 owner
     assert not (tmp_path / "a00123456").exists()
+
+
+def test_set_request_user_syncs_log_owner(tmp_path):
+    from app.core.config import Settings
+    from app.services.sqlite_repository import (
+        SQLiteRepository, set_request_user, reset_request_user,
+    )
+    repo = SQLiteRepository(Settings(database_url=f"sqlite:///{tmp_path}/t.db"))
+    user = repo.create_user("a00123456", "pw")
+    assert get_log_owner() is None
+    tok = set_request_user(user)
+    try:
+        assert get_log_owner() == "a00123456"
+    finally:
+        reset_request_user(tok)
+    assert get_log_owner() is None
