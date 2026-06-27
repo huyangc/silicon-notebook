@@ -25,9 +25,15 @@ def parse_llm_log(path: str, since_ts: str) -> Dict[str, float]:
     lats: List[float] = []
     tokens = 0
     retries = 0
-    try:
-        raw = open(path, encoding="utf-8").read().splitlines()
-    except FileNotFoundError:
+    from pathlib import Path
+    from app.services.log_reader import expand_channel_paths
+    raw: List[str] = []
+    for p in expand_channel_paths(Path(path)):
+        try:
+            raw.extend(p.read_text(encoding="utf-8").splitlines())
+        except FileNotFoundError:
+            continue
+    if not raw:
         return {"calls": 0, "retries": 0, "latency_p50_s": 0.0,
                 "latency_p95_s": 0.0, "total_tokens": 0}
     for line in raw:

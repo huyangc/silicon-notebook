@@ -170,3 +170,14 @@ class TestReadAskStageRecords:
         )
         records = list(read_ask_stage_records(str(p)))
         assert len(records) == 1
+
+    def test_aggregates_owner_subdirs(self, tmp_path):
+        """全局文件不存在时，聚合读取所有用户子目录下的 events.jsonl。"""
+        (tmp_path / "user-3a8f9c2b1d").mkdir()
+        (tmp_path / "user-local").mkdir()
+        (tmp_path / "user-3a8f9c2b1d" / "events.jsonl").write_text(
+            json.dumps({"kind": "ask_stage", "stage": "score", "latency_ms": 10}) + "\n")
+        (tmp_path / "user-local" / "events.jsonl").write_text(
+            json.dumps({"kind": "ask_stage", "stage": "score", "latency_ms": 20}) + "\n")
+        recs = list(read_ask_stage_records(str(tmp_path / "events.jsonl")))
+        assert sorted(r["latency_ms"] for r in recs) == [10, 20]
