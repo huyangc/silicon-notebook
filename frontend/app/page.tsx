@@ -2279,6 +2279,15 @@ export default function Home() {
     llm: "主 LLM", reasoning_llm: "推理 LLM", rewrite_llm: "改写 LLM",
     kg_llm: "构图 LLM", rerank: "重排 Rerank",
   };
+  // Base URL 示例：只填到服务根地址（/v1），由后端自动拼接具体接口路径。
+  // 前四个走 OpenAI 兼容 /chat/completions；rerank 走 DashScope 原生服务路径。
+  const BASE_URL_PLACEHOLDERS: Record<ModelRole, string> = {
+    llm: "https://api.openai.com/v1",
+    reasoning_llm: "https://api.deepseek.com/v1",
+    rewrite_llm: "https://api.openai.com/v1",
+    kg_llm: "https://api.openai.com/v1",
+    rerank: "https://dashscope.aliyuncs.com/api/v1",
+  };
 
   async function openModelPanel() {
     setModelPanelOpen(true);
@@ -3676,11 +3685,16 @@ export default function Home() {
               <button className="icon-button" onClick={() => setModelPanelOpen(false)}>×</button>
             </div>
             <div className="source-detail-body">
+              <p className="tool-hint" style={{ margin: "0 0 12px" }}>
+                Base URL 只需填到服务根地址（通常以 <code>/v1</code> 结尾），系统会自动拼接 <code>/chat/completions</code> 等接口路径。
+                例如填 <code>https://api.openai.com/v1</code>，而不是 <code>https://api.openai.com/v1/chat/completions</code>。
+              </p>
               {MODEL_ROLES.map((role) => (
                 <fieldset key={role} className="edit-form" style={{ marginBottom: 12 }}>
                   <legend>{ROLE_LABELS[role]}</legend>
                   <label>Base URL
                     <input value={modelForms[role].base_url}
+                      placeholder={BASE_URL_PLACEHOLDERS[role]}
                       onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], base_url: e.target.value } }))} />
                   </label>
                   <label>Model
