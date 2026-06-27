@@ -254,7 +254,7 @@ class SQLiteRepository:
         self._user_rerank_clients: Dict[str, RerankClient] = {}
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
-        self.event_log = EventLogger(settings, channel="events")
+        self.event_log = EventLogger(settings, channel="events", per_user=True)
         if settings.reasoning_llm_partially_configured:
             self.event_log.logger.warning(
                 "REASONING_LLM_* 仅部分配置(base_url/api_key/model 需全填)，"
