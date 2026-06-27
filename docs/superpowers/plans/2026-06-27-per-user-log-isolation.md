@@ -10,6 +10,8 @@
 
 > **机制说明(对已批准 spec 的细化):** spec「写入侧设计」举例用「注入 `owner_resolver` 回调」。本计划改用 core 层 `_log_owner` ContextVar——因为 `OpenAICompatibleClient`(`core/llm.py:49`)会被实例化多次(主/推理/KG/per-user),每个都建自己的 `LLMInteractionLogger`,逐个注入 resolver 繁琐且易漏。ContextVar 方案行为完全等价(按 owner 分目录、无用户回退 `user-local`、`_system` 兜底、core 不依赖 service),且更 DRY。
 
+> **⚠️ 执行期修正(owner 键):** 实现时核实 `UserProfile.id` 是 `user-local`(seeded admin,`_seed` 升级 id 不变)或 `user-<10hex>`(注册用户,`create_user` 用 `uuid4().hex[:10]`);`a00123456` 是 `username`,非 id。数据层隔离(notebook owner / `current_user()` 查 `id='user-local'` / `user_can_access_notebook(nb, user.id)`)全部用 `user.id`,故日志 owner 键统一用 **`user.id`**(一致 + id 不可变)。相应地:`set_log_owner(user.id)`;owner 白名单正则改为 `^user-[a-z0-9]+$`(覆盖 `user-local` 与 `user-<hex>`,仍禁 `/`·`..` 防穿越);测试样例用 `user-...` 形态或直接断言 `== user.id`,不再硬编码 `a00123456`(username 不是合法 owner 键,应映射到 `_system`)。下文 Task 1/2/6 的正则与样例以此为准。
+
 ---
 
 ## File Structure
