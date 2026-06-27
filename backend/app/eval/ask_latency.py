@@ -88,33 +88,37 @@ def read_ask_stage_records(
     path: str,
     last_n: Optional[int] = None,
 ) -> Iterator[dict]:
-    """Stream ask_stage records from a JSONL file.
+    """Stream ask_stage records from a JSONL channel.
 
-    Skips malformed lines, blank lines, and records where
-    ``kind != "ask_stage"``.  Returns an empty iterator if the file does
-    not exist.
+    Aggregates the legacy global file (`path`) and all per-user subdir files
+    (`<log_dir>/*/<basename>`). Skips malformed/blank lines and records where
+    ``kind != "ask_stage"``. Empty iterator if nothing exists.
 
     Args:
-        path:   Path to the JSONL file (default: .local/logs/events.jsonl).
-        last_n: If given, only yield the last N matching records.
+        path:   Path to the global events JSONL file (default:
+                .local/logs/events.jsonl). Per-user subdirs beside it are
+                aggregated automatically.
+        last_n: If given, only yield the last N matching records (after merge).
     """
-    try:
-        raw_lines = Path(path).read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return
+    from app.services.log_reader import expand_channel_paths
 
     parsed: list[dict] = []
-    for line in raw_lines:
-        line = line.strip()
-        if not line:
-            continue
+    for p in expand_channel_paths(Path(path)):
         try:
-            rec = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+            raw_lines = p.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
             continue
-        if rec.get("kind") != "ask_stage":
-            continue
-        parsed.append(rec)
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if rec.get("kind") != "ask_stage":
+                continue
+            parsed.append(rec)
 
     if last_n is not None:
         parsed = parsed[-last_n:]
