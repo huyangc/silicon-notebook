@@ -179,7 +179,7 @@ def set_request_user(user: "UserProfile | None"):
     同步设置 core 层 _log_owner，使 per-user 日志写入对应用户子目录。"""
     from app.core.event_logging import set_log_owner
     tok_user = _REQUEST_USER.set(user)
-    tok_owner = set_log_owner(user.username if user is not None else None)
+    tok_owner = set_log_owner(user.id if user is not None else None)
     return (tok_user, tok_owner)
 
 
