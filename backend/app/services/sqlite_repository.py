@@ -259,6 +259,12 @@ class SQLiteRepository:
             self.event_log.logger.warning(
                 "REASONING_LLM_* 仅部分配置(base_url/api_key/model 需全填)，"
                 "推理搜索将回退到全局 OPENAI_COMPAT_* 模型。")
+        from app.core.event_logging import llm_log_dir_aligned
+        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
+            self.event_log.logger.warning(
+                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
+                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
+                settings.llm_log_path, settings.event_log_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}

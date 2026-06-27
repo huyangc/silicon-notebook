@@ -125,3 +125,41 @@ def test_expand_channel_paths(tmp_path):
     paths = expand_channel_paths(logs / "events.jsonl")
     rels = [str(p.relative_to(logs)) for p in paths]
     assert rels == ["events.jsonl", "user-3a8f9c2b1d/events.jsonl", "user-local/events.jsonl"]
+
+
+def test_llm_log_dir_aligned():
+    from app.core.event_logging import llm_log_dir_aligned, _ROOT_DIR
+    # 默认：llm_log_path 的父目录与 event_log_dir 都相对、锚定到同一处 → 对齐
+    assert llm_log_dir_aligned(".local/logs/llm.jsonl", ".local/logs") is True
+    # 自定义 LLM_LOG_PATH 到别处而 event_log_dir 仍默认 → 不对齐
+    assert llm_log_dir_aligned("/custom/dir/llm.jsonl", ".local/logs") is False
+    # 都绝对、同目录 → 对齐
+    assert llm_log_dir_aligned("/x/y/llm.jsonl", "/x/y") is True
+    # 相对 vs 绝对但指向同一处：必须锚定后比较（直接字符串比较会误判为不对齐）
+    assert llm_log_dir_aligned(str(_ROOT_DIR / ".local/logs/llm.jsonl"), ".local/logs") is True
+
+
+def test_repo_warns_on_log_dir_mismatch(tmp_path, caplog):
+    import logging
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    with caplog.at_level(logging.WARNING):
+        SQLiteRepository(Settings(
+            database_url=f"sqlite:///{tmp_path}/t.db",
+            event_log_dir=str(tmp_path / "logs"),
+            llm_log_path=str(tmp_path / "other" / "llm.jsonl"),  # 不同目录
+        ))
+    assert any("EVENT_LOG_DIR" in r.getMessage() for r in caplog.records)
+
+
+def test_repo_no_warn_when_log_dirs_aligned(tmp_path, caplog):
+    import logging
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    with caplog.at_level(logging.WARNING):
+        SQLiteRepository(Settings(
+            database_url=f"sqlite:///{tmp_path}/t.db",
+            event_log_dir=str(tmp_path / "logs"),
+            llm_log_path=str(tmp_path / "logs" / "llm.jsonl"),  # 对齐
+        ))
+    assert not any("EVENT_LOG_DIR" in r.getMessage() for r in caplog.records)
