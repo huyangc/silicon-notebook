@@ -209,17 +209,51 @@ if __name__ == "__main__":
 """
 
 
+def _coerce_content_list(value: object) -> List[dict] | None:
+    """Return *value* as a content_list, decoding a JSON string if needed.
+
+    MinerU v3.4 may hand back ``content_list`` as an un-parsed JSON **string**;
+    older versions return the list directly. Anything else yields ``None``.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    if isinstance(value, list):
+        return value
+    return None
+
+
 def _extract_content_list(payload: object) -> List[dict]:
-    """Pull the content_list out of mineru-api's per-file response dict."""
+    """Pull the content_list out of mineru-api's per-file response dict.
+
+    MinerU v3.4 wraps results in ``{"results": {"file.pdf": {"content_list": …}}}``
+    where *content_list* may be a JSON **string** (not yet parsed). Older versions
+    returned the list directly or keyed by filename at the top level. All layouts
+    are handled here.
+    """
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
-        if isinstance(payload.get("content_list"), list):
-            return payload["content_list"]
-        # mineru-api keys the result by filename: {"doc.pdf": {"content_list": [...]}}
+        # v3.4 async-style wrapper: {"results": {"file.pdf": {"content_list": ...}}}
+        results = payload.get("results")
+        if isinstance(results, dict):
+            for value in results.values():
+                if isinstance(value, dict):
+                    cl = _coerce_content_list(value.get("content_list"))
+                    if cl is not None:
+                        return cl
+        # Direct content_list at top level
+        top_cl = _coerce_content_list(payload.get("content_list"))
+        if top_cl is not None:
+            return top_cl
+        # Older mineru-api keys the result by filename: {"doc.pdf": {"content_list": [...]}}
         for value in payload.values():
-            if isinstance(value, dict) and isinstance(value.get("content_list"), list):
-                return value["content_list"]
+            if isinstance(value, dict):
+                cl = _coerce_content_list(value.get("content_list"))
+                if cl is not None:
+                    return cl
     raise RuntimeError("MinerU response did not contain a content_list")
 
 

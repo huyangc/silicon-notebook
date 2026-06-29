@@ -2,8 +2,10 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app.core.config import Settings
-from app.services.mineru_client import MinerUClient
+from app.services.mineru_client import MinerUClient, _extract_content_list
 
 
 def _cli_client(monkeypatch):
@@ -50,6 +52,37 @@ def test_cli_office_uses_mineru_command(monkeypatch, tmp_path):
     assert FakePopen.captured_cmd[0] == "mineru"
     assert "-p" in FakePopen.captured_cmd and "-o" in FakePopen.captured_cmd
     assert out == [{"type": "text", "text": "ok", "page_idx": 0}]
+
+
+_BLOCKS = [{"type": "text", "text": "ok", "page_idx": 0}]
+
+
+def test_extract_v34_results_wrapper_with_json_string():
+    # MinerU v3.4：{"results": {"file.pdf": {"content_list": "<json string>"}}}
+    payload = {"results": {"doc.pdf": {"content_list": json.dumps(_BLOCKS)}}}
+    assert _extract_content_list(payload) == _BLOCKS
+
+
+def test_extract_v34_results_wrapper_with_list():
+    payload = {"results": {"doc.pdf": {"content_list": _BLOCKS}}}
+    assert _extract_content_list(payload) == _BLOCKS
+
+
+def test_extract_top_level_json_string():
+    assert _extract_content_list({"content_list": json.dumps(_BLOCKS)}) == _BLOCKS
+
+
+def test_extract_legacy_keyed_by_filename():
+    assert _extract_content_list({"doc.pdf": {"content_list": _BLOCKS}}) == _BLOCKS
+
+
+def test_extract_bare_list():
+    assert _extract_content_list(_BLOCKS) == _BLOCKS
+
+
+def test_extract_missing_content_list_raises():
+    with pytest.raises(RuntimeError, match="did not contain a content_list"):
+        _extract_content_list({"results": {"doc.pdf": {"md": "x"}}})
 
 
 def test_cli_pdf_still_uses_do_parse_script(monkeypatch, tmp_path):
