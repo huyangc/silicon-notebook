@@ -139,8 +139,8 @@ bash scripts/check.sh                        # 后端离线 smoke + 前端测试
 
 1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
 2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。
-3. 后端：结构化 Markdown 解析 → KG 抽取（Concept / Claim / Formula / Procedure）经**全局抽取池**并发——窗口并发由 `KG_EXTRACT_WORKERS` 跨所有文档封顶、文档并发由 `KG_JOB_CONCURRENCY` 控制，元素向量化同时在后台 daemon 线程并发执行。
-4. 来源在 KG 抽取完成后立即变绿（`extracted`）——无需等待向量化完成。
+3. 后端（异步后台作业）：结构化 Markdown 解析 → 分块 + 向量化——源处理完即可做 chunk-native 问答。
+4. **KG 抽取按需触发**（见下方「KG 抽取触发」）：摄取期仅当该 notebook 已有 KG、或 `KG_AUTO_EXTRACT=true` 时才抽。抽取发生时经**全局抽取池**并发——窗口并发由 `KG_EXTRACT_WORKERS` 跨所有文档封顶、文档并发由 `KG_JOB_CONCURRENCY` 控制——抽完的新源随后增量融入统一 KG。
 5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
 6. 混合检索（bi-gram 关键词 + float32 矩阵语义）驱动 KG-native 问答：答案含逐句 `[k_i]` 引用，支持多轮会话，并沿 KG 关系做 1-hop 邻居扩展。
 7. 统一 KG 跨文档聚合概念；待合并的跨文档概念对可逐一确认或拒绝。
@@ -154,6 +154,22 @@ bash scripts/check.sh                        # 后端离线 smoke + 前端测试
 - Studio 类文章研究、思维导图/信息图生成、派生规则审核、治理**晋升队列**（把个人 KG 节点申请晋升到基准语料，并批准/拒绝待审请求）、**基准库/个人层切换**，以及**边审查队列**（按「高中心性 × 低可信」排序确认/拒绝关系，被拒边从图推理中排除）仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
 
 notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
+
+## KG 抽取触发
+
+源解析 + 向量化完成后即可做 chunk-native 检索，因此 **KG 抽取按 notebook「按需开启」，并非每次上传都抽**：
+
+| 上传时 notebook 状态 | 是否抽 KG | 怎么触发 |
+|---|---|---|
+| 尚无 KG（新库） | **不**自动抽 | 按需构建：`POST /api/notebooks/{id}/kg/build`（界面：notebook 的**「构建知识图谱」**动作；在无 KG 的库上选严格推理模式时也会提示构建） |
+| 已有 KG | 每个新源**自动后台抽取** | 无需手动触发——续抽以保持 KG 完整；新源随后增量融入跨文档统一 KG |
+
+摄取期判定 = `KG_AUTO_EXTRACT 或 该 notebook 已有 KG`：
+
+- `KG_AUTO_EXTRACT`（默认 `false`）——为 `true` 时**所有** notebook 每次上传都抽 KG。
+- 否则仅当该 notebook 已有 KG 对象时，上传才抽。
+
+即：**首次 opt-in**（构建 KG，或设 `KG_AUTO_EXTRACT=true`），之后新文档自动抽取 + 融合。整库重抽用 `POST /api/notebooks/{id}/kg/rebuild`；离线批量构建见「离线批量摄取」一节。
 
 ## 检索模式（问答）
 
@@ -231,6 +247,8 @@ EMBED_CONCURRENCY       # 并发嵌入线程数（默认 8；温和值，防 429
 **KG 抽取并发与窗口化：**
 
 ```text
+KG_AUTO_EXTRACT             # 所有 notebook 每次上传都抽 KG（默认 false）；为 false 时，
+                            # 若该 notebook 已有 KG，新源仍自动续抽（首次 opt-in，之后自动维护）
 KG_EXTRACT_WORKERS          # 全局并发抽取窗口(LLM 调用)上限，跨所有文档共享(文档内+文档间)（默认 16）
 KG_JOB_CONCURRENCY          # 同时抽取的文档数(作业池)；各文档窗口共享上面的全局预算（默认 8）
 KG_ASK_RESERVE              # 为交互式 Ask 预留的 LLM 连接数，抽取打满时 Ask 不被饿死；连接池=WORKERS+RESERVE（默认 64）
