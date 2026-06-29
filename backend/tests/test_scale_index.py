@@ -85,3 +85,20 @@ def test_scale_ppr_topk_matches_rustworkx():
 
     assert set(rx_rank[:10]) >= set(scale_rank[:3])
     assert len(set(rx_rank[:10]) & set(scale_rank[:10])) >= 8
+
+
+from app.services.kg.scale_index import splice_active, build_transition
+
+
+def test_splice_active_unifies_shared_node_and_keeps_bridge():
+    base_ids = ["K-mosfet", "c1"]
+    base_edges = [("K-mosfet", "c1", 1.0), ("c1", "K-mosfet", 1.0)]
+    base_A, _ = build_transition(base_ids, base_edges)
+    active_ids = ["K-mosfet", "c2"]
+    active_edges = [("K-mosfet", "c2", 1.0), ("c2", "K-mosfet", 1.0)]
+    ids, A = splice_active(base_ids, base_A, active_ids, active_edges)
+    assert set(ids) == {"K-mosfet", "c1", "c2"}
+    index = {n: i for i, n in enumerate(ids)}
+    dense = A.toarray()
+    assert dense[index["c1"], index["K-mosfet"]] > 0
+    assert dense[index["c2"], index["K-mosfet"]] > 0
