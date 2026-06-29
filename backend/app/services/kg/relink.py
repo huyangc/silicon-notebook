@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 # relink 只产出这两种边(固定边词汇的安全子集)。
 _ABOUT = "about"
@@ -44,10 +44,6 @@ def _element_ids(node: Dict) -> set:
     """读 element_ids 为 set(容忍 None / 任意 iterable)。"""
     raw = node.get("element_ids") or ()
     return set(raw)
-
-
-def _edge_key(src: str, tgt: str, edge_type: str) -> Tuple[str, str, str]:
-    return (src, tgt, edge_type)
 
 
 def _shared_edge(n: Dict, m: Dict) -> Tuple[str, str, str] | None:
@@ -133,7 +129,7 @@ def complete_isolated_edges(
             return False
         if _at_cap(src) or _at_cap(tgt):
             return False
-        key = _edge_key(src, tgt, edge_type)
+        key = (src, tgt, edge_type)
         if key in emitted_keys:
             return False
         if frozenset((src, tgt)) in existing_pairs:   # 有向去重:反向已存在亦跳过
@@ -187,6 +183,8 @@ def complete_isolated_edges(
                     emitted_for_n += 1
 
         # --- Rule 2: name-in-text(仅当 N 仍孤立 + 启用 + N 为 claim/formula)---
+        # 注意:concept 节点不发起 name-match——about 方向由 claim/formula 端驱动,
+        # 故孤立的 concept 只能靠 rule-1 共享元素重连(rule-2 永不以 concept 为 N)。
         if (
             emitted_for_n == 0
             and enable_name_match
