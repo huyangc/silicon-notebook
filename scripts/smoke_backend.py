@@ -573,7 +573,8 @@ def check_api_layer() -> None:
         nid = nb["id"]
         assert ok("GET", "/api/notebooks")
         ok("GET", f"/api/notebooks/{nid}")
-        assert ok("GET", f"/api/notebooks/{nid}/sources") == []
+        _srcs = ok("GET", f"/api/notebooks/{nid}/sources")  # 分页 shape:{items,total_count,...}
+        assert _srcs["items"] == [] and _srcs["total_count"] == 0
 
         # Two-tier: set tier to base, then back to personal, via the REST route.
         assert ok("GET", f"/api/notebooks/{nid}")["tier"] == "personal"
