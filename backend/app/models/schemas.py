@@ -62,6 +62,13 @@ class SourceSummary(BaseModel):
     extraction_warning: Optional[str] = None
 
 
+class PaginatedSources(BaseModel):
+    items: List[SourceSummary]
+    total_count: int
+    offset: int
+    limit: int
+
+
 class SourceImportFile(BaseModel):
     file_name: str
     file_size: int = 0

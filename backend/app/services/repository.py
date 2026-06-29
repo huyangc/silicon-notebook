@@ -28,6 +28,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    PaginatedSources,
     RuleCard,
     SourceDetail,
     SourceElement,
@@ -67,6 +68,8 @@ class NotebookRepository(Protocol):
     ) -> str: ...
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]: ...
+
+    def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50, q: str = "") -> PaginatedSources: ...
 
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]: ...
 
