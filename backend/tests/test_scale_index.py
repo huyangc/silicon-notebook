@@ -102,3 +102,24 @@ def test_splice_active_unifies_shared_node_and_keeps_bridge():
     dense = A.toarray()
     assert dense[index["c1"], index["K-mosfet"]] > 0
     assert dense[index["c2"], index["K-mosfet"]] > 0
+
+
+import time
+import pytest
+
+
+@pytest.mark.slow
+def test_personalized_ppr_scales_to_1e5():
+    n, m = 100_000, 1_000_000
+    rng = np.random.default_rng(1)
+    rows = rng.integers(0, n, m); cols = rng.integers(0, n, m)
+    A = sp.csr_matrix((np.ones(m), (rows, cols)), shape=(n, n))
+    colsum = np.asarray(A.sum(0)).ravel(); colsum[colsum == 0] = 1
+    A = (A @ sp.diags(1.0 / colsum)).tocsr()
+    reset = np.zeros(n); reset[rng.integers(0, n, 50)] = 1.0
+    t = time.perf_counter()
+    x = personalized_ppr(A, reset, damping=0.5, tol=1e-6, max_iter=100)
+    dt = time.perf_counter() - t
+    assert abs(x.sum() - 1.0) < 1e-6
+    assert dt < 10.0
+    print(f"\n[scale] personalized_ppr 1e5 nodes / 1e6 edges: {dt:.3f}s")
