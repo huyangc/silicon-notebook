@@ -5401,12 +5401,13 @@ class SQLiteRepository:
                 ann_ids = list(ids)
                 ann_matrix = mat
 
-        # Build node_ids list: kg nodes first, then chunk nodes
+        # Build node_ids list: kg nodes first, then chunk nodes, then cluster hubs
         node_ids = list(kg_nodes.keys()) + chunk_ids
         kg_id_set = set(kg_nodes.keys())
         chunk_id_set = set(chunk_ids)
 
-        # chunk_index: indices of chunk nodes in node_ids
+        # chunk_index: indices of chunk nodes in node_ids (computed before adding
+        # cluster hub nodes so chunk positions are stable)
         id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
         chunk_index = [id_to_idx[cid] for cid in chunk_ids if cid in id_to_idx]
 
@@ -5440,6 +5441,24 @@ class SQLiteRepository:
             _add_undirected(oid, cid, 1.0)
         for a, b, w in extra_edges:
             _add_undirected(a, b, w)
+
+        # Cluster synonym bridges: add a virtual hub node "cluster:{canonical_id}"
+        # for each concept cluster that has ≥1 member present in node_ids.
+        # These nodes are NOT chunks and NOT kg entities — they serve purely as
+        # synonym routers so PPR mass flows between same-concept nodes from
+        # different documents (mirrors build_ppr_graph's hub logic in ppr.py:91-98).
+        node_ids_set = set(node_ids)
+        for canonical_id, members in cluster_groups.items():
+            present = [m for m in members if m in node_ids_set]
+            if not present:
+                continue
+            hub_id = f"cluster:{canonical_id}"
+            if hub_id not in node_ids_set:
+                node_ids.append(hub_id)
+                node_ids_set.add(hub_id)
+                idf.append(1.0)  # hub nodes are not KG entities; IDF = 1.0
+            for m in present:
+                _add_undirected(hub_id, m, 1.0)
 
         # Build CSR transition matrix
         transition, _ = si.build_transition(node_ids, edges)
