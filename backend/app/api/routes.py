@@ -52,6 +52,7 @@ from app.models.schemas import (
     ObjectSchemaUpdate,
     PromotionApproveResult,
     PromotionCandidate,
+    PaginatedSources,
     PromotionRejectRequest,
     RuleCard,
     SourceDetail,
@@ -262,9 +263,14 @@ def delete_notebook(notebook_id: str) -> None:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/sources", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
-def list_sources(notebook_id: str) -> List[SourceSummary]:
-    return repository().list_sources(notebook_id)
+@router.get("/notebooks/{notebook_id}/sources", response_model=PaginatedSources, dependencies=[Depends(require_notebook_access)])
+def list_sources(
+    notebook_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    q: str = Query(""),
+) -> PaginatedSources:
+    return repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
 
 
 @router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
