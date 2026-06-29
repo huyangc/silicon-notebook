@@ -53,24 +53,6 @@ def test_admin_can_mark_base(client):
     assert r.status_code == 200
 
 
-def test_article_cross_user_blocked(client):
-    a = _auth(client, "z00123456")
-    b = _auth(client, "l00000042")
-    nb = client.post("/api/notebooks", json={"name": "A"}, headers=a).json()["id"]
-    create_resp = client.post(
-        f"/api/notebooks/{nb}/articles",
-        json={"title": "secret", "abstract": "s"},
-        headers=a,
-    )
-    assert create_resp.status_code == 200, f"Article create failed: {create_resp.text}"
-    art_id = create_resp.json()["id"]
-    # B cannot research or delete A's article
-    assert client.post(f"/api/articles/{art_id}/research", headers=b).status_code == 404
-    assert client.delete(f"/api/articles/{art_id}", headers=b).status_code == 404
-    # A can delete its own
-    assert client.delete(f"/api/articles/{art_id}", headers=a).status_code == 204
-
-
 def test_promotion_queue_admin_only(client):
     b = _auth(client, "l00000042")
     assert client.get("/api/promotion-queue", headers=b).status_code == 403

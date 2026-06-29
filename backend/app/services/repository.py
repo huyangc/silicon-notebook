@@ -5,12 +5,8 @@ from typing import Callable, Iterable, List, Optional, Protocol
 
 from app.models.schemas import (
     AddUrlSourcesResult,
-    ArticleCreate,
-    ArticleResearchBrief,
-    ArticleSummary,
     AskRequest,
     AskResponse,
-    DerivedRuleCandidate,
     DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
@@ -132,21 +128,5 @@ class NotebookRepository(Protocol):
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse: ...
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse: ...
-
-    def list_articles(self, notebook_id: str) -> List[ArticleSummary]: ...
-
-    def create_article(self, notebook_id: str, payload: ArticleCreate) -> ArticleSummary: ...
-
-    def delete_article(self, article_id: str) -> None: ...
-
-    def research_article(self, article_id: str) -> ArticleResearchBrief: ...
-
-    def list_derived_rules(
-        self, notebook_id: str, status: str | None = None
-    ) -> List[DerivedRuleCandidate]: ...
-
-    def approve_derived_rule(self, notebook_id: str, candidate_id: str) -> RuleCard: ...
-
-    def reject_derived_rule(self, notebook_id: str, candidate_id: str) -> DerivedRuleCandidate: ...
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...
