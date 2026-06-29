@@ -453,7 +453,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "My KB"
 ```
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg subset), `--dry-run` (scan & estimate only).
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg subset), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent), `--dry-run` (scan & estimate only).
 
 Prereqs: configure EMBED and KG_LLM in `.env` (otherwise embedding/KG steps skip or error). Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
 

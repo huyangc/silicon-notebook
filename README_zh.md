@@ -422,7 +422,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "我的库"
 ```
 
-选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 子集验证)、`--dry-run`(只扫描预估)。
+选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 子集验证)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默)、`--dry-run`(只扫描预估)。
 
 前置:`.env` 配好 EMBED 与 KG_LLM(否则向量/KG 步骤会跳过或报错);重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 

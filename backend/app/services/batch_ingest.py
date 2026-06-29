@@ -153,6 +153,10 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None) ->
             res["extracted"] = len(out["built"])
             res["failed"] = len(out["failed"])
         else:
+            if not (repo.settings.kg_llm_configured
+                    or getattr(repo.llm_client, "configured", False)):
+                raise RuntimeError(
+                    "KG LLM 未配置(KG_LLM_* 或主 LLM 均未配):--limit 抽取只会产出 no-llm 空结果")
             with repo._connect() as db:
                 all_sids = [r["id"] for r in db.execute(
                     "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
@@ -226,6 +230,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=4, help="文件级并发(默认 4)")
     p.add_argument("--embed-conc", type=int, default=4, help="嵌入 backfill 并发(默认 4,避 429)")
     p.add_argument("--limit", type=int, default=None, help="kg 阶段只抽前 N 个未抽源(子集验证)")
+    p.add_argument("--allow-no-embed", action="store_true",
+                   help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
     return p
 
@@ -247,6 +253,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     repo = SQLiteRepository(Settings())
+    if not repo.settings.embedder_configured:
+        if not args.allow_no_embed:
+            print(
+                "error: EMBED 未配置(EMBED_PROVIDER 为空)→ 不会产出向量(chunk/节点),检索将失效。\n"
+                "  CLI 默认拒绝静默降级。确认要无向量导入,请显式加 --allow-no-embed。\n"
+                "  常见原因:未从仓库根运行(.env 未加载),或 .env 未配 EMBED_PROVIDER/EMBED_*。",
+                file=sys.stderr,
+            )
+            return 2
+        print("[warn] --allow-no-embed:无向量模式,本次不产出 chunk/节点向量。", flush=True)
     nb_name = args.notebook_name or (args.input_dir.name if args.input_dir else "Batch Import")
     notebook_id = ensure_notebook(repo, args.notebook_id, nb_name, owner=args.owner)
     manifest = Path(repo.storage_dir) / "batch_ingest" / f"{notebook_id}.jsonl"
