@@ -433,6 +433,30 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 
 MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion degrades to pypdf so uploads never block, while pipeline logs and the source `error_message` keep the fallback diagnostic; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
 
+### Offline batch ingestion (directory → KG)
+
+Ingest a directory of Markdown (and the occasional PDF) through the existing
+pipeline, in two phases: `ingest` (no LLM, fast — chunk Q&A works immediately),
+then `kg` (LLM extraction, separately resumable).
+
+```bash
+# 1) parse + chunk + embeddings (no LLM); creates a notebook named after the dir
+PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir
+
+# 2) validate KG quality on a subset first (extract only the first 50 un-extracted sources)
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 50
+
+# 3) extract KG for the whole notebook (idempotent; skips already-extracted; resumable)
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
+
+# or run both phases in one command
+PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "My KB"
+```
+
+Options: `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg subset), `--dry-run` (scan & estimate only).
+
+Prereqs: configure EMBED and KG_LLM in `.env` (otherwise embedding/KG steps skip or error). Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
+
 ## Current Limitations
 
 - Retrieval uses SQLite keyword (CJK bi-gram) + float32 matrix semantic search with per-notebook cache. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach). BM25/FTS5 and pgvector are deferred for larger scale.
