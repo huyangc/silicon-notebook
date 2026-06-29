@@ -181,6 +181,13 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None) ->
     return res
 
 
+def run_index(repo: SQLiteRepository, notebook_id: str) -> dict:
+    """Phase 3 (offline): build the scalable-retrieval index for a (base) notebook.
+    Static base KGs should re-run this after a rebuild."""
+    manifest = repo.build_scale_index(notebook_id)
+    return {"indexed_nodes": manifest.get("n_nodes", 0)}
+
+
 def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int:
     """补 KG 节点向量(复用 _backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
     if not repo.settings.embedder_configured:
@@ -221,7 +228,7 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
-    p.add_argument("phase", choices=["ingest", "kg", "all"])
+    p.add_argument("phase", choices=["ingest", "kg", "index", "all"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--notebook-name", default=None, help="新建 notebook 名(默认取目录名)")
@@ -241,6 +248,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.phase in {"ingest", "all"} and not args.input_dir:
         print("error: --input-dir required for ingest/all", file=sys.stderr)
+        return 2
+
+    if args.phase == "index" and not args.notebook_id:
+        print("error: --notebook-id required for index (specify the base notebook to index)",
+              file=sys.stderr)
         return 2
 
     if args.dry_run:
@@ -279,5 +291,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"phase=kg limit={args.limit}", flush=True)
         r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log)
         print(f"kg done: {r}", flush=True)
+
+    if args.phase in {"index", "all"}:
+        print(f"phase=index notebook={notebook_id}", flush=True)
+        r = run_index(repo, notebook_id)
+        print(f"index done: {r}", flush=True)
 
     return 0

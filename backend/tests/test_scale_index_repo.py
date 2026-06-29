@@ -153,3 +153,16 @@ def test_scale_ppr_empty_when_multiple_bases_supported(repo):
     only base (no OTHER base index to splice from)."""
     base = _seed_base_with_chunk(repo)
     assert repo.scale_ppr(base.id, "MOSFET") == []  # excludes self -> no base set
+
+
+def test_run_index_builds_for_notebook(repo):
+    from app.services import batch_ingest
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "gain", "section_path": ""}, "evidence": []},
+    ], [{"source_local_id": "a", "target_local_id": "b", "edge_type": "relates", "evidence": []}])
+    repo.rebuild_unified_kg(nb.id)
+    res = batch_ingest.run_index(repo, nb.id)
+    assert res["indexed_nodes"] >= 2
+    assert repo._scale_index(nb.id) is not None

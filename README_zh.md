@@ -440,6 +440,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 
 # 或一条命令跑完(ingest 然后 kg)
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "我的库"
+
+# 为基准层 notebook 构建可伸缩检索索引(离线;静态基准重建 KG 后需重跑)
+PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
 ```
 
 选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 子集验证)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默)、`--dry-run`(只扫描预估)。
