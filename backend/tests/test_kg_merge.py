@@ -3,6 +3,59 @@ from app.services.kg_merge import cluster_concepts, _norm
 
 def _concept(oid, name): return {"object_id": oid, "name": name}
 
+
+# --- acronym / parenthetical normalization (TC1) -----------------------------
+
+def test_norm_strips_trailing_acronym_paren():
+    # "Full (ACR)" collapses onto "Full"; bare acronym test happens via alias map.
+    assert _norm("Compressed Sparse Attention (CSA)") == _norm("Compressed Sparse Attention")
+    assert _norm("Compressed Sparse Attention (CSA)") == "compressed sparse attention"
+
+
+def test_norm_keeps_non_acronym_parenthetical():
+    # "Mechanism" is 9 chars and not all-caps -> not acronym-like -> NOT stripped.
+    assert "mechanism" in _norm("Attention (Mechanism)")
+    assert _norm("Attention (Mechanism)") != _norm("Attention")
+
+
+def test_build_acronym_alias_map_maps_bare_acronym_to_expansion():
+    from app.services.kg_merge import build_acronym_alias_map
+    amap = build_acronym_alias_map(["Compressed Sparse Attention (CSA)", "CSA", "other"])
+    assert amap.get(_norm("CSA")) == _norm("Compressed Sparse Attention")
+
+
+def test_cluster_concepts_merges_acronym_full_and_paren_variants():
+    concepts = [_concept("o1", "CSA"),
+                _concept("o2", "Compressed Sparse Attention"),
+                _concept("o3", "Compressed Sparse Attention (CSA)")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] == cm["o2"] == cm["o3"]   # all three -> one canonical
+
+
+def test_cluster_concepts_merges_moe_acronym_and_full():
+    concepts = [_concept("o1", "Mixture-of-Experts (MoE)"), _concept("o2", "MoE")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] == cm["o2"]
+
+
+def test_cluster_concepts_non_acronym_paren_not_overmerged():
+    # A non-acronym parenthetical must not merge with an unrelated concept.
+    concepts = [_concept("o1", "Attention (Mechanism)"), _concept("o2", "Quantization")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] != cm["o2"]
+
+
+def test_acronym_aliasing_does_not_override_version_conflict_guard():
+    # v3 vs v4 are still separate (conflict guard); aliasing must not collapse them.
+    concepts = [_concept("o1", "deepseek v3"), _concept("o2", "deepseek v4")]
+    vecs = {"o1": [1.0, 0.0], "o2": [0.999, 0.001]}
+    res = cluster_concepts(concepts, vecs, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] != cm["o2"]
+
 def test_name_seed_auto_merge():
     concepts = [_concept("o1", "MOSFET"), _concept("o2", "mosfet "), _concept("o3", "BJT")]
     vecs = {"o1": [1.0, 0], "o2": [1.0, 0], "o3": [0, 1.0]}

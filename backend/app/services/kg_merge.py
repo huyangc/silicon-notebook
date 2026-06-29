@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from typing import Dict, List, Set, FrozenSet
+from typing import Dict, Iterable, List, Set, FrozenSet
 
 import numpy as np
 
@@ -31,10 +31,56 @@ _ALIASES = {
 }
 
 
+# "Full (ACR)" shape: capture the part before the paren and the paren token.
+_PAREN_ACRONYM_RE = re.compile(r"^(.*\S)\s*\(([^)]+)\)\s*$")
+# Acronym-like paren token: single token, ≤8 chars, alnum/+/-//, starts with a letter.
+_ACRONYM_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+/\-]*$")
+
+
+def _is_acronym_token(tok: str) -> bool:
+    """An acronym-like token: no spaces, length ≤ 8, alnum/+/-// starting with a
+    letter, and (ALL-CAPS or short ≤ 6). Conservative so genuine words like
+    'Mechanism' (9 chars, not all-caps) are NOT treated as acronyms."""
+    tok = tok.strip()
+    if not tok or " " in tok or len(tok) > 8:
+        return False
+    if not _ACRONYM_TOKEN_RE.match(tok):
+        return False
+    return tok.isupper() or len(tok) <= 6
+
+
+def _strip_paren_acronym(name: str) -> str:
+    """If ``name`` is "Full (ACR)" with an acronym-like ACR, return "Full"
+    (the part before the paren). Otherwise return ``name`` unchanged."""
+    m = _PAREN_ACRONYM_RE.match(name or "")
+    if not m:
+        return name
+    if _is_acronym_token(m.group(2)):
+        return m.group(1)
+    return name
+
+
 def _norm(name: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9+/ ]+", " ", (name or "").strip().lower())
+    stripped = _strip_paren_acronym(name or "")
+    cleaned = re.sub(r"[^a-z0-9+/ ]+", " ", stripped.strip().lower())
     cleaned = re.sub(r"[\s\-_]+", " ", cleaned).strip()
     return _ALIASES.get(cleaned, cleaned)
+
+
+def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
+    """For every "Full (ACR)" name with an acronym-like ACR, map the acronym's
+    seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets a bare
+    "ACR" elsewhere in the batch be redirected onto the expansion's cluster."""
+    alias: Dict[str, str] = {}
+    for name in names:
+        m = _PAREN_ACRONYM_RE.match(name or "")
+        if not m or not _is_acronym_token(m.group(2)):
+            continue
+        acr_seed = _norm(m.group(2))
+        exp_seed = _norm(m.group(1))
+        if acr_seed and exp_seed and acr_seed != exp_seed:
+            alias[acr_seed] = exp_seed
+    return alias
 
 
 def _norm_statement(s: str) -> str:
@@ -176,6 +222,19 @@ class _UF:
     def union(self, a, b): self.p[self.find(a)] = self.find(b)
 
 
+def _seed_with_alias(obj, seed_fn, alias_map: Dict[str, str]) -> str:
+    """Compute seed via ``seed_fn``, then redirect bare-acronym seeds onto their
+    expansion (alias_map). Only redirects when the seed equals ``_norm(name)`` —
+    i.e. a plain concept seed — so a richer seed (procedure name#steps-signature)
+    is never collapsed by a coincidental acronym key."""
+    name = obj.get("name", "") if isinstance(obj, dict) else obj
+    base = seed_fn(obj)
+    nm = _norm(name)
+    if base == nm and nm in alias_map:
+        return alias_map[nm]
+    return base
+
+
 def cluster_objects(
     objects: List[dict],
     vectors: Dict[str, List[float]],
@@ -194,7 +253,14 @@ def cluster_objects(
     seed_fn(obj)->str 决定精确合并 key;conflict_fn(name_a,name_b)->bool 为护栏(None=不拦);
     id_prefix 决定 canonical_id 前缀(各类型隔离)。其余算法(ANN→护栏→星型→三档分流→
     confirmed/rejected force-union/block)与原 cluster_concepts 完全一致。"""
-    seed_of = {c["object_id"]: seed_fn(c) for c in objects}
+    # Acronym aliasing: redirect a bare-acronym seed onto its expansion's seed
+    # when an "Expansion (ACR)" name also appears in this batch. seed_fn already
+    # strips trailing parenthetical acronyms (via _norm), so "Full (ACR)" and
+    # "Full" coincide; this only catches the standalone "ACR" form. We only
+    # redirect when the object's seed is a pure _norm(name) (i.e. concepts) so a
+    # richer seed (e.g. procedure name#steps-signature) is never clobbered.
+    alias_map = build_acronym_alias_map([c.get("name", "") for c in objects])
+    seed_of = {c["object_id"]: _seed_with_alias(c, seed_fn, alias_map) for c in objects}
     seeds = sorted(set(seed_of.values()))
     uf = _UF(seeds)
     # confirmed/rejected 存储的是已经过 seed_fn 处理的 seed 字符串(caller 负责对齐)
@@ -328,10 +394,15 @@ def place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
     existing_cluster_map: {existing_object_id: canonical_id};existing_canon_names: {canonical_id: name}。
     返回 [{canonical_id, member_object_id, canonical_name}]。"""
     existing_cids = set(existing_cluster_map.values())
+    # Acronym aliasing: redirect bare-acronym seeds onto an expansion's seed when
+    # an "Expansion (ACR)" name is present among the new objects or existing
+    # canonical names. Keeps a standalone "ACR" landing in the expansion cluster.
+    alias_map = build_acronym_alias_map(
+        [o.get("name", "") for o in new_objects] + list(existing_canon_names.values()))
     rows = []
     for o in new_objects:
-        cid = f"{id_prefix}{seed_fn(o)}"
         name = o.get("name", "")
+        cid = f"{id_prefix}{_seed_with_alias(o, seed_fn, alias_map)}"
         canon_name = existing_canon_names.get(cid, name) if cid in existing_cids else name
         rows.append({"canonical_id": cid, "member_object_id": o["object_id"],
                      "canonical_name": canon_name})
