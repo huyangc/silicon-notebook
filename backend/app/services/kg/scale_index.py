@@ -152,3 +152,26 @@ def save_scale_index(
         json.dump(manifest, fh)
 
     return manifest
+
+
+def splice_active(
+    base_ids: List[str],
+    base_transition: "sp.csr_matrix",
+    active_ids: List[str],
+    active_edges: List[Tuple[str, str, float]],
+) -> Tuple[List[str], "sp.csr_matrix"]:
+    """把 active 的节点/边并入 base，按 id 合一（共享 canonical_id 自然合并）。
+    返回 (combined_ids, combined_transition)。base 边从 base_transition 的稀疏结构还原
+    （转移阵已列归一，权重信息有损，v1 用结构 + 权重 1.0 重算；等价测试证 top-k 稳健）。"""
+    base_coo = base_transition.tocoo()
+    # build_transition 建阵时: A[target_row, source_col] = i->j 归一化权重
+    # COO 中 row=target(j), col=source(i) → 边方向 source->target = base_ids[col]->base_ids[row]
+    base_edges_reconstructed = [
+        (base_ids[i], base_ids[j], 1.0)
+        for i, j in zip(base_coo.col, base_coo.row)
+    ]
+    base_set = set(base_ids)
+    combined_ids = list(base_ids) + [a for a in active_ids if a not in base_set]
+    combined_edges = base_edges_reconstructed + list(active_edges)
+    A, _ = build_transition(combined_ids, combined_edges)
+    return combined_ids, A
