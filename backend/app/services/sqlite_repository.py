@@ -5594,6 +5594,65 @@ class SQLiteRepository:
                     combined_chunk_ids.add(idx.node_ids[int(i)])
 
         active_node_ids, active_edges, active_chunk_ids = self._active_kg_delta(notebook_id)
+
+        # 2b. Cross-layer synonym bridge (spec: splice 步加有界跨层 synonym 边).
+        #     For each active node vector, query each base ANN — if cosine sim >=
+        #     threshold and the base node id differs from the active node id (no
+        #     duplicate of the exact-id unification already done by splice_active),
+        #     add an undirected edge (active↔base, weight=cosine).  The active node
+        #     will land in combined_ids via splice_active (new id); the base node is
+        #     already in combined_ids — so build_transition keeps both endpoints.
+        #     Complexity: |active_kg_nodes| × topk per base (small; no base matmul).
+        #     NOTE: qvec is not available yet (computed in step 3); bridge only needs
+        #     the active node embedding matrix — no dependency on the query vector.
+        if self.settings.ppr_emb_synonym_enabled:
+            import hnswlib as _hnswlib
+            _syn_k = self.settings.ppr_emb_synonym_topk
+            _syn_thr = self.settings.ppr_emb_synonym_threshold
+            # Fetch the active node embeddings — reused for the bridge (no second query).
+            with self._connect() as _db:
+                _a_ids, _a_mat = self._vector_matrix(
+                    _db, notebook_id, "knowledge_embeddings", "object_id")
+            if _a_ids is not None and _a_mat is not None and len(_a_mat) > 0:
+                import numpy as _np
+                _a_mat_arr = _np.asarray(_a_mat, dtype=np.float32)
+                _bridge_edges: List[Tuple[str, str, float]] = []
+                for _bid, _bidx in base_indexes:
+                    if not _bidx.ann_labels:
+                        continue
+                    _dim = int(_bidx.manifest.get("dim", _a_mat_arr.shape[1]))
+                    if _dim != _a_mat_arr.shape[1]:
+                        continue
+                    try:
+                        _ann = _hnswlib.Index(space="cosine", dim=_dim)
+                        _ann.load_index(_bidx.ann_path, max_elements=len(_bidx.ann_labels))
+                        _ann.set_ef(max(_syn_k + 1, 50))
+                    except Exception as _exc:  # noqa: BLE001 — fail-open
+                        self._note_model_error(
+                            "scale_ppr_xbridge_load", self.settings.embed_model, _exc)
+                        continue
+                    _base_id_set = set(_bidx.node_ids)
+                    for _ai, _a_id in enumerate(_a_ids):
+                        _avec = _a_mat_arr[_ai]
+                        try:
+                            _k = min(_syn_k, len(_bidx.ann_labels))
+                            _labs, _dists = _ann.knn_query(_avec, k=_k)
+                        except Exception as _exc:  # noqa: BLE001 — fail-open
+                            self._note_model_error(
+                                "scale_ppr_xbridge_query",
+                                self.settings.embed_model, _exc)
+                            continue
+                        for _lab, _dist in zip(_labs[0], _dists[0]):
+                            _base_nid = _bidx.ann_labels[int(_lab)]
+                            if _base_nid == _a_id:
+                                continue  # exact-id: already unified by splice_active
+                            _sim = max(0.0, 1.0 - float(_dist))
+                            if _sim >= _syn_thr:
+                                _bridge_edges.append((_a_id, _base_nid, _sim))
+                                _bridge_edges.append((_base_nid, _a_id, _sim))
+                if _bridge_edges:
+                    active_edges = list(active_edges) + _bridge_edges
+
         combined_ids, combined_A = si.splice_active(
             combined_ids, combined_A, active_node_ids, active_edges)
         combined_index = {nid: i for i, nid in enumerate(combined_ids)}
