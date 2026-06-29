@@ -403,6 +403,29 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
 MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。
 
+### 离线批量摄取(目录 → KG)
+
+把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
+先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
+
+```bash
+# 1) 解析+分块+向量(无 LLM):新建 notebook,名取目录名
+PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir
+
+# 2) 先小范围验证 KG 质量(只抽前 50 个未抽源)
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 50
+
+# 3) 整批抽 KG(幂等,跳过已抽;失败可重跑续抽)
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
+
+# 或一条命令跑完(ingest 然后 kg)
+PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "我的库"
+```
+
+选项:`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 子集验证)、`--dry-run`(只扫描预估)。
+
+前置:`.env` 配好 EMBED 与 KG_LLM(否则向量/KG 步骤会跳过或报错);重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
+
 ## 当前限制
 
 - 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
