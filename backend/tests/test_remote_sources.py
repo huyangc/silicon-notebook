@@ -1,4 +1,14 @@
-from app.services.remote_sources import probe_pdf, PdfProbe, FetchResult, _total_length
+import io
+
+import pytest
+
+from app.services.remote_sources import (
+    probe_pdf,
+    download_pdf,
+    PdfProbe,
+    FetchResult,
+    _total_length,
+)
 
 
 def _fetch(result):
@@ -59,3 +69,31 @@ def test_total_length_falls_back_to_content_length():
 def test_total_length_unknown_or_wildcard_returns_zero():
     assert _total_length({}) == 0
     assert _total_length({"Content-Range": "bytes 0-1023/*"}) == 0
+
+
+def test_download_pdf_writes_full_bytes(tmp_path):
+    dest = tmp_path / "doc.pdf"
+    data = b"%PDF-1.7 " + b"x" * 1000
+    total = download_pdf("https://a/doc.pdf", dest, opener=lambda u, t: io.BytesIO(data))
+    assert total == len(data)
+    assert dest.read_bytes() == data
+
+
+def test_download_pdf_rejects_oversize_and_cleans_up(tmp_path):
+    dest = tmp_path / "huge.pdf"
+    data = b"%PDF-" + b"y" * 5000
+    with pytest.raises(ValueError, match="200MB"):
+        download_pdf("https://a/huge.pdf", dest, max_bytes=1024,
+                     opener=lambda u, t: io.BytesIO(data))
+    assert not dest.exists()
+
+
+def test_download_pdf_cleans_up_on_network_error(tmp_path):
+    dest = tmp_path / "boom.pdf"
+
+    def boom(url, timeout):
+        raise ConnectionError("dns fail")
+
+    with pytest.raises(ConnectionError):
+        download_pdf("https://a/x.pdf", dest, opener=boom)
+    assert not dest.exists()

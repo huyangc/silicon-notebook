@@ -3033,7 +3033,7 @@ export default function Home() {
             </div>
             {linkSectionOpen && (
               <div className="source-detail-body">
-                <p className="tool-hint" style={{ margin: "0 0 6px" }}>每行一个公开可直链的 PDF；非 PDF 会被直接拒绝。由 mineru.net 云端解析。</p>
+                <p className="tool-hint" style={{ margin: "0 0 6px" }}>每行一个可直链的 PDF；非 PDF 会被直接拒绝。由 MinerU 解析（本地已配置则优先本地，否则走 mineru.net 云端）。</p>
                 <textarea
                   rows={5}
                   value={urlText}

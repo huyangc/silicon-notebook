@@ -3,9 +3,11 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -1419,8 +1421,11 @@ class SQLiteRepository:
         """逐 URL 初筛(非 PDF/不可达/超限→rejected,不建来源);通过的建 source_url
         来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。"""
         self.get_notebook(notebook_id)  # KeyError if missing
-        if not self.mineru_cloud_client.configured:
-            raise MinerUCloudNotConfigured("未配置 MinerU 云端凭证 (MINERU_API_TOKEN)")
+        # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
+        if not (self.mineru_client.configured or self.mineru_cloud_client.configured):
+            raise MinerUCloudNotConfigured(
+                "未配置 PDF 解析服务（本地 MINERU_MODE=http/cli 或云端 MINERU_API_TOKEN）"
+            )
         created: List[SourceSummary] = []
         rejected: List[RejectedUrl] = []
         for raw in urls:
@@ -1588,6 +1593,28 @@ class SQLiteRepository:
                 )
         return {"built": done, "failed": failed, "skipped": sorted(kgful)}
 
+    def _parse_url_via_local(
+        self, source_id: str, url: str, file_name: str
+    ) -> List[SourceElement]:
+        """下载 URL 到临时文件，走本地 MinerU(http/cli)/pypdf 解析（数据不出网）。
+
+        复用 parse_source_file 的「本地 MinerU 失败→pypdf 兜底」路径，与文件上传一致；
+        全程不触达 mineru.net 云端。解析后无论成败都清理临时文件。
+        """
+        fd, tmp = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            remote_sources.download_pdf(url, tmp_path)
+            return parse_source_file(
+                source_id, str(tmp_path), file_name or "source.pdf", self.mineru_client
+            )
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
     def process_source(self, source_id: str) -> SourceSummary:
         """Run the full parse -> embed -> extract pipeline with a status machine.
 
@@ -1620,18 +1647,29 @@ class SQLiteRepository:
         try:
             t = time.perf_counter()
             stage("parse", "start", t)
-            # URL 来源走 mineru.net 云端解析；本地文件来源走 MinerU(http/cli)/pypdf。
+            # URL 来源：本地 MinerU 已配置则优先本地（下载到临时文件，数据不出网），
+            # 否则走 mineru.net 云端；本地文件来源走 MinerU(http/cli)/pypdf。
+            # 本地优先时绝不静默回落云端——内网部署不能把内部 PDF 外发。
             if source.source_url:
-                content_list = self.mineru_cloud_client.parse_url(
-                    source.source_url, data_id=source_id
-                )
-                elements = mineru_content_list_to_elements(source_id, content_list)
-                mineru_error = str(getattr(self.mineru_cloud_client, "last_error", "") or "")
+                if self.mineru_client.configured:
+                    elements = self._parse_url_via_local(
+                        source_id, source.source_url, source.file_name
+                    )
+                    mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
+                    parser_mode = f"mineru_local({self.mineru_client.mode})"
+                else:
+                    content_list = self.mineru_cloud_client.parse_url(
+                        source.source_url, data_id=source_id
+                    )
+                    elements = mineru_content_list_to_elements(source_id, content_list)
+                    mineru_error = str(getattr(self.mineru_cloud_client, "last_error", "") or "")
+                    parser_mode = "mineru_cloud"
             else:
                 elements = parse_source_file(
                     source_id, source.file_path, source.file_name, self.mineru_client
                 )
                 mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
+                parser_mode = str(getattr(self.mineru_client, "mode", ""))
             element_parsers = sorted(
                 {
                     str(element.metadata.get("parser", ""))
@@ -1644,7 +1682,7 @@ class SQLiteRepository:
                 "done",
                 t,
                 elements=len(elements),
-                parser_mode=("mineru_cloud" if source.source_url else str(getattr(self.mineru_client, "mode", ""))),
+                parser_mode=parser_mode,
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )

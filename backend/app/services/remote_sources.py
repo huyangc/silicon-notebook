@@ -58,6 +58,48 @@ def probe_pdf(
     return PdfProbe(True, "", result.content_length, display)
 
 
+_DOWNLOAD_CHUNK = 256 * 1024
+
+
+def download_pdf(
+    url: str,
+    dest: "os.PathLike[str] | str",
+    *,
+    timeout: float = 120.0,
+    max_bytes: int = MAX_PDF_BYTES,
+    opener: Optional[Callable[[str, float], object]] = None,
+) -> int:
+    """流式下载 URL 到 dest（用于本地优先解析：先落盘再交给本地 MinerU）。
+
+    超过 max_bytes 立即抛错并保证不残留半截文件；网络层经可注入的
+    `opener(url, timeout) -> 支持 .read(size) 的上下文管理器` 完成，单测无需打网络。
+    """
+    opener = opener or _default_opener
+    total = 0
+    try:
+        with opener(url, timeout) as stream, open(dest, "wb") as handle:  # type: ignore[union-attr]
+            while True:
+                chunk = stream.read(_DOWNLOAD_CHUNK)  # type: ignore[attr-defined]
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("PDF 超过 200MB 上限")
+                handle.write(chunk)
+    except Exception:
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+    return total
+
+
+def _default_opener(url: str, timeout: float):
+    request = urllib.request.Request(url, method="GET")
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def _display_name(parsed: ParseResult) -> str:
     base = os.path.basename(parsed.path) or parsed.netloc or "source"
     if not base.lower().endswith(".pdf"):
