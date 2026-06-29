@@ -3182,6 +3182,42 @@ button.chat-session-card {
   max-width: 82ch;
 }
 
+.kg-action-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kg-action-stack .sort-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.kg-action-danger:hover:not(:disabled) {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+}
+
+.kg-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted, #667085);
+}
+
+.kg-range select {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid #d9dfeb;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #20242a;
+  background: #fff;
+}
+
 .kg-view-body {
   flex: 1 1 auto;
   min-height: 0;

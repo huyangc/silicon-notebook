@@ -77,7 +77,28 @@ def test_unified_graph_concept_level_cached(repo):
     repo.rebuild_unified_kg(nb.id)
     g = repo.unified_graph(nb.id, level="concept")
     assert len(g["nodes"]) == 2 and len(g["edges"]) == 1
-    assert repo.unified_graph(nb.id, level="concept") is repo._unified_cache[(nb.id,"concept")]  # cache hit (same object)
+    assert g["total_nodes"] == 2 and g["truncated"] is False   # metadata for "widen range"
+    # the full graph is cached (same object); unified_graph wraps it with metadata
+    assert repo._unified_graph_full(nb.id, "concept") is repo._unified_cache[(nb.id,"concept")]
+
+
+def test_unified_graph_limit_returns_core_subgraph(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    # hub h linked to a/b/c (degree 3,1,1,1); iso has no edge (degree 0)
+    objs = [{"local_id": i, "object_type": "concept",
+             "payload": {"name": i, "section_path": ""}, "evidence": []}
+            for i in ["h", "a", "b", "c", "iso"]]
+    rels = [{"source_local_id": "h", "target_local_id": t, "edge_type": "rel", "evidence": []}
+            for t in ["a", "b", "c"]]
+    repo.store_kg(nb.id, None, objs, rels)
+    repo.rebuild_unified_kg(nb.id)
+    g = repo.unified_graph(nb.id, level="concept", limit=2)
+    assert g["total_nodes"] == 5 and g["truncated"] is True
+    assert len(g["nodes"]) == 2                                  # hub + one neighbor
+    ids = {n["id"] for n in g["nodes"]}
+    assert all(e["source_object_id"] in ids and e["target_object_id"] in ids for e in g["edges"])
+    gfull = repo.unified_graph(nb.id, level="concept", limit=99)
+    assert gfull["truncated"] is False and len(gfull["nodes"]) == 5   # whole graph, isolated incl.
 
 def test_store_kg_invalidates_unified_cache(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

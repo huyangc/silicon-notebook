@@ -308,7 +308,7 @@ type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 
 type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
 type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
-type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
+type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[]; total_nodes?: number; total_edges?: number; truncated?: boolean };
 type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number; element_text?: string };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
@@ -627,7 +627,17 @@ function formatRelativeTime(iso: string): string {
   if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
   return new Date(then).toLocaleDateString();
 }
-const fetchUnifiedGraph = (nb: string) => api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=object`);
+// limit>0 只取连接度最高的前 N 个节点(核心子图，避免大图卡顿)；limit=0 取全量。
+const fetchUnifiedGraph = (nb: string, limit = 0) =>
+  api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=object${limit > 0 ? `&limit=${limit}` : ""}`);
+// 图谱范围档位：核心 80 / 160 / 320 / 全部(0)。打开图谱默认从核心 80 起。
+const KG_RANGE_DEFAULT = 80;
+const KG_RANGE_STEPS: Array<{ value: number; label: string }> = [
+  { value: 80, label: "核心 80" },
+  { value: 160, label: "核心 160" },
+  { value: 320, label: "核心 320" },
+  { value: 0, label: "全部" },
+];
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
 const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
 const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
@@ -906,9 +916,11 @@ export default function Home() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
+  const [kgLimit, setKgLimit] = useState(KG_RANGE_DEFAULT);
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
+  const [kgRangeBusy, setKgRangeBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
   const [relinkingKg, setRelinkingKg] = useState(false);
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
@@ -939,13 +951,7 @@ export default function Home() {
     });
   };
   // Relink isolated nodes: additive/synchronous, no confirm needed.
-  const startKgRelink = (nb: string) => {
-    setRelinkingKg(true);
-    relinkKg(nb)
-      .then((r) => setToast(`已补连 ${r.edges_added} 条边，剩余孤立节点 ${r.isolated_after}`))
-      .catch(reportError)
-      .finally(() => setRelinkingKg(false));
-  };
+  // 补连孤立节点已移入知识图谱视图（relinkFromKgView，完成后按当前范围重拉）。
   // While a build runs, poll the notebook until kg_ready flips — the build can
   // take minutes, so the button reflects real progress instead of a fixed guess.
   useEffect(() => {
@@ -2066,15 +2072,43 @@ export default function Home() {
     setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
     setKgSearch("");
     setKgSelectedTypes([]);
+    setKgLimit(KG_RANGE_DEFAULT);                 // 每次打开从核心范围起，避免一上来渲染全量
     setPendingKgFocusId(targetNodeId ?? null);
     try {
       const [g, pend, status] = await Promise.all([
-        fetchUnifiedGraph(currentNotebookId),
+        fetchUnifiedGraph(currentNotebookId, KG_RANGE_DEFAULT),
         fetchPendingMerges(currentNotebookId),
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
+  }
+
+  // 切换图谱范围档位：按新 limit 重拉子图（核心 N / 全部）。
+  async function changeKgRange(limit: number) {
+    if (!currentNotebookId) return;
+    setKgLimit(limit);
+    setKgRangeBusy(true);
+    try {
+      setUGraph(await fetchUnifiedGraph(currentNotebookId, limit));
+    } catch (err) { reportError(err); }
+    finally { setKgRangeBusy(false); }
+  }
+
+  // KG 视图内补连孤立节点：同步返回，完成后按当前范围重拉图谱与状态。
+  async function relinkFromKgView() {
+    if (!currentNotebookId) return;
+    setRelinkingKg(true);
+    try {
+      const r = await relinkKg(currentNotebookId);
+      setToast(`已补连 ${r.edges_added} 条边，剩余孤立节点 ${r.isolated_after}`);
+      const [g, status] = await Promise.all([
+        fetchUnifiedGraph(currentNotebookId, kgLimit),
+        fetchUnifiedKgStatus(currentNotebookId),
+      ]);
+      setUGraph(g); setUnifiedKgStatus(status);
+    } catch (err) { reportError(err); }
+    finally { setRelinkingKg(false); }
   }
 
   async function refreshUnifiedKg() {
@@ -2083,7 +2117,7 @@ export default function Home() {
     try {
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend, status] = await Promise.all([
-        fetchUnifiedGraph(currentNotebookId),
+        fetchUnifiedGraph(currentNotebookId, kgLimit),
         fetchPendingMerges(currentNotebookId),
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
@@ -2145,7 +2179,7 @@ export default function Home() {
         items.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
       );
       await rebuildUnifiedKg(currentNotebookId);
-      const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId), fetchPendingMerges(currentNotebookId)]);
+      const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId, kgLimit), fetchPendingMerges(currentNotebookId)]);
       setUGraph(g);
       setPendingMerges(
         pend.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
@@ -2680,26 +2714,6 @@ export default function Home() {
                             </p>
                           )
                         }
-                        <div className="tool-hint" style={{ margin: "0 2px 8px", display: "flex", gap: "10px" }}>
-                          <button
-                            type="button"
-                            className="link-button"
-                            disabled={buildingKg}
-                            title="清空现有知识图谱并重新抽取全部来源（后台任务）"
-                            onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
-                          >
-                            完整重抽
-                          </button>
-                          <button
-                            type="button"
-                            className="link-button"
-                            disabled={relinkingKg || buildingKg}
-                            title="为孤立节点补连边（快速、不覆盖现有图）"
-                            onClick={() => { if (currentNotebookId) startKgRelink(currentNotebookId); }}
-                          >
-                            {relinkingKg ? "补连中…" : "补连孤立节点"}
-                          </button>
-                        </div>
                       </>
                     )
                     : (
@@ -3464,11 +3478,58 @@ export default function Home() {
             <aside className="kg-rail">
               <input className="kg-search" placeholder="搜索节点、类型或关系…" value={kgSearch} onChange={(e) => setKgSearch(e.target.value)} />
               <div className="kg-rail-section">
+                <h3>图谱处理</h3>
+                <div className="kg-action-stack">
+                  <button
+                    type="button"
+                    className="sort-button"
+                    disabled={relinkingKg || buildingKg}
+                    title="为孤立节点补连边（快速、确定性，不覆盖现有图）"
+                    onClick={relinkFromKgView}
+                  >
+                    {relinkingKg ? "补连中…" : "补连孤立节点"}
+                  </button>
+                  <button
+                    type="button"
+                    className="sort-button"
+                    disabled={kgRefreshBusy || buildingKg}
+                    title="对现有节点重新聚类 / 跨文档合并并刷新（不重新抽取来源）"
+                    onClick={refreshUnifiedKg}
+                  >
+                    {kgRefreshBusy ? "合并中…" : "重新合并"}
+                  </button>
+                  <button
+                    type="button"
+                    className="sort-button kg-action-danger"
+                    disabled={buildingKg}
+                    title="清空现有知识图谱并重新抽取全部来源（后台任务，可能数分钟）"
+                    onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
+                  >
+                    {buildingKg ? "重抽中…" : "完整重抽"}
+                  </button>
+                </div>
+              </div>
+              <div className="kg-rail-section">
                 <h3>当前视图</h3>
                 <div className="tag-row">
                   <span className="tag">节点 {fgData.nodes.length}{uGraph ? ` / ${uGraph.nodes.length}` : ""}</span>
                   <span className="tag">边 {fgData.links.length}{uGraph ? ` / ${uGraph.edges.length}` : ""}</span>
                 </div>
+                <label className="kg-range">
+                  <span>范围</span>
+                  <select value={kgLimit} disabled={kgRangeBusy} onChange={(e) => changeKgRange(Number(e.target.value))}>
+                    {KG_RANGE_STEPS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                  </select>
+                </label>
+                {uGraph && (
+                  <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
+                    {kgRangeBusy
+                      ? "加载中…"
+                      : uGraph.truncated
+                        ? `已载 ${uGraph.nodes.length} / 共 ${uGraph.total_nodes ?? uGraph.nodes.length} 节点 · 按连接度，可扩大范围`
+                        : `共 ${uGraph.total_nodes ?? uGraph.nodes.length} 节点（已全部显示）`}
+                  </p>
+                )}
                 {unifiedKgStatus && (
                   <div className="tag-row" style={{ marginTop: 4 }}>
                     <span className="tag" style={{ color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined }}>
@@ -3479,14 +3540,6 @@ export default function Home() {
                     )}
                   </div>
                 )}
-                <button
-                  className="sort-button"
-                  style={{ marginTop: 6, width: "100%" }}
-                  onClick={refreshUnifiedKg}
-                  disabled={kgRefreshBusy}
-                >
-                  {kgRefreshBusy ? "重建中…" : "刷新图谱"}
-                </button>
               </div>
               <div className="kg-rail-section">
                 <h3>类型过滤</h3>

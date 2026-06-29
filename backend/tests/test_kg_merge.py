@@ -94,6 +94,39 @@ def test_derive_rewires_and_dedups_edges():
     assert len(about) == 1 and about[0]["target_object_id"]=="K1"   # rewired + deduped
 
 
+from app.services.kg_merge import limit_graph_by_degree
+
+
+def _star_graph():
+    # hub h connected to a,b,c; d,e isolated (degree 0)
+    nodes = [{"id": i, "object_type": "concept"} for i in ["h", "a", "b", "c", "d", "e"]]
+    edges = [{"source_object_id": "h", "target_object_id": t, "edge_type": "rel"}
+             for t in ["a", "b", "c"]]
+    return {"nodes": nodes, "edges": edges}
+
+
+def test_limit_keeps_top_degree_and_internal_edges():
+    g = limit_graph_by_degree(_star_graph(), 2)
+    ids = {n["id"] for n in g["nodes"]}
+    assert "h" in ids and len(ids) == 2          # hub (deg 3) + one of its neighbors
+    # every kept edge has both endpoints in the kept set
+    assert all(e["source_object_id"] in ids and e["target_object_id"] in ids for e in g["edges"])
+
+
+def test_limit_excludes_isolated_nodes_first():
+    g = limit_graph_by_degree(_star_graph(), 4)
+    ids = {n["id"] for n in g["nodes"]}
+    assert ids == {"h", "a", "b", "c"}           # degree-0 d/e ranked last, dropped
+    assert len(g["edges"]) == 3
+
+
+def test_limit_noop_when_limit_covers_all():
+    full = _star_graph()
+    g = limit_graph_by_degree(full, 99)
+    assert len(g["nodes"]) == 6 and len(g["edges"]) == 3
+    assert limit_graph_by_degree(full, None)["nodes"] is full["nodes"]
+
+
 def test_discriminative_conflict_blocks_contrast_twins():
     from app.services.kg_merge import _discriminative_conflict
     assert _discriminative_conflict("voltage voltage feedback", "current voltage feedback")
