@@ -5484,6 +5484,188 @@ class SQLiteRepository:
 
         return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
 
+    # ── scale index (offline build) ──────────────────────────────────────────
+
+    def _scale_index_version(self, notebook_id: str) -> list:
+        """JSON-serializable version key for the scale index of one notebook.
+
+        Mirrors _ppr_graph's version_parts pattern: COUNT+MAX(created_at/updated_at)
+        for objects, relations, chunks, concept_clusters — all for this single notebook.
+        """
+        with self._connect() as db:
+            obj_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
+                "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)).fetchone()
+            rel_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM knowledge_relations WHERE notebook_id=?", (notebook_id,)).fetchone()
+            chunk_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
+            clu_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
+        return [
+            notebook_id,
+            int(obj_ver["c"]), obj_ver["ts"],
+            int(rel_ver["c"]), rel_ver["ts"],
+            int(chunk_ver["c"]), chunk_ver["ts"],
+            int(clu_ver["c"]), clu_ver["ts"],
+        ]
+
+    def build_scale_index(self, notebook_id: str) -> dict:
+        """Offline: read KG from SQLite for ONE notebook, build CSR transition +
+        ANN index, write 7 files under {storage_dir}/kg_index/{notebook_id}/.
+        Returns the manifest dict.
+
+        Graph nodes: all USABLE kg-object IDs + all chunk IDs.
+        Edges (undirected → both directions added):
+          - relations (source↔target, weight 1.0)
+          - entity↔chunk memberships (weight 1.0)
+          - variant pairs (ppr_variant_edge_weight)
+          - synonym pairs from embeddings (cosine weight, if emb_synonym_enabled)
+        IDF[i] = 1 / membership_count for KG nodes (1.0 when 0), 1.0 for chunks.
+        ANN index = only kg nodes that have a row in knowledge_embeddings.
+        """
+        from app.services.kg import scale_index as si
+        from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
+
+        # Validate notebook exists
+        self.get_notebook(notebook_id)
+
+        ph = ",".join("?" for _ in USABLE_STATUSES)
+        kg_nodes: Dict[str, dict] = {}
+        relations: list = []
+        chunk_ids: list = []
+        cluster_groups: Dict[str, list] = {}
+
+        with self._connect() as db:
+            for r in db.execute(
+                    f"SELECT id, object_type, payload FROM knowledge_objects "
+                    f"WHERE notebook_id=? AND status IN ({ph})",
+                    (notebook_id, *USABLE_STATUSES)).fetchall():
+                kg_nodes[r["id"]] = {
+                    "type": r["object_type"],
+                    "name": json.loads(r["payload"] or "{}").get("name", ""),
+                }
+            for r in db.execute(
+                    "SELECT source_object_id, target_object_id FROM knowledge_relations "
+                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
+                relations.append(dict(r))
+            for r in db.execute(
+                    "SELECT id FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchall():
+                chunk_ids.append(r["id"])
+            for r in db.execute(
+                    "SELECT canonical_id, member_object_id FROM concept_clusters "
+                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
+                cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+
+        # Memberships: entity ↔ chunk
+        ent_chunk_map = self._ent_chunk_map(notebook_id)
+        memberships = [
+            (oid, cid)
+            for oid, cids in ent_chunk_map.items()
+            for cid in cids
+        ]
+
+        # Build extra edges: variant pairs + optional synonym pairs
+        extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
+
+        ann_ids: list = []
+        ann_matrix = None
+        if self.settings.ppr_emb_synonym_enabled:
+            with self._connect() as db:
+                ids, mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+            if ids and mat is not None and len(mat):
+                ann_ids = list(ids)
+                ann_matrix = mat
+                import numpy as _np
+                extra_edges = extra_edges + emb_synonym_edges(
+                    ann_ids, _np.asarray(ann_matrix),
+                    self.settings.ppr_emb_synonym_threshold,
+                    self.settings.ppr_emb_synonym_topk,
+                    self.settings.ppr_emb_synonym_max_entities,
+                )
+        else:
+            # Still gather embeddings for the ANN index even if synonym edges disabled
+            with self._connect() as db:
+                ids, mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+            if ids and mat is not None and len(mat):
+                ann_ids = list(ids)
+                ann_matrix = mat
+
+        # Build node_ids list: kg nodes first, then chunk nodes
+        node_ids = list(kg_nodes.keys()) + chunk_ids
+        kg_id_set = set(kg_nodes.keys())
+        chunk_id_set = set(chunk_ids)
+
+        # chunk_index: indices of chunk nodes in node_ids
+        id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+        chunk_index = [id_to_idx[cid] for cid in chunk_ids if cid in id_to_idx]
+
+        # IDF: 1 / membership_count (1.0 when 0); chunks get 1.0
+        kg_membership_counts: Dict[str, int] = {oid: len(cids) for oid, cids in ent_chunk_map.items()}
+        idf = []
+        for nid in node_ids:
+            if nid in kg_id_set:
+                cnt = kg_membership_counts.get(nid, 0)
+                idf.append(1.0 / cnt if cnt > 0 else 1.0)
+            else:
+                idf.append(1.0)
+
+        # Build undirected edges: add both directions for each logical edge
+        edges: List[Tuple[str, str, float]] = []
+        seen_undir: set = set()
+
+        def _add_undirected(a: str, b: str, w: float) -> None:
+            if a == b:
+                return
+            key = (a, b) if a < b else (b, a)
+            if key in seen_undir:
+                return
+            seen_undir.add(key)
+            edges.append((a, b, w))
+            edges.append((b, a, w))
+
+        for rel in relations:
+            _add_undirected(rel["source_object_id"], rel["target_object_id"], 1.0)
+        for oid, cid in memberships:
+            _add_undirected(oid, cid, 1.0)
+        for a, b, w in extra_edges:
+            _add_undirected(a, b, w)
+
+        # Build CSR transition matrix
+        transition, _ = si.build_transition(node_ids, edges)
+
+        # ANN vectors/labels: kg nodes with embeddings
+        import numpy as np
+        if ann_ids and ann_matrix is not None:
+            ann_labels = ann_ids
+            ann_vectors = np.asarray(ann_matrix, dtype=np.float32)
+        else:
+            ann_labels = []
+            ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
+
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        manifest = {
+            "version": self._scale_index_version(notebook_id),
+            "dim": self.settings.embed_dim,
+            "n_nodes": len(node_ids),
+            "n_kg_nodes": len(kg_nodes),
+            "n_chunks": len(chunk_ids),
+            "n_ann": len(ann_labels),
+        }
+        return si.save_scale_index(
+            out_dir,
+            node_ids=node_ids,
+            transition=transition,
+            idf=idf,
+            chunk_index=chunk_index,
+            ann_vectors=ann_vectors,
+            ann_labels=ann_labels,
+            manifest=manifest,
+        )
+
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
         """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → rx PPR →
         取 chunk 节点分数。返回前 ppr_top_chunks 的 RetrievedChunk(relevance=
