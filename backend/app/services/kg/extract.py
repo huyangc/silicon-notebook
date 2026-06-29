@@ -84,7 +84,7 @@ procedure), precedes.
 CONNECTIVITY (REQUIRED): every Claim MUST appear in at least one edge — at minimum
 an `about` edge to the Concept it concerns; every Concept SHOULD appear in at least
 one edge. Prefer reasoning edges (supports/derived_from/depends_on); fall back to
-`about`. Do NOT emit a node you cannot connect to anything in this passage.
+`about`.
 {base_rule}
 The passage is numbered elements, one per line, prefixed like [3]. Every node and
 edge MUST include "ev": the INTEGER label of the element that best contains it.
