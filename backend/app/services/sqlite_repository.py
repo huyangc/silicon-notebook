@@ -5507,20 +5507,272 @@ class SQLiteRepository:
             manifest=manifest,
         )
 
+    def _active_kg_delta(self, notebook_id: str):
+        """Gather the ACTIVE notebook's KG delta for splicing onto a base scale
+        index. Mirrors build_scale_index's single-notebook node/edge conventions
+        EXACTLY (KG node key = object_id, chunk node key = raw chunk_id, cluster
+        hub key = f"cluster:{canonical_id}"). Returns
+        (active_node_ids, active_edges, active_chunk_ids):
+          - active_node_ids: kg object_ids + raw chunk_ids + cluster hub ids
+          - active_edges: undirected (both dirs) relation/membership/variant/
+            synonym/cluster-bridge edges
+          - active_chunk_ids: raw chunk_ids (subset of node_ids)
+        """
+        from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
+        import numpy as np
+
+        ph = ",".join("?" for _ in USABLE_STATUSES)
+        kg_nodes: Dict[str, dict] = {}
+        relations: list = []
+        chunk_ids: list = []
+        cluster_groups: Dict[str, list] = {}
+        with self._connect() as db:
+            for r in db.execute(
+                    f"SELECT id, object_type, payload FROM knowledge_objects "
+                    f"WHERE notebook_id=? AND status IN ({ph})",
+                    (notebook_id, *USABLE_STATUSES)).fetchall():
+                kg_nodes[r["id"]] = {"type": r["object_type"],
+                                     "name": json.loads(r["payload"] or "{}").get("name", "")}
+            for r in db.execute(
+                    "SELECT source_object_id, target_object_id FROM knowledge_relations "
+                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
+                relations.append(dict(r))
+            for r in db.execute("SELECT id FROM chunks WHERE notebook_id=?",
+                                (notebook_id,)).fetchall():
+                chunk_ids.append(r["id"])
+            for r in db.execute(
+                    "SELECT canonical_id, member_object_id FROM concept_clusters "
+                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
+                cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+
+        ent_chunk_map = self._ent_chunk_map(notebook_id)
+        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items() for cid in cids]
+
+        extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
+        with self._connect() as db:
+            ann_ids_raw, ann_matrix_raw = self._vector_matrix(
+                db, notebook_id, "knowledge_embeddings", "object_id")
+        ann_ids = list(ann_ids_raw) if ann_ids_raw else []
+        if ann_ids and ann_matrix_raw is not None and len(ann_matrix_raw) \
+                and self.settings.ppr_emb_synonym_enabled:
+            extra_edges = extra_edges + emb_synonym_edges(
+                ann_ids, np.asarray(ann_matrix_raw),
+                self.settings.ppr_emb_synonym_threshold,
+                self.settings.ppr_emb_synonym_topk,
+                self.settings.ppr_emb_synonym_max_entities)
+
+        node_ids = list(kg_nodes.keys()) + chunk_ids
+        node_ids_set = set(node_ids)
+
+        edges: List[Tuple[str, str, float]] = []
+        seen_undir: set = set()
+
+        def _add_undirected(a: str, b: str, w: float) -> None:
+            if a == b:
+                return
+            key = (a, b) if a < b else (b, a)
+            if key in seen_undir:
+                return
+            seen_undir.add(key)
+            edges.append((a, b, w))
+            edges.append((b, a, w))
+
+        for rel in relations:
+            _add_undirected(rel["source_object_id"], rel["target_object_id"], 1.0)
+        for oid, cid in memberships:
+            _add_undirected(oid, cid, 1.0)
+        for a, b, w in extra_edges:
+            _add_undirected(a, b, w)
+
+        for canonical_id, members in cluster_groups.items():
+            present = [m for m in members if m in node_ids_set]
+            if not present:
+                continue
+            hub_id = f"cluster:{canonical_id}"
+            if hub_id not in node_ids_set:
+                node_ids.append(hub_id)
+                node_ids_set.add(hub_id)
+            for m in present:
+                _add_undirected(hub_id, m, 1.0)
+
+        return node_ids, edges, chunk_ids
+
+    def scale_ppr(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
+        """规模化 PPR:base 有持久化 scale 索引时,用 ANN 取 base KG 种子(避免
+        4GB 暴力 matmul)+ 把 active 增量 splice 进 base CSR 图 → personalized_ppr
+        → chunk 排名。返回 [(chunk_id, 归一分 0..1), ...] 降序,与 run_ppr 同形。
+        无可用 base 索引 / reset 全零 / 无 chunk 节点 → [](调用方回退 rustworkx 路径)。
+
+        节点 id 约定与 build_scale_index 完全一致:KG 节点 key=object_id,
+        chunk 节点 key=原始 chunk_id(非 "chunk:" 前缀),cluster hub key=
+        "cluster:{canonical_id}"。
+        """
+        import numpy as np
+        from app.services.kg import scale_index as si
+        from app.services.vector_index import query_sims
+
+        # 1. Base set: tier='base' notebooks (excluding active) with a valid index.
+        #    v1: support the common SINGLE base case; if >1 base index exists,
+        #    splice them sequentially onto the combined graph.
+        with self._connect() as db:
+            base_ids = [r["id"] for r in db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                (notebook_id,)).fetchall()]
+        base_indexes = [(bid, self._scale_index(bid)) for bid in base_ids]
+        base_indexes = [(bid, idx) for bid, idx in base_indexes if idx is not None]
+        if not base_indexes:
+            return []
+
+        # 2. Combined graph: start from the first base index, splice remaining
+        #    base indexes' nodes/edges, then splice the active delta.
+        first_id, first = base_indexes[0]
+        combined_ids = list(first.node_ids)
+        combined_A = first.transition
+        # combined_idf aligned to combined node order: base.idf for base nodes,
+        # 1.0 for any node introduced later (extra base nodes / active / hubs).
+        combined_idf_map: Dict[str, float] = {
+            nid: float(first.idf[i]) for i, nid in enumerate(first.node_ids)
+        }
+        # base chunk node ids of the FIRST base (raw chunk_id convention).
+        combined_chunk_ids: set = {
+            first.node_ids[i] for i in first.chunk_index
+            if 0 <= int(i) < len(first.node_ids)
+        }
+        # Per-base ANN seed accumulation (avoids base brute-force matmul): we keep
+        # the (base_id, ScaleIndex) list and query each base's hnswlib index below.
+
+        for bid, idx in base_indexes[1:]:
+            # reconstruct this base's edges from its CSR and splice as "active"-style
+            extra_ids, extra_A = si.splice_active(
+                combined_ids, combined_A, list(idx.node_ids),
+                self._csr_to_edges(idx.node_ids, idx.transition))
+            combined_ids, combined_A = extra_ids, extra_A
+            for i, nid in enumerate(idx.node_ids):
+                combined_idf_map.setdefault(nid, float(idx.idf[i]))
+            for i in idx.chunk_index:
+                if 0 <= int(i) < len(idx.node_ids):
+                    combined_chunk_ids.add(idx.node_ids[int(i)])
+
+        active_node_ids, active_edges, active_chunk_ids = self._active_kg_delta(notebook_id)
+        combined_ids, combined_A = si.splice_active(
+            combined_ids, combined_A, active_node_ids, active_edges)
+        combined_index = {nid: i for i, nid in enumerate(combined_ids)}
+        combined_chunk_ids.update(active_chunk_ids)
+
+        # combined_idf array aligned to combined_ids (1.0 for unknown nodes).
+        combined_idf = np.array(
+            [combined_idf_map.get(nid, 1.0) for nid in combined_ids], dtype=np.float64)
+
+        # 3. Reset vector.
+        reset = np.zeros(len(combined_ids), dtype=np.float64)
+        qvec = self._embed_query(question)
+
+        # 3a. Base KG seeds via ANN (no 4GB matmul): query each base hnswlib index.
+        if qvec is not None:
+            import hnswlib
+            qarr = np.asarray(qvec, dtype=np.float32)
+            top_n = self.settings.ppr_kg_seed_top_n
+            for bid, idx in base_indexes:
+                if not idx.ann_labels:
+                    continue
+                dim = int(idx.manifest.get("dim", qarr.shape[0]))
+                if dim != qarr.shape[0]:
+                    continue
+                try:
+                    ann = hnswlib.Index(space="cosine", dim=dim)
+                    ann.load_index(idx.ann_path, max_elements=len(idx.ann_labels))
+                    ann.set_ef(max(top_n + 1, 50))
+                    k = min(top_n, len(idx.ann_labels))
+                    labels, distances = ann.knn_query(qarr, k=k)
+                except Exception as exc:  # noqa: BLE001 — fail-open per seed source
+                    self._note_model_error("scale_ppr_ann", self.settings.embed_model, exc)
+                    continue
+                for lab, dist in zip(labels[0], distances[0]):
+                    node_id = idx.ann_labels[int(lab)]
+                    ci = combined_index.get(node_id)
+                    if ci is None:
+                        continue
+                    sim = max(0.0, 1.0 - float(dist))  # cosine distance → similarity
+                    if sim > 0:
+                        reset[ci] += sim * combined_idf[ci]
+
+        # 3b. Active KG seeds: bounded brute-force cosine over the small active
+        #     notebook's knowledge embeddings (NOT the base — base goes via ANN).
+        if qvec is not None:
+            with self._connect() as db:
+                a_ids, a_mat = self._vector_matrix(
+                    db, notebook_id, "knowledge_embeddings", "object_id")
+            sims = query_sims(qvec, list(a_ids) if a_ids else [], a_mat) \
+                if a_ids is not None else {}
+            if sims:
+                top = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)[
+                    : self.settings.ppr_kg_seed_top_n]
+                for oid, sim in top:
+                    ci = combined_index.get(oid)
+                    if ci is not None and sim > 0:
+                        reset[ci] += float(sim) * combined_idf[ci]
+
+        # 3c. Chunk seeds: ACTIVE notebook dense chunk seeds (raw chunk_id key —
+        #     matches build's chunk node convention). NOTE (v1 follow-up): base
+        #     notebook chunk dense seeds via a chunk-vector ANN are deliberately
+        #     out of SP2 scope; base CHUNKS still receive PPR mass via graph
+        #     propagation from base KG ANN seeds, so they remain rankable.
+        scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
+        pw = self.settings.ppr_passage_node_weight
+        for c in scored[: self.settings.ppr_chunk_seed_top_n]:
+            ci = combined_index.get(c.chunk_id)  # raw chunk_id, no "chunk:" prefix
+            if ci is not None and c.relevance > 0:
+                reset[ci] += float(c.relevance) * pw
+
+        # 4. PPR.
+        if reset.sum() <= 0:
+            return []
+        x = si.personalized_ppr(combined_A, reset, damping=self.settings.ppr_damping)
+        if x.sum() <= 0:
+            return []
+
+        # 5. Chunk rankings: collect chunk node scores, min-max normalize into
+        #    [0,1] (mirror run_ppr exactly), sort desc. chunk node key is the raw
+        #    chunk_id, so it IS the downstream chunk-fetch id (no prefix to strip).
+        raw = []
+        for cid in combined_chunk_ids:
+            ci = combined_index.get(cid)
+            if ci is not None:
+                raw.append((cid, float(x[ci])))
+        if not raw:
+            return []
+        vals = [s for _, s in raw]
+        lo, hi = min(vals), max(vals)
+        span = hi - lo
+        norm = [(cid, (s - lo) / span if span > 0 else 0.0) for cid, s in raw]
+        norm.sort(key=lambda kv: kv[1], reverse=True)
+        return norm
+
+    @staticmethod
+    def _csr_to_edges(node_ids, transition):
+        """Reconstruct edge list (src, dst, 1.0) from a column-stochastic CSR
+        transition matrix (mirrors splice_active's base-edge reconstruction)."""
+        coo = transition.tocoo()
+        # A[target_row, source_col]: edge source->target = node_ids[col]->node_ids[row]
+        return [(node_ids[i], node_ids[j], 1.0) for i, j in zip(coo.col, coo.row)]
+
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
-        """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → rx PPR →
+        """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → PPR →
         取 chunk 节点分数。返回前 ppr_top_chunks 的 RetrievedChunk(relevance=
-        归一 PPR 分,守 [0,1])。无 KG/无 chunk 时返回 []。"""
+        归一 PPR 分,守 [0,1])。无 KG/无 chunk 时返回 []。
+
+        分发:若存在有效 base scale 索引,走规模化 ANN-种子 + CSR PPR 路径
+        (scale_ppr);否则字节不变地回退到原 rustworkx 路径。"""
         from app.services.kg.ppr import run_ppr
-        G, key_to_idx, chunk_idx_to_id = self._ppr_graph(notebook_id)
-        if G.num_nodes() == 0 or not chunk_idx_to_id:
-            return []
-
-        reset = self._ppr_reset_vector(notebook_id, question, key_to_idx)
-        if not reset:
-            return []
-
-        ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
+        ranked = self.scale_ppr(notebook_id, question)
+        if not ranked:
+            G, key_to_idx, chunk_idx_to_id = self._ppr_graph(notebook_id)
+            if G.num_nodes() == 0 or not chunk_idx_to_id:
+                return []
+            reset = self._ppr_reset_vector(notebook_id, question, key_to_idx)
+            if not reset:
+                return []
+            ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
         ranked = ranked[: self.settings.ppr_top_chunks]
         if not ranked:
             return []
