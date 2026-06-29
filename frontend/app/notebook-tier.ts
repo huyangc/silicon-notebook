@@ -27,11 +27,31 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const nextTier = (current?: string): NotebookTier =>
-  current === "base" ? "personal" : "base";
+export type TierAction = "set" | "replace" | "unset";
 
-export const tierLabel = (current?: string): string =>
-  current === "base" ? "取消基准库" : "设为基准库";
+export type TierActionState = {
+  action: TierAction;
+  label: string;
+  otherBaseName?: string;
+};
+
+// 三态基准库按钮 —— 基准库全局唯一:
+// - 当前 notebook 已是 base → unset(可取消)
+// - 别处已有 base → replace(带当前基准库名,点击需确认替换)
+// - 全局无 base → set(直接设)
+export const tierActionState = (
+  current: NotebookSummaryLike | undefined,
+  all: readonly NotebookSummaryLike[]
+): TierActionState => {
+  if (current?.tier === "base") {
+    return { action: "unset", label: "取消基准库" };
+  }
+  const otherBase = all.find((n) => n.tier === "base" && n.id !== current?.id);
+  if (otherBase) {
+    return { action: "replace", label: "替换为基准库", otherBaseName: otherBase.name };
+  }
+  return { action: "set", label: "设为基准库" };
+};
 
 export const setNotebookTier = (
   notebookId: string,

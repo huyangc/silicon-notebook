@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier.ts";
+import { setNotebookTier, tierActionState } from "./notebook-tier.ts";
 
 function withFetchStub(run) {
   const calls = [];
@@ -15,15 +15,29 @@ function withFetchStub(run) {
   });
 }
 
-test("nextTier flips between base and personal", () => {
-  assert.strictEqual(nextTier("personal"), "base");
-  assert.strictEqual(nextTier("base"), "personal");
-  assert.strictEqual(nextTier(undefined), "base");
+test("tierActionState: 当前 notebook 已是 base → unset(可取消)", () => {
+  const cur = { id: "a", name: "A", tier: "base" };
+  const s = tierActionState(cur, [cur]);
+  assert.strictEqual(s.action, "unset");
 });
 
-test("tierLabel describes the toggle action for the current tier", () => {
-  assert.strictEqual(tierLabel("personal"), "设为基准库");
-  assert.strictEqual(tierLabel("base"), "取消基准库");
+test("tierActionState: 别处已有 base → replace,带当前基准库名", () => {
+  const cur = { id: "a", name: "A", tier: "personal" };
+  const other = { id: "b", name: "B 基准", tier: "base" };
+  const s = tierActionState(cur, [cur, other]);
+  assert.strictEqual(s.action, "replace");
+  assert.strictEqual(s.otherBaseName, "B 基准");
+});
+
+test("tierActionState: 全局无 base → set", () => {
+  const cur = { id: "a", name: "A", tier: "personal" };
+  const s = tierActionState(cur, [cur]);
+  assert.strictEqual(s.action, "set");
+});
+
+test("tierActionState: current 为空也不报错(默认 set)", () => {
+  const s = tierActionState(undefined, []);
+  assert.strictEqual(s.action, "set");
 });
 
 test("setNotebookTier POSTs /notebooks/{id}/tier with the tier body", () =>

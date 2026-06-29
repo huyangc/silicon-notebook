@@ -2837,6 +2837,28 @@ button.chat-session-card {
   overflow-wrap: anywhere;
 }
 
+/* 分析弹窗:带解释性描述的动作行 —— 按钮等宽左列 + 描述跟随,整组纵向堆叠 */
+.info-action-row {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.info-action-row > button {
+  flex: 0 0 auto;
+  min-width: 132px;
+  justify-content: center;
+  text-align: center;
+}
+
+.info-action-desc {
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .source-detail-card {
   width: min(740px, calc(100vw - 32px));
   max-height: min(920px, calc(100vh - 32px));

@@ -25,7 +25,7 @@ import {
   rejectPromotion,
   type PromotionCandidate,
 } from "./promotion-queue";
-import { setNotebookTier, nextTier, tierLabel } from "./notebook-tier";
+import { setNotebookTier, tierActionState } from "./notebook-tier";
 import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
@@ -363,6 +363,7 @@ type InfoModal = {
   sections?: Array<[string, string[]]>;
   actions: Array<{
     label: string;
+    desc?: string;
     primary?: boolean;
     danger?: boolean;
     action: () => void;
@@ -2252,16 +2253,23 @@ export default function Home() {
   }
 
   // --- Two-tier federation: mark notebook base / personal -----------------
-  async function toggleNotebookTier() {
+  async function handleTierAction() {
     if (!currentNotebook) return;
-    const target = nextTier(currentNotebook.tier);
+    const state = tierActionState(currentNotebook, notebooks);
+    if (state.action === "replace") {
+      const ok = window.confirm(
+        `当前基准库是「${state.otherBaseName}」。基准库全局唯一 —— 替换为「${currentNotebook.name}」？`
+      );
+      if (!ok) return;
+    }
+    const target = state.action === "unset" ? "personal" : "base";
     const updated = await setNotebookTier(currentNotebook.id, target);
     setCurrentNotebook(updated as NotebookSummary);
     await loadNotebookCollection();
     setToast(
       target === "base"
-        ? "已设为基准库（base）— 该 KG 将作为权威参考层参与检索与冲突仲裁"
-        : "已取消基准库，恢复为个人层（personal）"
+        ? "已设为基准库 — 该知识库将作为全局唯一的权威参考层参与检索与冲突仲裁"
+        : "已取消基准库，恢复为个人层"
     );
   }
 
@@ -2654,14 +2662,11 @@ export default function Home() {
                   title: "分析",
                   message: "从当前 notebook 的来源、文章研究和问答上下文进入分析。Studio 侧栏已收起，输出会在弹窗中呈现。",
                   actions: [
-                    { label: "运行当前提问", primary: true, action: () => runAsk().catch(reportError) },
-                    { label: "运行思维导图", action: () => runStudio("mindmap").catch(reportError) },
-                    { label: "运行信息图", action: () => runStudio("infographic").catch(reportError) },
-                    { label: "新建文章", action: () => setArticleModalOpen(true) },
-                    { label: "派生规则候选", action: () => openDerivedRules().catch(reportError) },
-                    ...(currentUser?.role === "admin" ? [{ label: "晋升队列", action: () => openPromoQueue().catch(reportError) }] : []),
-                    ...(currentUser?.role === "admin" ? [{ label: tierLabel(currentNotebook?.tier), action: () => toggleNotebookTier().catch(reportError) }] : []),
-                    { label: "边审查队列", action: () => openEdgeReviewQueue().catch(reportError) }
+                    { label: "运行当前提问", primary: true, desc: "用当前来源与问答上下文跑一次检索问答，结果在弹窗呈现", action: () => runAsk().catch(reportError) },
+                    { label: "派生规则候选", desc: "审核从文章研究中提炼、待入规则库的候选规则", action: () => openDerivedRules().catch(reportError) },
+                    ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
+                    ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                    { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
                   ]
                 })}>
                   <BarChart3 size={17} />
@@ -3300,15 +3305,27 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {infoModal.actions.map((action) => (
-                <button
-                  key={action.label}
-                  className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
-                  onClick={() => { setInfoModal(null); action.action(); }}
-                >
-                  {action.label}
-                </button>
-              ))}
+              {infoModal.actions.map((action) =>
+                action.desc ? (
+                  <div key={action.label} className="info-action-row">
+                    <button
+                      className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
+                      onClick={() => { setInfoModal(null); action.action(); }}
+                    >
+                      {action.label}
+                    </button>
+                    <span className="info-action-desc">{action.desc}</span>
+                  </div>
+                ) : (
+                  <button
+                    key={action.label}
+                    className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
+                    onClick={() => { setInfoModal(null); action.action(); }}
+                  >
+                    {action.label}
+                  </button>
+                )
+              )}
             </div>
           </div>
         </section>
