@@ -47,3 +47,41 @@ def test_build_transition_drops_dangling_endpoints():
     edges = [("a", "b", 1.0), ("a", "zzz", 1.0)]
     A, index = build_transition(node_ids, edges)
     assert A.shape == (2, 2)
+
+
+import rustworkx as rx
+
+
+def _random_graph(n=60, seed=7):
+    rng = np.random.default_rng(seed)
+    ids = [f"n{i}" for i in range(n)]
+    edges = []
+    for i in range(n):
+        for _ in range(rng.integers(1, 4)):
+            j = int(rng.integers(0, n))
+            if j != i:
+                edges.append((ids[i], ids[j], 1.0))
+                edges.append((ids[j], ids[i], 1.0))
+    return ids, edges
+
+
+def test_scale_ppr_topk_matches_rustworkx():
+    ids, edges = _random_graph()
+    index = {nid: i for i, nid in enumerate(ids)}
+    G = rx.PyDiGraph()
+    G.add_nodes_from(ids)
+    for s, t, w in edges:
+        G.add_edge(index[s], index[t], {"weight": w})
+    seeds = {index["n0"]: 1.0, index["n5"]: 1.0}
+    rx_scores = rx.pagerank(G, alpha=0.5,
+                            personalization={k: float(v) for k, v in seeds.items()},
+                            weight_fn=lambda p: float(p.get("weight", 1.0)))
+    rx_rank = [k for k, v in sorted(rx_scores.items(), key=lambda x: x[1], reverse=True)]
+
+    A, idx2 = build_transition(ids, edges)
+    reset = np.zeros(len(ids)); reset[index["n0"]] = 1.0; reset[index["n5"]] = 1.0
+    x = personalized_ppr(A, reset, damping=0.5, tol=1e-12, max_iter=500)
+    scale_rank = list(np.argsort(-x))
+
+    assert set(rx_rank[:10]) >= set(scale_rank[:3])
+    assert len(set(rx_rank[:10]) & set(scale_rank[:10])) >= 8
