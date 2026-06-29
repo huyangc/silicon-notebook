@@ -35,7 +35,7 @@ HippoRAG 跑的是**精确的全图个性化 PPR**，不是局部近似：用 ig
 build_scale_index(base_nb):                  scale_ppr(active_nb, query):
   读 SQLite KO/rel/chunk/cluster               1. 种子: ANN(base) + 暴力(active) → seeds+权重
   离线算 synonym 边（一次）                      2. 拼接: base CSR ⊕ active delta(按 canonical_id 合一)
-  → 持久化: CSR图 + hnswANN + IDF + 成员表      3. PPR: numpy CSR 幂迭代(reset=种子×IDF) 精确
+  → 持久化: CSR图 + hnswANN + IDF + 成员表      3. PPR: scipy CSR 幂迭代(reset=种子×IDF) 精确
   写 .local/storage/kg_index/{nb}/             4. 节点分 → 成员表 → chunk/knowledge 打分(下游不变)
 ```
 
@@ -43,7 +43,7 @@ build_scale_index(base_nb):                  scale_ppr(active_nb, query):
 
 每个 base notebook 一份，位于 `{storage_dir}/kg_index/{notebook_id}/`（`storage_dir` 默认 `.local/storage`）：
 
-- `graph.npz` —— PPR 图的紧凑 **CSR**：`indptr/indices`(int32) + `data`(float32) + `node_ids`(index↔object/chunk id)。含 relation/membership/synonym/variant 边；**synonym 边离线算好烘进去**。10^6 节点/10^7 边 ≈ 100–150MB。
+- `graph.npz` —— PPR 图的紧凑 **scipy.sparse CSR**（`scipy.sparse.save_npz`）+ 同目录 `node_ids.npy`（index↔object/chunk id）。含 relation/membership/synonym/variant 边；**synonym 边离线算好烘进去**。10^6 节点/10^7 边 ≈ 100–150MB。
 - `ann.bin` —— hnswlib 节点向量索引（种子链接用）+ label↔id 映射。常驻 ~4GB（与现状 matmul 矩阵同量级，但只建一次、查询 ms 级）。
 - `idf.npy` —— node specificity（成员 passage 数的倒数）。
 - `members.npz` —— node→chunk 成员稀疏表（PPR 分映射回 chunk）。
@@ -61,7 +61,7 @@ build_scale_index(base_nb):                  scale_ppr(active_nb, query):
 
 1. **种子**：query 向量 → base 的 hnsw ANN top-k + active（小，暴力 matmul）→ 合并 seeds 与权重；沿用现 `_ppr_reset_vector` 的 fact/keyword 信号组装 reset。
 2. **拼接 active delta**：取 base CSR，追加 active 的节点（按 `canonical_id` 与 base 去重合一）、active 边、跨层 membership/synonym（active 节点对 base ANN 查 → 有界条数）。成本 ∝ active 规模；按 active version 缓存拼接结果。
-3. **PPR**：numpy CSR 幂迭代实现个性化 PPR（`reset = 种子 × IDF`，damping 沿用现 `settings.ppr_*`），精确、确定性。可选 scipy 加速（不默认引入新依赖）。
+3. **PPR**：在 scipy.sparse CSR 上跑个性化幂迭代（`x ← (1-d)·reset + d·(Aᵀ_norm · x)`，SpMV 用 `csr.dot`；`reset = 种子 × IDF`，damping 沿用现 `settings.ppr_*`），精确、确定性，收敛判据 `‖Δx‖₁ < tol` 或 `max_iter`。
 4. **映射**：节点分 × 成员表 → chunk/knowledge 分。**输出与现 `federated_retrieve`/PPR 同形**（`RetrievedKnowledge`，带 `.notebook_id`/`.tier`），下游答案组装零改动。
 
 ## 激活/切换（不回归小库）
@@ -76,8 +76,8 @@ build_scale_index(base_nb):                  scale_ppr(active_nb, query):
 - `app/services/kg/scale_index.py`（新）——纯函数为主、可单测：
   - `build_scale_index(notebook_id, repo, ...) -> manifest`
   - `load_scale_index(notebook_id) -> ScaleIndex | None`（带进程内缓存 + manifest 校验）
-  - `personalized_ppr(csr, reset, damping, tol, max_iter) -> np.ndarray`（numpy CSR 幂迭代）
-  - `splice_active(base_index, active_delta) -> combined_csr`（按 canonical_id 合一）
+  - `personalized_ppr(csr, reset, damping, tol, max_iter) -> np.ndarray`（scipy.sparse CSR 幂迭代，SpMV 用 `csr.dot`）
+  - `splice_active(base_index, active_delta) -> combined_csr`（scipy 稀疏块拼接，按 canonical_id 合一）
 - `SQLiteRepository.scale_ppr(active_nb, query, ...)`（新）——在 `_ppr_graph`/`federated_retrieve` 入口按判据分流，返回与现路径同形结果。
 - `batch_ingest`：新增 `index` 阶段调用 `build_scale_index`；README/README_zh 补用法（按既有「CLI 进 README」约定）。
 
@@ -95,11 +95,11 @@ build_scale_index(base_nb):                  scale_ppr(active_nb, query):
 - **synonym 离线计算**在 10^6 是 O(N·k) ANN——离线可接受。
 - **索引过期**：base 重建后 manifest version 失配 → 需重跑 `index`（batch_ingest 内联）。
 - **等价性**：scale PPR 与现 rustworkx PPR 必须排序一致（由等价测试守护）。
-- **scipy 不引入**：PPR 用 numpy CSR 幂迭代；若实测 10^6 延迟不达标，再评估引入 scipy.sparse（仅性能优化，行为不变）。
+- **新增依赖 scipy**：用作 CSR 基底 + SpMV 引擎。理由：10^6/10^7 量级 scipy 的 C 实现 SpMV ≈ numpy 手搓的 5–10×（每查询 ~2.5–7.5s → ~0.5–1.5s），正落在查询热路径是否超时的分界；且 `save_npz/load_npz`、`csr.dot`、稀疏块拼接显著简化代码。scipy 为标准科学依赖、numpy 已在，权衡明确。加入 `backend/requirements.txt`。
 
 ## 实施顺序（writing-plans 细化）
 
-1. `scale_index.py`：`personalized_ppr`（numpy CSR）+ 等价测试（对照 rustworkx）。
+1. `scale_index.py`：`personalized_ppr`（scipy.sparse CSR）+ 等价测试（对照 rustworkx）；`requirements.txt` 加 scipy。
 2. `build_scale_index` + 持久化格式 + 加载/manifest。
 3. `splice_active` + 跨层合一测试。
 4. `scale_ppr` 接入 + 切换判据 + 回退测试。
