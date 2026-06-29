@@ -33,6 +33,16 @@ class TestTask1:
         nb2 = repo.get_notebook(nb.id)
         assert nb2.tier == "base"
 
+    def test_mark_notebook_base_is_globally_unique(self, repo):
+        """基准库全局唯一:把 B 设为 base 时，旧 base A 应在同一事务里被降级为 personal。"""
+        a = repo.create_notebook(NotebookCreate(name="base A"))
+        b = repo.create_notebook(NotebookCreate(name="base B"))
+        repo.mark_notebook_base(a.id)
+        assert repo.get_notebook(a.id).tier == "base"
+        repo.mark_notebook_base(b.id)  # 设新 base → 旧的应自动降级
+        assert repo.get_notebook(b.id).tier == "base"
+        assert repo.get_notebook(a.id).tier == "personal"
+
     def test_tier_is_idempotent_on_existing_db(self, tmp_path, monkeypatch):
         """Running _migrate() twice on a DB that already has the tier column
         must not raise (PRAGMA guard prevents duplicate ALTER TABLE)."""

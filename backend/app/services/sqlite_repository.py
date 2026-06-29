@@ -1271,10 +1271,15 @@ class SQLiteRepository:
         return self.get_notebook(notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
-        """Mark a notebook as the authoritative base KG (tier='base').
-        Idempotent; raises KeyError if the notebook does not exist."""
+        """Mark a notebook as THE single authoritative base KG (tier='base').
+        基准库全局唯一:同一事务里先把其它 tier='base' 的 notebook 降级为
+        'personal'，再把目标设为 'base'。Idempotent; raises KeyError if missing."""
         self.get_notebook(notebook_id)  # raises KeyError if missing
         with self._write() as db:
+            db.execute(
+                "UPDATE notebooks SET tier='personal', updated_at=? WHERE tier='base' AND id != ?",
+                (_now(), notebook_id),
+            )
             db.execute(
                 "UPDATE notebooks SET tier='base', updated_at=? WHERE id=?",
                 (_now(), notebook_id),
