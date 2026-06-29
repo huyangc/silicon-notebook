@@ -50,12 +50,12 @@ def test_iter_files_filters_and_sorts(tmp_path):
     assert len([n for n in names if n.endswith(".md")]) == 3
 
 
-def test_ensure_notebook_owner_defaults_user_local(repo):
-    nb_id = bi.ensure_notebook(repo, None, "nb")
+def test_ensure_notebook_default_owner_is_admin(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")   # owner defaults to the admin user
     with repo._connect() as db:
-        row = db.execute("SELECT created_by FROM notebooks WHERE id=?", (nb_id,)).fetchone()
-    assert nb_id.startswith("nb-")
-    assert row["created_by"] == "user-local"
+        cb = db.execute("SELECT created_by FROM notebooks WHERE id=?", (nb_id,)).fetchone()["created_by"]
+        role = db.execute("SELECT role FROM users WHERE id=?", (cb,)).fetchone()["role"]
+    assert role == "admin"          # 归属 admin 用户(语义),不依赖 created_by 是否字面 user-local
 
 
 def test_ensure_notebook_existing_id_passthrough(repo):
@@ -183,3 +183,24 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     res = bi.run_kg(repo, nb_id, limit=2, conc=2)
     assert res["extracted"] == 2
     assert len(extracted_calls) == 2          # 只抽前 2 个未抽源(targets[:limit])
+
+
+def test_ensure_notebook_explicit_owner(repo):
+    u = repo.create_user("a00123456", "pw123456")
+    assert u.id != "user-local"
+    nb_id = bi.ensure_notebook(repo, None, "nb", owner="a00123456")
+    nb_id2 = bi.ensure_notebook(repo, None, "nb2", owner="A00123456")  # 大小写不敏感
+    with repo._connect() as db:
+        cb = db.execute("SELECT created_by FROM notebooks WHERE id=?", (nb_id,)).fetchone()["created_by"]
+        cb2 = db.execute("SELECT created_by FROM notebooks WHERE id=?", (nb_id2,)).fetchone()["created_by"]
+    assert cb == u.id and cb2 == u.id
+
+
+def test_ensure_notebook_unknown_owner_errors(repo):
+    with pytest.raises(SystemExit):
+        bi.ensure_notebook(repo, None, "nb", owner="a00999999")
+
+
+def test_arg_parser_has_owner():
+    args = bi.build_arg_parser().parse_args(["ingest", "--input-dir", "x", "--owner", "a00123456"])
+    assert args.owner == "a00123456"
