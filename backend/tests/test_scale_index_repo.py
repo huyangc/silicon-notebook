@@ -1,5 +1,6 @@
 import json, os, pytest
 import numpy as np
+from scipy.sparse import load_npz
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
@@ -31,6 +32,10 @@ def test_build_scale_index_writes_artifacts(repo):
     for f in ("graph.npz", "node_ids.npy", "idf.npy", "chunk_index.npy", "ann.bin", "ann_labels.npy", "manifest.json"):
         assert os.path.exists(os.path.join(d, f)), f
     assert manifest["n_nodes"] >= 2
+    node_ids_arr = np.load(os.path.join(d, "node_ids.npy"), allow_pickle=True)
+    idf_arr = np.load(os.path.join(d, "idf.npy"))
+    G = load_npz(os.path.join(d, "graph.npz"))
+    assert len(idf_arr) == len(node_ids_arr) == G.shape[0] == G.shape[1]
 
 
 def test_build_scale_index_adds_cluster_bridge(repo):

@@ -5312,12 +5312,20 @@ class SQLiteRepository:
             clu_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
+            emb_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
         return [
             notebook_id,
             int(obj_ver["c"]), obj_ver["ts"],
             int(rel_ver["c"]), rel_ver["ts"],
             int(chunk_ver["c"]), chunk_ver["ts"],
             int(clu_ver["c"]), clu_ver["ts"],
+            int(emb_ver["c"]), emb_ver["ts"],
+            self.settings.ppr_variant_edge_weight,
+            self.settings.ppr_emb_synonym_enabled,
+            self.settings.ppr_emb_synonym_threshold,
+            self.settings.ppr_emb_synonym_topk,
         ]
 
     def build_scale_index(self, notebook_id: str) -> dict:
@@ -5378,33 +5386,24 @@ class SQLiteRepository:
         # Build extra edges: variant pairs + optional synonym pairs
         extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
 
-        ann_ids: list = []
-        ann_matrix = None
-        if self.settings.ppr_emb_synonym_enabled:
-            with self._connect() as db:
-                ids, mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
-            if ids and mat is not None and len(mat):
-                ann_ids = list(ids)
-                ann_matrix = mat
-                import numpy as _np
-                extra_edges = extra_edges + emb_synonym_edges(
-                    ann_ids, _np.asarray(ann_matrix),
-                    self.settings.ppr_emb_synonym_threshold,
-                    self.settings.ppr_emb_synonym_topk,
-                    self.settings.ppr_emb_synonym_max_entities,
-                )
-        else:
-            # Still gather embeddings for the ANN index even if synonym edges disabled
-            with self._connect() as db:
-                ids, mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
-            if ids and mat is not None and len(mat):
-                ann_ids = list(ids)
-                ann_matrix = mat
+        import numpy as np
+        with self._connect() as db:
+            ann_ids_raw, ann_matrix_raw = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+        ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
+        ann_matrix = ann_matrix_raw
+        has_vecs = bool(ann_ids) and ann_matrix is not None and len(ann_matrix)
+
+        if has_vecs and self.settings.ppr_emb_synonym_enabled:
+            extra_edges = extra_edges + emb_synonym_edges(
+                ann_ids, np.asarray(ann_matrix),
+                self.settings.ppr_emb_synonym_threshold,
+                self.settings.ppr_emb_synonym_topk,
+                self.settings.ppr_emb_synonym_max_entities,
+            )
 
         # Build node_ids list: kg nodes first, then chunk nodes, then cluster hubs
         node_ids = list(kg_nodes.keys()) + chunk_ids
         kg_id_set = set(kg_nodes.keys())
-        chunk_id_set = set(chunk_ids)
 
         # chunk_index: indices of chunk nodes in node_ids (computed before adding
         # cluster hub nodes so chunk positions are stable)
@@ -5464,7 +5463,6 @@ class SQLiteRepository:
         transition, _ = si.build_transition(node_ids, edges)
 
         # ANN vectors/labels: kg nodes with embeddings
-        import numpy as np
         if ann_ids and ann_matrix is not None:
             ann_labels = ann_ids
             ann_vectors = np.asarray(ann_matrix, dtype=np.float32)
@@ -5479,6 +5477,7 @@ class SQLiteRepository:
             "n_nodes": len(node_ids),
             "n_kg_nodes": len(kg_nodes),
             "n_chunks": len(chunk_ids),
+            "n_hubs": len(node_ids) - len(kg_nodes) - len(chunk_ids),
             "n_ann": len(ann_labels),
         }
         return si.save_scale_index(
