@@ -2702,7 +2702,7 @@ export default function Home() {
                                 title="有新增来源尚未入图，点击增量抽取并合并至知识图谱"
                                 onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                               >
-                                <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : `补抽 ${currentNotebook.kg_pending_sources ?? "?"} 篇新增并合并`}
+                                <Network size={20} strokeWidth={2.7} /> {buildingKg ? "补抽中…" : `补抽 ${currentNotebook.kg_pending_sources ?? "?"} 篇新增并合并`}
                               </button>
                               <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                                 知识图谱已构建 · 有 {currentNotebook.kg_pending_sources ?? "?"} 篇来源未入图
@@ -2728,7 +2728,7 @@ export default function Home() {
                             : "默认问答（通用）不需要；严格推理（推理 / 图谱）需先构建知识图谱"}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
-                          <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : "构建知识图谱"}
+                          <Network size={20} strokeWidth={2.7} /> {buildingKg ? "全量构建中…" : "全量构建知识图谱"}
                         </button>
                         <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                           {currentNotebook?.base_kg_available
@@ -3044,7 +3044,7 @@ export default function Home() {
                           disabled={buildingKg || asking}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
-                          {buildingKg ? "构建中…" : "构建知识图谱"}
+                          {buildingKg ? "全量构建中…" : "全量构建知识图谱"}
                         </button>
                       </span>
                     )}
