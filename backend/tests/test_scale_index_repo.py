@@ -58,3 +58,15 @@ def test_build_scale_index_adds_cluster_bridge(repo):
         "build_scale_index must include cluster: hub nodes for synonym bridges; "
         f"got node_ids={node_ids[:20]}"
     )
+
+
+def test_scale_index_loads_and_invalidates_on_change(repo):
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [{"local_id": "a", "object_type": "concept",
+        "payload": {"name": "X", "section_path": ""}, "evidence": []}], [])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    assert repo._scale_index(nb.id) is not None            # 版本一致 -> 命中
+    repo.store_kg(nb.id, None, [{"local_id": "b", "object_type": "concept",
+        "payload": {"name": "Y", "section_path": ""}, "evidence": []}], [])
+    assert repo._scale_index(nb.id) is None                 # 索引过期不返回

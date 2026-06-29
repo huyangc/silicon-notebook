@@ -266,6 +266,7 @@ class SQLiteRepository:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
         self._user_model_cfg_cache: Dict[str, dict] = {}
+        self._scale_idx_cache: Dict[str, Any] = {}
         self._vector_cache = VectorCache()
         self._write_lock = threading.RLock()
         self._migrate()
@@ -5327,6 +5328,21 @@ class SQLiteRepository:
             self.settings.ppr_emb_synonym_threshold,
             self.settings.ppr_emb_synonym_topk,
         ]
+
+    def _scale_index(self, notebook_id: str):
+        """Return a valid ScaleIndex (manifest version == current DB version) or None.
+        Process-cached: returns the cached instance when the version still matches."""
+        from app.services.kg import scale_index as si
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        cur = self._scale_index_version(notebook_id)
+        cached = self._scale_idx_cache.get(notebook_id)
+        if cached is not None and cached.manifest.get("version") == cur:
+            return cached
+        idx = si.load_scale_index(out_dir)
+        if idx is None or idx.manifest.get("version") != cur:
+            return None
+        self._scale_idx_cache[notebook_id] = idx
+        return idx
 
     def build_scale_index(self, notebook_id: str) -> dict:
         """Offline: read KG from SQLite for ONE notebook, build CSR transition +

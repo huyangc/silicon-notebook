@@ -14,6 +14,43 @@ import numpy as np
 import scipy.sparse as sp
 
 
+@dataclass
+class ScaleIndex:
+    node_ids: list
+    node_index: dict
+    transition: "sp.csr_matrix"
+    idf: "np.ndarray"
+    chunk_index: "np.ndarray"
+    ann_labels: list
+    ann_path: str
+    manifest: dict
+
+
+def load_scale_index(out_dir: str):
+    """从 out_dir 加载持久化的 ScaleIndex。manifest 不存在或目录不存在时返回 None。
+    ANN 索引不预加载（延迟由调用方按需用 ann_path 打开）。"""
+    mpath = os.path.join(out_dir, "manifest.json")
+    if not os.path.exists(mpath):
+        return None
+    with open(mpath) as fh:
+        manifest = json.load(fh)
+    transition = sp.load_npz(os.path.join(out_dir, "graph.npz"))
+    node_ids = list(np.load(os.path.join(out_dir, "node_ids.npy"), allow_pickle=True))
+    idf = np.load(os.path.join(out_dir, "idf.npy"))
+    chunk_index = np.load(os.path.join(out_dir, "chunk_index.npy"))
+    ann_labels = list(np.load(os.path.join(out_dir, "ann_labels.npy"), allow_pickle=True))
+    return ScaleIndex(
+        node_ids=node_ids,
+        node_index={n: i for i, n in enumerate(node_ids)},
+        transition=transition,
+        idf=idf,
+        chunk_index=chunk_index,
+        ann_labels=ann_labels,
+        ann_path=os.path.join(out_dir, "ann.bin"),
+        manifest=manifest,
+    )
+
+
 def personalized_ppr(
     transition: "sp.csr_matrix",
     reset: "np.ndarray",
