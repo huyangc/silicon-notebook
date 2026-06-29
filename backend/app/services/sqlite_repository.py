@@ -1626,6 +1626,16 @@ class SQLiteRepository:
                 )
         return result
 
+    def rebuild_notebook_kg(self, notebook_id: str) -> dict:
+        """Full re-extract: wipe all KG artefacts, then build from scratch.
+
+        Equivalent to delete_notebook_kg + build_notebook_kg but in a single
+        call so background threads don't need to chain the two methods.
+        After delete every source has no KG, so build re-extracts all of them;
+        build's tail relink pass runs automatically."""
+        self.delete_notebook_kg(notebook_id)
+        return self.build_notebook_kg(notebook_id)
+
     def _parse_url_via_local(
         self, source_id: str, url: str, file_name: str
     ) -> List[SourceElement]:
