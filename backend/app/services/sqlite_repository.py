@@ -3996,7 +3996,7 @@ class SQLiteRepository:
             extra = set()
             for i, (a, b, s) in enumerate(autoc):
                 d = by_id.get(f"ac{i}")
-                if d and d["decision"] == "merge" and d["confidence"] >= 0.90:
+                if d and d["decision"] == "merge" and d["confidence"] >= self.settings.kg_merge_confirm_threshold:
                     extra.add(frozenset((a[2:] if a.startswith("K-") else a,
                                         b[2:] if b.startswith("K-") else b)))
             if extra:
