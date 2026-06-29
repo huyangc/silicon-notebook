@@ -801,6 +801,35 @@ def build_kg(notebook_id: str) -> dict:
     return {"status": "building", "notebook_id": notebook_id}
 
 
+@router.post("/notebooks/{notebook_id}/kg/rebuild", dependencies=[Depends(require_notebook_access)])
+def rebuild_kg(notebook_id: str) -> dict:
+    """Full re-extract: clears all KG artefacts then re-extracts ALL sources
+    (background thread). Requires LLM configured (409 if not), 404 if notebook
+    missing — same guards as build_kg."""
+    repo = repository()
+    if not getattr(repo.llm_client, "configured", False):
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    threading.Thread(target=repo.rebuild_notebook_kg, args=(notebook_id,),
+                     name=f"rebuildkg-{notebook_id}", daemon=True).start()
+    return {"status": "rebuilding", "notebook_id": notebook_id}
+
+
+@router.post("/notebooks/{notebook_id}/kg/relink", dependencies=[Depends(require_notebook_access)])
+def relink_kg(notebook_id: str) -> dict:
+    """Deterministic reconnection of isolated KG nodes (synchronous, no LLM).
+    Returns {"isolated_before", "edges_added", "isolated_after"}."""
+    repo = repository()
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    return repo.relink_notebook_kg(notebook_id)
+
+
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
 def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile = Depends(get_current_user)) -> FeedbackResponse:
     if repository().answer_owner(answer_id) != user.id:
