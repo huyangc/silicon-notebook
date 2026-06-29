@@ -374,3 +374,184 @@ def test_flag_demotion_does_not_leak_into_next_ask():
     edges2 = [e for _n, e, _s in sub2 if e and e.get("edge_type") == "derived_from"]
     assert edges2, "expected the derived_from edge in the second traversal"
     assert edges2[0]["confidence"] == 1.0
+
+
+# ── TD1: transit-only cluster hubs (cross-doc bridge, never cited) ───────────
+# Synthetic fixture: two documents with NO direct edge between them, only
+# co-membership in a concept cluster.  A synthetic hub node bridges them so
+# multi-hop reasoning can cross documents, but the hub is TRANSIT-ONLY: it must
+# never appear in the multihop result, the rendered context, the id_map, or be
+# handed to the edge verifier (so the LLM cannot mistake "cluster:..." for a
+# real answer node).
+#
+# doc-A node a1 ──(intra-doc)──> a2     doc-B node b1 ──(intra-doc)──> b2
+#   a1 and b1 are both members of cluster "K-x"; no a*↔b* relation exists.
+CD_NODES = {
+    "a1": {"type": "Concept", "name": "Alpha One"},
+    "a2": {"type": "Claim",   "name": "Alpha Two"},
+    "b1": {"type": "Concept", "name": "Beta One"},
+    "b2": {"type": "Claim",   "name": "Beta Two"},
+}
+CD_RELATIONS = [
+    {"id": "ra", "source_object_id": "a1", "target_object_id": "a2",
+     "edge_type": "supports",
+     "evidence": [{"file": "fa", "char_start": 0, "char_end": 5,
+                   "line_start": 1, "line_end": 1, "quote": "a1 supports a2"}]},
+    {"id": "rb", "source_object_id": "b1", "target_object_id": "b2",
+     "edge_type": "supports",
+     "evidence": [{"file": "fb", "char_start": 0, "char_end": 5,
+                   "line_start": 1, "line_end": 1, "quote": "b1 supports b2"}]},
+]
+
+
+def test_cluster_groups_none_identical_to_before():
+    """Regression: cluster_groups=None (and omitted) → byte-identical graph
+    shape AND no `kind` change to behavior. Same node/edge counts as the
+    no-cluster build; multihop result unchanged."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+
+    G_omit, i2o_omit, o2i_omit = build_rx_graph(CD_NODES, CD_RELATIONS)
+    G_none, i2o_none, o2i_none = build_rx_graph(CD_NODES, CD_RELATIONS,
+                                                cluster_groups=None)
+    assert G_omit.num_nodes() == 4
+    assert G_omit.num_edges() == 2
+    assert G_none.num_nodes() == 4
+    assert G_none.num_edges() == 2
+
+    # multihop from a1 stays inside doc-A (no bridge) — exactly as before.
+    sub = multihop_subgraph(G_none, o2i_none, i2o_none, ["a1"],
+                            {"supports"}, max_depth=3, max_fan_out=10)
+    oids = [n["object_id"] for n, _, _ in sub]
+    assert oids == ["a1", "a2"]
+    assert "b1" not in oids and "b2" not in oids
+
+
+def test_real_nodes_tagged_kind_entity():
+    """When cluster_groups is in play, every real node payload carries
+    kind='entity' so the hub (kind='cluster') is distinguishable downstream."""
+    from app.services.kg.graph_reason import build_rx_graph
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        CD_NODES, CD_RELATIONS, cluster_groups={"K-x": ["a1", "b1"]})
+    for oid, idx in oid_to_idx.items():
+        assert G[idx].get("kind") == "entity", f"{oid} should be kind=entity"
+
+
+def test_cluster_hub_bridges_across_documents():
+    """The core cross-doc win: seed=a1 reaches b1 (and onward b2) PURELY through
+    the synthetic hub for cluster 'K-x' — there is NO a*↔b* relation."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        CD_NODES, CD_RELATIONS,
+        cluster_groups={"K-x": ["a1", "b1"]},
+    )
+    # Hub adds a node + 4 directed edges (hub↔a1, hub↔b1, both directions).
+    assert G.num_nodes() == 5
+    assert G.num_edges() == 2 + 4
+
+    sub = multihop_subgraph(
+        G, oid_to_idx, idx_to_oid,
+        seed_ids=["a1"],
+        # follow real edges + the synthetic synonym edge so mass crosses the hub
+        edge_types={"supports", "synonym"},
+        max_depth=4, max_fan_out=10,
+    )
+    oids = [n["object_id"] for n, _, _ in sub]
+    # cross-doc bridge worked: b1 (and b2 one hop further) are reachable
+    assert "b1" in oids, "expected to reach doc-B node b1 via the cluster hub"
+    assert "b2" in oids, "expected to reach b2 one hop past the bridge"
+
+
+def test_cluster_hub_never_emitted_rendered_or_verified():
+    """The hub is TRANSIT-ONLY: never in the multihop result, never in the
+    rendered context text or id_map, and never handed to the edge verifier."""
+    from app.services.kg.graph_reason import (
+        build_rx_graph, multihop_subgraph, render_subgraph_context,
+        verify_chain_edges,
+    )
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        CD_NODES, CD_RELATIONS,
+        cluster_groups={"K-x": ["a1", "b1"]},
+    )
+    sub = multihop_subgraph(
+        G, oid_to_idx, idx_to_oid,
+        seed_ids=["a1"],
+        edge_types={"supports", "synonym"},
+        max_depth=4, max_fan_out=10,
+    )
+
+    # (1) hub node never emitted into the result
+    result_oids = [n["object_id"] for n, _, _ in sub]
+    assert "cluster:K-x" not in result_oids
+    assert all(n.get("kind") != "cluster" for n, _, _ in sub)
+    # No synthetic synonym edge leaks into the result either (its endpoint is a
+    # hub, so the hop that produced it must have been suppressed).
+    assert all((e is None or e.get("edge_type") != "synonym") for _, e, _ in sub)
+
+    # (2) render: hub absent from text and id_map
+    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    assert "cluster:K-x" not in ctx
+    assert "K-x" not in ctx
+    assert all(v["object_id"] != "cluster:K-x" for v in id_map.values())
+    assert all(not str(v["object_id"]).startswith("cluster:")
+               for v in id_map.values())
+
+    # (3) verify: the verifier must never see a hub as src or tgt endpoint
+    seen_endpoints = []
+
+    class _SpyLLM:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            seen_endpoints.append(messages[0]["content"])
+            import json as _j
+            return _j.dumps({"valid": True, "reason": "ok"})
+
+    verify_chain_edges(sub, _SpyLLM())
+    for content in seen_endpoints:
+        assert "cluster:K-x" not in content
+        assert "K-x" not in content
+
+
+def test_cluster_single_member_adds_no_hub():
+    """A cluster with only 1 present member needs no hub — graph shape is the
+    no-cluster baseline (4 nodes, 2 edges)."""
+    from app.services.kg.graph_reason import build_rx_graph
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        CD_NODES, CD_RELATIONS,
+        cluster_groups={"K-solo": ["a1"]},
+    )
+    assert G.num_nodes() == 4
+    assert G.num_edges() == 2
+    assert "cluster:K-solo" not in oid_to_idx
+
+
+def test_cluster_member_absent_counts_as_not_present():
+    """Members named in cluster_groups but absent from `nodes` don't count
+    toward the ≥2 threshold; a1 present + ghost absent → lone member → no hub."""
+    from app.services.kg.graph_reason import build_rx_graph
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        CD_NODES, CD_RELATIONS,
+        cluster_groups={"K-x": ["a1", "ghost-not-in-nodes"]},
+    )
+    assert G.num_nodes() == 4
+    assert "cluster:K-x" not in oid_to_idx
+
+
+def test_cluster_hub_cycle_safe_low_fanout():
+    """Hub↔member both-direction edges form 2-cycles. With a tiny fan-out and a
+    deep budget, traversal must still terminate and visit each node at most
+    once (visited set guards the hub↔member ping-pong)."""
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        CD_NODES, CD_RELATIONS,
+        cluster_groups={"K-x": ["a1", "b1"]},
+    )
+    sub = multihop_subgraph(
+        G, oid_to_idx, idx_to_oid,
+        seed_ids=["a1"],
+        edge_types={"supports", "synonym"},
+        max_depth=10, max_fan_out=1,
+    )
+    oids = [n["object_id"] for n, _, _ in sub]
+    # no node appears twice despite hub↔member 2-cycles + deep budget
+    assert len(oids) == len(set(oids))
