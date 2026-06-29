@@ -5589,9 +5589,23 @@ class SQLiteRepository:
             kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
             token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
+            # 孤立节点降权: 计算本 notebook 有边节点集合(一次查询,O(edges))。
+            # 降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
+            rel_rows = db.execute(
+                "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchall()
+            connected_ids: set = set()
+            for r in rel_rows:
+                connected_ids.add(r["source_object_id"])
+                connected_ids.add(r["target_object_id"])
+            # candidate object ids for this retrieval call
+            candidate_ids = {o["id"] for objs in kg_objs.values() for o in objs}
+            isolated_ids: set = candidate_ids - connected_ids
         from app.services.vector_index import query_sims
         element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
         knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+        penalty = self.settings.kg_isolated_rank_penalty
         if self.settings.retrieval_rrf_enabled:
             scored = self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
         else:
@@ -5605,6 +5619,8 @@ class SQLiteRepository:
                     element_sims=element_sims, knowledge_sims=knowledge_sims,
                     w_keyword=w_keyword, w_semantic=w_semantic,
                     keyword_token_sets=token_sets,
+                    isolated_ids=isolated_ids,
+                    w_isolated_penalty=penalty,
                 ))
             scored.sort(key=lambda it: it.score, reverse=True)
         if self.settings.kg_canonical_fold_enabled:
