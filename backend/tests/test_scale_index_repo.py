@@ -88,16 +88,22 @@ def _seed_small_base(repo):
 
 
 def test_scale_ppr_returns_chunk_rankings_shape(repo):
-    nb = _seed_small_base(repo)
-    repo.build_scale_index(nb.id)
-    out = repo.scale_ppr(nb.id, "MOSFET gain")
-    assert isinstance(out, list)
+    """scale_ppr must return a non-empty ranked list with valid (str, float) pairs
+    when queried from a separate active notebook against a base that has a chunk."""
+    base = _seed_base_with_chunk(repo)
+    active = repo.create_notebook(NotebookCreate(name="active-shape"))
+    out = repo.scale_ppr(active.id, "MOSFET gain")
+    assert isinstance(out, list) and out, "scale_ppr must return a non-empty list"
     assert all(isinstance(cid, str) and 0.0 <= score <= 1.0 for cid, score in out)
 
 
 def test_graph_mode_falls_back_when_no_index(repo):
     nb = _seed_small_base(repo)
     assert repo._scale_index(nb.id) is None   # not built -> fallback path
+    # Confirm the dispatch in _ppr_retrieve reaches the rustworkx fallback
+    # without crashing (result is [] in the test env — no embed configured).
+    result = repo._ppr_retrieve(nb.id, "MOSFET")
+    assert isinstance(result, list)
 
 
 def _seed_base_with_chunk(repo):
