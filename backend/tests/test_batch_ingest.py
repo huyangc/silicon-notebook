@@ -67,6 +67,14 @@ def test_ensure_notebook_existing_id_passthrough(repo):
 def test_already_ingested_detects_hash(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     assert bi.already_ingested(repo, nb_id, "deadbeef") is False
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-x", nb_id, "S", "document", "s.md", "/tmp/s.md", 0, "cafe", "", "", "parsed", now, now))
+    assert bi.already_ingested(repo, nb_id, "cafe") is True
 
 
 def test_run_ingest_creates_sources_chunks_embeddings_no_kg(repo, tmp_path):
@@ -150,3 +158,28 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
                           (row["id"],)).fetchone()["c"]
     assert nsrc == 3
+
+
+def test_run_kg_limit_extracts_subset(repo, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        for i in range(3):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"src-lim-{i}", nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
+                 0, f"h{i}", "", "", "parsed", now, now))
+    extracted_calls = []
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted_calls.append(sid))
+    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+
+    def _no_build(nb):
+        raise AssertionError("build_notebook_kg must not be called when limit is set")
+    monkeypatch.setattr(repo, "build_notebook_kg", _no_build)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
+
+    res = bi.run_kg(repo, nb_id, limit=2, conc=2)
+    assert res["extracted"] == 2
+    assert len(extracted_calls) == 2          # 只抽前 2 个未抽源(targets[:limit])
