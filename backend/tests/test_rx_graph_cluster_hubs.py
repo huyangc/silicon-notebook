@@ -1,0 +1,308 @@
+"""TD2 — activate cross-document cluster hubs in the reasoning/graph path.
+
+These tests cover the *integration* seam (TD1 already unit-tests build_rx_graph's
+hub construction in test_graph_reason.py):
+
+  1. _rx_graph loads concept_clusters into cluster_groups and passes them to
+     build_rx_graph → a transit-only `cluster:` hub appears when ≥2 members of a
+     canonical are present (and NOT when <2).
+  2. _rx_graph's version cache key includes a concept_clusters (COUNT, MAX
+     created_at) part, so adding a cluster row invalidates the cached graph
+     (rebuild after a rebuild_unified_kg).
+  3. Cross-doc bridge through the REPO path: two objects in two sources with NO
+     direct relation, co-members of one canonical → multihop_subgraph from a1
+     with edge_types including "synonym" reaches b1, and the result contains NO
+     `cluster:` node (TD1 transit-only guarantee, asserted through this path).
+  4. _federated_rx_graph aggregates concept_clusters across ALL participants
+     (active + base tier) so a base-side member bridges an active-side member.
+  5. ask_graph's multihop_subgraph call uses edge_types == DEFAULT_REASONING_EDGES
+     | {"synonym"} (the bridge would be dormant without "synonym").
+"""
+import json
+
+import pytest
+
+
+# ── fixtures ─────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    from app.services.embedding import FakeEmbedder
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)
+    return r
+
+
+_NOW = "2026-06-29T00:00:00"
+
+
+def _seed_two_docs(repo, notebook_id):
+    """Two objects a1 (src-A) + b1 (src-B), no direct relation between them.
+
+    Each gets a tiny intra-doc partner so the graph is non-trivial, but there is
+    NO a*↔b* relation — only co-membership in a cluster can bridge them.
+    """
+    with repo._write() as db:
+        for oid, src in (("a1", "src-A"), ("a2", "src-A"),
+                         ("b1", "src-B"), ("b2", "src-B")):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (oid, notebook_id, "concept", "approved", "",
+                 json.dumps({"name": oid.upper()}), "[]", src, _NOW, _NOW))
+        # intra-doc edges only (a1->a2, b1->b2); no cross-doc relation
+        for rid, s, t in (("ra", "a1", "a2"), ("rb", "b1", "b2")):
+            db.execute(
+                "INSERT INTO knowledge_relations "
+                "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence,created_at,review_status) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (rid, notebook_id, s, t, "supports", "[]", _NOW, "pending"))
+
+
+def _add_cluster(repo, notebook_id, canonical_id, members, cc_prefix="cc"):
+    with repo._write() as db:
+        for i, m in enumerate(members):
+            db.execute(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"{cc_prefix}-{i}", notebook_id, canonical_id, m,
+                 canonical_id, "concept", "", _NOW))
+
+
+# ── 1 + 2: _rx_graph loads clusters; version invalidates on cluster change ───
+
+def test_rx_graph_version_invalidates_on_cluster_row(repo):
+    """Adding a concept_clusters row must change the cached graph object
+    (version key now includes concept_clusters COUNT/MAX created_at)."""
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+
+    G1, _, o2i_1 = repo._rx_graph(nb.id)
+    # Same data → same cached object (sanity: cache hit).
+    G1b, _, _ = repo._rx_graph(nb.id)
+    assert G1 is G1b, "expected a cache hit on identical data"
+
+    # Add a cluster row spanning a1+b1 → version must change → new graph object.
+    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
+    G2, _, o2i_2 = repo._rx_graph(nb.id)
+    assert G2 is not G1, "cluster row did not invalidate the cached graph"
+
+
+def test_rx_graph_passes_cluster_groups_hub_present_when_two_members(repo):
+    """_rx_graph passes cluster_groups → the returned graph contains a
+    `cluster:` hub node when ≥2 members of a canonical are present."""
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
+
+    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
+    hub_nodes = [G[i] for i in G.node_indices() if G[i].get("kind") == "cluster"]
+    assert len(hub_nodes) == 1, "expected exactly one transit-only cluster hub"
+    assert hub_nodes[0]["object_id"] == "cluster:K-x"
+
+
+def test_rx_graph_no_hub_when_single_member_present(repo):
+    """A canonical with only 1 present member adds no hub (lone member needs no
+    bridge) — exercised through the repo load path."""
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+    # canonical references a1 + a ghost object id absent from knowledge_objects
+    _add_cluster(repo, nb.id, "K-solo", ["a1", "ghost-not-an-object"])
+
+    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
+    hub_nodes = [G[i] for i in G.node_indices() if G[i].get("kind") == "cluster"]
+    assert hub_nodes == [], "no hub expected when <2 members are present"
+
+
+def test_rx_graph_no_clusters_no_hub_and_no_kind(repo):
+    """No concept_clusters rows → no hub, and real nodes carry NO kind tag
+    (None-path stays byte-identical to the pre-hub payload shape)."""
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+
+    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
+    assert all(G[i].get("kind") != "cluster" for i in G.node_indices())
+    # cluster_groups should be falsy → build_rx_graph leaves nodes untagged
+    a1 = G[oid_to_idx["a1"]]
+    assert "kind" not in a1, "real node tagged kind without any clusters present"
+
+
+# ── 3: cross-doc bridge through the repo path + transit-only guarantee ───────
+
+def test_rx_graph_synonym_traversal_bridges_cross_doc(repo):
+    """Integration: a1 (src-A) and b1 (src-B) have NO direct relation but share a
+    canonical. Building via _rx_graph + multihop with edge_types incl. "synonym"
+    reaches b1, AND the result contains NO `cluster:` node."""
+    from app.models.schemas import NotebookCreate
+    from app.services.kg.graph_reason import multihop_subgraph
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
+
+    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
+    sub = multihop_subgraph(
+        G, oid_to_idx, idx_to_oid,
+        seed_ids=["a1"],
+        edge_types={"supports", "synonym"},
+        max_depth=4, max_fan_out=10,
+    )
+    oids = [n["object_id"] for n, _, _ in sub]
+    assert "b1" in oids, "expected to reach cross-doc node b1 via the cluster hub"
+    # transit-only: no hub node ever emitted (TD1 guarantee, via this path)
+    assert all(not str(o).startswith("cluster:") for o in oids)
+    assert all(n.get("kind") != "cluster" for n, _, _ in sub)
+
+
+def test_rx_graph_no_bridge_without_synonym_edge(repo):
+    """Without "synonym" in edge_types, a1 cannot reach b1 (the bridge is
+    dormant — proves the synonym addition is load-bearing)."""
+    from app.models.schemas import NotebookCreate
+    from app.services.kg.graph_reason import multihop_subgraph
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
+
+    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
+    sub = multihop_subgraph(
+        G, oid_to_idx, idx_to_oid,
+        seed_ids=["a1"],
+        edge_types={"supports"},  # no synonym → hub edges not followed
+        max_depth=4, max_fan_out=10,
+    )
+    oids = [n["object_id"] for n, _, _ in sub]
+    assert "b1" not in oids
+
+
+# ── 4: _federated_rx_graph aggregates clusters across participants ───────────
+
+def test_federated_rx_graph_bridges_base_and_active_via_cluster(repo):
+    """_federated_rx_graph spans clusters from ALL participants: a base-tier
+    member and an active-tier member sharing one canonical bridge cross-tier."""
+    from app.models.schemas import NotebookCreate
+    from app.services.kg.graph_reason import multihop_subgraph
+    base_nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base_nb.id)
+    pers_nb = repo.create_notebook(NotebookCreate(name="personal"))
+
+    now = _NOW
+    with repo._write() as db:
+        # base object B1, active object P1; no relation between them at all
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("B1", base_nb.id, "concept", "approved", "",
+             json.dumps({"name": "Shared Concept"}), "[]", "sb", now, now))
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("P1", pers_nb.id, "concept", "approved", "",
+             json.dumps({"name": "Shared Concept"}), "[]", "sp", now, now))
+    # Same canonical_id stored under BOTH notebooks (name-derived, shared).
+    _add_cluster(repo, base_nb.id, "K-shared", ["B1"], cc_prefix="ccb")
+    _add_cluster(repo, pers_nb.id, "K-shared", ["P1"], cc_prefix="ccp")
+
+    G, idx_to_oid, oid_to_idx = repo._federated_rx_graph(pers_nb.id)
+    # Hub present: 2 members of K-shared present across participants.
+    hub_nodes = [G[i] for i in G.node_indices() if G[i].get("kind") == "cluster"]
+    assert any(h["object_id"] == "cluster:K-shared" for h in hub_nodes), (
+        "expected a federated cluster hub spanning base + active members")
+
+    sub = multihop_subgraph(
+        G, oid_to_idx, idx_to_oid,
+        seed_ids=["P1"],
+        edge_types={"supports", "synonym"},
+        max_depth=3, max_fan_out=10,
+    )
+    oids = [n["object_id"] for n, _, _ in sub]
+    assert "B1" in oids, "active P1 should reach base B1 via the shared cluster hub"
+    assert all(not str(o).startswith("cluster:") for o in oids)
+
+
+def test_federated_rx_graph_version_invalidates_on_cluster_row(repo):
+    """Adding a concept_clusters row to a participant must rebuild the federated
+    graph (per-participant concept_clusters in the version key)."""
+    from app.models.schemas import NotebookCreate
+    base_nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base_nb.id)
+    pers_nb = repo.create_notebook(NotebookCreate(name="personal"))
+    with repo._write() as db:
+        for oid, nbid in (("B1", base_nb.id), ("P1", pers_nb.id)):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (oid, nbid, "concept", "approved", "",
+                 json.dumps({"name": "Shared Concept"}), "[]", "s", _NOW, _NOW))
+
+    G1, _, _ = repo._federated_rx_graph(pers_nb.id)
+    G1b, _, _ = repo._federated_rx_graph(pers_nb.id)
+    assert G1 is G1b, "expected a federated cache hit on identical data"
+
+    # Add a cluster row on the BASE participant → version must change.
+    _add_cluster(repo, base_nb.id, "K-shared", ["B1"], cc_prefix="ccb")
+    G2, _, _ = repo._federated_rx_graph(pers_nb.id)
+    assert G2 is not G1, "cluster row on a participant did not invalidate fed graph"
+
+
+# ── 5: ask_graph uses DEFAULT_REASONING_EDGES | {"synonym"} ──────────────────
+
+def test_ask_graph_multihop_call_includes_synonym_edge_type(repo, monkeypatch):
+    """ask_graph's multihop_subgraph call must pass edge_types that include
+    "synonym" (and every DEFAULT_REASONING_EDGE) — without it the hub is dormant.
+
+    We monkeypatch multihop_subgraph at its source module so the patched symbol
+    is the one ask_graph imports, capture the edge_types kwarg, and drive
+    ask_graph directly with explicit seed_ids (bypasses the empty-retrieval
+    early-return and the PPR branch, which returns [] with no chunks seeded)."""
+    from app.models.schemas import NotebookCreate, AskRequest
+    from app.services.kg.graph_reason import DEFAULT_REASONING_EDGES
+    import app.services.kg.graph_reason as gr
+
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _seed_two_docs(repo, nb.id)
+    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
+
+    captured = {}
+    real = gr.multihop_subgraph
+
+    def _spy(*args, **kwargs):
+        # ask_graph passes edge_types explicitly (with synonym);
+        # _chunk_kg_overlay passes edge_types=None — capture only the former.
+        et = kwargs.get("edge_types")
+        if et is not None:
+            captured["edge_types"] = et
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(gr, "multihop_subgraph", _spy)
+
+    repo.ask_graph(nb.id, AskRequest(question="alpha", mode="graph"),
+                   seed_ids=["a1"])
+
+    assert "edge_types" in captured, "ask_graph never called multihop with edge_types"
+    et = captured["edge_types"]
+    assert "synonym" in et, f"synonym not in ask_graph edge_types: {et}"
+    # every default reasoning edge is still present (no narrowing)
+    assert set(DEFAULT_REASONING_EDGES).issubset(set(et))
+    # exactly the defaults plus synonym (no accidental broadening)
+    assert set(et) == set(DEFAULT_REASONING_EDGES) | {"synonym"}
+
+
+def test_default_reasoning_edges_unchanged_globally():
+    """Scope guard: the synonym addition must NOT mutate the module-level
+    DEFAULT_REASONING_EDGES constant."""
+    from app.services.kg.graph_reason import DEFAULT_REASONING_EDGES
+    assert "synonym" not in DEFAULT_REASONING_EDGES
+    assert DEFAULT_REASONING_EDGES == frozenset({"derived_from", "supports", "depends_on"})
