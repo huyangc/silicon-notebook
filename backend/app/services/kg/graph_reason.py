@@ -25,6 +25,7 @@ def build_rx_graph(
     relations: List[dict],
     tier: str = "base",
     tier_map: Optional[Dict[str, str]] = None,
+    cluster_groups: Optional[Dict[str, List[str]]] = None,
 ) -> Tuple[rx.PyDiGraph, Dict[int, str], Dict[str, int]]:
     """Build a PyDiGraph from dicts.
 
@@ -42,17 +43,36 @@ def build_rx_graph(
     `tier` when the key is absent or tier_map is None.  Federated callers pass
     tier_map AND tier="personal" so any unmapped (orphan) relation is treated
     conservatively as personal rather than authoritative base.
+
+    `cluster_groups` — optional {canonical_id: [object_id, ...]} mapping of
+    concept-cluster membership.  When provided, every REAL node is tagged
+    kind="entity" and, for each canonical_id with ≥2 of its members PRESENT as
+    nodes, a synthetic TRANSIT-ONLY hub node is added (object_id
+    f"cluster:{canonical_id}", kind="cluster") with both-direction synonym
+    edges to each present member.  These hubs let multi-hop reasoning bridge
+    documents that share a cluster but have no direct relation; they are
+    PASS-THROUGH only — multihop_subgraph traverses them but never emits them,
+    and render_subgraph_context / verify_chain_edges skip them — so the LLM can
+    never cite a "cluster:..." hub as a real answer.  Clusters with <2 present
+    members add no hub (a lone member needs no bridge).  When cluster_groups is
+    None the graph shape and node payloads are byte-identical to before.
     """
     G: rx.PyDiGraph = rx.PyDiGraph()
     idx_to_oid: Dict[int, str] = {}
     oid_to_idx: Dict[str, int] = {}
 
+    # Tag real nodes with kind="entity" ONLY when cluster_groups is in play, so
+    # the None path stays byte-identical to the pre-hub payload shape.
+    tag_kind = cluster_groups is not None
     for oid, meta in nodes.items():
-        idx = G.add_node({
+        payload = {
             "object_id": oid,
             "object_type": meta.get("type", ""),
             "name": meta.get("name", ""),
-        })
+        }
+        if tag_kind:
+            payload["kind"] = "entity"
+        idx = G.add_node(payload)
         idx_to_oid[idx] = oid
         oid_to_idx[oid] = idx
 
@@ -85,6 +105,27 @@ def build_rx_graph(
             },
         )
 
+    # Synthetic transit-only cluster hubs.  Only built when cluster_groups is
+    # provided; never alters the None-path graph.
+    if cluster_groups:
+        for canonical_id, members in cluster_groups.items():
+            present = [m for m in members if m in oid_to_idx]
+            if len(present) < 2:
+                continue  # a lone present member needs no hub
+            hub_idx = G.add_node({
+                "object_id": f"cluster:{canonical_id}",
+                "kind": "cluster",
+                "name": canonical_id,
+            })
+            for m in present:
+                m_idx = oid_to_idx[m]
+                # Both directions so a hub reached from any member can hand mass
+                # on to every sibling member (the cross-doc bridge).
+                G.add_edge(hub_idx, m_idx,
+                           {"edge_type": "synonym", "rel_id": "", "kind": "synonym"})
+                G.add_edge(m_idx, hub_idx,
+                           {"edge_type": "synonym", "rel_id": "", "kind": "synonym"})
+
     return G, idx_to_oid, oid_to_idx
 
 
@@ -106,6 +147,15 @@ def multihop_subgraph(
     Each node appears at most once (visited set guards cycles).  At each hop the
     eligible out-edges are sorted by confidence desc, then capped to
     `max_fan_out`.
+
+    TRANSIT-ONLY cluster hubs (kind=="cluster", produced by build_rx_graph from
+    cluster_groups): a hub is traversed THROUGH — its successors are still
+    enqueued so reasoning mass crosses to sibling members in other documents —
+    but the hub itself is NEVER appended to the result, and neither is the
+    synonym edge leading into it.  Downstream the answer only ever sees real
+    entity nodes, so the LLM cannot cite a "cluster:..." hub as an answer.  The
+    visited set still records the hub index, so the hub↔member both-direction
+    synonym edges can never ping-pong into an infinite loop.
 
     The returned node and edge payloads are shallow COPIES, never the live dicts
     stored inside `G`.  rustworkx's get_edge_data / G[idx] hand back the same
@@ -140,6 +190,12 @@ def multihop_subgraph(
         if depth >= max_depth:
             continue
         cur_oid = idx_to_oid.get(cur_idx)
+        # Is the node we're expanding FROM a transit hub?  If so, the synthetic
+        # synonym edges out of it are NOT real reasoning steps: the real member
+        # we reach through the hub is recorded as a fresh transit-arrival node
+        # (edge=None, src=None) so neither the synthetic edge nor the hub's id
+        # ever leaks into the rendered chain or the edge verifier.
+        cur_is_hub = G[cur_idx].get("kind") == "cluster"
         # Gather eligible out-edges for this node
         out_edges = []
         for tgt_idx in G.successor_indices(cur_idx):
@@ -156,7 +212,22 @@ def multihop_subgraph(
             if tgt_idx in visited:
                 continue
             visited.add(tgt_idx)
-            result.append((dict(G[tgt_idx]), dict(edge_data), cur_oid))
+            tgt_node = G[tgt_idx]
+            # Transit-only hub: still enqueue so its successors expand (mass
+            # crosses the bridge to sibling members), but do NOT append the hub
+            # (nor the synonym edge into it) to the result — hubs are never
+            # rendered or cited.  visited already guards the hub↔member cycle.
+            if tgt_node.get("kind") == "cluster":
+                queue.append((tgt_idx, depth + 1))
+                continue
+            if cur_is_hub:
+                # Reached a real member THROUGH a hub: the synthetic synonym
+                # edge is not a citable reasoning step, and src would be the
+                # hub's id.  Record the member as a transit-arrival node with no
+                # edge so nothing references the hub downstream.
+                result.append((dict(tgt_node), None, None))
+            else:
+                result.append((dict(tgt_node), dict(edge_data), cur_oid))
             queue.append((tgt_idx, depth + 1))
 
     return result
@@ -191,6 +262,12 @@ def render_subgraph_context(
     lines: List[str] = []
     id_map: Dict[str, dict] = {}
     oid_to_key: Dict[str, str] = {}
+
+    # Transit-only cluster hubs are never rendered or cited.  Filter them out
+    # up front so k-key numbering stays contiguous (no gaps) and the chain
+    # loop below never references a hub endpoint.  (multihop_subgraph already
+    # suppresses hubs; this is belt-and-suspenders for any other caller.)
+    subgraph = [t for t in subgraph if t[0].get("kind") != "cluster"]
 
     for i, (node, edge, _src_oid) in enumerate(subgraph, start=id_offset + 1):
         key = f"k{i}"
@@ -304,6 +381,13 @@ def verify_chain_edges(
     """
     import json as _json
     from app.services.cancellation import AskCancelled, raise_if_cancelled
+
+    # Never verify an edge whose endpoint is a transit-only cluster hub — the
+    # synthetic synonym edges aren't real reasoning steps and the hub id must
+    # not reach the LLM prompt.  Filter once so the edge_results loop and the
+    # edge_triples conflict-precedence loop below stay index-aligned.
+    # (multihop_subgraph already suppresses hubs; this guards other callers.)
+    subgraph = [t for t in subgraph if t[0].get("kind") != "cluster"]
 
     edge_results = []
     flagged = []
