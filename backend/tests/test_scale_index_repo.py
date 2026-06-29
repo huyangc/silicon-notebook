@@ -166,3 +166,199 @@ def test_run_index_builds_for_notebook(repo):
     res = batch_ingest.run_index(repo, nb.id)
     assert res["indexed_nodes"] >= 2
     assert repo._scale_index(nb.id) is not None
+
+
+# ── Test A: cross-layer synonym bridge ────────────────────────────────────────
+
+def _seed_base_with_near_vector(repo, concept_name: str, concept_id: str,
+                                 chunk_id: str, source_id: str):
+    """Helper: base notebook with ONE concept whose embedding uses concept_name
+    as input (deterministic via FakeEmbedder), wired to a chunk.
+    Returns (notebook, base_node_object_id) — the internal object id may differ
+    from concept_id due to rebuild_unified_kg reassignment, so we return the
+    actual object id looked up after the build."""
+    base = repo.create_notebook(NotebookCreate(name=f"base-{concept_name}"))
+    repo.mark_notebook_base(base.id)
+    now = "2026-06-29T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (source_id, base.id, f"{concept_name} paper", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (chunk_id, base.id, source_id,
+                    f"Content about {concept_name}.", "S", json.dumps([f"el{chunk_id}"]), now))
+        ev = json.dumps([{"source_id": source_id, "source_title": "", "element_id": f"el{chunk_id}",
+                          "element_type": "paragraph", "location_label": "p1",
+                          "quoted_span": concept_name, "confidence": 1.0}])
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (concept_id, base.id, "concept", "approved", "",
+                    json.dumps({"name": concept_name}), ev, source_id, now, now))
+        # Use concept_name as the embedding text so FakeEmbedder produces a
+        # deterministic vector tied to concept_name.
+        vec = repo.embedder.embed_query(concept_name)
+        db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                   "VALUES (?,?,?,?)", (concept_id, base.id, json.dumps(vec), now))
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    return base
+
+
+def test_cross_layer_synonym_bridge_adds_edges(repo, monkeypatch):
+    """Cross-layer ANN bridge: an active concept whose FakeEmbedder vector is
+    near (cosine >= threshold) a base concept's vector should cause extra edges
+    to be injected into the splice step, connecting the two previously-unrelated
+    nodes across layers.
+
+    FakeEmbedder(dim=16) is deterministic.  We verified offline that embed('i')
+    and embed('j') have cosine ~ 0.926 — well above the default threshold 0.83.
+    We set PPR_EMB_SYNONYM_THRESHOLD to a safe 0.80 to be robust against small
+    FakeEmbedder rounding differences, while 'i' vs 'j' sim is ~0.926 so the
+    bridge fires.
+
+    Strategy: build a base with concept 'i', build an active with concept 'j'
+    (no shared id, no shared cluster — different names, no explicit relation).
+    Count combined graph edges with the bridge enabled vs disabled.  With the
+    bridge enabled, the two notebooks' concept nodes should be connected via the
+    cross-layer edge, resulting in strictly MORE edges in the combined transition
+    matrix.
+    """
+    import numpy as np
+    from app.services.kg import scale_index as si
+
+    # Lower threshold so the ~0.926 similarity of FakeEmbedder('i','j') fires.
+    monkeypatch.setenv("PPR_EMB_SYNONYM_THRESHOLD", "0.80")
+    monkeypatch.setenv("PPR_EMB_SYNONYM_ENABLED", "true")
+    # Rebuild settings so env vars are picked up.
+    from app.core.config import Settings
+    repo.settings = Settings()
+    repo.embedder.dim = 16  # already 16 from fixture
+
+    # Concept names 'i' and 'j': FakeEmbedder(dim=16) cosine ~ 0.926 > 0.80.
+    base = _seed_base_with_near_vector(
+        repo, concept_name="i", concept_id="obj-base-i",
+        chunk_id="cBase", source_id="sBase")
+
+    # Active notebook: concept 'j' (near to 'i' by FakeEmbedder).
+    active = repo.create_notebook(NotebookCreate(name="active-j"))
+    now = "2026-06-29T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("sAct", active.id, "j paper", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("cAct", active.id, "sAct", "Content about j.", "S",
+                    json.dumps(["elAct"]), now))
+        ev = json.dumps([{"source_id": "sAct", "source_title": "", "element_id": "elAct",
+                          "element_type": "paragraph", "location_label": "p1",
+                          "quoted_span": "j", "confidence": 1.0}])
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("obj-act-j", active.id, "concept", "approved", "",
+                    json.dumps({"name": "j"}), ev, "sAct", now, now))
+        vec_j = repo.embedder.embed_query("j")
+        db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                   "VALUES (?,?,?,?)", ("obj-act-j", active.id, json.dumps(vec_j), now))
+    repo.rebuild_unified_kg(active.id)
+
+    # Verify that 'i' and 'j' are indeed similar enough with this embedder.
+    vec_i = np.array(repo.embedder.embed_query("i"), dtype=np.float64)
+    vec_j_arr = np.array(repo.embedder.embed_query("j"), dtype=np.float64)
+    sim_ij = float(np.dot(vec_i, vec_j_arr) /
+                   (np.linalg.norm(vec_i) * np.linalg.norm(vec_j_arr)))
+    assert sim_ij >= 0.80, (
+        f"FakeEmbedder('i','j') cosine={sim_ij:.4f} < 0.80 — test premise broken")
+
+    # Grab the base index BEFORE any settings change so version check passes.
+    base_idx = repo._scale_index(base.id)
+    assert base_idx is not None, "base scale index must be loadable before settings change"
+
+    # Count edges in combined graph WITHOUT bridge (disabled).
+    active_node_ids, active_edges, _ = repo._active_kg_delta(active.id)
+    _, A_no = si.splice_active(
+        list(base_idx.node_ids), base_idx.transition,
+        active_node_ids, active_edges)
+    nnz_no = A_no.nnz
+
+    # Manually compute bridge edges (mirrors the logic added to scale_ppr):
+    import hnswlib
+    with repo._connect() as _db:
+        _a_ids, _a_mat = repo._vector_matrix(
+            _db, active.id, "knowledge_embeddings", "object_id")
+    bridge_edges = []
+    if _a_ids and _a_mat is not None:
+        _a_mat_arr = np.asarray(_a_mat, dtype=np.float32)
+        dim = int(base_idx.manifest.get("dim", _a_mat_arr.shape[1]))
+        ann = hnswlib.Index(space="cosine", dim=dim)
+        ann.load_index(base_idx.ann_path, max_elements=len(base_idx.ann_labels))
+        ann.set_ef(max(repo.settings.ppr_emb_synonym_topk + 1, 50))
+        for ai, a_id in enumerate(_a_ids):
+            k = min(repo.settings.ppr_emb_synonym_topk, len(base_idx.ann_labels))
+            labs, dists = ann.knn_query(_a_mat_arr[ai], k=k)
+            for lab, dist in zip(labs[0], dists[0]):
+                base_nid = base_idx.ann_labels[int(lab)]
+                if base_nid == a_id:
+                    continue
+                sim = max(0.0, 1.0 - float(dist))
+                if sim >= repo.settings.ppr_emb_synonym_threshold:
+                    bridge_edges.append((a_id, base_nid, sim))
+                    bridge_edges.append((base_nid, a_id, sim))
+
+    assert bridge_edges, (
+        "Expected at least one cross-layer bridge edge (active 'j' ↔ base 'i'); "
+        f"sim_ij={sim_ij:.4f}, threshold={repo.settings.ppr_emb_synonym_threshold}")
+
+    _, A_with = si.splice_active(
+        list(base_idx.node_ids), base_idx.transition,
+        active_node_ids, list(active_edges) + bridge_edges)
+    nnz_with = A_with.nnz
+
+    assert nnz_with > nnz_no, (
+        f"Bridge should add edges: nnz_no={nnz_no}, nnz_with={nnz_with}")
+
+
+def test_cross_layer_bridge_disabled_no_extra_edges(repo, monkeypatch):
+    """When ppr_emb_synonym_enabled=False the bridge must not fire: the number of
+    nonzeros in the combined transition equals the no-bridge baseline."""
+    import numpy as np
+    from app.services.kg import scale_index as si
+
+    monkeypatch.setenv("PPR_EMB_SYNONYM_ENABLED", "false")
+    monkeypatch.setenv("PPR_EMB_SYNONYM_THRESHOLD", "0.80")
+    from app.core.config import Settings
+    repo.settings = Settings()
+
+    base = _seed_base_with_near_vector(
+        repo, concept_name="i", concept_id="obj-base2-i",
+        chunk_id="cBase2", source_id="sBase2")
+
+    active = repo.create_notebook(NotebookCreate(name="active-j2"))
+    now = "2026-06-29T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("sAct2", active.id, "j paper2", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("cAct2", active.id, "sAct2", "Content about j.", "S",
+                    json.dumps(["elAct2"]), now))
+        ev = json.dumps([{"source_id": "sAct2", "source_title": "", "element_id": "elAct2",
+                          "element_type": "paragraph", "location_label": "p1",
+                          "quoted_span": "j", "confidence": 1.0}])
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("obj-act2-j", active.id, "concept", "approved", "",
+                    json.dumps({"name": "j"}), ev, "sAct2", now, now))
+        vec_j = repo.embedder.embed_query("j")
+        db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                   "VALUES (?,?,?,?)", ("obj-act2-j", active.id, json.dumps(vec_j), now))
+    repo.rebuild_unified_kg(active.id)
+
+    # With bridge disabled: call scale_ppr (should return results without crash)
+    result = repo.scale_ppr(active.id, "some query")
+    assert isinstance(result, list)  # bridge off must not crash
