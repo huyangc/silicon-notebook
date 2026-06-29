@@ -343,6 +343,8 @@ def score_knowledge(
     w_keyword: float = W_KEYWORD,
     w_semantic: float = W_SEMANTIC,
     keyword_token_sets: Optional[Dict[str, FrozenSet[str]]] = None,
+    isolated_ids: Optional[Set[str]] = None,
+    w_isolated_penalty: float = 1.0,
 ) -> List[RetrievedKnowledge]:
     """Score knowledge by keyword + optional semantic similarity.
 
@@ -350,6 +352,11 @@ def score_knowledge(
     own payload embedding (`knowledge_vectors[object_id]`) or any of its evidence
     element embeddings (`element_vectors[element_id]`). When `query_vector` is
     None (no embedding configured) this degrades to keyword-only.
+
+    `isolated_ids` / `w_isolated_penalty`: 孤立节点(degree-0)排序降权。
+    penalty 仅乘入 score(排序用),绝不触碰 relevance([0,1]/tau 不变)。
+    与 _EDGE_TYPE_RANK_WEIGHT 同模式:降权仅作用于排序(score),绝不进 relevance。
+    默认 isolated_ids=None 或 w_isolated_penalty=1.0 → 精确 no-op,现有调用者不受影响。
     """
     weight = _TYPE_WEIGHT.get(object_type, 0.5)
     query_basis_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
@@ -394,7 +401,13 @@ def score_knowledge(
         relevance = _fuse(keyword, semantic, has_vector, w_keyword, w_semantic)
         if relevance < RELEVANCE_FLOOR:
             continue
-        final = relevance
+        # 降权仅作用于排序(score),绝不进 relevance(守 [0,1]/tau)。
+        # 与 _EDGE_TYPE_RANK_WEIGHT 同模式(见下方注释)。
+        final = relevance * (
+            w_isolated_penalty
+            if (isolated_ids is not None and object_id in isolated_ids)
+            else 1.0
+        )
         scored.append(
             RetrievedKnowledge(
                 object_id=object_id,
