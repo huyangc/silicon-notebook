@@ -503,7 +503,9 @@ class UnifiedKgStatus(BaseModel):
 
 class MergeReviewRequest(BaseModel):
     limit: int = 50
-    auto_confirm_threshold: float = 0.95
+    # 非对称自动落地阈值;省略时由后端 settings 决定(KG_MERGE_CONFIRM/SEPARATE_THRESHOLD)。
+    confirm_threshold: Optional[float] = None    # auto-merge 最低置信
+    separate_threshold: Optional[float] = None   # auto keep-separate(reject)最低置信
 
 
 class MergeReviewSummary(BaseModel):

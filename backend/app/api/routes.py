@@ -1007,7 +1007,8 @@ def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> M
         return MergeReviewSummary(**repository().review_pending_merges(
             notebook_id,
             limit=payload.limit,
-            auto_confirm_threshold=payload.auto_confirm_threshold,
+            confirm_threshold=payload.confirm_threshold,
+            separate_threshold=payload.separate_threshold,
         ))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")

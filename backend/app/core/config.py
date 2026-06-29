@@ -149,6 +149,11 @@ class Settings(BaseSettings):
     # 孤立(度为0)KG 节点的检索排序降权乘子。仅压 score 不动 relevance([0,1]/tau 守恒)。
     # 1.0=不降权(no-op); 0.5=孤立节点 score 减半;与 _EDGE_TYPE_RANK_WEIGHT 同模式。
     kg_isolated_rank_penalty: float = Field(0.5, validation_alias="KG_ISOLATED_RANK_PENALTY")
+    # 跨文档概念合并预审(review_pending_merges)的非对称自动落地阈值。单一 0.95 时
+    # 绝大多数 LLM 判定落入 unsure → 队列永不清空。改为非对称:auto-merge 需更高置信
+    # (误并污染图、不可逆),auto-keep-separate 可低些(误判仅多留一对待审、无害)。
+    kg_merge_confirm_threshold: float = Field(0.90, validation_alias="KG_MERGE_CONFIRM_THRESHOLD")
+    kg_merge_separate_threshold: float = Field(0.80, validation_alias="KG_MERGE_SEPARATE_THRESHOLD")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。

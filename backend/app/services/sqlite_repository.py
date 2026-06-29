@@ -3789,8 +3789,18 @@ class SQLiteRepository:
             "skipped_llm": False,
         }
 
-    def review_pending_merges(self, notebook_id: str, limit: int = 50, auto_confirm_threshold: float = 0.95) -> dict:
+    def review_pending_merges(
+        self,
+        notebook_id: str,
+        limit: int = 50,
+        confirm_threshold: Optional[float] = None,
+        separate_threshold: Optional[float] = None,
+    ) -> dict:
         self.get_notebook(notebook_id)
+        # 非对称阈值:auto-merge 需更高置信(误并不可逆、污染图);auto-keep-separate
+        # 可低些(误判仅多留一对待审)。未显式传入则取 settings 默认(0.90 / 0.80)。
+        confirm = confirm_threshold if confirm_threshold is not None else self.settings.kg_merge_confirm_threshold
+        separate = separate_threshold if separate_threshold is not None else self.settings.kg_merge_separate_threshold
         pending = self.pending_merges(notebook_id)[: max(1, min(limit, 200))]
         from app.services.concept_merge_review import review_merge_candidates
         decisions = review_merge_candidates(self.llm_client, pending)
@@ -3801,10 +3811,10 @@ class SQLiteRepository:
                 candidate_id = decision["candidate_id"]
                 confidence = decision["confidence"]
                 status = "pending"
-                if decision["decision"] == "merge" and confidence >= auto_confirm_threshold:
+                if decision["decision"] == "merge" and confidence >= confirm:
                     status = "confirmed"
                     confirmed += 1
-                elif decision["decision"] == "keep_separate" and confidence >= auto_confirm_threshold:
+                elif decision["decision"] == "keep_separate" and confidence >= separate:
                     status = "rejected"
                     rejected += 1
                 else:
