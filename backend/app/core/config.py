@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     kg_ask_reserve: int = Field(64, env="KG_ASK_RESERVE")
     # 单文档窗口数超过此值 → 记 WARN（不截断、不丢弃，仍全量抽取）。
     kg_window_warn_threshold: int = Field(1200, env="KG_WINDOW_WARN_THRESHOLD")
+    # 孤立节点补连: 默认开启。抽取后(inline)及 build_notebook_kg 末尾(backfill)用确定性
+    # 信号(共享证据元素 + 概念名命中文本)在**同源内**为 degree-0 节点补边,治 ~22%
+    # gleaning/首遍无边的孤立节点。注意 pydantic-settings v2 用 validation_alias 映射环境变量。
+    kg_relink_enabled: bool = Field(True, validation_alias="KG_RELINK_ENABLED")
     # embedding：每条截断长度、每条 API 批大小、落库分块大小。
     embed_truncate_chars: int = Field(2000, env="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, env="EMBED_BATCH_SIZE")
