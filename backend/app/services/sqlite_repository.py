@@ -50,6 +50,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    PaginatedSources,
     RejectedUrl,
     RuleCard,
     SearchHit,
@@ -1340,6 +1341,30 @@ class SQLiteRepository:
                 (notebook_id,),
             ).fetchall()
             return [self._source_from_row(db, row) for row in rows]
+
+    def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
+                          q: str = "") -> PaginatedSources:
+        """分页 + 可选 q(按 title/file_name 服务端过滤)。万级 source 安全:只取一页 +
+        一次 COUNT,不全量进内存。"""
+        self.get_notebook(notebook_id)
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 200))
+        needle = (q or "").strip().lower()
+        where = "WHERE notebook_id = ?"
+        params: List[object] = [notebook_id]
+        if needle:
+            where += " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"
+            like = f"%{needle}%"
+            params += [like, like]
+        with self._connect() as db:
+            total = db.execute(
+                f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]
+            rows = db.execute(
+                f"SELECT * FROM sources {where} ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+            items = [self._source_from_row(db, row) for row in rows]
+        return PaginatedSources(items=items, total_count=total, offset=offset, limit=limit)
 
     def get_source(self, source_id: str) -> SourceDetail:
         with self._connect() as db:
