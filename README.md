@@ -472,6 +472,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 
 # or run both phases in one command
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "My KB"
+
+# build the scalable-retrieval index for a base-tier notebook (offline; re-run after rebuilding a static base)
+PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
 ```
 
 Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg subset), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent), `--dry-run` (scan & estimate only).
