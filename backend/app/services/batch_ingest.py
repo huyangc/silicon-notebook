@@ -20,7 +20,9 @@ from typing import Callable, List, Optional
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.repository import UploadedSourceFile
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.sqlite_repository import (
+    SQLiteRepository, set_request_user, reset_request_user,
+)
 
 SUPPORTED_EXTS = {".md", ".markdown", ".pdf"}
 
@@ -49,12 +51,39 @@ def already_ingested(repo: SQLiteRepository, notebook_id: str, digest: str) -> b
     return row is not None
 
 
-def ensure_notebook(repo: SQLiteRepository, notebook_id: Optional[str], name: str) -> str:
-    """返回目标 notebook_id:给定则校验存在,否则新建(owner=current_user,默认 user-local)。"""
+def _resolve_owner_profile(repo: SQLiteRepository, owner: Optional[str]):
+    """解析 notebook 属主 → UserProfile。owner=用户名(大小写不敏感);
+    None → 默认取 admin 用户(role='admin' 中最早建的=seeded admin)。找不到 → SystemExit。"""
+    with repo._connect() as db:
+        if owner is not None:
+            from app.services.auth_utils import normalize_username
+            user = db.execute(
+                "SELECT * FROM users WHERE username=?", (normalize_username(owner),)).fetchone()
+            who = owner
+        else:
+            user = db.execute(
+                "SELECT * FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1").fetchone()
+            who = "admin"
+        if user is None:
+            raise SystemExit(f"error: owner not found: {who}")
+        profile = db.execute(
+            "SELECT * FROM user_profiles WHERE user_id=?", (user["id"],)).fetchone()
+    return repo._user_profile(user, profile)
+
+
+def ensure_notebook(repo: SQLiteRepository, notebook_id: Optional[str], name: str,
+                    owner: Optional[str] = None) -> str:
+    """返回目标 notebook_id:给定则校验存在,否则以解析出的属主新建。
+    owner=用户名(默认= admin 用户);notebook.created_by 记其 user id。"""
     if notebook_id:
         repo.get_notebook(notebook_id)   # 不存在则 KeyError
         return notebook_id
-    return repo.create_notebook(NotebookCreate(name=name)).id
+    profile = _resolve_owner_profile(repo, owner)
+    token = set_request_user(profile)
+    try:
+        return repo.create_notebook(NotebookCreate(name=name)).id
+    finally:
+        reset_request_user(token)
 
 
 def run_ingest(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
@@ -192,6 +221,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--notebook-name", default=None, help="新建 notebook 名(默认取目录名)")
+    p.add_argument("--owner", default=None,
+                   help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
     p.add_argument("--workers", type=int, default=4, help="文件级并发(默认 4)")
     p.add_argument("--embed-conc", type=int, default=4, help="嵌入 backfill 并发(默认 4,避 429)")
     p.add_argument("--limit", type=int, default=None, help="kg 阶段只抽前 N 个未抽源(子集验证)")
@@ -217,7 +248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     repo = SQLiteRepository(Settings())
     nb_name = args.notebook_name or (args.input_dir.name if args.input_dir else "Batch Import")
-    notebook_id = ensure_notebook(repo, args.notebook_id, nb_name)
+    notebook_id = ensure_notebook(repo, args.notebook_id, nb_name, owner=args.owner)
     manifest = Path(repo.storage_dir) / "batch_ingest" / f"{notebook_id}.jsonl"
     log = _make_logger(manifest)
     print(f"notebook={notebook_id} manifest={manifest}", flush=True)
