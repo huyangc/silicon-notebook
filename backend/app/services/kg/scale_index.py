@@ -40,3 +40,31 @@ def personalized_ppr(
         x = x_new
     total = x.sum()
     return x / total if total > 0 else x
+
+
+def build_transition(
+    node_ids: List[str],
+    edges: List[Tuple[str, str, float]],
+) -> Tuple["sp.csr_matrix", Dict[str, int]]:
+    """边列表 -> 列随机转移阵 A（A[j,i]=i->j 归一化权重）。
+
+    端点不在 node_ids 的边丢弃（防悬空）。out-degree 加权归一。返回 (A_csr, index)。
+    调用方负责把无向边拆成正反两条。
+    """
+    index = {nid: i for i, nid in enumerate(node_ids)}
+    n = len(node_ids)
+    rows, cols, data = [], [], []
+    for s, t, w in edges:
+        si, ti = index.get(s), index.get(t)
+        if si is None or ti is None:
+            continue
+        rows.append(ti)
+        cols.append(si)
+        data.append(float(w))
+    if not data:
+        return sp.csr_matrix((n, n), dtype=np.float64), index
+    M = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float64)
+    colsum = np.asarray(M.sum(axis=0)).ravel()
+    colsum[colsum == 0] = 1.0
+    D = sp.diags(1.0 / colsum)
+    return (M @ D).tocsr(), index
