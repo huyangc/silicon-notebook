@@ -90,6 +90,14 @@ type SourceSummary = {
   extraction_warning?: string | null;
 };
 
+type PaginatedSources = {
+  items: SourceSummary[];
+  total_count: number;
+  offset: number;
+  limit: number;
+};
+const SOURCES_PAGE_SIZE = 50;
+
 type SourceElement = {
   id: string;
   source_id: string;
@@ -822,6 +830,8 @@ export default function Home() {
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
   const [sources, setSources] = useState<SourceSummary[]>([]);
+  const [sourcesTotal, setSourcesTotal] = useState(0);
+  const [sourceQuery, setSourceQuery] = useState("");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -1379,16 +1389,28 @@ export default function Home() {
     setSourceModalOpen(true);
   }
 
+  async function loadSourcesPage(notebookId: string, opts: { reset?: boolean; query?: string } = {}) {
+    const q = opts.query ?? sourceQuery;
+    const offset = opts.reset ? 0 : sources.length;
+    const page = await api<PaginatedSources>(
+      `/notebooks/${notebookId}/sources?offset=${offset}&limit=${SOURCES_PAGE_SIZE}&q=${encodeURIComponent(q)}`,
+    );
+    setSourcesTotal(page.total_count);
+    setSources((prev) => (opts.reset ? page.items : [...prev, ...page.items]));
+  }
+
   async function openNotebook(notebookId: string) {
-    const [notebook, notebookSources, notebookArticles] = await Promise.all([
+    const [notebook, sourcesPage, notebookArticles] = await Promise.all([
       api<NotebookSummary>(`/notebooks/${notebookId}`),
-      api<SourceSummary[]>(`/notebooks/${notebookId}/sources`),
+      api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`),
       api<ArticleSummary[]>(`/notebooks/${notebookId}/articles`)
     ]);
     setCurrentNotebookId(notebookId);
     setCurrentNotebook(notebook);
     setTitleDraft(notebook.name);
-    setSources(notebookSources);
+    setSources(sourcesPage.items);
+    setSourcesTotal(sourcesPage.total_count);
+    setSourceQuery("");
     setArticles(notebookArticles);
     setSelectedArticleId(notebookArticles[0]?.id ?? "");
     setBuildingKg(false);
@@ -1607,6 +1629,7 @@ export default function Home() {
       body: formData
     });
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
+    setSourcesTotal((t) => t + uploaded.length);
     await loadNotebookCollection();
     setStagedFiles([]);
     setStagedDocTypes([]);
@@ -1681,6 +1704,7 @@ export default function Home() {
     const notebookId = currentNotebookId ?? source.notebook_id;
     await api<null>(`/sources/${source.id}`, { method: "DELETE" });
     setSources((previous) => previous.filter((item) => item.id !== source.id));
+    setSourcesTotal((t) => Math.max(0, t - 1));
     if (sourceDetail?.id === source.id) {
       setSourceDetail(null);
       setSourceElements([]);
@@ -2585,7 +2609,7 @@ export default function Home() {
             <aside className="workspace-panel sources-panel">
               <div className="workspace-panel-header">
                 <h2>Source Stack</h2>
-                <span className="panel-count">{sources.length} 个来源</span>
+                <span className="panel-count">{sourcesTotal} 个来源</span>
               </div>
               <div className="workspace-panel-body sources-body">
                 <label className="add-source-button">
@@ -2621,6 +2645,18 @@ export default function Home() {
                     </>
                   )
                 )}
+                <input
+                  className="source-search"
+                  type="search"
+                  placeholder="搜索来源（标题/文件名）"
+                  value={sourceQuery}
+                  onChange={(e) => setSourceQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && currentNotebookId) {
+                      loadSourcesPage(currentNotebookId, { reset: true, query: sourceQuery }).catch(reportError);
+                    }
+                  }}
+                />
                 <div className="source-list">
                   {sources.length === 0 ? (
                     <article className="source-empty">
@@ -2653,6 +2689,15 @@ export default function Home() {
                         </div>
                       </div>
                     ))
+                  )}
+                  {sources.length > 0 && sources.length < sourcesTotal && (
+                    <button
+                      type="button"
+                      className="add-source-button"
+                      onClick={() => { if (currentNotebookId) loadSourcesPage(currentNotebookId).catch(reportError); }}
+                    >
+                      加载更多（{sources.length}/{sourcesTotal}）
+                    </button>
                   )}
                 </div>
               </div>
