@@ -1591,7 +1591,18 @@ class SQLiteRepository:
                 self.event_log.logger.exception(
                     "build_notebook_kg: conflict resolution failed for %s", notebook_id
                 )
-        return {"built": done, "failed": failed, "skipped": sorted(kgful)}
+        result = {"built": done, "failed": failed, "skipped": sorted(kgful)}
+        # Backfill relink — reconnect any degree-0 nodes left in this notebook's
+        # KG (legacy graphs, or nodes the inline path couldn't link within their
+        # own source). Fail-safe: never breaks the build.
+        if getattr(self.settings, "kg_relink_enabled", True):
+            try:
+                result["relink"] = self.relink_notebook_kg(notebook_id)
+            except Exception:  # noqa: BLE001
+                self.event_log.logger.exception(
+                    "build_notebook_kg: relink failed for %s", notebook_id
+                )
+        return result
 
     def _parse_url_via_local(
         self, source_id: str, url: str, file_name: str
@@ -1949,6 +1960,44 @@ class SQLiteRepository:
         reextract_notebook and maintenance scripts."""
         self._run_extraction(source_id)
 
+    def _relink_extra_relations(
+        self, objects: List[dict], relations: List[dict], source_id: str
+    ) -> List[dict]:
+        """PURE: propose deterministic relink edges for degree-0 nodes within ONE
+        source's freshly-extracted (objects, relations), returning them in the same
+        shape build_records emits so store_kg can remap local→DB ids and persist
+        them with the SAME review_status/source_id as LLM edges.
+
+        Adapts the (objects, relations) extraction shape to the relink core's node
+        dict, then maps each new edge back to a relation dict. No DB / IO."""
+        from app.services.kg.relink import complete_isolated_edges
+
+        nodes = [
+            {
+                "id": o["local_id"],
+                "object_type": o["object_type"],
+                "name": (o.get("payload") or {}).get("name", ""),
+                "source_id": source_id,
+                "element_ids": {
+                    ev.get("element_id")
+                    for ev in o.get("evidence", [])
+                    if ev.get("element_id")
+                },
+            }
+            for o in objects
+        ]
+        edges = [(r["source_local_id"], r["target_local_id"]) for r in relations]
+        extra = complete_isolated_edges(nodes, edges)
+        return [
+            {
+                "source_local_id": e["source_object_id"],
+                "target_local_id": e["target_object_id"],
+                "edge_type": e["edge_type"],
+                "evidence": [{"basis": e["basis"], "quote": ""}],
+            }
+            for e in extra
+        ]
+
     def _run_extraction(self, source_id: str) -> None:
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)
@@ -2004,6 +2053,13 @@ class SQLiteRepository:
                     graph.total_windows, warn, source_id, source.file_name,
                 )
             objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
+            # Reconnect degree-0 nodes BEFORE store_kg, so the relink edges go
+            # through the same local→DB remap + review_status/source_id as LLM
+            # edges (esp. gleaning, which emits edgeless nodes). Intra-source only.
+            if getattr(self.settings, "kg_relink_enabled", True):
+                relations = relations + self._relink_extra_relations(
+                    objects, relations, source.id
+                )
             n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
             try:
                 self.incremental_fuse_source(source.notebook_id, source.id)
@@ -2782,6 +2838,112 @@ class SQLiteRepository:
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)
+
+    def relink_notebook_kg(self, notebook_id: str) -> dict:
+        """Backfill: reconnect degree-0 KG nodes in an EXISTING notebook.
+
+        For legacy / pre-relink graphs (the inline path handles new extractions).
+        Loads non-deprecated objects (same node filter as knowledge_graph) with
+        their evidence element_ids, asks the deterministic relink core for new
+        INTRA-SOURCE edges (nodes carry real source_id ⇒ cross-source never
+        linked), and inserts them into knowledge_relations EXACTLY like store_kg
+        does (review_status defaults to 'pending', the same value LLM edges get).
+        source_id of each new row = the SOURCE object's source_id. Idempotent:
+        an edge is skipped if a row with the same
+        (source_object_id, target_object_id, edge_type) already exists.
+
+        Returns {"isolated_before", "edges_added", "isolated_after"}."""
+        from app.services.kg.relink import complete_isolated_edges
+
+        self.get_notebook(notebook_id)  # KeyError if missing
+        with self._connect() as db:
+            obj_rows = db.execute(
+                "SELECT id, object_type, source_id, payload, evidence "
+                "FROM knowledge_objects "
+                "WHERE notebook_id = ? AND status != 'deprecated'",
+                (notebook_id,),
+            ).fetchall()
+            rel_rows = db.execute(
+                "SELECT source_object_id, target_object_id, edge_type "
+                "FROM knowledge_relations WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchall()
+            # Valid source ids — knowledge_relations.source_id has an FK to
+            # sources(id); a legacy/orphaned object source_id is stored as NULL
+            # (the column is nullable) to avoid a FOREIGN KEY violation.
+            valid_src = {
+                r["id"] for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)
+                ).fetchall()
+            }
+
+        nodes, src_by_id = [], {}
+        for r in obj_rows:
+            payload = json.loads(r["payload"] or "{}")
+            evidence = json.loads(r["evidence"] or "[]")
+            element_ids = {
+                ev.get("element_id")
+                for ev in evidence
+                if isinstance(ev, dict) and ev.get("element_id")
+            }
+            src_by_id[r["id"]] = r["source_id"] or ""
+            nodes.append({
+                "id": r["id"],
+                "object_type": r["object_type"],
+                "name": payload.get("name", ""),
+                "source_id": r["source_id"] or "",
+                "element_ids": element_ids,
+            })
+
+        edges = [(r["source_object_id"], r["target_object_id"]) for r in rel_rows]
+        connected = {oid for pair in edges for oid in pair}
+        isolated_before = sum(1 for n in nodes if n["id"] not in connected)
+
+        proposed = complete_isolated_edges(nodes, edges)
+
+        # Idempotency: skip any proposed edge already present (same triple).
+        existing_triples = {
+            (r["source_object_id"], r["target_object_id"], r["edge_type"])
+            for r in rel_rows
+        }
+        now = _now()
+        new_rows = []
+        for e in proposed:
+            triple = (e["source_object_id"], e["target_object_id"], e["edge_type"])
+            if triple in existing_triples:
+                continue
+            existing_triples.add(triple)
+            src = src_by_id.get(e["source_object_id"], "")
+            new_rows.append((
+                f"rel-{uuid4().hex[:10]}", notebook_id,
+                src if src in valid_src else None,   # NULL if source gone (FK-safe)
+                e["source_object_id"], e["target_object_id"], e["edge_type"],
+                json.dumps([{"basis": e["basis"], "quote": ""}], ensure_ascii=False),
+                now,
+            ))
+
+        if new_rows:
+            with self._write() as db:
+                db.executemany(
+                    "INSERT INTO knowledge_relations "
+                    "(id, notebook_id, source_id, source_object_id, target_object_id, "
+                    "edge_type, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    new_rows,
+                )
+            # Match store_kg / delete_notebook_kg so the in-memory rustworkx graph
+            # (and PPR/federated caches) pick up the new edges.
+            self._invalidate_unified_cache(notebook_id)
+            self._mark_unified_kg_dirty(notebook_id)
+
+        now_connected = connected | {
+            oid for r in new_rows for oid in (r[3], r[4])
+        }
+        isolated_after = sum(1 for n in nodes if n["id"] not in now_connected)
+        return {
+            "isolated_before": isolated_before,
+            "edges_added": len(new_rows),
+            "isolated_after": isolated_after,
+        }
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
         with self._connect() as db:
