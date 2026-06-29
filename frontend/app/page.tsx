@@ -647,7 +647,7 @@ const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/noteb
 const reviewPendingMergesApi = (nb: string) =>
   api<MergeReviewSummary>(`/notebooks/${nb}/unified-kg/merges/review`, {
     method: "POST",
-    body: JSON.stringify({ limit: 50, auto_confirm_threshold: 0.95 }),
+    body: JSON.stringify({ limit: 50 }),
   });
 
 function mergePairKey(candidate: PendingMerge): string {
