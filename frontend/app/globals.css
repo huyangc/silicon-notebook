@@ -2506,8 +2506,50 @@ button.chat-session-card {
 }
 
 .source-modal-card > .source-modal-header,
-.source-modal-card > .drop-zone {
+.source-modal-card > .drop-zone,
+.source-modal-card > .source-action-row {
   flex: 0 0 auto;
+}
+
+.source-action-row {
+  display: flex;
+  gap: 10px;
+  margin: 0 24px 4px;
+}
+
+.source-action-button {
+  flex: 1 1 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text, #1d2530);
+  font-weight: 700;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.source-action-button:hover {
+  border-color: #0f6d7a;
+  color: #0f6d7a;
+}
+
+.source-action-button.is-active {
+  border-color: #0f6d7a;
+  color: #0f6d7a;
+  background: #eef7f8;
+}
+
+.source-action-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .source-modal-card > .source-detail-body {
