@@ -1690,6 +1690,28 @@ button.chat-session-card {
   line-height: 1.6;
 }
 
+/* Compact inline text-link button used in secondary KG action rows */
+.link-button {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: #3b82c4;
+  font-size: 13px;
+  font-weight: 540;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link-button:hover {
+  color: #1a5fa8;
+}
+.link-button:disabled {
+  color: #aab;
+  cursor: default;
+  text-decoration: none;
+}
+
 .knowledge-kind-tabs {
   display: flex;
   flex-wrap: wrap;
