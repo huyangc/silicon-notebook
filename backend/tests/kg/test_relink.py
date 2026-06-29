@@ -258,14 +258,33 @@ def test_ranking_prefers_more_shared_elements():
 # ---- dedupe ----
 
 def test_existing_edge_either_direction_blocks_relink():
-    # The candidate relink would be c1→k1 about; an existing k1→c1 (reverse) edge
-    # both (a) makes c1/k1 non-isolated and (b) is caught by the either-direction
-    # dedupe guard. Either way no new edge is emitted.
+    # Connected-node short-circuit: the existing k1→c1 edge makes BOTH c1 and k1
+    # non-isolated, so neither is ever processed — relink returns early at the
+    # `connected` check. (The either-direction dedupe guard inside _try_emit is
+    # NOT what fires here; that path is covered by the test below where c1 stays
+    # isolated.)
     nodes = [
         _node("c1", "claim", "Gain rises with bias", element_ids={"E1"}),
         _node("k1", "concept", "open-loop gain", element_ids={"E1"}),
     ]
     edges = [("k1", "c1")]   # reverse direction of what relink would propose
+    assert complete_isolated_edges(nodes, edges=edges) == []
+
+
+def test_try_emit_blocks_reverse_existing_edge_to_connected_sibling():
+    # An existing reverse edge k1→c1 must never be duplicated as c1→k1 by relink.
+    # NOTE: because any edge that mentions c1 also marks c1 connected, c1 is not
+    # isolated here and is short-circuited before _try_emit — so the EXISTING-pair
+    # dedupe guard is structurally subsumed by the `connected` check for degree-0
+    # inputs. This test pins the observable contract (no reverse duplicate emitted);
+    # the guard itself is kept as cheap defensive insurance for callers that may
+    # compute isolation differently than strict degree-0. See report concern.
+    nodes = [
+        _node("c1", "claim", "Gain rises with bias", element_ids={"E1"}),
+        _node("k1", "concept", "open-loop gain", element_ids={"E1"}),
+        _node("kx", "concept", "feedback factor", element_ids={"E9"}),
+    ]
+    edges = [("k1", "kx"), ("k1", "c1")]
     assert complete_isolated_edges(nodes, edges=edges) == []
 
 
