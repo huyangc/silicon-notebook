@@ -6,22 +6,60 @@ def _concept(oid, name): return {"object_id": oid, "name": name}
 
 # --- acronym / parenthetical normalization (TC1) -----------------------------
 
-def test_norm_strips_trailing_acronym_paren():
-    # "Full (ACR)" collapses onto "Full"; bare acronym test happens via alias map.
+def test_norm_strips_trailing_initialism_paren():
+    # "Full (ACR)" collapses onto "Full" ONLY when ACR is an initialism of Full.
     assert _norm("Compressed Sparse Attention (CSA)") == _norm("Compressed Sparse Attention")
     assert _norm("Compressed Sparse Attention (CSA)") == "compressed sparse attention"
 
 
-def test_norm_keeps_non_acronym_parenthetical():
-    # "Mechanism" is 9 chars and not all-caps -> not acronym-like -> NOT stripped.
+def test_norm_keeps_non_initialism_parenthetical():
+    # "Mechanism" is not an initialism of "Attention" -> NOT stripped.
     assert "mechanism" in _norm("Attention (Mechanism)")
     assert _norm("Attention (Mechanism)") != _norm("Attention")
 
 
-def test_build_acronym_alias_map_maps_bare_acronym_to_expansion():
+def test_norm_keeps_qualifier_paren_not_initialism():
+    # Qualifier/discriminator parens (LP/HP/n/p/v3) are NOT initialisms of the
+    # head word, so they must survive normalization (no collapse onto the head).
+    assert _norm("Filter (LP)") != _norm("Filter (HP)")
+    assert _norm("Filter (LP)") != _norm("Filter")
+    assert _norm("Channel (n)") != _norm("Channel (p)")
+    assert _norm("Type (v3)") != _norm("Type (v4)")
+
+
+def test_is_initialism_of():
+    from app.services.kg_merge import _is_initialism_of
+    assert _is_initialism_of("CSA", "Compressed Sparse Attention")
+    assert _is_initialism_of("MoE", "Mixture-of-Experts")
+    assert _is_initialism_of("hca", "Heavily Compressed Attention")
+    assert not _is_initialism_of("LP", "Filter")
+    assert not _is_initialism_of("n", "Channel")
+    assert not _is_initialism_of("v3", "Type")
+    assert not _is_initialism_of("Mechanism", "Attention")
+
+
+def test_build_acronym_alias_map_maps_bare_initialism_to_expansion():
     from app.services.kg_merge import build_acronym_alias_map
     amap = build_acronym_alias_map(["Compressed Sparse Attention (CSA)", "CSA", "other"])
     assert amap.get(_norm("CSA")) == _norm("Compressed Sparse Attention")
+
+
+def test_build_acronym_alias_map_skips_non_initialism():
+    from app.services.kg_merge import build_acronym_alias_map
+    # "LP"/"HP" are not initialisms of "Filter" -> no alias recorded.
+    amap = build_acronym_alias_map(["Filter (LP)", "Filter (HP)"])
+    assert amap == {}
+
+
+def test_build_acronym_alias_map_deterministic_on_conflict():
+    from app.services.kg_merge import build_acronym_alias_map
+    # Same acronym "AL" initialism of two distinct expansions: must resolve
+    # deterministically (stable across input order), never last-writer-wins.
+    fwd = build_acronym_alias_map(["Alpha Layer (AL)", "Adaptive Loop (AL)"])
+    rev = build_acronym_alias_map(["Adaptive Loop (AL)", "Alpha Layer (AL)"])
+    assert fwd == rev                                   # order-independent
+    # tie-break = lexicographically smallest expansion seed
+    assert fwd.get(_norm("AL")) == min(_norm("Alpha Layer"), _norm("Adaptive Loop"))
 
 
 def test_cluster_concepts_merges_acronym_full_and_paren_variants():
@@ -40,19 +78,45 @@ def test_cluster_concepts_merges_moe_acronym_and_full():
     assert cm["o1"] == cm["o2"]
 
 
-def test_cluster_concepts_non_acronym_paren_not_overmerged():
-    # A non-acronym parenthetical must not merge with an unrelated concept.
+def test_cluster_concepts_non_initialism_paren_not_overmerged():
+    # A non-initialism parenthetical must not merge with an unrelated concept.
     concepts = [_concept("o1", "Attention (Mechanism)"), _concept("o2", "Quantization")]
     res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
     cm = res["cluster_map"]
     assert cm["o1"] != cm["o2"]
 
 
-def test_acronym_aliasing_does_not_override_version_conflict_guard():
-    # v3 vs v4 are still separate (conflict guard); aliasing must not collapse them.
-    concepts = [_concept("o1", "deepseek v3"), _concept("o2", "deepseek v4")]
-    vecs = {"o1": [1.0, 0.0], "o2": [0.999, 0.001]}
-    res = cluster_concepts(concepts, vecs, confirmed=set(), rejected=set())
+def test_cluster_concepts_qualifier_parens_stay_separate():
+    # REGRESSION: "Filter (LP)" / "Filter (HP)" are distinct concepts — the
+    # qualifier is a discriminator, not an abbreviation. Must NOT collapse.
+    concepts = [_concept("o1", "Filter (LP)"), _concept("o2", "Filter (HP)")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] != cm["o2"]
+
+
+def test_cluster_concepts_channel_np_stay_separate():
+    concepts = [_concept("o1", "Channel (n)"), _concept("o2", "Channel (p)")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] != cm["o2"]
+
+
+def test_cluster_concepts_bare_acronym_no_expansion_keeps_own_seed():
+    # A bare acronym with NO matching expansion in the batch keeps its own seed.
+    concepts = [_concept("o1", "CSA"), _concept("o2", "Quantization")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
+    cm = res["cluster_map"]
+    assert cm["o1"] == "K-csa"
+    assert cm["o1"] != cm["o2"]
+
+
+def test_cluster_concepts_version_parens_stay_separate():
+    # REGRESSION (replaces a bogus paren-less test): "Model (v3)" / "Model (v4)"
+    # in one batch must stay separate — v3/v4 are not initialisms of "Model",
+    # so neither strip nor alias fires.
+    concepts = [_concept("o1", "Model (v3)"), _concept("o2", "Model (v4)")]
+    res = cluster_concepts(concepts, {}, confirmed=set(), rejected=set())
     cm = res["cluster_map"]
     assert cm["o1"] != cm["o2"]
 

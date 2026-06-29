@@ -33,30 +33,33 @@ _ALIASES = {
 
 # "Full (ACR)" shape: capture the part before the paren and the paren token.
 _PAREN_ACRONYM_RE = re.compile(r"^(.*\S)\s*\(([^)]+)\)\s*$")
-# Acronym-like paren token: single token, ≤8 chars, alnum/+/-//, starts with a letter.
-_ACRONYM_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+/\-]*$")
+# Cheap sanity guard: paren token is a single run of letters/digits (no spaces).
+_ACRONYM_TOKEN_RE = re.compile(r"^[A-Za-z0-9]+$")
 
 
-def _is_acronym_token(tok: str) -> bool:
-    """An acronym-like token: no spaces, length ≤ 8, alnum/+/-// starting with a
-    letter, and (ALL-CAPS or short ≤ 6). Conservative so genuine words like
-    'Mechanism' (9 chars, not all-caps) are NOT treated as acronyms."""
-    tok = tok.strip()
-    if not tok or " " in tok or len(tok) > 8:
-        return False
-    if not _ACRONYM_TOKEN_RE.match(tok):
-        return False
-    return tok.isupper() or len(tok) <= 6
+def _is_initialism_of(acr: str, full: str) -> bool:
+    """True iff ``acr`` is the initialism of ``full`` — the concatenated first
+    characters of full's words (split on space/-/_) equal acr's letters/digits.
+    This is what separates a genuine abbreviation ("CSA" of "Compressed Sparse
+    Attention", "MoE" of "Mixture-of-Experts") from a qualifier/discriminator
+    ("LP" of "Filter", "n" of "Channel", "v3" of "Type") that merely happens to
+    be short or upper-case. Only initialisms are safe to strip/alias."""
+    initials = "".join(w[0] for w in re.split(r"[\s\-_]+", full or "") if w).lower()
+    acr_clean = re.sub(r"[^a-z0-9]+", "", (acr or "").lower())
+    return bool(initials) and initials == acr_clean
 
 
 def _strip_paren_acronym(name: str) -> str:
-    """If ``name`` is "Full (ACR)" with an acronym-like ACR, return "Full"
-    (the part before the paren). Otherwise return ``name`` unchanged."""
+    """If ``name`` is "Full (ACR)" where ACR is the initialism of Full, return
+    "Full" (the part before the paren). Otherwise return ``name`` unchanged.
+    Qualifier parens (LP/HP/n/p/v3) are NOT initialisms of the head → left
+    intact, so e.g. "Filter (LP)" and "Filter (HP)" stay distinct."""
     m = _PAREN_ACRONYM_RE.match(name or "")
     if not m:
         return name
-    if _is_acronym_token(m.group(2)):
-        return m.group(1)
+    head, tok = m.group(1), m.group(2)
+    if _ACRONYM_TOKEN_RE.match(tok) and _is_initialism_of(tok, head):
+        return head
     return name
 
 
@@ -68,17 +71,25 @@ def _norm(name: str) -> str:
 
 
 def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
-    """For every "Full (ACR)" name with an acronym-like ACR, map the acronym's
-    seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets a bare
-    "ACR" elsewhere in the batch be redirected onto the expansion's cluster."""
+    """For every "Full (ACR)" name where ACR is the initialism of Full, map the
+    acronym's seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets
+    a bare "ACR" elsewhere in the batch be redirected onto the expansion's
+    cluster. Deterministic on conflict: if one acronym is the initialism of two
+    distinct expansions, the lexicographically smallest expansion seed wins
+    (never last-writer-wins → result is independent of input order)."""
     alias: Dict[str, str] = {}
     for name in names:
         m = _PAREN_ACRONYM_RE.match(name or "")
-        if not m or not _is_acronym_token(m.group(2)):
+        if not m:
             continue
-        acr_seed = _norm(m.group(2))
-        exp_seed = _norm(m.group(1))
-        if acr_seed and exp_seed and acr_seed != exp_seed:
+        head, tok = m.group(1), m.group(2)
+        if not _ACRONYM_TOKEN_RE.match(tok) or not _is_initialism_of(tok, head):
+            continue
+        acr_seed, exp_seed = _norm(tok), _norm(head)
+        if not acr_seed or not exp_seed or acr_seed == exp_seed:
+            continue
+        prev = alias.get(acr_seed)
+        if prev is None or exp_seed < prev:
             alias[acr_seed] = exp_seed
     return alias
 
