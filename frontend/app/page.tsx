@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -841,7 +841,7 @@ export default function Home() {
   const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
   const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
-  const [urlModalOpen, setUrlModalOpen] = useState(false);
+  const [linkSectionOpen, setLinkSectionOpen] = useState(false);
   const [urlText, setUrlText] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
   const [urlRejected, setUrlRejected] = useState<Array<{ url: string; reason: string }>>([]);
@@ -1639,7 +1639,7 @@ export default function Home() {
       setToast(`已添加 ${result.created.length} 个，被拒 ${result.rejected.length} 个`);
       if (result.rejected.length === 0) {
         setUrlText("");
-        setUrlModalOpen(false);
+        setLinkSectionOpen(false);
       }
     } catch (error) {
       reportError(error);
@@ -2588,12 +2588,8 @@ export default function Home() {
                 <span className="panel-count">{sources.length} 个来源</span>
               </div>
               <div className="workspace-panel-body sources-body">
-                <label className="add-source-button">
+                <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); setSourceModalOpen(true); }}>
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
-                  <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
-                </label>
-                <button type="button" className="add-source-button" onClick={() => { setUrlRejected([]); setUrlModalOpen(true); }}>
-                  <ExternalLink size={20} strokeWidth={2.7} /> 添加链接
                 </button>
                 {currentNotebookId && sources.length > 0 && (
                   currentNotebook?.kg_ready ? (
@@ -2967,16 +2963,57 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>添加来源</h2>
-                <p>选择文件后，可为每个文件指定文档类型（默认自动检测）；类型决定该文件的抽取 schema。</p>
+                <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定抽取 schema。</p>
               </div>
-              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setSourceModalOpen(false); }} title="Close">×</button>
+              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             <label className="drop-zone">
               <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
               <span className="drop-plus">＋</span>
-              <strong>{stagedFiles.length > 0 ? "继续添加文件" : "选择来源文件"}</strong>
+              <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
               <small>支持 {SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。</small>
             </label>
+            <div className="source-action-row">
+              <label className="source-action-button">
+                <Upload size={18} strokeWidth={2.5} /> 上传文件
+                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
+              </label>
+              <button
+                type="button"
+                className={`source-action-button${linkSectionOpen ? " is-active" : ""}`}
+                onClick={() => { setUrlRejected([]); setLinkSectionOpen((open) => !open); }}
+              >
+                <ExternalLink size={18} strokeWidth={2.5} /> 添加链接
+              </button>
+            </div>
+            {linkSectionOpen && (
+              <div className="source-detail-body">
+                <p className="tool-hint" style={{ margin: "0 0 6px" }}>每行一个公开可直链的 PDF；非 PDF 会被直接拒绝。由 mineru.net 云端解析。</p>
+                <textarea
+                  rows={5}
+                  value={urlText}
+                  placeholder={"https://arxiv.org/pdf/2401.00001\nhttps://example.com/paper.pdf"}
+                  onChange={(event) => setUrlText(event.target.value)}
+                />
+                {urlRejected.length > 0 && (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    <span className="section-title">被拒链接</span>
+                    {urlRejected.map((item, index) => (
+                      <div className="checklist-row" key={`${item.url}-${index}`}>
+                        <span style={{ flex: 1, wordBreak: "break-all" }}>{item.url}</span>
+                        <small style={{ color: "var(--danger, #c0392b)" }}>{item.reason}</small>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="tag-row">
+                  <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources().catch(reportError)}>
+                    {urlBusy ? "添加中…" : "添加并解析"}
+                  </button>
+                  <button className="sort-button" onClick={() => { setUrlText(""); setUrlRejected([]); setLinkSectionOpen(false); }}>取消</button>
+                </div>
+              </div>
+            )}
             {stagedFiles.length > 0 && (
               <div className="source-detail-body">
                 <div className="tool-input-row">
@@ -3008,45 +3045,6 @@ export default function Home() {
                 </div>
               </div>
             )}
-          </div>
-        </section>
-      )}
-
-      {urlModalOpen && (
-        <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUrlModalOpen(false); }}>
-          <div className="source-modal-card">
-            <div className="source-modal-header">
-              <div>
-                <h2>添加链接</h2>
-                <p>每行一个公开可直链的 PDF；非 PDF 会被直接拒绝。由 mineru.net 云端解析。</p>
-              </div>
-              <button className="icon-button" onClick={() => setUrlModalOpen(false)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              <textarea
-                rows={6}
-                value={urlText}
-                placeholder={"https://arxiv.org/pdf/2401.00001\nhttps://example.com/paper.pdf"}
-                onChange={(event) => setUrlText(event.target.value)}
-              />
-              {urlRejected.length > 0 && (
-                <div className="stack" style={{ marginTop: 8 }}>
-                  <span className="section-title">被拒链接</span>
-                  {urlRejected.map((item, index) => (
-                    <div className="checklist-row" key={`${item.url}-${index}`}>
-                      <span style={{ flex: 1, wordBreak: "break-all" }}>{item.url}</span>
-                      <small style={{ color: "var(--danger, #c0392b)" }}>{item.reason}</small>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="tag-row">
-                <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources().catch(reportError)}>
-                  {urlBusy ? "添加中…" : "添加并解析"}
-                </button>
-                <button className="sort-button" onClick={() => setUrlModalOpen(false)}>取消</button>
-              </div>
-            </div>
           </div>
         </section>
       )}
