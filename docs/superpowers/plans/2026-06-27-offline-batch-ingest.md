@@ -719,7 +719,7 @@ gh pr create --base master --title "feat: 离线批量摄取脚本(Part A)" \
 
 ## Self-Review(计划 vs spec §4)
 
-- **§4.2 CLI**:`ingest/kg/all` + `--input-dir/--notebook-id/--notebook-name/--workers/--limit/--dry-run` → Task 5/6 全覆盖。(`--group-by-subdir`、`--owner`、`--embed-conc` 中:`--embed-conc` 已实现;**`--group-by-subdir` 与 `--owner` 本计划暂缓**——见下「范围裁剪」。)
+- **§4.2 CLI**:`ingest/kg/all` + `--input-dir/--notebook-id/--notebook-name/--workers/--limit/--dry-run` → Task 5/6 全覆盖。(`--embed-conc` 与 `--owner` 已实现;**`--group-by-subdir` 不做**——YAGNI,见下「范围裁剪」。)
 - **§4.3 Phase 1**(EMBED 关→backfill、KG 不触发、去重、有界并发、失败隔离)→ Task 3 + Task 2。
 - **§4.4 Phase 2**(build_notebook_kg / --limit 子集 / 关 per-source 融合 / 一次 rebuild / 节点向量、关系向量跳过)→ Task 4。
 - **§4.5 去重/幂等/可恢复**(file_hash + manifest + build_notebook_kg 幂等跳过)→ Task 2/3/4/5。
@@ -730,5 +730,6 @@ gh pr create --base master --title "feat: 离线批量摄取脚本(Part A)" \
 - **Type consistency**:`run_ingest`/`run_kg` 返回 dict 键、`build_notebook_kg` 返回 `{"built","failed","skipped"}`、`rebuild_unified_kg`→int、`_backfill_knowledge_embeddings(db,nb,objects)` 均与现有代码一致。
 
 ### 范围裁剪(YAGNI,记录决策)
-- **`--group-by-subdir` 与 `--owner` 暂缓**:首版默认全进 1 个 notebook、owner=user-local(离线 admin 场景足够)。两者都是小增量,确有需要时各加 1 个 Task(`--owner` = 解析用户并 `set` `_REQUEST_USER` ContextVar 后再 `ensure_notebook`;`--group-by-subdir` = 对每个一级子目录循环 `ensure_notebook`+`run_ingest`)。若评审认为首版就要,告知我补上。
+- **`--owner` 已实现**(评审追加):大小写不敏感解析用户名→设 `_REQUEST_USER` ContextVar 后 `ensure_notebook`;**默认解析 `role='admin'` 的用户**(消除「owner=user-local 占位」歧义),而非裸写 user-local。
+- **`--group-by-subdir` 不做**(YAGNI):默认全进 1 个 notebook;确需再加(对每个一级子目录循环 `ensure_notebook`+`run_ingest`)。
 - **element 向量**:Phase 1 只补 chunk 向量(chunk-native 主路径);`_embed_source` 的 element 向量是否被检索消费留待实现期确认(spec §4.3),默认不补。
