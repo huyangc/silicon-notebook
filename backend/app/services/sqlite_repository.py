@@ -4758,85 +4758,60 @@ class SQLiteRepository:
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:
         self.get_notebook(notebook_id)
         needle = query.strip().lower()
-        hits: List[SearchHit] = []
         if not needle:
             return NotebookSearchResponse(query=query, hits=[])
+        like = f"%{needle}%"
+        cap = 20  # 总命中上限(沿用旧 hits[:20]);每实体各取至多 cap,合并后再截断
+        hits: List[SearchHit] = []
         with self._connect() as db:
-            notebook = db.execute(
-                "SELECT * FROM notebooks WHERE id = ?",
-                (notebook_id,),
-            ).fetchone()
-            source_rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
-            element_rows = db.execute(
-                """
-                SELECT source_elements.*, sources.title AS source_title
-                FROM source_elements
-                JOIN sources ON sources.id = source_elements.source_id
-                WHERE sources.notebook_id = ?
-                """,
-                (notebook_id,),
-            ).fetchall()
-            article_rows = db.execute(
-                "SELECT * FROM articles WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
-            knowledge_rows = db.execute(
+            notebook = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
+            # Notebook / Domain:两条,Python 侧判断即可(无需查询)
+            for scope, text in (("Notebook", notebook["name"]), ("Domain", notebook["primary_domain"])):
+                if needle in f"{scope} {text}".lower():
+                    hits.append(SearchHit(scope=scope, notebook_id=notebook_id, label=scope,
+                                          text=_snippet(text or scope, needle), source_id="", element_id=""))
+            src_rows = db.execute(
+                "SELECT * FROM sources WHERE notebook_id = ? AND "
+                "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?) "
+                "ORDER BY created_at ASC LIMIT ?",
+                (notebook_id, like, like, like, cap)).fetchall()
+            for s in src_rows:
+                label = s["title"] or s["file_name"]
+                body = s["summary"] or s["file_name"] or s["title"]
+                hits.append(SearchHit(scope="Source", notebook_id=notebook_id, label=label,
+                                      text=_snippet(body, needle), source_id=s["id"], element_id=""))
+            el_rows = db.execute(
+                "SELECT se.*, s.title AS source_title FROM source_elements se "
+                "JOIN sources s ON s.id = se.source_id WHERE s.notebook_id = ? AND "
+                "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
+                "LIMIT ?",
+                (notebook_id, like, like, like, cap)).fetchall()
+            for e in el_rows:
+                label = f"{e['source_title']} · {e['location_label']}"
+                hits.append(SearchHit(scope="Element", notebook_id=notebook_id, label=label,
+                                      text=_snippet(e["text"] or label, needle),
+                                      source_id=e["source_id"], element_id=e["id"]))
+            art_rows = db.execute(
+                "SELECT * FROM articles WHERE notebook_id = ? AND "
+                "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ?) LIMIT ?",
+                (notebook_id, like, like, cap)).fetchall()
+            for a in art_rows:
+                hits.append(SearchHit(scope="Article", notebook_id=notebook_id, label=a["title"],
+                                      text=_snippet(a["summary"] or a["title"], needle),
+                                      source_id="", element_id=""))
+            ko_rows = db.execute(
                 "SELECT id, object_type, payload FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated'",
-                (notebook_id,),
-            ).fetchall()
-
-        candidates = [
-            ("Notebook", notebook_id, notebook["name"], notebook["purpose"], "", ""),
-            ("Domain", notebook_id, notebook["primary_domain"], notebook["primary_domain"], "", ""),
-        ]
-        for source in source_rows:
-            candidates.extend(
-                [
-                    ("Source", notebook_id, source["title"], source["summary"], source["id"], ""),
-                    ("Source", notebook_id, source["file_name"], source["file_name"], source["id"], ""),
-                ]
-            )
-        for element in element_rows:
-            candidates.append(
-                (
-                    "Element",
-                    notebook_id,
-                    f"{element['source_title']} · {element['location_label']}",
-                    element["text"],
-                    element["source_id"],
-                    element["id"],
-                )
-            )
-        for article in article_rows:
-            candidates.append(
-                ("Article", notebook_id, article["title"], article["summary"], "", "")
-            )
-        for ko in knowledge_rows:
-            payload = json.loads(ko["payload"] or "{}")
-            label = OBJECT_TYPE_LABELS.get(ko["object_type"], ko["object_type"])
-            headline = self._knowledge_headline(ko["object_type"], payload)
-            candidates.append(
-                (label, notebook_id, headline, self._payload_join(payload), "", "")
-            )
-
-        for scope, nb_id, label, text, source_id, element_id in candidates:
-            haystack = f"{label} {text}".lower()
-            if needle not in haystack:
-                continue
-            hits.append(
-                SearchHit(
-                    scope=scope,
-                    notebook_id=nb_id,
-                    label=label,
-                    text=_snippet(text or label, needle),
-                    source_id=source_id,
-                    element_id=element_id,
-                )
-            )
+                "WHERE notebook_id = ? AND status != 'deprecated' AND LOWER(payload) LIKE ? LIMIT ?",
+                (notebook_id, like, cap)).fetchall()
+            for ko in ko_rows:
+                payload = json.loads(ko["payload"] or "{}")
+                label = OBJECT_TYPE_LABELS.get(ko["object_type"], ko["object_type"])
+                headline = self._knowledge_headline(ko["object_type"], payload)
+                body = self._payload_join(payload)
+                if needle not in f"{label} {headline} {body}".lower():
+                    continue  # payload LIKE 命中但去掉键名/无关字段的假阳
+                hits.append(SearchHit(scope=label, notebook_id=notebook_id, label=headline,
+                                      text=_snippet(body or headline, needle), source_id="", element_id=""))
         return NotebookSearchResponse(query=query, hits=hits[:20])
 
     def _note_model_error(self, stage: str, model: str, exc: Exception) -> None:
