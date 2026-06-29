@@ -5225,7 +5225,18 @@ class SQLiteRepository:
             # compare lexically, so e.g. verified→rejected with another
             # verified edge present left MAX='verified'.) set_edge_review's
             # explicit _invalidate_unified_cache remains as belt-and-braces.
-            version = ("rxgraph", ver["c"], ver["ts"], ver["n_rej"], ver["n_ver"])
+            #
+            # TD2: concept_clusters (COUNT, MAX created_at) is also part of the
+            # key — the cross-doc cluster hubs are built from cluster_groups, so
+            # a rebuild_unified_kg that rewrites concept_clusters (without
+            # touching knowledge_relations) must still invalidate the graph.
+            clu_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                "FROM concept_clusters WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+            version = ("rxgraph", ver["c"], ver["ts"], ver["n_rej"], ver["n_ver"],
+                       clu_ver["c"], clu_ver["ts"])
 
             def _load():
                 ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -5249,7 +5260,23 @@ class SQLiteRepository:
                     (notebook_id,),
                 ).fetchall()
                 relations = [dict(r) for r in rel_rows]
-                return build_rx_graph(nodes, relations)
+                # TD2: load concept-cluster membership so build_rx_graph can add
+                # transit-only cross-doc hubs (kind="cluster") for canonicals
+                # with ≥2 present members. Same SELECT/aggregation as _ppr_graph.
+                cluster_groups: dict = {}
+                for r in db.execute(
+                    "SELECT canonical_id, member_object_id FROM concept_clusters "
+                    "WHERE notebook_id = ?",
+                    (notebook_id,),
+                ).fetchall():
+                    cluster_groups.setdefault(r["canonical_id"], []).append(
+                        r["member_object_id"])
+                # `or None`: with zero clusters, pass None so build_rx_graph's
+                # None-path holds (real nodes carry NO kind tag → byte-identical
+                # to the pre-hub payload shape). An empty dict would be falsy too,
+                # but be explicit.
+                return build_rx_graph(
+                    nodes, relations, cluster_groups=cluster_groups or None)
 
             return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
 
@@ -5289,13 +5316,17 @@ class SQLiteRepository:
                 (r["id"], r["tier"]) for r in base_rows
             ]
             # Version key: per-notebook (nb_id, relations (count, max created_at,
-            # per-review-status counts), objects (count, max updated_at)). Object
-            # coverage makes object-only changes (deprecate / status flip /
-            # payload edit) rebuild the graph. Track E: the per-status counts
-            # (n_rej, n_ver) make a single edge flip between pending/verified/
-            # rejected change the version even when (COUNT, MAX created_at) is
-            # unchanged — same soundness argument as _rx_graph; set_edge_review's
-            # explicit evict-all-fed_rxgraph remains as belt-and-braces.
+            # per-review-status counts), objects (count, max updated_at),
+            # concept_clusters (count, max created_at)). Object coverage makes
+            # object-only changes (deprecate / status flip / payload edit)
+            # rebuild the graph. Track E: the per-status counts (n_rej, n_ver)
+            # make a single edge flip between pending/verified/rejected change
+            # the version even when (COUNT, MAX created_at) is unchanged — same
+            # soundness argument as _rx_graph; set_edge_review's explicit
+            # evict-all-fed_rxgraph remains as belt-and-braces. TD2: the
+            # concept_clusters part means a rebuild_unified_kg on ANY participant
+            # (which rewrites clusters without touching relations) invalidates
+            # the federated graph, so the cross-doc hubs are rebuilt.
             version_parts = []
             for nb_id, _ in participants:
                 rel_ver = db.execute(
@@ -5310,10 +5341,16 @@ class SQLiteRepository:
                     "FROM knowledge_objects WHERE notebook_id = ?",
                     (nb_id,),
                 ).fetchone()
+                clu_ver = db.execute(
+                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+                    "FROM concept_clusters WHERE notebook_id = ?",
+                    (nb_id,),
+                ).fetchone()
                 version_parts.append(
                     (nb_id, rel_ver["c"], rel_ver["ts"],
                      rel_ver["n_rej"], rel_ver["n_ver"],
-                     obj_ver["c"], obj_ver["ts"]))
+                     obj_ver["c"], obj_ver["ts"],
+                     clu_ver["c"], clu_ver["ts"]))
             version = ("fed_rxgraph", tuple(version_parts))
 
             tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
@@ -5321,6 +5358,7 @@ class SQLiteRepository:
             def _load():
                 nodes: dict = {}
                 all_relations: list = []
+                cluster_groups: dict = {}
                 ph = ",".join("?" for _ in USABLE_STATUSES)
                 for nb_id, _ in participants:
                     obj_rows = db.execute(
@@ -5346,7 +5384,25 @@ class SQLiteRepository:
                         d = dict(r)
                         d["notebook_id"] = nb_id   # tag for tier_map lookup
                         all_relations.append(d)
-                return build_rx_graph(nodes, all_relations, tier="personal", tier_map=tier_map)
+                    # TD2: aggregate concept-cluster membership across ALL
+                    # participants. canonical_ids are name-derived and shared
+                    # across tiers (same as _ppr_graph), so a base-tier member
+                    # and an active-tier member of the same canonical land in
+                    # one group → build_rx_graph adds a transit-only hub that
+                    # bridges them cross-document. object_ids are globally unique
+                    # so no collision across notebooks.
+                    for r in db.execute(
+                        "SELECT canonical_id, member_object_id FROM concept_clusters "
+                        "WHERE notebook_id = ?",
+                        (nb_id,),
+                    ).fetchall():
+                        cluster_groups.setdefault(r["canonical_id"], []).append(
+                            r["member_object_id"])
+                # `or None`: no clusters → None-path (no kind tag, no hubs),
+                # byte-identical to the pre-hub federated graph shape.
+                return build_rx_graph(
+                    nodes, all_relations, tier="personal", tier_map=tier_map,
+                    cluster_groups=cluster_groups or None)
 
             return self._vector_cache.get(
                 f"{active_notebook_id}:fed_rxgraph", version, _load)
@@ -6886,7 +6942,13 @@ class SQLiteRepository:
             subgraph = multihop_subgraph(
                 G, oid_to_idx, idx_to_oid,
                 seed_ids=use_seeds,
-                edge_types=DEFAULT_REASONING_EDGES,
+                # TD2: include "synonym" so multihop walks THROUGH the transit-
+                # only cross-doc cluster hubs (their member edges are "synonym").
+                # Scoped to this call only — DEFAULT_REASONING_EDGES (a frozenset)
+                # is NOT broadened globally. The hub node itself is still filtered
+                # from the result/render/verify by build_rx_graph + multihop_subgraph
+                # (kind="cluster" pass-through), so the LLM never cites a hub.
+                edge_types=DEFAULT_REASONING_EDGES | {"synonym"},
                 max_depth=getattr(self.settings, "graph_max_depth", 3),
                 max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
             )
