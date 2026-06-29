@@ -57,7 +57,7 @@ def ensure_notebook(repo: SQLiteRepository, notebook_id: Optional[str], name: st
     return repo.create_notebook(NotebookCreate(name=name)).id
 
 
-def run_ingest(repo, notebook_id, files, workers=4, conc=4, log=None) -> dict:
+def run_ingest(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
     """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。"""
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
@@ -90,70 +90,81 @@ def run_ingest(repo, notebook_id, files, workers=4, conc=4, log=None) -> dict:
     return counts
 
 
-def backfill_chunk_embeddings(repo, notebook_id, conc=4) -> int:
+def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int:
     """补该 notebook 所有 source 的 chunk 向量(低并发)。EMBED 未配则跳过。返回处理的 source 数。"""
     if not repo.settings.embedder_configured:
         return 0
+    orig_conc = repo.settings.embed_concurrency
     repo.settings.embed_concurrency = conc
-    with repo._connect() as db:
-        sids = [r["id"] for r in db.execute(
-            "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
     done = 0
-    for sid in sids:
-        try:
-            repo._embed_chunks_for_source(sid)
-            done += 1
-        except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
-            pass
+    try:
+        with repo._connect() as db:
+            sids = [r["id"] for r in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
+        for sid in sids:
+            try:
+                repo._embed_chunks_for_source(sid)
+                done += 1
+            except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
+                pass
+    finally:
+        repo.settings.embed_concurrency = orig_conc
     return done
 
 
-def run_kg(repo, notebook_id, limit=None, conc=4, log=None) -> dict:
+def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None) -> dict:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。"""
     log = log or (lambda _e: None)
+    orig_fusion = repo.settings.kg_incremental_fusion_enabled
     repo.settings.kg_incremental_fusion_enabled = False   # 批量期关 per-source 融合,收尾一次全量
     res = {"extracted": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
+    try:
+        if limit is None:
+            out = repo.build_notebook_kg(notebook_id)   # 只抽尚无 KG 的 source,幂等,失败隔离
+            res["extracted"] = len(out["built"])
+            res["failed"] = len(out["failed"])
+        else:
+            with repo._connect() as db:
+                all_sids = [r["id"] for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
+                kgful = {r["source_id"] for r in db.execute(
+                    "SELECT DISTINCT source_id FROM knowledge_objects "
+                    "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
+            targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
+            for sid in targets:
+                try:
+                    repo._set_source_status(sid, "extracting")
+                    repo._run_extraction(sid)
+                    repo._set_source_status(sid, "extracted")
+                    res["extracted"] += 1
+                except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                    res["failed"] += 1
+                    log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
 
-    if limit is None:
-        out = repo.build_notebook_kg(notebook_id)   # 只抽尚无 KG 的 source,幂等,失败隔离
-        res["extracted"] = len(out["built"])
-        res["failed"] = len(out["failed"])
-    else:
-        with repo._connect() as db:
-            all_sids = [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
-            kgful = {r["source_id"] for r in db.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
-        targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
-        for sid in targets:
-            try:
-                repo._set_source_status(sid, "extracting")
-                repo._run_extraction(sid)
-                repo._set_source_status(sid, "extracted")
-                res["extracted"] += 1
-            except Exception as exc:   # noqa: BLE001 — 单源失败隔离
-                res["failed"] += 1
-                log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
-
-    res["clusters"] = repo.rebuild_unified_kg(notebook_id)
-    res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+        res["clusters"] = repo.rebuild_unified_kg(notebook_id)
+        res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+    finally:
+        repo.settings.kg_incremental_fusion_enabled = orig_fusion   # 还原,避免污染 repo 实例
     return res
 
 
-def backfill_node_embeddings(repo, notebook_id, conc=4) -> int:
+def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int:
     """补 KG 节点向量(复用 _backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
     if not repo.settings.embedder_configured:
         return 0
+    orig_conc = repo.settings.embed_concurrency
     repo.settings.embed_concurrency = conc
-    with repo._connect() as db:
-        objects = [
-            {"id": r["id"], "payload": json.loads(r["payload"] or "{}")}
-            for r in db.execute(
-                "SELECT id, payload FROM knowledge_objects "
-                "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)).fetchall()
-        ]
-        repo._backfill_knowledge_embeddings(db, notebook_id, objects)
+    try:
+        with repo._connect() as db:
+            objects = [
+                {"id": r["id"], "payload": json.loads(r["payload"] or "{}")}
+                for r in db.execute(
+                    "SELECT id, payload FROM knowledge_objects "
+                    "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)).fetchall()
+            ]
+            repo._backfill_knowledge_embeddings(db, notebook_id, objects)
+    finally:
+        repo.settings.embed_concurrency = orig_conc
     return len(objects)
 
 
@@ -161,12 +172,11 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
     if manifest_path is None:
         return lambda _e: None
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = manifest_path.open("a", encoding="utf-8")
 
     def _log(entry: dict) -> None:
         entry = dict(entry, ts=time.time())
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        fh.flush()
+        with manifest_path.open("a", encoding="utf-8") as fh:  # 每条 open/close,避免句柄泄漏
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         if entry.get("status") == "failed":
             print(f"[{entry.get('phase')}] FAILED "
                   f"{entry.get('path') or entry.get('source_id') or ''}: "
