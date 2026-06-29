@@ -893,6 +893,28 @@ class SQLiteRepository:
         ).fetchone()
         return bool(row[0])
 
+    def _source_has_kg(self, db: sqlite3.Connection, source_id: str) -> bool:
+        """True iff the source has ≥1 knowledge_objects row with a matching source_id."""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
+            (source_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    def _count_pending_kg_sources(self, db: sqlite3.Connection, notebook_id: str) -> int:
+        """Count sources in the notebook that are PARSED (have ≥1 source_elements row)
+        but have NO KG (no knowledge_objects row with that source_id)."""
+        row = db.execute(
+            """
+            SELECT COUNT(*) FROM sources s
+            WHERE s.notebook_id = ?
+              AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)
+              AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '')
+            """,
+            (notebook_id,),
+        ).fetchone()
+        return int(row[0])
+
     def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
         """True iff some tier='base' notebook has any knowledge_objects."""
         sql = ("SELECT EXISTS(SELECT 1 FROM knowledge_objects ko "
@@ -7735,6 +7757,7 @@ class SQLiteRepository:
             tier=row["tier"] if "tier" in keys else "personal",
             kg_ready=self._has_kg(db, row["id"]),
             base_kg_available=self._any_base_notebook_has_kg(db),
+            kg_pending_sources=self._count_pending_kg_sources(db, row["id"]),
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
@@ -7755,6 +7778,7 @@ class SQLiteRepository:
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
             source_url=row["source_url"] if "source_url" in row.keys() else "",
             extraction_warning=self._extraction_warning(db, row["id"]),
+            kg_extracted=self._source_has_kg(db, row["id"]),
         )
 
     def _extraction_warning(self, db: sqlite3.Connection, source_id: str) -> Optional[str]:
