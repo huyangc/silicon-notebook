@@ -197,6 +197,97 @@ def test_rebuild_applies_llm_confirmed_auto_candidate(repo):
         f"Expected same cluster after LLM-confirmed merge, got {cmap}")
 
 
+class _CannedReviewLLM:
+    """Mock LLM that returns a fixed (decision, confidence) for every candidate it
+    is asked to review. Mirrors concept_merge_review's chat_json interface so
+    review_pending_merges runs without a real model."""
+
+    configured = True
+
+    def __init__(self, decision: str, confidence: float):
+        self._decision = decision
+        self._confidence = confidence
+
+    def chat_json(self, messages, schema):
+        import re
+        content = messages[0]["content"]
+        ids = re.findall(r"id=(\S+)", content)
+        decisions = [
+            {
+                "candidate_id": cid,
+                "decision": self._decision,
+                "canonical_name": "x",
+                "confidence": self._confidence,
+                "rationale": "canned",
+            }
+            for cid in ids
+        ]
+        return json.dumps({"decisions": decisions})
+
+
+def _candidate_status(repo, nb_id, cid):
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT status FROM concept_merge_candidates WHERE id=? AND notebook_id=?",
+            (cid, nb_id)).fetchone()
+    return row["status"]
+
+
+def test_review_merge_below_confirm_threshold_stays_pending(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    cid = repo.pending_merges(nb.id)[0]["id"]
+    repo.llm_client = _CannedReviewLLM("merge", 0.88)
+    out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
+    assert out == {"reviewed": 1, "confirmed": 0, "rejected": 0, "unsure": 1}
+    assert _candidate_status(repo, nb.id, cid) == "pending"
+
+
+def test_review_merge_at_confirm_threshold_is_confirmed(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    cid = repo.pending_merges(nb.id)[0]["id"]
+    repo.llm_client = _CannedReviewLLM("merge", 0.92)
+    out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
+    assert out == {"reviewed": 1, "confirmed": 1, "rejected": 0, "unsure": 0}
+    assert _candidate_status(repo, nb.id, cid) == "confirmed"
+
+
+def test_review_keep_separate_at_threshold_is_rejected(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    cid = repo.pending_merges(nb.id)[0]["id"]
+    repo.llm_client = _CannedReviewLLM("keep_separate", 0.85)
+    out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
+    assert out == {"reviewed": 1, "confirmed": 0, "rejected": 1, "unsure": 0}
+    assert _candidate_status(repo, nb.id, cid) == "rejected"
+
+
+def test_review_keep_separate_below_threshold_stays_pending(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    cid = repo.pending_merges(nb.id)[0]["id"]
+    repo.llm_client = _CannedReviewLLM("keep_separate", 0.70)
+    out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
+    assert out == {"reviewed": 1, "confirmed": 0, "rejected": 0, "unsure": 1}
+    assert _candidate_status(repo, nb.id, cid) == "pending"
+
+
+def test_review_defaults_drain_keep_separate_that_old_single_threshold_left_pending(repo):
+    """Under the old single 0.95 threshold a 0.88 keep_separate stayed pending forever.
+    With the asymmetric settings defaults (confirm 0.90 / separate 0.80) it now drains
+    to rejected without any explicit threshold args."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    assert repo.settings.kg_merge_confirm_threshold == 0.90
+    assert repo.settings.kg_merge_separate_threshold == 0.80
+    repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
+    cid = repo.pending_merges(nb.id)[0]["id"]
+    repo.llm_client = _CannedReviewLLM("keep_separate", 0.88)
+    out = repo.review_pending_merges(nb.id)  # no thresholds -> settings defaults
+    assert out == {"reviewed": 1, "confirmed": 0, "rejected": 1, "unsure": 0}
+    assert _candidate_status(repo, nb.id, cid) == "rejected"
+
+
 def test_write_clusters_is_per_type_isolated(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_clusters(nb.id, [{"canonical_id": "K-a", "member_object_id": "o1",
