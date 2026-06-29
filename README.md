@@ -147,8 +147,8 @@ The outer page is a notebook collection/library (KG-native pipeline):
 
 1. Click `＋ 新建` — the app creates an `Untitled notebook` and enters it immediately (no dialog).
 2. Upload PDF, Markdown, DOCX, PPTX, CSV, or XLSX sources (multipart).
-3. Backend: structured Markdown parse → KG extraction (Concept / Claim / Formula / Procedure objects) via a shared global extraction pool — window concurrency capped by `KG_EXTRACT_WORKERS` across all documents, document concurrency by `KG_JOB_CONCURRENCY` — while element embedding runs concurrently in a background daemon thread.
-4. Source turns green (`extracted`) as soon as KG extraction completes — no need to wait for embedding.
+3. Backend (async background job): structured Markdown parse → chunking + embeddings — chunk-native Q&A is ready as soon as the source finishes processing.
+4. **KG extraction is conditional** (see [KG extraction trigger](#kg-extraction-trigger)): on ingest it runs only when the notebook already has a KG, or when `KG_AUTO_EXTRACT=true`. When it runs it uses a shared global extraction pool — window concurrency capped by `KG_EXTRACT_WORKERS` across all documents, document concurrency by `KG_JOB_CONCURRENCY` — and the new source is then incrementally fused into the unified KG.
 5. Knowledge objects are stored in `knowledge_objects` + `knowledge_relations` with element-level evidence bindings.
 6. Hybrid retrieval (bi-gram keyword + float32 matrix semantic) feeds KG-native Q&A: answers contain sentence-level `[k_i]` citations, support multi-turn conversations, and expand via 1-hop KG neighbours.
 7. Unified KG aggregates concepts across documents; pending cross-document merges can be confirmed or rejected.
@@ -162,6 +162,22 @@ Inside a notebook:
 - Studio-style article research, mind map / infographic generation, derived-rule review, the governance **promotion queue** (propose a personal-KG node for promotion to the base corpus, then approve/reject pending requests), the **mark-base / mark-personal** tier toggle, and the **edge-review queue** (confirm / reject relations ranked by high-centrality × low-trust; rejected edges are excluded from graph reasoning) remain reachable from the top analysis toolbar and show their output in dialogs rather than a fixed right column.
 
 The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
+
+## KG extraction trigger
+
+Chunk-native retrieval is ready as soon as a source is parsed + embedded, so **KG extraction is opt-in per notebook** rather than run on every upload:
+
+| Notebook state on upload | KG extraction | How it happens |
+|---|---|---|
+| No KG yet (fresh notebook) | **Not** auto-run | Build on demand: `POST /api/notebooks/{id}/kg/build` (UI: a notebook's **构建知识图谱 / Build KG** action; also surfaced when you pick a strict-reasoning mode on a KG-less notebook) |
+| Already has a KG | **Auto-run** in the background for each new source | No manual trigger — keeps the KG complete; the new source is then incrementally fused into the unified cross-document KG |
+
+The ingest-time decision is `KG_AUTO_EXTRACT or notebook-already-has-KG`:
+
+- `KG_AUTO_EXTRACT` (default `false`) — when `true`, every upload extracts KG for **all** notebooks.
+- Otherwise extraction runs on upload only if the notebook already contains KG objects.
+
+So you **opt in once** (build the KG, or set `KG_AUTO_EXTRACT=true`); after that, new documents are auto-extracted and fused. Re-extract a whole notebook from scratch with `POST /api/notebooks/{id}/kg/rebuild`. For bulk/offline builds, see the **Offline batch ingestion** section.
 
 ## Retrieval modes (Ask)
 
@@ -239,6 +255,9 @@ EMBED_CONCURRENCY       # concurrent embedding threads (default 8; mild, avoids 
 **KG extraction concurrency & windowing:**
 
 ```text
+KG_AUTO_EXTRACT             # extract KG on every upload for ALL notebooks (default false);
+                            # when false, a new source is still auto-extracted if its
+                            # notebook already has a KG (opt in once → auto-maintained)
 KG_EXTRACT_WORKERS          # GLOBAL cap on concurrent extraction LLM calls (windows),
                             # shared across all documents, intra- + inter-doc (default 16)
 KG_JOB_CONCURRENCY          # how many documents extract concurrently; their windows
