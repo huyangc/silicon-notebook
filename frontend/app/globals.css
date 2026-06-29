@@ -2261,6 +2261,24 @@ button.chat-session-card {
   background: #9a5b00;
 }
 
+/* Per-source KG status badge shown in source-row-actions when kg_ready is true. */
+.source-kg-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--soft);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.source-kg-badge--in {
+  color: #177a55;
+  border-color: #b7e4cf;
+  background: #f0faf5;
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;
