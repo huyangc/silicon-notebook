@@ -149,7 +149,8 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(SQLiteRepository, "build_notebook_kg",
                         lambda self, nb: {"built": [], "failed": [], "skipped": []})
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", lambda self, nb: 0)
-    rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1"])
+    rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1",
+                  "--allow-no-embed"])
     assert rc == 0
     r2 = SQLiteRepository(Settings())
     with r2._connect() as db:
@@ -180,6 +181,9 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     monkeypatch.setattr(repo, "build_notebook_kg", _no_build)
     monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
 
+    repo.settings.kg_llm_base_url = "http://kg.example"
+    repo.settings.kg_llm_api_key = "k"
+    repo.settings.kg_llm_model = "kg-model"
     res = bi.run_kg(repo, nb_id, limit=2, conc=2)
     assert res["extracted"] == 2
     assert len(extracted_calls) == 2          # 只抽前 2 个未抽源(targets[:limit])
@@ -204,3 +208,29 @@ def test_ensure_notebook_unknown_owner_errors(repo):
 def test_arg_parser_has_owner():
     args = bi.build_arg_parser().parse_args(["ingest", "--input-dir", "x", "--owner", "a00123456"])
     assert args.owner == "a00123456"
+
+
+def test_main_refuses_silent_no_embed(repo, tmp_path, monkeypatch, capsys):
+    d = _make_md_dir(tmp_path, n=1)
+    monkeypatch.setenv("EMBED_PROVIDER", "")     # main 自建 repo → embedder 未配
+    rc = bi.main(["ingest", "--input-dir", str(d)])
+    assert rc == 2
+    assert "allow-no-embed" in capsys.readouterr().err
+
+
+def test_main_allows_no_embed_with_flag(repo, tmp_path, monkeypatch):
+    d = _make_md_dir(tmp_path, n=1)
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    rc = bi.main(["ingest", "--input-dir", str(d), "--allow-no-embed"])
+    assert rc == 0
+    r2 = SQLiteRepository(Settings())
+    with r2._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources").fetchone()["c"]
+        nemb = db.execute("SELECT COUNT(*) c FROM chunk_embeddings").fetchone()["c"]
+    assert nsrc >= 1 and nemb == 0               # 显式确认的无向量导入
+
+
+def test_run_kg_limit_requires_llm(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    with pytest.raises(RuntimeError):            # 无 KG/主 LLM → --limit 直接报错,不静默
+        bi.run_kg(repo, nb_id, limit=1, conc=2)
