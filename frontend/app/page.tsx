@@ -2680,7 +2680,7 @@ export default function Home() {
                             </p>
                           )
                         }
-                        <p className="tool-hint" style={{ margin: "0 2px 8px", display: "flex", gap: "10px" }}>
+                        <div className="tool-hint" style={{ margin: "0 2px 8px", display: "flex", gap: "10px" }}>
                           <button
                             type="button"
                             className="link-button"
@@ -2699,7 +2699,7 @@ export default function Home() {
                           >
                             {relinkingKg ? "补连中…" : "补连孤立节点"}
                           </button>
-                        </p>
+                        </div>
                       </>
                     )
                     : (
