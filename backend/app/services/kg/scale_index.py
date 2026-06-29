@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -68,3 +70,48 @@ def build_transition(
     colsum[colsum == 0] = 1.0
     D = sp.diags(1.0 / colsum)
     return (M @ D).tocsr(), index
+
+
+def save_scale_index(
+    out_dir: str,
+    *,
+    node_ids: List[str],
+    transition: "sp.csr_matrix",
+    idf: List[float],
+    chunk_index: List[int],
+    ann_vectors,
+    ann_labels: List[str],
+    manifest: dict,
+) -> dict:
+    """把构建好的数组落盘到 out_dir。
+
+    ann_vectors: (m, dim) float32 numpy array（只含有 embeddings 的 KG 节点）。
+    ann_labels: 对应 kg 节点 object_id 列表（与 ann_vectors 行对齐）。
+    写出 7 个文件：graph.npz, node_ids.npy, idf.npy, chunk_index.npy,
+    ann.bin, ann_labels.npy, manifest.json。返回传入的 manifest dict。
+    """
+    import hnswlib
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    sp.save_npz(os.path.join(out_dir, "graph.npz"), transition)
+    np.save(os.path.join(out_dir, "node_ids.npy"), np.asarray(node_ids, dtype=object))
+    np.save(os.path.join(out_dir, "idf.npy"), np.asarray(idf, dtype=np.float32))
+    np.save(os.path.join(out_dir, "chunk_index.npy"), np.asarray(chunk_index, dtype=np.int32))
+    np.save(os.path.join(out_dir, "ann_labels.npy"), np.asarray(ann_labels, dtype=object))
+
+    ann_vecs = np.asarray(ann_vectors, dtype=np.float32) if len(ann_vectors) else np.empty((0, 1), dtype=np.float32)
+    dim = int(ann_vecs.shape[1]) if ann_vecs.shape[0] > 0 else int(manifest.get("dim", 1))
+    if dim < 1:
+        dim = 1
+
+    idx = hnswlib.Index(space="cosine", dim=dim)
+    idx.init_index(max_elements=max(1, ann_vecs.shape[0]), ef_construction=200, M=16, random_seed=42)
+    if ann_vecs.shape[0] > 0:
+        idx.add_items(ann_vecs, np.arange(ann_vecs.shape[0]))
+    idx.save_index(os.path.join(out_dir, "ann.bin"))
+
+    with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh)
+
+    return manifest
