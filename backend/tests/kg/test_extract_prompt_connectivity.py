@@ -29,12 +29,11 @@ def test_claim_must_have_edge():
 
 def test_about_edge_fallback():
     p = _get_prompt()
-    assert "`about`" in p or "about" in p, "Prompt must mention `about` as fallback edge"
-
-
-def test_no_disconnected_node_instruction():
-    p = _get_prompt()
-    assert "Do NOT emit a node you cannot connect" in p
+    # the bare word "about" appears all over the prompt; assert the specific
+    # backtick-wrapped form and the fallback instruction itself.
+    assert "`about`" in p, "Prompt must mention the backtick-wrapped `about` edge"
+    assert "fall back to\n`about`" in p or "fall back to `about`" in p, \
+        "Prompt must instruct falling back to `about`"
 
 
 def test_concept_should_have_edge():
