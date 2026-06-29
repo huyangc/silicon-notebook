@@ -2129,6 +2129,7 @@ export default function Home() {
   async function reviewPendingMerges() {
     if (!currentNotebookId) return;
     setKgReviewBusy(true);
+    setToast("正在 LLM 预审（约 1 分钟，请稍候）…");
     try {
       const summary = await reviewPendingMergesApi(currentNotebookId);
       setToast(`已预审 ${summary.reviewed} 项：合并 ${summary.confirmed}，分开 ${summary.rejected}，保留 ${summary.unsure}`);
@@ -3572,7 +3573,7 @@ export default function Home() {
               <div className="kg-rail-section">
                 <h3>待确认合并 ({pendingMerges.length})</h3>
                 <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
-                  LLM 预审
+                  {kgReviewBusy ? "预审中…" : "LLM 预审"}
                 </button>
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
