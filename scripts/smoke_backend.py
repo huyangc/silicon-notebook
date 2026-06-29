@@ -796,6 +796,7 @@ def check_json_fences() -> None:
 
 def check_llm_interaction_logging() -> None:
     """LLM interaction logger writes parseable JSONL and never propagates IO errors."""
+    from app.core.event_logging import get_log_owner, owner_dir
     from app.core.llm_logging import LLMInteractionLogger
 
     with tempfile.TemporaryDirectory(prefix="silicon-notebook-llmlog-") as temp_dir:
@@ -815,7 +816,10 @@ def check_llm_interaction_logging() -> None:
                 "response": {"content": "{}"},
             }
         )
-        line = log_path.read_text(encoding="utf-8").strip().splitlines()[-1]
+        # per-user 模式(PR#93):llm 日志写在 dirname(llm_log_path)/<owner>/llm.jsonl;
+        # owner 未设(离线/无请求上下文)→ user-local。读 logger 实际写入的 per-user 路径。
+        written = log_path.parent / owner_dir(get_log_owner()) / log_path.name
+        line = written.read_text(encoding="utf-8").strip().splitlines()[-1]
         parsed = json.loads(line)
         for field in ("ts", "id", "kind", "model", "status", "latency_ms"):
             assert field in parsed, field
@@ -855,6 +859,8 @@ def check_event_logging() -> None:
 
 def check_pipeline_event_logging() -> None:
     """process_source emits stage events and stores real failure error_message."""
+    from app.core.event_logging import get_log_owner, owner_dir
+
     with tempfile.TemporaryDirectory(prefix="silicon-notebook-pipe-") as temp_dir:
         root = Path(temp_dir)
         log_dir = root / "logs"
@@ -874,9 +880,12 @@ def check_pipeline_event_logging() -> None:
         run = _latest_extraction_run(repo, uploaded[0].id)
         assert run["run_type"] == "kg" and run["error_message"] == "no-llm"
 
+        # per-user 模式(PR#93):仓库 event_log 写在 event_log_dir/<owner>/events.jsonl;
+        # 离线无请求上下文 → owner=user-local。读实际写入的 per-user 路径。
+        events_path = log_dir / owner_dir(get_log_owner()) / "events.jsonl"
         events = [
             json.loads(line)
-            for line in (log_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            for line in events_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
         pipeline = [event for event in events if event.get("kind") == "pipeline"]
