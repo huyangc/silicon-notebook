@@ -614,6 +614,8 @@ async function readAskStream<TResponse>(
 
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
 const buildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/build`, { method: "POST" });
+const rebuildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
+const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
 
 function formatRelativeTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -908,12 +910,41 @@ export default function Home() {
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
+  const [relinkingKg, setRelinkingKg] = useState(false);
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
     setBuildingKg(true);
     buildKg(nb)
       .then(() => setToast("已开始构建知识图谱（后台进行，可能需要数分钟）；完成后会自动更新"))
       .catch((e) => { reportError(e); setBuildingKg(false); });
+  };
+  // Trigger full re-extract: clears existing KG and rebuilds from all sources.
+  const startKgRebuild = (nb: string) => {
+    setInfoModal({
+      title: "完整重抽知识图谱",
+      message: "将清空现有知识图谱并重新抽取全部来源，确定？",
+      actions: [
+        { label: "取消", action: () => {} },
+        {
+          label: "确定重抽",
+          danger: true,
+          action: () => {
+            setBuildingKg(true);
+            rebuildKg(nb)
+              .then(() => setToast("已开始完整重抽（后台进行，可能需要数分钟）；完成后会自动更新"))
+              .catch((e) => { reportError(e); setBuildingKg(false); });
+          },
+        },
+      ],
+    });
+  };
+  // Relink isolated nodes: additive/synchronous, no confirm needed.
+  const startKgRelink = (nb: string) => {
+    setRelinkingKg(true);
+    relinkKg(nb)
+      .then((r) => setToast(`已补连 ${r.edges_added} 条边，剩余孤立节点 ${r.isolated_after}`))
+      .catch(reportError)
+      .finally(() => setRelinkingKg(false));
   };
   // While a build runs, poll the notebook until kg_ready flips — the build can
   // take minutes, so the button reflects real progress instead of a fixed guess.
@@ -2624,28 +2655,53 @@ export default function Home() {
                 </button>
                 {currentNotebookId && sources.length > 0 && (
                   currentNotebook?.kg_ready
-                    ? (currentNotebook?.kg_pending_sources ?? 0) > 0
-                      ? (
-                        <>
+                    ? (
+                      <>
+                        {(currentNotebook?.kg_pending_sources ?? 0) > 0
+                          ? (
+                            <>
+                              <button
+                                type="button"
+                                className="add-source-button"
+                                disabled={buildingKg}
+                                title="有新增来源尚未入图，点击增量抽取并合并至知识图谱"
+                                onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                              >
+                                <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : `补抽 ${currentNotebook.kg_pending_sources ?? "?"} 篇新增并合并`}
+                              </button>
+                              <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                                知识图谱已构建 · 有 {currentNotebook.kg_pending_sources ?? "?"} 篇来源未入图
+                              </p>
+                            </>
+                          )
+                          : (
+                            <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                              ✓ 知识图谱已构建 · 可用严格推理（推理 / 图谱）
+                            </p>
+                          )
+                        }
+                        <p className="tool-hint" style={{ margin: "0 2px 8px", display: "flex", gap: "10px" }}>
                           <button
                             type="button"
-                            className="add-source-button"
+                            className="link-button"
                             disabled={buildingKg}
-                            title="有新增来源尚未入图，点击增量抽取并合并至知识图谱"
-                            onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                            title="清空现有知识图谱并重新抽取全部来源（后台任务）"
+                            onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
                           >
-                            <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : `补抽 ${currentNotebook.kg_pending_sources} 篇新增并合并`}
+                            完整重抽
                           </button>
-                          <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                            知识图谱已构建 · 有 {currentNotebook.kg_pending_sources} 篇来源未入图
-                          </p>
-                        </>
-                      )
-                      : (
-                        <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                          ✓ 知识图谱已构建 · 可用严格推理（推理 / 图谱）
+                          <button
+                            type="button"
+                            className="link-button"
+                            disabled={relinkingKg || buildingKg}
+                            title="为孤立节点补连边（快速、不覆盖现有图）"
+                            onClick={() => { if (currentNotebookId) startKgRelink(currentNotebookId); }}
+                          >
+                            {relinkingKg ? "补连中…" : "补连孤立节点"}
+                          </button>
                         </p>
-                      )
+                      </>
+                    )
                     : (
                       <>
                         <button
