@@ -5344,25 +5344,22 @@ class SQLiteRepository:
         self._scale_idx_cache[notebook_id] = idx
         return idx
 
-    def build_scale_index(self, notebook_id: str) -> dict:
-        """Offline: read KG from SQLite for ONE notebook, build CSR transition +
-        ANN index, write 7 files under {storage_dir}/kg_index/{notebook_id}/.
-        Returns the manifest dict.
+    def _gather_kg_graph(self, notebook_id: str):
+        """Gather all KG nodes/relations/chunks/cluster_groups for a notebook
+        and build the undirected edge set used by both build_scale_index and
+        _active_kg_delta.  Single source of truth — no duplicated _add_undirected.
 
-        Graph nodes: all USABLE kg-object IDs + all chunk IDs.
-        Edges (undirected → both directions added):
-          - relations (source↔target, weight 1.0)
-          - entity↔chunk memberships (weight 1.0)
-          - variant pairs (ppr_variant_edge_weight)
-          - synonym pairs from embeddings (cosine weight, if emb_synonym_enabled)
-        IDF[i] = 1 / membership_count for KG nodes (1.0 when 0), 1.0 for chunks.
-        ANN index = only kg nodes that have a row in knowledge_embeddings.
+        Returns
+        -------
+        (node_ids, edges, chunk_ids, kg_node_ids, membership_counts)
+          node_ids          : list[str]  — kg node ids + chunk_ids + cluster hub ids
+          edges             : list[(str,str,float)] — undirected (both dirs, deduped)
+          chunk_ids         : list[str]  — raw chunk ids (stable subset of node_ids)
+          kg_node_ids       : list[str]  — KG object ids (for idf / n_kg_nodes)
+          membership_counts : dict[str,int] — {object_id: len(chunks)} for IDF
         """
-        from app.services.kg import scale_index as si
         from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
-
-        # Validate notebook exists
-        self.get_notebook(notebook_id)
+        import numpy as np
 
         ph = ",".join("?" for _ in USABLE_STATUSES)
         kg_nodes: Dict[str, dict] = {}
@@ -5393,50 +5390,29 @@ class SQLiteRepository:
 
         # Memberships: entity ↔ chunk
         ent_chunk_map = self._ent_chunk_map(notebook_id)
-        memberships = [
-            (oid, cid)
-            for oid, cids in ent_chunk_map.items()
-            for cid in cids
-        ]
+        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items() for cid in cids]
+        membership_counts: Dict[str, int] = {oid: len(cids) for oid, cids in ent_chunk_map.items()}
 
-        # Build extra edges: variant pairs + optional synonym pairs
+        # Extra edges: variant pairs + optional synonym pairs
         extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
-
-        import numpy as np
         with self._connect() as db:
-            ann_ids_raw, ann_matrix_raw = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+            ann_ids_raw, ann_matrix_raw = self._vector_matrix(
+                db, notebook_id, "knowledge_embeddings", "object_id")
         ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
-        ann_matrix = ann_matrix_raw
-        has_vecs = bool(ann_ids) and ann_matrix is not None and len(ann_matrix)
-
+        has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
         if has_vecs and self.settings.ppr_emb_synonym_enabled:
             extra_edges = extra_edges + emb_synonym_edges(
-                ann_ids, np.asarray(ann_matrix),
+                ann_ids, np.asarray(ann_matrix_raw),
                 self.settings.ppr_emb_synonym_threshold,
                 self.settings.ppr_emb_synonym_topk,
                 self.settings.ppr_emb_synonym_max_entities,
             )
 
-        # Build node_ids list: kg nodes first, then chunk nodes, then cluster hubs
-        node_ids = list(kg_nodes.keys()) + chunk_ids
-        kg_id_set = set(kg_nodes.keys())
+        # node_ids: kg nodes first, then chunk nodes (cluster hubs appended below)
+        node_ids: list = list(kg_nodes.keys()) + chunk_ids
+        node_ids_set: set = set(node_ids)
 
-        # chunk_index: indices of chunk nodes in node_ids (computed before adding
-        # cluster hub nodes so chunk positions are stable)
-        id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
-        chunk_index = [id_to_idx[cid] for cid in chunk_ids if cid in id_to_idx]
-
-        # IDF: 1 / membership_count (1.0 when 0); chunks get 1.0
-        kg_membership_counts: Dict[str, int] = {oid: len(cids) for oid, cids in ent_chunk_map.items()}
-        idf = []
-        for nid in node_ids:
-            if nid in kg_id_set:
-                cnt = kg_membership_counts.get(nid, 0)
-                idf.append(1.0 / cnt if cnt > 0 else 1.0)
-            else:
-                idf.append(1.0)
-
-        # Build undirected edges: add both directions for each logical edge
+        # Build undirected edges (single _add_undirected closure, shared state)
         edges: List[Tuple[str, str, float]] = []
         seen_undir: set = set()
 
@@ -5457,12 +5433,8 @@ class SQLiteRepository:
         for a, b, w in extra_edges:
             _add_undirected(a, b, w)
 
-        # Cluster synonym bridges: add a virtual hub node "cluster:{canonical_id}"
+        # Cluster synonym bridges: virtual hub node "cluster:{canonical_id}"
         # for each concept cluster that has ≥1 member present in node_ids.
-        # These nodes are NOT chunks and NOT kg entities — they serve purely as
-        # synonym routers so PPR mass flows between same-concept nodes from
-        # different documents (mirrors build_ppr_graph's hub logic in ppr.py:91-98).
-        node_ids_set = set(node_ids)
         for canonical_id, members in cluster_groups.items():
             present = [m for m in members if m in node_ids_set]
             if not present:
@@ -5471,14 +5443,61 @@ class SQLiteRepository:
             if hub_id not in node_ids_set:
                 node_ids.append(hub_id)
                 node_ids_set.add(hub_id)
-                idf.append(1.0)  # hub nodes are not KG entities; IDF = 1.0
             for m in present:
                 _add_undirected(hub_id, m, 1.0)
+
+        kg_node_ids: list = list(kg_nodes.keys())
+        return node_ids, edges, chunk_ids, kg_node_ids, membership_counts
+
+    def build_scale_index(self, notebook_id: str) -> dict:
+        """Offline: read KG from SQLite for ONE notebook, build CSR transition +
+        ANN index, write 7 files under {storage_dir}/kg_index/{notebook_id}/.
+        Returns the manifest dict.
+
+        Graph nodes: all USABLE kg-object IDs + all chunk IDs.
+        Edges (undirected → both directions added):
+          - relations (source↔target, weight 1.0)
+          - entity↔chunk memberships (weight 1.0)
+          - variant pairs (ppr_variant_edge_weight)
+          - synonym pairs from embeddings (cosine weight, if emb_synonym_enabled)
+        IDF[i] = 1 / membership_count for KG nodes (1.0 when 0), 1.0 for chunks.
+        ANN index = only kg nodes that have a row in knowledge_embeddings.
+        """
+        from app.services.kg import scale_index as si
+
+        import numpy as np
+
+        # Validate notebook exists
+        self.get_notebook(notebook_id)
+
+        node_ids, edges, chunk_ids, kg_node_ids, membership_counts = \
+            self._gather_kg_graph(notebook_id)
+
+        kg_id_set = set(kg_node_ids)
+
+        # chunk_index: indices of chunk nodes in node_ids (stable; cluster hubs
+        # already appended at the end of node_ids by _gather_kg_graph)
+        id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+        chunk_index = [id_to_idx[cid] for cid in chunk_ids if cid in id_to_idx]
+
+        # IDF: 1 / membership_count (1.0 when 0); chunks and hub nodes get 1.0
+        idf: list = []
+        for nid in node_ids:
+            if nid in kg_id_set:
+                cnt = membership_counts.get(nid, 0)
+                idf.append(1.0 / cnt if cnt > 0 else 1.0)
+            else:
+                idf.append(1.0)
 
         # Build CSR transition matrix
         transition, _ = si.build_transition(node_ids, edges)
 
         # ANN vectors/labels: kg nodes with embeddings
+        with self._connect() as db:
+            ann_ids_raw, ann_matrix_raw = self._vector_matrix(
+                db, notebook_id, "knowledge_embeddings", "object_id")
+        ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
+        ann_matrix = ann_matrix_raw
         if ann_ids and ann_matrix is not None:
             ann_labels = ann_ids
             ann_vectors = np.asarray(ann_matrix, dtype=np.float32)
@@ -5486,14 +5505,15 @@ class SQLiteRepository:
             ann_labels = []
             ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
 
+        n_kg = len(kg_node_ids)
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
         manifest = {
             "version": self._scale_index_version(notebook_id),
             "dim": self.settings.embed_dim,
             "n_nodes": len(node_ids),
-            "n_kg_nodes": len(kg_nodes),
+            "n_kg_nodes": n_kg,
             "n_chunks": len(chunk_ids),
-            "n_hubs": len(node_ids) - len(kg_nodes) - len(chunk_ids),
+            "n_hubs": len(node_ids) - n_kg - len(chunk_ids),
             "n_ann": len(ann_labels),
         }
         return si.save_scale_index(
@@ -5509,92 +5529,12 @@ class SQLiteRepository:
 
     def _active_kg_delta(self, notebook_id: str):
         """Gather the ACTIVE notebook's KG delta for splicing onto a base scale
-        index. Mirrors build_scale_index's single-notebook node/edge conventions
-        EXACTLY (KG node key = object_id, chunk node key = raw chunk_id, cluster
-        hub key = f"cluster:{canonical_id}"). Returns
-        (active_node_ids, active_edges, active_chunk_ids):
-          - active_node_ids: kg object_ids + raw chunk_ids + cluster hub ids
-          - active_edges: undirected (both dirs) relation/membership/variant/
-            synonym/cluster-bridge edges
-          - active_chunk_ids: raw chunk_ids (subset of node_ids)
+        index. Delegates to _gather_kg_graph (shared with build_scale_index) so
+        node/edge conventions are guaranteed identical.  Returns
+        (active_node_ids, active_edges, active_chunk_ids).
         """
-        from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
-        import numpy as np
-
-        ph = ",".join("?" for _ in USABLE_STATUSES)
-        kg_nodes: Dict[str, dict] = {}
-        relations: list = []
-        chunk_ids: list = []
-        cluster_groups: Dict[str, list] = {}
-        with self._connect() as db:
-            for r in db.execute(
-                    f"SELECT id, object_type, payload FROM knowledge_objects "
-                    f"WHERE notebook_id=? AND status IN ({ph})",
-                    (notebook_id, *USABLE_STATUSES)).fetchall():
-                kg_nodes[r["id"]] = {"type": r["object_type"],
-                                     "name": json.loads(r["payload"] or "{}").get("name", "")}
-            for r in db.execute(
-                    "SELECT source_object_id, target_object_id FROM knowledge_relations "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
-                relations.append(dict(r))
-            for r in db.execute("SELECT id FROM chunks WHERE notebook_id=?",
-                                (notebook_id,)).fetchall():
-                chunk_ids.append(r["id"])
-            for r in db.execute(
-                    "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
-                cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-
-        ent_chunk_map = self._ent_chunk_map(notebook_id)
-        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items() for cid in cids]
-
-        extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
-        with self._connect() as db:
-            ann_ids_raw, ann_matrix_raw = self._vector_matrix(
-                db, notebook_id, "knowledge_embeddings", "object_id")
-        ann_ids = list(ann_ids_raw) if ann_ids_raw else []
-        if ann_ids and ann_matrix_raw is not None and len(ann_matrix_raw) \
-                and self.settings.ppr_emb_synonym_enabled:
-            extra_edges = extra_edges + emb_synonym_edges(
-                ann_ids, np.asarray(ann_matrix_raw),
-                self.settings.ppr_emb_synonym_threshold,
-                self.settings.ppr_emb_synonym_topk,
-                self.settings.ppr_emb_synonym_max_entities)
-
-        node_ids = list(kg_nodes.keys()) + chunk_ids
-        node_ids_set = set(node_ids)
-
-        edges: List[Tuple[str, str, float]] = []
-        seen_undir: set = set()
-
-        def _add_undirected(a: str, b: str, w: float) -> None:
-            if a == b:
-                return
-            key = (a, b) if a < b else (b, a)
-            if key in seen_undir:
-                return
-            seen_undir.add(key)
-            edges.append((a, b, w))
-            edges.append((b, a, w))
-
-        for rel in relations:
-            _add_undirected(rel["source_object_id"], rel["target_object_id"], 1.0)
-        for oid, cid in memberships:
-            _add_undirected(oid, cid, 1.0)
-        for a, b, w in extra_edges:
-            _add_undirected(a, b, w)
-
-        for canonical_id, members in cluster_groups.items():
-            present = [m for m in members if m in node_ids_set]
-            if not present:
-                continue
-            hub_id = f"cluster:{canonical_id}"
-            if hub_id not in node_ids_set:
-                node_ids.append(hub_id)
-                node_ids_set.add(hub_id)
-            for m in present:
-                _add_undirected(hub_id, m, 1.0)
-
+        node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
+            self._gather_kg_graph(notebook_id)
         return node_ids, edges, chunk_ids
 
     def scale_ppr(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
@@ -5645,7 +5585,7 @@ class SQLiteRepository:
             # reconstruct this base's edges from its CSR and splice as "active"-style
             extra_ids, extra_A = si.splice_active(
                 combined_ids, combined_A, list(idx.node_ids),
-                self._csr_to_edges(idx.node_ids, idx.transition))
+                si.csr_to_edges(idx.node_ids, idx.transition))
             combined_ids, combined_A = extra_ids, extra_A
             for i, nid in enumerate(idx.node_ids):
                 combined_idf_map.setdefault(nid, float(idx.idf[i]))
@@ -5747,14 +5687,6 @@ class SQLiteRepository:
         norm = [(cid, (s - lo) / span if span > 0 else 0.0) for cid, s in raw]
         norm.sort(key=lambda kv: kv[1], reverse=True)
         return norm
-
-    @staticmethod
-    def _csr_to_edges(node_ids, transition):
-        """Reconstruct edge list (src, dst, 1.0) from a column-stochastic CSR
-        transition matrix (mirrors splice_active's base-edge reconstruction)."""
-        coo = transition.tocoo()
-        # A[target_row, source_col]: edge source->target = node_ids[col]->node_ids[row]
-        return [(node_ids[i], node_ids[j], 1.0) for i, j in zip(coo.col, coo.row)]
 
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
         """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → PPR →

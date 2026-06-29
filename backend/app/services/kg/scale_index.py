@@ -154,6 +154,18 @@ def save_scale_index(
     return manifest
 
 
+def csr_to_edges(
+    node_ids: List[str],
+    transition: "sp.csr_matrix",
+) -> List[Tuple[str, str, float]]:
+    """Reconstruct an edge list (src, dst, 1.0) from a column-stochastic CSR
+    transition matrix.  Mirrors the base-edge reconstruction inside splice_active.
+    A[target_row, source_col] → edge source->target = node_ids[col]->node_ids[row].
+    """
+    coo = transition.tocoo()
+    return [(node_ids[i], node_ids[j], 1.0) for i, j in zip(coo.col, coo.row)]
+
+
 def splice_active(
     base_ids: List[str],
     base_transition: "sp.csr_matrix",
