@@ -42,21 +42,6 @@ def _insert_source_with_element(repo, notebook_id: str) -> str:
     return source_id
 
 
-def _insert_derived_candidate(repo, notebook_id: str) -> str:
-    candidate_id = f"drv-{uuid4().hex[:10]}"
-    now = _now()
-    with repo._connect() as db:
-        db.execute(
-            """INSERT INTO derived_rule_candidates
-               (id, notebook_id, article_id, title, proposed_rule, rationale,
-                status, evidence, created_at)
-               VALUES (?, ?, NULL, 'Thermal rule', 'Keep junction temperature low.',
-                       'Thermal margin prevents drift.', 'draft', '[]', ?)""",
-            (candidate_id, notebook_id, now),
-        )
-    return candidate_id
-
-
 def test_update_knowledge_requires_matching_notebook(repo):
     nb_a = repo.create_notebook(NotebookCreate(name="A"))
     nb_b = repo.create_notebook(NotebookCreate(name="B"))
@@ -81,33 +66,6 @@ def test_merge_knowledge_requires_same_notebook(repo):
     obj_a_2 = repo._test_insert_object(nb_a.id, "claim", {"name": "A claim duplicate"})
     merged = repo.merge_knowledge(nb_a.id, obj_a_2, MergeRequest(into_id=obj_a))
     assert merged.id == obj_a
-
-
-def test_approve_derived_rule_is_idempotent(repo):
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    candidate_id = _insert_derived_candidate(repo, nb.id)
-
-    first = repo.approve_derived_rule(nb.id, candidate_id)
-    second = repo.approve_derived_rule(nb.id, candidate_id)
-
-    assert second.id == first.id
-    with repo._connect() as db:
-        (approved_rules,) = db.execute(
-            """SELECT COUNT(*) FROM knowledge_objects
-               WHERE notebook_id = ? AND object_type = 'rule'
-                 AND source_candidate_id = ?""",
-            (nb.id, candidate_id),
-        ).fetchone()
-    assert approved_rules == 1
-
-
-def test_approve_derived_rule_requires_matching_notebook(repo):
-    nb_a = repo.create_notebook(NotebookCreate(name="A"))
-    nb_b = repo.create_notebook(NotebookCreate(name="B"))
-    candidate_id = _insert_derived_candidate(repo, nb_b.id)
-
-    with pytest.raises(KeyError):
-        repo.approve_derived_rule(nb_a.id, candidate_id)
 
 
 def test_delete_source_removes_source_knowledge_embeddings(tmp_path, monkeypatch):

@@ -171,31 +171,6 @@ def answer_prompt(question: str, context_block: str, history_block: str = "") ->
     )
 
 
-ARTICLE_SCHEMA_HINT = (
-    '{"core_contribution":"","claims":[{"statement":"","claim_type":'
-    '"mechanism|result|recommendation|warning|comparison","quoted_span":""}],'
-    '"limitations":[""],"validation_plan":[""],'
-    '"derived_rule_candidates":[{"proposed_rule":"","rationale":"",'
-    '"quoted_span":""}]}'
-)
-
-
-def article_prompt(title: str, elements_block: str, rules_block: str) -> str:
-    return (
-        "You analyze a technical article for a semiconductor knowhow notebook "
-        "and relate it to the notebook's existing rules. The article may mix "
-        "Chinese and English.\n\n"
-        "Produce: core_contribution, key claims (each with a verbatim "
-        "`quoted_span` from the article), limitations, a validation_plan, and "
-        "derived_rule_candidates (proposed new rules with rationale and a "
-        "supporting quoted_span). Do not invent facts; only use the article "
-        "text. Return valid JSON only.\n\n"
-        f"Article title: {title}\n\n"
-        f"Article elements:\n{elements_block}\n\n"
-        f"Existing notebook rules (for relationship analysis):\n{rules_block}"
-    )
-
-
 PLAN_SCHEMA_HINT = (
     '{"sub_queries":[{"query":"","types":["concept","claim","formula","procedure"],'
     '"prefer":"keyword|semantic|balanced","reason":""}]}'

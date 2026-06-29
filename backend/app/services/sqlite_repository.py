@@ -22,13 +22,9 @@ from app.core.llm import OpenAICompatibleClient
 from app.models.schemas import (
     AddUrlSourcesResult,
     AnswerAnchor,
-    ArticleCreate,
-    ArticleResearchBrief,
-    ArticleSummary,
     AskRequest,
     AskResponse,
     Citation,
-    DerivedRuleCandidate,
     DuplicateGroup,
     Evidence,
     FeedbackRequest,
@@ -89,13 +85,11 @@ from app.services.model_config import resolve_effective_config, ResolvedModelCon
 from app.services.parsers import parse_source_file, mineru_content_list_to_elements
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
-    ARTICLE_SCHEMA_HINT,
     DESCRIPTION_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
     NOTEBOOK_META_SCHEMA_HINT,
     SCHEMA_INDUCTION_HINT,
     answer_prompt,
-    article_prompt,
     followup_rewrite_prompt,
     notebook_description_prompt,
     notebook_meta_prompt,
@@ -462,17 +456,6 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_nb ON chunk_embeddings(notebook_id);
 
-                CREATE TABLE IF NOT EXISTS articles (
-                  id TEXT PRIMARY KEY,
-                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-                  source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
-                  title TEXT NOT NULL,
-                  status TEXT NOT NULL DEFAULT 'uploaded',
-                  summary TEXT NOT NULL DEFAULT '',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS extraction_runs (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -556,31 +539,6 @@ class SQLiteRepository:
                   notebook_id TEXT NOT NULL,
                   rating TEXT NOT NULL,
                   comment TEXT NOT NULL DEFAULT '',
-                  created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS article_claims (
-                  id TEXT PRIMARY KEY,
-                  article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
-                  notebook_id TEXT NOT NULL,
-                  statement TEXT NOT NULL DEFAULT '',
-                  claim_type TEXT NOT NULL DEFAULT '',
-                  relation_type TEXT NOT NULL DEFAULT '',
-                  related_rule_id TEXT NOT NULL DEFAULT '',
-                  implication TEXT NOT NULL DEFAULT '',
-                  evidence TEXT NOT NULL DEFAULT '[]',
-                  created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS derived_rule_candidates (
-                  id TEXT PRIMARY KEY,
-                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-                  article_id TEXT REFERENCES articles(id) ON DELETE CASCADE,
-                  title TEXT NOT NULL DEFAULT '',
-                  proposed_rule TEXT NOT NULL DEFAULT '',
-                  rationale TEXT NOT NULL DEFAULT '',
-                  status TEXT NOT NULL DEFAULT 'draft',
-                  evidence TEXT NOT NULL DEFAULT '[]',
                   created_at TEXT NOT NULL
                 );
 
@@ -1217,15 +1175,6 @@ class SQLiteRepository:
                 "SELECT nb.created_by AS owner FROM answers a "
                 "JOIN notebooks nb ON nb.id = a.notebook_id WHERE a.id = ?",
                 (answer_id,),
-            ).fetchone()
-        return row["owner"] if row else None
-
-    def article_owner(self, article_id: str) -> "str | None":
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT nb.created_by AS owner FROM articles a "
-                "JOIN notebooks nb ON nb.id = a.notebook_id WHERE a.id = ?",
-                (article_id,),
             ).fetchone()
         return row["owner"] if row else None
 
@@ -1958,27 +1907,7 @@ class SQLiteRepository:
 
     def delete_source(self, source_id: str) -> None:
         source = self.get_source(source_id)
-        now = _now()
         with self._write() as db:
-            article_rows = db.execute(
-                "SELECT id FROM articles WHERE source_id = ?",
-                (source_id,),
-            ).fetchall()
-            article_ids = [row["id"] for row in article_rows]
-            if article_ids:
-                placeholders = ",".join("?" for _ in article_ids)
-                db.execute(
-                    f"DELETE FROM article_claims WHERE article_id IN ({placeholders})",
-                    article_ids,
-                )
-                db.execute(
-                    f"DELETE FROM derived_rule_candidates WHERE article_id IN ({placeholders})",
-                    article_ids,
-                )
-                db.execute(
-                    "UPDATE articles SET source_id = NULL, status = ?, updated_at = ? WHERE source_id = ?",
-                    ("uploaded", now, source_id),
-                )
             self._clear_source_extraction_state(
                 db,
                 source_id,
@@ -4433,125 +4362,6 @@ class SQLiteRepository:
             )
         return oid
 
-    def _derived_from_row(self, row: sqlite3.Row) -> DerivedRuleCandidate:
-        return DerivedRuleCandidate(
-            id=row["id"],
-            notebook_id=row["notebook_id"],
-            article_id=row["article_id"] or "",
-            title=row["title"],
-            proposed_rule=row["proposed_rule"],
-            rationale=row["rationale"],
-            status=row["status"],
-            evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
-            created_label=_created_label(row["created_at"]),
-        )
-
-    def list_derived_rules(
-        self, notebook_id: str, status: str | None = None
-    ) -> List[DerivedRuleCandidate]:
-        self.get_notebook(notebook_id)
-        query = "SELECT * FROM derived_rule_candidates WHERE notebook_id = ?"
-        params: List[object] = [notebook_id]
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        query += " ORDER BY created_at DESC, id ASC"
-        with self._connect() as db:
-            rows = db.execute(query, params).fetchall()
-        return [self._derived_from_row(row) for row in rows]
-
-    def _rule_card_from_row(self, row: sqlite3.Row) -> RuleCard:
-        obj = {
-            "id": row["id"],
-            "payload": json.loads(row["payload"] or "{}"),
-            "evidence": [Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
-            "status": row["status"],
-            "owner": row["owner"],
-            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
-        }
-        return self._rule_card(self._as_retrieved(obj, row["object_type"]))
-
-    def approve_derived_rule(self, notebook_id: str, candidate_id: str) -> RuleCard:
-        """Promote a derived rule candidate into the formal rule library (§7.5)."""
-        now = _now()
-        with self._write() as db:
-            row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
-                (candidate_id, notebook_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(candidate_id)
-            existing = db.execute(
-                """
-                SELECT * FROM knowledge_objects
-                WHERE notebook_id = ? AND object_type = 'rule'
-                  AND source_candidate_id = ?
-                ORDER BY created_at ASC, id ASC
-                LIMIT 1
-                """,
-                (notebook_id, candidate_id),
-            ).fetchone()
-            if existing is not None:
-                if row["status"] != "approved":
-                    db.execute(
-                        "UPDATE derived_rule_candidates SET status = 'approved' WHERE id = ?",
-                        (candidate_id,),
-                    )
-                return self._rule_card_from_row(existing)
-            if row["status"] == "rejected":
-                raise ValueError("cannot approve a rejected derived rule candidate")
-            payload = {
-                "title": row["title"] or _first_sentence(row["proposed_rule"], 90),
-                "statement": row["proposed_rule"],
-                "applies_to": [],
-                "recommendation": "",
-                "risk_if_ignored": row["rationale"] or "",
-                "severity": "medium",
-            }
-            ko_id = f"ko-{uuid4().hex[:10]}"
-            db.execute(
-                """
-                INSERT INTO knowledge_objects
-                (id, notebook_id, object_type, status, owner, payload, evidence,
-                 source_candidate_id, created_at, updated_at)
-                VALUES (?, ?, 'rule', 'approved', '', ?, ?, ?, ?, ?)
-                """,
-                (
-                    ko_id,
-                    notebook_id,
-                    json.dumps(payload, ensure_ascii=False),
-                    row["evidence"] or "[]",
-                    candidate_id,
-                    now,
-                    now,
-                ),
-            )
-            db.execute(
-                "UPDATE derived_rule_candidates SET status = 'approved' WHERE id = ?",
-                (candidate_id,),
-            )
-            ko_row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (ko_id,)).fetchone()
-        return self._rule_card_from_row(ko_row)
-
-    def reject_derived_rule(self, notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
-        with self._write() as db:
-            row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ? AND notebook_id = ?",
-                (candidate_id, notebook_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(candidate_id)
-            if row["status"] == "approved":
-                raise ValueError("cannot reject an approved derived rule candidate")
-            db.execute(
-                "UPDATE derived_rule_candidates SET status = 'rejected' WHERE id = ?",
-                (candidate_id,),
-            )
-            row = db.execute(
-                "SELECT * FROM derived_rule_candidates WHERE id = ?", (candidate_id,)
-            ).fetchone()
-        return self._derived_from_row(row)
-
     # --- Governance: promotion state machine (Track F) -------------------
 
     @staticmethod
@@ -5057,14 +4867,6 @@ class SQLiteRepository:
                 hits.append(SearchHit(scope="Element", notebook_id=notebook_id, label=label,
                                       text=_snippet(e["text"] or label, needle),
                                       source_id=e["source_id"], element_id=e["id"]))
-            art_rows = db.execute(
-                "SELECT * FROM articles WHERE notebook_id = ? AND "
-                "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ?) LIMIT ?",
-                (notebook_id, like, like, cap)).fetchall()
-            for a in art_rows:
-                hits.append(SearchHit(scope="Article", notebook_id=notebook_id, label=a["title"],
-                                      text=_snippet(a["summary"] or a["title"], needle),
-                                      source_id="", element_id=""))
             ko_rows = db.execute(
                 "SELECT id, object_type, payload FROM knowledge_objects "
                 "WHERE notebook_id = ? AND status != 'deprecated' AND LOWER(payload) LIKE ? LIMIT ?",
@@ -7437,410 +7239,6 @@ class SQLiteRepository:
             source_status_counts=source_status_counts,
         )
 
-    def list_articles(self, notebook_id: str) -> List[ArticleSummary]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM articles WHERE notebook_id = ? ORDER BY created_at ASC",
-                (notebook_id,),
-            ).fetchall()
-        return [
-            ArticleSummary(
-                id=row["id"],
-                notebook_id=row["notebook_id"],
-                source_id=row["source_id"] or "",
-                title=row["title"],
-                status=row["status"],
-                summary=row["summary"],
-            )
-            for row in rows
-        ]
-
-    def create_article(self, notebook_id: str, payload: ArticleCreate) -> ArticleSummary:
-        self.get_notebook(notebook_id)
-        article_id = f"art-{uuid4().hex[:10]}"
-        now = _now()
-        source_id = payload.source_id.strip()
-        if source_id:
-            with self._connect() as db:
-                source_row = db.execute(
-                    "SELECT id FROM sources WHERE id = ? AND notebook_id = ?",
-                    (source_id, notebook_id),
-                ).fetchone()
-            if source_row is None:
-                raise ValueError("Article source must belong to the current notebook")
-        with self._write() as db:
-            db.execute(
-                """
-                INSERT INTO articles
-                (id, notebook_id, source_id, title, status, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    article_id,
-                    notebook_id,
-                    source_id or None,
-                    payload.title,
-                    "uploaded",
-                    payload.abstract or "Article uploaded; research brief not generated yet.",
-                    now,
-                    now,
-                ),
-            )
-        return self.list_articles(notebook_id)[-1]
-
-    def delete_article(self, article_id: str) -> None:
-        with self._write() as db:
-            row = db.execute("SELECT id FROM articles WHERE id = ?", (article_id,)).fetchone()
-            if row is None:
-                raise KeyError(article_id)
-            db.execute("DELETE FROM articles WHERE id = ?", (article_id,))
-
-    def research_article(self, article_id: str) -> ArticleResearchBrief:
-        with self._connect() as db:
-            row = db.execute("SELECT * FROM articles WHERE id = ?", (article_id,)).fetchone()
-        if row is None:
-            raise KeyError(article_id)
-        article = ArticleSummary(
-            id=row["id"],
-            notebook_id=row["notebook_id"],
-            source_id=row["source_id"] or "",
-            title=row["title"],
-            status=row["status"],
-            summary=row["summary"],
-        )
-        notebook_id = row["notebook_id"]
-        article_elements, article_source_title = self._article_elements(row)
-        element_text = "\n".join(
-            f"[{element.location_label}] {element.text}" for element in article_elements
-        )
-        article_text = f"{row['title']}\n{row['summary']}\n{element_text}".strip()
-        with self._connect() as db:
-            rules = self._knowledge_objects(db, notebook_id, "rule")
-
-        brief_data = None
-        if self.llm_client.configured and article_text:
-            try:
-                brief_data = self._research_article_with_llm(
-                    article.title,
-                    article_text,
-                    rules,
-                    article_elements,
-                    article_source_title,
-                )
-            except Exception:
-                brief_data = None
-        if brief_data is None:
-            brief_data = self._research_article_fallback(
-                article.title,
-                row["summary"],
-                rules,
-                article_elements,
-                article_source_title,
-            )
-
-        self._persist_article_research(article_id, notebook_id, brief_data)
-        article.status = "brief-ready"
-        return ArticleResearchBrief(
-            article=article,
-            core_contribution=brief_data["core_contribution"],
-            claims=[claim["statement"] for claim in brief_data["claims"]],
-            limitations=brief_data["limitations"],
-            notebook_relationships=brief_data["notebook_relationships"],
-            derived_rule_candidates=[
-                item["proposed_rule"] for item in brief_data["derived_rule_candidates"]
-            ],
-            validation_plan=brief_data["validation_plan"],
-            citations=self._article_citations(brief_data),
-        )
-
-    def _research_article_with_llm(
-        self,
-        title: str,
-        article_text: str,
-        rules: List[dict],
-        article_elements: List[SourceElement],
-        article_source_title: str,
-    ) -> dict:
-        rules_block = "\n".join(
-            f"- {str(rule['payload'].get('title', '')).strip()}: "
-            f"{str(rule['payload'].get('statement', '')).strip()}"
-            for rule in rules[:20]
-        ) or "- (notebook has no approved rules yet)"
-        raw = self.llm_client.chat_json(
-            [{"role": "user", "content": article_prompt(title, article_text[:8000], rules_block)}],
-            ARTICLE_SCHEMA_HINT,
-        )
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("article analysis did not return a JSON object")
-
-        claims: List[dict] = []
-        for claim in data.get("claims") or []:
-            if isinstance(claim, dict):
-                statement = str(claim.get("statement", "")).strip()
-                claim_type = str(claim.get("claim_type", "")).strip()
-                quoted_span = str(claim.get("quoted_span", "")).strip()
-            else:
-                statement = str(claim).strip()
-                claim_type = ""
-                quoted_span = statement
-            if statement:
-                claims.append(
-                    {
-                        "statement": statement,
-                        "claim_type": claim_type,
-                        "evidence": self._article_evidence(
-                            quoted_span or statement,
-                            article_elements,
-                            article_source_title,
-                        ),
-                    }
-                )
-        derived: List[dict] = []
-        for item in data.get("derived_rule_candidates") or []:
-            if isinstance(item, dict):
-                text = str(item.get("proposed_rule", "")).strip()
-                rationale = str(item.get("rationale", "")).strip()
-                quoted_span = str(item.get("quoted_span", "")).strip()
-            else:
-                text = str(item).strip()
-                rationale = ""
-                quoted_span = text
-            if text:
-                derived.append(
-                    {
-                        "title": _first_sentence(text, 90),
-                        "proposed_rule": text,
-                        "rationale": rationale,
-                        "evidence": self._article_evidence(
-                            quoted_span or text,
-                            article_elements,
-                            article_source_title,
-                        ),
-                    }
-                )
-
-        def str_list(key: str) -> List[str]:
-            value = data.get(key) or []
-            if isinstance(value, list):
-                return [str(item).strip() for item in value if str(item).strip()]
-            if isinstance(value, str) and value.strip():
-                return [value.strip()]
-            return []
-
-        claims = self._attach_claim_relationships(claims, rules)
-        return {
-            "core_contribution": str(data.get("core_contribution", "")).strip()
-            or "Article analyzed; see claims below.",
-            "claims": claims,
-            "limitations": str_list("limitations"),
-            "validation_plan": str_list("validation_plan"),
-            "derived_rule_candidates": derived,
-            "notebook_relationships": self._article_rule_relationships(claims),
-        }
-
-    def _research_article_fallback(
-        self,
-        title: str,
-        summary: str,
-        rules: List[dict],
-        article_elements: List[SourceElement],
-        article_source_title: str,
-    ) -> dict:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?。！？])\s+", summary or "") if s.strip()]
-        claim_texts = sentences[:4] if sentences else ([title] if title else [])
-        claims = [
-            {
-                "statement": statement,
-                "claim_type": _claim_type(statement),
-                "evidence": self._article_evidence(
-                    statement,
-                    article_elements,
-                    article_source_title,
-                ),
-            }
-            for statement in claim_texts
-        ]
-        claims = self._attach_claim_relationships(claims, rules)
-        derived = self._derived_rules_from_claims(claims)
-        core = sentences[0] if sentences else (title or "No abstract provided for this article.")
-        return {
-            "core_contribution": core,
-            "claims": claims,
-            "limitations": [
-                "Analysis derived from the article title and abstract only "
-                "(no full-text element parsing in this beta).",
-            ],
-            "validation_plan": [
-                "Upload the full article text so claims can be bound to element-level evidence.",
-                "Cross-check each claim against the notebook's approved rules.",
-            ],
-            "derived_rule_candidates": derived,
-            "notebook_relationships": self._article_rule_relationships(claims),
-        }
-
-    def _article_elements(self, row: sqlite3.Row) -> tuple[List[SourceElement], str]:
-        source_id = row["source_id"]
-        if not source_id:
-            return [], row["title"]
-        try:
-            source = self.get_source(source_id)
-            return self.source_elements(source_id), source.title
-        except KeyError:
-            return [], row["title"]
-
-    def _article_evidence(
-        self,
-        quoted_span: str,
-        article_elements: List[SourceElement],
-        article_source_title: str,
-    ) -> List[Evidence]:
-        """Bind a quoted span to the best matching source element (substring check)."""
-        if not quoted_span.strip() or not article_elements:
-            return []
-        needle = " ".join((quoted_span or "").split()).lower()
-        if len(needle) < 6:
-            return []
-        for element in article_elements:
-            haystack = " ".join((element.text or "").split()).lower()
-            if needle in haystack or haystack in needle:
-                return [Evidence(
-                    source_id=element.source_id,
-                    source_title=article_source_title,
-                    element_id=element.id,
-                    element_type=element.element_type,
-                    location_label=element.location_label,
-                    quoted_span=quoted_span.strip()[:400],
-                    confidence=0.65,
-                )]
-        return []
-
-    def _attach_claim_relationships(self, claims: List[dict], rules: List[dict]) -> List[dict]:
-        for claim in claims:
-            relation_type, rule_id, implication = self._best_rule_relationship(
-                claim["statement"],
-                rules,
-            )
-            claim["relation_type"] = relation_type
-            claim["related_rule_id"] = rule_id
-            claim["implication"] = implication
-        return claims
-
-    def _best_rule_relationship(self, statement: str, rules: List[dict]) -> tuple[str, str, str]:
-        best_rule: Optional[dict] = None
-        best_score = 0.0
-        for rule in rules:
-            payload = rule["payload"]
-            rule_text = f"{payload.get('title', '')} {payload.get('statement', '')}"
-            score = keyword_score(statement, rule_text)
-            if score > best_score:
-                best_score = score
-                best_rule = rule
-        if best_rule is None or best_score <= 0:
-            return "", "", ""
-        relation_type = _relation_type(statement)
-        title = str(best_rule["payload"].get("title", "")).strip() or best_rule["id"]
-        implication = f"{relation_type} approved rule: {title}"
-        return relation_type, best_rule["id"], implication
-
-    def _article_rule_relationships(self, claims: List[dict]) -> List[str]:
-        relationships: List[str] = []
-        for claim in claims:
-            relation_type = claim.get("relation_type", "")
-            related_rule_id = claim.get("related_rule_id", "")
-            if relation_type and related_rule_id:
-                relationships.append(f"{relation_type} {related_rule_id}: {claim['statement']}")
-        return relationships
-
-    def _derived_rules_from_claims(self, claims: List[dict]) -> List[dict]:
-        derived: List[dict] = []
-        for claim in claims:
-            statement = claim["statement"]
-            if not _rule_candidate_text(statement):
-                continue
-            proposed_rule = statement
-            derived.append(
-                {
-                    "title": _first_sentence(proposed_rule, 90),
-                    "proposed_rule": proposed_rule,
-                    "rationale": claim.get("implication", "") or "Derived from article claim.",
-                    "evidence": claim.get("evidence", []),
-                }
-            )
-        return derived
-
-    def _article_citations(self, brief_data: dict) -> List[Citation]:
-        citations: List[Citation] = []
-        seen: set[tuple[str, str, str]] = set()
-        for item in [*brief_data["claims"], *brief_data["derived_rule_candidates"]]:
-            for evidence in item.get("evidence", []):
-                key = (evidence.source_id, evidence.element_id, evidence.quoted_span)
-                if key in seen:
-                    continue
-                seen.add(key)
-                citations.append(_citation("Article evidence", evidence))
-        return citations
-
-    def _persist_article_research(
-        self, article_id: str, notebook_id: str, brief_data: dict
-    ) -> None:
-        now = _now()
-        with self._write() as db:
-            db.execute("DELETE FROM article_claims WHERE article_id = ?", (article_id,))
-            db.execute("DELETE FROM derived_rule_candidates WHERE article_id = ?", (article_id,))
-            for index, claim in enumerate(brief_data["claims"], start=1):
-                db.execute(
-                    """
-                    INSERT INTO article_claims
-                    (id, article_id, notebook_id, statement, claim_type, relation_type,
-                     related_rule_id, implication, evidence, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        f"clm-{article_id}-{index:03d}",
-                        article_id,
-                        notebook_id,
-                        claim["statement"],
-                        claim.get("claim_type", ""),
-                        claim.get("relation_type", ""),
-                        claim.get("related_rule_id", ""),
-                        claim.get("implication", ""),
-                        json.dumps(
-                            [evidence.model_dump() for evidence in claim.get("evidence", [])],
-                            ensure_ascii=False,
-                        ),
-                        now,
-                    ),
-                )
-            for index, item in enumerate(brief_data["derived_rule_candidates"], start=1):
-                db.execute(
-                    """
-                    INSERT INTO derived_rule_candidates
-                    (id, notebook_id, article_id, title, proposed_rule, rationale,
-                     status, evidence, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        f"drc-{article_id}-{index:03d}",
-                        notebook_id,
-                        article_id,
-                        item.get("title", "") or _first_sentence(item["proposed_rule"], 90),
-                        item["proposed_rule"],
-                        item.get("rationale", ""),
-                        "draft",
-                        json.dumps(
-                            [evidence.model_dump() for evidence in item.get("evidence", [])],
-                            ensure_ascii=False,
-                        ),
-                        now,
-                    ),
-                )
-            db.execute(
-                "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
-                ("brief-ready", now, article_id),
-            )
-
     def _notebook_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> NotebookSummary:
         counts = {
             "sources": self._count(db, "sources", "notebook_id", row["id"]),
@@ -7850,7 +7248,6 @@ class SQLiteRepository:
             "methods": self._count_knowledge(db, row["id"], "method"),
             "risks": self._count_knowledge(db, row["id"], "risk"),
             "glossary": self._count_knowledge(db, row["id"], "glossary"),
-            "article_claims": self._count(db, "article_claims", "notebook_id", row["id"]),
         }
         keys = row.keys()
 
@@ -8003,43 +7400,6 @@ def _created_label(value: str) -> str:
     except ValueError:
         dt = datetime.now()
     return f"{dt.year}年{dt.month}月{dt.day}日"
-
-
-def _first_sentence(text: str, limit: int = 200) -> str:
-    parts = re.split(r"(?<=[.!?。！？])\s+", text.strip())
-    sentence = parts[0] if parts else text
-    return sentence.strip()[:limit]
-
-
-def _claim_type(statement: str) -> str:
-    lower = statement.lower()
-    if re.search(r"\b(must|should|require|ensure|verify)\b|必须|应该|应当|需要|确认|验证", statement, re.IGNORECASE):
-        return "recommendation"
-    if re.search(r"\b(risk|fail|failure|damage|degrade|hazard)\b|风险|失效|损坏|退化", statement, re.IGNORECASE):
-        return "warning"
-    if any(token in lower for token in ("reduce", "increase", "improve", "measured", "observed")):
-        return "result"
-    return "mechanism"
-
-
-def _relation_type(statement: str) -> str:
-    if re.search(r"\b(challenge|contradict|conflict|however|limitation)\b|挑战|相反|冲突|局限", statement, re.IGNORECASE):
-        return "challenges"
-    if re.search(r"\b(refine|tune|adjust|balance|tradeoff)\b|权衡|细化|调整", statement, re.IGNORECASE):
-        return "refines"
-    if re.search(r"\b(extend|new|additional|also|further)\b|新增|扩展|进一步", statement, re.IGNORECASE):
-        return "extends"
-    return "supports"
-
-
-def _rule_candidate_text(statement: str) -> bool:
-    return bool(
-        re.search(
-            r"\b(must|shall|should|require[sd]?|ensure|verify|confirm|balance)\b|必须|应当|应该|需要|确认|验证|权衡",
-            statement,
-            re.IGNORECASE,
-        )
-    )
 
 
 def _safe_filename(file_name: str) -> str:

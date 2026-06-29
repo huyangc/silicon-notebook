@@ -131,15 +131,6 @@ type Evidence = {
   element_id: string;
 };
 
-type ArticleSummary = {
-  id: string;
-  notebook_id: string;
-  source_id: string;
-  title: string;
-  status: string;
-  summary: string;
-};
-
 type AnswerAnchor = {
   key: string;
   object_id: string;
@@ -180,17 +171,6 @@ type ConversationDetail = {
   updated_at: string;
   turn_count: number;
   turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
-};
-
-type ArticleResearchBrief = {
-  article: ArticleSummary;
-  core_contribution: string;
-  claims: string[];
-  limitations: string[];
-  notebook_relationships: string[];
-  derived_rule_candidates: string[];
-  validation_plan: string[];
-  citations: Citation[];
 };
 
 type Citation = {
@@ -278,18 +258,6 @@ const EMPTY_KNOWLEDGE: Record<string, KnowledgeItem[] | null> = {};
 type KnowledgeRef = { id: string; object_type: string; headline: string; status: string };
 type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
 
-type DerivedRuleCandidate = {
-  id: string;
-  notebook_id: string;
-  article_id: string;
-  title: string;
-  proposed_rule: string;
-  rationale: string;
-  status: string;
-  evidence: Evidence[];
-  created_label: string;
-};
-
 type NotebookAnalytics = {
   answers_total: number;
   feedback_useful: number;
@@ -350,11 +318,6 @@ const KG_TYPE_STYLE: Record<string, { color: string; border: string; text: strin
   claim: { color: "#16a085", border: "#0f6f5f", text: "CL", glyph: "triangle" },
   formula: { color: "#a855f7", border: "#6d28d9", text: "F", glyph: "diamond" },
   procedure: { color: "#f59e0b", border: "#b45309", text: "P", glyph: "square" }
-};
-
-type StudioOutput = {
-  title: string;
-  sections: Array<[string, string[]]>;
 };
 
 type InfoModal = {
@@ -892,9 +855,6 @@ export default function Home() {
   const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
-  const [articleModalOpen, setArticleModalOpen] = useState(false);
-  const [articles, setArticles] = useState<ArticleSummary[]>([]);
-  const [selectedArticleId, setSelectedArticleId] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
   const [askMode, setAskMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
@@ -902,8 +862,6 @@ export default function Home() {
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
   const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
-  const [derivedRules, setDerivedRules] = useState<DerivedRuleCandidate[] | null>(null);
-  const [derivedOpen, setDerivedOpen] = useState(false);
   // Promotion queue modal (Track F governance)
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
   const [promoOpen, setPromoOpen] = useState(false);
@@ -1453,10 +1411,9 @@ export default function Home() {
   }
 
   async function openNotebook(notebookId: string) {
-    const [notebook, sourcesPage, notebookArticles] = await Promise.all([
+    const [notebook, sourcesPage] = await Promise.all([
       api<NotebookSummary>(`/notebooks/${notebookId}`),
-      api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`),
-      api<ArticleSummary[]>(`/notebooks/${notebookId}/articles`)
+      api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`)
     ]);
     setCurrentNotebookId(notebookId);
     setCurrentNotebook(notebook);
@@ -1464,8 +1421,6 @@ export default function Home() {
     setSources(sourcesPage.items);
     setSourcesTotal(sourcesPage.total_count);
     setSourceQuery("");
-    setArticles(notebookArticles);
-    setSelectedArticleId(notebookArticles[0]?.id ?? "");
     setBuildingKg(false);
     setTurns([]);
     setConversationId(null);
@@ -1487,36 +1442,6 @@ export default function Home() {
     window.scrollTo(0, 0);
   }
 
-  async function loadArticles(notebookId: string) {
-    const list = await api<ArticleSummary[]>(`/notebooks/${notebookId}/articles`);
-    setArticles(list);
-    setSelectedArticleId((previous) =>
-      list.some((article) => article.id === previous) ? previous : list[0]?.id ?? ""
-    );
-    return list;
-  }
-
-  async function createArticle(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!currentNotebookId) return;
-    const formData = new FormData(event.currentTarget);
-    const title = String(formData.get("title") || "").trim();
-    if (!title) return;
-    const created = await api<ArticleSummary>(`/notebooks/${currentNotebookId}/articles`, {
-      method: "POST",
-      body: JSON.stringify({
-        title,
-        abstract: String(formData.get("abstract") || ""),
-        source_id: String(formData.get("source_id") || "")
-      })
-    });
-    setArticles((previous) => [...previous, created]);
-    setSelectedArticleId(created.id);
-    setArticleModalOpen(false);
-    await loadNotebookCollection();
-    setToast("文章已添加，可在 Studio 生成研究简报");
-  }
-
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
     if (!answerId) return;
     await api(`/answers/${answerId}/feedback`, {
@@ -1531,7 +1456,6 @@ export default function Home() {
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
     setSources([]);
-    setArticles([]);
     setTitleDraft("");
     setTurns([]);
     setConversationId(null);
@@ -1773,27 +1697,6 @@ export default function Home() {
     setKnowledge(EMPTY_KNOWLEDGE);
     setDuplicates(null);
     setToast("来源已删除");
-  }
-
-  function confirmDeleteArticle(article: ArticleSummary) {
-    setInfoModal({
-      title: "删除文章",
-      message: `确定删除“${article.title}”吗？它的研究简报、claims 和候选规则会一起移除。`,
-      actions: [
-        { label: "取消", action: () => {} },
-        { label: "删除文章", danger: true, action: () => deleteArticle(article.id).catch(reportError) }
-      ]
-    });
-  }
-
-  async function deleteArticle(articleId: string) {
-    if (!currentNotebookId) return;
-    await api<null>(`/articles/${articleId}`, { method: "DELETE" });
-    setArticles((previous) => previous.filter((article) => article.id !== articleId));
-    await loadNotebookCollection();
-    const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
-    setCurrentNotebook(refreshed);
-    setToast("文章已删除");
   }
 
   async function runAsk(nextQuestion = question) {
@@ -2232,26 +2135,6 @@ export default function Home() {
     }
   }
 
-  async function openDerivedRules() {
-    if (!currentNotebookId) return;
-    const response = await api<DerivedRuleCandidate[]>(`/notebooks/${currentNotebookId}/derived-rules`);
-    setDerivedRules(response);
-    setDerivedOpen(true);
-  }
-
-  async function decideDerivedRule(candidateId: string, decision: "approve" | "reject") {
-    if (!currentNotebookId) return;
-    await api(`/notebooks/${currentNotebookId}/derived-rules/${candidateId}/${decision}`, { method: "POST" });
-    await openDerivedRules();
-    if (decision === "approve") {
-      if (knowledge.rule !== null) await loadKnowledge("rule");
-      await loadNotebookCollection();
-      setToast("派生规则已批准并加入规则库");
-    } else {
-      setToast("派生规则候选已拒绝");
-    }
-  }
-
   // --- Two-tier federation: mark notebook base / personal -----------------
   async function handleTierAction() {
     if (!currentNotebook) return;
@@ -2340,57 +2223,6 @@ export default function Home() {
         }
       }).catch(reportError);
     }
-  }
-
-  function showStudioOutput(output: StudioOutput) {
-    setInfoModal({
-      title: output.title,
-      message: "生成结果基于当前 notebook 的来源与文章研究，暂以弹窗形式展示。",
-      sections: output.sections,
-      actions: [{ label: "关闭", primary: true, action: () => {} }]
-    });
-  }
-
-  async function runStudio(kind: "mindmap" | "infographic") {
-    if (!currentNotebookId) return;
-    const notebookArticles = articles.length > 0 ? articles : await loadArticles(currentNotebookId);
-    if (notebookArticles.length === 0) {
-      showStudioOutput({
-        title: kind === "mindmap" ? "思维导图" : "信息图",
-        sections: [
-          ["暂无文章", ["该 notebook 还没有文章。请在 Article Studio 添加文章后再生成研究简报。"]],
-          ["下一步", ["上传来源", "新建文章", "运行文章研究"]]
-        ]
-      });
-      return;
-    }
-    const brief = await api<ArticleResearchBrief>(`/articles/${notebookArticles[0].id}/research`, { method: "POST" });
-    setArticles((previous) =>
-      previous.map((article) => article.id === brief.article.id ? brief.article : article)
-    );
-    await loadNotebookCollection();
-    const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
-    setCurrentNotebook(refreshed);
-    if (kind === "mindmap") {
-      showStudioOutput({
-        title: "思维导图",
-        sections: [
-          ["中心主题", [brief.article.title]],
-          ["关键 claim", brief.claims],
-          ["与 notebook 的关系", brief.notebook_relationships],
-          ["候选规则", brief.derived_rule_candidates]
-        ]
-      });
-      return;
-    }
-    showStudioOutput({
-      title: "信息图",
-      sections: [
-        ["核心贡献", [brief.core_contribution]],
-        ["局限性", brief.limitations],
-        ["验证计划", brief.validation_plan]
-      ]
-    });
   }
 
   function reportError(error: unknown) {
@@ -2660,10 +2492,8 @@ export default function Home() {
               <div className="workspace-nav-group">
                 <button className="workspace-nav-button" onClick={() => setInfoModal({
                   title: "分析",
-                  message: "从当前 notebook 的来源、文章研究和问答上下文进入分析。Studio 侧栏已收起，输出会在弹窗中呈现。",
+                  message: "对当前 notebook 的知识图谱与基准库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
                   actions: [
-                    { label: "运行当前提问", primary: true, desc: "用当前来源与问答上下文跑一次检索问答，结果在弹窗呈现", action: () => runAsk().catch(reportError) },
-                    { label: "派生规则候选", desc: "审核从文章研究中提炼、待入规则库的候选规则", action: () => openDerivedRules().catch(reportError) },
                     ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
                     ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
                     { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
@@ -3389,28 +3219,6 @@ export default function Home() {
         </section>
       )}
 
-      {articleModalOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setArticleModalOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
-              <div>
-                <h2>新建文章</h2>
-                <p>输入标题与摘要。研究简报会基于文章内容生成 claim，并与已批准的规则建立关系。</p>
-              </div>
-              <button className="icon-button" onClick={() => setArticleModalOpen(false)} title="Close">×</button>
-            </div>
-            <form className="edit-form" onSubmit={(event) => createArticle(event).catch(reportError)}>
-              <label>标题<input name="title" maxLength={160} required /></label>
-              <label>摘要<textarea name="abstract" rows={6} maxLength={2000} /></label>
-              <div className="modal-actions">
-                <button type="button" className="sort-button" onClick={() => setArticleModalOpen(false)}>取消</button>
-                <button type="submit" className="new-pill">保存</button>
-              </div>
-            </form>
-          </div>
-        </section>
-      )}
-
       {analytics && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setAnalytics(null); }}>
           <div className="utility-modal-card">
@@ -3759,43 +3567,6 @@ export default function Home() {
                 )}
               </div>
             </aside>
-          </div>
-        </section>
-      )}
-
-      {derivedOpen && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setDerivedOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
-              <div>
-                <h2>派生规则候选</h2>
-                <p>来自文章研究的候选规则。批准后会加入正式规则库，可在知识库中浏览和检索。</p>
-              </div>
-              <button className="icon-button" onClick={() => setDerivedOpen(false)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              {(derivedRules ?? []).length === 0 ? (
-                <p className="tool-hint">暂无派生规则候选。先在 Studio 对文章运行研究简报。</p>
-              ) : (
-                <div className="stack">
-                  {(derivedRules ?? []).map((candidate) => (
-                    <article className="item" key={candidate.id}>
-                      <div className="tag-row"><span className="tag">{candidate.status}</span></div>
-                      <h3>{candidate.title || candidate.proposed_rule.slice(0, 80)}</h3>
-                      <p>{candidate.proposed_rule}</p>
-                      {candidate.rationale && <p><strong>依据：</strong>{candidate.rationale}</p>}
-                      <EvidenceLine evidence={candidate.evidence} />
-                      {candidate.status === "draft" && (
-                        <div className="modal-actions">
-                          <button className="sort-button" onClick={() => decideDerivedRule(candidate.id, "reject").catch(reportError)}>拒绝</button>
-                          <button className="new-pill" onClick={() => decideDerivedRule(candidate.id, "approve").catch(reportError)}>批准为规则</button>
-                        </div>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         </section>
       )}

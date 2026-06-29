@@ -269,32 +269,6 @@ class ConversationDetail(ConversationSummary):
     turns: List[ConversationTurn] = Field(default_factory=list)
 
 
-class ArticleCreate(BaseModel):
-    title: str
-    abstract: str = ""
-    source_id: str = ""
-
-
-class ArticleSummary(BaseModel):
-    id: str
-    notebook_id: str
-    source_id: str = ""
-    title: str
-    status: str
-    summary: str
-
-
-class ArticleResearchBrief(BaseModel):
-    article: ArticleSummary
-    core_contribution: str
-    claims: List[str]
-    limitations: List[str]
-    notebook_relationships: List[str]
-    derived_rule_candidates: List[str]
-    validation_plan: List[str]
-    citations: List[Citation]
-
-
 class SearchHit(BaseModel):
     scope: str
     notebook_id: str
@@ -457,18 +431,6 @@ class DuplicateGroup(BaseModel):
 
 class MergeRequest(BaseModel):
     into_id: str
-
-
-class DerivedRuleCandidate(BaseModel):
-    id: str
-    notebook_id: str
-    article_id: str = ""
-    title: str
-    proposed_rule: str
-    rationale: str = ""
-    status: str
-    evidence: List[Evidence] = Field(default_factory=list)
-    created_label: str = ""
 
 
 class FeedbackRequest(BaseModel):

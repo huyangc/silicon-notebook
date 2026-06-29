@@ -12,9 +12,6 @@ from fastapi.responses import StreamingResponse
 from app.api.deps import repository, require_notebook_access, get_current_user
 from app.core.config import get_settings
 from app.models.schemas import (
-    ArticleCreate,
-    ArticleResearchBrief,
-    ArticleSummary,
     AskRequest,
     AskResponse,
     ConceptWhitelistAdd,
@@ -22,7 +19,6 @@ from app.models.schemas import (
     ConversationDetail,
     ConversationRenameRequest,
     ConversationSummary,
-    DerivedRuleCandidate,
     DetectDocTypesRequest,
     DetectedDocType,
     DuplicateGroup,
@@ -54,7 +50,6 @@ from app.models.schemas import (
     PromotionCandidate,
     PaginatedSources,
     PromotionRejectRequest,
-    RuleCard,
     SourceDetail,
     SourceElement,
     AddUrlSourcesRequest,
@@ -667,72 +662,6 @@ def bulk_delete_conversations(notebook_id: str, older_than_days: int = Query(...
         return {"deleted": deleted}
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/notebooks/{notebook_id}/articles", response_model=List[ArticleSummary], dependencies=[Depends(require_notebook_access)])
-def list_articles(notebook_id: str) -> List[ArticleSummary]:
-    try:
-        return repository().list_articles(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/articles", response_model=ArticleSummary, dependencies=[Depends(require_notebook_access)])
-def create_article(notebook_id: str, payload: ArticleCreate) -> ArticleSummary:
-    try:
-        return repository().create_article(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@router.delete("/articles/{article_id}", status_code=204)
-def delete_article(article_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    if repository().article_owner(article_id) != user.id:
-        raise HTTPException(status_code=404, detail="Article not found")
-    try:
-        repository().delete_article(article_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Article not found")
-
-
-@router.post("/articles/{article_id}/research", response_model=ArticleResearchBrief)
-def research_article(article_id: str, user: UserProfile = Depends(get_current_user)) -> ArticleResearchBrief:
-    if repository().article_owner(article_id) != user.id:
-        raise HTTPException(status_code=404, detail="Article not found")
-    try:
-        return repository().research_article(article_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Article not found")
-
-
-@router.get("/notebooks/{notebook_id}/derived-rules", response_model=List[DerivedRuleCandidate], dependencies=[Depends(require_notebook_access)])
-def list_derived_rules(notebook_id: str) -> List[DerivedRuleCandidate]:
-    try:
-        return repository().list_derived_rules(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/derived-rules/{candidate_id}/approve", response_model=RuleCard, dependencies=[Depends(require_notebook_access)])
-def approve_derived_rule(notebook_id: str, candidate_id: str) -> RuleCard:
-    try:
-        return repository().approve_derived_rule(notebook_id, candidate_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Derived rule candidate not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@router.post("/notebooks/{notebook_id}/derived-rules/{candidate_id}/reject", response_model=DerivedRuleCandidate, dependencies=[Depends(require_notebook_access)])
-def reject_derived_rule(notebook_id: str, candidate_id: str) -> DerivedRuleCandidate:
-    try:
-        return repository().reject_derived_rule(notebook_id, candidate_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Derived rule candidate not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
