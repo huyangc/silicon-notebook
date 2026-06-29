@@ -71,6 +71,7 @@ type NotebookSummary = {
   tier?: string;
   kg_ready?: boolean;
   base_kg_available?: boolean;
+  kg_pending_sources?: number;
 };
 
 type SourceSummary = {
@@ -88,6 +89,7 @@ type SourceSummary = {
   created_label: string;
   error_message?: string;
   extraction_warning?: string | null;
+  kg_extracted?: boolean;
 };
 
 type PaginatedSources = {
@@ -2621,30 +2623,49 @@ export default function Home() {
                   <Plus size={20} strokeWidth={2.7} /> 添加来源
                 </button>
                 {currentNotebookId && sources.length > 0 && (
-                  currentNotebook?.kg_ready ? (
-                    <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                      ✓ 知识图谱已构建 · 可用严格推理（推理 / 图谱）
-                    </p>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className="add-source-button"
-                        disabled={buildingKg}
-                        title={currentNotebook?.base_kg_available
-                          ? "本库尚未建图，严格推理会借用底层库（base）；点击为本库单独构建知识图谱"
-                          : "默认问答（通用）不需要；严格推理（推理 / 图谱）需先构建知识图谱"}
-                        onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
-                      >
-                        <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : "构建知识图谱"}
-                      </button>
-                      <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                        {currentNotebook?.base_kg_available
-                          ? "本库未建图，严格推理将借用底层库（base）"
-                          : "默认问答无需；严格推理（推理 / 图谱）需要先构建"}
-                      </p>
-                    </>
-                  )
+                  currentNotebook?.kg_ready
+                    ? (currentNotebook?.kg_pending_sources ?? 0) > 0
+                      ? (
+                        <>
+                          <button
+                            type="button"
+                            className="add-source-button"
+                            disabled={buildingKg}
+                            title="有新增来源尚未入图，点击增量抽取并合并至知识图谱"
+                            onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                          >
+                            <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : `补抽 ${currentNotebook.kg_pending_sources} 篇新增并合并`}
+                          </button>
+                          <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                            知识图谱已构建 · 有 {currentNotebook.kg_pending_sources} 篇来源未入图
+                          </p>
+                        </>
+                      )
+                      : (
+                        <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                          ✓ 知识图谱已构建 · 可用严格推理（推理 / 图谱）
+                        </p>
+                      )
+                    : (
+                      <>
+                        <button
+                          type="button"
+                          className="add-source-button"
+                          disabled={buildingKg}
+                          title={currentNotebook?.base_kg_available
+                            ? "本库尚未建图，严格推理会借用底层库（base）；点击为本库单独构建知识图谱"
+                            : "默认问答（通用）不需要；严格推理（推理 / 图谱）需先构建知识图谱"}
+                          onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                        >
+                          <Network size={20} strokeWidth={2.7} /> {buildingKg ? "构建中…" : "构建知识图谱"}
+                        </button>
+                        <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                          {currentNotebook?.base_kg_available
+                            ? "本库未建图，严格推理将借用底层库（base）"
+                            : "默认问答无需；严格推理（推理 / 图谱）需要先构建"}
+                        </p>
+                      </>
+                    )
                 )}
                 <input
                   className="source-search"
@@ -2679,6 +2700,14 @@ export default function Home() {
                           {source.extraction_warning && <span title={source.extraction_warning} style={{cursor:"help",marginLeft:2}}>⚠</span>}
                         </button>
                         <div className="source-row-actions">
+                          {currentNotebook?.kg_ready && (
+                            <span
+                              className={`source-kg-badge${source.kg_extracted ? " source-kg-badge--in" : ""}`}
+                              title={source.kg_extracted ? "已入图：该来源已完成 KG 抽取" : "未入图：该来源尚未加入知识图谱"}
+                            >
+                              {source.kg_extracted ? "已入图" : "未入图"}
+                            </span>
+                          )}
                           {source.source_url ? (
                             <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} onClick={(e) => e.stopPropagation()}>
                               <ExternalLink size={13} />
