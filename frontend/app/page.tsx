@@ -1619,6 +1619,11 @@ export default function Home() {
     setStagedDocTypes((prev) => prev.map(() => value));
   }
 
+  function removeStagedFile(index: number) {
+    setStagedFiles((prev) => prev.filter((_, i) => i !== index));
+    setStagedDocTypes((prev) => prev.filter((_, i) => i !== index));
+  }
+
   async function confirmUpload() {
     if (!currentNotebookId || stagedFiles.length === 0) return;
     const formData = new FormData();
@@ -3061,26 +3066,36 @@ export default function Home() {
             )}
             {stagedFiles.length > 0 && (
               <div className="source-detail-body">
-                <div className="tool-input-row">
+                <div className="staged-head">
                   <span className="section-title">{stagedFiles.length} 个待上传文件</span>
-                  <label>全部设为
-                    <select value="" onChange={(event) => { if (event.target.value !== "__none__") setAllStagedDocTypes(event.target.value); }}>
-                      <option value="__none__">— 批量 —</option>
+                  <label className="staged-bulk">全部设为
+                    <select value="__none__" onChange={(event) => { if (event.target.value !== "__none__") setAllStagedDocTypes(event.target.value); }}>
+                      <option value="__none__">— 批量设置 —</option>
                       {docTypeOptions.map((opt) => <option key={opt.id || "auto"} value={opt.id}>{opt.label}</option>)}
                     </select>
                   </label>
                 </div>
                 <div className="stack">
                   {stagedFiles.map((file, index) => (
-                    <div className="checklist-row" key={`${file.name}-${index}`}>
-                      <span style={{ flex: 1 }}>{file.name}</span>
+                    <div className="staged-file-row" key={`${file.name}-${index}`}>
+                      <span className="staged-file-name" title={file.name}>{file.name}</span>
                       <select
+                        className="staged-file-type"
                         value={stagedDocTypes[index] ?? ""}
                         onChange={(event) => setStagedDocType(index, event.target.value)}
                       >
                         {docTypeOptions.length === 0 && <option value="">自动检测</option>}
                         {docTypeOptions.map((opt) => <option key={opt.id || "auto"} value={opt.id}>{opt.label}</option>)}
                       </select>
+                      <button
+                        type="button"
+                        className="staged-file-remove"
+                        title="移除此文件"
+                        aria-label={`移除 ${file.name}`}
+                        onClick={() => removeStagedFile(index)}
+                      >
+                        ×
+                      </button>
                     </div>
                   ))}
                 </div>

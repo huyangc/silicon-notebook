@@ -2552,6 +2552,86 @@ button.chat-session-card {
   cursor: pointer;
 }
 
+.staged-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.staged-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted, #667085);
+  white-space: nowrap;
+}
+
+.staged-bulk select {
+  flex: 0 0 auto;
+  width: 150px;
+  border: 1px solid #d9dfeb;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #20242a;
+  background: #fff;
+}
+
+.staged-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px 7px 12px;
+  background: #fbfcfe;
+}
+
+.staged-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #344255;
+}
+
+.staged-file-type {
+  flex: 0 0 150px;
+  width: 150px;
+  border: 1px solid #d9dfeb;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #20242a;
+  background: #fff;
+}
+
+.staged-file-remove {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #8a94a6;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.staged-file-remove:hover {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+}
+
 .source-modal-card > .source-detail-body {
   /* 由 flex 接管高度（覆盖公共 max-height），文件列表在剩余空间内滚动 */
   flex: 1 1 auto;
