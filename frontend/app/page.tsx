@@ -638,6 +638,8 @@ const KG_RANGE_STEPS: Array<{ value: number; label: string }> = [
   { value: 320, label: "核心 320" },
   { value: 0, label: "全部" },
 ];
+// 搜索在全量 KG 上进行；命中过多时按连接度封顶渲染，避免泛词卡死画布。
+const KG_SEARCH_RENDER_CAP = 300;
 const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
 const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
 const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
@@ -916,6 +918,8 @@ export default function Home() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
+  const [uGraphFull, setUGraphFull] = useState<UnifiedGraphResp | null>(null);  // 全量图，仅搜索时懒加载
+  const [kgFullBusy, setKgFullBusy] = useState(false);
   const [kgLimit, setKgLimit] = useState(KG_RANGE_DEFAULT);
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
@@ -1225,13 +1229,15 @@ export default function Home() {
   );
 
   const fgData = useMemo(() => {
-    if (!uGraph) return { nodes: [] as FgNode[], links: [] as FgLink[] };
-    const deg: Record<string, number> = {};
-    uGraph.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
     const q = kgSearch.trim().toLowerCase();
+    // 搜索覆盖全量 KG（全量已载时），否则只渲染当前范围内的核心子图。
+    const base = (q && uGraphFull) ? uGraphFull : uGraph;
+    if (!base) return { nodes: [] as FgNode[], links: [] as FgLink[], searchTruncated: false };
+    const deg: Record<string, number> = {};
+    base.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
     const edgeMatchedNodes = new Set<string>();
     if (q) {
-      uGraph.edges.forEach((edge) => {
+      base.edges.forEach((edge) => {
         const label = `${edge.edge_type} ${RELATION_LABELS[edge.edge_type] ?? ""}`.toLowerCase();
         if (label.includes(q)) {
           edgeMatchedNodes.add(edge.source_object_id);
@@ -1239,7 +1245,7 @@ export default function Home() {
         }
       });
     }
-    const nodes: FgNode[] = uGraph.nodes
+    let nodes: FgNode[] = base.nodes
       .filter((n) => {
         if (kgSelectedTypes.length > 0 && !kgSelectedTypes.includes(n.object_type)) return false;
         if (!q) return true;
@@ -1250,13 +1256,20 @@ export default function Home() {
         const degree = deg[n.id] ?? 0;
         return { id: n.id, name: kgNodeName(n), type: n.object_type, val: 5 + Math.min(18, degree), degree };
       });
+    // 泛词命中过多时按连接度封顶渲染，避免卡顿。
+    let searchTruncated = false;
+    if (q && nodes.length > KG_SEARCH_RENDER_CAP) {
+      nodes = [...nodes].sort((a, b) => b.degree - a.degree).slice(0, KG_SEARCH_RENDER_CAP);
+      searchTruncated = true;
+    }
     const keep = new Set(nodes.map((n) => n.id));
-    const links: FgLink[] = uGraph.edges
+    const links: FgLink[] = base.edges
       .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
       .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type }));
-    return { nodes, links };
-  }, [uGraph, kgSearch, kgSelectedTypes]);
+    return { nodes, links, searchTruncated };
+  }, [uGraph, uGraphFull, kgSearch, kgSelectedTypes]);
 
+  const kgSearching = kgSearch.trim().length > 0;
   const kgDenseView = kgSelectedTypes.length === 0 && !kgSearch.trim() && fgData.nodes.length > 36;
 
   const kgTypeCounts = useMemo(() => {
@@ -2072,6 +2085,7 @@ export default function Home() {
     setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
     setKgSearch("");
     setKgSelectedTypes([]);
+    setUGraphFull(null);                          // 全量图按需懒加载，开窗先清掉旧缓存
     setKgLimit(KG_RANGE_DEFAULT);                 // 每次打开从核心范围起，避免一上来渲染全量
     setPendingKgFocusId(targetNodeId ?? null);
     try {
@@ -2082,6 +2096,16 @@ export default function Home() {
       ]);
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
+  }
+
+  // 搜索需覆盖全量 KG：首次输入搜索词时懒加载全量图并缓存，供 fgData 作搜索数据源。
+  async function ensureFullGraph() {
+    if (!currentNotebookId || uGraphFull || kgFullBusy) return;
+    setKgFullBusy(true);
+    try {
+      setUGraphFull(await fetchUnifiedGraph(currentNotebookId, 0));
+    } catch (err) { reportError(err); }
+    finally { setKgFullBusy(false); }
   }
 
   // 切换图谱范围档位：按新 limit 重拉子图（核心 N / 全部）。
@@ -2106,7 +2130,7 @@ export default function Home() {
         fetchUnifiedGraph(currentNotebookId, kgLimit),
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
-      setUGraph(g); setUnifiedKgStatus(status);
+      setUGraph(g); setUGraphFull(null); setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
     finally { setRelinkingKg(false); }
   }
@@ -2121,7 +2145,7 @@ export default function Home() {
         fetchPendingMerges(currentNotebookId),
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
-      setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
+      setUGraph(g); setUGraphFull(null); setPendingMerges(pend); setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
     finally { setKgRefreshBusy(false); }
   }
@@ -2181,7 +2205,7 @@ export default function Home() {
       );
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId, kgLimit), fetchPendingMerges(currentNotebookId)]);
-      setUGraph(g);
+      setUGraph(g); setUGraphFull(null);
       setPendingMerges(
         pend.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
       );
@@ -3477,7 +3501,7 @@ export default function Home() {
           </div>
           <div className="kg-view-body">
             <aside className="kg-rail">
-              <input className="kg-search" placeholder="搜索节点、类型或关系…" value={kgSearch} onChange={(e) => setKgSearch(e.target.value)} />
+              <input className="kg-search" placeholder="搜索全部节点、类型或关系…" value={kgSearch} onChange={(e) => { setKgSearch(e.target.value); if (e.target.value.trim()) void ensureFullGraph(); }} />
               <div className="kg-rail-section">
                 <h3>图谱处理</h3>
                 <div className="kg-action-stack">
@@ -3513,16 +3537,24 @@ export default function Home() {
               <div className="kg-rail-section">
                 <h3>当前视图</h3>
                 <div className="tag-row">
-                  <span className="tag">节点 {fgData.nodes.length}{uGraph ? ` / ${uGraph.nodes.length}` : ""}</span>
-                  <span className="tag">边 {fgData.links.length}{uGraph ? ` / ${uGraph.edges.length}` : ""}</span>
+                  <span className="tag">节点 {fgData.nodes.length}{!kgSearching && uGraph ? ` / ${uGraph.nodes.length}` : ""}</span>
+                  <span className="tag">边 {fgData.links.length}{!kgSearching && uGraph ? ` / ${uGraph.edges.length}` : ""}</span>
                 </div>
                 <label className="kg-range">
                   <span>范围</span>
-                  <select value={kgLimit} disabled={kgRangeBusy} onChange={(e) => changeKgRange(Number(e.target.value))}>
+                  <select value={kgLimit} disabled={kgRangeBusy || kgSearching} onChange={(e) => changeKgRange(Number(e.target.value))}>
                     {KG_RANGE_STEPS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                   </select>
                 </label>
-                {uGraph && (
+                {kgSearching ? (
+                  <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
+                    {kgFullBusy && !uGraphFull
+                      ? "搜索全量加载中…"
+                      : fgData.searchTruncated
+                        ? `命中较多，仅显示前 ${KG_SEARCH_RENDER_CAP} 个（按连接度），请细化关键词`
+                        : `在全部 ${uGraphFull?.total_nodes ?? uGraphFull?.nodes.length ?? "?"} 节点中命中 ${fgData.nodes.length}`}
+                  </p>
+                ) : uGraph && (
                   <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
                     {kgRangeBusy
                       ? "加载中…"
