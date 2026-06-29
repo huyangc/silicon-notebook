@@ -368,3 +368,25 @@ def derive_unified_graph(nodes: List[dict], edges: List[dict], cluster_map: Dict
         seen_edge.add(key)
         out_edges.append({"source_object_id": s, "target_object_id": t, "edge_type": e["edge_type"]})
     return {"nodes": out_nodes, "edges": out_edges}
+
+
+def limit_graph_by_degree(graph: dict, limit: int) -> dict:
+    """Return the `limit` most-connected nodes (by degree) plus only the edges
+    whose BOTH endpoints survive — the "core" subgraph shown before the user
+    widens the range. Isolated (degree-0) nodes rank last, so they appear only
+    when the full graph is requested. No-op when limit covers every node."""
+    nodes = graph["nodes"]
+    edges = graph["edges"]
+    if limit is None or limit >= len(nodes):
+        return {"nodes": nodes, "edges": edges}
+    deg: Dict[str, int] = {}
+    for e in edges:
+        deg[e["source_object_id"]] = deg.get(e["source_object_id"], 0) + 1
+        deg[e["target_object_id"]] = deg.get(e["target_object_id"], 0) + 1
+    # stable sort: degree desc, preserving original order among equal degrees
+    ranked = sorted(nodes, key=lambda n: deg.get(n["id"], 0), reverse=True)
+    keep = {n["id"] for n in ranked[:limit]}
+    kept_nodes = [n for n in nodes if n["id"] in keep]
+    kept_edges = [e for e in edges
+                  if e["source_object_id"] in keep and e["target_object_id"] in keep]
+    return {"nodes": kept_nodes, "edges": kept_edges}

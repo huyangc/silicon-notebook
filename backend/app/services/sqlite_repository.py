@@ -3909,7 +3909,26 @@ class SQLiteRepository:
             "clusters": int(row["cluster_count"] or clusters),
         }
 
-    def unified_graph(self, notebook_id: str, level: str = "concept") -> dict:
+    def unified_graph(self, notebook_id: str, level: str = "concept",
+                      limit: Optional[int] = None) -> dict:
+        """Graph data for the KG view. When `limit` is set and the full graph has
+        more nodes, return only the `limit` most-connected ones (core subgraph) so
+        the UI doesn't choke; `total_nodes`/`total_edges`/`truncated` let the
+        frontend offer "widen range". The full graph is still derived + cached;
+        the limit is a cheap slice applied after the cache."""
+        full = self._unified_graph_full(notebook_id, level)
+        total_nodes, total_edges = len(full["nodes"]), len(full["edges"])
+        from app.services.kg_merge import limit_graph_by_degree
+        sliced = limit_graph_by_degree(full, limit) if limit is not None else full
+        return {
+            "nodes": sliced["nodes"],
+            "edges": sliced["edges"],
+            "total_nodes": total_nodes,
+            "total_edges": total_edges,
+            "truncated": len(sliced["nodes"]) < total_nodes,
+        }
+
+    def _unified_graph_full(self, notebook_id: str, level: str = "concept") -> dict:
         self.get_notebook(notebook_id)
         cached = self._unified_cache.get((notebook_id, level))
         if cached is not None:

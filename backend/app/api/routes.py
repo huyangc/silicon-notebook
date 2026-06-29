@@ -4,7 +4,7 @@ import json
 import queue
 import threading
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -865,9 +865,13 @@ def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
 
 
 @router.get("/notebooks/{notebook_id}/unified-kg", dependencies=[Depends(require_notebook_access)])
-def get_unified_kg(notebook_id: str, level: str = Query("concept")) -> dict:
+def get_unified_kg(
+    notebook_id: str,
+    level: str = Query("concept"),
+    limit: Optional[int] = Query(None, ge=1, description="只返回连接度最高的前 N 个节点(核心子图);省略=全量"),
+) -> dict:
     try:
-        return repository().unified_graph(notebook_id, level=level)
+        return repository().unified_graph(notebook_id, level=level, limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
