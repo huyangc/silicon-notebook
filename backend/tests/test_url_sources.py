@@ -18,6 +18,7 @@ def _base_env(tmp_path, monkeypatch):
 def cloud_repo(tmp_path, monkeypatch):
     _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("MINERU_API_TOKEN", "tok-test")
+    monkeypatch.setenv("MINERU_MODE", "off")  # 仅云端：本地未配置，URL 走 mineru.net
     return SQLiteRepository(Settings())
 
 
@@ -25,6 +26,17 @@ def cloud_repo(tmp_path, monkeypatch):
 def notoken_repo(tmp_path, monkeypatch):
     _base_env(tmp_path, monkeypatch)
     monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_MODE", "off")
+    return SQLiteRepository(Settings())
+
+
+@pytest.fixture
+def local_repo(tmp_path, monkeypatch):
+    """本地 MinerU(http) 已配置、云端 token 缺失：URL 来源应走本地。"""
+    _base_env(tmp_path, monkeypatch)
+    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
     return SQLiteRepository(Settings())
 
 
@@ -82,6 +94,42 @@ def test_process_source_url_branch_parses_via_cloud(cloud_repo, monkeypatch):
     detail = cloud_repo.get_source(sid)
     assert detail.parse_status == "extracted"
     assert any("Hello world" in e.text for e in cloud_repo.source_elements(sid))
+
+
+def test_add_url_sources_allows_local_only(local_repo, monkeypatch):
+    nb = local_repo.create_notebook(NotebookCreate(name="n"))
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf",
+        lambda url, **kw: PdfProbe(True, "", 10, "doc.pdf"),
+    )
+    res = local_repo.add_url_sources(nb.id, ["https://a/doc.pdf"], scheduler=lambda sid: None)
+    assert len(res.created) == 1
+
+
+def test_process_source_url_prefers_local_over_cloud(local_repo, monkeypatch):
+    nb = local_repo.create_notebook(NotebookCreate(name="n"))
+    sid = _make_url_source(local_repo, monkeypatch, nb.id)
+
+    downloaded = []
+    monkeypatch.setattr(
+        remote_sources, "download_pdf",
+        lambda url, dest, **kw: (downloaded.append(url), open(dest, "wb").write(b"%PDF-"))[0],
+    )
+    monkeypatch.setattr(
+        local_repo.mineru_client, "parse",
+        lambda path, name: [{"type": "text", "text": "Local parsed", "page_idx": 0}],
+    )
+
+    def cloud_must_not_run(url, **kw):
+        raise AssertionError("本地优先时不得触达云端 mineru.net")
+
+    monkeypatch.setattr(local_repo.mineru_cloud_client, "parse_url", cloud_must_not_run)
+
+    local_repo.process_source(sid)
+    detail = local_repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert downloaded == ["https://a/doc.pdf"]
+    assert any("Local parsed" in e.text for e in local_repo.source_elements(sid))
 
 
 def test_process_source_url_branch_failure_marks_failed(cloud_repo, monkeypatch):

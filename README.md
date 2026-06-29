@@ -431,6 +431,8 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 
   Keep `MINERU_MODE=off` in `.env.example` so other environments stay offline-safe by default.
 
+**URL sources ("Add link") prefer local MinerU.** A pasted PDF URL is parsed by the local MinerU service whenever one is configured (`MINERU_MODE=http`/`cli`): the backend downloads the PDF and runs it through the same local-MinerU→pypdf path as file uploads, so on an intranet deployment internal PDFs never leave the network. The `MINERU_API_TOKEN` cloud (mineru.net) path is used only as a fallback when no local MinerU is configured — and once local is in use it is never silently called. Adding a URL requires *either* a local MinerU or the cloud token.
+
 MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion degrades to pypdf so uploads never block, while pipeline logs and the source `error_message` keep the fallback diagnostic; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
 
 ### Offline batch ingestion (directory → KG)
