@@ -60,6 +60,8 @@ class SourceSummary(BaseModel):
     # Non-empty when the latest KG extraction had network-failed windows that
     # silently contributed zero nodes (degraded run, not a clean "completed").
     extraction_warning: Optional[str] = None
+    # 该 source 是否已抽取 KG / 已入图
+    kg_extracted: bool = False
 
 
 class PaginatedSources(BaseModel):
@@ -146,6 +148,8 @@ class NotebookSummary(BaseModel):
     # 系统中是否存在已建 KG 的 tier='base' 笔记本。即便本 notebook 无图,有 base 也可
     # 进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或 base_kg_available)。
     base_kg_available: bool = False
+    # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
+    kg_pending_sources: int = 0
 
 
 class NotebookTemplate(BaseModel):
