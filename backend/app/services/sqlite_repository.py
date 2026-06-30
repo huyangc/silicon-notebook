@@ -367,6 +367,19 @@ class SQLiteRepository:
                 yield db
 
     def _migrate(self) -> None:
+        # Pre-migration: if kg_cluster_scratch exists without run_id (schema from
+        # before SP3), drop it so the executescript below can recreate it with the
+        # new schema.  The table is purely transient (cleared before each use), so
+        # no data is lost.  This must run BEFORE the executescript because
+        # executescript commits pending transactions and would hit the index-creation
+        # error if the column is missing.
+        with self._connect() as db:
+            kcs_info = db.execute("PRAGMA table_info(kg_cluster_scratch)").fetchall()
+            if kcs_info and "run_id" not in {r["name"] for r in kcs_info}:
+                db.executescript(
+                    "DROP TABLE IF EXISTS kg_cluster_scratch; "
+                    "DROP INDEX IF EXISTS idx_kg_cluster_scratch_nb_run;"
+                )
         with self._connect() as db:
             db.executescript(
                 """
@@ -763,6 +776,25 @@ class SQLiteRepository:
             prof_cols = {r["name"] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()}
             if "model_settings" not in prof_cols:
                 db.execute("ALTER TABLE user_profiles ADD COLUMN model_settings TEXT NOT NULL DEFAULT '{}'")
+            # kg_cluster_scratch: run_id column added in SP3 to isolate concurrent
+            # rebuilds. Pre-existing DBs have the table without this column.
+            # The scratch table is purely transient (always cleared before use), so
+            # drop-and-recreate is safe; no data is lost.
+            kcs_cols = {r["name"] for r in db.execute("PRAGMA table_info(kg_cluster_scratch)").fetchall()}
+            if kcs_cols and "run_id" not in kcs_cols:
+                db.executescript(
+                    """
+                    DROP TABLE IF EXISTS kg_cluster_scratch;
+                    CREATE TABLE IF NOT EXISTS kg_cluster_scratch (
+                      notebook_id TEXT NOT NULL,
+                      run_id TEXT NOT NULL,
+                      object_id TEXT NOT NULL,
+                      seed TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_kg_cluster_scratch_nb_run
+                      ON kg_cluster_scratch(notebook_id, run_id);
+                    """
+                )
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
