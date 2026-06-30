@@ -141,41 +141,81 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> in
     return done
 
 
-def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None) -> dict:
-    """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。"""
+def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
+           no_rebuild: bool = False, rebuild_only: bool = False) -> dict:
+    """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
+
+    Flags:
+      rebuild_only=True  — 跳过抽取,直接 rebuild_unified_kg + 节点向量(含 scale index)。
+      no_rebuild=True    — 只抽取,跳过 rebuild_unified_kg 和 scale index(大批量分批抽,最后一批再 rebuild)。
+      两者互斥;互斥时抛 ValueError。
+
+    Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
+    repo.build_scale_index(notebook_id) 使索引与新簇同步。
+    """
+    if no_rebuild and rebuild_only:
+        raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
+
     log = log or (lambda _e: None)
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
     repo.settings.kg_incremental_fusion_enabled = False   # 批量期关 per-source 融合,收尾一次全量
     res = {"extracted": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
     try:
-        if limit is None:
-            out = repo.build_notebook_kg(notebook_id)   # 只抽尚无 KG 的 source,幂等,失败隔离
-            res["extracted"] = len(out["built"])
-            res["failed"] = len(out["failed"])
-        else:
-            if not (repo.settings.kg_llm_configured
-                    or getattr(repo.llm_client, "configured", False)):
-                raise RuntimeError(
-                    "KG LLM 未配置(KG_LLM_* 或主 LLM 均未配):--limit 抽取只会产出 no-llm 空结果")
-            with repo._connect() as db:
-                all_sids = [r["id"] for r in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
-                kgful = {r["source_id"] for r in db.execute(
-                    "SELECT DISTINCT source_id FROM knowledge_objects "
-                    "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
-            targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
-            for sid in targets:
-                try:
-                    repo._set_source_status(sid, "extracting")
-                    repo._run_extraction(sid)
-                    repo._set_source_status(sid, "extracted")
-                    res["extracted"] += 1
-                except Exception as exc:   # noqa: BLE001 — 单源失败隔离
-                    res["failed"] += 1
-                    log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
+        # ── 抽取阶段(rebuild_only 时跳过) ────────────────────────────────────
+        if not rebuild_only:
+            llm_ok = (repo.settings.kg_llm_configured
+                      or getattr(repo.llm_client, "configured", False))
+            if limit is None:
+                # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
+                if llm_ok or not no_rebuild:
+                    out = repo.build_notebook_kg(notebook_id)   # 只抽尚无 KG 的 source,幂等,失败隔离
+                    res["extracted"] = len(out["built"])
+                    res["failed"] = len(out["failed"])
+            else:
+                if not llm_ok:
+                    raise RuntimeError(
+                        "KG LLM 未配置(KG_LLM_* 或主 LLM 均未配):--limit 抽取只会产出 no-llm 空结果")
+                with repo._connect() as db:
+                    all_sids = [r["id"] for r in db.execute(
+                        "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
+                    kgful = {r["source_id"] for r in db.execute(
+                        "SELECT DISTINCT source_id FROM knowledge_objects "
+                        "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
+                targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
+                n_targets = len(targets)
+                for i, sid in enumerate(targets, 1):
+                    try:
+                        repo._set_source_status(sid, "extracting")
+                        repo._run_extraction(sid)
+                        repo._set_source_status(sid, "extracted")
+                        res["extracted"] += 1
+                        log({"phase": "kg", "source_id": sid, "status": "extracted",
+                             "progress": f"{i}/{n_targets}"})
+                    except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                        res["failed"] += 1
+                        log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
 
-        res["clusters"] = repo.rebuild_unified_kg(notebook_id)
+        # ── no_rebuild:抽取后直接返回,不做 rebuild/scale-index ───────────────
+        if no_rebuild:
+            return res
+
+        # ── Rebuild 阶段 ──────────────────────────────────────────────────────
+        clusters = repo.rebuild_unified_kg(notebook_id)
+        res["clusters"] = clusters
+        log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
         res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+
+        # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────────
+        nb = repo.get_notebook(notebook_id)
+        is_base = (nb.tier == "base")
+        has_index = (repo._scale_index(notebook_id) is not None)
+        if is_base or has_index:
+            manifest = repo.build_scale_index(notebook_id)
+            scale_nodes = manifest.get("n_nodes", 0)
+            res["scale_index_nodes"] = scale_nodes
+            log({"phase": "kg", "status": "scale_index_built", "nodes": scale_nodes})
+            print(f"scale index built (nodes={scale_nodes})", flush=True)
+
     finally:
         repo.settings.kg_incremental_fusion_enabled = orig_fusion   # 还原,避免污染 repo 实例
     return res
@@ -236,7 +276,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
     p.add_argument("--workers", type=int, default=4, help="文件级并发(默认 4)")
     p.add_argument("--embed-conc", type=int, default=4, help="嵌入 backfill 并发(默认 4,避 429)")
-    p.add_argument("--limit", type=int, default=None, help="kg 阶段只抽前 N 个未抽源(子集验证)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="kg 阶段只抽前 N 个未抽源(仅限制本次抽取数量;最终 rebuild 仍覆盖全本 notebook)")
+    p.add_argument("--no-rebuild", action="store_true",
+                   help="kg 阶段:只抽取,跳过 rebuild_unified_kg 和 scale index。"
+                        "大批量分批抽取用法:重复 'kg --limit N --no-rebuild',最后一次 'kg --rebuild-only'。")
+    p.add_argument("--rebuild-only", action="store_true",
+                   help="kg 阶段:跳过抽取,直接 rebuild_unified_kg + 节点向量 + scale index(base tier 时)。")
     p.add_argument("--allow-no-embed", action="store_true",
                    help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
@@ -288,8 +334,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ingest done: {c}", flush=True)
 
     if args.phase in {"kg", "all"}:
-        print(f"phase=kg limit={args.limit}", flush=True)
-        r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log)
+        no_rebuild = getattr(args, "no_rebuild", False)
+        rebuild_only = getattr(args, "rebuild_only", False)
+        print(f"phase=kg limit={args.limit} no_rebuild={no_rebuild} rebuild_only={rebuild_only}",
+              flush=True)
+        r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
+                   no_rebuild=no_rebuild, rebuild_only=rebuild_only)
         print(f"kg done: {r}", flush=True)
 
     if args.phase in {"index", "all"}:
