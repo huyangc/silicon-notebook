@@ -24,6 +24,15 @@ class ScaleIndex:
     ann_labels: list
     ann_path: str
     manifest: dict
+    # Folded concept-level viz graph (Task 4 / SP1). None when an older index has
+    # no viz.npz (has_viz absent in manifest). Used to serve a bounded core for
+    # the KG view + neighbors without re-deriving/folding the full graph.
+    viz_ids: list = None          # folded node ids (canonical_id or raw object_id)
+    viz_adj: "sp.csr_matrix" = None   # undirected adjacency over folded nodes
+    viz_deg: "np.ndarray" = None  # int32 degree (viz_adj.getnnz(axis=1))
+    viz_types: list = None        # object_type per folded node
+    viz_names: list = None        # display name per folded node (hydration-free)
+    viz_edges: list = None        # directed-deduped folded edges [[src,dst,edge_type],...]
 
 
 def load_scale_index(out_dir: str):
@@ -39,6 +48,20 @@ def load_scale_index(out_dir: str):
     idf = np.load(os.path.join(out_dir, "idf.npy"))
     chunk_index = np.load(os.path.join(out_dir, "chunk_index.npy"))
     ann_labels = list(np.load(os.path.join(out_dir, "ann_labels.npy"), allow_pickle=True))
+
+    viz_ids = viz_adj = viz_deg = viz_types = viz_names = viz_edges = None
+    if manifest.get("has_viz"):
+        viz_npz = os.path.join(out_dir, "viz.npz")
+        viz_adj_path = os.path.join(out_dir, "viz_adj.npz")
+        if os.path.exists(viz_npz) and os.path.exists(viz_adj_path):
+            with np.load(viz_npz, allow_pickle=True) as z:
+                viz_ids = list(z["viz_ids"])
+                viz_deg = z["viz_deg"]
+                viz_types = list(z["viz_types"])
+                viz_names = list(z["viz_names"])
+                viz_edges = json.loads(str(z["viz_edges"]))
+            viz_adj = sp.load_npz(viz_adj_path)
+
     return ScaleIndex(
         node_ids=node_ids,
         node_index={n: i for i, n in enumerate(node_ids)},
@@ -48,6 +71,12 @@ def load_scale_index(out_dir: str):
         ann_labels=ann_labels,
         ann_path=os.path.join(out_dir, "ann.bin"),
         manifest=manifest,
+        viz_ids=viz_ids,
+        viz_adj=viz_adj,
+        viz_deg=viz_deg,
+        viz_types=viz_types,
+        viz_names=viz_names,
+        viz_edges=viz_edges,
     )
 
 
@@ -119,6 +148,12 @@ def save_scale_index(
     ann_vectors,
     ann_labels: List[str],
     manifest: dict,
+    viz_ids: List[str] = None,
+    viz_adj: "sp.csr_matrix" = None,
+    viz_deg=None,
+    viz_types: List[str] = None,
+    viz_names: List[str] = None,
+    viz_payload: dict = None,
 ) -> dict:
     """把构建好的数组落盘到 out_dir。
 
@@ -126,6 +161,9 @@ def save_scale_index(
     ann_labels: 对应 kg 节点 object_id 列表（与 ann_vectors 行对齐）。
     写出 7 个文件：graph.npz, node_ids.npy, idf.npy, chunk_index.npy,
     ann.bin, ann_labels.npy, manifest.json。返回传入的 manifest dict。
+
+    当传入折叠 viz 图（viz_ids 非空）时额外写 viz.npz + viz_adj.npz 并把
+    manifest["has_viz"]=True，供 unified_graph/neighbors 有界分派直接消费。
     """
     import hnswlib
 
@@ -136,6 +174,20 @@ def save_scale_index(
     np.save(os.path.join(out_dir, "idf.npy"), np.asarray(idf, dtype=np.float32))
     np.save(os.path.join(out_dir, "chunk_index.npy"), np.asarray(chunk_index, dtype=np.int32))
     np.save(os.path.join(out_dir, "ann_labels.npy"), np.asarray(ann_labels, dtype=object))
+
+    # Folded viz graph (Task 4). Persisted only when provided; manifest flag lets
+    # load_scale_index skip when absent (older indexes stay valid).
+    if viz_ids is not None and viz_adj is not None:
+        np.savez(
+            os.path.join(out_dir, "viz.npz"),
+            viz_ids=np.asarray(viz_ids, dtype=object),
+            viz_deg=np.asarray(viz_deg, dtype=np.int32),
+            viz_types=np.asarray(viz_types, dtype=object),
+            viz_names=np.asarray(viz_names, dtype=object),
+            viz_edges=json.dumps((viz_payload or {}).get("edges", [])),
+        )
+        sp.save_npz(os.path.join(out_dir, "viz_adj.npz"), viz_adj.tocsr())
+        manifest = {**manifest, "has_viz": True}
 
     ann_vecs = np.asarray(ann_vectors, dtype=np.float32) if len(ann_vectors) else np.empty((0, 1), dtype=np.float32)
     dim = int(ann_vecs.shape[1]) if ann_vecs.shape[0] > 0 else int(manifest.get("dim", 1))

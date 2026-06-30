@@ -848,6 +848,19 @@ def object_context(notebook_id: str, object_id: str):
         raise HTTPException(status_code=404, detail="Object not found")
 
 
+@router.get("/notebooks/{notebook_id}/objects/{object_id}/neighbors", dependencies=[Depends(require_notebook_access)])
+def object_neighbors(
+    notebook_id: str,
+    object_id: str,
+    cap: int = Query(50, ge=1, description="最多返回的 1-hop 邻居数"),
+) -> dict:
+    """折叠图中某节点的 1-hop 邻域(有界);与 unified-kg 同形(nodes/edges)。"""
+    try:
+        return repository().kg_neighbors(notebook_id, object_id, cap=cap)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
 @router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/confirm", dependencies=[Depends(require_notebook_access)])
 def confirm_merge(notebook_id: str, candidate_id: str) -> dict:
     try:
