@@ -445,7 +445,18 @@ PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_di
 PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
 ```
 
-选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 子集验证)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默)、`--dry-run`(只扫描预估)。
+**大型基础 KG(10^5–10^6 对象)。** 末尾的 unified 聚类是流式的(内存随**唯一归一化概念名数**而非总对象数有界),所以 `kg` 不物化全量向量即可扩展。超大语料可分批抽取、末尾一次聚类:
+
+```bash
+# 分批抽取(跳过昂贵的末尾聚类),按需重复
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 1000 --no-rebuild
+# 末尾只聚类 +(重)建 scale 索引,不再抽取
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --rebuild-only
+```
+
+`--limit` 只限本轮**抽取**的来源数;最终聚类始终覆盖整个 notebook。base 层 notebook 在 `kg` 重建后会**自动重建**可伸缩检索索引(不会陈旧)。`KG_CLUSTER_REP_ANN_MAX`(默认 2,000,000)封顶 rep-ANN 规模——超出则分片建索引并 WARNING(绝不静默截断)。
+
+选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 抽取子集——聚类仍覆盖全量)、`--no-rebuild` / `--rebuild-only`(分批大库构建时拆分「抽取」与「末尾聚类」)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默)、`--dry-run`(只扫描预估)。
 
 前置:`.env` 配好 EMBED 与 KG_LLM(否则向量/KG 步骤会跳过或报错);重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
