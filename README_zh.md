@@ -443,7 +443,12 @@ PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_di
 
 # 为基准层 notebook 构建可伸缩检索索引(离线;静态基准重建 KG 后需重跑)
 PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
+
+# 补该 notebook 缺失的 chunk + 节点向量(幂等;需 EMBED 配好)
+PYTHONPATH=backend python scripts/batch_ingest.py embed --notebook-id nb-xxxx
 ```
+
+`embed` 子命令只补**缺失**的 chunk 与 KG 节点向量(例如某次被 429 限流后留下的空洞)。必须给 `--notebook-id` 且 EMBED 已配好——它本身就是补向量的命令,故**忽略 `--allow-no-embed`**,EMBED 未配时直接报错退出。
 
 **大型基础 KG(10^5–10^6 对象)。** 末尾的 unified 聚类是流式的(内存随**唯一归一化概念名数**而非总对象数有界),所以 `kg` 不物化全量向量即可扩展。超大语料可分批抽取、末尾一次聚类:
 
@@ -456,7 +461,15 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` 只限本轮**抽取**的来源数;最终聚类始终覆盖整个 notebook。base 层 notebook 在 `kg` 重建后会**自动重建**可伸缩检索索引(不会陈旧)。`KG_CLUSTER_REP_ANN_MAX`(默认 2,000,000)封顶 rep-ANN 规模——超出则分片建索引并 WARNING(绝不静默截断)。
 
-选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 抽取子集——聚类仍覆盖全量)、`--no-rebuild` / `--rebuild-only`(分批大库构建时拆分「抽取」与「末尾聚类」)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默)、`--dry-run`(只扫描预估)。
+**并发调优。** 三个旋钮控制吞吐(与 429 压力):
+
+- `--workers` —— `all` 阶段**同时抽取的文档数**(覆盖 `KG_JOB_CONCURRENCY`);`ingest` 阶段为文件解析并发。
+- `--embed-conc` —— embedding 并发(覆盖 `EMBED_CONCURRENCY`);`all` 阶段 chunk 向量在每篇文档管线的后台跑。
+- `KG_EXTRACT_WORKERS`(`.env`,默认 16)—— KG 抽取 LLM 窗口级的全局总并发,跨所有文档共享(文档内 + 文档间)。
+
+`all` 阶段 embedding 峰值并发 ≈ `--workers × --embed-conc`,两者同时调高易触发服务商 429,谨慎。若某次限流留下缺失向量,事后用 `embed` 子命令补修。
+
+选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(`all` 阶段同时抽取的文档数 = `KG_JOB_CONCURRENCY`;其余阶段为文件并发)、`--embed-conc`(embedding 并发 = `EMBED_CONCURRENCY`;避 429)、`--limit`(kg 抽取子集——聚类仍覆盖全量)、`--no-rebuild` / `--rebuild-only`(分批大库构建时拆分「抽取」与「末尾聚类」)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默;`embed` 子命令忽略此项)、`--dry-run`(只扫描预估)。`embed` 子命令只补缺失的 chunk + 节点向量,需 `--notebook-id`。
 
 前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
