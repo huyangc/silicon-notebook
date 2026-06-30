@@ -181,3 +181,84 @@ def test_kg_search_endpoint_returns_hit_fields(client):
             assert field in h, f"missing field: {field}"
         assert h["name"] == "voltage regulator"
         assert h["object_type"] == "concept"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 continuity test: search → canonical id → kg_neighbors non-empty
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def repo_with_embed(tmp_path, monkeypatch):
+    """Repo fixture with FakeEmbedder wired up (needed for build_scale_index)."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
+    monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=EMBED_DIM)
+    return r
+
+
+def test_search_hit_folded_to_canonical_id_and_neighbors_nonempty(repo_with_embed):
+    """CONTINUITY: Fix 1 — kg_search must return canonical K- ids after rebuild
+    so that kg_neighbors (viz fast-path) can expand a search hit.
+
+    Setup:
+      - Two concepts with the same name ("MOSFET" / "mosfet") → rebuild clusters them
+        under one K-<canonical> id.
+      - A third concept ("current mirror") related to the first.
+      - After rebuild_unified_kg + build_scale_index, kg_search("mosfet") must
+        return a hit whose object_id starts with "K-" (the canonical id).
+      - kg_neighbors on that canonical id must return non-empty nodes (click-to-expand
+        works: the canonical id exists in the viz graph and has a neighbour).
+    """
+    nb = repo_with_embed.create_notebook(NotebookCreate(name="continuity-nb"))
+
+    # Ingest two same-named concepts from separate "sources" so they cluster.
+    repo_with_embed.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept",
+         "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "c", "object_type": "concept",
+         "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [
+        {"source_local_id": "c", "target_local_id": "a",
+         "edge_type": "uses", "evidence": []},
+    ])
+    repo_with_embed.store_kg(nb.id, None, [
+        {"local_id": "b", "object_type": "concept",
+         "payload": {"name": "mosfet", "section_path": ""}, "evidence": []},
+    ], [])
+
+    # Build the folded KG and scale index.
+    repo_with_embed.rebuild_unified_kg(nb.id)
+    repo_with_embed.build_scale_index(nb.id)
+
+    # Verify cluster map exists and both MOSFET concepts are clustered.
+    cmap = repo_with_embed.cluster_map(nb.id)
+    assert len(cmap) >= 2, f"Expected at least 2 cluster entries; cmap={cmap}"
+    mosfet_canonicals = {v for v in cmap.values()}
+    assert any(c.startswith("K-") for c in mosfet_canonicals), (
+        f"Expected at least one K- canonical id in cluster_map values; got {mosfet_canonicals}"
+    )
+
+    # Search and check Fix 1: returned object_id is canonical (K- prefix).
+    hits = repo_with_embed.kg_search(nb.id, "mosfet", k=10)
+    assert hits, "kg_search('mosfet') returned no hits"
+    mosfet_hits = [h for h in hits if "mosfet" in h["name"].lower()]
+    assert mosfet_hits, f"No mosfet hit in results: {hits}"
+    hit = mosfet_hits[0]
+    assert hit["object_id"].startswith("K-"), (
+        f"Fix 1 FAILED: search hit object_id={hit['object_id']!r} is not a canonical K- id. "
+        "kg_neighbors fast-path will return empty for this hit (click-to-expand broken)."
+    )
+
+    # Check click-to-expand: kg_neighbors on the canonical id must be non-empty.
+    nbr = repo_with_embed.kg_neighbors(nb.id, hit["object_id"], cap=10)
+    assert nbr["nodes"], (
+        f"Fix 1 FAILED: kg_neighbors(canonical_id={hit['object_id']!r}) returned empty nodes. "
+        "Click-to-expand is broken even after Fix 1 — check viz graph / scale index."
+    )

@@ -1415,6 +1415,8 @@ class SQLiteRepository:
         """Enrich merged hits with object_type and fill missing names.
 
         Drops hits for objects that no longer exist or are deprecated.
+        Always uses the fresh payload name when available (Fix 2: overrides
+        the possibly-stale FTS-provided name so renames are reflected).
         """
         if not hits:
             return []
@@ -1442,16 +1444,63 @@ class SQLiteRepository:
                 continue  # object gone or deprecated
             enriched = dict(h)
             enriched["object_type"] = m["object_type"]
-            if not enriched.get("name"):
-                enriched["name"] = m["name"]
+            # Fix 2: always use fresh payload name; fall back to FTS-provided
+            # name only when payload has none (e.g. newly inserted without name).
+            fresh_name = m["name"]
+            enriched["name"] = fresh_name if fresh_name else enriched.get("name", "")
             result.append(enriched)
         return result
+
+    def _fold_hits_to_canonical(self, notebook_id: str, hits: list, k: int) -> list:
+        """Fix 1: fold raw ko-<obj> ids in hits to K-<canonical> ids.
+
+        Uses a BOUNDED query (only the ≤k hit ids) against concept_clusters —
+        does NOT load the full cluster_map which can be 5M entries at scale.
+        For each hit that has a cluster row: replace object_id with canonical_id
+        and set name to canonical_name (so it matches the viz node label).
+        Hits without a cluster row (non-concept types, or pre-rebuild state) are
+        kept as-is. After folding, dedup by object_id keeping MAX score, re-sort
+        by score desc, truncate to k.
+        """
+        if not hits:
+            return hits
+        ids = [h["object_id"] for h in hits]
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT member_object_id, canonical_id, canonical_name "
+                f"FROM concept_clusters "
+                f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
+                [notebook_id] + ids,
+            ).fetchall()
+        fold: dict[str, tuple[str, str]] = {
+            r["member_object_id"]: (r["canonical_id"], r["canonical_name"])
+            for r in rows
+        }
+        # Apply fold and dedup by canonical id (keep MAX score)
+        best: dict[str, dict] = {}
+        for h in hits:
+            mapping = fold.get(h["object_id"])
+            folded = dict(h)
+            if mapping is not None:
+                canon_id, canon_name = mapping
+                folded["object_id"] = canon_id
+                folded["name"] = canon_name  # canonical_name overrides payload name
+            key = folded["object_id"]
+            if key not in best or folded["score"] > best[key]["score"]:
+                best[key] = folded
+        result = sorted(best.values(), key=lambda x: x["score"], reverse=True)
+        return result[:k]
 
     def kg_search(self, notebook_id: str, q: str, k: int = 30) -> list:
         """Search KG objects by name (FTS5 lexical) union ANN semantic.
 
         Returns [{object_id, name, object_type, score, match}] sorted by score desc.
         Raises KeyError if notebook not found.
+
+        Fix 1: after hydration, folds raw ko-<obj> concept ids to K-<canonical>
+        ids via a bounded concept_clusters lookup so search results share the same
+        id space as the viz graph — enabling click-to-expand on search hits.
         """
         from app.services.kg.search import fts_search, merge_search_hits
         self.get_notebook(notebook_id)
@@ -1459,7 +1508,8 @@ class SQLiteRepository:
             lex = fts_search(db, notebook_id, q, k)
         sem = self._semantic_search(notebook_id, q, k)
         merged = merge_search_hits(lex, sem, k)
-        return self._hydrate_search_hits(notebook_id, merged)
+        hydrated = self._hydrate_search_hits(notebook_id, merged)
+        return self._fold_hits_to_canonical(notebook_id, hydrated, k)
 
     def eval_insert_source_for_test(
         self, nb_id: str, name: str, text: str, tmpdir: str
