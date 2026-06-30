@@ -13,7 +13,7 @@ import hashlib
 import json
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -49,6 +49,16 @@ def already_ingested(repo: SQLiteRepository, notebook_id: str, digest: str) -> b
             (notebook_id, digest),
         ).fetchone()
     return row is not None
+
+
+def source_id_by_hash(repo: SQLiteRepository, notebook_id: str, digest: str) -> Optional[str]:
+    """已按内容哈希摄取过则返回其 source id,否则 None(续跑/去重用)。"""
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? AND file_hash=?",
+            (notebook_id, digest),
+        ).fetchone()
+    return row["id"] if row else None
 
 
 def _resolve_owner_profile(repo: SQLiteRepository, owner: Optional[str]):
@@ -231,6 +241,97 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
     return res
 
 
+def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
+    """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
+    跨源并发提交到全局 KG job 池;**末尾一次** rebuild_unified_kg + 补节点向量(+ scale index)。
+
+    - 新文件(hash 未见过)→ upload_sources(scheduler=submit_job(process_source)):
+      parse + 后台 embed + extract 一次调用内并发完成。
+    - 已 parse、缺 KG 的旧 source(同 hash 已摄取过)→ submit_job(extract_source):
+      只补抽 KG(embed 在上次 ingest 已做,无需重嵌)。
+    批量期强制 kg_auto_extract=True(让 process_source 走到 extract)且关 per-source 融合;
+    finally 恢复两者原值。单 source 失败隔离,计入 failed,不连累其余。
+    """
+    from app.services.kg.scheduler import submit_job
+
+    log = log or (lambda _e: None)
+    orig_auto = repo.settings.kg_auto_extract
+    orig_fusion = repo.settings.kg_incremental_fusion_enabled
+    repo.settings.kg_auto_extract = True                 # 强制 process_source 走 extract 分支
+    repo.settings.kg_incremental_fusion_enabled = False  # 批量期关 per-source 融合,收尾一次 rebuild
+
+    files = list(files)
+    res = {"new": 0, "resumed": 0, "extracted": 0, "failed": 0,
+           "clusters": 0, "nodes_embedded": 0}
+    try:
+        # ── 分两批:新文件 vs 已 parse 缺 KG 的续抽源 ─────────────────────────────
+        with repo._connect() as db:
+            kgful = {r["source_id"] for r in db.execute(
+                "SELECT DISTINCT source_id FROM knowledge_objects "
+                "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
+        new_files: List[Path] = []
+        resume_sids: List[str] = []
+        for p in files:
+            sid = source_id_by_hash(repo, notebook_id, sha256_bytes(p.read_bytes()))
+            if sid is None:
+                new_files.append(p)
+            elif sid not in kgful:        # 已 parse、缺 KG → 只需补抽
+                resume_sids.append(sid)
+            # else: 已有 KG → 跳过(幂等,既不新建也不重抽)
+        res["new"] = len(new_files)
+        res["resumed"] = len(resume_sids)
+
+        # ── 提交并发 job、收集 futures ───────────────────────────────────────────
+        futs = {}
+
+        def _sched(sid: str) -> None:
+            futs[submit_job(repo.process_source, sid)] = sid
+
+        if new_files:
+            repo.upload_sources(
+                notebook_id,
+                [UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
+                 for p in new_files],
+                scheduler=_sched,                 # 每个新 source 作为 process_source job 并发
+            )
+        for sid in resume_sids:
+            futs[submit_job(repo.extract_source, sid)] = sid   # 只补抽 KG,不 embed
+
+        # ── 等待全部 job,逐个打印进度、统计 ─────────────────────────────────────
+        total = len(futs)
+        for i, fut in enumerate(as_completed(futs), 1):
+            sid = futs[fut]
+            try:
+                fut.result()
+                res["extracted"] += 1
+                print(f"[pipeline {i}/{total}] {sid} ✓", flush=True)
+                log({"phase": "all", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
+            except Exception as exc:   # noqa: BLE001 — 单 source 失败隔离
+                res["failed"] += 1
+                print(f"[pipeline {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
+                log({"phase": "all", "source_id": sid, "status": "failed", "error": str(exc)})
+
+        # ── 末尾一次:跨文档聚类 → 补节点向量 →(base/已建索引)scale index ────────
+        print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
+        clusters = repo.rebuild_unified_kg(notebook_id)
+        res["clusters"] = clusters
+        log({"phase": "all", "status": "rebuilt", "clusters": clusters})
+        print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
+        res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+
+        nb = repo.get_notebook(notebook_id)
+        if nb.tier == "base" or repo._scale_index(notebook_id) is not None:
+            manifest = repo.build_scale_index(notebook_id)
+            scale_nodes = manifest.get("n_nodes", 0)
+            res["scale_index_nodes"] = scale_nodes
+            log({"phase": "all", "status": "scale_index_built", "nodes": scale_nodes})
+            print(f"scale index built (nodes={scale_nodes})", flush=True)
+    finally:
+        repo.settings.kg_auto_extract = orig_auto
+        repo.settings.kg_incremental_fusion_enabled = orig_fusion
+    return res
+
+
 def run_index(repo: SQLiteRepository, notebook_id: str) -> dict:
     """Phase 3 (offline): build the scalable-retrieval index for a (base) notebook.
     Static base KGs should re-run this after a rebuild."""
@@ -345,14 +446,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     log = _make_logger(manifest)
     print(f"notebook={notebook_id} manifest={manifest}", flush=True)
 
-    if args.phase in {"ingest", "all"}:
+    if args.phase == "all":
+        print("phase=all (pipelined)", flush=True)
+        _t = time.perf_counter()
+        r = run_all(repo, notebook_id, iter_files(args.input_dir),
+                    workers=args.workers, conc=args.embed_conc, log=log)
+        print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+        return 0
+
+    if args.phase == "ingest":
         files = iter_files(args.input_dir)
         print(f"phase=ingest files={len(files)}", flush=True)
         _t = time.perf_counter()
         c = run_ingest(repo, notebook_id, files, workers=args.workers, conc=args.embed_conc, log=log)
         print(f"ingest done: {c} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
-    if args.phase in {"kg", "all"}:
+    if args.phase == "kg":
         no_rebuild = getattr(args, "no_rebuild", False)
         rebuild_only = getattr(args, "rebuild_only", False)
         print(f"phase=kg limit={args.limit} no_rebuild={no_rebuild} rebuild_only={rebuild_only}",
@@ -362,7 +471,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    no_rebuild=no_rebuild, rebuild_only=rebuild_only)
         print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
-    if args.phase in {"index", "all"}:
+    if args.phase == "index":
         print(f"phase=index notebook={notebook_id}", flush=True)
         _t = time.perf_counter()
         r = run_index(repo, notebook_id)
