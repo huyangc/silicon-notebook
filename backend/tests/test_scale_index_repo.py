@@ -168,6 +168,43 @@ def test_run_index_builds_for_notebook(repo):
     assert repo._scale_index(nb.id) is not None
 
 
+# ── Task 4: run_kg flags tests ─────────────────────────────────────────────────
+
+def test_run_kg_rebuild_only_rebuilds_scale_index_for_base(repo):
+    from app.services import batch_ingest
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(nb.id)
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept",
+         "payload": {"name": "X", "section_path": ""}, "evidence": []}
+    ], [])
+    # rebuild_unified_kg required before run_kg rebuild_only so clusters exist
+    repo.rebuild_unified_kg(nb.id)
+    res = batch_ingest.run_kg(repo, nb.id, rebuild_only=True)
+    assert repo._scale_index(nb.id) is not None  # base tier -> index (re)built after rebuild
+
+
+def test_run_kg_no_rebuild_skips_clustering(repo, monkeypatch):
+    from app.services import batch_ingest
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    called = {"rebuild": 0}
+    orig = repo.rebuild_unified_kg
+    monkeypatch.setattr(
+        repo, "rebuild_unified_kg",
+        lambda *a, **k: (called.__setitem__("rebuild", called["rebuild"] + 1), orig(*a, **k))[1]
+    )
+    batch_ingest.run_kg(repo, nb.id, no_rebuild=True)
+    assert called["rebuild"] == 0  # no_rebuild skipped clustering
+
+
+def test_run_kg_rejects_both_flags(repo):
+    import pytest
+    from app.services import batch_ingest
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    with pytest.raises(ValueError):
+        batch_ingest.run_kg(repo, nb.id, no_rebuild=True, rebuild_only=True)
+
+
 # ── Test A: cross-layer synonym bridge ────────────────────────────────────────
 
 def _seed_base_with_near_vector(repo, concept_name: str, concept_id: str,
