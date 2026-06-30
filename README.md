@@ -477,7 +477,18 @@ PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_di
 PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
 ```
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg subset), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent), `--dry-run` (scan & estimate only).
+**Large base KGs (10^5–10^6 objects).** The final unified clustering streams (bounded by the number of unique normalized concept names, not the total object count), so `kg` scales without materializing all vectors. For a very large corpus you can extract in batches and cluster once at the end:
+
+```bash
+# extract in chunks across runs without the (expensive) final clustering
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 1000 --no-rebuild   # repeat as needed
+# then cluster + (re)build the scale index once, no extraction
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --rebuild-only
+```
+
+`--limit` bounds only how many sources are *extracted* this run; the final clustering always covers the whole notebook. After a `kg` rebuild on a base-tier notebook the scalable-retrieval index is rebuilt automatically (so it never goes stale). `KG_CLUSTER_REP_ANN_MAX` (default 2,000,000) caps the rep-ANN size — above it the index is built in shards with a warning (never silently truncated).
+
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent), `--dry-run` (scan & estimate only).
 
 Prereqs: configure EMBED and KG_LLM in `.env` (otherwise embedding/KG steps skip or error). Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
 
