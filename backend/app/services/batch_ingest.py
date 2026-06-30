@@ -271,7 +271,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("phase", choices=["ingest", "kg", "index", "all"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
-    p.add_argument("--notebook-name", default=None, help="新建 notebook 名(默认取目录名)")
+    p.add_argument("--notebook-name", default=None,
+                   help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
                    help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
     p.add_argument("--workers", type=int, default=4, help="文件级并发(默认 4)")
@@ -310,6 +311,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  ... (+{len(files) - 20} more)", flush=True)
         return 0
 
+    if args.phase in {"ingest", "all"} and not args.notebook_id and not args.notebook_name:
+        print("error: 新建 notebook 需用 --notebook-name 指定名字(不再默认用目录名)",
+              file=sys.stderr)
+        return 2
+
     repo = SQLiteRepository(Settings())
     if not repo.settings.embedder_configured:
         if not args.allow_no_embed:
@@ -321,7 +327,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 2
         print("[warn] --allow-no-embed:无向量模式,本次不产出 chunk/节点向量。", flush=True)
-    nb_name = args.notebook_name or (args.input_dir.name if args.input_dir else "Batch Import")
+    nb_name = args.notebook_name or "Batch Import"  # 新建路径已强制 --notebook-name;append（带 id）时不使用
     notebook_id = ensure_notebook(repo, args.notebook_id, nb_name, owner=args.owner)
     manifest = Path(repo.storage_dir) / "batch_ingest" / f"{notebook_id}.jsonl"
     log = _make_logger(manifest)

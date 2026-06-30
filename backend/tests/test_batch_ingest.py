@@ -143,6 +143,14 @@ def test_main_requires_input_dir_for_ingest(repo, capsys):
     assert "input-dir" in capsys.readouterr().err
 
 
+def test_main_requires_notebook_name_when_creating(repo, tmp_path, capsys):
+    """新建库(ingest 无 --notebook-id)必须显式 --notebook-name,不再默认用目录名。"""
+    d = _make_md_dir(tmp_path, n=1)
+    rc = bi.main(["ingest", "--input-dir", str(d)])
+    assert rc == 2
+    assert "notebook-name" in capsys.readouterr().err
+
+
 def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
@@ -213,7 +221,7 @@ def test_arg_parser_has_owner():
 def test_main_refuses_silent_no_embed(repo, tmp_path, monkeypatch, capsys):
     d = _make_md_dir(tmp_path, n=1)
     monkeypatch.setenv("EMBED_PROVIDER", "")     # main 自建 repo → embedder 未配
-    rc = bi.main(["ingest", "--input-dir", str(d)])
+    rc = bi.main(["ingest", "--input-dir", str(d), "--notebook-name", "X"])
     assert rc == 2
     assert "allow-no-embed" in capsys.readouterr().err
 
@@ -221,7 +229,7 @@ def test_main_refuses_silent_no_embed(repo, tmp_path, monkeypatch, capsys):
 def test_main_allows_no_embed_with_flag(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=1)
     monkeypatch.setenv("EMBED_PROVIDER", "")
-    rc = bi.main(["ingest", "--input-dir", str(d), "--allow-no-embed"])
+    rc = bi.main(["ingest", "--input-dir", str(d), "--notebook-name", "X", "--allow-no-embed"])
     assert rc == 0
     r2 = SQLiteRepository(Settings())
     with r2._connect() as db:
