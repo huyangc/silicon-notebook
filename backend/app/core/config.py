@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     kg_incremental_fusion_enabled: bool = Field(True, env="KG_INCREMENTAL_FUSION_ENABLED")
     # Tier2 桥接检测成本护栏:已有 concept 数超此值则跳过 Tier2(Tier1 名种子 append 照跑)。
     kg_incremental_tier2_max_entities: int = Field(50000, env="KG_INCREMENTAL_TIER2_MAX_ENTITIES")
+    # unified 聚类 rep-ANN 上限:唯一 name-seed 超此值则分片建 ANN + WARNING(绝不静默截断)。
+    kg_cluster_rep_ann_max: int = Field(2_000_000, validation_alias="KG_CLUSTER_REP_ANN_MAX")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。
