@@ -107,11 +107,13 @@ def run_ingest(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, lo
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
+    total = len(files)
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            for status, path, err in pool.map(_one, files):
+            for i, (status, path, err) in enumerate(pool.map(_one, files), 1):
                 counts[status] += 1
                 log({"phase": "ingest", "path": str(path), "status": status, "error": err})
+                print(f"[ingest {i}/{total}] {Path(path).name}: {status}", flush=True)
     finally:
         repo.settings.embed_provider = orig_provider   # 恢复,供 backfill 使用
 
@@ -130,12 +132,14 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> in
         with repo._connect() as db:
             sids = [r["id"] for r in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
-        for sid in sids:
+        n = len(sids)
+        for i, sid in enumerate(sids, 1):
             try:
                 repo._embed_chunks_for_source(sid)
                 done += 1
+                print(f"[embed {i}/{n}] {sid}", flush=True)
             except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
-                pass
+                print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
     finally:
         repo.settings.embed_concurrency = orig_conc
     return done
@@ -168,7 +172,11 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
             if limit is None:
                 # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
                 if llm_ok or not no_rebuild:
-                    out = repo.build_notebook_kg(notebook_id)   # 只抽尚无 KG 的 source,幂等,失败隔离
+                    out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
+                        notebook_id,
+                        progress=lambda i, n, sid, ok: print(
+                            f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True),
+                    )
                     res["extracted"] = len(out["built"])
                     res["failed"] = len(out["failed"])
             else:
@@ -200,9 +208,11 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
             return res
 
         # ── Rebuild 阶段 ──────────────────────────────────────────────────────
+        print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
         clusters = repo.rebuild_unified_kg(notebook_id)
         res["clusters"] = clusters
         log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
+        print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
         res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
 
         # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────────
@@ -338,21 +348,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.phase in {"ingest", "all"}:
         files = iter_files(args.input_dir)
         print(f"phase=ingest files={len(files)}", flush=True)
+        _t = time.perf_counter()
         c = run_ingest(repo, notebook_id, files, workers=args.workers, conc=args.embed_conc, log=log)
-        print(f"ingest done: {c}", flush=True)
+        print(f"ingest done: {c} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     if args.phase in {"kg", "all"}:
         no_rebuild = getattr(args, "no_rebuild", False)
         rebuild_only = getattr(args, "rebuild_only", False)
         print(f"phase=kg limit={args.limit} no_rebuild={no_rebuild} rebuild_only={rebuild_only}",
               flush=True)
+        _t = time.perf_counter()
         r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
                    no_rebuild=no_rebuild, rebuild_only=rebuild_only)
-        print(f"kg done: {r}", flush=True)
+        print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     if args.phase in {"index", "all"}:
         print(f"phase=index notebook={notebook_id}", flush=True)
+        _t = time.perf_counter()
         r = run_index(repo, notebook_id)
-        print(f"index done: {r}", flush=True)
+        print(f"index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     return 0

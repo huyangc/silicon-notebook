@@ -1577,10 +1577,12 @@ class SQLiteRepository:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
         return self.settings.kg_auto_extract or self._notebook_has_kg(notebook_id)
 
-    def build_notebook_kg(self, notebook_id: str) -> dict:
-        """按需对该 notebook 下"尚无 KG"的 source 逐个抽取(复用 _run_extraction)。
+    def build_notebook_kg(self, notebook_id: str, *, progress=None) -> dict:
+        """按需对该 notebook 下"尚无 KG"的 source 抽取(复用 _run_extraction)。
         幂等:已有 knowledge_objects 的 source 跳过。无 LLM → RuntimeError。
-        单 source 失败隔离,不连累其余、不回退其终态,错误入 event log。"""
+        跨源**并发**(提交到全局 KG job 池;窗口仍由全局 window 池封顶,两池分离防死锁);
+        单 source 失败隔离,不连累其余、不回退其终态,错误入 event log。
+        progress(i, n, source_id, ok):可选回调,每抽完一源调一次(批量 CLI 显示进度用)。"""
         self.get_notebook(notebook_id)  # KeyError if missing
         if not getattr(self.llm_client, "configured", False):
             raise RuntimeError("LLM not configured; cannot build KG")
@@ -1593,15 +1595,33 @@ class SQLiteRepository:
                 "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)).fetchall()}
         targets = [sid for sid in src_ids if sid not in kgful]
         done, failed = [], []
-        for sid in targets:
+
+        def _extract_one(sid: str) -> bool:
             try:
                 self._set_source_status(sid, "extracting")
                 self._run_extraction(sid)
                 self._set_source_status(sid, "extracted")
-                done.append(sid)
+                return True
             except Exception:  # noqa: BLE001 — 隔离单 source 失败
-                failed.append(sid)
                 self.event_log.logger.exception("build_notebook_kg failed for %s", sid)
+                return False
+
+        # 跨源并发:提交到全局 KG job 池(cap=KG_JOB_CONCURRENCY);窗口仍走全局 window
+        # 池(cap=KG_EXTRACT_WORKERS)、总量封顶不打爆 LLM,两池分离防死锁。
+        import concurrent.futures as _cf
+        from app.services.kg import scheduler as _kg_scheduler
+        futs = {_kg_scheduler.submit_job(_extract_one, sid): sid for sid in targets}
+        for _i, fut in enumerate(_cf.as_completed(futs), 1):
+            sid = futs[fut]
+            ok = bool(fut.result())   # _extract_one 内部已吞异常,只返回布尔
+            (done if ok else failed).append(sid)
+            if progress is not None:
+                try:
+                    progress(_i, len(targets), sid, ok)
+                except Exception:  # noqa: BLE001 — 进度回调绝不破坏构建
+                    pass
+        done.sort()
+        failed.sort()
         try:
             self._mark_unified_kg_dirty(notebook_id)
         except Exception:

@@ -111,7 +111,7 @@ def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     calls = {}
 
-    def fake_build(nb):
+    def fake_build(nb, *, progress=None):
         calls["fusion_flag_during"] = repo.settings.kg_incremental_fusion_enabled
         calls["build_nb"] = nb
         return {"built": ["s1", "s2"], "failed": [], "skipped": []}
@@ -155,7 +155,7 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(SQLiteRepository, "build_notebook_kg",
-                        lambda self, nb: {"built": [], "failed": [], "skipped": []})
+                        lambda self, nb, *, progress=None: {"built": [], "failed": [], "skipped": []})
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", lambda self, nb: 0)
     rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1",
                   "--allow-no-embed"])
@@ -195,6 +195,60 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     res = bi.run_kg(repo, nb_id, limit=2, conc=2)
     assert res["extracted"] == 2
     assert len(extracted_calls) == 2          # 只抽前 2 个未抽源(targets[:limit])
+
+
+class _StubLLM:
+    configured = True
+
+
+def _seed_sources(repo, nb_id, n, prefix):
+    now = "2026-01-01T00:00:00"
+    sids = [f"{prefix}-{i}" for i in range(n)]
+    with repo._write() as db:
+        for i, sid in enumerate(sids):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
+                 0, f"h{i}", "", "", "parsed", now, now))
+    return sids
+
+
+def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
+    """build_notebook_kg 跨源并发抽取(全局 job 池),逐源回调进度;全部成功。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    nb_id = bi.ensure_notebook(repo, None, "nb-conc")
+    sids = _seed_sources(repo, nb_id, 6, "src-c")
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
+    monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
+    seen = []
+    out = repo.build_notebook_kg(nb_id, progress=lambda i, n, sid, ok: seen.append((i, n, sid, ok)))
+    assert sorted(out["built"]) == sorted(sids) and out["failed"] == []
+    assert len(seen) == len(sids)
+    assert {n for _, n, _, _ in seen} == {len(sids)}              # 总数稳定 = N
+    assert all(ok for *_, ok in seen)
+    assert sorted(i for i, *_ in seen) == list(range(1, len(sids) + 1))  # 进度 i 覆盖 1..N
+
+
+def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
+    """单源抽取异常被隔离:计入 failed,其余照常 built。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    nb_id = bi.ensure_notebook(repo, None, "nb-iso")
+    sids = _seed_sources(repo, nb_id, 3, "src-i")
+    bad = sids[1]
+
+    def _extract(sid):
+        if sid == bad:
+            raise RuntimeError("boom")
+    monkeypatch.setattr(repo, "_run_extraction", _extract)
+    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
+    monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
+    out = repo.build_notebook_kg(nb_id)
+    assert bad in out["failed"] and len(out["built"]) == 2
 
 
 def test_ensure_notebook_explicit_owner(repo):
