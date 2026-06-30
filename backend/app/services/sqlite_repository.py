@@ -4071,6 +4071,15 @@ class SQLiteRepository:
         the UI doesn't choke; `total_nodes`/`total_edges`/`truncated` let the
         frontend offer "widen range". The full graph is still derived + cached;
         the limit is a cheap slice applied after the cache."""
+        # Bounded fast-path: when a limit is requested AND a valid scale index with
+        # a persisted folded viz graph exists, serve the degree-top-N core straight
+        # from the compact arrays (no full re-fold). EQUIVALENT to the legacy slice
+        # below (same node-id set / totals / shape). Small notebooks with no index
+        # fall through unchanged.
+        if limit is not None and level != "concept":
+            idx = self._scale_index(notebook_id)
+            if idx is not None and getattr(idx, "viz_ids", None) is not None:
+                return self._unified_graph_bounded(idx, limit)
         full = self._unified_graph_full(notebook_id, level)
         total_nodes, total_edges = len(full["nodes"]), len(full["edges"])
         from app.services.kg_merge import limit_graph_by_degree
@@ -4104,6 +4113,152 @@ class SQLiteRepository:
                  "edges": [e for e in g["edges"] if e["source_object_id"] in cids and e["target_object_id"] in cids]}
         self._unified_cache[(notebook_id, level)] = g
         return g
+
+    def _viz_dict(self, idx):
+        """Pack a ScaleIndex's persisted viz arrays into the dict shape the pure
+        viz_neighbors function expects (1-hop topology over the folded graph)."""
+        return {"viz_ids": idx.viz_ids, "viz_adj": idx.viz_adj,
+                "viz_deg": idx.viz_deg, "viz_types": idx.viz_types}
+
+    def _viz_node(self, idx, fid, name_by_id, type_by_id):
+        """One folded node in the unified_graph shape {id,object_type,payload:{name}}.
+        Names/types come from the persisted viz arrays (no DB round-trip)."""
+        return {"id": fid, "object_type": type_by_id.get(fid, ""),
+                "payload": {"name": name_by_id.get(fid, "")}}
+
+    def _unified_graph_bounded(self, idx, limit: int) -> dict:
+        """Degree-top-N core from the persisted folded viz graph — EQUIVALENT to
+        limit_graph_by_degree(_unified_graph_full(nb,'object'), limit): same node-id
+        set (incl. degree-tie order), same kept edges, same totals/shape.
+
+        Selection mirrors limit_graph_by_degree EXACTLY: stable sort by degree desc
+        preserving viz_ids order (which equals _unified_graph_full's node order),
+        keep the first `limit`, then keep edges whose both endpoints survive."""
+        import numpy as np
+        ids, deg = idx.viz_ids, idx.viz_deg
+        names = idx.viz_names or []
+        types = idx.viz_types or []
+        name_by_id = {n: nm for n, nm in zip(ids, names)}
+        type_by_id = {n: t for n, t in zip(ids, types)}
+        total_nodes = len(ids)
+        edges_all = idx.viz_edges or []
+
+        if limit is None or limit >= total_nodes:
+            keep_ids = list(ids)
+        else:
+            # stable: Python's sorted is stable; deg desc with original-index tiebreak
+            order = sorted(range(total_nodes), key=lambda i: -int(deg[i]))
+            keep_ids = [ids[i] for i in order[:limit]]
+        keep = set(keep_ids)
+
+        nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in ids if fid in keep]
+        kept_edges = [{"source_object_id": s, "target_object_id": t, "edge_type": et}
+                      for s, t, et in edges_all if s in keep and t in keep]
+        return {
+            "nodes": nodes,
+            "edges": kept_edges,
+            "total_nodes": total_nodes,
+            "total_edges": len(edges_all),
+            "truncated": len(nodes) < total_nodes,
+        }
+
+    def kg_neighbors(self, notebook_id: str, object_id: str, cap: int = 50) -> dict:
+        """1-hop neighborhood of `object_id` (≤cap) in the folded concept graph.
+
+        Fast path: persisted viz graph → viz_neighbors → hydrate names/edge_types
+        (same node/edge shape as unified_graph). Fallback (no index): a bounded
+        1-hop query over knowledge_relations, folding endpoints via cluster_map so
+        the shape matches the unified graph the frontend already renders."""
+        self.get_notebook(notebook_id)
+        idx = self._scale_index(notebook_id)
+        if idx is not None and getattr(idx, "viz_ids", None) is not None:
+            from app.services.kg.scale_index import viz_neighbors
+            nb = viz_neighbors(self._viz_dict(idx), object_id, cap)
+            name_by_id = {n: nm for n, nm in zip(idx.viz_ids, idx.viz_names or [])}
+            type_by_id = {n: t for n, t in zip(idx.viz_ids, idx.viz_types or [])}
+            nbr_ids = {n["id"] for n in nb["nodes"]}
+            nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in nbr_ids]
+            # edge_type: look up from the persisted folded edge list (either
+            # direction); default 'related' if not found (e.g. hub/membership).
+            et_map = {}
+            for s, t, et in (idx.viz_edges or []):
+                et_map[(s, t)] = et
+            edges = []
+            for e in nb["edges"]:
+                s, t = e["source"], e["target"]
+                et = et_map.get((s, t)) or et_map.get((t, s)) or "related"
+                edges.append({"source_object_id": s, "target_object_id": t, "edge_type": et})
+            return {"nodes": nodes, "edges": edges}
+        return self._kg_neighbors_db(notebook_id, object_id, cap)
+
+    def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:
+        """DB fallback for kg_neighbors: bounded 1-hop over knowledge_relations,
+        folding concept endpoints to canonical ids (cluster_map) so the result
+        matches the folded unified-graph view. `object_id` is interpreted as a
+        folded id (canonical_id or raw object_id)."""
+        cmap = self.cluster_map(notebook_id)
+        # member -> canonical for matching folded id back to raw endpoints
+        members_of = {}
+        for m, c in cmap.items():
+            members_of.setdefault(c, []).append(m)
+        raw_ids = set(members_of.get(object_id, [object_id]))
+        ph = ",".join("?" for _ in raw_ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT source_object_id, target_object_id, edge_type "
+                f"FROM knowledge_relations WHERE notebook_id=? "
+                f"AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
+                (notebook_id, *raw_ids, *raw_ids),
+            ).fetchall()
+        # object_type + name lookup for the folded nodes we touch
+        def canon(oid):
+            return cmap.get(oid, oid)
+        edges, nbr_ids, seen = [], set(), set()
+        for r in rows:
+            s, t = canon(r["source_object_id"]), canon(r["target_object_id"])
+            if s == t:
+                continue
+            # orient relative to the queried folded node
+            if s == object_id:
+                other = t
+            elif t == object_id:
+                other = s
+            else:
+                continue
+            if other in seen or len(seen) >= cap:
+                continue
+            seen.add(other)
+            nbr_ids.add(other)
+            edges.append({"source_object_id": object_id, "target_object_id": other,
+                          "edge_type": r["edge_type"]})
+        all_ids = {object_id} | nbr_ids
+        meta = self._object_meta(notebook_id, all_ids, cmap)
+        nodes = [{"id": oid, "object_type": meta.get(oid, ("", ""))[0],
+                  "payload": {"name": meta.get(oid, ("", ""))[1]}} for oid in all_ids]
+        return {"nodes": nodes, "edges": edges}
+
+    def _object_meta(self, notebook_id: str, folded_ids, cmap):
+        """{folded_id: (object_type, name)} for a set of folded ids. A folded
+        concept id is either a canonical_id (resolve via a member object) or a raw
+        object id. Used by the DB neighbors fallback to hydrate node display."""
+        members_of = {}
+        for m, c in cmap.items():
+            members_of.setdefault(c, []).append(m)
+        # representative raw object id per folded id
+        rep = {fid: (members_of.get(fid, [fid])[0]) for fid in folded_ids}
+        rep_ids = set(rep.values())
+        if not rep_ids:
+            return {}
+        ph = ",".join("?" for _ in rep_ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT id, object_type, payload FROM knowledge_objects "
+                f"WHERE notebook_id=? AND id IN ({ph})",
+                (notebook_id, *rep_ids),
+            ).fetchall()
+        by_raw = {r["id"]: (r["object_type"], json.loads(r["payload"] or "{}").get("name", ""))
+                  for r in rows}
+        return {fid: by_raw.get(rep[fid], ("", "")) for fid in folded_ids}
 
     def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn,
                           run_id: str = "", compute_reps: bool = True):
@@ -5880,6 +6035,14 @@ class SQLiteRepository:
             ann_labels = []
             ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
 
+        # Folded concept-level viz graph (Task 4 / SP1): derive the EXACT same
+        # graph _unified_graph_full(nb, "object") returns (concepts folded to
+        # canonical ids via cluster_map, edges deduped) and persist it as compact
+        # arrays so unified_graph(limit=N)/neighbors can serve a bounded core
+        # without re-folding the full graph at request time.
+        (viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload) = \
+            self._build_viz_graph_arrays(notebook_id)
+
         n_kg = len(kg_node_ids)
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
         manifest = {
@@ -5890,6 +6053,8 @@ class SQLiteRepository:
             "n_chunks": len(chunk_ids),
             "n_hubs": len(node_ids) - n_kg - len(chunk_ids),
             "n_ann": len(ann_labels),
+            "n_viz_nodes": len(viz_ids),
+            "n_viz_edges": len(viz_payload.get("edges", [])),
         }
         return si.save_scale_index(
             out_dir,
@@ -5900,7 +6065,77 @@ class SQLiteRepository:
             ann_vectors=ann_vectors,
             ann_labels=ann_labels,
             manifest=manifest,
+            viz_ids=viz_ids,
+            viz_adj=viz_adj,
+            viz_deg=viz_deg,
+            viz_types=viz_types,
+            viz_names=viz_names,
+            viz_payload=viz_payload,
         )
+
+    def _build_viz_graph_arrays(self, notebook_id: str):
+        """Build the persisted folded-viz-graph arrays from the SAME folded graph
+        _unified_graph_full(nb, "object") produces. Returns
+        (viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload):
+          - viz_ids       : folded node ids (canonical_id or raw object_id), in the
+                            SAME order _unified_graph_full returns nodes (matters for
+                            degree-tie ordering vs limit_graph_by_degree).
+          - viz_adj       : undirected adjacency CSR over folded nodes (for
+                            viz_neighbors 1-hop; symmetric, binary).
+          - viz_deg       : int32 degree computed the SAME way limit_graph_by_degree
+                            does (+1 per endpoint per DIRECTED deduped edge), so the
+                            bounded degree-top-N selection matches the legacy slice
+                            exactly (values AND tie order).
+          - viz_types     : object_type per folded node
+          - viz_names     : display name per folded node (payload.name)
+          - viz_payload   : {"edges": [[src,dst,edge_type], ...]} — the EXACT
+                            directed-deduped folded edge list, so the bounded path
+                            reproduces edges (and total_edges) identically.
+        """
+        import numpy as np
+        import scipy.sparse as sp
+
+        # level="object" = the full folded graph (no concept-only filter), which is
+        # exactly what unified_graph(level="object") slices with limit_graph_by_degree.
+        full = self._unified_graph_full(notebook_id, "object")
+        nodes = full["nodes"]
+        edges = full["edges"]
+
+        viz_ids = [n["id"] for n in nodes]
+        viz_types = [n["object_type"] for n in nodes]
+        viz_names = [(n.get("payload") or {}).get("name", "") for n in nodes]
+        index = {nid: i for i, nid in enumerate(viz_ids)}
+        n = len(viz_ids)
+
+        # Degree mirrors limit_graph_by_degree: count each directed deduped edge
+        # once per endpoint (bidirectional/multi-type pairs add up).
+        deg = np.zeros(n, dtype=np.int64)
+        # Undirected adjacency for neighbor lookup (binary, symmetric).
+        und_rows, und_cols, und_seen = [], [], set()
+        edge_list: List[list] = []
+        for e in edges:
+            s, t = e["source_object_id"], e["target_object_id"]
+            si_, ti = index.get(s), index.get(t)
+            if si_ is None or ti is None:
+                continue
+            edge_list.append([s, t, e["edge_type"]])
+            deg[si_] += 1
+            deg[ti] += 1
+            if si_ != ti:
+                pair = (si_, ti) if si_ < ti else (ti, si_)
+                if pair not in und_seen:
+                    und_seen.add(pair)
+                    und_rows += [pair[0], pair[1]]
+                    und_cols += [pair[1], pair[0]]
+
+        if und_rows:
+            data = np.ones(len(und_rows), dtype=np.int8)
+            viz_adj = sp.csr_matrix((data, (und_rows, und_cols)), shape=(n, n))
+        else:
+            viz_adj = sp.csr_matrix((n, n), dtype=np.int8)
+        viz_deg = deg.astype(np.int32)
+        viz_payload = {"edges": edge_list}
+        return viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload
 
     def _active_kg_delta(self, notebook_id: str):
         """Gather the ACTIVE notebook's KG delta for splicing onto a base scale
