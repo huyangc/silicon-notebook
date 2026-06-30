@@ -26,6 +26,7 @@ from app.models.schemas import (
     EdgeReviewRequest,
     FeedbackRequest,
     FeedbackResponse,
+    KgSearchResponse,
     KnowledgeGraph,
     KnowledgeRecord,
     KnowledgeTypeCount,
@@ -506,6 +507,24 @@ def search_notebook(
 ) -> NotebookSearchResponse:
     try:
         return repository().search_notebook(notebook_id, q)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get(
+    "/notebooks/{notebook_id}/kg/search",
+    response_model=KgSearchResponse,
+    dependencies=[Depends(require_notebook_access)],
+)
+def kg_search(
+    notebook_id: str,
+    q: str = Query(...),
+    k: int = Query(30, ge=1, le=200),
+) -> KgSearchResponse:
+    """词法(FTS5)∪语义(ANN)搜索 KG 节点,按 score 降序返回 k 条。"""
+    try:
+        hits = repository().kg_search(notebook_id, q, k)
+        return KgSearchResponse(query=q, hits=hits)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
