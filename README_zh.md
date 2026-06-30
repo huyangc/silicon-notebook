@@ -429,8 +429,8 @@ MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素�
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
 
 ```bash
-# 1) 解析+分块+向量(无 LLM):新建 notebook,名取目录名
-PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir
+# 1) 解析+分块+向量(无 LLM):新建库须用 --notebook-name 指定名字
+PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir --notebook-name "我的库"
 
 # 2) 先小范围验证 KG 质量(只抽前 50 个未抽源)
 PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 50

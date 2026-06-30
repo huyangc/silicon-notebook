@@ -461,8 +461,8 @@ pipeline, in two phases: `ingest` (no LLM, fast — chunk Q&A works immediately)
 then `kg` (LLM extraction, separately resumable).
 
 ```bash
-# 1) parse + chunk + embeddings (no LLM); creates a notebook named after the dir
-PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir
+# 1) parse + chunk + embeddings (no LLM); --notebook-name is required when creating a notebook
+PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir --notebook-name "My KB"
 
 # 2) validate KG quality on a subset first (extract only the first 50 un-extracted sources)
 PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 50
