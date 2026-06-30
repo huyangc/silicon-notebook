@@ -202,7 +202,7 @@ def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
     return out
 
 
-def _star_groups(seeds: List[str], members: Dict[str, List[str]],
+def _star_groups(seeds: List[str], members_count: Dict[str, int],
                  edges: List[tuple], hi: float) -> Dict[str, str]:
     """贪心星型: 按成员数降序, 未分配 seed 作锚点, 认领其 ≥hi 直接邻居中未分配者。
     只允许"锚点—直接邻居", 不允许锚点间再链 → 簇直径有界, 无链式大簇。
@@ -212,7 +212,7 @@ def _star_groups(seeds: List[str], members: Dict[str, List[str]],
         if sim >= hi:
             adj.setdefault(a, []).append((b, sim))
             adj.setdefault(b, []).append((a, sim))
-    order = sorted(seeds, key=lambda s: (-len(members.get(s, [])), s))
+    order = sorted(seeds, key=lambda s: (-members_count.get(s, 0), s))
     assigned: Dict[str, str] = {}
     for s in order:
         if s in assigned:
@@ -246,6 +246,61 @@ def _seed_with_alias(obj, seed_fn, alias_map: Dict[str, str]) -> str:
     return base
 
 
+def cluster_seeds(
+    seeds: List[str],
+    reps: Dict[str, np.ndarray],
+    members_count: Dict[str, int],
+    seed_first_name: Dict[str, str],
+    confirmed: Set[FrozenSet[str]],
+    rejected: Set[FrozenSet[str]],
+    *,
+    conflict_fn=None,
+    id_prefix: str = "K-",
+    hi: float = 0.94,
+    lo: float = 0.82,
+    top_k: int = 5,
+    max_pending: int = 1000,
+) -> dict:
+    """seed 级聚类核心(随 #seeds 有界)。confirmed/rejected 为 seed 对(frozenset)。
+    返回 {seed_to_canonical, canonical_names, auto_candidates, pending, capped}。"""
+    uf = _UF(seeds)
+    for pair in confirmed:
+        if len(pair) != 2:
+            continue
+        a, b = tuple(pair)
+        if a in uf.p and b in uf.p:
+            uf.union(a, b)
+    rej = {frozenset(p) for p in rejected}
+    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo)
+    cand = []
+    for a, b, sim in raw:
+        if rej and frozenset((a, b)) in rej:
+            continue
+        if conflict_fn and conflict_fn(seed_first_name.get(a, a), seed_first_name.get(b, b)):
+            continue
+        cand.append((a, b, sim))
+    star = _star_groups(seeds, members_count, cand, hi)
+    auto_set = {frozenset((nb, anc)) for nb, anc in star.items() if nb != anc}
+    groups: Dict[str, List[str]] = {}
+    for s in seeds:
+        groups.setdefault(uf.find(s), []).append(s)
+    canon_id, canon_name = {}, {}
+    for root, grp in groups.items():
+        best = max(grp, key=lambda s: members_count.get(s, 0))
+        cid = id_prefix + min(grp)
+        for s in grp:
+            canon_id[s] = cid
+        canon_name[cid] = seed_first_name[best]
+    auto_candidates = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
+                       if sim >= hi and frozenset((a, b)) in auto_set and canon_id[a] != canon_id[b]]
+    pending = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
+               if sim < hi and canon_id[a] != canon_id[b]]
+    pending.sort(key=lambda t: t[2], reverse=True)
+    was_capped = len(pending) > max_pending
+    return {"seed_to_canonical": canon_id, "canonical_names": canon_name,
+            "auto_candidates": auto_candidates, "pending": pending[:max_pending], "capped": was_capped}
+
+
 def cluster_objects(
     objects: List[dict],
     vectors: Dict[str, List[float]],
@@ -273,15 +328,6 @@ def cluster_objects(
     alias_map = build_acronym_alias_map([c.get("name", "") for c in objects])
     seed_of = {c["object_id"]: _seed_with_alias(c, seed_fn, alias_map) for c in objects}
     seeds = sorted(set(seed_of.values()))
-    uf = _UF(seeds)
-    # confirmed/rejected 存储的是已经过 seed_fn 处理的 seed 字符串(caller 负责对齐)
-    for pair in confirmed:
-        if len(pair) != 2:
-            continue   # both names normalize equal (size-1 fold) or malformed: harmless
-        a, b = tuple(pair)
-        if a in uf.p and b in uf.p:
-            uf.union(a, b)
-    rej = {frozenset(p) for p in rejected}
 
     seed_first_name: Dict[str, str] = {}
     for c in objects:
@@ -299,40 +345,15 @@ def cluster_objects(
         if vs:
             reps[s] = np.mean(np.asarray(vs, dtype=np.float32), axis=0)
 
-    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo)
-    cand = []
-    for a, b, sim in raw:
-        if rej and frozenset((a, b)) in rej:
-            continue
-        if conflict_fn and conflict_fn(seed_first_name.get(a, a), seed_first_name.get(b, b)):
-            continue
-        cand.append((a, b, sim))
-
-    star = _star_groups(seeds, members, cand, hi)
-    auto_set = {frozenset((nb, anc)) for nb, anc in star.items() if nb != anc}
-
-    groups: Dict[str, List[str]] = {}
-    for s in seeds:
-        groups.setdefault(uf.find(s), []).append(s)
-    canon_id, canon_name = {}, {}
-    for root, grp in groups.items():
-        best = max(grp, key=lambda s: len(members[s]))
-        cid = id_prefix + min(grp)
-        for s in grp:
-            canon_id[s] = cid
-        canon_name[cid] = seed_first_name[best]
+    members_count = {s: len(lst) for s, lst in members.items()}
+    sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                       conflict_fn=conflict_fn, id_prefix=id_prefix, hi=hi, lo=lo,
+                       top_k=top_k, max_pending=max_pending)
+    canon_id = sd["seed_to_canonical"]
     cluster_map = {c["object_id"]: canon_id[seed_of[c["object_id"]]] for c in objects}
-    names = {c["object_id"]: canon_name[cluster_map[c["object_id"]]] for c in objects}
-
-    auto_candidates = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
-                       if sim >= hi and frozenset((a, b)) in auto_set and canon_id[a] != canon_id[b]]
-    pending = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
-               if sim < hi and canon_id[a] != canon_id[b]]
-    pending.sort(key=lambda t: t[2], reverse=True)
-    was_capped = len(pending) > max_pending
-    pending = pending[:max_pending]
+    names = {c["object_id"]: sd["canonical_names"][cluster_map[c["object_id"]]] for c in objects}
     return {"cluster_map": cluster_map, "canonical_names": names,
-            "auto_candidates": auto_candidates, "pending": pending, "capped": was_capped}
+            "auto_candidates": sd["auto_candidates"], "pending": sd["pending"], "capped": sd["capped"]}
 
 
 def cluster_concepts(
