@@ -458,7 +458,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(文件并发)、`--embed-conc`(嵌入并发,避 429)、`--limit`(kg 抽取子集——聚类仍覆盖全量)、`--no-rebuild` / `--rebuild-only`(分批大库构建时拆分「抽取」与「末尾聚类」)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默)、`--dry-run`(只扫描预估)。
 
-前置:`.env` 配好 EMBED 与 KG_LLM(否则向量/KG 步骤会跳过或报错);重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
+前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
 ## 当前限制
 

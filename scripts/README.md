@@ -69,6 +69,7 @@ KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
+| `git-cleanup.sh` | 清理「PR 已合并」的本地分支 + worktree:默认 dry-run 预演,`--apply` 执行,`--remote` 连带删远程(保护 master / 当前分支 / `eval` / `backup/*`) |
 
 ---
 
