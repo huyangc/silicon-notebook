@@ -292,9 +292,9 @@ def test_ann_candidates_recall_vs_bruteforce():
 def test_star_groups_breaks_chains():
     from app.services.kg_merge import _star_groups
     seeds = ["A", "B", "C"]
-    members = {"A": [1, 2, 3], "B": [1], "C": [1]}   # A 质量最高 → A 当锚点
+    members_count = {"A": 3, "B": 1, "C": 1}   # A 质量最高 → A 当锚点
     edges = [("A", "B", 0.96), ("B", "C", 0.96)]      # A~B、B~C ≥hi; 无 A~C
-    asn = _star_groups(seeds, members, edges, hi=0.94)
+    asn = _star_groups(seeds, members_count, edges, hi=0.94)
     assert asn["A"] == "A"
     assert asn["B"] == "A"
     assert asn["C"] == "C"
@@ -303,9 +303,9 @@ def test_star_groups_breaks_chains():
 def test_star_groups_claims_direct_neighbors():
     from app.services.kg_merge import _star_groups
     seeds = ["X", "Y", "Z"]
-    members = {"X": [1, 2], "Y": [1], "Z": [1]}
+    members_count = {"X": 2, "Y": 1, "Z": 1}
     edges = [("X", "Y", 0.97), ("X", "Z", 0.95)]
-    asn = _star_groups(seeds, members, edges, hi=0.94)
+    asn = _star_groups(seeds, members_count, edges, hi=0.94)
     assert asn["Y"] == "X" and asn["Z"] == "X"
 
 
@@ -328,3 +328,27 @@ def test_cluster_concepts_guard_blocks_twin_candidate():
     assert res["cluster_map"]["a"] != res["cluster_map"]["b"]
     allcand = {frozenset((a, b)) for a, b, _ in res["auto_candidates"] + res["pending"]}
     assert frozenset(("K-single balanced mixer", "K-double balanced mixer")) not in allcand
+
+
+from app.services.kg_merge import cluster_objects, cluster_seeds, _norm
+import numpy as np
+
+
+def test_cluster_seeds_matches_cluster_objects_smallcase():
+    objs = [{"object_id": f"o{i}", "name": n} for i, n in enumerate(
+        ["MOSFET", "mosfet", "current mirror", "current-mirror", "slew rate"])]
+    vecs = {"o0": [1.0, 0.0], "o1": [1.0, 0.0], "o2": [0.0, 1.0], "o3": [0.0, 1.0], "o4": [0.5, 0.5]}
+    full = cluster_objects(objs, vecs, set(), set(), seed_fn=lambda c: _norm(c["name"]))
+    seed_of = {o["object_id"]: _norm(o["name"]) for o in objs}
+    seeds = sorted(set(seed_of.values()))
+    members_count, seed_first_name, acc = {}, {}, {}
+    for o in objs:
+        s = seed_of[o["object_id"]]
+        members_count[s] = members_count.get(s, 0) + 1
+        seed_first_name.setdefault(s, o["name"])
+        acc.setdefault(s, []).append(vecs[o["object_id"]])
+    reps = {s: np.mean(np.asarray(vs, dtype=np.float32), axis=0) for s, vs in acc.items()}
+    sd = cluster_seeds(seeds, reps, members_count, seed_first_name, set(), set(),
+                       conflict_fn=None, id_prefix="K-")
+    cmap = {o["object_id"]: sd["seed_to_canonical"][seed_of[o["object_id"]]] for o in objs}
+    assert cmap == full["cluster_map"]
