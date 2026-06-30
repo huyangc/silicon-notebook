@@ -638,12 +638,15 @@ class SQLiteRepository:
                 -- TEMP TABLE on purpose (the rebuild spans multiple connections +
                 -- mid-rebuild LLM calls; a connection-scoped temp would force one
                 -- long-held write lock). Cleared per-type and at rebuild start/end.
+                -- run_id isolates concurrent same-notebook rebuilds so two overlapping
+                -- calls never wipe/interleave each other's scratch rows.
                 CREATE TABLE IF NOT EXISTS kg_cluster_scratch (
                   notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
                   object_id TEXT NOT NULL,
                   seed TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_kg_cluster_scratch_nb ON kg_cluster_scratch(notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_kg_cluster_scratch_nb_run ON kg_cluster_scratch(notebook_id, run_id);
 
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
@@ -3907,23 +3910,35 @@ class SQLiteRepository:
         self._unified_cache[(notebook_id, level)] = g
         return g
 
-    def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn):
+    def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn,
+                          run_id: str = "", compute_reps: bool = True):
         """Stream knowledge_objects of one type → populate kg_cluster_scratch
         (object_id → seed) and accumulate seed-level aggregates, memory-bounded
         by #unique seeds (NOT #objects). Returns (reps, members_count,
         seed_first_name):
-          - reps[seed]          = mean of member vectors (dim-filtered)
+          - reps[seed]          = mean of member vectors (dim-filtered); empty
+                                  dict when compute_reps=False (skips Pass B).
           - members_count[seed] = #objects for that seed
           - seed_first_name[s]  = first-seen object name for that seed
-        kg_cluster_scratch is cleared for this notebook at entry so it only ever
-        holds the type currently being clustered (types are processed serially)."""
+        kg_cluster_scratch rows are scoped by (notebook_id, run_id) so concurrent
+        rebuilds of the same notebook never wipe each other's scratch. The caller
+        is responsible for clearing rows with the same (notebook_id, run_id) before
+        calling this and after all types are processed.
+
+        compute_reps=False skips Pass B (embeddings join) entirely and returns
+        reps={}. Use for non-concept types (claim/formula/procedure) where
+        cluster_seeds receives {} vectors anyway — avoids a large ANN over
+        non-concept seeds."""
         import numpy as np
         from app.services.kg_merge import build_acronym_alias_map, _seed_with_alias, _norm
 
         embed_dim = self.settings.embed_dim
-        # Scratch holds only the current type — clear before repopulating.
+        # Scratch is scoped to (notebook_id, run_id); clear only this run's rows
+        # for the current type before repopulating (types are processed serially
+        # within a run, so a simple delete by run_id is safe).
         with self._write() as db:
-            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=?", (notebook_id,))
+            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
+                       (notebook_id, run_id))
 
         # Pass A1: stream names once to build the acronym alias map.
         def _name_gen():
@@ -3956,30 +3971,37 @@ class SQLiteRepository:
                     seed = _seed_with_alias({"name": name, "payload": pay}, seed_fn, alias_map)
                     members_count[seed] = members_count.get(seed, 0) + 1
                     seed_first_name.setdefault(seed, name)
-                    buf.append((notebook_id, r["id"], seed))
+                    buf.append((notebook_id, run_id, r["id"], seed))
                     if len(buf) >= 1000:
                         wdb.executemany(
-                            "INSERT INTO kg_cluster_scratch (notebook_id, object_id, seed) VALUES (?,?,?)",
+                            "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (?,?,?,?)",
                             buf)
                         buf.clear()
                 if buf:
                     wdb.executemany(
-                        "INSERT INTO kg_cluster_scratch (notebook_id, object_id, seed) VALUES (?,?,?)",
+                        "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (?,?,?,?)",
                         buf)
                     buf.clear()
 
         # Pass B: stream vectors joined to seeds → rep mean per seed. Bounded by
         # #unique seeds (rep_sum/rep_cnt), NOT #objects. Dim-mismatched legacy
         # vectors are skipped (mirrors the old length filter).
+        # Skipped entirely when compute_reps=False (non-concept types where
+        # cluster_seeds receives {} vectors anyway — avoids an ANN over
+        # millions of claim/formula/procedure seeds at scale).
+        if not compute_reps:
+            return {}, members_count, seed_first_name
+
         rep_sum: Dict[str, "np.ndarray"] = {}
         rep_cnt: Dict[str, int] = {}
         with self._connect() as db:
             cur = db.execute(
                 "SELECT s.seed AS seed, e.vector AS vector "
                 "FROM knowledge_embeddings e "
-                "JOIN kg_cluster_scratch s ON s.object_id=e.object_id AND s.notebook_id=e.notebook_id "
+                "JOIN kg_cluster_scratch s ON s.object_id=e.object_id "
+                "  AND s.notebook_id=e.notebook_id AND s.run_id=? "
                 "WHERE e.notebook_id=?",
-                (notebook_id,))
+                (run_id, notebook_id))
             for r in cur:
                 v = json.loads(r["vector"])
                 if len(v) != embed_dim:
@@ -3998,17 +4020,20 @@ class SQLiteRepository:
     def _write_cluster_map_streamed(self, notebook_id: str, object_type: str,
                                     seed_to_canonical: Dict[str, str],
                                     canonical_names: Dict[str, str],
-                                    desc_by_cid: Optional[Dict[str, str]] = None) -> None:
+                                    desc_by_cid: Optional[Dict[str, str]] = None,
+                                    run_id: str = "") -> None:
         """Persist concept_clusters rows for one type by streaming
         kg_cluster_scratch (object_id, seed). Matches write_clusters' columns and
         DELETE scope EXACTLY (clear-by-(notebook_id, object_type), then insert one
-        row per member object). Rows whose seed has no canonical are skipped."""
+        row per member object). Rows whose seed has no canonical are skipped.
+        Only reads scratch rows matching run_id so concurrent rebuilds don't cross."""
         now = _now()
         desc_by_cid = desc_by_cid or {}
         with self._connect() as rdb:
             cur = rdb.execute(
-                "SELECT object_id, seed FROM kg_cluster_scratch WHERE notebook_id=?",
-                (notebook_id,))
+                "SELECT object_id, seed FROM kg_cluster_scratch "
+                "WHERE notebook_id=? AND run_id=?",
+                (notebook_id, run_id))
             with self._write() as wdb:
                 wdb.execute("DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
                             (notebook_id, object_type))
@@ -4042,17 +4067,18 @@ class SQLiteRepository:
         all-objects-in-memory path (guarded by tests/test_unified_kg_repository,
         test_cross_doc_merge, test_kg_merge, test_rebuild_streaming)."""
         self.get_notebook(notebook_id)
+        from uuid import uuid4 as _uuid4
         from app.services.kg_merge import (cluster_seeds, _norm, _discriminative_conflict,
                                            seed_claim, seed_formula, seed_procedure)
-        # Start cleanup: drop any leftover scratch rows for this notebook.
-        with self._write() as db:
-            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=?", (notebook_id,))
+        # Each rebuild gets a unique run_id so concurrent rebuilds of the SAME
+        # notebook never wipe or read each other's scratch rows.
+        run_id = _uuid4().hex
 
         # --- Concepts (vector + name-seed clustering) ----------------------
         # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
         # (object_id -> seed) and returns seed-level aggregates only.
         reps, members_count, seed_first_name = self._stream_seed_reps(
-            notebook_id, "concept", lambda o: _norm(o["name"]))
+            notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
         # IMPORTANT: include seeds with NO vector (name-only) — use members_count
         # keys, not reps keys, to match the legacy all-objects path.
         seeds = sorted(members_count)
@@ -4110,8 +4136,8 @@ class SQLiteRepository:
                     erows = db.execute(
                         f"SELECT k.evidence AS evidence FROM knowledge_objects k "
                         f"JOIN kg_cluster_scratch s ON s.object_id=k.id "
-                        f"WHERE s.notebook_id=? AND s.seed IN ({ph})",
-                        (notebook_id, *cseeds)).fetchall()
+                        f"WHERE s.notebook_id=? AND s.run_id=? AND s.seed IN ({ph})",
+                        (notebook_id, run_id, *cseeds)).fetchall()
                 quotes = []
                 for er in erows:
                     for ev in json.loads(er["evidence"] or "[]"):
@@ -4133,23 +4159,27 @@ class SQLiteRepository:
                 if desc:
                     desc_by_cid[cid] = desc
         self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
-                                         sd["canonical_names"], desc_by_cid)
+                                         sd["canonical_names"], desc_by_cid, run_id=run_id)
         # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
         # vector near-dup remains concept-only). Each type isolated by id prefix.
         # These types carry no vectors → reps_t is empty → cluster_seeds does only
         # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
+        # compute_reps=False skips Pass B entirely (no embeddings join) since
+        # cluster_seeds receives {} anyway — avoids wasted ANN at scale.
         _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
                        "formula": (seed_formula, "KF-"),
                        "procedure": (seed_procedure, "KP-")}
         for t, (sfn, prefix) in _TYPE_MERGE.items():
-            reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn)
+            reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
+                                                          run_id=run_id,
+                                                          compute_reps=False)
             # Empty type → scratch empty → _write_cluster_map_streamed clears rows
             # (same as legacy write_clusters([], object_type=t)).
             sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
                                  conflict_fn=None, id_prefix=prefix,
                                  rep_ann_max=self.settings.kg_cluster_rep_ann_max)
             self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
-                                             sd_t["canonical_names"])
+                                             sd_t["canonical_names"], run_id=run_id)
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = _now()
@@ -4187,9 +4217,11 @@ class SQLiteRepository:
                 """,
                 (notebook_id, now, object_count, relation_count, cluster_count, now),
             )
-        # Final cleanup: drop this notebook's scratch rows.
+        # Final cleanup: drop only THIS run's scratch rows (run_id-scoped so a
+        # concurrent rebuild with a different run_id is unaffected).
         with self._write() as db:
-            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=?", (notebook_id,))
+            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
+                       (notebook_id, run_id))
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
