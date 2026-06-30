@@ -91,3 +91,39 @@ def test_kg_neighbors_matches_topology(repo):
     assert {"gain", "bias"} <= names  # both leaves are neighbors
     for e in out["edges"]:
         assert set(e.keys()) == {"source_object_id", "target_object_id", "edge_type"}
+
+
+import time
+
+
+@pytest.mark.slow
+def test_viz_and_search_bounded_at_scale(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    # N kept modest: this test proves SP1's BOUNDED query path (no _unified_graph_full
+    # call + ms-level viz/search), which is N-independent. The setup cost is dominated
+    # by build_scale_index (SP2's offline build), not what SP1 measures here.
+    N, B = 4_000, 2_000
+    for s in range(0, N, B):
+        objs = [{"local_id": f"c{i}", "object_type": "concept",
+                 "payload": {"name": f"concept number {i}", "section_path": ""}, "evidence": []}
+                for i in range(s, s + B)]
+        rels = [{"source_local_id": f"c{i}", "target_local_id": f"c{i+1}", "edge_type": "rel", "evidence": []}
+                for i in range(s, s + B - 1)]
+        repo.store_kg(nb.id, None, objs, rels)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    # bounded viz must NOT materialize the full graph
+    calls = {"full": 0}
+    real_full = repo._unified_graph_full
+    monkeypatch.setattr(repo, "_unified_graph_full",
+                        lambda *a, **k: (calls.__setitem__("full", calls["full"] + 1), real_full(*a, **k))[1])
+    t = time.perf_counter()
+    g = repo.unified_graph(nb.id, level="object", limit=80)
+    dt_viz = time.perf_counter() - t
+    assert len(g["nodes"]) == 80 and g["total_nodes"] >= N * 0.9
+    assert calls["full"] == 0, "bounded path must not call _unified_graph_full"
+    t = time.perf_counter()
+    hits = repo.kg_search(nb.id, "number 123", k=20)
+    dt_search = time.perf_counter() - t
+    assert isinstance(hits, list)
+    print(f"\n[scale] viz limit=80: {dt_viz:.3f}s (full_calls={calls['full']}); kg_search: {dt_search:.3f}s, hits={len(hits)}")
