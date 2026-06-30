@@ -283,6 +283,18 @@ class NotebookSearchResponse(BaseModel):
     hits: List[SearchHit]
 
 
+class KgSearchHit(BaseModel):
+    object_id: str
+    name: str
+    object_type: str
+    score: float
+    match: str
+
+
+class KgSearchResponse(BaseModel):
+    query: str
+    hits: List[KgSearchHit]
+
 
 class KnowledgeUpdate(BaseModel):
     payload: Optional[Dict[str, Any]] = None

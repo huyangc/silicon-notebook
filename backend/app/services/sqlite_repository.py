@@ -687,6 +687,10 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_communities_nb_level ON communities(notebook_id, level);
                 DROP INDEX IF EXISTS idx_communities_nb;
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS kg_objects_fts
+                  USING fts5(object_id UNINDEXED, notebook_id UNINDEXED, name,
+                             tokenize='trigram');
                 """
             )
             # Lightweight column migrations for pre-existing databases.
@@ -1326,8 +1330,136 @@ class SQLiteRepository:
                           "extraction_runs", "unified_kg_state"):
                 cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
                 counts[table] = cur.rowcount
+            fts_cur = db.execute(
+                "DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,)
+            )
+            counts["kg_objects_fts"] = fts_cur.rowcount
         self._invalidate_unified_cache(notebook_id)
         return counts
+
+    # ------------------------------------------------------------------
+    # KG search: FTS5 (lexical) + ANN (semantic) + hydration
+    # ------------------------------------------------------------------
+
+    def backfill_kg_fts(self, notebook_id: str) -> int:
+        """Re-populate kg_objects_fts from knowledge_objects for this notebook.
+
+        Idempotent: deletes existing FTS rows first, then re-inserts from
+        knowledge_objects (non-deprecated, non-empty name).  Returns the
+        number of rows inserted.
+        """
+        self.get_notebook(notebook_id)
+        with self._write() as db:
+            db.execute("DELETE FROM kg_objects_fts WHERE notebook_id=?", (notebook_id,))
+            rows = db.execute(
+                "SELECT id, payload FROM knowledge_objects "
+                "WHERE notebook_id=? AND status != 'deprecated'",
+                (notebook_id,),
+            ).fetchall()
+            fts_rows = []
+            for r in rows:
+                try:
+                    payload = json.loads(r["payload"] or "{}")
+                except Exception:
+                    payload = {}
+                name = (payload.get("name") or "").strip()
+                if name:
+                    fts_rows.append((r["id"], notebook_id, name))
+            if fts_rows:
+                db.executemany(
+                    "INSERT INTO kg_objects_fts(object_id, notebook_id, name) VALUES (?,?,?)",
+                    fts_rows,
+                )
+        return len(fts_rows) if fts_rows else 0
+
+    def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
+        """ANN semantic search over the notebook's scale index.
+
+        Returns [{object_id, name:'', score, match:'semantic'}] or []
+        on any failure / missing index.
+        """
+        try:
+            if not self.settings.embedder_configured:
+                return []
+            idx = self._scale_index(notebook_id)
+            if idx is None or not idx.ann_labels:
+                return []
+            qvec = self._embed_query(q)
+            if qvec is None:
+                return []
+            import hnswlib
+            import numpy as np
+            dim = int(idx.manifest.get("dim", len(qvec)))
+            if dim != len(qvec):
+                return []
+            ann = hnswlib.Index(space="cosine", dim=dim)
+            ann.load_index(idx.ann_path, max_elements=len(idx.ann_labels))
+            ann.set_ef(max(k + 1, 50))
+            actual_k = min(k, len(idx.ann_labels))
+            labels, distances = ann.knn_query(np.asarray(qvec, dtype=np.float32), k=actual_k)
+            hits = []
+            for lab, dist in zip(labels[0], distances[0]):
+                node_id = idx.ann_labels[int(lab)]
+                # Skip chunk nodes and cluster hub nodes (not KG objects)
+                if node_id.startswith("cluster:") or not node_id.startswith("ko-"):
+                    continue
+                score = max(0.0, 1.0 - float(dist))
+                if score > 0:
+                    hits.append({"object_id": node_id, "name": "", "score": score,
+                                 "match": "semantic"})
+            return hits
+        except Exception:  # noqa: BLE001 — fail-open
+            return []
+
+    def _hydrate_search_hits(self, notebook_id: str, hits: list) -> list:
+        """Enrich merged hits with object_type and fill missing names.
+
+        Drops hits for objects that no longer exist or are deprecated.
+        """
+        if not hits:
+            return []
+        ids = [h["object_id"] for h in hits]
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT id, object_type, status, payload FROM knowledge_objects "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        meta: dict = {}
+        for r in rows:
+            if r["status"] == "deprecated":
+                continue
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except Exception:
+                payload = {}
+            meta[r["id"]] = {"object_type": r["object_type"], "name": payload.get("name", "")}
+        result = []
+        for h in hits:
+            m = meta.get(h["object_id"])
+            if m is None:
+                continue  # object gone or deprecated
+            enriched = dict(h)
+            enriched["object_type"] = m["object_type"]
+            if not enriched.get("name"):
+                enriched["name"] = m["name"]
+            result.append(enriched)
+        return result
+
+    def kg_search(self, notebook_id: str, q: str, k: int = 30) -> list:
+        """Search KG objects by name (FTS5 lexical) union ANN semantic.
+
+        Returns [{object_id, name, object_type, score, match}] sorted by score desc.
+        Raises KeyError if notebook not found.
+        """
+        from app.services.kg.search import fts_search, merge_search_hits
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            lex = fts_search(db, notebook_id, q, k)
+        sem = self._semantic_search(notebook_id, q, k)
+        merged = merge_search_hits(lex, sem, k)
+        return self._hydrate_search_hits(notebook_id, merged)
 
     def eval_insert_source_for_test(
         self, nb_id: str, name: str, text: str, tmpdir: str
@@ -2836,6 +2968,17 @@ class SQLiteRepository:
                       json.dumps(o["evidence"], ensure_ascii=False),
                       source_id or '', now, now) for o in chunk],
                 )
+                fts_rows = [
+                    (o["_oid"], notebook_id, o["payload"].get("name", ""))
+                    for o in chunk
+                    if (o["payload"].get("name") or "").strip()
+                ]
+                if fts_rows:
+                    db.executemany(
+                        "INSERT INTO kg_objects_fts(object_id, notebook_id, name) "
+                        "VALUES (?, ?, ?)",
+                        fts_rows,
+                    )
         for i in range(0, len(db_relations), CHUNK):
             chunk = db_relations[i:i + CHUNK]
             with self._write() as db:
