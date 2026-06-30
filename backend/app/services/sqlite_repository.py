@@ -633,6 +633,18 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL
                 );
 
+                -- Transient scratch for memory-bounded rebuild_unified_kg: maps
+                -- object_id -> seed for the type currently being clustered. NOT a
+                -- TEMP TABLE on purpose (the rebuild spans multiple connections +
+                -- mid-rebuild LLM calls; a connection-scoped temp would force one
+                -- long-held write lock). Cleared per-type and at rebuild start/end.
+                CREATE TABLE IF NOT EXISTS kg_cluster_scratch (
+                  notebook_id TEXT NOT NULL,
+                  object_id TEXT NOT NULL,
+                  seed TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_cluster_scratch_nb ON kg_cluster_scratch(notebook_id);
+
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_source_elements_source ON source_elements(source_id);
@@ -3895,34 +3907,168 @@ class SQLiteRepository:
         self._unified_cache[(notebook_id, level)] = g
         return g
 
+    def _stream_seed_reps(self, notebook_id: str, object_type: str, seed_fn):
+        """Stream knowledge_objects of one type → populate kg_cluster_scratch
+        (object_id → seed) and accumulate seed-level aggregates, memory-bounded
+        by #unique seeds (NOT #objects). Returns (reps, members_count,
+        seed_first_name):
+          - reps[seed]          = mean of member vectors (dim-filtered)
+          - members_count[seed] = #objects for that seed
+          - seed_first_name[s]  = first-seen object name for that seed
+        kg_cluster_scratch is cleared for this notebook at entry so it only ever
+        holds the type currently being clustered (types are processed serially)."""
+        import numpy as np
+        from app.services.kg_merge import build_acronym_alias_map, _seed_with_alias, _norm
+
+        embed_dim = self.settings.embed_dim
+        # Scratch holds only the current type — clear before repopulating.
+        with self._write() as db:
+            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=?", (notebook_id,))
+
+        # Pass A1: stream names once to build the acronym alias map.
+        def _name_gen():
+            with self._connect() as db:
+                cur = db.execute(
+                    "SELECT payload FROM knowledge_objects "
+                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
+                    (notebook_id, object_type))
+                for r in cur:
+                    yield json.loads(r["payload"] or "{}").get("name", "")
+        alias_map = build_acronym_alias_map(_name_gen())
+
+        # Pass A2: stream (id, name) → seed; accumulate counts/first-name; buffer
+        # (notebook_id, id, seed) into scratch in batches.
+        members_count: Dict[str, int] = {}
+        seed_first_name: Dict[str, str] = {}
+        buf: List[tuple] = []
+        with self._connect() as rdb:
+            cur = rdb.execute(
+                "SELECT id, payload FROM knowledge_objects "
+                "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
+                (notebook_id, object_type))
+            with self._write() as wdb:
+                for r in cur:
+                    pay = json.loads(r["payload"] or "{}")
+                    name = pay.get("name", "")
+                    # Pass the full payload-bearing object so seed_fn can use it
+                    # (e.g. seed_procedure appends a steps signature from payload).
+                    # Mirrors the legacy cluster_objects(tobjs={name,payload}, ...).
+                    seed = _seed_with_alias({"name": name, "payload": pay}, seed_fn, alias_map)
+                    members_count[seed] = members_count.get(seed, 0) + 1
+                    seed_first_name.setdefault(seed, name)
+                    buf.append((notebook_id, r["id"], seed))
+                    if len(buf) >= 1000:
+                        wdb.executemany(
+                            "INSERT INTO kg_cluster_scratch (notebook_id, object_id, seed) VALUES (?,?,?)",
+                            buf)
+                        buf.clear()
+                if buf:
+                    wdb.executemany(
+                        "INSERT INTO kg_cluster_scratch (notebook_id, object_id, seed) VALUES (?,?,?)",
+                        buf)
+                    buf.clear()
+
+        # Pass B: stream vectors joined to seeds → rep mean per seed. Bounded by
+        # #unique seeds (rep_sum/rep_cnt), NOT #objects. Dim-mismatched legacy
+        # vectors are skipped (mirrors the old length filter).
+        rep_sum: Dict[str, "np.ndarray"] = {}
+        rep_cnt: Dict[str, int] = {}
+        with self._connect() as db:
+            cur = db.execute(
+                "SELECT s.seed AS seed, e.vector AS vector "
+                "FROM knowledge_embeddings e "
+                "JOIN kg_cluster_scratch s ON s.object_id=e.object_id AND s.notebook_id=e.notebook_id "
+                "WHERE e.notebook_id=?",
+                (notebook_id,))
+            for r in cur:
+                v = json.loads(r["vector"])
+                if len(v) != embed_dim:
+                    continue
+                arr = np.asarray(v, dtype=np.float32)
+                seed = r["seed"]
+                if seed in rep_sum:
+                    rep_sum[seed] += arr
+                    rep_cnt[seed] += 1
+                else:
+                    rep_sum[seed] = arr.copy()
+                    rep_cnt[seed] = 1
+        reps: Dict[str, "np.ndarray"] = {s: rep_sum[s] / rep_cnt[s] for s in rep_sum}
+        return reps, members_count, seed_first_name
+
+    def _write_cluster_map_streamed(self, notebook_id: str, object_type: str,
+                                    seed_to_canonical: Dict[str, str],
+                                    canonical_names: Dict[str, str],
+                                    desc_by_cid: Optional[Dict[str, str]] = None) -> None:
+        """Persist concept_clusters rows for one type by streaming
+        kg_cluster_scratch (object_id, seed). Matches write_clusters' columns and
+        DELETE scope EXACTLY (clear-by-(notebook_id, object_type), then insert one
+        row per member object). Rows whose seed has no canonical are skipped."""
+        now = _now()
+        desc_by_cid = desc_by_cid or {}
+        with self._connect() as rdb:
+            cur = rdb.execute(
+                "SELECT object_id, seed FROM kg_cluster_scratch WHERE notebook_id=?",
+                (notebook_id,))
+            with self._write() as wdb:
+                wdb.execute("DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
+                            (notebook_id, object_type))
+                buf: List[tuple] = []
+                for r in cur:
+                    cid = seed_to_canonical.get(r["seed"])
+                    if cid is None:
+                        continue
+                    buf.append((f"cc-{uuid4().hex[:10]}", notebook_id, cid, r["object_id"],
+                                canonical_names.get(cid, ""), object_type,
+                                desc_by_cid.get(cid, ""), now))
+                    if len(buf) >= 1000:
+                        wdb.executemany(
+                            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                            "VALUES (?,?,?,?,?,?,?,?)", buf)
+                        buf.clear()
+                if buf:
+                    wdb.executemany(
+                        "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)", buf)
+                    buf.clear()
+
     def rebuild_unified_kg(self, notebook_id: str) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
-        pending candidates (preserving confirmed/rejected). Returns #clusters."""
+        pending candidates (preserving confirmed/rejected). Returns #clusters.
+
+        Memory-bounded (streamed): object→seed mappings live in the
+        kg_cluster_scratch table; only seed-level aggregates (reps, counts,
+        names) are held in RAM, so peak memory scales with #unique name-seeds,
+        not #objects. Clustering semantics are identical to the legacy
+        all-objects-in-memory path (guarded by tests/test_unified_kg_repository,
+        test_cross_doc_merge, test_kg_merge, test_rebuild_streaming)."""
         self.get_notebook(notebook_id)
-        from app.services.kg_merge import cluster_concepts
-        with self._connect() as db:
-            crows = db.execute(
-                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND object_type='concept' AND status!='deprecated'",
-                (notebook_id,)).fetchall()
-            vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchall()
-        concepts = [{"object_id": r["id"], "name": json.loads(r["payload"] or "{}").get("name", "")} for r in crows]
-        vectors = {r["object_id"]: json.loads(r["vector"]) for r in vrows}
-        # Defensive: a pre-existing DB may hold vectors of a different dimension
-        # (legacy embedder). Drop mismatched-length vectors so cluster_concepts'
-        # numpy stack can't raise; name-seed merge still applies to those nodes.
-        dim = self.settings.embed_dim
-        vectors = {oid: v for oid, v in vectors.items() if len(v) == dim}
+        from app.services.kg_merge import (cluster_seeds, _norm, _discriminative_conflict,
+                                           seed_claim, seed_formula, seed_procedure)
+        # Start cleanup: drop any leftover scratch rows for this notebook.
+        with self._write() as db:
+            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=?", (notebook_id,))
+
+        # --- Concepts (vector + name-seed clustering) ----------------------
+        # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
+        # (object_id -> seed) and returns seed-level aggregates only.
+        reps, members_count, seed_first_name = self._stream_seed_reps(
+            notebook_id, "concept", lambda o: _norm(o["name"]))
+        # IMPORTANT: include seeds with NO vector (name-only) — use members_count
+        # keys, not reps keys, to match the legacy all-objects path.
+        seeds = sorted(members_count)
         # decided_pairs keys are canonical ids of the form "K-<normalized_seed_name>";
-        # cluster_concepts wants confirmed/rejected keyed by normalized seed name -> strip "K-".
+        # cluster_seeds wants confirmed/rejected keyed by normalized seed name -> strip "K-".
         def _seed(cid: str) -> str:
             return cid[2:] if cid.startswith("K-") else cid
         decided = self.decided_pairs(notebook_id)
         confirmed = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "confirmed"}
         rejected = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "rejected"}
-        res = cluster_concepts(concepts, vectors, confirmed, rejected)
+        sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                           conflict_fn=_discriminative_conflict, id_prefix="K-",
+                           rep_ann_max=self.settings.kg_cluster_rep_ann_max)
         # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
         from app.services.concept_merge_review import review_merge_candidates
-        autoc = res.get("auto_candidates", [])
+        autoc = sd.get("auto_candidates", [])
         if autoc and getattr(self.kg_llm_client, "configured", False):
             cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
                           for i, (a, b, s) in enumerate(autoc)]
@@ -3936,24 +4082,36 @@ class SQLiteRepository:
                                         b[2:] if b.startswith("K-") else b)))
             if extra:
                 confirmed = set(confirmed) | extra
-                res = cluster_concepts(concepts, vectors, confirmed, rejected)
-        rows = [{"canonical_id": res["cluster_map"][c["object_id"]], "member_object_id": c["object_id"],
-                 "canonical_name": res["canonical_names"][c["object_id"]]} for c in concepts]
+                # reps/members already in RAM — re-cluster is cheap.
+                sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                                   conflict_fn=_discriminative_conflict, id_prefix="K-",
+                                   rep_ann_max=self.settings.kg_cluster_rep_ann_max)
+        seed_to_canonical = sd["seed_to_canonical"]
+        desc_by_cid: Dict[str, str] = {}
         if self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False):
             from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
-            # members per canonical cluster
-            members_by_cid: Dict[str, List[str]] = {}
-            for r in rows:
-                members_by_cid.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-            desc_by_cid: Dict[str, str] = {}
-            for cid, mids in members_by_cid.items():
-                if len(mids) < 2:
+            # Total members per canonical = Σ members_count over its seeds. Keep
+            # only multi-member (cross-doc merged) canonicals — same cost bound as
+            # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
+            # no 5M-row member list is materialized.
+            total_by_cid: Dict[str, int] = {}
+            seeds_by_cid: Dict[str, List[str]] = {}
+            for s, cid in seed_to_canonical.items():
+                total_by_cid[cid] = total_by_cid.get(cid, 0) + members_count.get(s, 0)
+                seeds_by_cid.setdefault(cid, []).append(s)
+            for cid, total in total_by_cid.items():
+                if total < 2:
                     continue   # only fuse cross-doc merged clusters (cost bound)
-                # gather member evidence quotes
-                ph = ",".join("?" for _ in mids)
+                cseeds = seeds_by_cid[cid]
+                # Member evidence is fetched per canonical via the scratch join,
+                # bounded by that canonical's member count (not the whole table).
+                ph = ",".join("?" for _ in cseeds)
                 with self._connect() as db:
                     erows = db.execute(
-                        f"SELECT evidence FROM knowledge_objects WHERE id IN ({ph})", mids).fetchall()
+                        f"SELECT k.evidence AS evidence FROM knowledge_objects k "
+                        f"JOIN kg_cluster_scratch s ON s.object_id=k.id "
+                        f"WHERE s.notebook_id=? AND s.seed IN ({ph})",
+                        (notebook_id, *cseeds)).fetchall()
                 quotes = []
                 for er in erows:
                     for ev in json.loads(er["evidence"] or "[]"):
@@ -3963,7 +4121,7 @@ class SQLiteRepository:
                 quotes = list(dict.fromkeys(quotes))[:8]   # dedup, cap
                 if not quotes:
                     continue
-                name = next((r["canonical_name"] for r in rows if r["canonical_id"] == cid), "")
+                name = sd["canonical_names"].get(cid, "")
                 block = "\n".join(f"- {q}" for q in quotes)
                 try:
                     raw = self.kg_llm_client.chat_json(
@@ -3974,39 +4132,24 @@ class SQLiteRepository:
                     desc = ""
                 if desc:
                     desc_by_cid[cid] = desc
-            if desc_by_cid:
-                for r in rows:
-                    if r["canonical_id"] in desc_by_cid:
-                        r["canonical_description"] = desc_by_cid[r["canonical_id"]]
-        self.write_clusters(notebook_id, rows)
+        self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
+                                         sd["canonical_names"], desc_by_cid)
         # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
         # vector near-dup remains concept-only). Each type isolated by id prefix.
-        from app.services.kg_merge import (cluster_objects, seed_claim,
-                                           seed_formula, seed_procedure)
+        # These types carry no vectors → reps_t is empty → cluster_seeds does only
+        # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
         _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
                        "formula": (seed_formula, "KF-"),
                        "procedure": (seed_procedure, "KP-")}
         for t, (sfn, prefix) in _TYPE_MERGE.items():
-            with self._connect() as db:
-                trows = db.execute(
-                    "SELECT id, payload FROM knowledge_objects "
-                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
-                    (notebook_id, t)).fetchall()
-            tobjs = []
-            for r in trows:
-                pay = json.loads(r["payload"] or "{}")
-                tobjs.append({"object_id": r["id"], "name": pay.get("name", ""),
-                              "payload": pay})
-            if not tobjs:
-                self.write_clusters(notebook_id, [], object_type=t)   # clear stale rows
-                continue
-            res_t = cluster_objects(tobjs, {}, set(), set(), seed_fn=sfn,
-                                    conflict_fn=None, id_prefix=prefix)
-            trows_w = [{"canonical_id": res_t["cluster_map"][o["object_id"]],
-                        "member_object_id": o["object_id"],
-                        "canonical_name": res_t["canonical_names"][o["object_id"]]}
-                       for o in tobjs]
-            self.write_clusters(notebook_id, trows_w, object_type=t)
+            reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn)
+            # Empty type → scratch empty → _write_cluster_map_streamed clears rows
+            # (same as legacy write_clusters([], object_type=t)).
+            sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
+                                 conflict_fn=None, id_prefix=prefix,
+                                 rep_ann_max=self.settings.kg_cluster_rep_ann_max)
+            self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
+                                             sd_t["canonical_names"])
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = _now()
@@ -4015,9 +4158,11 @@ class SQLiteRepository:
             db.executemany(
                 "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
                 "VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in res["pending"]])
+                [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in sd["pending"]])
         self._invalidate_unified_cache(notebook_id)
-        cluster_count = len(set(res["cluster_map"].values()))
+        # #distinct concept canonicals (== set of cluster_map values in the legacy
+        # path: every canonical has ≥1 seed and every concept seed has a canonical).
+        cluster_count = len(set(seed_to_canonical.values()))
         with self._write() as db:
             object_count = db.execute(
                 "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
@@ -4042,6 +4187,9 @@ class SQLiteRepository:
                 """,
                 (notebook_id, now, object_count, relation_count, cluster_count, now),
             )
+        # Final cleanup: drop this notebook's scratch rows.
+        with self._write() as db:
+            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=?", (notebook_id,))
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
