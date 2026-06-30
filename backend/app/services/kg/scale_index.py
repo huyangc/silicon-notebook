@@ -187,3 +187,35 @@ def splice_active(
     combined_edges = base_edges_reconstructed + list(active_edges)
     A, _ = build_transition(combined_ids, combined_edges)
     return combined_ids, A
+
+
+def viz_core(viz: dict, limit: int) -> dict:
+    """折叠 viz 图取度数 top-N + 诱导边。viz: {viz_ids, viz_adj(csr), viz_deg, viz_types}。
+    返回 {nodes:[{id,type,degree}], edges:[{source,target}], total_nodes, total_edges, truncated}。"""
+    ids, adj, deg, types = viz["viz_ids"], viz["viz_adj"], viz["viz_deg"], viz["viz_types"]
+    total = len(ids)
+    n = total if (not limit or limit <= 0) else min(limit, total)
+    top = np.argsort(-deg)[:n]
+    keep = set(int(i) for i in top)
+    nodes = [{"id": ids[i], "type": types[i], "degree": int(deg[i])} for i in top]
+    coo = adj.tocoo()
+    seen = set(); edges = []
+    for r, c in zip(coo.row.tolist(), coo.col.tolist()):
+        if r in keep and c in keep and r < c and (r, c) not in seen:
+            seen.add((r, c)); edges.append({"source": ids[r], "target": ids[c]})
+    return {"nodes": nodes, "edges": edges, "total_nodes": total,
+            "total_edges": int(adj.nnz // 2), "truncated": n < total}
+
+
+def viz_neighbors(viz: dict, node_id: str, cap: int = 50) -> dict:
+    """折叠图中 node_id 的 1-hop 邻域(≤cap),返回 {nodes,edges}。未知 id → 空。"""
+    ids, adj, deg, types = viz["viz_ids"], viz["viz_adj"], viz["viz_deg"], viz["viz_types"]
+    index = {nid: i for i, nid in enumerate(ids)}
+    i = index.get(node_id)
+    if i is None:
+        return {"nodes": [], "edges": []}
+    nbr = [int(j) for j in adj.getrow(i).indices][:max(0, cap)]
+    keep = [i] + nbr
+    nodes = [{"id": ids[j], "type": types[j], "degree": int(deg[j])} for j in keep]
+    edges = [{"source": node_id, "target": ids[j]} for j in nbr]
+    return {"nodes": nodes, "edges": edges}

@@ -194,3 +194,36 @@ def test_personalized_ppr_scales_to_1e5():
     assert abs(x.sum() - 1.0) < 1e-6
     assert dt < 10.0
     print(f"\n[scale] personalized_ppr 1e5 nodes / 1e6 edges: {dt:.3f}s")
+
+
+import numpy as np, scipy.sparse as sp
+from app.services.kg.scale_index import viz_core, viz_neighbors
+
+
+def _viz():
+    ids = ["h", "a", "b", "c", "iso"]
+    idx = {n: i for i, n in enumerate(ids)}
+    rows, cols = [], []
+    for s, t in [("h","a"),("h","b"),("h","c")]:
+        rows += [idx[s], idx[t]]; cols += [idx[t], idx[s]]
+    adj = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(5,5))
+    deg = np.asarray(adj.getnnz(axis=1)).ravel().astype(np.int32)
+    types = ["concept"]*5
+    return {"viz_ids": ids, "viz_adj": adj, "viz_deg": deg, "viz_types": types}
+
+
+def test_viz_core_top_n_by_degree_with_induced_edges():
+    v = _viz()
+    out = viz_core(v, limit=2)
+    ids = {n["id"] for n in out["nodes"]}
+    assert "h" in ids and len(ids) == 2
+    assert all({e["source"], e["target"]} <= ids for e in out["edges"])
+    assert out["total_nodes"] == 5 and out["truncated"] is True
+
+
+def test_viz_neighbors_one_hop_bounded():
+    v = _viz()
+    out = viz_neighbors(v, "h", cap=2)
+    nb = {n["id"] for n in out["nodes"]}
+    assert "h" in nb and len(out["nodes"]) <= 3
+    assert all(e["source"]=="h" or e["target"]=="h" for e in out["edges"])
