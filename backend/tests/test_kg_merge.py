@@ -352,3 +352,14 @@ def test_cluster_seeds_matches_cluster_objects_smallcase():
                        conflict_fn=None, id_prefix="K-")
     cmap = {o["object_id"]: sd["seed_to_canonical"][seed_of[o["object_id"]]] for o in objs}
     assert cmap == full["cluster_map"]
+
+
+def test_ann_candidates_shards_above_cap(caplog):
+    import numpy as np
+    from app.services.kg_merge import _ann_candidates
+    seeds = [f"s{i}" for i in range(50)]
+    reps = {s: np.random.default_rng(i).random(8).astype("float32") for i, s in enumerate(seeds)}
+    with caplog.at_level("WARNING"):
+        out = _ann_candidates(seeds, reps, k=5, lo=0.0, max_reps=10)
+    assert isinstance(out, list)
+    assert any("rep" in r.message.lower() for r in caplog.records)

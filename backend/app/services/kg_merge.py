@@ -167,38 +167,71 @@ def _discriminative_conflict(name_a: str, name_b: str) -> bool:
 
 
 def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
-                    k: int = 5, lo: float = 0.82) -> List[tuple]:
+                    k: int = 5, lo: float = 0.82,
+                    max_reps: int | None = None) -> List[tuple]:
     """hnswlib 余弦 top-k 近邻候选(sim≥lo), 去重无序对。O(N log N)。
-    reps: seed -> 代表向量(未归一化亦可, cosine 空间内部归一)。"""
+    reps: seed -> 代表向量(未归一化亦可, cosine 空间内部归一)。
+    max_reps: 若 idx_seeds 超过此上限, 分片建索引(每片自洽); 跨片同义对会丢失, 有 WARNING。
+    """
+    import math
     import hnswlib
     idx_seeds = [s for s in seeds if s in reps]
     n = len(idx_seeds)
     if n < 2:
         return []
-    M = np.asarray([reps[s] for s in idx_seeds], dtype=np.float32)
-    dim = int(M.shape[1])
-    index = hnswlib.Index(space="cosine", dim=dim)
-    index.init_index(max_elements=n, ef_construction=200, M=16, random_seed=42)
-    index.set_num_threads(1)
-    index.add_items(M, np.arange(n))
-    index.set_ef(max(64, k + 32))
-    kk = min(k + 1, n)
-    labels, distances = index.knn_query(M, k=kk)
+
+    def _run_shard(shard_seeds: List[str]) -> List[tuple]:
+        """Build one hnswlib index over shard_seeds and return deduped (a,b,sim) pairs."""
+        sn = len(shard_seeds)
+        if sn < 2:
+            return []
+        Mshard = np.asarray([reps[s] for s in shard_seeds], dtype=np.float32)
+        dim = int(Mshard.shape[1])
+        index = hnswlib.Index(space="cosine", dim=dim)
+        index.init_index(max_elements=sn, ef_construction=200, M=16, random_seed=42)
+        index.set_num_threads(1)
+        index.add_items(Mshard, np.arange(sn))
+        index.set_ef(max(64, k + 32))
+        kk = min(k + 1, sn)
+        labels, distances = index.knn_query(Mshard, k=kk)
+        local_out: List[tuple] = []
+        local_seen: set = set()
+        for i in range(sn):
+            for lab, dist in zip(labels[i], distances[i]):
+                j = int(lab)
+                if j == i:
+                    continue
+                sim = 1.0 - float(dist)
+                if sim < lo:
+                    continue
+                a, b = (i, j) if i < j else (j, i)
+                if (a, b) in local_seen:
+                    continue
+                local_seen.add((a, b))
+                local_out.append((shard_seeds[a], shard_seeds[b], sim))
+        return local_out
+
+    if max_reps is None or n <= max_reps:
+        return _run_shard(idx_seeds)
+
+    # Sharded path: n exceeds cap — build one index per shard of size <= max_reps.
+    n_shards = math.ceil(n / max_reps)
+    _log.warning(
+        "rep-ANN sharding: %d seeds exceeds cap %d; building in %d shards "
+        "(cross-shard synonym pairs may be missed)",
+        n, max_reps, n_shards,
+    )
     out: List[tuple] = []
     seen: set = set()
-    for i in range(n):
-        for lab, dist in zip(labels[i], distances[i]):
-            j = int(lab)
-            if j == i:
-                continue
-            sim = 1.0 - float(dist)
-            if sim < lo:
-                continue
-            a, b = (i, j) if i < j else (j, i)
-            if (a, b) in seen:
-                continue
-            seen.add((a, b))
-            out.append((idx_seeds[a], idx_seeds[b], sim))
+    for shard_idx in range(n_shards):
+        start = shard_idx * max_reps
+        end = min(start + max_reps, n)
+        shard_seeds = idx_seeds[start:end]
+        for a, b, sim in _run_shard(shard_seeds):
+            key = (a, b) if a < b else (b, a)
+            if key not in seen:
+                seen.add(key)
+                out.append((a, b, sim))
     return out
 
 
@@ -260,8 +293,10 @@ def cluster_seeds(
     lo: float = 0.82,
     top_k: int = 5,
     max_pending: int = 1000,
+    rep_ann_max: int | None = None,
 ) -> dict:
     """seed 级聚类核心(随 #seeds 有界)。confirmed/rejected 为 seed 对(frozenset)。
+    rep_ann_max: 传给 _ann_candidates 的分片上限(None=不分片)。
     返回 {seed_to_canonical, canonical_names, auto_candidates, pending, capped}。"""
     uf = _UF(seeds)
     for pair in confirmed:
@@ -271,7 +306,7 @@ def cluster_seeds(
         if a in uf.p and b in uf.p:
             uf.union(a, b)
     rej = {frozenset(p) for p in rejected}
-    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo)
+    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo, max_reps=rep_ann_max)
     cand = []
     for a, b, sim in raw:
         if rej and frozenset((a, b)) in rej:
