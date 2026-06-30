@@ -321,7 +321,7 @@ class Settings(BaseSettings):
     @property
     def embedder_configured(self) -> bool:
         return bool(
-            (self.embed_provider or "").strip() == "dashscope"
+            (self.embed_provider or "").strip().lower() == "dashscope"  # 大小写不敏感:DashScope 也算配置
             and (self.embed_base_url or "").strip()
             and (self.embed_api_key or "").strip()
             and (self.embed_model or "").strip()
