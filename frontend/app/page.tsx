@@ -1213,8 +1213,6 @@ export default function Home() {
 
     // 搜索模式：服务端返回的命中节点 + 核心图/展开图中对应节点的已知边。
     if (q && kgSearchHits.length > 0) {
-      // 从合并图中查找命中节点（含展开邻居），找不到则构造占位节点。
-      const nodeById = new Map(uGraphMerged.nodes.map((n) => [n.id, n]));
       const deg: Record<string, number> = {};
       uGraphMerged.edges.forEach((e) => { deg[e.source_object_id] = (deg[e.source_object_id] ?? 0) + 1; deg[e.target_object_id] = (deg[e.target_object_id] ?? 0) + 1; });
       const filtered = kgSearchHits.filter((h) => kgSelectedTypes.length === 0 || kgSelectedTypes.includes(h.object_type));
@@ -1227,12 +1225,6 @@ export default function Home() {
       const links: FgLink[] = uGraphMerged.edges
         .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
         .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type }));
-      // 保留 nodeById 覆盖 — 确保已展开节点 detail panel 可用
-      filtered.forEach((h) => {
-        if (!nodeById.has(h.object_id)) {
-          nodeById.set(h.object_id, { id: h.object_id, object_type: h.object_type, payload: { name: h.name } });
-        }
-      });
       return { nodes, links, searchHitCount: nodes.length };
     }
 
