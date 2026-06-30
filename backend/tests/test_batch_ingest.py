@@ -152,11 +152,13 @@ def test_main_requires_notebook_name_when_creating(repo, tmp_path, capsys):
 
 
 def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
+    """`all` 现在走 run_all(process_source/extract_source + rebuild_unified_kg),
+    不再走 build_notebook_kg。无向量模式下抽取 no-op,但 parse 流程跑通,3 个 source 建成。"""
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
-    monkeypatch.setattr(SQLiteRepository, "build_notebook_kg",
-                        lambda self, nb, *, progress=None: {"built": [], "failed": [], "skipped": []})
+    monkeypatch.setattr(SQLiteRepository, "_run_extraction", lambda self, sid: None)
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", lambda self, nb: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
     rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1",
                   "--allow-no-embed"])
     assert rc == 0
@@ -296,3 +298,70 @@ def test_run_kg_limit_requires_llm(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")
     with pytest.raises(RuntimeError):            # 无 KG/主 LLM → --limit 直接报错,不静默
         bi.run_kg(repo, nb_id, limit=1, conc=2)
+
+
+def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
+    """run_all per-source 流水线:每个新文件建 source + 走 process_source 抽取(extracted=N),
+    末尾一次 rebuild_unified_kg。强制 kg_auto_extract 让 process_source 走到 extract。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())   # configured=True → 走 extract 分支
+    d = _make_md_dir(tmp_path, n=2)                        # 2 个 docN.md + 1 个 nested.md = 3
+    nb_id = bi.ensure_notebook(repo, None, "nb-all")
+    extracted = []
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted.append(sid))
+    rebuild_calls = []
+    monkeypatch.setattr(repo, "rebuild_unified_kg",
+                        lambda nb: (rebuild_calls.append(nb), 5)[1])
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+
+    res = bi.run_all(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+
+    with repo._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert nsrc == 3                              # 每个文件都建了 source
+    assert res["new"] == 3 and res["resumed"] == 0
+    assert res["extracted"] == 3 and res["failed"] == 0   # 每个都被抽取(process_source→_run_extraction)
+    assert len(extracted) == 3
+    assert res["clusters"] == 5
+    assert rebuild_calls == [nb_id]               # 末尾恰好一次 rebuild
+
+
+def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
+    """已 parse、无 KG 的 source(同 hash 已摄取过)走 extract_source 补抽,不重复新建 source。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    nb_id = bi.ensure_notebook(repo, None, "nb-resume")
+    d = tmp_path / "docs"
+    d.mkdir()
+    files = []
+    sids = []
+    now = "2026-01-01T00:00:00"
+    for i in range(3):
+        p = d / f"doc{i}.md"
+        body = f"# Title {i}\n\nBody {i} " + "z" * 50
+        p.write_text(body, encoding="utf-8")
+        files.append(p)
+        digest = bi.sha256_bytes(p.read_bytes())
+        sid = f"src-r-{i}"
+        sids.append(sid)
+        with repo._write() as db:               # 预置 parsed source,同 hash → already_ingested
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, nb_id, f"S{i}", "document", p.name, str(p), 0, digest,
+                 "", "", "parsed", now, now))
+    extracted = []
+    monkeypatch.setattr(repo, "extract_source", lambda sid: extracted.append(sid))
+    # process_source 不应被调用(全部走 resume 路径);若被调用会因无 elements 抛错并计 failed
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+
+    res = bi.run_all(repo, nb_id, files, workers=2, conc=2)
+
+    with repo._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert nsrc == 3                              # 不重复新建
+    assert res["new"] == 0 and res["resumed"] == 3
+    assert sorted(extracted) == sorted(sids)      # 已存在的全部走 extract_source 补抽
+    assert res["extracted"] == 3 and res["failed"] == 0
