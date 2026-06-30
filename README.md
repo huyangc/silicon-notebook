@@ -490,7 +490,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent), `--dry-run` (scan & estimate only).
 
-Prereqs: configure EMBED and KG_LLM in `.env` (otherwise embedding/KG steps skip or error). Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
+Prereqs: configure EMBED and `KG_LLM` (KG extraction falls back to the global `OPENAI_COMPAT_*`) in `.env`. With EMBED unconfigured the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors (chunk/KG vectors are then skipped), never silently; KG extraction errors if no LLM is reachable. Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
 
 ## Current Limitations
 
