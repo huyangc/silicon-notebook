@@ -320,9 +320,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not repo.settings.embedder_configured:
         if not args.allow_no_embed:
             print(
-                "error: EMBED 未配置(EMBED_PROVIDER 为空)→ 不会产出向量(chunk/节点),检索将失效。\n"
-                "  CLI 默认拒绝静默降级。确认要无向量导入,请显式加 --allow-no-embed。\n"
-                "  常见原因:未从仓库根运行(.env 未加载),或 .env 未配 EMBED_PROVIDER/EMBED_*。",
+                f"error: EMBED 未就绪 → 不会产出向量(chunk/节点),检索将失效。\n"
+                f"  当前 EMBED_PROVIDER={(repo.settings.embed_provider or '').strip()!r}"
+                "(目前仅支持 'dashscope',大小写不敏感),且需 EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL 都配齐。\n"
+                "  若确认 .env 已配:.env 按「当前工作目录」加载——请从含 .env 的仓库根(主 checkout,不是 worktree)运行。\n"
+                "  确实要无向量导入,请显式加 --allow-no-embed。",
                 file=sys.stderr,
             )
             return 2
