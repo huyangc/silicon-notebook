@@ -475,7 +475,12 @@ PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_di
 
 # build the scalable-retrieval index for a base-tier notebook (offline; re-run after rebuilding a static base)
 PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
+
+# backfill any missing chunk + node vectors for a notebook (idempotent; requires EMBED configured)
+PYTHONPATH=backend python scripts/batch_ingest.py embed --notebook-id nb-xxxx
 ```
+
+The `embed` subcommand re-fills only the chunk and KG-node vectors that are *missing* (e.g. after a 429-throttled run left gaps). It requires `--notebook-id` and a configured EMBED endpoint — being a vector-backfill command, it ignores `--allow-no-embed` and errors out if EMBED is unconfigured.
 
 **Large base KGs (10^5–10^6 objects).** The final unified clustering streams (bounded by the number of unique normalized concept names, not the total object count), so `kg` scales without materializing all vectors. For a very large corpus you can extract in batches and cluster once at the end:
 
@@ -488,7 +493,15 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` bounds only how many sources are *extracted* this run; the final clustering always covers the whole notebook. After a `kg` rebuild on a base-tier notebook the scalable-retrieval index is rebuilt automatically (so it never goes stale). `KG_CLUSTER_REP_ANN_MAX` (default 2,000,000) caps the rep-ANN size — above it the index is built in shards with a warning (never silently truncated).
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (file concurrency), `--embed-conc` (embedding concurrency, throttles 429s), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent), `--dry-run` (scan & estimate only).
+**Concurrency tuning.** Three knobs control throughput (and 429 pressure):
+
+- `--workers` — in the `all` phase, how many *documents* are extracted at once (overrides `KG_JOB_CONCURRENCY`). In `ingest` it is the file-parse concurrency.
+- `--embed-conc` — embedding concurrency (overrides `EMBED_CONCURRENCY`). In `all`, chunk embedding runs in the background of each document's pipeline.
+- `KG_EXTRACT_WORKERS` (`.env`, default 16) — the global cap on concurrent KG-extraction LLM windows, shared across all documents (intra- and inter-document).
+
+In the `all` phase, peak embedding concurrency is roughly `--workers × --embed-conc`, so raise both cautiously to avoid provider 429s. If a throttled run leaves vectors missing, repair them later with the `embed` subcommand.
+
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (documents extracted concurrently in `all` = `KG_JOB_CONCURRENCY`; file concurrency otherwise), `--embed-conc` (embedding concurrency = `EMBED_CONCURRENCY`; throttles 429s), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent; ignored by the `embed` subcommand), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + node vectors and requires `--notebook-id`.
 
 Prereqs: configure EMBED and `KG_LLM` (KG extraction falls back to the global `OPENAI_COMPAT_*`) in `.env`. With EMBED unconfigured the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors (chunk/KG vectors are then skipped), never silently; KG extraction errors if no LLM is reachable. Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
 

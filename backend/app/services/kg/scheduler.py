@@ -84,8 +84,11 @@ def job_concurrency() -> int:
 
 
 def configure(*, window_workers: int | None = None, job_workers: int | None = None) -> None:
-    """Test-only: rebuild both pools with explicit sizes (falls back to settings
-    for any omitted value)."""
+    """Rebuild both pools with explicit sizes (falls back to settings for any
+    omitted value). Used by tests and by the offline CLI (batch_ingest.run_all)
+    to override pool capacity at runtime — the pools otherwise read an
+    independent Settings() at first use, so repo.settings changes don't reach
+    them and this explicit call is the only way to resize them."""
     with _lock:
         s = Settings()
         _shutdown_locked()

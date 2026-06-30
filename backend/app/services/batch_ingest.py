@@ -131,14 +131,35 @@ def run_ingest(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, lo
     return counts
 
 
-def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int:
-    """补该 notebook 所有 source 的 chunk 向量(低并发)。EMBED 未配则跳过。返回处理的 source 数。"""
+def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4,
+                              missing_only=False) -> int:
+    """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
+
+    - missing_only=False(默认):遍历每个 source 调 _embed_chunks_for_source 全量重嵌
+      (INSERT OR REPLACE upsert),返回处理的 *source* 数。
+    - missing_only=True:只补缺向量的 chunk(NOT EXISTS),一次 _embed_chunks_batch,
+      返回补的 *chunk* 数(无缺失则跳过返回 0)。
+    """
     if not repo.settings.embedder_configured:
         return 0
     orig_conc = repo.settings.embed_concurrency
     repo.settings.embed_concurrency = conc
-    done = 0
     try:
+        if missing_only:
+            with repo._connect() as db:
+                rows = db.execute(
+                    "SELECT c.id, c.text FROM chunks c WHERE c.notebook_id=? "
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
+                    "WHERE e.chunk_id=c.id)", (notebook_id,)).fetchall()
+            items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
+            if not items:
+                print("[embed] 无缺失 chunk 向量,跳过", flush=True)
+                return 0
+            print(f"[embed] 补缺失 chunk 向量:{len(items)} 个", flush=True)
+            repo._embed_chunks_batch(notebook_id, items)
+            return len(items)
+
+        done = 0
         with repo._connect() as db:
             sids = [r["id"] for r in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
@@ -150,9 +171,9 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> in
                 print(f"[embed {i}/{n}] {sid}", flush=True)
             except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
                 print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
+        return done
     finally:
         repo.settings.embed_concurrency = orig_conc
-    return done
 
 
 def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
@@ -251,14 +272,26 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
       只补抽 KG(embed 在上次 ingest 已做,无需重嵌)。
     批量期强制 kg_auto_extract=True(让 process_source 走到 extract)且关 per-source 融合;
     finally 恢复两者原值。单 source 失败隔离,计入 failed,不连累其余。
+
+    并发旋钮(本函数内生效,finally 复原):
+      workers → scheduler.configure(job_workers=workers) 覆盖 KG_JOB_CONCURRENCY
+        (= 同时抽几篇文档)。scheduler 池容量读独立 Settings(),不会被 repo.settings
+        传导,故必须显式 configure。
+      conc    → repo.settings.embed_concurrency=conc 覆盖 EMBED_CONCURRENCY
+        (process_source 内的后台 chunk embed 用它)。
     """
+    from app.services.kg import scheduler as _sched
     from app.services.kg.scheduler import submit_job
 
     log = log or (lambda _e: None)
     orig_auto = repo.settings.kg_auto_extract
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
+    orig_embed_conc = repo.settings.embed_concurrency
     repo.settings.kg_auto_extract = True                 # 强制 process_source 走 extract 分支
     repo.settings.kg_incremental_fusion_enabled = False  # 批量期关 per-source 融合,收尾一次 rebuild
+    repo.settings.embed_concurrency = conc               # process_source 后台 chunk embed 并发
+    # KG job 池读独立 Settings(),repo.settings 改不到它 → 显式 configure 覆盖 KG_JOB_CONCURRENCY
+    _sched.configure(job_workers=max(1, workers))
 
     files = list(files)
     res = {"new": 0, "resumed": 0, "extracted": 0, "failed": 0,
@@ -329,6 +362,7 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
     finally:
         repo.settings.kg_auto_extract = orig_auto
         repo.settings.kg_incremental_fusion_enabled = orig_fusion
+        repo.settings.embed_concurrency = orig_embed_conc
     return res
 
 
@@ -359,6 +393,48 @@ def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int
     return len(objects)
 
 
+def _count_missing_chunk_vectors(repo: SQLiteRepository, notebook_id) -> int:
+    with repo._connect() as db:
+        return db.execute(
+            "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
+            (notebook_id,)).fetchone()["c"]
+
+
+def _count_missing_node_vectors(repo: SQLiteRepository, notebook_id) -> int:
+    with repo._connect() as db:
+        return db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects o WHERE o.notebook_id=? "
+            "AND o.status!='deprecated' AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_embeddings e WHERE e.object_id=o.id)",
+            (notebook_id,)).fetchone()["c"]
+
+
+def run_embed(repo: SQLiteRepository, notebook_id, conc=4) -> dict:
+    """补该 notebook 缺失的 chunk + 节点向量(幂等,只补缺失)。
+
+    先 SQL 盘点缺失数并打印,再 backfill_chunk_embeddings(missing_only=True) +
+    backfill_node_embeddings(节点本就只补缺失),最后打印 after 盘点。
+    """
+    chunk_missing = _count_missing_chunk_vectors(repo, notebook_id)
+    node_missing = _count_missing_node_vectors(repo, notebook_id)
+    print(f"embed: 缺失盘点 chunk={chunk_missing} node={node_missing}", flush=True)
+
+    chunks_embedded = backfill_chunk_embeddings(repo, notebook_id, conc, missing_only=True)
+    nodes_embedded = backfill_node_embeddings(repo, notebook_id, conc)
+
+    chunk_after = _count_missing_chunk_vectors(repo, notebook_id)
+    node_after = _count_missing_node_vectors(repo, notebook_id)
+    print(f"embed done: 补 chunk={chunks_embedded} node(扫描)={nodes_embedded};"
+          f"剩余缺失 chunk={chunk_after} node={node_after}", flush=True)
+    return {
+        "chunks_embedded": chunks_embedded,
+        "nodes_embedded": nodes_embedded,
+        "chunk_missing_before": chunk_missing,
+        "node_missing_before": node_missing,
+    }
+
+
 def _make_logger(manifest_path: Optional[Path]) -> LogFn:
     if manifest_path is None:
         return lambda _e: None
@@ -379,15 +455,19 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
-    p.add_argument("phase", choices=["ingest", "kg", "index", "all"])
+    p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--notebook-name", default=None,
                    help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
                    help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
-    p.add_argument("--workers", type=int, default=4, help="文件级并发(默认 4)")
-    p.add_argument("--embed-conc", type=int, default=4, help="嵌入 backfill 并发(默认 4,避 429)")
+    p.add_argument("--workers", type=int, default=4,
+                   help="all 阶段同时抽取的文档数(覆盖 KG_JOB_CONCURRENCY);"
+                        "其余阶段为文件级并发。默认 4")
+    p.add_argument("--embed-conc", type=int, default=4,
+                   help="embedding 并发(覆盖 EMBED_CONCURRENCY;all 阶段峰值≈workers×此值,"
+                        "注意 429)。默认 4")
     p.add_argument("--limit", type=int, default=None,
                    help="kg 阶段只抽前 N 个未抽源(仅限制本次抽取数量;最终 rebuild 仍覆盖全本 notebook)")
     p.add_argument("--no-rebuild", action="store_true",
@@ -413,6 +493,11 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    if args.phase == "embed" and not args.notebook_id:
+        print("error: --notebook-id required for embed (specify the notebook to backfill vectors)",
+              file=sys.stderr)
+        return 2
+
     if args.dry_run:
         files = iter_files(args.input_dir) if args.input_dir else []
         print(f"[dry-run] {len(files)} files under {args.input_dir}", flush=True)
@@ -428,14 +513,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     repo = SQLiteRepository(Settings())
+    # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
+    allow_no_embed = args.allow_no_embed and args.phase != "embed"
     if not repo.settings.embedder_configured:
-        if not args.allow_no_embed:
+        if not allow_no_embed:
+            extra = ("\n  注意:embed 子命令用于补向量,--allow-no-embed 对它无效。"
+                     if args.phase == "embed" else "")
             print(
                 f"error: EMBED 未就绪 → 不会产出向量(chunk/节点),检索将失效。\n"
                 f"  当前 EMBED_PROVIDER={(repo.settings.embed_provider or '').strip()!r}"
                 "(目前仅支持 'dashscope',大小写不敏感),且需 EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL 都配齐。\n"
                 "  若确认 .env 已配:.env 按「当前工作目录」加载——请从含 .env 的仓库根(主 checkout,不是 worktree)运行。\n"
-                "  确实要无向量导入,请显式加 --allow-no-embed。",
+                "  确实要无向量导入,请显式加 --allow-no-embed。" + extra,
                 file=sys.stderr,
             )
             return 2
@@ -476,5 +565,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         _t = time.perf_counter()
         r = run_index(repo, notebook_id)
         print(f"index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+
+    if args.phase == "embed":
+        print(f"phase=embed notebook={notebook_id}", flush=True)
+        _t = time.perf_counter()
+        r = run_embed(repo, notebook_id, conc=args.embed_conc)
+        print(f"embed done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     return 0

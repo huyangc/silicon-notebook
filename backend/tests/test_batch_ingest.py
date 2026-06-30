@@ -95,6 +95,66 @@ def test_run_ingest_creates_sources_chunks_embeddings_no_kg(repo, tmp_path):
     assert nko == 0
 
 
+def test_backfill_chunk_embeddings_missing_only(repo, tmp_path):
+    """missing_only=True 只补缺向量的 chunk:返回值==被删数、补全后全有向量、
+    未删的行 created_at 不变(证明没重嵌已有的)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)  # 全量嵌入
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT chunk_id, created_at FROM chunk_embeddings WHERE notebook_id=? "
+            "ORDER BY chunk_id", (nb_id,)).fetchall()
+    all_ids = [r["chunk_id"] for r in rows]
+    assert len(all_ids) >= 2
+    before_created = {r["chunk_id"]: r["created_at"] for r in rows}
+
+    k = 2
+    deleted = all_ids[:k]
+    kept = all_ids[k:]
+    with repo._write() as db:
+        db.executemany("DELETE FROM chunk_embeddings WHERE chunk_id=?",
+                       [(cid,) for cid in deleted])
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"] == len(kept)
+
+    n = bi.backfill_chunk_embeddings(repo, nb_id, conc=2, missing_only=True)
+
+    assert n == k                                    # 只处理缺的
+    with repo._connect() as db:
+        nemb = db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+        nch = db.execute("SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
+                         (nb_id,)).fetchone()["c"]
+        after = {r["chunk_id"]: r["created_at"] for r in db.execute(
+            "SELECT chunk_id, created_at FROM chunk_embeddings WHERE notebook_id=?",
+            (nb_id,)).fetchall()}
+    assert nemb == nch                               # 补全后所有 chunk 都有向量
+    for cid in kept:                                 # 未删的没被重嵌(created_at 不变)
+        assert after[cid] == before_created[cid]
+
+
+def test_backfill_chunk_embeddings_missing_only_noop_when_complete(repo, tmp_path):
+    """全有向量时 missing_only=True 返回 0(无缺失则跳过)。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=2)
+    assert bi.backfill_chunk_embeddings(repo, nb_id, conc=2, missing_only=True) == 0
+
+
+def test_backfill_chunk_embeddings_default_full_reembed(repo, tmp_path):
+    """missing_only 默认 False:仍走全量(遍历 source),返回处理的 source 数。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    with repo._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert bi.backfill_chunk_embeddings(repo, nb_id, conc=2) == nsrc   # 默认=全量按 source
+
+
 def test_run_ingest_dedup_skips_on_rerun(repo, tmp_path):
     d = _make_md_dir(tmp_path, n=2)
     nb_id = bi.ensure_notebook(repo, None, "nb")
@@ -300,6 +360,96 @@ def test_run_kg_limit_requires_llm(repo):
         bi.run_kg(repo, nb_id, limit=1, conc=2)
 
 
+# ── Task 2: embed 子命令 + run_embed ─────────────────────────────────────────
+
+def _seed_node(repo, nb_id, oid):
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,payload,"
+            "source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (oid, nb_id, "concept", "active",
+             json.dumps({"name": f"name-{oid}", "definition": "definition text " * 5}),
+             "src-x", now, now))
+
+
+def test_run_embed_fills_missing_chunk_and_node_vectors(repo, tmp_path):
+    """run_embed:盘点 → 补缺失 chunk(missing_only)+ 节点向量 → 归零。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_node(repo, nb_id, "ko-2")
+
+    with repo._connect() as db:                      # 制造缺失:删 1 个 chunk 向量
+        cid = db.execute("SELECT chunk_id FROM chunk_embeddings WHERE notebook_id=? LIMIT 1",
+                         (nb_id,)).fetchone()["chunk_id"]
+    with repo._write() as db:
+        db.execute("DELETE FROM chunk_embeddings WHERE chunk_id=?", (cid,))
+
+    out = bi.run_embed(repo, nb_id, conc=2)
+
+    assert out["chunk_missing_before"] == 1
+    assert out["node_missing_before"] == 2           # 两个 node 都还没向量
+    assert out["chunks_embedded"] == 1
+    assert out["nodes_embedded"] >= 2
+    with repo._connect() as db:                      # 缺失归零
+        chunk_missing = db.execute(
+            "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)", (nb_id,)).fetchone()["c"]
+        node_missing = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects o WHERE o.notebook_id=? "
+            "AND o.status!='deprecated' AND NOT EXISTS "
+            "(SELECT 1 FROM knowledge_embeddings e WHERE e.object_id=o.id)",
+            (nb_id,)).fetchone()["c"]
+    assert chunk_missing == 0 and node_missing == 0
+
+
+def test_main_embed_end_to_end_zeroes_missing(repo, tmp_path, capsys, monkeypatch):
+    """main(['embed','--notebook-id',id]) 端到端:跑完缺失归零,打印 phase=embed。
+    main 自建 repo → 用 FakeEmbedder 替 make_embedder,与 fixture repo 同库。"""
+    monkeypatch.setattr("app.services.embedding.make_embedder",
+                        lambda settings: FakeEmbedder(dim=16))
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=2)
+    with repo._connect() as db:                      # 制造缺失
+        cids = [r["chunk_id"] for r in db.execute(
+            "SELECT chunk_id FROM chunk_embeddings WHERE notebook_id=?", (nb_id,)).fetchall()]
+    with repo._write() as db:
+        db.execute("DELETE FROM chunk_embeddings WHERE chunk_id=?", (cids[0],))
+
+    rc = bi.main(["embed", "--notebook-id", nb_id])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "phase=embed" in out
+    with repo._connect() as db:
+        chunk_missing = db.execute(
+            "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)", (nb_id,)).fetchone()["c"]
+    assert chunk_missing == 0
+
+
+def test_main_embed_requires_notebook_id(repo, capsys):
+    rc = bi.main(["embed"])
+    assert rc == 2
+    assert "notebook-id" in capsys.readouterr().err
+
+
+def test_main_embed_requires_embed_even_with_allow_no_embed(repo, tmp_path, monkeypatch, capsys):
+    """embed 子命令就是补向量:EMBED 未配 → return 2,且忽略 --allow-no-embed。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb")     # 用配好 EMBED 的 repo 先建库
+    monkeypatch.setenv("EMBED_PROVIDER", "")         # main 自建 repo → embedder 未配
+    rc = bi.main(["embed", "--notebook-id", nb_id, "--allow-no-embed"])
+    assert rc == 2
+    assert "EMBED" in capsys.readouterr().err
+
+
+def test_arg_parser_embed_phase():
+    args = bi.build_arg_parser().parse_args(["embed", "--notebook-id", "nb-x"])
+    assert args.phase == "embed"
+
+
 def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     """run_all per-source 流水线:每个新文件建 source + 走 process_source 抽取(extracted=N),
     末尾一次 rebuild_unified_kg。强制 kg_auto_extract 让 process_source 走到 extract。"""
@@ -324,6 +474,39 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     assert len(extracted) == 3
     assert res["clusters"] == 5
     assert rebuild_calls == [nb_id]               # 末尾恰好一次 rebuild
+
+
+def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, monkeypatch):
+    """Task 3:run_all 用 scheduler.configure(job_workers=workers) 覆盖 KG_JOB_CONCURRENCY,
+    并在 try 内把 repo.settings.embed_concurrency 设为 conc、finally 恢复原值。"""
+    from app.services.kg import scheduler as _sched
+
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-flags")
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+
+    configure_calls = []
+    monkeypatch.setattr(_sched, "configure",
+                        lambda **kw: configure_calls.append(kw))
+    seen_embed_conc = {}
+    real_rebuild = repo.rebuild_unified_kg
+
+    def _spy_rebuild(nb):                            # rebuild 在 try 内 → 此刻应已被覆盖为 conc
+        seen_embed_conc["during"] = repo.settings.embed_concurrency
+        return real_rebuild(nb)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", _spy_rebuild)
+
+    orig_embed_conc = repo.settings.embed_concurrency
+    try:
+        bi.run_all(repo, nb_id, bi.iter_files(d), workers=3, conc=7)
+        assert any(c.get("job_workers") == 3 for c in configure_calls)  # 以 job_workers==workers 调过
+        assert seen_embed_conc["during"] == 7        # try 内 embed_concurrency 被设为 conc
+        assert repo.settings.embed_concurrency == orig_embed_conc       # finally 恢复
+    finally:
+        _sched.reset()                               # 避免污染全局池
 
 
 def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
