@@ -1,3 +1,4 @@
+import time
 import pytest
 from unittest.mock import patch
 from app.core.config import Settings
@@ -122,3 +123,52 @@ def test_concurrent_rebuild_scratch_isolated(repo):
     concept_members1 = [oid for oid, cid in cmap1.items() if cid.startswith("K-")]
     assert len(concept_members1) == 2, "both NMOS objects must be in the concept cluster"
     assert cmap1 == cmap2, "cluster map must be identical across sequential rebuilds"
+
+
+@pytest.mark.slow
+def test_rebuild_streaming_scales(repo):
+    """Gated scale test: rebuild_unified_kg completes with bounded memory for a
+    large synthetic notebook (~20k mostly-unique concepts).  The test records
+    wall-clock time and verifies that:
+      - every concept is written to concept_clusters (rows == N)
+      - kg_cluster_scratch is fully cleaned up after the rebuild
+      - the cluster count is ≥ 90 % of N (mostly-unique names → mostly separate clusters)
+    """
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    N = 20_000
+    BATCH = 2_000
+    for start in range(0, N, BATCH):
+        objs = [
+            {
+                "local_id": f"c{i}",
+                "object_type": "concept",
+                "payload": {"name": f"concept number {i}", "section_path": ""},
+                "evidence": [],
+            }
+            for i in range(start, start + BATCH)
+        ]
+        repo.store_kg(nb.id, None, objs, [])
+
+    t = time.perf_counter()
+    n_clusters = repo.rebuild_unified_kg(nb.id)
+    dt = time.perf_counter() - t
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT COUNT(*) AS c FROM concept_clusters "
+            "WHERE notebook_id=? AND object_type='concept'",
+            (nb.id,),
+        ).fetchone()["c"]
+        scratch = db.execute(
+            "SELECT COUNT(*) AS c FROM kg_cluster_scratch WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()["c"]
+
+    assert rows == N, f"expected {N} concept_clusters rows, got {rows}"
+    assert scratch == 0, "kg_cluster_scratch must be empty after rebuild"
+    assert n_clusters >= N * 0.9, (
+        f"expected ≥{N * 0.9:.0f} clusters (mostly-unique names), got {n_clusters}"
+    )
+    print(
+        f"\n[scale] rebuild_unified_kg {N} concepts: {dt:.2f}s, clusters={n_clusters}"
+    )
