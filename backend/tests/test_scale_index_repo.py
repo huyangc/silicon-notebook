@@ -755,3 +755,27 @@ def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
     with open(mpath) as fh:
         manifest = json.load(fh)
     assert "s2" in manifest["watermark_sources"], "fold 未把 delta source s2 纳入水位(空跑了)"
+
+
+def test_scale_index_eligible_decoupled_from_tier(repo, monkeypatch):
+    """检索索引 eligible 与 tier 解耦:非 base 但规模够大(超建议阈值)也应可建;小库仍不 eligible。"""
+    from app.models.schemas import NotebookCreate
+    monkeypatch.setattr(repo.settings, "index_suggest_chunk_threshold", 3)
+    now = "2026-07-01T00:00:00"
+
+    def mk(name, n_chunks):
+        nb = repo.create_notebook(NotebookCreate(name=name))  # tier=personal(默认)
+        with repo._write() as db:
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (f"s-{nb.id}", nb.id, "t", "md", "ready", now, now))
+            for i in range(n_chunks):
+                db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                           "VALUES (?,?,?,?,?,?,?)", (f"c-{nb.id}-{i}", nb.id, f"s-{nb.id}", "x", "", "[]", now))
+        return nb
+
+    big = mk("big-personal", 5)      # 5 > 阈值 3 → suggested
+    small = mk("small-personal", 1)  # 1 < 阈值 3
+    assert repo.scale_index_status(big.id)["eligible"] is True     # 非 base 也 eligible(解耦)
+    assert repo.scale_index_status(small.id)["eligible"] is False  # 小库仍不 eligible
+    # 大个人库 trigger 不再 409(now → building/already_building)
+    assert repo.trigger_scale_index_rebuild(big.id)["status"] in ("building", "already_building")
