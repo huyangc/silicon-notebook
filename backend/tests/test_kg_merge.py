@@ -363,3 +363,26 @@ def test_ann_candidates_shards_above_cap(caplog):
         out = _ann_candidates(seeds, reps, k=5, lo=0.0, max_reps=10)
     assert isinstance(out, list)
     assert any("rep" in r.message.lower() for r in caplog.records)
+
+
+def test_cluster_seeds_emits_pending_seeds():
+    import numpy as np
+    from app.services.kg_merge import cluster_seeds
+    # 两个高相似但 <hi 的 seed → 一条 pending
+    seeds = ["deepseek v2", "deepseek v2 series", "unrelated topic"]
+    v = {"deepseek v2": np.array([1.0, 0.0], dtype=np.float32),
+         "deepseek v2 series": np.array([0.96, 0.28], dtype=np.float32),
+         "unrelated topic": np.array([0.0, 1.0], dtype=np.float32)}
+    mc = {s: 1 for s in seeds}
+    sfn = {s: s for s in seeds}
+    res = cluster_seeds(seeds, v, mc, sfn, set(), set(), hi=0.999, lo=0.5)
+    assert "pending_seeds" in res
+    # pending_seeds 与 pending 一一对应(同对同序)
+    assert len(res["pending_seeds"]) == len(res["pending"])
+    for (sa, sb, ca, cb, sim), (pa, pb, psim) in zip(res["pending_seeds"], res["pending"]):
+        assert (ca, cb, sim) == (pa, pb, psim)
+        # seed 名对能还原(strip-"K-" == seed)
+        assert {ca[2:], cb[2:]} == {sa, sb}
+    # 至少命中那条版本变体对
+    assert any({sa, sb} == {"deepseek v2", "deepseek v2 series"}
+               for sa, sb, *_ in res["pending_seeds"])
