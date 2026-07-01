@@ -292,6 +292,7 @@ class SQLiteRepository:
         self._unified_cache: Dict[Any, Any] = {}
         self._user_model_cfg_cache: Dict[str, dict] = {}
         self._scale_idx_cache: Dict[str, Any] = {}
+        self._viz_idx_cache: Dict[str, Any] = {}
         self._vector_cache = VectorCache()
         self._write_lock = threading.RLock()
         self._migrate()
@@ -6676,43 +6677,28 @@ class SQLiteRepository:
         )
 
     def _build_viz_graph_arrays(self, notebook_id: str):
-        """Build the persisted folded-viz-graph arrays from the SAME folded graph
-        _unified_graph_full(nb, "object") produces. Returns
-        (viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload):
-          - viz_ids       : folded node ids (canonical_id or raw object_id), in the
-                            SAME order _unified_graph_full returns nodes (matters for
-                            degree-tie ordering vs limit_graph_by_degree).
-          - viz_adj       : undirected adjacency CSR over folded nodes (for
-                            viz_neighbors 1-hop; symmetric, binary).
-          - viz_deg       : int32 degree computed the SAME way limit_graph_by_degree
-                            does (+1 per endpoint per DIRECTED deduped edge), so the
-                            bounded degree-top-N selection matches the legacy slice
-                            exactly (values AND tie order).
-          - viz_types     : object_type per folded node
-          - viz_names     : display name per folded node (payload.name)
-          - viz_payload   : {"edges": [[src,dst,edge_type], ...]} — the EXACT
-                            directed-deduped folded edge list, so the bounded path
-                            reproduces edges (and total_edges) identically.
-        """
+        """Full-payload derivation (used by build_scale_index). Delegates the
+        array math to _viz_arrays_from_graph so build_viz_index can reuse it with
+        a lighter (json_extract) derivation."""
+        return self._viz_arrays_from_graph(self._unified_graph_full(notebook_id, "object"))
+
+    def _viz_arrays_from_graph(self, full: dict):
+        """(viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload) from a
+        folded object-level graph dict {nodes, edges}. Node order = input order
+        (matters for degree-tie vs limit_graph_by_degree). Only reads id /
+        object_type / payload.name — payload may be full or name-only."""
         import numpy as np
         import scipy.sparse as sp
 
-        # level="object" = the full folded graph (no concept-only filter), which is
-        # exactly what unified_graph(level="object") slices with limit_graph_by_degree.
-        full = self._unified_graph_full(notebook_id, "object")
         nodes = full["nodes"]
         edges = full["edges"]
-
         viz_ids = [n["id"] for n in nodes]
         viz_types = [n["object_type"] for n in nodes]
         viz_names = [(n.get("payload") or {}).get("name", "") for n in nodes]
         index = {nid: i for i, nid in enumerate(viz_ids)}
         n = len(viz_ids)
 
-        # Degree mirrors limit_graph_by_degree: count each directed deduped edge
-        # once per endpoint (bidirectional/multi-type pairs add up).
         deg = np.zeros(n, dtype=np.int64)
-        # Undirected adjacency for neighbor lookup (binary, symmetric).
         und_rows, und_cols, und_seen = [], [], set()
         edge_list: List[list] = []
         for e in edges:
@@ -6738,6 +6724,53 @@ class SQLiteRepository:
         viz_deg = deg.astype(np.int32)
         viz_payload = {"edges": edge_list}
         return viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload
+
+    def _derive_object_graph_lite(self, notebook_id: str) -> dict:
+        """Object-level folded graph EQUIVALENT to _unified_graph_full(nb,'object')
+        but WITHOUT full-payload json.loads: node names come from SQL
+        json_extract(payload,'$.name'). Same table + same WHERE (no ORDER BY) →
+        same scan order → same fold order → identical viz arrays."""
+        self.get_notebook(notebook_id)
+        from app.services.kg_merge import derive_unified_graph
+        with self._connect() as db:
+            nrows = db.execute(
+                "SELECT id, object_type, json_extract(payload,'$.name') AS name "
+                "FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,),
+            ).fetchall()
+        nodes = [{"id": r["id"], "object_type": r["object_type"],
+                  "payload": {"name": r["name"] or ""}} for r in nrows]
+        edges = [{"source_object_id": r["source_object_id"],
+                  "target_object_id": r["target_object_id"], "edge_type": r["edge_type"]}
+                 for r in self.relations_for_notebook(notebook_id)]
+        return derive_unified_graph(nodes, edges, self.cluster_map(notebook_id))
+
+    def _viz_index_dir(self, notebook_id: str) -> str:
+        return os.path.join(str(self.settings.storage_dir), "kg_viz", notebook_id)
+
+    def build_viz_index(self, notebook_id: str) -> Optional[dict]:
+        """Build + persist a viz-only index under {storage_dir}/kg_viz/{nb}/ so the
+        KG-view fast paths light up for notebooks without a full scale index.
+        json_extract names avoid the 300k-row json.loads. Returns manifest, or
+        None for an empty graph (no non-deprecated objects). Caches on success."""
+        from app.services.kg import viz_index as vi
+        self.get_notebook(notebook_id)
+        full = self._derive_object_graph_lite(notebook_id)
+        if not full["nodes"]:
+            return None
+        viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = \
+            self._viz_arrays_from_graph(full)
+        manifest = {
+            "version": self._scale_index_version(notebook_id),
+            "n_viz_nodes": len(viz_ids),
+            "n_viz_edges": len(viz_payload.get("edges", [])),
+        }
+        out_dir = self._viz_index_dir(notebook_id)
+        vi.save_viz_index(out_dir, viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
+                          viz_types=viz_types, viz_names=viz_names,
+                          viz_payload=viz_payload, manifest=manifest)
+        self._viz_idx_cache[notebook_id] = vi.load_viz_index(out_dir)
+        return manifest
 
     def _active_kg_delta(self, notebook_id: str):
         """Gather the ACTIVE notebook's KG delta for splicing onto a base scale
