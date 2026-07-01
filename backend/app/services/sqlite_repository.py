@@ -4515,7 +4515,7 @@ class SQLiteRepository:
         # below (same node-id set / totals / shape). Small notebooks with no index
         # fall through unchanged.
         if limit is not None and level != "concept":
-            idx = self._scale_index(notebook_id)
+            idx = self._viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
                 return self._unified_graph_bounded(idx, limit)
         full = self._unified_graph_full(notebook_id, level)
@@ -4608,7 +4608,7 @@ class SQLiteRepository:
         1-hop query over knowledge_relations, folding endpoints via cluster_map so
         the shape matches the unified graph the frontend already renders."""
         self.get_notebook(notebook_id)
-        idx = self._scale_index(notebook_id)
+        idx = self._viz_index(notebook_id)
         if idx is not None and getattr(idx, "viz_ids", None) is not None:
             from app.services.kg.scale_index import viz_neighbors
             nb = viz_neighbors(self._viz_dict(idx), object_id, cap)
@@ -4669,7 +4669,13 @@ class SQLiteRepository:
             nbr_ids.add(other)
             edges.append({"source_object_id": object_id, "target_object_id": other,
                           "edge_type": r["edge_type"]})
-        all_ids = {object_id} | nbr_ids
+        # Include the queried node itself only when it's a known canonical id or
+        # has neighbours; unknown / non-canonical ids that produced no edges are
+        # dropped so that both the viz fast-path and the DB path return equivalent
+        # empty results for unrecognised lookups.
+        canonical_ids = set(cmap.values())
+        include_self = bool(nbr_ids) or object_id in canonical_ids
+        all_ids = (nbr_ids | {object_id}) if include_self else nbr_ids
         meta = self._object_meta(notebook_id, all_ids, cmap)
         nodes = [{"id": oid, "object_type": meta.get(oid, ("", ""))[0],
                   "payload": {"name": meta.get(oid, ("", ""))[1]}} for oid in all_ids]
@@ -6464,6 +6470,27 @@ class SQLiteRepository:
             return None
         self._scale_idx_cache[notebook_id] = idx
         return idx
+
+    def _viz_index(self, notebook_id: str):
+        """Index exposing folded viz arrays for the KG-view fast paths, or None.
+
+        Priority: (1) a valid full scale index (base library — already carries the
+        viz arrays); (2) a persisted viz-only index whose version matches; (3)
+        lazily build one (synchronous) + persist. None only for an empty graph."""
+        scale = self._scale_index(notebook_id)
+        if scale is not None and getattr(scale, "viz_ids", None) is not None:
+            return scale
+        from app.services.kg import viz_index as vi
+        cur = self._scale_index_version(notebook_id)
+        cached = self._viz_idx_cache.get(notebook_id)
+        if cached is not None and cached.manifest.get("version") == cur:
+            return cached
+        idx = vi.load_viz_index(self._viz_index_dir(notebook_id))
+        if idx is not None and idx.manifest.get("version") == cur:
+            self._viz_idx_cache[notebook_id] = idx
+            return idx
+        self.build_viz_index(notebook_id)   # sync lazy build; sets cache on success
+        return self._viz_idx_cache.get(notebook_id)
 
     def _gather_kg_graph(self, notebook_id: str):
         """Gather all KG nodes/relations/chunks/cluster_groups for a notebook

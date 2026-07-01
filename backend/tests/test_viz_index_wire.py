@@ -1,0 +1,75 @@
+"""_viz_index 懒构建 + unified_graph/kg_neighbors 等价 + 检索隔离 + base 复用。"""
+import os
+import pytest
+from app.core.config import Settings
+from app.services.sqlite_repository import SQLiteRepository
+from app.services.embedding import FakeEmbedder
+from app.models.schemas import NotebookCreate
+from app.services.kg_merge import limit_graph_by_degree
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
+    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
+    monkeypatch.setenv("EMBED_API_KEY", "test-key")
+    monkeypatch.setenv("EMBED_MODEL", "test-model")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)
+    return r
+
+
+def _star(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "gain", "section_path": ""}, "evidence": []},
+        {"local_id": "c", "object_type": "concept", "payload": {"name": "bias", "section_path": ""}, "evidence": []},
+    ], [
+        {"source_local_id": "a", "target_local_id": "b", "edge_type": "relates", "evidence": []},
+        {"source_local_id": "a", "target_local_id": "c", "edge_type": "relates", "evidence": []},
+    ])
+    repo.rebuild_unified_kg(nb.id)
+    return nb
+
+
+def test_unified_graph_lazy_builds_and_matches(repo):
+    nb = _star(repo)
+    # 无任何预构建:unified_graph 触发懒建并等价全量派生
+    legacy = repo._unified_graph_full(nb.id, "object")
+    legacy_top2 = limit_graph_by_degree(legacy, 2)
+    bounded = repo.unified_graph(nb.id, level="object", limit=2)
+    assert len(bounded["nodes"]) == len(legacy_top2["nodes"]) == 2
+    assert bounded["total_nodes"] == len(legacy["nodes"])
+    assert bounded["total_edges"] == len(legacy["edges"])
+    # 懒建落盘了
+    assert os.path.exists(os.path.join(repo._viz_index_dir(nb.id), "manifest.json"))
+
+
+def test_neighbors_lazy_matches_db(repo):
+    nb = _star(repo)
+    # canonical id 折叠后 "MOSFET" 概念:两路应一致
+    db_res = repo._kg_neighbors_db(nb.id, "MOSFET", 50)
+    viz_res = repo.kg_neighbors(nb.id, "MOSFET", 50)
+    assert {n["id"] for n in viz_res["nodes"]} == {n["id"] for n in db_res["nodes"]}
+    assert {(e["source_object_id"], e["target_object_id"]) for e in viz_res["edges"]} == \
+           {(e["source_object_id"], e["target_object_id"]) for e in db_res["edges"]}
+
+
+def test_scale_index_isolation(repo):
+    nb = _star(repo)
+    repo.unified_graph(nb.id, level="object", limit=2)  # 建 viz 索引
+    # 检索路径不受污染:该库仍无检索 scale 索引
+    assert repo._scale_index(nb.id) is None
+
+
+def test_empty_notebook_falls_back(repo):
+    nb = repo.create_notebook(NotebookCreate(name="empty"))
+    # 空库:_viz_index None,unified_graph 走全量派生(不报错,空结果)
+    assert repo._viz_index(nb.id) is None
+    g = repo.unified_graph(nb.id, level="object", limit=2)
+    assert g["nodes"] == [] and g["total_nodes"] == 0
