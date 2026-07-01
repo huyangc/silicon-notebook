@@ -152,6 +152,23 @@ class NotebookSummary(BaseModel):
     kg_pending_sources: int = 0
 
 
+class ShareResponse(BaseModel):
+    share_token: str
+    copyable: bool
+    size: Dict[str, int]
+
+
+class SharedPreview(BaseModel):
+    name: str
+    owner_display: str
+    source_count: int
+    node_count: int
+    edge_count: int
+    source_titles: List[str]
+    mode: str
+    size: Dict[str, int]
+
+
 class NotebookTemplate(BaseModel):
     id: str
     label: str

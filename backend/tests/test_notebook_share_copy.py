@@ -177,3 +177,30 @@ def test_copy_notebook_deep_copies_and_remaps(repo):
         assert db.execute("SELECT COUNT(*) FROM conversations WHERE notebook_id=?", (new.id,)).fetchone()[0] == 0
     # 原库不受影响
     assert len(_rows(repo, "knowledge_objects", src)) == 2
+
+
+def test_share_preview_copy_end_to_end(repo, client):
+    src = _seed_full_notebook(repo, owner="user-local")  # 归 seeded admin(=API 调用者)
+    # 分享
+    r = client.post(f"/api/notebooks/{src}/share"); assert r.status_code == 200
+    token = r.json()["share_token"]; assert r.json()["copyable"] is True
+    # 预览
+    p = client.get(f"/api/shared/{token}"); assert p.status_code == 200
+    assert p.json()["mode"] == "copy" and p.json()["source_count"] == 1
+    # 拷贝
+    c = client.post(f"/api/shared/{token}/copy"); assert c.status_code == 200
+    new_id = c.json()["id"]; assert new_id != src
+    assert len(_rows(repo, "knowledge_objects", new_id)) == 2
+    # 取消分享 → 预览/拷贝 404
+    assert client.delete(f"/api/notebooks/{src}/share").status_code == 204
+    assert client.get(f"/api/shared/{token}").status_code == 404
+    assert client.post(f"/api/shared/{token}/copy").status_code == 404
+
+
+def test_copy_refuses_too_large(repo, client, monkeypatch):
+    # 首个 client 请求才触发 repository() 重建(conftest 已清缓存),此时读到 =1
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+    assert client.get(f"/api/shared/{token}").json()["mode"] == "too_large"
+    assert client.post(f"/api/shared/{token}/copy").status_code == 409
