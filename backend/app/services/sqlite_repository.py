@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import tempfile
@@ -1233,6 +1234,48 @@ class SQLiteRepository:
             if row is None:
                 raise KeyError(notebook_id)
             return self._notebook_from_row(db, row)
+
+    def share_notebook(self, notebook_id: str) -> dict:
+        """开启分享(幂等):已分享则复用现有 token。返回 token + copyable + size。"""
+        self.get_notebook(notebook_id)  # 不存在 → KeyError
+        with self._write() as db:
+            row = db.execute(
+                "SELECT is_shared, share_token FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+            token = row["share_token"] if (row["is_shared"] and row["share_token"]) \
+                else f"shr-{secrets.token_urlsafe(16)}"
+            db.execute("UPDATE notebooks SET is_shared=1, share_token=?, updated_at=? WHERE id=?",
+                       (token, _now(), notebook_id))
+        stats = self.notebook_copy_stats(notebook_id)
+        return {"share_token": token, "copyable": stats["copyable"], "size": stats["size"]}
+
+    def unshare_notebook(self, notebook_id: str) -> None:
+        self.get_notebook(notebook_id)
+        with self._write() as db:
+            db.execute("UPDATE notebooks SET is_shared=0, share_token=NULL, updated_at=? WHERE id=?",
+                       (_now(), notebook_id))
+
+    def find_notebook_by_share_token(self, token: str) -> "str | None":
+        if not token:
+            return None
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id FROM notebooks WHERE share_token=? AND is_shared=1", (token,)).fetchone()
+        return row["id"] if row else None
+
+    def notebook_copy_stats(self, notebook_id: str) -> dict:
+        """便宜的大小盘点 + 是否在拷贝阈值内。"""
+        with self._connect() as db:
+            def one(sql):
+                return db.execute(sql, (notebook_id,)).fetchone()[0]
+            b = one("SELECT COALESCE(SUM(file_size),0) FROM sources WHERE notebook_id=?")
+            src = one("SELECT COUNT(*) FROM sources WHERE notebook_id=?")
+            ch = one("SELECT COUNT(*) FROM chunks WHERE notebook_id=?")
+            nd = one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?")
+            eg = one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id=?")
+        copyable = (b <= self.settings.notebook_copy_max_bytes) \
+            and ((ch + nd) <= self.settings.notebook_copy_max_rows)
+        return {"copyable": copyable,
+                "size": {"bytes": b, "sources": src, "chunks": ch, "nodes": nd, "edges": eg}}
 
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         """owner 即可访问；无 admin 全局越权（base 本 owner=admin，故仅 admin 能进）。"""
