@@ -6852,6 +6852,10 @@ class SQLiteRepository:
 
         n_kg = len(kg_node_ids)
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        with self._connect() as db:
+            watermark_sources = sorted(
+                r["id"] for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall())
         manifest = {
             "version": self._scale_index_version(notebook_id),
             "dim": self.settings.embed_dim,
@@ -6862,6 +6866,7 @@ class SQLiteRepository:
             "n_ann": len(ann_labels),
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
+            "watermark_sources": watermark_sources,
         }
         return si.save_scale_index(
             out_dir,
