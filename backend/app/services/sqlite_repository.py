@@ -5078,13 +5078,9 @@ class SQLiteRepository:
         _stage(f"concept: streamed {sum(members_count.values())} objs → "
                f"{len(seeds)} seeds, {len(reps)} vecs "
                f"({_time.perf_counter() - _t:.1f}s)")
-        # decided_pairs keys are canonical ids of the form "K-<normalized_seed_name>";
-        # cluster_seeds wants confirmed/rejected keyed by normalized seed name -> strip "K-".
-        def _seed(cid: str) -> str:
-            return cid[2:] if cid.startswith("K-") else cid
-        decided = self.decided_pairs(notebook_id)
-        confirmed = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "confirmed"}
-        rejected = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "rejected"}
+        decided = self.decided_seed_pairs(notebook_id)
+        confirmed = {p for p, s in decided.items() if s == "confirmed"}
+        rejected = {p for p, s in decided.items() if s in ("rejected", "deferred")}
         _t_cluster = _time.perf_counter()
         sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                            conflict_fn=_discriminative_conflict, id_prefix="K-",
@@ -5269,9 +5265,11 @@ class SQLiteRepository:
         with self._write() as db:
             db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,))
             db.executemany(
-                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in sd["pending"]])
+                "INSERT INTO concept_merge_candidates "
+                "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?, 'pending', ?, ?)",
+                [(f"mc-{uuid4().hex[:10]}", notebook_id, ca, cb, sa, sb, score, now, now)
+                 for sa, sb, ca, cb, score in sd["pending_seeds"]])
         _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
         self._invalidate_unified_cache(notebook_id)
         # #distinct concept canonicals (== set of cluster_map values in the legacy
