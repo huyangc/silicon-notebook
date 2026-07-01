@@ -30,8 +30,13 @@ LogFn = Callable[[dict], None]
 
 
 def _rebuild_progress(phase: str, i: int, n: int) -> None:
-    """CLI progress printer for rebuild_unified_kg sub-phases (e.g. concept_desc:
-    LLM description gen). Overwrites in place until the last item, then newline."""
+    """CLI progress printer for rebuild_unified_kg sub-phases. Two shapes:
+      - stage banner (n == 0): print the phase alone on its own line;
+      - item progress (n > 0, e.g. concept_desc LLM gen): overwrite in place
+        until the last item, then newline."""
+    if n == 0:
+        print(f"  {phase}", flush=True)
+        return
     end = "\n" if i >= n else "\r"
     print(f"  {phase}: {i}/{n}", end=end, flush=True)
 

@@ -548,3 +548,18 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
     assert res["new"] == 0 and res["resumed"] == 3
     assert sorted(extracted) == sorted(sids)      # 已存在的全部走 extract_source 补抽
     assert res["extracted"] == 3 and res["failed"] == 0
+
+
+# --- _rebuild_progress banner rendering (n==0 => stage banner) ---------------
+
+def test_rebuild_progress_banner_prints_phase_alone(capsys):
+    bi._rebuild_progress("concept: streamed 10 objs → 3 seeds", 0, 0)
+    out = capsys.readouterr().out
+    assert "concept: streamed 10 objs → 3 seeds" in out
+    assert "/" not in out          # no i/n rendering for a banner
+
+
+def test_rebuild_progress_item_prints_ratio(capsys):
+    bi._rebuild_progress("concept_desc", 2, 5)
+    out = capsys.readouterr().out
+    assert "concept_desc" in out and "2/5" in out
