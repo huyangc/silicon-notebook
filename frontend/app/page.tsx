@@ -311,6 +311,7 @@ type NodeContext = { id: string; object_type: string; name: string; section_path
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
 type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number; viz_indexed: boolean; viz_nodes: number; viz_edges: number; viz_stale: boolean };
 type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
+type MergeReviewJob = { status: string; total: number; done: number; error: string };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
 type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
 type KgSearchHit = { object_id: string; name: string; object_type: string; score: number; match: string };
@@ -650,6 +651,10 @@ const reviewPendingMergesApi = (nb: string) =>
     method: "POST",
     body: JSON.stringify({ limit: 50 }),
   });
+const reviewAllMergesApi = (nb: string) =>
+  api<{ status: string }>(`/notebooks/${nb}/unified-kg/merges/review-all`, { method: "POST" });
+const fetchMergeReviewJob = (nb: string) =>
+  api<MergeReviewJob>(`/notebooks/${nb}/unified-kg/merges/review-job`);
 
 function mergePairKey(candidate: PendingMerge): string {
   return [candidate.canonical_a, candidate.canonical_b].sort().join("\u0000");
@@ -1032,6 +1037,7 @@ export default function Home() {
     } catch (e) { reportError(e); setBuildingScaleIndex(false); }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
+  const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
@@ -2259,6 +2265,33 @@ export default function Home() {
       setUnifiedKgStatus(status);
     } catch (err) { reportError(err); }
     finally { setKgReviewBusy(false); }
+  }
+
+  async function reviewAllMerges() {
+    if (!currentNotebookId) return;
+    const nb = currentNotebookId;
+    try {
+      await reviewAllMergesApi(nb);
+      setReviewAllJob({ status: "running", total: pendingMerges.length, done: 0, error: "" });
+      const poll = window.setInterval(async () => {
+        try {
+          const job = await fetchMergeReviewJob(nb);
+          setReviewAllJob(job);
+          if (job.status !== "running") {
+            window.clearInterval(poll);
+            const [pend, status] = await Promise.all([
+              fetchPendingMerges(nb),
+              fetchUnifiedKgStatus(nb),
+            ]);
+            setPendingMerges(pend);
+            setUnifiedKgStatus(status);
+            setToast(job.status === "failed"
+              ? `全部预审中止：${job.error || "未知错误"}（已处理 ${job.done}）`
+              : `全部预审完成：已处理 ${job.done} 项`);
+          }
+        } catch { /* transient; keep polling */ }
+      }, 6000);
+    } catch (err) { reportError(err); }
   }
 
   function focusKgGraphNode(nodeId: string) {
@@ -4022,6 +4055,15 @@ export default function Home() {
                 <h3>待确认合并 ({pendingMerges.length})</h3>
                 <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
                   {kgReviewBusy ? "预审中…" : "LLM 预审"}
+                </button>
+                <button
+                  className="ghost-button"
+                  onClick={reviewAllMerges}
+                  disabled={!pendingMerges.length || reviewAllJob?.status === "running"}
+                >
+                  {reviewAllJob?.status === "running"
+                    ? `全部预审中… ${reviewAllJob.done}/${reviewAllJob.total}`
+                    : "全部预审"}
                 </button>
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
