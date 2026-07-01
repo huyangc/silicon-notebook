@@ -57,6 +57,8 @@ from app.models.schemas import (
     AddUrlSourcesRequest,
     AddUrlSourcesResult,
     SetTierRequest,
+    ShareResponse,
+    SharedPreview,
     SourceImportRequest,
     SourceSummary,
     UnifiedKgStatus,
@@ -736,6 +738,43 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
         return repository().get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/share", response_model=ShareResponse,
+             dependencies=[Depends(require_notebook_access)])
+def share_notebook_route(notebook_id: str) -> ShareResponse:
+    try:
+        return ShareResponse(**repository().share_notebook(notebook_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.delete("/notebooks/{notebook_id}/share", status_code=204,
+               dependencies=[Depends(require_notebook_access)])
+def unshare_notebook_route(notebook_id: str) -> None:
+    try:
+        repository().unshare_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/shared/{token}", response_model=SharedPreview)
+def shared_preview_route(token: str, user: UserProfile = Depends(get_current_user)) -> SharedPreview:
+    nb_id = repository().find_notebook_by_share_token(token)
+    if nb_id is None:
+        raise HTTPException(status_code=404, detail="Shared notebook not found")
+    return SharedPreview(**repository().shared_preview(nb_id))
+
+
+@router.post("/shared/{token}/copy", response_model=NotebookSummary)
+def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
+    repo = repository()
+    nb_id = repo.find_notebook_by_share_token(token)
+    if nb_id is None:
+        raise HTTPException(status_code=404, detail="Shared notebook not found")
+    if not repo.notebook_copy_stats(nb_id)["copyable"]:
+        raise HTTPException(status_code=409, detail="notebook too large to copy")
+    return repo.copy_notebook(nb_id, new_owner_id=user.id)
 
 
 @router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_access)])

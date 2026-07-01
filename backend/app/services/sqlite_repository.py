@@ -1277,6 +1277,27 @@ class SQLiteRepository:
         return {"copyable": copyable,
                 "size": {"bytes": b, "sources": src, "chunks": ch, "nodes": nd, "edges": eg}}
 
+    def shared_preview(self, notebook_id: str) -> dict:
+        nb = self.get_notebook(notebook_id)
+        stats = self.notebook_copy_stats(notebook_id)
+        with self._connect() as db:
+            owner = db.execute(
+                "SELECT u.username FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by "
+                "WHERE nb.id=?", (notebook_id,)).fetchone()
+            titles = [r["title"] for r in db.execute(
+                "SELECT title FROM sources WHERE notebook_id=? ORDER BY created_at LIMIT 50",
+                (notebook_id,)).fetchall()]
+        return {
+            "name": nb.name,
+            "owner_display": (owner["username"] if owner and owner["username"] else ""),
+            "source_count": stats["size"]["sources"],
+            "node_count": stats["size"]["nodes"],
+            "edge_count": stats["size"]["edges"],
+            "source_titles": titles,
+            "mode": "copy" if stats["copyable"] else "too_large",
+            "size": stats["size"],
+        }
+
     @staticmethod
     def _insert_row(db, table: str, d: dict) -> None:
         cols = list(d.keys())
