@@ -48,6 +48,33 @@ def test_kg_object_candidates_core_and_delta(repo):
     assert set(cand.keys()) & {"o1", "o2"}     # ANN 核也在候选
     assert all(0.0 <= s <= 1.0 for s in cand.values())
 
+
+def test_retrieve_scored_bounded_when_indexed(repo, monkeypatch):
+    import json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    def add(sid, oid, name, day):
+        with repo._write() as db:
+            now = f"2026-07-{day:02d}T00:00:00"
+            db.execute("INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+                       "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), "[]", sid, now, now))
+            v = repo.embedder.embed_texts([name])[0]
+            db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                       "VALUES (?,?,?,?)", (oid, nb.id, json.dumps(v), now))
+    for i in range(6):
+        add("s1", f"o{i}", f"concept {i}", 1)
+    repo.rebuild_unified_kg(nb.id); repo.build_scale_index(nb.id)
+    add("s2", "odelta", "delta concept special", 2)
+    monkeypatch.setattr(repo.settings, "chunk_recall", 3)
+    out = repo._retrieve_scored(nb.id, "delta concept special")
+    ids = {o.object_id for o in out}
+    assert "odelta" in ids                # delta 对象被召回
+    assert len(ids) <= 3 + 1              # 有界:≤ recall(3)核 + delta(1),远小于 7 全量
+
+
 def test_keyword_score_ignores_stopwords():
     # Verbose phrasing must not dilute the score: only content tokens count.
     # Basis after dropping stopwords (what/is/and/are/its) -> {engram, problems};
