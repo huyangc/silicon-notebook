@@ -430,3 +430,41 @@ def test_build_scale_index_writes_chunk_ann(repo):
     assert idx is not None
     assert list(idx.chunk_ann_labels) == ["c1", "c2"] or set(idx.chunk_ann_labels) == {"c1", "c2"}
     assert idx.chunk_ann_path.endswith("chunk_ann.bin")
+
+
+def test_scale_index_status_and_rebuild(repo, monkeypatch):
+    import json, time
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        for cid in ("c1", "c2"):
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, "s1", f"text {cid}", "", "[]", now))
+            v = repo.embedder.embed_texts([cid])[0]
+            db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                       (cid, nb.id, json.dumps(v), now))
+    repo.rebuild_unified_kg(nb.id)
+
+    # 非 base 且无索引 → 不合格
+    st0 = repo.scale_index_status(nb.id)
+    assert st0["exists"] is False and st0["eligible"] is False
+    import pytest
+    with pytest.raises(ValueError):
+        repo.trigger_scale_index_rebuild(nb.id)
+
+    # 标 base → 合格 → 触发后台重建 → 轮询到建成
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    assert repo.scale_index_status(nb.id)["eligible"] is True
+    r = repo.trigger_scale_index_rebuild(nb.id)
+    assert r["status"] in ("building", "already_building")
+    for _ in range(50):
+        if not repo.scale_index_status(nb.id)["building"]:
+            break
+        time.sleep(0.1)
+    st = repo.scale_index_status(nb.id)
+    assert st["exists"] is True and st["building"] is False and st["stale"] is False
+    assert st["n_chunk_ann"] == 2 and st["has_chunk_ann"] is True

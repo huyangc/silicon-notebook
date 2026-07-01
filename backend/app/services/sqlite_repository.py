@@ -295,6 +295,8 @@ class SQLiteRepository:
         self._viz_idx_cache: Dict[str, Any] = {}
         self._vector_cache = VectorCache()
         self._write_lock = threading.RLock()
+        self._scale_building: set = set()
+        self._scale_building_lock = threading.Lock()
         self._migrate()
         self._seed()
 
@@ -6735,6 +6737,58 @@ class SQLiteRepository:
             chunk_ann_vectors=chunk_ann_vectors,
             chunk_ann_labels=chunk_ann_labels,
         )
+
+    def scale_index_status(self, notebook_id: str) -> dict:
+        """scale 索引状态(供在线重建入口 UX)。exists=磁盘有 manifest;
+        stale=manifest 版本 != 当前 _scale_index_version;building=后台重建中;
+        eligible=base-tier 或已建过(镜像 CLI 门控)。计数取自 manifest。"""
+        nb = self.get_notebook(notebook_id)  # KeyError → 404
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        mpath = os.path.join(out_dir, "manifest.json")
+        building = notebook_id in self._scale_building
+        exists = os.path.exists(mpath)
+        eligible = (nb.tier == "base") or exists
+        if not exists:
+            return {"exists": False, "stale": False, "building": building,
+                    "eligible": eligible, "n_nodes": 0, "n_chunks": 0,
+                    "n_ann": 0, "n_chunk_ann": 0, "has_chunk_ann": False}
+        with open(mpath) as fh:
+            manifest = json.load(fh)
+        stale = manifest.get("version") != self._scale_index_version(notebook_id)
+        return {"exists": True, "stale": bool(stale), "building": building,
+                "eligible": True,
+                "n_nodes": int(manifest.get("n_nodes", 0)),
+                "n_chunks": int(manifest.get("n_chunks", 0)),
+                "n_ann": int(manifest.get("n_ann", 0)),
+                "n_chunk_ann": int(manifest.get("n_chunk_ann", 0)),
+                "has_chunk_ann": bool(manifest.get("has_chunk_ann", False))}
+
+    def trigger_scale_index_rebuild(self, notebook_id: str) -> dict:
+        """base-tier(或已建过)才允许;后台线程跑 build_scale_index,in-flight 去重。
+        不合格 → ValueError(路由转 409)。build_scale_index 只读 DB 向量建 ANN,
+        不发模型调用,故普通 daemon 线程即可(无需 copy_context)。"""
+        nb = self.get_notebook(notebook_id)  # KeyError → 404
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        eligible = (nb.tier == "base") or os.path.exists(os.path.join(out_dir, "manifest.json"))
+        if not eligible:
+            raise ValueError("notebook is not base-tier and has no existing scale index")
+        with self._scale_building_lock:
+            if notebook_id in self._scale_building:
+                return {"status": "already_building", "notebook_id": notebook_id}
+            self._scale_building.add(notebook_id)
+        def _run():
+            try:
+                self.build_scale_index(notebook_id)
+            except Exception:  # noqa: BLE001 — 后台任务,失败仅记录
+                try:
+                    self.event_log.logger.exception("build_scale_index failed for %s", notebook_id)
+                except Exception:
+                    pass
+            finally:
+                with self._scale_building_lock:
+                    self._scale_building.discard(notebook_id)
+        threading.Thread(target=_run, name=f"scaleidx-{notebook_id}", daemon=True).start()
+        return {"status": "building", "notebook_id": notebook_id}
 
     def _build_viz_graph_arrays(self, notebook_id: str):
         """Full-payload derivation (used by build_scale_index). Delegates the

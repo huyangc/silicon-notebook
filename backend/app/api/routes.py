@@ -61,6 +61,7 @@ from app.models.schemas import (
     SharedPreview,
     SourceImportRequest,
     SourceSummary,
+    ScaleIndexStatus,
     UnifiedKgStatus,
     UserProfile,
 )
@@ -854,6 +855,25 @@ def rebuild_unified_kg(notebook_id: str) -> dict:
 def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
     try:
         return UnifiedKgStatus(**repository().unified_kg_status(notebook_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/scale-index/rebuild", dependencies=[Depends(require_notebook_access)])
+def rebuild_scale_index(notebook_id: str) -> dict:
+    """在线重建 scale 检索索引(base-tier / 已建过;后台任务)。409 若不合格,404 若缺。"""
+    try:
+        return repository().trigger_scale_index_rebuild(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/notebooks/{notebook_id}/scale-index/status", dependencies=[Depends(require_notebook_access)])
+def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
+    try:
+        return ScaleIndexStatus(**repository().scale_index_status(notebook_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
