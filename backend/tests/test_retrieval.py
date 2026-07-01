@@ -1,4 +1,52 @@
+import pytest
 from app.services.retrieval import keyword_score
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    from app.services.embedding import FakeEmbedder
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
+                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "16"}.items():
+        monkeypatch.setenv(k, v)
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=16)
+    return r
+
+
+def test_kg_object_candidates_core_and_delta(repo):
+    import json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    def add(sid, oid, name, day):
+        with repo._write() as db:
+            now = f"2026-07-{day:02d}T00:00:00"
+            db.execute("INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+                       "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), "[]", sid, now, now))
+            v = repo.embedder.embed_texts([name])[0]
+            db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                       "VALUES (?,?,?,?)", (oid, nb.id, json.dumps(v), now))
+    add("s1", "o1", "current mirror", 1)
+    add("s1", "o2", "bandgap reference", 1)
+    repo.rebuild_unified_kg(nb.id); repo.build_scale_index(nb.id)
+    add("s2", "o3", "MOSFET amplifier", 2)   # build 后新增 = delta
+    # id_filter
+    with repo._connect() as db:
+        objs = repo._knowledge_objects(db, nb.id, "concept", id_filter={"o1"})
+    assert {o["id"] for o in objs} == {"o1"}
+    # 候选:ANN 核(o1/o2)⊕ delta(o3)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    cand = repo._kg_object_candidates(nb.id, repo._embed_query("MOSFET amplifier"), idx, recall=10)
+    assert "o3" in cand                        # delta 对象在候选
+    assert set(cand.keys()) & {"o1", "o2"}     # ANN 核也在候选
+    assert all(0.0 <= s <= 1.0 for s in cand.values())
 
 def test_keyword_score_ignores_stopwords():
     # Verbose phrasing must not dilute the score: only content tokens count.
