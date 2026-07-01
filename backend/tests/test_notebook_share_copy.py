@@ -99,3 +99,81 @@ def test_remap_json_ids_scalars_and_arrays():
     assert out["evidence"][0]["source_id"] == "src-A"
     assert out["element_ids"] == ["el-A", "el-B", "el-unknown"]  # 未命中的原样
     assert out["note"] == "untouched"
+
+
+def _seed_full_notebook(repo, owner="user-local"):
+    """种一个各表都有数据、且含交叉引用的小 notebook,返回 nb_id。"""
+    import json, uuid
+    from app.services.sqlite_repository import _now
+    now = _now()
+    nb = f"nb-{uuid.uuid4().hex[:10]}"; s = f"src-{uuid.uuid4().hex[:6]}"
+    e1 = f"el-{uuid.uuid4().hex[:6]}"; c1 = f"ck-{uuid.uuid4().hex[:6]}"
+    o1 = f"ko-{uuid.uuid4().hex[:6]}"; o2 = f"ko-{uuid.uuid4().hex[:6]}"
+    r1 = f"rel-{uuid.uuid4().hex[:6]}"
+    with repo._write() as db:
+        db.execute("INSERT INTO notebooks (id,name,purpose,primary_domain,status,created_by,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)", (nb,"Orig","","Semiconductor","draft",owner,now,now))
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,file_size,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?)", (s,nb,"S","document","s.md","",10,now,now))
+        db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,created_at) "
+                   "VALUES (?,?,?,?,?,?)", (e1,s,"para","p1","hello",now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?)", (c1,nb,s,"chunk txt",json.dumps([e1]),now))
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                   (c1,nb,json.dumps([0.1,0.2]),now))
+        for o in (o1,o2):
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,source_id,payload,evidence,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?)",
+                       (o,nb,"concept",s,json.dumps({"name":"x"}),json.dumps([{"element_id":e1,"source_id":s}]),now,now))
+            db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                       (o,nb,json.dumps([0.3]),now))
+        db.execute("INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)", (r1,nb,s,o1,o2,"rel",json.dumps([{"element_id":e1}]),now))
+        db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,created_at) "
+                   "VALUES (?,?,?,?,?,?)", (f"cl-{uuid.uuid4().hex[:6]}",nb,o1,o1,"x",now))
+        # 一个不该被拷贝的对话
+        db.execute("INSERT INTO conversations (id,notebook_id,title,created_by,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?)", (f"cv-{uuid.uuid4().hex[:6]}",nb,"chat",owner,now,now))
+    return nb
+
+
+def _mk_user(repo, uid, email=None):
+    """建一个真实 users 行(notebooks.created_by 有 FK→users.id,拷贝目标用户须存在)。"""
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", (uid, email or f"{uid}@e.test", uid, "user", now, now))
+    return uid
+
+
+def test_copy_notebook_deep_copies_and_remaps(repo):
+    src = _seed_full_notebook(repo)
+    _mk_user(repo, "user-bob")  # created_by FK→users.id,目标用户须先存在(生产里恒成立)
+    new = repo.copy_notebook(src, new_owner_id="user-bob")
+    assert new.id != src and new.tier == "personal"
+    with repo._connect() as db:
+        assert db.execute("SELECT created_by FROM notebooks WHERE id=?", (new.id,)).fetchone()[0] == "user-bob"
+        assert db.execute("SELECT is_shared,share_token FROM notebooks WHERE id=?", (new.id,)).fetchone()[0] == 0
+    # 行数一致
+    for t in ("sources","chunks","knowledge_objects","knowledge_relations","concept_clusters"):
+        assert len(_rows(repo, t, new.id)) == len(_rows(repo, t, src)), t
+    # 关系指向副本内 objects(无悬空)
+    with repo._connect() as db:
+        obj_ids = {r["id"] for r in _rows(repo, "knowledge_objects", new.id)}
+        rel = _rows(repo, "knowledge_relations", new.id)[0]
+        assert rel["source_object_id"] in obj_ids and rel["target_object_id"] in obj_ids
+        # chunk.element_ids 已重写到副本 element
+        import json
+        new_elem_ids = {r["id"] for r in db.execute(
+            "SELECT se.id FROM source_elements se JOIN sources s ON s.id=se.source_id WHERE s.notebook_id=?", (new.id,))}
+        ck = _rows(repo, "chunks", new.id)[0]
+        assert json.loads(ck["element_ids"])[0] in new_elem_ids
+        # evidence.element_id 已重写
+        ev = json.loads(_rows(repo, "knowledge_objects", new.id)[0]["evidence"])
+        assert ev[0]["element_id"] in new_elem_ids
+    # conversations 不被拷贝
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM conversations WHERE notebook_id=?", (new.id,)).fetchone()[0] == 0
+    # 原库不受影响
+    assert len(_rows(repo, "knowledge_objects", src)) == 2

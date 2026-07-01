@@ -1277,6 +1277,136 @@ class SQLiteRepository:
         return {"copyable": copyable,
                 "size": {"bytes": b, "sources": src, "chunks": ch, "nodes": nd, "edges": eg}}
 
+    @staticmethod
+    def _insert_row(db, table: str, d: dict) -> None:
+        cols = list(d.keys())
+        db.execute(
+            f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+            [d[c] for c in cols],
+        )
+
+    def copy_notebook(self, source_notebook_id: str, *, new_owner_id: str,
+                      new_name: "str | None" = None) -> "NotebookSummary":
+        """把 notebook 深拷贝成归 new_owner_id 的新库:全表 id 重映射(列 + JSON)+ 磁盘文件复制
+        + 完整性自检,单事务、失败回滚 + 清理文件。不拷 conversations/answers/feedback/派生索引。
+        调用方负责 size 门与 is_shared 校验。"""
+        src = self.get_notebook(source_notebook_id)  # KeyError if missing
+        new_id = f"nb-{uuid4().hex[:10]}"
+        now = _now()
+        name = new_name or f"{src.name} (副本)"
+
+        def _nid(old: str) -> str:
+            prefix = old.split("-", 1)[0] if old else "id"
+            return f"{prefix}-{uuid4().hex[:10]}"
+
+        src_dir = self.storage_dir / "notebooks" / source_notebook_id
+        dst_dir = self.storage_dir / "notebooks" / new_id
+        copied_files = False
+        try:
+            if src_dir.exists():
+                shutil.copytree(src_dir, dst_dir)
+                copied_files = True
+            with self._write() as db:
+                # 1) notebooks 行:动态复制全列,覆盖关键字段
+                nb = dict(db.execute("SELECT * FROM notebooks WHERE id=?", (source_notebook_id,)).fetchone())
+                nb.update(id=new_id, name=name, created_by=new_owner_id, tier="personal",
+                          is_shared=0, share_token=None, created_at=now, updated_at=now)
+                self._insert_row(db, "notebooks", nb)
+
+                smap, emap, cmap, omap, rmap = {}, {}, {}, {}, {}
+
+                # 2) sources(+ file_path 指向新目录)
+                for r in db.execute("SELECT * FROM sources WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["id"] = smap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                    if d.get("file_path"):
+                        d["file_path"] = str(dst_dir / Path(d["file_path"]).name)
+                    self._insert_row(db, "sources", d)
+
+                # 3) source_elements(经 source_id 关联;无 notebook_id 列)
+                for r in db.execute(
+                    "SELECT se.* FROM source_elements se JOIN sources s ON s.id=se.source_id "
+                    "WHERE s.notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["id"] = emap.setdefault(r["id"], _nid(r["id"]))
+                    d["source_id"] = smap[r["source_id"]]
+                    self._insert_row(db, "source_elements", d)
+
+                jmaps = {"element_id": emap, "element_ids": emap, "source_id": smap, "object_id": omap}
+
+                # 4) chunks(element_ids 是裸 JSON 数组:包成 {"element_ids": [...]} 走 element_ids
+                #    路由后再取出,因为 _remap_json_ids 的数组重写按「键名」触发,而非顶层裸数组)
+                for r in db.execute("SELECT * FROM chunks WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["id"] = cmap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                    d["source_id"] = smap[r["source_id"]]
+                    d["element_ids"] = json.dumps(_remap_json_ids(
+                        {"element_ids": json.loads(d.get("element_ids") or "[]")}, jmaps)["element_ids"])
+                    self._insert_row(db, "chunks", d)
+
+                # 5) knowledge_objects(source_id / source_candidate_id + evidence/payload JSON)
+                for r in db.execute("SELECT * FROM knowledge_objects WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["id"] = omap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                    d["source_id"] = smap.get(r["source_id"], r["source_id"])
+                    if d.get("source_candidate_id"):
+                        d["source_candidate_id"] = smap.get(r["source_candidate_id"], r["source_candidate_id"])
+                    d["payload"] = json.dumps(_remap_json_ids(json.loads(d.get("payload") or "{}"), jmaps))
+                    d["evidence"] = json.dumps(_remap_json_ids(json.loads(d.get("evidence") or "[]"), jmaps))
+                    self._insert_row(db, "knowledge_objects", d)
+
+                # 6) knowledge_relations(两端 object + source + evidence JSON)
+                for r in db.execute("SELECT * FROM knowledge_relations WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["id"] = rmap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                    d["source_id"] = smap.get(r["source_id"], r["source_id"])
+                    d["source_object_id"] = omap[r["source_object_id"]]
+                    d["target_object_id"] = omap[r["target_object_id"]]
+                    d["evidence"] = json.dumps(_remap_json_ids(json.loads(d.get("evidence") or "[]"), jmaps))
+                    self._insert_row(db, "knowledge_relations", d)
+
+                # 7) embeddings(主键=外键,按映射改)
+                for r in db.execute("SELECT * FROM chunk_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["chunk_id"] = cmap[r["chunk_id"]]; d["notebook_id"] = new_id
+                    self._insert_row(db, "chunk_embeddings", d)
+                for r in db.execute(
+                    "SELECT ee.* FROM element_embeddings ee JOIN sources s ON s.id=ee.source_id "
+                    "WHERE s.notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["element_id"] = emap[r["element_id"]]; d["source_id"] = smap[r["source_id"]]; d["notebook_id"] = new_id
+                    self._insert_row(db, "element_embeddings", d)
+                for r in db.execute("SELECT * FROM knowledge_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["object_id"] = omap[r["object_id"]]; d["notebook_id"] = new_id
+                    self._insert_row(db, "knowledge_embeddings", d)
+                for r in db.execute("SELECT * FROM relation_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["relation_id"] = rmap[r["relation_id"]]; d["notebook_id"] = new_id
+                    self._insert_row(db, "relation_embeddings", d)
+
+                # 8) concept_clusters(canonical_id / member_object_id → object 映射)
+                for r in db.execute("SELECT * FROM concept_clusters WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["id"] = _nid(r["id"]); d["notebook_id"] = new_id
+                    d["canonical_id"] = omap.get(r["canonical_id"], r["canonical_id"])
+                    d["member_object_id"] = omap.get(r["member_object_id"], r["member_object_id"])
+                    self._insert_row(db, "concept_clusters", d)
+
+                # 9) 自定义 object_schemas(notebook_id 命中的才拷)
+                for r in db.execute("SELECT * FROM object_schemas WHERE notebook_id=?", (source_notebook_id,)).fetchall():
+                    d = dict(r); d["notebook_id"] = new_id
+                    self._insert_row(db, "object_schemas", d)
+
+                # 10) 完整性自检:行数一致 + 关系无悬空
+                for t in ("sources", "chunks", "knowledge_objects", "knowledge_relations", "concept_clusters"):
+                    a = db.execute(f"SELECT COUNT(*) FROM {t} WHERE notebook_id=?", (new_id,)).fetchone()[0]
+                    b = db.execute(f"SELECT COUNT(*) FROM {t} WHERE notebook_id=?", (source_notebook_id,)).fetchone()[0]
+                    if a != b:
+                        raise RuntimeError(f"copy_notebook: {t} 行数不一致 {a}!={b}")
+                dangling = db.execute(
+                    "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id=? AND ("
+                    "r.source_object_id NOT IN (SELECT id FROM knowledge_objects WHERE notebook_id=?) OR "
+                    "r.target_object_id NOT IN (SELECT id FROM knowledge_objects WHERE notebook_id=?))",
+                    (new_id, new_id, new_id)).fetchone()[0]
+                if dangling:
+                    raise RuntimeError("copy_notebook: 关系存在悬空引用")
+            return self.get_notebook(new_id)
+        except Exception:
+            if copied_files:
+                shutil.rmtree(dst_dir, ignore_errors=True)
+            raise
+
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
         """owner 即可访问；无 admin 全局越权（base 本 owner=admin，故仅 admin 能进）。"""
         with self._connect() as db:
