@@ -1,4 +1,4 @@
-import math
+import json
 
 from app.services.concept_merge_review import review_merge_candidates
 
@@ -186,3 +186,102 @@ def test_unconfigured_or_empty_returns_empty():
 
     assert review_merge_candidates(_Off(), _cands(3)) == []
     assert review_merge_candidates(_ReviewLLM(), []) == []
+
+
+# --- totality: the function must NEVER raise, for ANY LLM output shape ---
+
+
+class _RawLLM:
+    """Returns a fixed raw string from chat_json (controls the exact LLM output)."""
+
+    configured = True
+
+    def __init__(self, raw: str):
+        self.raw = raw
+
+    def chat_json(self, messages, response_schema_hint):
+        return self.raw
+
+
+def test_decisions_non_iterable_does_not_raise():
+    # {"decisions": 5} -> `for item in decisions` would TypeError.
+    out = review_merge_candidates(_RawLLM('{"decisions": 5}'), _cands(1))
+    assert out == []
+
+
+def test_decisions_is_dict_or_string_does_not_raise():
+    assert review_merge_candidates(_RawLLM('{"decisions": {"a": 1}}'), _cands(1)) == []
+    assert review_merge_candidates(_RawLLM('{"decisions": "nope"}'), _cands(1)) == []
+
+
+def test_categorical_confidence_does_not_raise():
+    # confidence:"high" -> float("high") would ValueError.
+    raw = json.dumps({"decisions": [
+        {"candidate_id": "ac0", "decision": "merge", "canonical_name": "x",
+         "confidence": "high", "rationale": "r"},
+    ]})
+    out = review_merge_candidates(_RawLLM(raw), _cands(1))
+    # No raise. Item either dropped or confidence coerced to 0.0 — never a crash.
+    assert isinstance(out, list)
+    for d in out:
+        assert isinstance(d["confidence"], float)
+
+
+def test_dict_and_list_confidence_do_not_raise():
+    raw = json.dumps({"decisions": [
+        {"candidate_id": "ac0", "decision": "merge", "confidence": {"x": 1}},
+        {"candidate_id": "ac1", "decision": "merge", "confidence": [1, 2, 3]},
+        # a good one alongside the bad ones — should still come through
+        {"candidate_id": "ac2", "decision": "merge", "confidence": 0.9},
+    ]})
+    out = review_merge_candidates(_RawLLM(raw), _cands(3))
+    by_id = {d["candidate_id"]: d for d in out}
+    assert "ac2" in by_id and by_id["ac2"]["confidence"] == 0.9
+    for d in out:
+        assert isinstance(d["confidence"], float)
+
+
+def test_batch_size_none_does_not_raise():
+    fake = _CountingLLM()
+    out = review_merge_candidates(fake, _cands(3), batch_size=None)
+    # falls back to default step; single chunk here.
+    assert {d["candidate_id"] for d in out} == {"mc-0", "mc-1", "mc-2"}
+
+
+def test_parallel_bad_confidence_isolated_does_not_raise():
+    # chunks [mc-0,mc-1] [mc-2,mc-3] [mc-4]; the fake injects a categorical
+    # confidence for mc-2's chunk. Must not raise; good chunks returned.
+    class _BadConfChunk:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint):
+            content = messages[0]["content"]
+            ids = [tok[3:] for line in content.splitlines()
+                   for tok in line.split() if tok.startswith("id=")]
+            decisions = []
+            for cid in ids:
+                conf = "high" if cid == "mc-2" else 0.9
+                decisions.append({"candidate_id": cid, "decision": "merge",
+                                  "canonical_name": f"c-{cid}", "confidence": conf,
+                                  "rationale": "x"})
+            return json.dumps({"decisions": decisions})
+
+    out = review_merge_candidates(_BadConfChunk(), _cands(5), batch_size=2, max_workers=4)
+    ids = {d["candidate_id"] for d in out}
+    # good chunks fully present; mc-2 dropped (bad confidence) but mc-3 (its chunkmate) kept.
+    assert {"mc-0", "mc-1", "mc-3", "mc-4"} <= ids
+    for d in out:
+        assert isinstance(d["confidence"], float)
+
+
+def test_worker_exception_is_swallowed():
+    # A fake whose chat_json raises inside the worker thread. The parallel path's
+    # fut.result() must not re-raise.
+    class _Boom:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint):
+            raise RuntimeError("boom from worker")
+
+    out = review_merge_candidates(_Boom(), _cands(4), batch_size=1, max_workers=4)
+    assert out == []

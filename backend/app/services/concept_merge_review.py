@@ -34,13 +34,27 @@ def _prompt(candidates: List[dict]) -> str:
     )
 
 
+def _to_float(v: Any) -> float:
+    """Coerce an LLM-supplied confidence to a float; anything uncoercible → 0.0.
+
+    LLMs routinely return categorical strings ('high'/'medium'), dicts, or lists
+    for a numeric field. This must never raise — the value simply degrades to 0.0
+    (below any auto-merge threshold), keeping the candidate pending.
+    """
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _review_chunk(llm_client: Any, chunk: List[dict]) -> List[dict]:
-    """Adjudicate one chunk of candidates. NEVER raises.
+    """Adjudicate one chunk of candidates. NEVER raises — for ANY LLM output.
 
     Any failure — LLM/transport error, truncated or malformed JSON, non-dict
-    payload — is logged and yields zero decisions for this chunk. Those
-    candidates simply stay pending (safe, reviewable later); they must never be
-    allowed to crash the rebuild.
+    payload, or a malformed individual decision — is logged/skipped and yields
+    zero (or fewer) decisions for this chunk. Those candidates simply stay
+    pending (safe, reviewable later); they must never be allowed to crash the
+    rebuild or 500 the review endpoint.
     """
     try:
         raw = llm_client.chat_json([{"role": "user", "content": _prompt(chunk)}], _SCHEMA)
@@ -52,20 +66,28 @@ def _review_chunk(llm_client: Any, chunk: List[dict]) -> List[dict]:
         )
         return []
     decisions = data.get("decisions") if isinstance(data, dict) else []
+    # decisions may be any JSON type (LLM deviation, e.g. {"decisions": 5}); only a
+    # list is iterable as decisions — anything else contributes nothing.
+    if not isinstance(decisions, list):
+        decisions = []
     out: List[dict] = []
-    for item in decisions or []:
+    for item in decisions:
         if not isinstance(item, dict):
             continue
-        decision = str(item.get("decision", "")).strip()
-        if decision not in {"merge", "keep_separate", "unsure"}:
+        try:
+            decision = str(item.get("decision", "")).strip()
+            if decision not in {"merge", "keep_separate", "unsure"}:
+                continue
+            out.append({
+                "candidate_id": str(item.get("candidate_id", "")).strip(),
+                "decision": decision,
+                "canonical_name": str(item.get("canonical_name", "")).strip(),
+                "confidence": _to_float(item.get("confidence", 0)),
+                "rationale": str(item.get("rationale", "")).strip()[:500],
+            })
+        except Exception as err:  # noqa: BLE001 — a bad item never sinks the chunk
+            logger.warning("merge-review: skipping malformed decision (%s)", err)
             continue
-        out.append({
-            "candidate_id": str(item.get("candidate_id", "")).strip(),
-            "decision": decision,
-            "canonical_name": str(item.get("canonical_name", "")).strip(),
-            "confidence": float(item.get("confidence", 0) or 0),
-            "rationale": str(item.get("rationale", "")).strip()[:500],
-        })
     return [item for item in out if item["candidate_id"]]
 
 
@@ -89,7 +111,7 @@ def review_merge_candidates(
     """
     if not getattr(llm_client, "configured", False) or not candidates:
         return []
-    step = max(1, int(batch_size))
+    step = max(1, int(batch_size or 30))
     chunks = [candidates[i:i + step] for i in range(0, len(candidates), step)]
 
     out: List[dict] = []
@@ -99,7 +121,12 @@ def review_merge_candidates(
         ) as pool:
             futures = [pool.submit(_review_chunk, llm_client, chunk) for chunk in chunks]
             for fut in concurrent.futures.as_completed(futures):
-                out.extend(fut.result())
+                # _review_chunk is already total, but guard the future boundary too:
+                # a worker exception must never re-raise out of this function.
+                try:
+                    out.extend(fut.result())
+                except Exception:  # noqa: BLE001 — belt-and-suspenders
+                    logger.warning("merge-review: chunk failed in worker; skipping")
     else:
         for chunk in chunks:
             out.extend(_review_chunk(llm_client, chunk))
