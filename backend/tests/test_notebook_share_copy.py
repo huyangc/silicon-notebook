@@ -222,3 +222,21 @@ def test_copy_appears_in_copier_list_and_original_untouched(repo, client):
     assert new_id in ids and src in ids  # copier==admin 两个都在
     # 原库对象数不变
     assert len(_rows(repo, "knowledge_objects", src)) == 2
+
+
+def test_copy_skips_object_schemas_and_backfills_fts(repo):
+    """B1 回归:源库有自定义 object_schema(object_type 全局唯一)时,拷贝不撞主键、不拷该表;
+    I1:拷完 kg_objects_fts 已按副本重建(拷完即搜)。"""
+    src = _seed_full_notebook(repo, owner="user-local")
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO object_schemas (object_type,notebook_id,created_at,updated_at) VALUES (?,?,?,?)",
+            ("customtype", src, _now(), _now()))
+    new = repo.copy_notebook(src, new_owner_id="user-local")  # user-local 已 seed,满足 created_by FK
+    with repo._connect() as db:
+        # object_schemas 不随库拷(全局表;副本名下 0 行,不撞 UNIQUE)
+        assert db.execute(
+            "SELECT COUNT(*) FROM object_schemas WHERE notebook_id=?", (new.id,)).fetchone()[0] == 0
+        # 词法搜索索引已按副本 backfill(源 2 个 name 非空对象 → 副本 2 行)
+        assert db.execute(
+            "SELECT COUNT(*) FROM kg_objects_fts WHERE notebook_id=?", (new.id,)).fetchone()[0] == 2
