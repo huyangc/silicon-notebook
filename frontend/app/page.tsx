@@ -610,9 +610,12 @@ const buildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/n
 const rebuildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
 const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
 
+type ScaleIndexState = "unindexed" | "suggested" | "queued" | "building" | "indexed" | "stale";
 type ScaleIndexStatus = { exists: boolean; stale: boolean; building: boolean; eligible: boolean;
+  state?: ScaleIndexState;
   n_nodes: number; n_chunks: number; n_ann: number; n_chunk_ann: number; has_chunk_ann: boolean };
-const rebuildScaleIndex = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST" });
+const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now") =>
+  api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when }) });
 const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/${nb}/scale-index/status`);
 
 function formatRelativeTime(iso: string): string {
@@ -1029,11 +1032,17 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [buildingScaleIndex, currentNotebookId]);
   // Kick off a scale-index rebuild; the effect above then polls until it's ready.
-  const startScaleIndexRebuild = async (nb: string) => {
+  const startScaleIndexRebuild = async (nb: string, when: "now" | "idle" = "now") => {
     setBuildingScaleIndex(true);
     try {
-      await rebuildScaleIndex(nb);
-      setToast("已开始重建检索索引（后台进行，可能数分钟）；完成后自动更新");
+      await rebuildScaleIndex(nb, when);
+      if (when === "idle") {
+        setToast("已排队，将在服务器空闲时（低峰）重建；完成后自动更新");
+        // Reflect the queued state right away; the poll effect keeps it fresh.
+        fetchScaleIndexStatus(nb).then((s) => setScaleIndexStatus(s)).catch(() => {});
+      } else {
+        setToast("已开始重建检索索引（后台进行，可能数分钟）；完成后自动更新");
+      }
     } catch (e) { reportError(e); setBuildingScaleIndex(false); }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
@@ -2896,11 +2905,18 @@ export default function Home() {
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
                       ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
-                      ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [{
-                        label: buildingScaleIndex ? "检索索引重建中…" : "重建检索索引",
-                        desc: "重建大库的向量检索索引（CSR 图 + ANN），供 scale 检索使用；后台进行，完成后自动更新",
-                        action: () => { if (currentNotebookId && !buildingScaleIndex) startScaleIndexRebuild(currentNotebookId); },
-                      }] : []),
+                      ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [
+                        {
+                          label: buildingScaleIndex ? "检索索引重建中…" : "立即重建检索索引",
+                          desc: "重建大库的向量检索索引（CSR 图 + ANN）；立即在后台进行，完成后自动更新",
+                          action: () => { if (currentNotebookId && !buildingScaleIndex) startScaleIndexRebuild(currentNotebookId, "now"); },
+                        },
+                        {
+                          label: "空闲时重建检索索引",
+                          desc: "排队等待服务器空闲（低峰窗口）时自动重建，避开高峰",
+                          action: () => { if (currentNotebookId) startScaleIndexRebuild(currentNotebookId, "idle"); },
+                        },
+                      ] : []),
                       { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
                     ]
                   })}>
@@ -3005,7 +3021,24 @@ export default function Home() {
                 )}
                 {currentNotebook?.tier === "base" && scaleIndexStatus && (
                   <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                    检索索引：{scaleIndexStatus.building ? "构建中…" : !scaleIndexStatus.exists ? "未构建" : scaleIndexStatus.stale ? "已过期，建议重建" : "已同步"}
+                    检索索引：{
+                      (() => {
+                        const labels: Record<ScaleIndexState, string> = {
+                          unindexed: "未索引",
+                          suggested: "建议建索引",
+                          queued: "已排队（空闲时建）",
+                          building: "构建中…",
+                          indexed: "已同步",
+                          stale: "建议重建",
+                        };
+                        // Prefer the backend six-state field; fall back to legacy booleans.
+                        const state: ScaleIndexState = scaleIndexStatus.state
+                          ?? (scaleIndexStatus.building ? "building"
+                            : !scaleIndexStatus.exists ? "unindexed"
+                            : scaleIndexStatus.stale ? "stale" : "indexed");
+                        return labels[state];
+                      })()
+                    }
                     {scaleIndexStatus.exists && ` · 节点 ${scaleIndexStatus.n_nodes} · chunk ${scaleIndexStatus.n_chunks}`}
                   </p>
                 )}
