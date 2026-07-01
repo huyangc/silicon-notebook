@@ -7058,6 +7058,15 @@ class SQLiteRepository:
                 return {"status": "already_building"}
             self._scale_building.add(notebook_id)
         try:
+            # 先把 delta 融进 concept_clusters(spec §4「incremental_fuse 簇」),
+            # 否则 _gather_kg_graph(delta) 查不到 delta 对象的 cluster 成员 → 缺跨文档 hub 桥,
+            # delta 对象在 scale_ppr 里跳不到兄弟概念(重现孤岛/对比检索坍缩)。
+            # incremental_fuse_source 是 LLM-free(Tier1 名种子 append+Tier2 向量桥),daemon 线程安全、可重入。
+            for _sid in delta["delta_sources"]:
+                try:
+                    self.incremental_fuse_source(notebook_id, _sid)
+                except Exception:  # noqa: BLE001 — 融合失败不阻断 fold(退化为无 hub,仍可 ANN 召回)
+                    self.event_log.logger.exception("fold incremental_fuse failed for %s", _sid)
             d_nodes, d_edges, d_chunks, d_kg_ids, d_membership = \
                 self._gather_kg_graph(notebook_id, source_ids=delta["delta_sources"])
             kg_set = set(d_kg_ids)
