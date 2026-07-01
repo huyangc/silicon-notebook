@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.models.schemas import (
-    ArticleCreate,
     AskRequest,
     Evidence,
     FeedbackRequest,
@@ -468,7 +467,7 @@ def check_kg_store_ask_and_conversations() -> None:
         assert len(graph.nodes) == 3 and len(graph.edges) == 1
         types = {item.object_type: item.count for item in repo.knowledge_types(nb.id)}
         assert types.get("claim") == 2 and types.get("concept") == 1
-        claims = repo.list_knowledge(nb.id, "claim")
+        claims = repo.list_knowledge(nb.id, "claim").items
         assert claims and claims[0].headline
 
         answer = repo.ask(
@@ -506,7 +505,7 @@ def check_kg_store_ask_and_conversations() -> None:
         repo.delete_conversation(answer.conversation_id)
         assert repo.list_conversations(nb.id) == []
 
-        claim_id = next(item.id for item in repo.list_knowledge(nb.id, "claim"))
+        claim_id = next(item.id for item in repo.list_knowledge(nb.id, "claim").items)
         repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="deprecated", owner="curator"))
         assert all(node.id != claim_id for node in repo.knowledge_graph(nb.id).nodes)
         dep_answer = repo.ask(
@@ -515,7 +514,7 @@ def check_kg_store_ask_and_conversations() -> None:
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
         repo.update_knowledge(nb.id, claim_id, KnowledgeUpdate(status="reviewed"))
-        reviewed = next(item for item in repo.list_knowledge(nb.id, "claim") if item.id == claim_id)
+        reviewed = next(item for item in repo.list_knowledge(nb.id, "claim").items if item.id == claim_id)
         assert reviewed.status == "reviewed" and reviewed.last_reviewed
 
 
@@ -592,7 +591,6 @@ def check_api_layer() -> None:
         ok("GET", f"/api/notebooks/{nid}/duplicates", params={"type": "claim"})
         ok("GET", f"/api/notebooks/{nid}/graph")
         ok("GET", f"/api/notebooks/{nid}/analytics")
-        ok("GET", f"/api/notebooks/{nid}/derived-rules")
 
         schemas = ok("GET", "/api/object-schemas")
         assert any(schema["object_type"] == "concept" for schema in schemas)
@@ -1064,7 +1062,7 @@ def main() -> None:
 
         ktypes = {item.object_type: item.count for item in repository.knowledge_types(notebook.id)}
         assert ktypes.get("claim") == 1 and ktypes.get("concept") == 1
-        generic_claims = repository.list_knowledge(notebook.id, "claim")
+        generic_claims = repository.list_knowledge(notebook.id, "claim").items
         assert generic_claims and any(field.key == "name" for field in generic_claims[0].fields)
 
         answer = repository.ask(
@@ -1091,7 +1089,7 @@ def main() -> None:
         )
         assert all(item.id != claim_id for item in dep_answer.related_knowledge)
         repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="reviewed"))
-        reviewed = next(item for item in repository.list_knowledge(notebook.id, "claim") if item.id == claim_id)
+        reviewed = next(item for item in repository.list_knowledge(notebook.id, "claim").items if item.id == claim_id)
         assert reviewed.status == "reviewed" and reviewed.last_reviewed
         try:
             repository.update_knowledge(notebook.id, claim_id, KnowledgeUpdate(status="bogus"))
@@ -1118,18 +1116,18 @@ def main() -> None:
             applies_to=["wirebond", "analog input"],
             recommendation="Route the return separately.",
         )
-        rules_now = repository.list_knowledge(notebook.id, "rule")
+        rules_now = repository.list_knowledge(notebook.id, "rule").items
         assert {rule.id for rule in rules_now} >= {rule_id, rule_id_2}
-        assert isinstance(repository.list_knowledge(notebook.id, "method"), list)
-        assert isinstance(repository.list_knowledge(notebook.id, "risk"), list)
-        assert isinstance(repository.list_knowledge(notebook.id, "glossary"), list)
+        assert isinstance(repository.list_knowledge(notebook.id, "method").items, list)
+        assert isinstance(repository.list_knowledge(notebook.id, "risk").items, list)
+        assert isinstance(repository.list_knowledge(notebook.id, "glossary").items, list)
         assert isinstance(repository.find_duplicates(notebook.id, "rule"), list)
 
         merged = repository.merge_knowledge(notebook.id, rule_id_2, MergeRequest(into_id=rule_id))
         assert merged.id == rule_id
         assert any(
             rule.id == rule_id_2 and rule.status == "deprecated"
-            for rule in repository.list_knowledge(notebook.id, "rule")
+            for rule in repository.list_knowledge(notebook.id, "rule").items
         )
 
         analytics = repository.notebook_analytics(notebook.id)
@@ -1138,59 +1136,10 @@ def main() -> None:
         assert analytics.knowledge_counts.get("rule", 0) >= 1
         assert sum(analytics.source_status_counts.values()) >= 1
 
-        article = repository.create_article(
-            notebook.id,
-            ArticleCreate(
-                title="Thermal via placement for power dies",
-                abstract=(
-                    "Dense thermal via arrays reduce junction temperature. "
-                    "Via pitch must balance routing congestion against heat spreading."
-                ),
-            ),
-        )
-        brief = repository.research_article(article.id)
-        joined = " ".join([brief.core_contribution] + brief.claims).lower()
-        assert "bondwire" not in joined
-        assert "thermal" in joined or "via" in joined
-        with repository._connect() as db:
-            claim_row = db.execute(
-                "SELECT relation_type, implication FROM article_claims WHERE article_id = ? LIMIT 1",
-                (article.id,),
-            ).fetchone()
-            derived_count = db.execute(
-                "SELECT COUNT(*) AS count FROM derived_rule_candidates WHERE article_id = ?",
-                (article.id,),
-            ).fetchone()
-        assert claim_row is not None
-        assert "thermal" in " ".join(brief.derived_rule_candidates).lower() or int(derived_count["count"]) >= 1
-
-        derived = repository.list_derived_rules(notebook.id)
-        draft = next((item for item in derived if item.status == "draft"), None)
-        if draft is not None:
-            rules_before = len(repository.list_knowledge(notebook.id, "rule"))
-            approved_rule = repository.approve_derived_rule(notebook.id, draft.id)
-            assert approved_rule.status == "approved"
-            assert len(repository.list_knowledge(notebook.id, "rule")) == rules_before + 1
-            assert any(item.status == "approved" for item in repository.list_derived_rules(notebook.id))
-
-        repository.delete_article(article.id)
-        assert all(item.id != article.id for item in repository.list_articles(notebook.id))
-        with repository._connect() as db:
-            deleted_claim_count = db.execute(
-                "SELECT COUNT(*) AS count FROM article_claims WHERE article_id = ?",
-                (article.id,),
-            ).fetchone()
-            deleted_derived_count = db.execute(
-                "SELECT COUNT(*) AS count FROM derived_rule_candidates WHERE article_id = ?",
-                (article.id,),
-            ).fetchone()
-        assert int(deleted_claim_count["count"]) == 0
-        assert int(deleted_derived_count["count"]) == 0
-
         reparsed = repository.parse_source(markdown.id)
         assert reparsed.parse_status == "extracted"
-        assert all(item.id != claim_id for item in repository.list_knowledge(notebook.id, "claim"))
-        assert all(rule.id != rule_id for rule in repository.list_knowledge(notebook.id, "rule"))
+        assert all(item.id != claim_id for item in repository.list_knowledge(notebook.id, "claim").items)
+        assert all(rule.id != rule_id for rule in repository.list_knowledge(notebook.id, "rule").items)
 
         scheduled: list[str] = []
         queued = repository.upload_sources(
@@ -1225,7 +1174,7 @@ def main() -> None:
         assert restarted.get_notebook(notebook.id).name == "Smoke notebook"
         assert restarted.source_elements(markdown.id)
 
-    print("backend smoke ok: sqlite persistence, KG extraction boundary, retrieval, article, feedback")
+    print("backend smoke ok: sqlite persistence, KG extraction boundary, retrieval, feedback")
 
 
 def _docx_bytes(text: str) -> bytes:
