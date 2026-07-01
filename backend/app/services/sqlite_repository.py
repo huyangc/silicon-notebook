@@ -1297,6 +1297,8 @@ class SQLiteRepository:
         with self._write() as db:
             db.execute("UPDATE notebooks SET is_shared=0, share_token=NULL, updated_at=? WHERE id=?",
                        (_now(), notebook_id))
+            # 取消分享 → 踢掉所有只读成员(大库只读共享路径)。
+            db.execute("DELETE FROM notebook_members WHERE notebook_id=?", (notebook_id,))
 
     def find_notebook_by_share_token(self, token: str) -> "str | None":
         if not token:
@@ -1338,7 +1340,7 @@ class SQLiteRepository:
             "node_count": stats["size"]["nodes"],
             "edge_count": stats["size"]["edges"],
             "source_titles": titles,
-            "mode": "copy" if stats["copyable"] else "too_large",
+            "mode": "copy" if stats["copyable"] else "readonly",
             "size": stats["size"],
         }
 
