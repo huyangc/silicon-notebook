@@ -1542,6 +1542,18 @@ class SQLiteRepository:
                 (notebook_id,)).fetchall()
         return [{"username": r["username"], "added_at": r["added_at"]} for r in rows]
 
+    def join_shared(self, notebook_id: str, user_id: str) -> "NotebookSummary":
+        """把 user 加为只读成员(幂等),返回该库 summary(access=reader)。"""
+        self.add_member(notebook_id, user_id)
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+            nb = self._notebook_from_row(db, row)
+        nb.access = "reader"
+        return nb
+
+    def leave_notebook(self, notebook_id: str, user_id: str) -> None:
+        self.remove_member(notebook_id, user_id)
+
     def source_owner(self, source_id: str) -> "str | None":
         with self._connect() as db:
             row = db.execute(

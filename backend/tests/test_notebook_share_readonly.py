@@ -158,3 +158,24 @@ def test_list_notebooks_includes_joined_marked_reader(repo):
     got = {n.id: n for n in repo.list_notebooks()}
     assert got[owner_nb].access == "owner" and got[owner_nb].shared_from == ""
     assert got[other_nb].access == "reader" and got[other_nb].shared_from == "a00000009"
+
+
+# ---------------------------------------------------------------- Task 6
+def test_join_large_then_leave(tmp_path, monkeypatch, repo):
+    # ⚠ 必须在任何 HTTP 请求(触发 repository() 首次构建+缓存)之前设阈值,否则 app 缓存旧值→大库被判小库
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000011")   # 首个请求:此时 repository() 才构建,读到 MAX_ROWS=1
+    nb = client.post("/api/notebooks", json={"name": "Big"}, headers=owner_h).json()["id"]
+    with repo._write() as db:  # 造大库(3 个节点 > 阈值 1 → readonly)
+        for i in range(3):
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?)", (f"ko-{i}", nb, "concept", _now(), _now()))
+    token = client.post(f"/api/notebooks/{nb}/share", headers=owner_h).json()["share_token"]
+    bob_h = _login(client, "b00000012")
+    joined = client.post(f"/api/shared/{token}/join", headers=bob_h)
+    assert joined.status_code == 200 and joined.json()["access"] == "reader"
+    ids = {n["id"]: n for n in client.get("/api/notebooks", headers=bob_h).json()}
+    assert nb in ids and ids[nb]["access"] == "reader"
+    assert client.request("DELETE", f"/api/notebooks/{nb}/membership", headers=bob_h).status_code == 204
+    assert nb not in {n["id"] for n in client.get("/api/notebooks", headers=bob_h).json()}

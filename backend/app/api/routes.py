@@ -781,6 +781,24 @@ def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user))
     return repo.copy_notebook(nb_id, new_owner_id=user.id)
 
 
+@router.post("/shared/{token}/join", response_model=NotebookSummary)
+def join_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
+    """大库只读加入:凭 share_token 成为只读成员。小库应走 copy 而非 join。"""
+    repo = repository()
+    nb_id = repo.find_notebook_by_share_token(token)
+    if nb_id is None:
+        raise HTTPException(status_code=404, detail="Shared notebook not found")
+    if repo.notebook_copy_stats(nb_id)["copyable"]:
+        raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
+    return repo.join_shared(nb_id, user.id)
+
+
+@router.delete("/notebooks/{notebook_id}/membership", status_code=204)
+def leave_notebook_route(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> None:
+    """退出只读共享:只删自己的成员记录(幂等,不影响他人)。"""
+    repository().leave_notebook(notebook_id, user.id)
+
+
 @router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_access)])
 def build_kg(notebook_id: str) -> dict:
     """按需触发该 notebook 的 KG 建图(后台线程,幂等)。
