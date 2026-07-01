@@ -292,6 +292,11 @@ class SQLiteRepository:
         self._unified_cache: Dict[Any, Any] = {}
         self._user_model_cfg_cache: Dict[str, dict] = {}
         self._scale_idx_cache: Dict[str, Any] = {}
+        # P1-8: memoize _scale_index_version keyed on kg_mutation_seq. Maps
+        # notebook_id -> (last_seq, version_list). When seq is unchanged we skip
+        # the 5 COUNT/MAX aggregates and return the cached list (same format —
+        # no on-disk manifest.version invalidation).
+        self._scale_ver_cache: Dict[str, Any] = {}
         self._viz_idx_cache: Dict[str, Any] = {}
         self._vector_cache = VectorCache()
         self._write_lock = threading.RLock()
@@ -3765,6 +3770,10 @@ class SQLiteRepository:
             )
             if cur.rowcount == 0:
                 raise KeyError(f"relation {rel_id!r} not found in notebook {notebook_id!r}")
+        # review_status flips in place (relation COUNT unchanged) — bump the
+        # monotonic seq so seq-keyed fast paths (_scale_index_version /
+        # _cluster_input_version) don't serve a stale version for this edit.
+        self._mark_unified_kg_dirty(notebook_id)
         # Invalidate cached graph so _rx_graph rebuilds on next access
         # (belt-and-braces: _rx_graph's per-status-count version key would
         # also catch the flip on its own).
@@ -4074,7 +4083,8 @@ class SQLiteRepository:
             loser_ref = right_ref if winner_ref == left_ref else left_ref
             if kind == "edge":
                 self.set_edge_review(notebook_id, loser_ref, "rejected")
-                # set_edge_review already calls _invalidate_unified_cache; mark dirty too.
+                # set_edge_review already marks dirty + invalidates cache; this
+                # extra mark is a harmless belt-and-suspenders (seq is monotonic).
                 self._mark_unified_kg_dirty(notebook_id)
             else:  # kind == "node"
                 self.update_knowledge(
@@ -6228,6 +6238,10 @@ class SQLiteRepository:
                 (now, now, source_id),
             )
             row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (into_id,)).fetchone()
+        # merge deprecates one object in place (COUNT unchanged) — bump the
+        # monotonic seq so _scale_index_version / _cluster_input_version fast
+        # paths (keyed on kg_mutation_seq) don't miss this same-second edit.
+        self._mark_unified_kg_dirty(row["notebook_id"])
         self._invalidate_unified_cache(row["notebook_id"])
         obj = {
             "id": row["id"],
@@ -6707,8 +6721,50 @@ class SQLiteRepository:
 
         Mirrors _ppr_graph's version_parts pattern: COUNT+MAX(created_at/updated_at)
         for objects, relations, chunks, concept_clusters — all for this single notebook.
+
+        P1-8 fast path (format-preserving memoization). This is called several
+        times per query (retrieval / PPR / status) and each call ran 5 COUNT/MAX
+        aggregates (10 aggregate columns). The version key FORMAT is unchanged, so
+        on-disk manifest.version keeps matching — no index invalidation.
+
+        Change signal = the O(1) monotonic kg_mutation_seq (bumped by
+        _mark_unified_kg_dirty — the single choke point for objects / relations /
+        chunks / embeddings; the merge-knowledge and edge-review in-place edits
+        were wired in to close their gaps) PLUS a direct read of the two
+        concept_clusters aggregates (COUNT + MAX(created_at)).
+
+        Why clusters can't ride on seq: rebuild_unified_kg DELIBERATELY preserves
+        kg_mutation_seq across a rebuild (its end-write omits the seq column, so
+        _cluster_input_version is stable and re-running rebuild is idempotent — see
+        that method's docstring). But rebuild REWRITES concept_clusters, which this
+        version key must reflect (the scale index is downstream of clusters). So we
+        never elide the cluster aggregates: seq elides only the four non-cluster
+        tables' eight aggregate columns, and clusters are checked every call. Net
+        fast path = 1 O(1) seq read + 2 cluster aggregates instead of 10.
         """
+        settings_tail = (
+            self.settings.ppr_variant_edge_weight,
+            self.settings.ppr_emb_synonym_enabled,
+            self.settings.ppr_emb_synonym_threshold,
+            self.settings.ppr_emb_synonym_topk,
+        )
         with self._connect() as db:
+            st = db.execute(
+                "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()
+            seq = int(st["kg_mutation_seq"]) if st else 0
+            # Clusters are ALWAYS re-read (rebuild moves them without bumping seq).
+            clu_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
+            clu_key = (int(clu_ver["c"]), clu_ver["ts"])
+            cached = self._scale_ver_cache.get(notebook_id)
+            if (cached is not None and cached[0] == seq
+                    and cached[1] == clu_key and cached[2] == settings_tail):
+                # seq + cluster aggregates + settings unchanged → skip the four
+                # non-cluster tables' eight aggregate columns.
+                return list(cached[3])
             obj_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
                 "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)).fetchone()
@@ -6718,24 +6774,22 @@ class SQLiteRepository:
             chunk_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
-            clu_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
             emb_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
-        return [
+        version = [
             notebook_id,
             int(obj_ver["c"]), obj_ver["ts"],
             int(rel_ver["c"]), rel_ver["ts"],
             int(chunk_ver["c"]), chunk_ver["ts"],
-            int(clu_ver["c"]), clu_ver["ts"],
+            clu_key[0], clu_key[1],
             int(emb_ver["c"]), emb_ver["ts"],
-            self.settings.ppr_variant_edge_weight,
-            self.settings.ppr_emb_synonym_enabled,
-            self.settings.ppr_emb_synonym_threshold,
-            self.settings.ppr_emb_synonym_topk,
+            *settings_tail,
         ]
+        # Memoize keyed on (seq, cluster aggregates, settings). Store a copy so a
+        # caller mutating the returned list can't corrupt the cache.
+        self._scale_ver_cache[notebook_id] = (seq, clu_key, settings_tail, list(version))
+        return version
 
     def _scale_index(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex (manifest version == current DB version) or None.
