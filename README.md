@@ -498,7 +498,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 - `--workers` — in the `all` phase, how many *documents* are extracted at once (overrides `KG_JOB_CONCURRENCY`). In `ingest` it is the file-parse concurrency.
 - `--embed-conc` — embedding concurrency (overrides `EMBED_CONCURRENCY`). In `all`, chunk embedding runs in the background of each document's pipeline.
 - `KG_EXTRACT_WORKERS` (`.env`, default 16) — the global cap on concurrent KG-extraction LLM windows, shared across all documents (intra- and inter-document).
-- `--pool-report-interval` — in the `all` and `kg` phases, print a live pool-utilization line every N seconds (default 15; `0` disables it). It reports the KG-LLM (extraction-window) pool vs the embedding threads side by side — e.g. `[pool 45s] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40` — so you can confirm the embedding model and the KG-LLM are saturating a shared-compute model service *at the same time*.
+- `--pool-report-interval` — in the `all` and `kg` phases, print a live pool-utilization line every N seconds (default 15; `0` disables it). It reports the KG-LLM (extraction-window) pool vs the embedding threads side by side — e.g. `[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40` — so you can confirm the embedding model and the KG-LLM are saturating a shared-compute model service *at the same time*.
 
 In the `all` phase, peak embedding concurrency is roughly `--workers × --embed-conc`, so raise both cautiously to avoid provider 429s. If a throttled run leaves vectors missing, repair them later with the `embed` subcommand.
 

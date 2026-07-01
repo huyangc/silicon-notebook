@@ -58,12 +58,13 @@ def _live_embed_thread_counts() -> Counter:
     return c
 
 
-def _format_pool_snapshot(elapsed: float, s: dict, embed: Counter, done: int, total: int) -> str:
-    """Pure one-line snapshot of pool utilization. `s` is scheduler.stats();
-    `embed` is _live_embed_thread_counts(). Shows KG-LLM(window) vs embed
-    concurrency side by side so a shared-compute model service can be confirmed
-    to run both pools at once."""
-    return (f"[pool {elapsed:.0f}s] KG-LLM(window) {s['window_active']}/{s['window_max']}"
+def _format_pool_snapshot(ts: str, s: dict, embed: Counter, done: int, total: int) -> str:
+    """Pure one-line snapshot of pool utilization. `ts` is the wall-clock time of
+    the snapshot (so it lines up with the model-call logs); `s` is
+    scheduler.stats(); `embed` is _live_embed_thread_counts(). Shows KG-LLM(window)
+    vs embed concurrency side by side so a shared-compute model service can be
+    confirmed to run both pools at once."""
+    return (f"[pool {ts}] KG-LLM(window) {s['window_active']}/{s['window_max']}"
             f" · 源(job) {s['job_active']}/{s['job_max']}"
             f" · embed {embed.get('bg', 0)}bg+{embed.get('pool', 0)}pool"
             f" · 源完成 {done}/{total}")
@@ -82,12 +83,10 @@ class _PoolReporter:
         self.log = log
         self.done = 0
         self._stop = threading.Event()
-        self._t0 = 0.0
         self._thread: Optional[threading.Thread] = None
 
     def __enter__(self) -> "_PoolReporter":
         if self.interval and self.interval > 0:
-            self._t0 = time.perf_counter()
             self._thread = threading.Thread(
                 target=self._loop, name="pool-report", daemon=True)
             self._thread.start()
@@ -99,7 +98,7 @@ class _PoolReporter:
             try:
                 s = _sched.stats()
                 line = _format_pool_snapshot(
-                    time.perf_counter() - self._t0, s,
+                    time.strftime("%H:%M:%S"), s,
                     _live_embed_thread_counts(), self.done, self.total)
                 print(line, flush=True)
                 if self.log:
