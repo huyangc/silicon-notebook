@@ -247,3 +247,22 @@ def test_viz_neighbors_one_hop_bounded():
     nb = {n["id"] for n in out["nodes"]}
     assert "h" in nb and len(out["nodes"]) <= 3
     assert all(e["source"]=="h" or e["target"]=="h" for e in out["edges"])
+
+
+def test_fold_arrays_extends_base():
+    import numpy as np
+    from app.services.kg import scale_index as si
+    base_ids = ["a", "b", "cA"]           # cA = chunk
+    base_edges = [("a", "b", 1.0), ("b", "a", 1.0), ("a", "cA", 1.0), ("cA", "a", 1.0)]
+    base_A, _ = si.build_transition(base_ids, base_edges)
+    base_idf = np.array([0.5, 1.0, 1.0])  # a,b,cA
+    base_chunk_index = np.array([2])       # cA at pos 2
+    d_ids = ["c", "cB"]                    # new kg node c + new chunk cB
+    d_edges = [("c", "cB", 1.0), ("cB", "c", 1.0), ("c", "a", 1.0), ("a", "c", 1.0)]
+    node_ids, A, idf, chunk_index = si.fold_arrays(
+        base_ids, base_A, base_idf, base_chunk_index, d_ids, d_edges, ["cB"], {"c": 0.25})
+    assert node_ids == ["a", "b", "cA", "c", "cB"]      # 前缀不变 + 追加
+    assert list(chunk_index) == [2, 4]                  # cA(2) + cB(4)
+    assert abs(idf[3] - 0.25) < 1e-9 and idf[4] == 1.0  # c 用 map,cB 默认 1.0
+    cs = np.asarray(A.sum(axis=0)).ravel()
+    assert np.allclose(cs[cs > 0], 1.0)                 # 列随机守恒
