@@ -420,7 +420,7 @@ class TestBaseReviewGateEdgeCases:
         base = _make_base_nb(repo)
         _store_claim(repo, base.id, "reviewed base claim about gain")
         records = repo.list_knowledge(base.id, "claim")
-        assert len(records) == 1
+        assert len(records.items) == 1
         assert _objects_in(repo, base.id, "claim")[0]["status"] == "reviewed"
 
     def test_curator_can_upgrade_reviewed_to_approved(self, repo):
