@@ -196,6 +196,26 @@ def test_personalized_ppr_scales_to_1e5():
     print(f"\n[scale] personalized_ppr 1e5 nodes / 1e6 edges: {dt:.3f}s")
 
 
+def test_splice_active_matches_full_rebuild():
+    import numpy as np
+    from app.services.kg import scale_index as si
+    base_ids = [f"b{i}" for i in range(20)]
+    base_edges = [(base_ids[i], base_ids[(i * 7 + 3) % 20], 1.0) for i in range(20)]
+    base_A, _ = si.build_transition(base_ids, base_edges)
+    active_ids = ["b3", "b7", "x0", "x1"]          # 含共享 id (b3,b7) + 新 id
+    active_edges = [("x0", "b3", 1.0), ("b3", "x0", 1.0),
+                    ("x1", "x0", 1.0), ("x0", "x1", 1.0),
+                    ("x1", "ZZZ", 1.0)]              # 末条悬空(端点不存在)应被丢弃
+    combined_ids, combined_A = si.splice_active(base_ids, base_A, active_ids, active_edges)
+    ref_base_edges = si.csr_to_edges(base_ids, base_A)
+    ref_ids = list(base_ids) + [a for a in active_ids if a not in set(base_ids)]
+    ref_A, _ = si.build_transition(ref_ids, ref_base_edges + active_edges)
+    assert combined_ids == ref_ids
+    assert np.allclose(combined_A.toarray(), ref_A.toarray())
+    cs = np.asarray(combined_A.sum(axis=0)).ravel()
+    assert np.allclose(cs[cs > 0], 1.0)            # 列随机性守恒
+
+
 import numpy as np, scipy.sparse as sp
 from app.services.kg.scale_index import viz_core, viz_neighbors
 
