@@ -27,6 +27,14 @@ _job_pool: cf.ThreadPoolExecutor | None = None
 _window_max = 0
 _job_max = 0
 
+# In-flight (active) task counters — a submitted callable inc's on start and
+# dec's in finally, so these reflect tasks *running right now*, not merely
+# spawned threads. Guarded by _active_lock (separate from the pool _lock so a
+# stats() read never contends with pool (re)build).
+_active_lock = threading.Lock()
+_window_active = 0
+_job_active = 0
+
 
 def _build(window_workers: int, job_workers: int) -> None:
     global _window_pool, _job_pool, _window_max, _job_max
@@ -48,20 +56,55 @@ def _ensure() -> None:
 
 
 def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
-    """Submit one window (LLM call) to the global window pool."""
+    """Submit one window (LLM call) to the global window pool. The callable is
+    wrapped so _window_active reflects in-flight (running) windows."""
     _ensure()
-    return _window_pool.submit(fn, *args, **kwargs)
+
+    def _run():
+        global _window_active
+        with _active_lock:
+            _window_active += 1
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            with _active_lock:
+                _window_active -= 1
+
+    return _window_pool.submit(_run)
 
 
 def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
     """Submit one document-extraction job to the job pool (fire-and-forget;
     callee handles its own errors/status). 在提交线程(请求线程)抓取 ContextVar
-    快照并在 worker 内重放，使后台 job 的 current_user() 拿到真实用户(每用户 KG_LLM)。"""
+    快照并在 worker 内重放，使后台 job 的 current_user() 拿到真实用户(每用户 KG_LLM)。
+    包一层 _run 让 _job_active 反映在跑的 job 数,但仍经 ctx.run 重放 ContextVar 快照
+    (每用户 KG_LLM 的命脉,不得退化成裸 submit(fn))。"""
     _ensure()
     ctx = contextvars.copy_context()
-    fut = _job_pool.submit(ctx.run, fn, *args, **kwargs)
+
+    def _run():
+        global _job_active
+        with _active_lock:
+            _job_active += 1
+        try:
+            return ctx.run(fn, *args, **kwargs)   # PRESERVED copy_context propagation
+        finally:
+            with _active_lock:
+                _job_active -= 1
+
+    fut = _job_pool.submit(_run)
     fut.add_done_callback(_log_job_exception)
     return fut
+
+
+def stats() -> dict:
+    """Live pool utilization. Reads globals only (no _ensure) — returns zeros
+    before the pool is built, and never contends with pool (re)build."""
+    with _active_lock:
+        return {
+            "window_active": _window_active, "window_max": _window_max,
+            "job_active": _job_active, "job_max": _job_max,
+        }
 
 
 def _log_job_exception(fut: cf.Future) -> None:
