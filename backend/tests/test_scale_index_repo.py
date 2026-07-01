@@ -669,3 +669,89 @@ def test_fold_scale_index_delta(repo):
     assert out is not None
     scored = out[0]
     assert scored and "c2" in {c.chunk_id for c in scored}
+
+
+def test_trigger_when_and_mode(repo, monkeypatch):
+    from app.models.schemas import NotebookCreate
+    import json
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
+        v = repo.embedder.embed_texts(["c1"])[0]
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c1", nb.id, json.dumps(v), now))
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    repo.rebuild_unified_kg(nb.id)
+    # when=idle → 入队、status=queued、不立即建
+    r = repo.trigger_scale_index_rebuild(nb.id, when="idle")
+    assert r["status"] == "queued"
+    assert repo.scale_index_status(nb.id)["state"] == "queued"
+    assert nb.id in repo._scale_idle_queue
+    # force drain(绕过时间窗)→ 建成、出队、state 回 indexed
+    repo._process_idle_queue(force=True)
+    import time
+    for _ in range(50):
+        if not repo._scale_building and nb.id not in repo._scale_idle_queue:
+            break
+        time.sleep(0.1)
+    assert nb.id not in repo._scale_idle_queue
+    assert repo.scale_index_status(nb.id)["exists"] is True
+
+
+def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
+    """idle→auto 有既存索引时走 fold_scale_index_delta 且真的建成(非空跑 already_building)。"""
+    from app.models.schemas import NotebookCreate
+    import json, time
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
+        v = repo.embedder.embed_texts(["c1"])[0]
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c1", nb.id, json.dumps(v), now))
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    repo.rebuild_unified_kg(nb.id)
+    # 先建一个基础索引
+    repo.build_scale_index(nb.id)
+    assert repo.scale_index_status(nb.id)["exists"] is True
+
+    # 加一个新 source+chunk → 产生 delta
+    with repo._write() as db:
+        now = "2026-07-01T01:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", ("s2", nb.id, "t2", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)", ("c2", nb.id, "s2", "y", "", "[]", now))
+        v = repo.embedder.embed_texts(["c2"])[0]
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c2", nb.id, json.dumps(v), now))
+
+    # _resolve_scale_mode(auto) 应选 fold(有索引)
+    assert repo._resolve_scale_mode(nb.id, "auto") == "fold"
+
+    # 监视 fold 被调用
+    calls = {"fold": 0, "build": 0}
+    orig_fold = repo.fold_scale_index_delta
+    orig_build = repo.build_scale_index
+    def spy_fold(nbid, *a, **kw):
+        calls["fold"] += 1
+        return orig_fold(nbid, *a, **kw)
+    def spy_build(nbid, *a, **kw):
+        calls["build"] += 1
+        return orig_build(nbid, *a, **kw)
+    monkeypatch.setattr(repo, "fold_scale_index_delta", spy_fold)
+    monkeypatch.setattr(repo, "build_scale_index", spy_build)
+
+    r = repo.trigger_scale_index_rebuild(nb.id, when="idle", mode="auto")
+    assert r["status"] == "queued"
+    repo._process_idle_queue(force=True)
+    for _ in range(50):
+        if not repo._scale_building and nb.id not in repo._scale_idle_queue:
+            break
+        time.sleep(0.1)
+    assert calls["fold"] == 1, "idle→auto 未走 fold"
+    assert calls["build"] == 0, "不应走 full build"
+    # watermark 应含 s2(证明 fold 真的建成、非空跑)
+    import os
+    mpath = os.path.join(repo.settings.storage_dir, "kg_index", nb.id, "manifest.json")
+    with open(mpath) as fh:
+        manifest = json.load(fh)
+    assert "s2" in manifest["watermark_sources"], "fold 未把 delta source s2 纳入水位(空跑了)"

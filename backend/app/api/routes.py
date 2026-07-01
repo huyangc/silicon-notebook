@@ -66,6 +66,7 @@ from app.models.schemas import (
     SharedPreview,
     SourceImportRequest,
     SourceSummary,
+    RebuildScaleIndexRequest,
     ScaleIndexStatus,
     UnifiedKgStatus,
     UserProfile,
@@ -889,10 +890,15 @@ def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
 
 
 @router.post("/notebooks/{notebook_id}/scale-index/rebuild", dependencies=[Depends(require_notebook_access)])
-def rebuild_scale_index(notebook_id: str) -> dict:
-    """在线重建 scale 检索索引(base-tier / 已建过;后台任务)。409 若不合格,404 若缺。"""
+def rebuild_scale_index(notebook_id: str, body: RebuildScaleIndexRequest = RebuildScaleIndexRequest()) -> dict:
+    """在线重建 scale 检索索引(base-tier / 已建过)。when=now 立即后台/idle 低峰调度;
+    mode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。"""
+    if body.when not in ("now", "idle"):
+        raise HTTPException(status_code=400, detail="when must be one of: now, idle")
+    if body.mode not in ("auto", "fold", "full"):
+        raise HTTPException(status_code=400, detail="mode must be one of: auto, fold, full")
     try:
-        return repository().trigger_scale_index_rebuild(notebook_id)
+        return repository().trigger_scale_index_rebuild(notebook_id, when=body.when, mode=body.mode)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except ValueError as exc:

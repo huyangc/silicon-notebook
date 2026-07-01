@@ -539,6 +539,11 @@ class ScaleIndexStatus(BaseModel):
     total_chunks: int = 0
 
 
+class RebuildScaleIndexRequest(BaseModel):
+    when: str = "now"    # now(立即后台) | idle(低峰调度)
+    mode: str = "auto"   # auto(有索引→fold 否则→full) | fold | full
+
+
 class MergeReviewRequest(BaseModel):
     limit: int = 50
     # 非对称自动落地阈值;省略时由后端 settings 决定(KG_MERGE_CONFIRM/SEPARATE_THRESHOLD)。

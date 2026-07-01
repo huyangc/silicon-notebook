@@ -297,6 +297,8 @@ class SQLiteRepository:
         self._write_lock = threading.RLock()
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
+        self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
+        self._scale_scheduler_started = False
         self._migrate()
         self._seed()
 
@@ -7035,10 +7037,12 @@ class SQLiteRepository:
             chunk_ann_labels=chunk_ann_labels,
         )
 
-    def fold_scale_index_delta(self, notebook_id: str) -> dict:
+    def fold_scale_index_delta(self, notebook_id: str, _assume_locked: bool = False) -> dict:
         """O(delta) 增量 fold:delta splice 进现有索引(ANN add_items、CSR splice),
         写 tmp 目录后锁内原子交换。无现有索引→全量 build;无 delta→no-op(返回旧 manifest)。
-        fold 中途抛错→tmp 丢弃、旧索引不动(finally 只清 building 标记,未交换即无损)。"""
+        fold 中途抛错→tmp 丢弃、旧索引不动(finally 只清 building 标记,未交换即无损)。
+        _assume_locked=True 时(由 _run_scale_op 调用):调用方已持 _scale_building guard,
+        本方法跳过自身 add/discard,避免嵌套去重导致空跑返回 already_building。"""
         import os
         import shutil
 
@@ -7053,10 +7057,11 @@ class SQLiteRepository:
         delta = self._index_delta(notebook_id)
         if not delta["delta_sources"]:
             return idx.manifest
-        with self._scale_building_lock:
-            if notebook_id in self._scale_building:
-                return {"status": "already_building"}
-            self._scale_building.add(notebook_id)
+        if not _assume_locked:
+            with self._scale_building_lock:
+                if notebook_id in self._scale_building:
+                    return {"status": "already_building"}
+                self._scale_building.add(notebook_id)
         try:
             # 先把 delta 融进 concept_clusters(spec §4「incremental_fuse 簇」),
             # 否则 _gather_kg_graph(delta) 查不到 delta 对象的 cluster 成员 → 缺跨文档 hub 桥,
@@ -7157,8 +7162,9 @@ class SQLiteRepository:
                 self._scale_idx_cache.pop(notebook_id, None)  # 失效进程缓存 → 下次 reload
             return manifest
         finally:
-            with self._scale_building_lock:
-                self._scale_building.discard(notebook_id)
+            if not _assume_locked:
+                with self._scale_building_lock:
+                    self._scale_building.discard(notebook_id)
 
     def _index_delta(self, notebook_id: str) -> dict:
         """按 manifest 水位算 delta:水位后新增的 source 及其 chunk 数。
@@ -7202,8 +7208,11 @@ class SQLiteRepository:
         eligible = (nb.tier == "base") or exists
         base = {"exists": exists, "building": building, "eligible": eligible,
                 "delta_chunks": int(delta["delta_chunks"]), "total_chunks": int(total_chunks)}
+        queued = notebook_id in self._scale_idle_queue
         if building:
             base["state"] = "building"
+        elif queued:
+            base["state"] = "queued"
         elif not exists:
             base["state"] = "suggested" if total_chunks > self.settings.index_suggest_chunk_threshold else "unindexed"
         else:
@@ -7225,31 +7234,97 @@ class SQLiteRepository:
                      "n_chunk_ann": 0, "has_chunk_ann": False})
         return base
 
-    def trigger_scale_index_rebuild(self, notebook_id: str) -> dict:
-        """base-tier(或已建过)才允许;后台线程跑 build_scale_index,in-flight 去重。
-        不合格 → ValueError(路由转 409)。build_scale_index 只读 DB 向量建 ANN,
-        不发模型调用,故普通 daemon 线程即可(无需 copy_context)。"""
-        nb = self.get_notebook(notebook_id)  # KeyError → 404
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        eligible = (nb.tier == "base") or os.path.exists(os.path.join(out_dir, "manifest.json"))
-        if not eligible:
-            raise ValueError("notebook is not base-tier and has no existing scale index")
+    def _resolve_scale_mode(self, notebook_id: str, mode: str) -> str:
+        """把 mode 解析为具体操作:fold|full。
+        auto = 有(含 stale)索引 → fold,否则 → full。"""
+        if mode in ("fold", "full"):
+            return mode
+        return "fold" if self._scale_index(notebook_id, allow_stale=True) is not None else "full"
+
+    def _run_scale_op(self, notebook_id: str, mode: str) -> None:
+        """后台执行(guarded):按 mode 跑 fold_scale_index_delta 或 build_scale_index。
+        本方法持 _scale_building guard;fold 用 _assume_locked=True 调用,避免嵌套去重空跑
+        (fold 自身若再 add 会因已在集合返回 already_building)。build_scale_index 无自身
+        guard,不受影响。只读 DB 向量建 ANN、不发模型调用,普通 daemon 线程即可。"""
         with self._scale_building_lock:
             if notebook_id in self._scale_building:
-                return {"status": "already_building", "notebook_id": notebook_id}
+                return
             self._scale_building.add(notebook_id)
+
         def _run():
             try:
-                self.build_scale_index(notebook_id)
+                op = self._resolve_scale_mode(notebook_id, mode)
+                if op == "fold":
+                    self.fold_scale_index_delta(notebook_id, _assume_locked=True)
+                else:
+                    self.build_scale_index(notebook_id)
             except Exception:  # noqa: BLE001 — 后台任务,失败仅记录
                 try:
-                    self.event_log.logger.exception("build_scale_index failed for %s", notebook_id)
+                    self.event_log.logger.exception("scale op failed for %s", notebook_id)
                 except Exception:
                     pass
             finally:
                 with self._scale_building_lock:
                     self._scale_building.discard(notebook_id)
         threading.Thread(target=_run, name=f"scaleidx-{notebook_id}", daemon=True).start()
+
+    def _process_idle_queue(self, force: bool = False) -> None:
+        """低峰窗口(或 force)内 drain idle 队列,逐个后台重建。
+        force=True 绕过时间窗(供测试/手动)。窗口按本地 datetime.now().hour 判定,
+        start>end 视为跨零点。"""
+        import datetime
+        if not force:
+            hour = datetime.datetime.now().hour
+            lo = self.settings.scale_index_offpeak_start_hour
+            hi = self.settings.scale_index_offpeak_end_hour
+            in_window = (lo <= hour < hi) if lo <= hi else (hour >= lo or hour < hi)
+            if not in_window:
+                return
+        with self._scale_building_lock:
+            queued = dict(self._scale_idle_queue)
+            self._scale_idle_queue.clear()
+        for nb, mode in queued.items():
+            self._run_scale_op(nb, mode)
+
+    def _ensure_scale_scheduler(self) -> None:
+        """懒启动低峰调度器 daemon(一次性):首次 idle 入队才启,避免 app-startup 接线。"""
+        import time
+        with self._scale_building_lock:
+            if self._scale_scheduler_started:
+                return
+            self._scale_scheduler_started = True
+
+        def _loop():
+            while True:
+                time.sleep(max(30, self.settings.scale_index_scheduler_poll_seconds))
+                try:
+                    self._process_idle_queue(force=False)
+                except Exception:  # noqa: BLE001
+                    try:
+                        self.event_log.logger.exception("scale scheduler tick failed")
+                    except Exception:
+                        pass
+        threading.Thread(target=_loop, name="scaleidx-scheduler", daemon=True).start()
+
+    def trigger_scale_index_rebuild(self, notebook_id: str, when: str = "now",
+                                    mode: str = "auto") -> dict:
+        """base-tier(或已建过)才允许;不合格 → ValueError(路由转 409)。
+        when="now" 立即后台重建(in-flight 去重);when="idle" 入 _scale_idle_queue、
+        懒启动低峰调度器,返回 queued。mode="auto" 时由 _resolve_scale_mode 挑 fold/full。
+        默认 when="now"/mode="auto" 保持既有无参调用行为不变。"""
+        nb = self.get_notebook(notebook_id)  # KeyError → 404
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        eligible = (nb.tier == "base") or os.path.exists(os.path.join(out_dir, "manifest.json"))
+        if not eligible:
+            raise ValueError("notebook is not base-tier and has no existing scale index")
+        if when == "idle":
+            with self._scale_building_lock:
+                self._scale_idle_queue[notebook_id] = mode
+            self._ensure_scale_scheduler()
+            return {"status": "queued", "notebook_id": notebook_id}
+        if notebook_id in self._scale_building:
+            return {"status": "already_building", "notebook_id": notebook_id}
+        self._run_scale_op(notebook_id, mode)
         return {"status": "building", "notebook_id": notebook_id}
 
     def _build_viz_graph_arrays(self, notebook_id: str):
