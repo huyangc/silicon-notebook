@@ -52,12 +52,23 @@ def test_unified_graph_lazy_builds_and_matches(repo):
 
 def test_neighbors_lazy_matches_db(repo):
     nb = _star(repo)
-    # canonical id 折叠后 "MOSFET" 概念:两路应一致
-    db_res = repo._kg_neighbors_db(nb.id, "MOSFET", 50)
-    viz_res = repo.kg_neighbors(nb.id, "MOSFET", 50)
-    assert {n["id"] for n in viz_res["nodes"]} == {n["id"] for n in db_res["nodes"]}
+    full = repo._unified_graph_full(nb.id, "object")
+    # 真·折叠 canonical id:取度数最高的折叠节点(MOSFET 概念,连 gain+bias)
+    deg = {}
+    for e in full["edges"]:
+        deg[e["source_object_id"]] = deg.get(e["source_object_id"], 0) + 1
+        deg[e["target_object_id"]] = deg.get(e["target_object_id"], 0) + 1
+    hub_id = max(deg, key=deg.get)
+    db_res = repo._kg_neighbors_db(nb.id, hub_id, 50)
+    viz_res = repo.kg_neighbors(nb.id, hub_id, 50)
+    db_ids = {n["id"] for n in db_res["nodes"]}
+    viz_ids = {n["id"] for n in viz_res["nodes"]}
+    # 非空且两路一致:hub + 2 个邻居(gain, bias)
+    assert len(viz_ids) == 3
+    assert viz_ids == db_ids
     assert {(e["source_object_id"], e["target_object_id"]) for e in viz_res["edges"]} == \
            {(e["source_object_id"], e["target_object_id"]) for e in db_res["edges"]}
+    assert len(viz_res["edges"]) == 2
 
 
 def test_scale_index_isolation(repo):
