@@ -3970,3 +3970,9 @@ button.chat-session-card {
   outline: 2px solid rgba(31, 94, 255, 0.28);
   outline-offset: 2px;
 }
+
+/* Pagination */
+.pagination { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 2px; }
+.pagination-info { font-size: 12px; color: var(--muted, #667085); margin-right: auto; }
+.pagination-page { font-size: 13px; color: #20242a; }
+.pagination-jump { width: 68px; box-sizing: border-box; border: 1px solid #d9dfeb; border-radius: 8px; padding: 5px 8px; font-size: 13px; }
