@@ -7262,11 +7262,62 @@ class SQLiteRepository:
         from app.services.vector_index import query_sims
         recall = recall or self.settings.chunk_recall
         query_vector = self._embed_query(query)
+        if self.settings.chunk_ann_enabled and query_vector is not None:
+            idx = self._scale_index(notebook_id)
+            if idx is not None and getattr(idx, "chunk_ann_labels", None):
+                ann = self._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
+                if ann is not None:
+                    return ann
+        # ↓ 现有暴力路径保持不变
         with self._connect() as db:
             chunks = self._gather_chunks(db, notebook_id)
             ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        return scored, ids, mat
+
+    def _retrieve_chunks_ann(self, notebook_id, query, query_vector, idx, recall):
+        """ANN 候选版 chunk 检索:只对 top-recall 候选打分,避免全表 matmul+重分词。
+        返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。"""
+        import numpy as np, hnswlib
+        from app.services.retrieval import score_chunks
+        from app.services.vector_index import build_matrix
+        labels = idx.chunk_ann_labels
+        if not labels:
+            return None
+        qarr = np.asarray(query_vector, dtype=np.float32)
+        dim = int(idx.manifest.get("dim", qarr.shape[0]))
+        if dim != qarr.shape[0]:
+            return None
+        try:
+            ann = hnswlib.Index(space="cosine", dim=dim)
+            ann.load_index(idx.chunk_ann_path, max_elements=len(labels))
+            ann.set_ef(max(recall + 1, 64))
+            k = min(recall, len(labels))
+            labs, dists = ann.knn_query(qarr, k=k)
+        except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
+            self._note_model_error("chunk_ann_query", self.settings.embed_model, exc)
+            return None
+        cand_ids = [labels[int(l)] for l in labs[0]]
+        chunk_sims = {labels[int(l)]: max(0.0, 1.0 - float(d)) for l, d in zip(labs[0], dists[0])}
+        if not cand_ids:
+            return [], [], None
+        ph = ",".join("?" for _ in cand_ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
+                f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+                f"WHERE c.id IN ({ph})", cand_ids).fetchall()
+            vrows = db.execute(
+                f"SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE chunk_id IN ({ph})",
+                cand_ids).fetchall()
+        chunks = [{
+            "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
+            "section_path": r["section_path"], "source_title": r["source_title"],
+            "element_ids": json.loads(r["element_ids"] or "[]"),
+        } for r in rows]
+        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        ids, mat = build_matrix((r["vid"], r["vector"]) for r in vrows)
         return scored, ids, mat
 
     def _retrieve_chunks_multi(self, notebook_id, sub_queries):

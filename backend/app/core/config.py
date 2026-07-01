@@ -122,6 +122,7 @@ class Settings(BaseSettings):
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
+    chunk_ann_enabled: bool = Field(False, env="CHUNK_ANN_ENABLED")  # 大库 chunk 检索走 ANN 候选(默认关,待真机 recall 对照)
     # qwen3-rerank (DashScope text-rerank) 配置
     rerank_model: str = Field("", env="RERANK_MODEL")
     rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", env="RERANK_BASE_URL")
