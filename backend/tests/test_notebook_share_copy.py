@@ -204,3 +204,21 @@ def test_copy_refuses_too_large(repo, client, monkeypatch):
     token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
     assert client.get(f"/api/shared/{token}").json()["mode"] == "too_large"
     assert client.post(f"/api/shared/{token}/copy").status_code == 409
+
+
+def test_non_owner_cannot_share(repo, client):
+    # 造一个属于别人的库;当前用户(seeded admin=user-local)不是 owner。
+    # created_by 有 FK→users.id,故先建出这个 owner 用户(生产里 owner 恒存在)。
+    _mk_user(repo, "user-someone-else")
+    other = _seed_full_notebook(repo, owner="user-someone-else")
+    assert client.post(f"/api/notebooks/{other}/share").status_code == 404  # 不泄露存在性
+
+
+def test_copy_appears_in_copier_list_and_original_untouched(repo, client):
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+    new_id = client.post(f"/api/shared/{token}/copy").json()["id"]
+    ids = {n["id"] for n in client.get("/api/notebooks").json()}
+    assert new_id in ids and src in ids  # copier==admin 两个都在
+    # 原库对象数不变
+    assert len(_rows(repo, "knowledge_objects", src)) == 2
