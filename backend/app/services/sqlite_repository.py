@@ -1229,13 +1229,29 @@ class SQLiteRepository:
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
 
     def list_notebooks(self) -> List[NotebookSummary]:
-        owner_id = self.current_user().id
+        """自有库(access=owner)∪ 经只读共享加入的库(access=reader)。"""
+        uid = self.current_user().id
+        out: List[NotebookSummary] = []
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM notebooks WHERE created_by = ? ORDER BY created_at ASC",
-                (owner_id,),
+                (uid,),
             ).fetchall()
-            return [self._notebook_from_row(db, row) for row in rows]
+            for row in rows:
+                nb = self._notebook_from_row(db, row)
+                nb.access = "owner"
+                out.append(nb)
+            joined = db.execute(
+                "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
+                "JOIN notebooks nb ON nb.id = m.notebook_id "
+                "LEFT JOIN users u ON u.id = nb.created_by "
+                "WHERE m.user_id = ? ORDER BY m.added_at ASC", (uid,)).fetchall()
+            for row in joined:
+                nb = self._notebook_from_row(db, row)
+                nb.access = "reader"
+                nb.shared_from = row["_owner_username"] or ""
+                out.append(nb)
+        return out
 
     def list_notebook_templates(self) -> List[NotebookTemplate]:
         return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]

@@ -150,6 +150,11 @@ class NotebookSummary(BaseModel):
     base_kg_available: bool = False
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
+    # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);
+    # "reader" = 经只读共享加入(仅读)。默认 owner 向后兼容。
+    access: str = "owner"
+    # reader 时 = 原 owner 的用户名(前端展示「来自 X」);owner 时空串。
+    shared_from: str = ""
 
 
 class ShareResponse(BaseModel):

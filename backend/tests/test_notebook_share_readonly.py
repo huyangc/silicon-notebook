@@ -146,3 +146,15 @@ def test_conversation_owner_is_creator_not_notebook_owner(repo):
         db.execute("INSERT INTO conversations (id,notebook_id,title,created_by,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?)", ("cv-1", nb, "chat", "user-mbr", _now(), _now()))
     assert repo.conversation_owner("cv-1") == "user-mbr"   # 创建者,不是 notebook owner
+
+
+# ---------------------------------------------------------------- Task 5
+def test_list_notebooks_includes_joined_marked_reader(repo):
+    # 先建 alice(created_by 有 FK→users.id),再建她的库。
+    _mk_user(repo, "user-alice", "a00000009")
+    owner_nb = _mk_nb(repo, owner="user-local", name="Mine")
+    other_nb = _mk_nb(repo, owner="user-alice", name="Alice's")
+    repo.add_member(other_nb, "user-local")   # 当前用户(seeded admin=user-local)加入了 alice 的库
+    got = {n.id: n for n in repo.list_notebooks()}
+    assert got[owner_nb].access == "owner" and got[owner_nb].shared_from == ""
+    assert got[other_nb].access == "reader" and got[other_nb].shared_from == "a00000009"
