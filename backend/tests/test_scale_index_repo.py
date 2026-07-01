@@ -574,3 +574,66 @@ def test_scale_index_status_state_machine(repo, monkeypatch):
     add_source("s3", ["c5", "c6"], 3)
     st2 = repo.scale_index_status(nb.id)
     assert st2["state"] == "stale" and st2["delta_chunks"] == 2
+
+
+def test_fold_scale_index_delta(repo):
+    """端到端 fold:水位后新增 source 经 O(delta) fold 收进现有索引 —— delta 归零、
+    index 版本新鲜、ann/chunk_ann 含新 id、n_nodes 增长、新 chunk 经 ANN 可召回。"""
+    import json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+
+    def add(sid, oid, cid, name, day):
+        with repo._write() as db:
+            now = f"2026-07-{day:02d}T00:00:00"
+            db.execute(
+                "INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, sid, name, "", "[]", now))
+            db.execute(
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+                "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), "[]", sid, now, now))
+            for tbl, key in [("chunk_embeddings", cid), ("knowledge_embeddings", oid)]:
+                v = repo.embedder.embed_texts([name])[0]
+                col = "chunk_id" if tbl == "chunk_embeddings" else "object_id"
+                db.execute(
+                    f"INSERT INTO {tbl} ({col},notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                    (key, nb.id, json.dumps(v), now))
+
+    add("s1", "o1", "c1", "current mirror", 1)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    m0 = repo.scale_index_status(nb.id)
+
+    # delta 一个新 source
+    add("s2", "o2", "c2", "bandgap reference special", 2)
+    assert repo._index_delta(nb.id)["delta_chunks"] == 1
+
+    # fold —— O(delta) 增量收进索引
+    repo.fold_scale_index_delta(nb.id)
+
+    # 水位前移 → delta 清零
+    d = repo._index_delta(nb.id)
+    assert d["delta_chunks"] == 0 and d["delta_sources"] == []
+
+    # 版本新鲜(fold 更新了 manifest version)→ _scale_index 不带 allow_stale 仍返回
+    idx = repo._scale_index(nb.id)
+    assert idx is not None
+    # ann 含新对象、chunk_ann 含新 chunk
+    assert "o2" in set(idx.ann_labels)
+    assert idx.chunk_ann_labels is not None and "c2" in set(idx.chunk_ann_labels)
+    assert "o1" in set(idx.ann_labels) and "c1" in set(idx.chunk_ann_labels)
+    # CSR 节点增长
+    assert idx.manifest["n_nodes"] > m0["n_nodes"]
+    assert "o2" in set(idx.node_ids) and "c2" in set(idx.node_ids)
+    assert len(idx.idf) == len(idx.node_ids) == idx.transition.shape[0]
+
+    # 新内容经 ANN 可召回(_retrieve_chunks_ann 返回 (scored, ids, mat))
+    qv = repo._embed_query("bandgap reference special")
+    out = repo._retrieve_chunks_ann(nb.id, "bandgap reference special", qv, idx, recall=10)
+    assert out is not None
+    scored = out[0]
+    assert scored and "c2" in {c.chunk_id for c in scored}
