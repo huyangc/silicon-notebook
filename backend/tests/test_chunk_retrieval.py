@@ -216,3 +216,9 @@ def test_ask_chunk_single_subquery_still_works(repo, monkeypatch):
         query_en="alpha", sub_queries=[qr.SubQuerySpec("alpha topic")]))
     resp = repo.ask_chunk(nb.id, AskRequest(question="alpha"))
     assert resp.citations   # 单子查询走 MMR,正常返回
+
+
+def test_chunk_ann_enabled_default_on():
+    """默认开:有索引的库自动走 ANN 核⊕delta;小库无索引自然回退暴力(零影响)。"""
+    from app.core.config import Settings
+    assert Settings(_env_file=None).chunk_ann_enabled is True
