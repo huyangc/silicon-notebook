@@ -355,14 +355,35 @@ def test_cluster_seeds_matches_cluster_objects_smallcase():
 
 
 def test_ann_candidates_shards_above_cap(caplog):
+    # OOM fallback: only a max_reps at/above the sharding floor triggers sharding.
     import numpy as np
-    from app.services.kg_merge import _ann_candidates
-    seeds = [f"s{i}" for i in range(50)]
+    from app.services.kg_merge import _ann_candidates, _MIN_SHARD_CAP
+    n = _MIN_SHARD_CAP + 5
+    seeds = [f"s{i}" for i in range(n)]
     reps = {s: np.random.default_rng(i).random(8).astype("float32") for i, s in enumerate(seeds)}
     with caplog.at_level("WARNING"):
-        out = _ann_candidates(seeds, reps, k=5, lo=0.0, max_reps=10)
+        out = _ann_candidates(seeds, reps, k=5, lo=0.0, max_reps=_MIN_SHARD_CAP)
     assert isinstance(out, list)
     assert any("rep" in r.message.lower() for r in caplog.records)
+
+
+def test_ann_candidates_no_cross_shard_loss(caplog):
+    # A too-small max_reps must be ignored (single global hnsw), so a pair that
+    # the old sharded path would split across shards is still found.
+    import numpy as np
+    from app.services.kg_merge import _ann_candidates
+    rng = np.random.RandomState(1)
+    seeds = [f"s{i}" for i in range(6)]
+    reps = {s: rng.randn(16).astype(np.float32) for s in seeds}
+    reps["s0"] = reps["s5"] + 0.001 * rng.randn(16).astype(np.float32)  # s0~s5 近似同义
+    # max_reps=3 would split s0,s5 into different shards under the old path → dropped;
+    # the global path (too-small cap ignored) must recover it.
+    with caplog.at_level("WARNING"):
+        pairs = _ann_candidates(seeds, reps, k=5, lo=0.8, max_reps=3)
+    got = {frozenset((a, b)) for a, b, *_ in pairs}
+    assert frozenset(("s0", "s5")) in got
+    # too-small cap → no sharding → no WARNING
+    assert not any("rep" in r.message.lower() for r in caplog.records)
 
 
 def test_cluster_seeds_emits_pending_seeds():
