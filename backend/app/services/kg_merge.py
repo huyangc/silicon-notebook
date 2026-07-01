@@ -297,7 +297,7 @@ def cluster_seeds(
 ) -> dict:
     """seed 级聚类核心(随 #seeds 有界)。confirmed/rejected 为 seed 对(frozenset)。
     rep_ann_max: 传给 _ann_candidates 的分片上限(None=不分片)。
-    返回 {seed_to_canonical, canonical_names, auto_candidates, pending, capped}。"""
+    返回 {seed_to_canonical, canonical_names, auto_candidates, pending, pending_seeds, capped}。"""
     uf = _UF(seeds)
     for pair in confirmed:
         if len(pair) != 2:
@@ -331,9 +331,13 @@ def cluster_seeds(
     pending = [(canon_id[a], canon_id[b], sim) for a, b, sim in cand
                if sim < hi and canon_id[a] != canon_id[b]]
     pending.sort(key=lambda t: t[2], reverse=True)
+    pending_seeds = [(a, b, canon_id[a], canon_id[b], sim) for a, b, sim in cand
+                     if sim < hi and canon_id[a] != canon_id[b]]
+    pending_seeds.sort(key=lambda t: t[4], reverse=True)
     was_capped = len(pending) > max_pending
     return {"seed_to_canonical": canon_id, "canonical_names": canon_name,
-            "auto_candidates": auto_candidates, "pending": pending[:max_pending], "capped": was_capped}
+            "auto_candidates": auto_candidates, "pending": pending[:max_pending],
+            "pending_seeds": pending_seeds[:max_pending], "capped": was_capped}
 
 
 def cluster_objects(
@@ -388,7 +392,8 @@ def cluster_objects(
     cluster_map = {c["object_id"]: canon_id[seed_of[c["object_id"]]] for c in objects}
     names = {c["object_id"]: sd["canonical_names"][cluster_map[c["object_id"]]] for c in objects}
     return {"cluster_map": cluster_map, "canonical_names": names,
-            "auto_candidates": sd["auto_candidates"], "pending": sd["pending"], "capped": sd["capped"]}
+            "auto_candidates": sd["auto_candidates"], "pending": sd["pending"],
+            "pending_seeds": sd["pending_seeds"], "capped": sd["capped"]}
 
 
 def cluster_concepts(
