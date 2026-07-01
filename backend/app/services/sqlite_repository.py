@@ -810,6 +810,10 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''")
             if "reviewed_by" not in cm_cols:
                 db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
+            if "seed_a" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN seed_a TEXT NOT NULL DEFAULT ''")
+            if "seed_b" not in cm_cols:
+                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN seed_b TEXT NOT NULL DEFAULT ''")
             # object_type column for concept_clusters (per-type isolation).
             cc_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_clusters)").fetchall()}
             if "object_type" not in cc_cols:
@@ -4473,6 +4477,29 @@ class SQLiteRepository:
         with self._connect() as db:
             rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
         return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
+
+    def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
+        """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
+
+        Seed-name keys are STABLE across rebuilds (canonical ids shift when a
+        cluster's min-member changes; seed names don't). Legacy rows written
+        before the seed_a/seed_b columns existed carry '' → fall back to
+        strip-"K-"(canonical), matching the old decided_pairs key derivation."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT canonical_a, canonical_b, seed_a, seed_b, status "
+                "FROM concept_merge_candidates WHERE notebook_id=? "
+                "AND status IN ('confirmed','rejected','deferred')",
+                (notebook_id,),
+            ).fetchall()
+        def _strip(cid: str) -> str:
+            return cid[2:] if cid.startswith("K-") else cid
+        out: Dict[frozenset, str] = {}
+        for r in rows:
+            a = r["seed_a"] or _strip(r["canonical_a"])
+            b = r["seed_b"] or _strip(r["canonical_b"])
+            out[frozenset((a, b))] = r["status"]
+        return out
 
     def concept_whitelist_terms(self) -> set:
         with self._connect() as db:
