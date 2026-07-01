@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
-from app.core.llm import OpenAICompatibleClient
+from app.core.llm import OpenAICompatibleClient, cap_kwargs
 from app.models.schemas import (
     AddUrlSourcesResult,
     AnswerAnchor,
@@ -7341,6 +7341,7 @@ class SQLiteRepository:
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
+            **cap_kwargs(self.llm_client, "answer_max_tokens"),
         )
         raise_if_cancelled(cancel_event)
         data = json.loads(raw)
@@ -7378,6 +7379,7 @@ class SQLiteRepository:
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
             cancel_event=cancel_event,
+            **cap_kwargs(self.llm_client, "answer_max_tokens"),
         )
         raise_if_cancelled(cancel_event)
         data = json.loads(raw)
@@ -8038,6 +8040,7 @@ class SQLiteRepository:
             timeout=self.settings.reasoning_timeout_seconds,
             max_retries=self.settings.reasoning_max_retries,
             cancel_event=cancel_event,
+            **cap_kwargs(self.reasoning_llm_client, "answer_max_tokens"),
         )
         raise_if_cancelled(cancel_event)
         data = json.loads(raw)
@@ -8452,6 +8455,7 @@ class SQLiteRepository:
                           "content": answer_prompt(question, context_block, history)}],
                         ANSWER_SCHEMA_HINT,
                         cancel_event=cancel_event,
+                        **cap_kwargs(self.llm_client, "answer_max_tokens"),
                     )
                     raise_if_cancelled(cancel_event)
                     data = json.loads(raw)
