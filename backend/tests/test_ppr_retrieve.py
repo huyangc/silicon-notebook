@@ -437,6 +437,7 @@ def test_scale_ppr_caches_combined_graph(repo, monkeypatch):
 
     r1 = repo.scale_ppr(active.id, "Mixture of Experts")
     n_after_first = calls["n"]
+    assert n_after_first > 0                     # 首查确有 splice(未命中缓存)
     r2 = repo.scale_ppr(active.id, "Mixture of Experts")
     assert calls["n"] == n_after_first          # 第二次命中缓存、不再 splice
     assert isinstance(r1, list) and isinstance(r2, list)

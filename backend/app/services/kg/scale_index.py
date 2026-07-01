@@ -121,17 +121,16 @@ def build_transition(
     """
     index = {nid: i for i, nid in enumerate(node_ids)}
     n = len(node_ids)
-    rows, cols, data = [], [], []
-    for s, t, w in edges:
-        si, ti = index.get(s), index.get(t)
-        if si is None or ti is None:
-            continue
-        rows.append(ti)
-        cols.append(si)
-        data.append(float(w))
-    if not data:
+    if not edges:
         return sp.csr_matrix((n, n), dtype=np.float64), index
-    M = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float64)
+    src = np.fromiter((index.get(s, -1) for s, _, _ in edges), dtype=np.int64, count=len(edges))
+    tgt = np.fromiter((index.get(t, -1) for _, t, _ in edges), dtype=np.int64, count=len(edges))
+    w = np.fromiter((float(wt) for _, _, wt in edges), dtype=np.float64, count=len(edges))
+    keep = (src >= 0) & (tgt >= 0)
+    src, tgt, w = src[keep], tgt[keep], w[keep]
+    if src.size == 0:
+        return sp.csr_matrix((n, n), dtype=np.float64), index
+    M = sp.csr_matrix((w, (tgt, src)), shape=(n, n), dtype=np.float64)   # A[j,i]=i->j
     colsum = np.asarray(M.sum(axis=0)).ravel()
     colsum[colsum == 0] = 1.0
     D = sp.diags(1.0 / colsum)
@@ -226,19 +225,36 @@ def splice_active(
 ) -> Tuple[List[str], "sp.csr_matrix"]:
     """把 active 的节点/边并入 base，按 id 合一（共享 canonical_id 自然合并）。
     返回 (combined_ids, combined_transition)。base 边从 base_transition 的稀疏结构还原
-    （转移阵已列归一，权重信息有损，v1 用结构 + 权重 1.0 重算；等价测试证 top-k 稳健）。"""
-    base_coo = base_transition.tocoo()
-    # build_transition 建阵时: A[target_row, source_col] = i->j 归一化权重
-    # COO 中 row=target(j), col=source(i) → 边方向 source->target = base_ids[col]->base_ids[row]
-    base_edges_reconstructed = [
-        (base_ids[i], base_ids[j], 1.0)
-        for i, j in zip(base_coo.col, base_coo.row)
-    ]
+    （转移阵已列归一，权重信息有损，v1 用结构 + 权重 1.0 重算；等价测试证 top-k 稳健）。
+    向量化：base 边直接复用 CSR/COO 结构数组（source=col, target=row，权重 1.0），
+    active 边映射进 combined 索引空间后拼接，一次性建列随机阵，避免逐边 Python 循环。"""
     base_set = set(base_ids)
     combined_ids = list(base_ids) + [a for a in active_ids if a not in base_set]
-    combined_edges = base_edges_reconstructed + list(active_edges)
-    A, _ = build_transition(combined_ids, combined_edges)
-    return combined_ids, A
+    index = {nid: i for i, nid in enumerate(combined_ids)}
+    n = len(combined_ids)
+    coo = base_transition.tocoo()
+    # base 结构还原:source=base_ids[col], target=base_ids[row],权重 1.0(原语义)。
+    # combined 前 len(base_ids) 项与 base 对齐,索引可直接复用。
+    base_src = coo.col.astype(np.int64)
+    base_tgt = coo.row.astype(np.int64)
+    base_w = np.ones(coo.nnz, dtype=np.float64)
+    if active_edges:
+        a_src = np.fromiter((index.get(s, -1) for s, _, _ in active_edges), dtype=np.int64, count=len(active_edges))
+        a_tgt = np.fromiter((index.get(t, -1) for _, t, _ in active_edges), dtype=np.int64, count=len(active_edges))
+        a_w = np.fromiter((float(w) for _, _, w in active_edges), dtype=np.float64, count=len(active_edges))
+        keep = (a_src >= 0) & (a_tgt >= 0)
+        src = np.concatenate([base_src, a_src[keep]])
+        tgt = np.concatenate([base_tgt, a_tgt[keep]])
+        w = np.concatenate([base_w, a_w[keep]])
+    else:
+        src, tgt, w = base_src, base_tgt, base_w
+    if src.size == 0:
+        return combined_ids, sp.csr_matrix((n, n), dtype=np.float64)
+    M = sp.csr_matrix((w, (tgt, src)), shape=(n, n), dtype=np.float64)
+    colsum = np.asarray(M.sum(axis=0)).ravel()
+    colsum[colsum == 0] = 1.0
+    D = sp.diags(1.0 / colsum)
+    return combined_ids, (M @ D).tocsr()
 
 
 def viz_core(viz: dict, limit: int) -> dict:
