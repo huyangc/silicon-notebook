@@ -26,6 +26,16 @@ import {
   type PromotionCandidate,
 } from "./promotion-queue";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
+import {
+  shareNotebook,
+  unshareNotebook,
+  previewShared,
+  copyShared,
+  parseShareToken,
+  buildShareLink,
+  type ShareResponse,
+  type SharedPreview,
+} from "./notebook-share";
 import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
@@ -885,6 +895,12 @@ export default function Home() {
   const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
   const [edgeReviewOpen, setEdgeReviewOpen] = useState(false);
   const [edgeBusy, setEdgeBusy] = useState(false);
+  // 分享(owner 侧):shareModal 存分享结果并驱动分享弹窗;shareBusy 覆盖分享/取消分享请求
+  const [shareModal, setShareModal] = useState<ShareResponse | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
+  // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝请求
+  const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
+  const [copyBusy, setCopyBusy] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
@@ -975,6 +991,8 @@ export default function Home() {
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
   const kgGraphRef = useRef<any>(null);
+  // 收到分享的 token 缓存 —— 挂载时从 URL 抓到后立即清掉 ?share,故拷贝时从这里取。
+  const shareTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!getToken()) { setAuthChecked(true); return; }
@@ -983,6 +1001,29 @@ export default function Home() {
       .catch(() => { clearToken(); })
       .finally(() => setAuthChecked(true));
   }, []);
+
+  // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
+  // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
+  useEffect(() => {
+    if (!authChecked || !getToken()) return;
+    const token = parseShareToken(window.location.search);
+    if (!token) return;
+    shareTokenRef.current = token;
+    // 立即清掉 ?share,保留其余 query 与 hash(避免刷新重复弹窗)。
+    const cleaned = window.location.search
+      .replace(/^\?/, "")
+      .split("&")
+      .filter((p) => p && p.split("=")[0] !== "share")
+      .join("&");
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (cleaned ? `?${cleaned}` : "") + window.location.hash
+    );
+    previewShared(token)
+      .then((preview) => setSharedPreview(preview))
+      .catch(() => setToast("分享链接无效或已取消"));
+  }, [authChecked]);
 
   useEffect(() => {
     const element = chatBodyRef.current;
@@ -2223,6 +2264,59 @@ export default function Home() {
     );
   }
 
+  // --- 分享与拷贝(Phase 1) --------------------------------------------
+  // A. 分享(owner 侧):开启分享 → 拿 token → 打开分享弹窗
+  async function openShareModal() {
+    if (!currentNotebook) return;
+    setShareBusy(true);
+    try {
+      const result = await shareNotebook(currentNotebook.id);
+      setShareModal(result);
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  // 复制分享链接到剪贴板(退化时至少把链接抛到状态栏)
+  async function copyShareLink() {
+    if (!shareModal) return;
+    const link = buildShareLink(shareModal.share_token, window.location.origin);
+    try {
+      await navigator.clipboard?.writeText(link);
+      setToast("分享链接已复制");
+    } catch {
+      setStatusText(link);
+      setToast("复制失败，链接已显示在状态栏");
+    }
+  }
+
+  // 取消分享:撤销 token → 关弹窗
+  async function handleUnshare() {
+    if (!currentNotebook) return;
+    setShareBusy(true);
+    try {
+      await unshareNotebook(currentNotebook.id);
+      setShareModal(null);
+      setToast("已取消分享，链接立即失效");
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  // B. 接收分享(拷贝侧):拷贝分享库到当前用户空间 → 选中新库 → 关弹窗
+  async function handleCopyShared(token: string) {
+    setCopyBusy(true);
+    try {
+      const created = await copyShared(token);
+      await loadNotebookCollection();
+      setCurrentNotebookId(String(created.id));
+      setSharedPreview(null);
+      setToast("已拷贝到你的空间");
+    } finally {
+      setCopyBusy(false);
+    }
+  }
+
   // --- Governance: promotion queue (Track F) ---------------------------
   async function openPromoQueue() {
     const queue = await fetchPromotionQueue();
@@ -2581,11 +2675,7 @@ export default function Home() {
                   <Network size={17} />
                   <span>知识图谱</span>
                 </button>
-                <button className="workspace-nav-button" onClick={() => setInfoModal({
-                  title: "分享",
-                  message: "当前是本机单用户 beta，分享会生成本地 notebook 链接；多人权限后续再接入。",
-                  actions: [{ label: "复制本机链接", primary: true, action: () => navigator.clipboard?.writeText(window.location.href).then(() => setToast("本机链接已复制")).catch(() => setStatusText(window.location.href)) }]
-                })}>
+                <button className="workspace-nav-button" disabled={shareBusy} onClick={() => openShareModal().catch(reportError)}>
                   <Share2 size={17} />
                   <span>分享</span>
                 </button>
@@ -3030,6 +3120,91 @@ export default function Home() {
               <div className="tag-row">
                 <button className="new-pill" onClick={() => submitCreate().catch(reportError)}>创建并添加来源</button>
                 <button className="sort-button" onClick={() => setCreateOpen(false)}>取消</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {shareModal && currentNotebook && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setShareModal(null); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>分享「{currentNotebook.name}」</h2>
+                <p>{shareModal.copyable
+                  ? "拿到链接的登录用户可将这个知识库整份拷贝到自己的空间。"
+                  : "此库较大，暂只支持生成链接；只读共享访问即将支持。"}</p>
+              </div>
+              <button className="icon-button" onClick={() => setShareModal(null)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <label>分享链接
+                <div className="tag-row" style={{ marginTop: 6 }}>
+                  <input
+                    readOnly
+                    value={buildShareLink(shareModal.share_token, window.location.origin)}
+                    onFocus={(event) => event.currentTarget.select()}
+                    style={{ flex: 1 }}
+                  />
+                  <button className="sort-button" onClick={() => copyShareLink().catch(reportError)}>复制</button>
+                </div>
+              </label>
+              <p className="tool-hint" style={{ margin: "2px 0 0" }}>
+                {shareModal.copyable ? "他人可拷贝" : "库较大，暂只支持生成链接（共享访问即将支持）"}
+                {` · ${shareModal.size.sources} 来源 · ${shareModal.size.nodes} 节点 · ${shareModal.size.edges} 边 · ${formatFileSize(shareModal.size.bytes)}`}
+              </p>
+              <div className="tag-row">
+                <button className="sort-button" disabled={shareBusy} onClick={() => handleUnshare().catch(reportError)}>取消分享</button>
+                <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {sharedPreview && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedPreview(null); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>{sharedPreview.name}</h2>
+                <p>由 {sharedPreview.owner_display} 分享 · {sharedPreview.source_count} 来源 · {sharedPreview.node_count} 节点 · {sharedPreview.edge_count} 边</p>
+              </div>
+              <button className="icon-button" onClick={() => setSharedPreview(null)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {sharedPreview.source_titles.length > 0 && (
+                <div className="stack">
+                  <span className="section-title">来源</span>
+                  {sharedPreview.source_titles.map((title, index) => (
+                    <div className="checklist-row" key={`${title}-${index}`}>
+                      <span style={{ flex: 1, wordBreak: "break-word" }}>{title}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {sharedPreview.mode === "too_large" && (
+                <p className="tool-hint" style={{ margin: "2px 0 0", color: "var(--danger, #c0392b)" }}>
+                  此库过大，暂不支持拷贝（只读共享即将支持）
+                </p>
+              )}
+              <div className="tag-row">
+                {sharedPreview.mode === "copy" ? (
+                  <button
+                    className="new-pill"
+                    disabled={copyBusy}
+                    onClick={() => {
+                      const token = shareTokenRef.current;
+                      if (token) handleCopyShared(token).catch(reportError);
+                    }}
+                  >
+                    {copyBusy ? "拷贝中…" : "拷贝到我的空间"}
+                  </button>
+                ) : (
+                  <button className="new-pill" disabled title="此库过大，暂不支持拷贝（只读共享即将支持）">拷贝到我的空间</button>
+                )}
+                <button className="sort-button" onClick={() => setSharedPreview(null)}>取消</button>
               </div>
             </div>
           </div>
