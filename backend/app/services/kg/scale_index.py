@@ -33,6 +33,8 @@ class ScaleIndex:
     viz_types: list = None        # object_type per folded node
     viz_names: list = None        # display name per folded node (hydration-free)
     viz_edges: list = None        # directed-deduped folded edges [[src,dst,edge_type],...]
+    chunk_ann_labels: list = None   # chunk_id 列表(与 chunk_ann.bin 行对齐);无则 None
+    chunk_ann_path: str = None      # chunk hnsw 文件路径;无则 None
 
 
 def load_scale_index(out_dir: str):
@@ -62,6 +64,14 @@ def load_scale_index(out_dir: str):
                 viz_edges = json.loads(str(z["viz_edges"]))
             viz_adj = sp.load_npz(viz_adj_path)
 
+    chunk_ann_labels = None
+    chunk_ann_path = None
+    if manifest.get("has_chunk_ann"):
+        labpath = os.path.join(out_dir, "chunk_ann_labels.npy")
+        if os.path.exists(labpath):
+            chunk_ann_labels = list(np.load(labpath, allow_pickle=True))
+            chunk_ann_path = os.path.join(out_dir, "chunk_ann.bin")
+
     return ScaleIndex(
         node_ids=node_ids,
         node_index={n: i for i, n in enumerate(node_ids)},
@@ -77,6 +87,8 @@ def load_scale_index(out_dir: str):
         viz_types=viz_types,
         viz_names=viz_names,
         viz_edges=viz_edges,
+        chunk_ann_labels=chunk_ann_labels,
+        chunk_ann_path=chunk_ann_path,
     )
 
 
@@ -153,6 +165,8 @@ def save_scale_index(
     viz_types: List[str] = None,
     viz_names: List[str] = None,
     viz_payload: dict = None,
+    chunk_ann_vectors=None,
+    chunk_ann_labels: List[str] = None,
 ) -> dict:
     """把构建好的数组落盘到 out_dir。
 
@@ -198,6 +212,20 @@ def save_scale_index(
     if ann_vecs.shape[0] > 0:
         idx.add_items(ann_vecs, np.arange(ann_vecs.shape[0]))
     idx.save_index(os.path.join(out_dir, "ann.bin"))
+
+    # Chunk-level ANN (Task 1). Same hnsw params as the KG ann above; persisted
+    # only when chunk vectors/labels are provided. manifest flag lets
+    # load_scale_index skip when absent (older indexes stay valid).
+    if chunk_ann_labels:
+        c_vecs = np.asarray(chunk_ann_vectors, dtype=np.float32)
+        c_dim = int(c_vecs.shape[1]) if c_vecs.shape[0] > 0 else dim
+        c_idx = hnswlib.Index(space="cosine", dim=c_dim)
+        c_idx.init_index(max_elements=max(1, c_vecs.shape[0]), ef_construction=200, M=16, random_seed=42)
+        if c_vecs.shape[0] > 0:
+            c_idx.add_items(c_vecs, np.arange(c_vecs.shape[0]))
+        c_idx.save_index(os.path.join(out_dir, "chunk_ann.bin"))
+        np.save(os.path.join(out_dir, "chunk_ann_labels.npy"), np.asarray(chunk_ann_labels, dtype=object))
+        manifest = {**manifest, "has_chunk_ann": True, "n_chunk_ann": len(chunk_ann_labels)}
 
     with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
         json.dump(manifest, fh)

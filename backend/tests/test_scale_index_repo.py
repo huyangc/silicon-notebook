@@ -399,3 +399,34 @@ def test_cross_layer_bridge_disabled_no_extra_edges(repo, monkeypatch):
     # With bridge disabled: call scale_ppr (should return results without crash)
     result = repo.scale_ppr(active.id, "some query")
     assert isinstance(result, list)  # bridge off must not crash
+
+
+def test_build_scale_index_writes_chunk_ann(repo):
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        for cid, txt in [("c1", "MOSFET current mirror"), ("c2", "bandgap reference voltage")]:
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, "s1", txt, "", "[]", now))
+    # 给 chunk 补向量：FakeEmbedder 无回填 API，直插 chunk_embeddings（embed_texts 为实际 API）
+    with repo._write() as db:
+        if not db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?",
+                          (nb.id,)).fetchone()["c"]:
+            for cid in ("c1", "c2"):
+                v = repo.embedder.embed_texts([cid])[0]
+                db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                           (cid, nb.id, json.dumps(v), now))
+    repo.rebuild_unified_kg(nb.id)
+    manifest = repo.build_scale_index(nb.id)
+    d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
+    assert os.path.exists(os.path.join(d, "chunk_ann.bin"))
+    assert os.path.exists(os.path.join(d, "chunk_ann_labels.npy"))
+    assert manifest.get("has_chunk_ann") is True
+    assert manifest.get("n_chunk_ann") == 2
+    # load 能读回 chunk ann
+    idx = repo._scale_index(nb.id)
+    assert idx is not None
+    assert list(idx.chunk_ann_labels) == ["c1", "c2"] or set(idx.chunk_ann_labels) == {"c1", "c2"}
+    assert idx.chunk_ann_path.endswith("chunk_ann.bin")
