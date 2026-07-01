@@ -8338,6 +8338,19 @@ class SQLiteRepository:
         except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
             self._note_model_error("chunk_ann_delta", self.settings.embed_model, exc)
 
+        # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
+        try:
+            from app.services.kg.search import chunk_fts_search
+            with self._connect() as db:
+                lex = chunk_fts_search(db, notebook_id, query, k=recall)
+            for h in lex:
+                cid = h["chunk_id"]
+                if cid not in chunk_sims:
+                    cand_ids.append(cid)
+                    chunk_sims[cid] = 0.0   # 词法命中无语义分;score_chunks 的 keyword 分兜底
+        except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
+            self._note_model_error("chunk_fts", self.settings.embed_model, exc)
+
         if not cand_ids:
             return [], [], None
         ph = ",".join("?" for _ in cand_ids)
