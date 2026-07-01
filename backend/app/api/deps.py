@@ -49,10 +49,23 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
         reset_request_user(ctx_token)
 
 
-async def require_notebook_access(
+async def require_notebook_write(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> str:
-    """notebook 子资源守卫：非 owner → 404（不泄露存在性）。"""
+    """写守卫:仅 owner。非 owner → 404(不泄露存在性)。"""
     if not repository().user_can_access_notebook(notebook_id, user.id):
         raise HTTPException(status_code=404, detail="Notebook not found")
     return notebook_id
+
+
+async def require_notebook_read(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> str:
+    """读守卫:owner ∪ 只读成员。非授权 → 404(不泄露存在性)。"""
+    if not repository().user_can_read_notebook(notebook_id, user.id):
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    return notebook_id
+
+
+# 向后兼容别名:老代码/未分类路由默认仍是 owner-only(默认最严兜底)。
+require_notebook_access = require_notebook_write

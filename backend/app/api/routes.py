@@ -9,7 +9,10 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import repository, require_notebook_access, get_current_user
+from app.api.deps import (
+    repository, require_notebook_access, require_notebook_read,
+    require_notebook_write, get_current_user,
+)
 from app.core.config import get_settings
 from app.models.schemas import (
     AskRequest,
@@ -228,7 +231,7 @@ def create_notebook(payload: NotebookCreate) -> NotebookSummary:
     return repository().create_notebook(payload)
 
 
-@router.get("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_read)])
 def get_notebook(notebook_id: str) -> NotebookSummary:
     try:
         return repository().get_notebook(notebook_id)
@@ -236,7 +239,7 @@ def get_notebook(notebook_id: str) -> NotebookSummary:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics, dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics, dependencies=[Depends(require_notebook_read)])
 def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
     try:
         return repository().notebook_analytics(notebook_id)
@@ -263,7 +266,7 @@ def delete_notebook(notebook_id: str) -> None:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/sources", response_model=PaginatedSources, dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/sources", response_model=PaginatedSources, dependencies=[Depends(require_notebook_read)])
 def list_sources(
     notebook_id: str,
     offset: int = Query(0, ge=0),
@@ -381,7 +384,7 @@ def delete_source(source_id: str, user: UserProfile = Depends(get_current_user))
 @router.get(
     "/notebooks/{notebook_id}/knowledge-types",
     response_model=List[KnowledgeTypeCount],
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_read)],
 )
 def knowledge_types(notebook_id: str) -> List[KnowledgeTypeCount]:
     try:
@@ -390,7 +393,7 @@ def knowledge_types(notebook_id: str) -> List[KnowledgeTypeCount]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/knowledge", response_model=PaginatedKnowledge, dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/knowledge", response_model=PaginatedKnowledge, dependencies=[Depends(require_notebook_read)])
 def list_knowledge(
     notebook_id: str,
     type: str = Query(...),
@@ -480,7 +483,7 @@ _KNOWLEDGE_TYPE_MAP = {
 }
 
 
-@router.get("/notebooks/{notebook_id}/duplicates", response_model=List[DuplicateGroup], dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/duplicates", response_model=List[DuplicateGroup], dependencies=[Depends(require_notebook_read)])
 def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[DuplicateGroup]:
     object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
     try:
@@ -490,7 +493,7 @@ def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[Duplic
 
 
 
-@router.get("/notebooks/{notebook_id}/graph", response_model=KnowledgeGraph, dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/graph", response_model=KnowledgeGraph, dependencies=[Depends(require_notebook_read)])
 def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
     try:
         return repository().knowledge_graph(notebook_id)
@@ -508,7 +511,7 @@ def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
 def search_notebook(
     notebook_id: str,
     q: str = Query(""),
@@ -537,7 +540,7 @@ def kg_search(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     try:
         return repository().ask(notebook_id, payload)
@@ -624,7 +627,7 @@ async def _stream_ask_events(
         cancel_event.set()
 
 
-@router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
 async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
     repo = repository()
     try:
@@ -642,7 +645,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
     )
 
 
-@router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary], dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary], dependencies=[Depends(require_notebook_read)])
 def list_conversations(notebook_id: str) -> List[ConversationSummary]:
     try:
         return repository().list_conversations(notebook_id)
@@ -695,7 +698,7 @@ def bulk_delete_conversations(notebook_id: str, older_than_days: int = Query(...
 # Edge trust & curation (Track E)
 # ---------------------------------------------------------------------------
 
-@router.get("/notebooks/{notebook_id}/edge-review-queue", response_model=List[EdgeReviewItem], dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/edge-review-queue", response_model=List[EdgeReviewItem], dependencies=[Depends(require_notebook_read)])
 def edge_review_queue(notebook_id: str, limit: int = 100) -> List[EdgeReviewItem]:
     """Return edges ranked by review priority (high centrality × low trust) desc.
     Excludes already-rejected edges.
@@ -851,7 +854,7 @@ def rebuild_unified_kg(notebook_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/unified-kg/status", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/unified-kg/status", dependencies=[Depends(require_notebook_read)])
 def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
     try:
         return UnifiedKgStatus(**repository().unified_kg_status(notebook_id))
@@ -878,7 +881,7 @@ def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/unified-kg", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/unified-kg", dependencies=[Depends(require_notebook_read)])
 def get_unified_kg(
     notebook_id: str,
     level: str = Query("concept"),
@@ -890,7 +893,7 @@ def get_unified_kg(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/unified-kg/pending-merges", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/unified-kg/pending-merges", dependencies=[Depends(require_notebook_read)])
 def get_pending_merges(notebook_id: str) -> list:
     try:
         return repository().pending_merges(notebook_id)
@@ -898,7 +901,7 @@ def get_pending_merges(notebook_id: str) -> list:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/concepts/{canonical_id}/detail", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/concepts/{canonical_id}/detail", dependencies=[Depends(require_notebook_read)])
 def get_concept_detail(notebook_id: str, canonical_id: str) -> dict:
     try:
         return repository().concept_detail(notebook_id, canonical_id)
@@ -906,7 +909,7 @@ def get_concept_detail(notebook_id: str, canonical_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Concept not found")
 
 
-@router.get("/notebooks/{notebook_id}/objects/{object_id}/context", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/objects/{object_id}/context", dependencies=[Depends(require_notebook_read)])
 def object_context(notebook_id: str, object_id: str):
     try:
         return repository().node_context(notebook_id, object_id)
@@ -914,7 +917,7 @@ def object_context(notebook_id: str, object_id: str):
         raise HTTPException(status_code=404, detail="Object not found")
 
 
-@router.get("/notebooks/{notebook_id}/objects/{object_id}/neighbors", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/objects/{object_id}/neighbors", dependencies=[Depends(require_notebook_read)])
 def object_neighbors(
     notebook_id: str,
     object_id: str,
@@ -974,7 +977,7 @@ def resolve_conflicts(notebook_id: str) -> dict:
     return {"status": "resolving", "notebook_id": notebook_id}
 
 
-@router.get("/notebooks/{notebook_id}/kg/conflicts/pending", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/kg/conflicts/pending", dependencies=[Depends(require_notebook_read)])
 def get_pending_conflicts(notebook_id: str) -> list:
     """Return all pending conflict candidates for a notebook."""
     try:
