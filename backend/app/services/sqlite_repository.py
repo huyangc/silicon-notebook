@@ -118,6 +118,19 @@ from app.services.retrieval import (
 )
 
 
+try:
+    import orjson as _orjson
+    def _fast_loads(s):
+        """orjson for speed (5-10x on big float arrays); fall back to stdlib json
+        for any value orjson rejects (e.g. NaN/Infinity in legacy vectors)."""
+        try:
+            return _orjson.loads(s)
+        except Exception:
+            return json.loads(s)
+except ImportError:  # pragma: no cover
+    _fast_loads = json.loads
+
+
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
@@ -4428,7 +4441,7 @@ class SQLiteRepository:
                     "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
                     (notebook_id, object_type))
                 for r in cur:
-                    yield json.loads(r["payload"] or "{}").get("name", "")
+                    yield _fast_loads(r["payload"] or "{}").get("name", "")
         alias_map = build_acronym_alias_map(_name_gen())
 
         # Pass A2: stream (id, name) → seed; accumulate counts/first-name; buffer
@@ -4443,7 +4456,7 @@ class SQLiteRepository:
                 (notebook_id, object_type))
             with self._write() as wdb:
                 for r in cur:
-                    pay = json.loads(r["payload"] or "{}")
+                    pay = _fast_loads(r["payload"] or "{}")
                     name = pay.get("name", "")
                     # Pass the full payload-bearing object so seed_fn can use it
                     # (e.g. seed_procedure appends a steps signature from payload).
@@ -4483,7 +4496,7 @@ class SQLiteRepository:
                 "WHERE e.notebook_id=?",
                 (run_id, notebook_id))
             for r in cur:
-                v = json.loads(r["vector"])
+                v = _fast_loads(r["vector"])
                 if len(v) != embed_dim:
                     continue
                 arr = np.asarray(v, dtype=np.float32)
@@ -4557,14 +4570,31 @@ class SQLiteRepository:
         # notebook never wipe or read each other's scratch rows.
         run_id = _uuid4().hex
 
+        # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
+        # channels (event_log INFO + progress banner). Pure logging — no effect on
+        # clustering results or the progress=None data path.
+        import time as _time
+        _t_total = _time.perf_counter()
+        def _stage(msg: str) -> None:
+            self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
+            if progress is not None:
+                try:
+                    progress(msg, 0, 0)
+                except Exception:
+                    pass
+
         # --- Concepts (vector + name-seed clustering) ----------------------
         # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
         # (object_id -> seed) and returns seed-level aggregates only.
+        _t = _time.perf_counter()
         reps, members_count, seed_first_name = self._stream_seed_reps(
             notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
         # IMPORTANT: include seeds with NO vector (name-only) — use members_count
         # keys, not reps keys, to match the legacy all-objects path.
         seeds = sorted(members_count)
+        _stage(f"concept: streamed {sum(members_count.values())} objs → "
+               f"{len(seeds)} seeds, {len(reps)} vecs "
+               f"({_time.perf_counter() - _t:.1f}s)")
         # decided_pairs keys are canonical ids of the form "K-<normalized_seed_name>";
         # cluster_seeds wants confirmed/rejected keyed by normalized seed name -> strip "K-".
         def _seed(cid: str) -> str:
@@ -4572,12 +4602,14 @@ class SQLiteRepository:
         decided = self.decided_pairs(notebook_id)
         confirmed = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "confirmed"}
         rejected = {frozenset((_seed(a), _seed(b))) for (a, b), s in decided.items() if s == "rejected"}
+        _t_cluster = _time.perf_counter()
         sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                            conflict_fn=_discriminative_conflict, id_prefix="K-",
                            rep_ann_max=self.settings.kg_cluster_rep_ann_max)
         # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
         from app.services.concept_merge_review import review_merge_candidates
         autoc = sd.get("auto_candidates", [])
+        _t_mr = _time.perf_counter()
         if autoc and getattr(self.kg_llm_client, "configured", False):
             # Optional LLM adjudication is an enhancement — it must NEVER be able to
             # crash the rebuild. review_merge_candidates is already fail-open (chunked +
@@ -4612,10 +4644,18 @@ class SQLiteRepository:
                 sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                                    conflict_fn=_discriminative_conflict, id_prefix="K-",
                                    rep_ann_max=self.settings.kg_cluster_rep_ann_max)
+            _stage(f"concept: merge-review {len(autoc)} candidates → "
+                   f"{len(extra)} merged ({_time.perf_counter() - _t_mr:.1f}s)")
+        _stage(f"concept: clustered {len(seeds)} seeds → "
+               f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
+               f"{len(sd.get('auto_candidates', []))} auto-cand "
+               f"({_time.perf_counter() - _t_cluster:.1f}s)")
         seed_to_canonical = sd["seed_to_canonical"]
         desc_by_cid: Dict[str, str] = {}
         desc_sig_by_cid: Dict[str, str] = {}
-        if self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False):
+        _t_desc = _time.perf_counter()
+        _desc_ran = self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False)
+        if _desc_ran:
             from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
             # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
             # so this is bounded by #canonicals (not #members). Reuse fires only on an
@@ -4707,9 +4747,16 @@ class SQLiteRepository:
                                 progress("concept_desc", done_n, len(work))
                             except Exception:
                                 pass
+        if _desc_ran:
+            _stage(f"concept: descriptions {len(desc_by_cid)} "
+                   f"({_time.perf_counter() - _t_desc:.1f}s)")
+        else:
+            _stage("concept: descriptions skipped")
+        _t = _time.perf_counter()
         self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
                                          sd["canonical_names"], desc_by_cid,
                                          desc_sig_by_cid, run_id=run_id)
+        _stage(f"concept: wrote clusters ({_time.perf_counter() - _t:.1f}s)")
         # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
         # vector near-dup remains concept-only). Each type isolated by id prefix.
         # These types carry no vectors → reps_t is empty → cluster_seeds does only
@@ -4720,6 +4767,7 @@ class SQLiteRepository:
                        "formula": (seed_formula, "KF-"),
                        "procedure": (seed_procedure, "KP-")}
         for t, (sfn, prefix) in _TYPE_MERGE.items():
+            _t = _time.perf_counter()
             reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
                                                           run_id=run_id,
                                                           compute_reps=False)
@@ -4730,15 +4778,18 @@ class SQLiteRepository:
                                  rep_ann_max=self.settings.kg_cluster_rep_ann_max)
             self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
                                              sd_t["canonical_names"], run_id=run_id)
+            _stage(f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
         # Refresh pending candidates in ONE transaction (per-candidate inserts
         # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
         now = _now()
+        _t = _time.perf_counter()
         with self._write() as db:
             db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,))
             db.executemany(
                 "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
                 "VALUES (?,?,?,?,?, 'pending', ?, ?)",
                 [(f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now) for a, b, score in sd["pending"]])
+        _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
         self._invalidate_unified_cache(notebook_id)
         # #distinct concept canonicals (== set of cluster_map values in the legacy
         # path: every canonical has ≥1 seed and every concept seed has a canonical).
@@ -4772,6 +4823,7 @@ class SQLiteRepository:
         with self._write() as db:
             db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
                        (notebook_id, run_id))
+        _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:

@@ -231,10 +231,13 @@ def test_progress_callback_invoked_per_work_item(repo):
     repo.rebuild_unified_kg(nb.id, progress=progress)
 
     work_n = 2   # two multi-member canonicals need descriptions
-    assert len(events) == work_n
-    assert all(phase == "concept_desc" for (phase, _i, _n) in events)
-    assert all(n == work_n for (_p, _i, n) in events)
+    # The progress channel now ALSO carries sub-stage banners (i==0, n==0);
+    # isolate the concept_desc per-work-item progress events (n > 0).
+    item_events = [(p, i, n) for (p, i, n) in events if n > 0]
+    assert len(item_events) == work_n
+    assert all(phase == "concept_desc" for (phase, _i, _n) in item_events)
+    assert all(n == work_n for (_p, _i, n) in item_events)
     # final progress reports i == n (completed all)
-    assert max(i for (_p, i, _n) in events) == work_n
+    assert max(i for (_p, i, _n) in item_events) == work_n
     # i values are the 1..n sequence (order may vary due to concurrency)
-    assert sorted(i for (_p, i, _n) in events) == list(range(1, work_n + 1))
+    assert sorted(i for (_p, i, _n) in item_events) == list(range(1, work_n + 1))
