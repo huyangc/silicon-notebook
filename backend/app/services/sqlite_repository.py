@@ -660,6 +660,10 @@ class SQLiteRepository:
                 CREATE TABLE IF NOT EXISTS unified_kg_state (
                   notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
                   dirty INTEGER NOT NULL DEFAULT 0,
+                  -- O(1) content-hash of the clustering INPUTS at the last rebuild
+                  -- (see _cluster_input_version). rebuild_unified_kg skips the whole
+                  -- recompute when this still matches; empty '' means never rebuilt.
+                  cluster_input_version TEXT NOT NULL DEFAULT '',
                   last_rebuild_at TEXT NOT NULL DEFAULT '',
                   object_count INTEGER NOT NULL DEFAULT 0,
                   relation_count INTEGER NOT NULL DEFAULT 0,
@@ -787,6 +791,13 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_description TEXT NOT NULL DEFAULT ''")
             if "canonical_desc_sig" not in cc_cols:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_desc_sig TEXT NOT NULL DEFAULT ''")
+            # cluster_input_version for unified_kg_state: content-hash of the
+            # clustering inputs at the last rebuild, so rebuild_unified_kg can skip
+            # the recompute when inputs are unchanged. Additive; pre-existing DBs
+            # get '' (never-rebuilt) and thus never wrongly skip.
+            uks_cols = {r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)").fetchall()}
+            if "cluster_input_version" not in uks_cols:
+                db.execute("ALTER TABLE unified_kg_state ADD COLUMN cluster_input_version TEXT NOT NULL DEFAULT ''")
             # Community report columns (title/summary/findings).
             comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
             for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
@@ -4388,6 +4399,51 @@ class SQLiteRepository:
         # evict so a same-second KG edit with an unchanged version tuple cannot serve stale.
         self._vector_cache.invalidate(f"{notebook_id}:ppr_graph")
 
+    def _cluster_input_version(self, notebook_id: str) -> str:
+        """O(1) content-hash of EVERYTHING that changes rebuild_unified_kg's
+        clustering output, so an unchanged version lets rebuild skip the recompute.
+
+        COUNT + MAX over indexed columns only (no payload/vector scan). Signals:
+          - knowledge_objects (the objects being clustered): status!='deprecated'
+            mirrors the rebuild's object filter + its final object_count.
+          - decided merge pairs: confirmed/rejected rows — WHERE mirrors
+            decided_pairs() EXACTLY; these force-union/block clusters. PENDING is
+            excluded on purpose (rebuild itself rewrites pending candidates, so
+            counting them would make the version move across a rebuild).
+          - knowledge_embeddings: vectors feed the ANN → change clustering.
+          - settings.embed_dim: a dim change means different vectors are kept.
+
+        Correctness bias: over-inclusion only forces a (cheap) recompute; a MISSED
+        input would serve a stale clustering — the cardinal sin — so when unsure we
+        include. Clustering SETTINGS (thresholds, rep_ann_max) are intentionally NOT
+        here; the explicit 刷新图谱 path passes force=True to pick those up.
+
+        Stable across a rebuild: rebuild writes only concept_clusters + pending
+        concept_merge_candidates, neither of which is in this signature.
+        """
+        with self._connect() as db:
+            obj = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
+                "FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,)).fetchone()
+            dec = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
+                "FROM concept_merge_candidates "
+                "WHERE notebook_id=? AND status IN ('confirmed','rejected')",
+                (notebook_id,)).fetchone()
+            emb = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM knowledge_embeddings WHERE notebook_id=?",
+                (notebook_id,)).fetchone()
+        parts = [
+            "v1", notebook_id,
+            int(obj["c"]), obj["ts"],
+            int(dec["c"]), dec["ts"],
+            int(emb["c"]), emb["ts"],
+            int(self.settings.embed_dim),
+        ]
+        return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
+
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
         now = _now()
         with self._write() as db:
@@ -4763,9 +4819,17 @@ class SQLiteRepository:
                     buf.clear()
 
     def rebuild_unified_kg(self, notebook_id: str,
-                           progress: Optional[Callable[[str, int, int], None]] = None) -> int:
+                           progress: Optional[Callable[[str, int, int], None]] = None,
+                           force: bool = False) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
         pending candidates (preserving confirmed/rejected). Returns #clusters.
+
+        Skip-when-unchanged gate: a content-hash of the clustering inputs
+        (_cluster_input_version) is stored at each rebuild. When force=False and
+        that version still matches AND clusters already exist, the whole recompute
+        is skipped and the cached cluster count returned — nothing is deleted or
+        rewritten. force=True (explicit 刷新图谱 / recluster) always recomputes and
+        also picks up clustering-SETTINGS changes the data-version can't see.
 
         Memory-bounded (streamed): object→seed mappings live in the
         kg_cluster_scratch table; only seed-level aggregates (reps, counts,
@@ -4774,6 +4838,29 @@ class SQLiteRepository:
         all-objects-in-memory path (guarded by tests/test_unified_kg_repository,
         test_cross_doc_merge, test_kg_merge, test_rebuild_streaming)."""
         self.get_notebook(notebook_id)
+        # Content-version of the clustering inputs, captured ONCE at entry. Reused
+        # both for the skip gate below and for the END-write (so the stored version
+        # reflects the inputs this rebuild actually consumed).
+        _ver = self._cluster_input_version(notebook_id)
+        if not force:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT cluster_input_version, cluster_count FROM unified_kg_state WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()
+                cc = db.execute(
+                    "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()
+            if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc and cc["c"] > 0:
+                cached = int(row["cluster_count"] or 0)
+                self.event_log.logger.info(
+                    "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
+                    notebook_id, cached)
+                if progress is not None:
+                    try:
+                        progress(f"跳过:自上次 rebuild 起输入未变化({cached} clusters)", 0, 0)
+                    except Exception:
+                        pass
+                return cached
         from uuid import uuid4 as _uuid4
         from app.services.kg_merge import (cluster_seeds, _norm, _discriminative_conflict,
                                            seed_claim, seed_formula, seed_procedure)
@@ -5017,17 +5104,18 @@ class SQLiteRepository:
             db.execute(
                 """
                 INSERT INTO unified_kg_state
-                (notebook_id, dirty, last_rebuild_at, object_count, relation_count, cluster_count, updated_at)
-                VALUES (?, 0, ?, ?, ?, ?, ?)
+                (notebook_id, dirty, cluster_input_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at)
+                VALUES (?, 0, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(notebook_id) DO UPDATE SET
                   dirty=0,
+                  cluster_input_version=excluded.cluster_input_version,
                   last_rebuild_at=excluded.last_rebuild_at,
                   object_count=excluded.object_count,
                   relation_count=excluded.relation_count,
                   cluster_count=excluded.cluster_count,
                   updated_at=excluded.updated_at
                 """,
-                (notebook_id, now, object_count, relation_count, cluster_count, now),
+                (notebook_id, _ver, now, object_count, relation_count, cluster_count, now),
             )
         # Final cleanup: drop only THIS run's scratch rows (run_id-scoped so a
         # concurrent rebuild with a different run_id is unaffected).

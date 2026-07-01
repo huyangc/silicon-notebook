@@ -252,7 +252,10 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
 
         # ── Rebuild 阶段 ──────────────────────────────────────────────────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress)
+        # force=rebuild_only:rebuild_only 是显式「只重建」入口(用户主动重聚),
+        # 必须重算;普通 kg 阶段走门控(force=False),无新文件时跳过重聚(本次优化点)。
+        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
+                                           force=rebuild_only)
         res["clusters"] = clusters
         log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
         print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
@@ -358,7 +361,10 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
 
         # ── 末尾一次:跨文档聚类 → 补节点向量 →(base/已建索引)scale index ────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress)
+        # 门控(force=False):自动收尾重聚。无新增/变更时(如重跑同一批)输入版本
+        # 未变 → 跳过整段重聚,直接返回缓存簇数(本次优化点)。
+        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
+                                           force=False)
         res["clusters"] = clusters
         log({"phase": "all", "status": "rebuilt", "clusters": clusters})
         print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
