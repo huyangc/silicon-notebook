@@ -124,6 +124,38 @@ def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
     assert {c.chunk_id for c in scored} <= set(idx.chunk_ann_labels)
 
 
+def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):
+    import json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    def add_source(sid, pairs, day):  # pairs: [(chunk_id, text)]
+        with repo._write() as db:
+            now = f"2026-07-{day:02d}T00:00:00"
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+            for cid, txt in pairs:
+                db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                           "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, sid, txt, "", "[]", now))
+                v = repo.embedder.embed_texts([txt])[0]
+                db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                           (cid, nb.id, json.dumps(v), now))
+    # 建索引时的存量
+    add_source("s1", [("c1", "alpha topic"), ("c2", "beta topic")], 1)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    # build 之后新上传一个 source(delta)——它不在 chunk_ann.bin 里
+    add_source("s2", [("c3", "gamma delta topic")], 2)
+    monkeypatch.setattr(repo.settings, "chunk_ann_enabled", True)
+
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    assert idx is not None and getattr(idx, "chunk_ann_labels", None)
+    assert "c3" not in set(idx.chunk_ann_labels)  # 前提:c3 确实不在存量 ANN
+    out = repo._retrieve_chunks_ann(nb.id, "gamma delta topic", repo._embed_query("gamma delta topic"), idx, recall=10)
+    assert out is not None
+    scored, ids, mat = out
+    assert "c3" in {c.chunk_id for c in scored}   # ⊕ delta:新上传的 c3 被召回
+
+
 class _FakeLLM:
     """配置好的假 LLM:chat_json 回定长 JSON, 内含 [k1] 标记。"""
     configured = True
