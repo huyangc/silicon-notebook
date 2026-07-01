@@ -49,3 +49,10 @@ def test_notebooks_has_share_columns(repo):
         cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)")}
     assert "is_shared" in cols
     assert "share_token" in cols
+
+
+def test_copy_thresholds_defaults():
+    from app.core.config import Settings
+    s = Settings()
+    assert s.notebook_copy_max_bytes == 50 * 1024 * 1024
+    assert s.notebook_copy_max_rows == 5000

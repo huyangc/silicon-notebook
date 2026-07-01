@@ -270,6 +270,9 @@ class Settings(BaseSettings):
         env="DATABASE_URL",
     )
     storage_dir: str = Field(".local/storage", validation_alias="SILICON_NOTEBOOK_STORAGE_DIR")
+    # Notebook 分享拷贝阈值:超过任一阈值的库仅可只读共享(Phase 2),不可深拷贝。
+    notebook_copy_max_bytes: int = Field(50 * 1024 * 1024, validation_alias="NOTEBOOK_COPY_MAX_BYTES")
+    notebook_copy_max_rows: int = Field(5000, validation_alias="NOTEBOOK_COPY_MAX_ROWS")
     # NoDecode 让 pydantic-settings 不把环境变量当 JSON 解析（否则逗号串会崩），
     # 改由下面的 split_cors_origins(mode="before") 处理逗号分隔；validation_alias
     # 才能真正读到 SILICON_NOTEBOOK_CORS_ORIGINS（v2 下 Field(env=...) 会被忽略）。
