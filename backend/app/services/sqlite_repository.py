@@ -5907,36 +5907,61 @@ class SQLiteRepository:
         return max(keyword, semantic * 0.95)
 
     def find_duplicates(self, notebook_id: str, object_type: str) -> List[DuplicateGroup]:
+        """Near-duplicate detection by normalized-seed BLOCKING — the same seed the
+        KG clustering uses (name/statement/formula normalization + acronym alias).
+        Only objects that share a seed are compared, so this is O(N + Σ block²)
+        instead of the old O(N²) all-pairs — which also loaded EVERY element vector
+        of the notebook into memory and froze 查重 at 10^5+ objects. The ≥0.6 grouping
+        is preserved, just scoped to each (tiny) same-seed block; keyword overlap only
+        (no vectors are loaded — nothing scales with the notebook's embedding count).
+        Cross-seed *semantic* near-dups (different names, similar meaning) are out of
+        scope here; the clustering / emb_synonym pass merges those on KG rebuild."""
+        from app.services.kg_merge import (
+            build_acronym_alias_map, _seed_with_alias,
+            seed_concept, seed_claim, seed_formula, seed_procedure,
+        )
+        seed_fn = {
+            "concept": seed_concept, "claim": seed_claim,
+            "formula": seed_formula, "procedure": seed_procedure,
+        }.get(object_type, seed_concept)
+
         self.get_notebook(notebook_id)
         with self._connect() as db:
             objs = self._knowledge_objects(db, notebook_id, object_type, statuses=None)
-            elements = self._gather_elements(db, notebook_id)
         objs = [o for o in objs if o.get("status") != "deprecated"]
-        element_vectors = self._element_vectors(elements)
+
+        # Block by seed: only same-normalized-name objects become candidates.
+        alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
+        by_seed: Dict[str, List[dict]] = {}
+        for o in objs:
+            seed = _seed_with_alias(
+                {"name": o["payload"].get("name", ""), "payload": o["payload"]},
+                seed_fn, alias_map)
+            if seed:
+                by_seed.setdefault(seed, []).append(o)
+
         groups: List[DuplicateGroup] = []
-        used: set = set()
-        for i, base in enumerate(objs):
-            if base["id"] in used:
+        for members in by_seed.values():
+            if len(members) < 2:
                 continue
-            members = [base]
-            best = 0.0
-            for other in objs[i + 1:]:
-                if other["id"] in used:
-                    continue
-                sim = self._knowledge_similarity(base, other, element_vectors)
-                if sim >= 0.6:
-                    members.append(other)
-                    used.add(other["id"])
-                    best = max(best, sim)
-            if len(members) > 1:
-                used.add(base["id"])
-                groups.append(
-                    DuplicateGroup(
-                        object_type=object_type,
-                        similarity=round(best, 3),
-                        members=[self._knowledge_ref(m, object_type) for m in members],
-                    )
-                )
+            # Same seed = same normalized name/statement = the duplicate signal
+            # (consistent with how the KG clustering merges variants, incl. case /
+            # whitespace / acronym). similarity is a display hint only: max pairwise
+            # keyword overlap within the block — capped so a pathologically large
+            # same-name block stays bounded, and with {} vectors so nothing loads
+            # the embedding table.
+            best = 1.0
+            if len(members) <= 25:
+                best = 0.0
+                for i in range(len(members)):
+                    for j in range(i + 1, len(members)):
+                        best = max(best, self._knowledge_similarity(members[i], members[j], {}))
+            groups.append(DuplicateGroup(
+                object_type=object_type,
+                similarity=round(best, 3),
+                members=[self._knowledge_ref(m, object_type) for m in members],
+            ))
+        groups.sort(key=lambda g: (-len(g.members), -g.similarity))
         return groups
 
     def merge_knowledge(self, notebook_id: str, source_id: str, payload: MergeRequest) -> RuleCard:

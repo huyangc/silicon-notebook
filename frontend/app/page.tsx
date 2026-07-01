@@ -4549,7 +4549,7 @@ function KnowledgeBrowser({
       </div>
       {duplicates !== null && (
         <div className="knowledge-panel">
-          <p className="section-title">重复组（相似度 ≥ 0.6）</p>
+          <p className="section-title">重复组（规范名归一化后相同）</p>
           {duplicates.length === 0 ? (
             <p className="tool-hint">未发现重复。</p>
           ) : duplicates.map((group, index) => (
