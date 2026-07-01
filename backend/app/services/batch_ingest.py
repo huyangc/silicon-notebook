@@ -12,7 +12,9 @@ import argparse
 import hashlib
 import json
 import sys
+import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -39,6 +41,77 @@ def _rebuild_progress(phase: str, i: int, n: int) -> None:
         return
     end = "\n" if i >= n else "\r"
     print(f"  {phase}: {i}/{n}", end=end, flush=True)
+
+
+def _live_embed_thread_counts() -> Counter:
+    """Snapshot of live embedding threads by name convention:
+      - `embed-<sid>` per-source background embed daemons → "bg"
+      - `emb-el`/`emb-ck`/`emb-kg`/`emb-rel` pool workers → "pool"
+    Best-effort observability only; racy by nature (threads come and go)."""
+    c: Counter = Counter()
+    for t in threading.enumerate():
+        n = t.name or ""
+        if n.startswith("embed-"):
+            c["bg"] += 1
+        elif n.startswith("emb-"):
+            c["pool"] += 1
+    return c
+
+
+def _format_pool_snapshot(elapsed: float, s: dict, embed: Counter, done: int, total: int) -> str:
+    """Pure one-line snapshot of pool utilization. `s` is scheduler.stats();
+    `embed` is _live_embed_thread_counts(). Shows KG-LLM(window) vs embed
+    concurrency side by side so a shared-compute model service can be confirmed
+    to run both pools at once."""
+    return (f"[pool {elapsed:.0f}s] KG-LLM(window) {s['window_active']}/{s['window_max']}"
+            f" · 源(job) {s['job_active']}/{s['job_max']}"
+            f" · embed {embed.get('bg', 0)}bg+{embed.get('pool', 0)}pool"
+            f" · 源完成 {done}/{total}")
+
+
+class _PoolReporter:
+    """Background daemon that periodically prints live pool utilization + emits a
+    structured log line. interval<=0 disables it entirely (no thread started).
+
+    Exception-guarded: a bad stats read / print / log never breaks ingest.
+    Update `.done` from the driving loop; `__exit__` stops and joins (timeout)."""
+
+    def __init__(self, interval: float, total: int, log: Optional[LogFn] = None):
+        self.interval = interval
+        self.total = total
+        self.log = log
+        self.done = 0
+        self._stop = threading.Event()
+        self._t0 = 0.0
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "_PoolReporter":
+        if self.interval and self.interval > 0:
+            self._t0 = time.perf_counter()
+            self._thread = threading.Thread(
+                target=self._loop, name="pool-report", daemon=True)
+            self._thread.start()
+        return self
+
+    def _loop(self) -> None:
+        from app.services.kg import scheduler as _sched
+        while not self._stop.wait(self.interval):
+            try:
+                s = _sched.stats()
+                line = _format_pool_snapshot(
+                    time.perf_counter() - self._t0, s,
+                    _live_embed_thread_counts(), self.done, self.total)
+                print(line, flush=True)
+                if self.log:
+                    self.log({"phase": "pool", **s, "done": self.done, "total": self.total})
+            except Exception:   # noqa: BLE001 — observability must never break ingest
+                pass
+
+    def __exit__(self, *exc) -> bool:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        return False
 
 
 def iter_files(root: Path, exts: Optional[set] = None) -> List[Path]:
@@ -189,7 +262,8 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4,
 
 
 def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
-           no_rebuild: bool = False, rebuild_only: bool = False) -> dict:
+           no_rebuild: bool = False, rebuild_only: bool = False,
+           report_interval: int = 15) -> dict:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
     Flags:
@@ -209,17 +283,28 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
     res = {"extracted": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
     try:
         # ── 抽取阶段(rebuild_only 时跳过) ────────────────────────────────────
+        # 抽取驱动 KG-LLM window 池,故用 _PoolReporter 周期自报 KG-LLM vs embed 并发。
         if not rebuild_only:
             llm_ok = (repo.settings.kg_llm_configured
                       or getattr(repo.llm_client, "configured", False))
             if limit is None:
                 # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
                 if llm_ok or not no_rebuild:
-                    out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
-                        notebook_id,
-                        progress=lambda i, n, sid, ok: print(
-                            f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True),
-                    )
+                    # 尚无 KG 的源数当 total(build_notebook_kg 内部自算目标,故 done 靠其
+                    # progress 回调回填);查询很廉价。
+                    with repo._connect() as db:
+                        kg_total = db.execute(
+                            "SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
+                            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
+                            "WHERE k.source_id=s.id AND k.source_id!='')",
+                            (notebook_id,)).fetchone()["c"]
+                    with _PoolReporter(report_interval, total=kg_total, log=log) as reporter:
+                        def _kg_progress(i, n, sid, ok):
+                            reporter.done = i
+                            reporter.total = n
+                            print(f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True)
+                        out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
+                            notebook_id, progress=_kg_progress)
                     res["extracted"] = len(out["built"])
                     res["failed"] = len(out["failed"])
             else:
@@ -234,17 +319,19 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
                         "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
                 targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
                 n_targets = len(targets)
-                for i, sid in enumerate(targets, 1):
-                    try:
-                        repo._set_source_status(sid, "extracting")
-                        repo._run_extraction(sid)
-                        repo._set_source_status(sid, "extracted")
-                        res["extracted"] += 1
-                        log({"phase": "kg", "source_id": sid, "status": "extracted",
-                             "progress": f"{i}/{n_targets}"})
-                    except Exception as exc:   # noqa: BLE001 — 单源失败隔离
-                        res["failed"] += 1
-                        log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
+                with _PoolReporter(report_interval, total=n_targets, log=log) as reporter:
+                    for i, sid in enumerate(targets, 1):
+                        try:
+                            repo._set_source_status(sid, "extracting")
+                            repo._run_extraction(sid)
+                            repo._set_source_status(sid, "extracted")
+                            res["extracted"] += 1
+                            log({"phase": "kg", "source_id": sid, "status": "extracted",
+                                 "progress": f"{i}/{n_targets}"})
+                        except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                            res["failed"] += 1
+                            log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
+                        reporter.done = i
 
         # ── no_rebuild:抽取后直接返回,不做 rebuild/scale-index ───────────────
         if no_rebuild:
@@ -277,7 +364,8 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
     return res
 
 
-def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
+def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None,
+            report_interval: int = 15) -> dict:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
     跨源并发提交到全局 KG job 池;**末尾一次** rebuild_unified_kg + 补节点向量(+ scale index)。
 
@@ -345,19 +433,21 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
         for sid in resume_sids:
             futs[submit_job(repo.extract_source, sid)] = sid   # 只补抽 KG,不 embed
 
-        # ── 等待全部 job,逐个打印进度、统计 ─────────────────────────────────────
+        # ── 等待全部 job,逐个打印进度、统计(周期自报 KG-LLM vs embed 并发) ──────
         total = len(futs)
-        for i, fut in enumerate(as_completed(futs), 1):
-            sid = futs[fut]
-            try:
-                fut.result()
-                res["extracted"] += 1
-                print(f"[pipeline {i}/{total}] {sid} ✓", flush=True)
-                log({"phase": "all", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
-            except Exception as exc:   # noqa: BLE001 — 单 source 失败隔离
-                res["failed"] += 1
-                print(f"[pipeline {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
-                log({"phase": "all", "source_id": sid, "status": "failed", "error": str(exc)})
+        with _PoolReporter(report_interval, total=total, log=log) as reporter:
+            for i, fut in enumerate(as_completed(futs), 1):
+                sid = futs[fut]
+                try:
+                    fut.result()
+                    res["extracted"] += 1
+                    print(f"[pipeline {i}/{total}] {sid} ✓", flush=True)
+                    log({"phase": "all", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
+                except Exception as exc:   # noqa: BLE001 — 单 source 失败隔离
+                    res["failed"] += 1
+                    print(f"[pipeline {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
+                    log({"phase": "all", "source_id": sid, "status": "failed", "error": str(exc)})
+                reporter.done = i
 
         # ── 末尾一次:跨文档聚类 → 补节点向量 →(base/已建索引)scale index ────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
@@ -499,6 +589,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="kg 阶段:跳过抽取,直接 rebuild_unified_kg + 节点向量 + scale index(base tier 时)。")
     p.add_argument("--allow-no-embed", action="store_true",
                    help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
+    p.add_argument("--pool-report-interval", type=int, default=15,
+                   help="每 N 秒自报线程池占用(KG-LLM/源/embed);0 关闭。all/kg 阶段生效")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
     return p
 
@@ -561,7 +653,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("phase=all (pipelined)", flush=True)
         _t = time.perf_counter()
         r = run_all(repo, notebook_id, iter_files(args.input_dir),
-                    workers=args.workers, conc=args.embed_conc, log=log)
+                    workers=args.workers, conc=args.embed_conc, log=log,
+                    report_interval=args.pool_report_interval)
         print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
         return 0
 
@@ -579,7 +672,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               flush=True)
         _t = time.perf_counter()
         r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
-                   no_rebuild=no_rebuild, rebuild_only=rebuild_only)
+                   no_rebuild=no_rebuild, rebuild_only=rebuild_only,
+                   report_interval=args.pool_report_interval)
         print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     if args.phase == "index":
