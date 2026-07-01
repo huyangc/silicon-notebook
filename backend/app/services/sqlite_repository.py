@@ -4459,6 +4459,7 @@ class SQLiteRepository:
                     status = "rejected"
                     rejected += 1
                 else:
+                    status = "deferred"
                     unsure += 1
                 db.execute(
                     """
