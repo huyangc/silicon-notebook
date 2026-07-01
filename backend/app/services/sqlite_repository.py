@@ -4492,14 +4492,17 @@ class SQLiteRepository:
                 "SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters WHERE notebook_id=?",
                 (notebook_id,),
             ).fetchone()["c"]
+        viz = self._viz_index_probe(notebook_id)
         if row is None:
-            return {"dirty": False, "last_rebuild_at": "", "objects": 0, "relations": 0, "clusters": int(clusters)}
+            return {"dirty": False, "last_rebuild_at": "", "objects": 0, "relations": 0,
+                    "clusters": int(clusters), **viz}
         return {
             "dirty": bool(row["dirty"]),
             "last_rebuild_at": row["last_rebuild_at"],
             "objects": int(row["object_count"]),
             "relations": int(row["relation_count"]),
             "clusters": int(row["cluster_count"] or clusters),
+            **viz,
         }
 
     def unified_graph(self, notebook_id: str, level: str = "concept",
@@ -5163,6 +5166,14 @@ class SQLiteRepository:
             db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
                        (notebook_id, run_id))
         _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
+        # Proactively refresh the viz-only index so the next KG-view open doesn't
+        # pay a lazy build (and to cover same-second in-place edits the version
+        # tuple can miss). Fail-open: a viz build error must never break rebuild.
+        try:
+            self.build_viz_index(notebook_id)
+        except Exception:
+            self.event_log.logger.warning(
+                "build_viz_index failed after rebuild for %s", notebook_id, exc_info=True)
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
@@ -6491,6 +6502,28 @@ class SQLiteRepository:
             return idx
         self.build_viz_index(notebook_id)   # sync lazy build; sets cache on success
         return self._viz_idx_cache.get(notebook_id)
+
+    def _viz_index_probe(self, notebook_id: str) -> dict:
+        """Read-only viz-index status — NEVER builds. Returns
+        {viz_indexed, viz_nodes, viz_edges, viz_stale}."""
+        cur = self._scale_index_version(notebook_id)
+        scale = self._scale_index(notebook_id)
+        if scale is not None and getattr(scale, "viz_ids", None) is not None:
+            m = scale.manifest
+            return {"viz_indexed": True,
+                    "viz_nodes": int(m.get("n_viz_nodes", len(scale.viz_ids))),
+                    "viz_edges": int(m.get("n_viz_edges", len(scale.viz_edges or []))),
+                    "viz_stale": False}
+        from app.services.kg import viz_index as vi
+        idx = vi.load_viz_index(self._viz_index_dir(notebook_id))
+        if idx is None:
+            return {"viz_indexed": False, "viz_nodes": 0, "viz_edges": 0, "viz_stale": False}
+        m = idx.manifest
+        fresh = m.get("version") == cur
+        return {"viz_indexed": fresh,
+                "viz_nodes": int(m.get("n_viz_nodes", 0)),
+                "viz_edges": int(m.get("n_viz_edges", 0)),
+                "viz_stale": not fresh}
 
     def _gather_kg_graph(self, notebook_id: str):
         """Gather all KG nodes/relations/chunks/cluster_groups for a notebook

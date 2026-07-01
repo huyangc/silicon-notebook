@@ -497,6 +497,10 @@ class UnifiedKgStatus(BaseModel):
     objects: int = 0
     relations: int = 0
     clusters: int = 0
+    viz_indexed: bool = False
+    viz_nodes: int = 0
+    viz_edges: int = 0
+    viz_stale: bool = False
 
 
 class MergeReviewRequest(BaseModel):
