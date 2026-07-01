@@ -29,7 +29,7 @@ export type ShareResponse = {
   size: ShareSize;
 };
 
-// GET /shared/{token} 的响应。mode: "copy"(可拷贝) | "too_large"(库太大只读共享待支持)。
+// GET /shared/{token} 的响应。mode: "copy"(可拷贝) | "readonly"(库太大→只读共享,加入为只读成员)。
 export type SharedPreview = {
   name: string;
   owner_display: string;
@@ -37,8 +37,18 @@ export type SharedPreview = {
   node_count: number;
   edge_count: number;
   source_titles: string[];
-  mode: "copy" | "too_large";
+  mode: "copy" | "readonly";
   size: ShareSize;
+};
+
+// GET /notebooks/shared-by-me 的每项:owner 的「已分享总览」。readonly 库带只读成员名单。
+export type SharedByMeItem = {
+  id: string;
+  name: string;
+  share_token: string;
+  mode: "copy" | "readonly";
+  size: ShareSize;
+  members: { username: string; added_at: string }[];
 };
 
 const API_BASE =
@@ -73,6 +83,18 @@ export const previewShared = (token: string): Promise<SharedPreview> =>
 export const copyShared = (token: string): Promise<NotebookSummaryLike> =>
   apiFetch(`/shared/${token}/copy`, { method: "POST" });
 
+// 加入大库为只读成员(小库应走拷贝 → 400 → throw)。返回该库 summary(access=reader)。
+export const joinShared = (token: string): Promise<NotebookSummaryLike> =>
+  apiFetch(`/shared/${token}/join`, { method: "POST" });
+
+// 退出只读共享(移除自己的成员身份,期望 204)。
+export const leaveNotebook = (notebookId: string): Promise<void> =>
+  apiFetch<void>(`/notebooks/${notebookId}/membership`, { method: "DELETE" });
+
+// owner 的「已分享总览」:所有我 owner 且 is_shared 的库(readonly 带成员名单)。
+export const sharedByMe = (): Promise<SharedByMeItem[]> =>
+  apiFetch(`/notebooks/shared-by-me`);
+
 // --- 纯 helper(单测) --------------------------------------------------------
 
 // 从 `?share=shr-xxx` 取分享 token;无则 null。容错前导 `?`、多参数。
@@ -95,3 +117,7 @@ export const parseShareToken = (search: string): string | null => {
 // 拼可复制的分享链接:${origin}/?share=${token}。
 export const buildShareLink = (token: string, origin: string): string =>
   `${origin}/?share=${token}`;
+
+// 分享模式的中文文案:readonly→「只读共享」,其余(copy)→「可拷贝」。
+export const shareModeLabel = (mode: string): string =>
+  mode === "readonly" ? "只读共享" : "可拷贝";
