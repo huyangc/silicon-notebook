@@ -121,8 +121,31 @@ def test_emb_synonym_edges_connects_similar():
     assert all(0.8 <= w <= 1.0001 for _, _, w in pairs)
 
 
-def test_emb_synonym_edges_guard_skips_large():
+def test_variant_edge_pairs_star_not_quadratic():
+    from collections import Counter
+    from app.services.kg.ppr import variant_edge_pairs
+    kg = {f"o{i}": {"name": f"GPT v{i}"} for i in range(5)}  # 同 base "gpt"
+    edges = variant_edge_pairs(kg, 0.5)
+    # 星型:4 条无向(代表↔其余),非 C(5,2)=10 条
+    undirected = {frozenset((a, b)) for a, b, _ in edges}
+    assert len(undirected) == 4                    # k-1,非 k(k-1)/2
+    # 连通性:所有成员经代表连通(代表在每条边里)
+    deg = Counter()
+    [deg.update([a, b]) for a, b, _ in edges]
+    assert max(deg.values()) == 4                  # 代表 degree=k-1
+
+
+def test_emb_synonym_edges_ann_beyond_cutoff():
     import numpy as np
     from app.services.kg.ppr import emb_synonym_edges
-    M = np.ones((5, 3), dtype=np.float32)
-    assert emb_synonym_edges(["a", "b", "c", "d", "e"], M, 0.8, 5, max_entities=3) == []
+    rng = np.random.RandomState(0)
+    n = 60000                                       # > 旧 max_entities=50000
+    # 造 3 对近似同义(其余随机),确认 ANN 版能召回这几对(旧版此规模返 [])
+    M = rng.randn(n, 16).astype(np.float32)
+    for a, b in [(0, 1), (2, 3), (4, 5)]:
+        M[b] = M[a] + 0.001 * rng.randn(16)
+    ids = [f"e{i}" for i in range(n)]
+    edges = emb_synonym_edges(ids, M, threshold=0.9, top_k=10)
+    pairs = {frozenset((a, b)) for a, b, _ in edges}
+    assert frozenset(("e0", "e1")) in pairs
+    assert edges != []                              # 关键:超 5 万不再返 []
