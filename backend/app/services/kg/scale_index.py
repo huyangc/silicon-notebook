@@ -304,6 +304,20 @@ def fold_arrays(base_node_ids, base_transition, base_idf, base_chunk_index,
     return node_ids, transition, idf, np.asarray(chunk_index, dtype=np.int32)
 
 
+def add_items_to_ann(src_bin, dim, add_vectors, base_count):
+    """load 现有 hnsw(base_count 个)→ resize 容纳 base_count+len(add)→ add_items
+    (labels 从 base_count 递增)→ 返回 index(调用方 save)。add_vectors: (m,dim) float32。
+    add_vectors 为空时纯 load(仍 resize 到 base_count 以保 max_elements 合法)。"""
+    import hnswlib
+    add = np.asarray(add_vectors, dtype=np.float32) if len(add_vectors) else None
+    n_add = int(add.shape[0]) if add is not None else 0
+    idx = hnswlib.Index(space="cosine", dim=dim)
+    idx.load_index(src_bin, max_elements=base_count + n_add)
+    if n_add:
+        idx.add_items(add, np.arange(base_count, base_count + n_add))
+    return idx
+
+
 def viz_core(viz: dict, limit: int) -> dict:
     """折叠 viz 图取度数 top-N + 诱导边。viz: {viz_ids, viz_adj(csr), viz_deg, viz_types}。
     返回 {nodes:[{id,type,degree}], edges:[{source,target}], total_nodes, total_edges, truncated}。"""

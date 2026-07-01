@@ -7035,6 +7035,122 @@ class SQLiteRepository:
             chunk_ann_labels=chunk_ann_labels,
         )
 
+    def fold_scale_index_delta(self, notebook_id: str) -> dict:
+        """O(delta) 增量 fold:delta splice 进现有索引(ANN add_items、CSR splice),
+        写 tmp 目录后锁内原子交换。无现有索引→全量 build;无 delta→no-op(返回旧 manifest)。
+        fold 中途抛错→tmp 丢弃、旧索引不动(finally 只清 building 标记,未交换即无损)。"""
+        import os
+        import shutil
+
+        import numpy as np
+        import scipy.sparse as sp
+        from app.services.kg import scale_index as si
+        from app.services.vector_index import build_matrix
+
+        idx = self._scale_index(notebook_id, allow_stale=True)
+        if idx is None:
+            return self.build_scale_index(notebook_id)
+        delta = self._index_delta(notebook_id)
+        if not delta["delta_sources"]:
+            return idx.manifest
+        with self._scale_building_lock:
+            if notebook_id in self._scale_building:
+                return {"status": "already_building"}
+            self._scale_building.add(notebook_id)
+        try:
+            d_nodes, d_edges, d_chunks, d_kg_ids, d_membership = \
+                self._gather_kg_graph(notebook_id, source_ids=delta["delta_sources"])
+            kg_set = set(d_kg_ids)
+            d_idf_map = {oid: (1.0 / c if c > 0 else 1.0)
+                         for oid, c in d_membership.items()}
+            node_ids, transition, idf, chunk_index = si.fold_arrays(
+                list(idx.node_ids), idx.transition, idx.idf, idx.chunk_index,
+                d_nodes, d_edges, d_chunks, d_idf_map)
+
+            out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+            tmp_dir = out_dir + ".tmp"
+            if os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            # 非 ANN 工件:node_ids/idf/chunk_index/graph
+            sp.save_npz(os.path.join(tmp_dir, "graph.npz"), transition)
+            np.save(os.path.join(tmp_dir, "node_ids.npy"), np.asarray(node_ids, dtype=object))
+            np.save(os.path.join(tmp_dir, "idf.npy"), np.asarray(idf, dtype=np.float32))
+            np.save(os.path.join(tmp_dir, "chunk_index.npy"), np.asarray(chunk_index, dtype=np.int32))
+
+            dim = int(idx.manifest.get("dim", self.settings.embed_dim))
+
+            def _delta_vecs(table, col, ids):
+                if not ids:
+                    return [], []
+                ph = ",".join("?" for _ in ids)
+                with self._connect() as db:
+                    rows = db.execute(
+                        f"SELECT {col} AS vid, vector FROM {table} "
+                        f"WHERE notebook_id=? AND {col} IN ({ph})",
+                        (notebook_id, *ids)).fetchall()
+                return build_matrix((r["vid"], r["vector"]) for r in rows)
+
+            # ANN(KG 对象):增量 add delta 对象向量
+            kg_vids, kg_mat = _delta_vecs("knowledge_embeddings", "object_id", list(kg_set))
+            ann = si.add_items_to_ann(
+                idx.ann_path, dim, kg_mat if len(kg_mat) else [], len(idx.ann_labels))
+            ann.save_index(os.path.join(tmp_dir, "ann.bin"))
+            ann_labels = list(idx.ann_labels) + list(kg_vids)
+            np.save(os.path.join(tmp_dir, "ann_labels.npy"), np.asarray(ann_labels, dtype=object))
+
+            # chunk ANN:增量 add delta chunk 向量(若原有 chunk_ann)
+            manifest = dict(idx.manifest)
+            if idx.chunk_ann_path and idx.chunk_ann_labels is not None:
+                ch_vids, ch_mat = _delta_vecs("chunk_embeddings", "chunk_id", list(d_chunks))
+                cann = si.add_items_to_ann(
+                    idx.chunk_ann_path, dim, ch_mat if len(ch_mat) else [],
+                    len(idx.chunk_ann_labels))
+                cann.save_index(os.path.join(tmp_dir, "chunk_ann.bin"))
+                ch_labels = list(idx.chunk_ann_labels) + list(ch_vids)
+                np.save(os.path.join(tmp_dir, "chunk_ann_labels.npy"),
+                        np.asarray(ch_labels, dtype=object))
+                manifest["has_chunk_ann"] = True
+                manifest["n_chunk_ann"] = len(ch_labels)
+
+            # viz:保持旧(UI-only,可 stale)——从旧目录拷 viz 文件到 tmp(若有)
+            for f in ("viz.npz", "viz_adj.npz"):
+                src = os.path.join(out_dir, f)
+                if os.path.exists(src):
+                    shutil.copy2(src, os.path.join(tmp_dir, f))
+
+            # manifest:水位=当前全部 source、version bump、counts
+            with self._connect() as db:
+                watermark = sorted(r["id"] for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall())
+                total_chunks = db.execute(
+                    "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()["c"]
+            manifest.update({
+                "version": self._scale_index_version(notebook_id),
+                "watermark_sources": watermark,
+                "n_nodes": len(node_ids),
+                "n_chunks": int(total_chunks),
+                "n_ann": len(ann_labels),
+            })
+            with open(os.path.join(tmp_dir, "manifest.json"), "w") as fh:
+                json.dump(manifest, fh)
+
+            # 原子交换(锁内):out_dir → .old,tmp → out_dir,rm .old
+            old_dir = out_dir + ".old"
+            with self._scale_building_lock:
+                if os.path.exists(old_dir):
+                    shutil.rmtree(old_dir)
+                os.rename(out_dir, old_dir)
+                os.rename(tmp_dir, out_dir)
+                shutil.rmtree(old_dir, ignore_errors=True)
+                self._scale_idx_cache.pop(notebook_id, None)  # 失效进程缓存 → 下次 reload
+            return manifest
+        finally:
+            with self._scale_building_lock:
+                self._scale_building.discard(notebook_id)
+
     def _index_delta(self, notebook_id: str) -> dict:
         """按 manifest 水位算 delta:水位后新增的 source 及其 chunk 数。
         无 manifest(未索引)→ 全部 source/chunk 视为 delta(语义:纯暴力)。"""
