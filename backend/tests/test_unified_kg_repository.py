@@ -233,14 +233,14 @@ def _candidate_status(repo, nb_id, cid):
     return row["status"]
 
 
-def test_review_merge_below_confirm_threshold_stays_pending(repo):
+def test_review_merge_below_confirm_threshold_becomes_deferred(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     repo.llm_client = _CannedReviewLLM("merge", 0.88)
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
     assert out == {"reviewed": 1, "confirmed": 0, "rejected": 0, "unsure": 1}
-    assert _candidate_status(repo, nb.id, cid) == "pending"
+    assert _candidate_status(repo, nb.id, cid) == "deferred"
 
 
 def test_review_merge_at_confirm_threshold_is_confirmed(repo):
@@ -263,14 +263,14 @@ def test_review_keep_separate_at_threshold_is_rejected(repo):
     assert _candidate_status(repo, nb.id, cid) == "rejected"
 
 
-def test_review_keep_separate_below_threshold_stays_pending(repo):
+def test_review_keep_separate_below_threshold_becomes_deferred(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
     repo.llm_client = _CannedReviewLLM("keep_separate", 0.70)
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
     assert out == {"reviewed": 1, "confirmed": 0, "rejected": 0, "unsure": 1}
-    assert _candidate_status(repo, nb.id, cid) == "pending"
+    assert _candidate_status(repo, nb.id, cid) == "deferred"
 
 
 def test_review_defaults_drain_keep_separate_that_old_single_threshold_left_pending(repo):
