@@ -8695,6 +8695,26 @@ def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+def _remap_json_ids(value, maps: dict):
+    """递归重写 JSON 里的 id 引用(拷贝 notebook 用)。按键名路由到对应映射:
+    element_id/source_id/object_id → 标量替换;element_ids → 数组逐元素替换。
+    映射里没有的值原样保留。maps 形如 {"element_id": {...}, "element_ids": {...}, ...}。"""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k in ("element_id", "source_id", "object_id") and isinstance(v, str):
+                out[k] = maps.get(k, {}).get(v, v)
+            elif k == "element_ids" and isinstance(v, list):
+                m = maps.get("element_ids", {})
+                out[k] = [m.get(x, x) if isinstance(x, str) else _remap_json_ids(x, maps) for x in v]
+            else:
+                out[k] = _remap_json_ids(v, maps)
+        return out
+    if isinstance(value, list):
+        return [_remap_json_ids(x, maps) for x in value]
+    return value
+
+
 def _session_expiry(days: int = 30) -> str:
     return (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
 

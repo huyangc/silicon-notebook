@@ -75,3 +75,27 @@ def test_copy_stats_reports_size_and_copyable(repo):
     stats = repo.notebook_copy_stats(nb)
     assert stats["copyable"] is True          # 空库当然可拷贝
     assert set(stats["size"]) == {"bytes", "sources", "chunks", "nodes", "edges"}
+
+
+def test_remap_json_ids_scalars_and_arrays():
+    from app.services.sqlite_repository import _remap_json_ids
+    # 生产里 copy_notebook 对 element_id / element_ids 传的是同一个 emap,故这里
+    # 两个键共用同一份 element 映射(el-1→el-A, el-2→el-B),与真实调用一致。
+    el_map = {"el-1": "el-A", "el-2": "el-B"}
+    maps = {"element_id": el_map, "element_ids": el_map,
+            "source_id": {"src-1": "src-A"}, "object_id": {"ko-1": "ko-A"}}
+    payload = {
+        "source_id": "src-1",
+        "steps": [{"element_id": "el-1", "quote": "keep me"}],
+        "evidence": [{"element_id": "el-2", "source_id": "src-1", "quoted_span": "keep"}],
+        "element_ids": ["el-1", "el-2", "el-unknown"],
+        "note": "untouched",
+    }
+    out = _remap_json_ids(payload, maps)
+    assert out["source_id"] == "src-A"
+    assert out["steps"][0]["element_id"] == "el-A"
+    assert out["steps"][0]["quote"] == "keep me"
+    assert out["evidence"][0]["element_id"] == "el-B"
+    assert out["evidence"][0]["source_id"] == "src-A"
+    assert out["element_ids"] == ["el-A", "el-B", "el-unknown"]  # 未命中的原样
+    assert out["note"] == "untouched"
