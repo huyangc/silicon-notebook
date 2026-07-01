@@ -623,6 +623,16 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
 
+                CREATE TABLE IF NOT EXISTS merge_review_jobs (
+                  notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
+                  status TEXT NOT NULL DEFAULT 'idle',
+                  total INTEGER NOT NULL DEFAULT 0,
+                  done INTEGER NOT NULL DEFAULT 0,
+                  started_at TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL DEFAULT '',
+                  error TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE TABLE IF NOT EXISTS kg_conflict_candidates (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -4473,6 +4483,69 @@ class SQLiteRepository:
             self._mark_unified_kg_dirty(notebook_id)
             self._invalidate_unified_cache(notebook_id)
         return {"reviewed": len(decisions), "confirmed": confirmed, "rejected": rejected, "unsure": unsure}
+
+    def merge_review_job_status(self, notebook_id: str) -> dict:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT status,total,done,error FROM merge_review_jobs WHERE notebook_id=?",
+                (notebook_id,)).fetchone()
+        if row is None:
+            return {"status": "idle", "total": 0, "done": 0, "error": ""}
+        return {"status": row["status"], "total": int(row["total"]),
+                "done": int(row["done"]), "error": row["error"]}
+
+    def run_merge_review_job(self, notebook_id: str, *, batch: int = 100) -> dict:
+        """Drain the whole pending merge queue in batches (each batch = one
+        review_pending_merges call). Single-flight per notebook. Fail-open per
+        batch; a batch that reviews 0 (LLM down) counts as a stall — abort after
+        2 consecutive stalls so a persistent failure can't loop forever. Since
+        Task 4 makes unsure→deferred, every reviewed candidate leaves pending, so
+        a healthy run strictly shrinks the queue and terminates."""
+        self.get_notebook(notebook_id)
+        with self._write() as db:
+            row = db.execute("SELECT status FROM merge_review_jobs WHERE notebook_id=?",
+                             (notebook_id,)).fetchone()
+            if row is not None and row["status"] == "running":
+                return {"status": "running", "already": True}
+            total = db.execute(
+                "SELECT COUNT(*) c FROM concept_merge_candidates "
+                "WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchone()["c"]
+            now = _now()
+            db.execute(
+                """
+                INSERT INTO merge_review_jobs (notebook_id,status,total,done,started_at,updated_at,error)
+                VALUES (?, 'running', ?, 0, ?, ?, '')
+                ON CONFLICT(notebook_id) DO UPDATE SET
+                  status='running', total=excluded.total, done=0,
+                  started_at=excluded.started_at, updated_at=excluded.updated_at, error=''
+                """,
+                (notebook_id, total, now, now))
+        done, stalls, error, final = 0, 0, "", "done"
+        max_batches = (total // max(1, batch)) + 3
+        try:
+            for _ in range(max_batches):
+                if not self.pending_merges(notebook_id):
+                    break
+                summary = self.review_pending_merges(notebook_id, limit=batch)
+                reviewed = int(summary.get("reviewed", 0))
+                done += reviewed
+                with self._write() as db:
+                    db.execute("UPDATE merge_review_jobs SET done=?, updated_at=? WHERE notebook_id=?",
+                               (done, _now(), notebook_id))
+                if reviewed == 0:
+                    stalls += 1
+                    if stalls >= 2:
+                        error, final = "LLM 预审连续无进展,已中止", "failed"
+                        break
+                else:
+                    stalls = 0
+        except Exception as exc:  # noqa: BLE001
+            error, final = f"{type(exc).__name__}: {exc}", "failed"
+            self.event_log.logger.exception("merge review job failed for %s", notebook_id)
+        with self._write() as db:
+            db.execute("UPDATE merge_review_jobs SET status=?, error=?, updated_at=? WHERE notebook_id=?",
+                       (final, error, _now(), notebook_id))
+        return {"status": final, "total": total, "done": done, "error": error}
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
         with self._connect() as db:

@@ -36,6 +36,7 @@ from app.models.schemas import (
     KnowledgeUpdate,
     PaginatedKnowledge,
     MergeRequest,
+    MergeReviewJob,
     MergeReviewRequest,
     MergeReviewSummary,
     ModelServiceView,
@@ -1065,6 +1066,29 @@ def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> M
             confirm_threshold=payload.confirm_threshold,
             separate_threshold=payload.separate_threshold,
         ))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/review-all", dependencies=[Depends(require_notebook_access)])
+def review_all_unified_kg_merges(notebook_id: str) -> dict:
+    repo = repository()
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if repo.merge_review_job_status(notebook_id)["status"] == "running":
+        return {"status": "running"}
+    ctx = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx.run(repo.run_merge_review_job, notebook_id),
+                     name=f"mergereview-{notebook_id}", daemon=True).start()
+    return {"status": "started"}
+
+
+@router.get("/notebooks/{notebook_id}/unified-kg/merges/review-job", dependencies=[Depends(require_notebook_access)])
+def merge_review_job(notebook_id: str) -> MergeReviewJob:
+    try:
+        return MergeReviewJob(**repository().merge_review_job_status(notebook_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

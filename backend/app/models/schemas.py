@@ -517,6 +517,13 @@ class UnifiedKgStatus(BaseModel):
     viz_stale: bool = False
 
 
+class MergeReviewJob(BaseModel):
+    status: str
+    total: int = 0
+    done: int = 0
+    error: str = ""
+
+
 class ScaleIndexStatus(BaseModel):
     exists: bool
     stale: bool
