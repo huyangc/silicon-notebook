@@ -133,7 +133,10 @@ notebook 下各表主键是**全局唯一 id**,且有大量**列级**与 **JSON 
 
 ### 5.6 不拷贝的表(明确排除)
 
-`conversations`、`answers`、`feedback`(接收者的问答从零开始,不带原主的历史)、`extraction_runs`(运行日志)、`concept_merge_candidates`(评审 scratch,重建时再生)、`scale_index`/`kg_index` 磁盘产物(base 库派生索引;副本 `personal` 不需要,如需可后续「刷新图谱」重建)、原库的 `is_shared`/`share_token`(副本默认不分享)。
+- **用户/历史数据**:`conversations`、`answers`、`feedback`(接收者的问答从零开始,不带原主的历史)。
+- **`object_schemas`**:主键 `object_type` 是**全局唯一命名空间**(非按 notebook 作用域),拷贝会撞 UNIQUE;自定义 schema 是全局定义,副本对象的 `object_type` 直接解析到既有全局 schema,故**不拷**。
+- **派生数据(源真相拷了即可重建,不随库拷)**:`kg_objects_fts`(词法搜索索引——**拷贝末尾自动 `backfill_kg_fts(new_id)` 重建**,使副本「拷完即搜」)、`communities`/`get_community_reports`、`unified_kg_state`(KG 状态数字,首次「刷新图谱」自愈)、`concept_merge_candidates`/`kg_conflict_candidates`/`promotion_candidates`(评审 scratch)、`extraction_runs`(运行日志)、`scale_index`/`kg_index` 磁盘产物(base 库索引;副本 `personal` 不需要)。除 FTS 外的派生态在接收者首次「刷新图谱」(`rebuild_unified_kg`)时重建。
+- **分享态**:原库的 `is_shared`/`share_token`(副本默认不分享)。
 
 ---
 

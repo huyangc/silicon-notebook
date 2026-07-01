@@ -1391,10 +1391,9 @@ class SQLiteRepository:
                     d["member_object_id"] = omap.get(r["member_object_id"], r["member_object_id"])
                     self._insert_row(db, "concept_clusters", d)
 
-                # 9) 自定义 object_schemas(notebook_id 命中的才拷)
-                for r in db.execute("SELECT * FROM object_schemas WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["notebook_id"] = new_id
-                    self._insert_row(db, "object_schemas", d)
+                # 9) object_schemas 不拷:其主键是**全局唯一**的 object_type(非按 notebook
+                #    作用域),原样拷会撞 UNIQUE 约束使整库拷贝回滚。自定义 schema 是全局定义,
+                #    副本对象的 object_type 直接解析到既有全局 schema,无需随库带。
 
                 # 10) 完整性自检:行数一致 + 关系无悬空
                 for t in ("sources", "chunks", "knowledge_objects", "knowledge_relations", "concept_clusters"):
@@ -1409,6 +1408,13 @@ class SQLiteRepository:
                     (new_id, new_id, new_id)).fetchone()[0]
                 if dangling:
                     raise RuntimeError("copy_notebook: 关系存在悬空引用")
+            # 词法搜索索引(kg_objects_fts)是派生数据:从拷好的 knowledge_objects 重建,使副本
+            # "拷完即搜"。幂等、best-effort——在拷贝事务提交后单独跑,失败不回滚已成的拷贝
+            # (用户可"刷新图谱"重建全部派生索引)。
+            try:
+                self.backfill_kg_fts(new_id)
+            except Exception:
+                self.event_log.logger.exception("copy_notebook: FTS backfill failed for %s", new_id)
             return self.get_notebook(new_id)
         except Exception:
             if copied_files:
