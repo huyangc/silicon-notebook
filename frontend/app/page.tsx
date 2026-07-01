@@ -602,6 +602,11 @@ const buildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/n
 const rebuildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
 const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
 
+type ScaleIndexStatus = { exists: boolean; stale: boolean; building: boolean; eligible: boolean;
+  n_nodes: number; n_chunks: number; n_ann: number; n_chunk_ann: number; has_chunk_ann: boolean };
+const rebuildScaleIndex = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST" });
+const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/${nb}/scale-index/status`);
+
 function formatRelativeTime(iso: string): string {
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return "";
@@ -922,6 +927,8 @@ export default function Home() {
   const [kgRangeBusy, setKgRangeBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
   const [relinkingKg, setRelinkingKg] = useState(false);
+  const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
+  const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
     setBuildingKg(true);
@@ -974,6 +981,45 @@ export default function Home() {
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [buildingKg, currentNotebookId]);
+  // Scale-index (CSR graph + ANN) status: only meaningful for base-tier libraries.
+  // Load once when a base notebook is selected; the build effect below polls during a rebuild.
+  useEffect(() => {
+    const nb = currentNotebookId;
+    if (!nb || currentNotebook?.tier !== "base") { setScaleIndexStatus(null); return; }
+    let cancelled = false;
+    fetchScaleIndexStatus(nb).then((s) => { if (!cancelled) setScaleIndexStatus(s); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [currentNotebookId, currentNotebook?.tier]);
+  // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
+  // until building flips false, with a 20min safety cap so the button never spins forever.
+  useEffect(() => {
+    if (!buildingScaleIndex || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const s = await fetchScaleIndexStatus(nb);
+        if (cancelled) return;
+        setScaleIndexStatus(s);
+        if (!s.building) {
+          setBuildingScaleIndex(false);
+          setToast(s.stale ? "索引重建结束（仍有更新未纳入）" : "检索索引重建完成 ✓");
+        }
+      } catch { /* transient error; keep polling */ }
+    }, 6000);
+    const cap = window.setTimeout(() => {
+      if (!cancelled) { setBuildingScaleIndex(false); setToast("索引仍在后台构建，请稍后查看"); }
+    }, 20 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+  }, [buildingScaleIndex, currentNotebookId]);
+  // Kick off a scale-index rebuild; the effect above then polls until it's ready.
+  const startScaleIndexRebuild = async (nb: string) => {
+    setBuildingScaleIndex(true);
+    try {
+      await rebuildScaleIndex(nb);
+      setToast("已开始重建检索索引（后台进行，可能数分钟）；完成后自动更新");
+    } catch (e) { reportError(e); setBuildingScaleIndex(false); }
+  };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
@@ -2657,6 +2703,11 @@ export default function Home() {
                   actions: [
                     ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
                     ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                    ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [{
+                      label: buildingScaleIndex ? "检索索引重建中…" : "重建检索索引",
+                      desc: "重建大库的向量检索索引（CSR 图 + ANN），供 scale 检索使用；后台进行，完成后自动更新",
+                      action: () => { if (currentNotebookId && !buildingScaleIndex) startScaleIndexRebuild(currentNotebookId); },
+                    }] : []),
                     { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
                   ]
                 })}>
@@ -2753,6 +2804,12 @@ export default function Home() {
                         </p>
                       </>
                     )
+                )}
+                {currentNotebook?.tier === "base" && scaleIndexStatus && (
+                  <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
+                    检索索引：{scaleIndexStatus.building ? "构建中…" : !scaleIndexStatus.exists ? "未构建" : scaleIndexStatus.stale ? "已过期，建议重建" : "已同步"}
+                    {scaleIndexStatus.exists && ` · 节点 ${scaleIndexStatus.n_nodes} · chunk ${scaleIndexStatus.n_chunks}`}
+                  </p>
                 )}
                 <input
                   className="source-search"
