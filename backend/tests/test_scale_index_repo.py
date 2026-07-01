@@ -779,3 +779,33 @@ def test_scale_index_eligible_decoupled_from_tier(repo, monkeypatch):
     assert repo.scale_index_status(small.id)["eligible"] is False  # 小库仍不 eligible
     # 大个人库 trigger 不再 409(now → building/already_building)
     assert repo.trigger_scale_index_rebuild(big.id)["status"] in ("building", "already_building")
+
+
+def test_scale_ann_handle_cached(repo, monkeypatch):
+    """P0-4: _open_scale_ann memoizes the hnswlib handle on the ScaleIndex
+    instance — repeated opens reuse the same handle and load_index runs once."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept",
+         "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept",
+         "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id)
+    assert idx is not None and idx.ann_labels
+
+    import hnswlib
+    calls = {"n": 0}
+    real = hnswlib.Index.load_index
+
+    def spy(self, *a, **k):
+        calls["n"] += 1
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(hnswlib.Index, "load_index", spy)
+    h1 = repo._open_scale_ann(idx, "kg")
+    h2 = repo._open_scale_ann(idx, "kg")
+    assert h1 is not None and h1 is h2   # 同一 handle 复用
+    assert calls["n"] == 1               # 只 load 一次
