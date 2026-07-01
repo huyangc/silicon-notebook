@@ -156,6 +156,52 @@ def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):
     assert "c3" in {c.chunk_id for c in scored}   # ⊕ delta:新上传的 c3 被召回
 
 
+def test_chunk_ann_unions_lexical(repo, monkeypatch):
+    """纯词法命中的 chunk 经 FTS 被召回(ANN 语义漏它)。
+    显式布置向量隔离出「纯词法」通道:
+      · 8 个填充 chunk:向量与 query 近正交(cosine≈0,ANN top-8 独占但语义弱到过不了
+        RELEVANCE_FLOOR → score_chunks 丢弃),文本不含罕见词;
+      · 目标 c_lex:向量与 query 反向(cosine=-1,ANN 必漏,排在 8 个填充之后),
+        但文本含罕见词法词 XZQW9000 与 query 字面匹配(keyword=1.0)。
+    纯 ANN(语义)→ 候选 8 填充全被 floor 丢、c_lex 根本没进候选 → 空;
+    只有 FTS 词法∪ 把 c_lex 补进候选,keyword 分兜排序 → 被召回。"""
+    import json as _json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="lex"))
+    now = "2026-07-01T00:00:00"
+    query = "XZQW9000"                                   # 罕见词法词即整条 query(keyword=1.0)
+    qv = repo._embed_query(query)                        # query 向量
+    far = [-x for x in qv]                               # 与 query 反向(cosine=-1,语义最远)
+    half = len(qv) // 2
+    mid = qv[:half] + far[half:]                          # 半正半反 → 与 query cosine≈0(语义弱)
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        # 8 个填充 chunk:向量近正交(ANN 命中但语义分过不了 floor),文本不含罕见词
+        rows = [(f"c{i}", "alpha beta topic detail body filler", mid) for i in range(8)]
+        # 目标 chunk:向量反向(ANN 必漏),但文本含罕见词法词 XZQW9000
+        rows.append(("c_lex", "XZQW9000 unrelated bandgap widget spec", far))
+        for cid, txt, v in rows:
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, "s1", txt, "", "[]", now))
+            db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                       (cid, nb.id, _json.dumps(v), now))
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    repo.backfill_chunk_fts(nb.id)
+
+    monkeypatch.setattr(repo.settings, "chunk_ann_enabled", True)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    assert idx is not None and idx.chunk_ann_labels, "前置:build_scale_index 须产出 chunk ANN"
+    assert "c_lex" in set(idx.chunk_ann_labels), "前置:c_lex 在存量 ANN(非 delta 路径召回)"
+
+    # recall=8:ANN top-8 全被 8 个填充 chunk 占满(语义弱),c_lex(反向向量)语义漏
+    out = repo._retrieve_chunks_ann(nb.id, query, qv, idx, recall=8)
+    assert out is not None
+    scored = out[0]
+    assert "c_lex" in {c.chunk_id for c in scored}   # 词法命中被并入并打分排序
+
+
 class _FakeLLM:
     """配置好的假 LLM:chat_json 回定长 JSON, 内含 [k1] 标记。"""
     configured = True
