@@ -48,6 +48,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    PaginatedKnowledge,
     PaginatedSources,
     RejectedUrl,
     RuleCard,
@@ -2706,15 +2707,67 @@ class SQLiteRepository:
         )
 
     def list_knowledge(
-        self, notebook_id: str, object_type: str
-    ) -> List[KnowledgeRecord]:
-        """Generic, type-agnostic listing for any object type (used to browse
-        the academic/textbook types that have no dedicated card endpoint)."""
+        self,
+        notebook_id: str,
+        object_type: str,
+        status: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> PaginatedKnowledge:
+        """Generic, type-agnostic paginated listing for any object type.
+
+        status=None preserves the original behaviour: no status filter (all
+        statuses returned), matching the old ``statuses=None`` call to
+        ``_knowledge_objects``.  Pass a non-empty string to filter to that
+        one status.
+        """
         self.get_notebook(notebook_id)
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 200))
         schema = self.effective_schemas().get(object_type)
+
+        base_query = (
+            "FROM knowledge_objects "
+            "WHERE notebook_id = ? AND object_type = ?"
+        )
+        params: List[object] = [notebook_id, object_type]
+        if status:
+            base_query += " AND status = ?"
+            params.append(status)
+
         with self._connect() as db:
-            objects = self._knowledge_objects(db, notebook_id, object_type, statuses=None)
-        return [self._knowledge_record(object_type, obj, schema) for obj in objects]
+            total = db.execute(
+                f"SELECT COUNT(*) c {base_query}", params
+            ).fetchone()["c"]
+            rows = db.execute(
+                f"SELECT * {base_query} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+
+        objects: List[dict] = []
+        for row in rows:
+            keys = row.keys()
+            objects.append(
+                {
+                    "id": row["id"],
+                    "payload": json.loads(row["payload"] or "{}"),
+                    "evidence": [
+                        Evidence(**item)
+                        for item in json.loads(row["evidence"] or "[]")
+                    ],
+                    "status": row["status"],
+                    "owner": row["owner"],
+                    "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
+                }
+            )
+
+        items = [self._knowledge_record(object_type, obj, schema) for obj in objects]
+        return PaginatedKnowledge(
+            items=items,
+            total_count=total,
+            offset=offset,
+            limit=limit,
+        )
 
     # --- Editable extraction-schema registry ----------------------------
     @staticmethod

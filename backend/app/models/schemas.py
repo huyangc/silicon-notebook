@@ -335,6 +335,13 @@ class KnowledgeTypeCount(BaseModel):
     count: int
 
 
+class PaginatedKnowledge(BaseModel):
+    items: List[KnowledgeRecord]
+    total_count: int
+    offset: int
+    limit: int
+
+
 class ObjectSchemaModel(BaseModel):
     """An editable extraction-schema definition (a typed knowledge object)."""
 

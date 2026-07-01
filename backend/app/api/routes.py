@@ -31,6 +31,7 @@ from app.models.schemas import (
     KnowledgeRecord,
     KnowledgeTypeCount,
     KnowledgeUpdate,
+    PaginatedKnowledge,
     MergeRequest,
     MergeReviewRequest,
     MergeReviewSummary,
@@ -386,13 +387,17 @@ def knowledge_types(notebook_id: str) -> List[KnowledgeTypeCount]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/knowledge", response_model=List[KnowledgeRecord], dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/knowledge", response_model=PaginatedKnowledge, dependencies=[Depends(require_notebook_access)])
 def list_knowledge(
-    notebook_id: str, type: str = Query(...)
-) -> List[KnowledgeRecord]:
+    notebook_id: str,
+    type: str = Query(...),
+    status: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> PaginatedKnowledge:
     object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
     try:
-        return repository().list_knowledge(notebook_id, object_type)
+        return repository().list_knowledge(notebook_id, object_type, status=status, offset=offset, limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

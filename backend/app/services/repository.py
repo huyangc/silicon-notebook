@@ -13,6 +13,7 @@ from app.models.schemas import (
     KnowledgeGraph,
     KnowledgeRecord,
     KnowledgeTypeCount,
+    PaginatedKnowledge,
     KnowledgeUpdate,
     ObjectSchemaCreate,
     ObjectSchemaModel,
@@ -96,8 +97,13 @@ class NotebookRepository(Protocol):
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]: ...
 
     def list_knowledge(
-        self, notebook_id: str, object_type: str
-    ) -> List[KnowledgeRecord]: ...
+        self,
+        notebook_id: str,
+        object_type: str,
+        status: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> PaginatedKnowledge: ...
 
     def list_object_schemas(self) -> List[ObjectSchemaModel]: ...
 
