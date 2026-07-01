@@ -1795,13 +1795,13 @@ class SQLiteRepository:
             qvec = self._embed_query(q)
             if qvec is None:
                 return []
-            import hnswlib
             import numpy as np
             dim = int(idx.manifest.get("dim", len(qvec)))
             if dim != len(qvec):
                 return []
-            ann = hnswlib.Index(space="cosine", dim=dim)
-            ann.load_index(idx.ann_path, max_elements=len(idx.ann_labels))
+            ann = self._open_scale_ann(idx, "kg")
+            if ann is None:
+                return []
             ann.set_ef(max(k + 1, 50))
             actual_k = min(k, len(idx.ann_labels))
             labels, distances = ann.knn_query(np.asarray(qvec, dtype=np.float32), k=actual_k)
@@ -6756,6 +6756,28 @@ class SQLiteRepository:
             return idx
         return idx if allow_stale else None
 
+    def _open_scale_ann(self, idx, kind: str):
+        """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例(进程缓存,版本变→新实例→重开)。
+        kind='kg'→ann.bin/ann_labels;'chunk'→chunk_ann.bin/chunk_ann_labels。失败/无工件→None。"""
+        import hnswlib
+        attr = "ann_handle" if kind == "kg" else "chunk_ann_handle"
+        cached = getattr(idx, attr, None)
+        if cached is not None:
+            return cached
+        path = idx.ann_path if kind == "kg" else getattr(idx, "chunk_ann_path", None)
+        labels = idx.ann_labels if kind == "kg" else getattr(idx, "chunk_ann_labels", None)
+        if not path or not labels:
+            return None
+        dim = int(idx.manifest.get("dim", self.settings.embed_dim))
+        try:
+            h = hnswlib.Index(space="cosine", dim=dim)
+            h.load_index(path, max_elements=len(labels))
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            self._note_model_error(f"scale_ann_open_{kind}", self.settings.embed_model, exc)
+            return None
+        setattr(idx, attr, h)
+        return h
+
     def _viz_index(self, notebook_id: str):
         """Index exposing folded viz arrays for the KG-view fast paths, or None.
 
@@ -7476,7 +7498,6 @@ class SQLiteRepository:
         import numpy as np
         if not self.settings.ppr_emb_synonym_enabled:
             return active_edges
-        import hnswlib as _hnswlib
         _syn_k = self.settings.ppr_emb_synonym_topk
         _syn_thr = self.settings.ppr_emb_synonym_threshold
         # Fetch the active node embeddings — reused for the bridge (no second query).
@@ -7493,14 +7514,10 @@ class SQLiteRepository:
             _dim = int(_bidx.manifest.get("dim", _a_mat_arr.shape[1]))
             if _dim != _a_mat_arr.shape[1]:
                 continue
-            try:
-                _ann = _hnswlib.Index(space="cosine", dim=_dim)
-                _ann.load_index(_bidx.ann_path, max_elements=len(_bidx.ann_labels))
-                _ann.set_ef(max(_syn_k + 1, 50))
-            except Exception as _exc:  # noqa: BLE001 — fail-open
-                self._note_model_error(
-                    "scale_ppr_xbridge_load", self.settings.embed_model, _exc)
+            _ann = self._open_scale_ann(_bidx, "kg")
+            if _ann is None:
                 continue
+            _ann.set_ef(max(_syn_k + 1, 50))
             for _ai, _a_id in enumerate(_a_ids):
                 _avec = _a_mat_arr[_ai]
                 try:
@@ -7647,7 +7664,6 @@ class SQLiteRepository:
 
         # 3a. Base KG seeds via ANN (no 4GB matmul): query each base hnswlib index.
         if qvec is not None:
-            import hnswlib
             qarr = np.asarray(qvec, dtype=np.float32)
             top_n = self.settings.ppr_kg_seed_top_n
             for bid, idx in base_indexes:
@@ -7656,9 +7672,10 @@ class SQLiteRepository:
                 dim = int(idx.manifest.get("dim", qarr.shape[0]))
                 if dim != qarr.shape[0]:
                     continue
+                ann = self._open_scale_ann(idx, "kg")
+                if ann is None:
+                    continue
                 try:
-                    ann = hnswlib.Index(space="cosine", dim=dim)
-                    ann.load_index(idx.ann_path, max_elements=len(idx.ann_labels))
                     ann.set_ef(max(top_n + 1, 50))
                     k = min(top_n, len(idx.ann_labels))
                     labels, distances = ann.knn_query(qarr, k=k)
@@ -7916,7 +7933,7 @@ class SQLiteRepository:
     def _kg_object_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
         """ANN 核候选(idx.ann_path=knowledge_embeddings)⊕ delta 对象暴力。
         返回 {object_id: sim∈[0,1]}。fail-open 返回 {} 让上层退回全量。"""
-        import numpy as np, hnswlib
+        import numpy as np
         from app.services.vector_index import build_matrix, query_sims
         sims: dict = {}
         labels = getattr(idx, "ann_labels", None)
@@ -7924,9 +7941,10 @@ class SQLiteRepository:
             qarr = np.asarray(query_vector, dtype=np.float32)
             dim = int(idx.manifest.get("dim", qarr.shape[0]))
             if dim == qarr.shape[0]:
+                ann = self._open_scale_ann(idx, "kg")
+                if ann is None:
+                    return {}
                 try:
-                    ann = hnswlib.Index(space="cosine", dim=dim)
-                    ann.load_index(idx.ann_path, max_elements=len(labels))
                     ann.set_ef(max(recall + 1, 64))
                     k = min(recall, len(labels))
                     labs, dists = ann.knn_query(qarr, k=k)
@@ -8194,7 +8212,7 @@ class SQLiteRepository:
     def _retrieve_chunks_ann(self, notebook_id, query, query_vector, idx, recall):
         """ANN 候选版 chunk 检索:只对 top-recall 候选打分,避免全表 matmul+重分词。
         返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。"""
-        import numpy as np, hnswlib
+        import numpy as np
         from app.services.retrieval import score_chunks
         from app.services.vector_index import build_matrix, query_sims
         labels = idx.chunk_ann_labels
@@ -8204,9 +8222,10 @@ class SQLiteRepository:
         dim = int(idx.manifest.get("dim", qarr.shape[0]))
         if dim != qarr.shape[0]:
             return None
+        ann = self._open_scale_ann(idx, "chunk")
+        if ann is None:
+            return None
         try:
-            ann = hnswlib.Index(space="cosine", dim=dim)
-            ann.load_index(idx.chunk_ann_path, max_elements=len(labels))
             ann.set_ef(max(recall + 1, 64))
             k = min(recall, len(labels))
             labs, dists = ann.knn_query(qarr, k=k)

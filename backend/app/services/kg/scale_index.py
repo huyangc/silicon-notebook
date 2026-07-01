@@ -35,6 +35,8 @@ class ScaleIndex:
     viz_edges: list = None        # directed-deduped folded edges [[src,dst,edge_type],...]
     chunk_ann_labels: list = None   # chunk_id 列表(与 chunk_ann.bin 行对齐);无则 None
     chunk_ann_path: str = None      # chunk hnsw 文件路径;无则 None
+    ann_handle: object = None        # 惰性缓存的 hnswlib KG ANN handle(不落盘)
+    chunk_ann_handle: object = None  # 惰性缓存的 chunk ANN handle(不落盘)
 
 
 def load_scale_index(out_dir: str):
