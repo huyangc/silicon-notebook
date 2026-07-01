@@ -7745,29 +7745,64 @@ class SQLiteRepository:
         the reasoning retriever's tools; `w_keyword`/`w_semantic` carry the
         per-sub-query `prefer` bias."""
         type_list = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
+        query_vector = self._embed_query(query)
+        # indexed 时用 ANN 核 ⊕ delta 取有界候选;无索引→cand_sims=None→全量(现状)。
+        cand_sims = None
+        if query_vector is not None:
+            idx = self._scale_index(notebook_id, allow_stale=True)
+            if idx is not None and getattr(idx, "ann_labels", None):
+                cand_sims = self._kg_object_candidates(
+                    notebook_id, query_vector, idx, self.settings.chunk_recall)
+                if not cand_sims:
+                    cand_sims = None   # fail-open → 全量
+        from app.services.vector_index import query_sims, build_matrix
         with self._connect() as db:
-            kg_objs = {t: self._knowledge_objects(db, notebook_id, t) for t in type_list}
-            query_vector = self._embed_query(query)
-            elem_ids, elem_mat = self._vector_matrix(db, notebook_id, "element_embeddings", "element_id")
-            kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+            id_filter = set(cand_sims.keys()) if cand_sims is not None else None
+            kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
+                       for t in type_list}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
             token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
-            # 孤立节点降权: 计算本 notebook 有边节点集合(一次查询,O(edges))。
-            # 降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
-            rel_rows = db.execute(
-                "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
+            # candidate object ids for this retrieval call
+            candidate_ids = {o["id"] for o in all_kg_objs}
+            # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
+            if cand_sims is not None:
+                # 有界:仅按候选对象查边(避免全表扫),element_sims 仅候选证据元素。
+                if candidate_ids:
+                    phc = ",".join("?" for _ in candidate_ids)
+                    rel_rows = db.execute(
+                        f"SELECT source_object_id, target_object_id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND (source_object_id IN ({phc}) OR target_object_id IN ({phc}))",
+                        (notebook_id, *candidate_ids, *candidate_ids)).fetchall()
+                else:
+                    rel_rows = []
+                elem_id_set = {ev.element_id for o in all_kg_objs
+                               for ev in o.get("evidence", []) if getattr(ev, "element_id", None)}
+                if elem_id_set:
+                    phe = ",".join("?" for _ in elem_id_set)
+                    erows = db.execute(
+                        f"SELECT element_id AS vid, vector FROM element_embeddings "
+                        f"WHERE notebook_id=? AND element_id IN ({phe})",
+                        (notebook_id, *elem_id_set)).fetchall()
+                else:
+                    erows = []
+            else:
+                rel_rows = db.execute(
+                    "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = ?",
+                    (notebook_id,)).fetchall()
             connected_ids: set = set()
             for r in rel_rows:
                 connected_ids.add(r["source_object_id"])
                 connected_ids.add(r["target_object_id"])
-            # candidate object ids for this retrieval call
-            candidate_ids = {o["id"] for objs in kg_objs.values() for o in objs}
             isolated_ids: set = candidate_ids - connected_ids
-        from app.services.vector_index import query_sims
-        element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
-        knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+            if cand_sims is not None:
+                knowledge_sims = cand_sims
+                e_ids, e_mat = build_matrix((r["vid"], r["vector"]) for r in erows)
+                element_sims = query_sims(query_vector, e_ids, e_mat) if e_ids else {}
+            else:
+                elem_ids, elem_mat = self._vector_matrix(db, notebook_id, "element_embeddings", "element_id")
+                kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
+                element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
+                knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
         penalty = self.settings.kg_isolated_rank_penalty
         if self.settings.retrieval_rrf_enabled:
             scored = self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
