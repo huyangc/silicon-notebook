@@ -4037,22 +4037,25 @@ function SchemaRow({
       description
     });
   return (
-    <article className={`item ${schema.status === "disabled" ? "knowledge-deprecated" : ""}`}>
-      <div className="tag-row">
+    <article className={`item schema-card ${schema.status === "disabled" ? "knowledge-deprecated" : ""}`}>
+      <div className="schema-card-head">
         <strong>{schema.object_type}</strong>
         <span className="tag">{schema.source}</span>
         <span className={`tag ${schema.status === "active" ? "severity-low" : ""}`}>{schema.status}</span>
       </div>
-      <label>显示名
+      <label className="schema-field">
+        <span>显示名</span>
         <input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} />
       </label>
-      <label>字段（逗号分隔，按顺序）
+      <label className="schema-field">
+        <span>字段（逗号分隔，按顺序）</span>
         <textarea rows={2} value={fieldsText} disabled={busy} onChange={(e) => setFieldsText(e.target.value)} />
       </label>
-      <label>说明（用于抽取提示）
+      <label className="schema-field">
+        <span>说明（用于抽取提示）</span>
         <input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} />
       </label>
-      <div className="tag-row">
+      <div className="schema-actions">
         <button className="sort-button" disabled={busy || !dirty} onClick={save}>保存</button>
         {schema.status === "active" ? (
           <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "disabled" })}>停用</button>
@@ -4085,17 +4088,27 @@ function NewSchemaForm({
     setObjectType(""); setLabel(""); setFieldsText(""); setDescription("");
   };
   return (
-    <article className="item">
+    <article className="item schema-card">
       <p className="section-title">新增自定义类型</p>
-      <label>类型 id（snake_case）
+      <label className="schema-field">
+        <span>类型 id（snake_case）</span>
         <input value={objectType} disabled={busy} placeholder="例如 process_window" onChange={(e) => setObjectType(e.target.value)} />
       </label>
-      <label>显示名<input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} /></label>
-      <label>字段（逗号分隔）
+      <label className="schema-field">
+        <span>显示名</span>
+        <input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} />
+      </label>
+      <label className="schema-field">
+        <span>字段（逗号分隔）</span>
         <textarea rows={2} value={fieldsText} disabled={busy} placeholder="title, condition, limit" onChange={(e) => setFieldsText(e.target.value)} />
       </label>
-      <label>说明<input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} /></label>
-      <button className="sort-button" disabled={busy} onClick={submit}>新增类型</button>
+      <label className="schema-field">
+        <span>说明</span>
+        <input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+      <div className="schema-actions">
+        <button className="sort-button" disabled={busy} onClick={submit}>新增类型</button>
+      </div>
     </article>
   );
 }

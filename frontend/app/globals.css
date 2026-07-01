@@ -2187,6 +2187,58 @@ button.chat-session-card {
   line-height: 1.45;
 }
 
+/* Schema 管理卡片:整齐的竖排表单(小标签 + 全宽控件),消除内联 label 的错位换行。 */
+.schema-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.schema-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schema-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.schema-field > span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted, #667085);
+}
+
+.schema-field input,
+.schema-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d9dfeb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #20242a;
+  background: #fff;
+  outline: 0;
+}
+
+.schema-field textarea {
+  resize: vertical;
+  min-height: 56px;
+  line-height: 1.5;
+}
+
+.schema-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
 .source-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
