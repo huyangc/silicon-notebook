@@ -176,7 +176,7 @@ def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
         calls["build_nb"] = nb
         return {"built": ["s1", "s2"], "failed": [], "skipped": []}
 
-    def fake_rebuild(nb):
+    def fake_rebuild(nb, progress=None):
         calls["rebuild_nb"] = nb
         return 7
 
@@ -217,7 +217,7 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(SQLiteRepository, "_run_extraction", lambda self, sid: None)
-    monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", lambda self, nb: 0)
+    monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", lambda self, nb, progress=None: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
     rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1",
                   "--allow-no-embed"])
@@ -249,7 +249,7 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     def _no_build(nb):
         raise AssertionError("build_notebook_kg must not be called when limit is set")
     monkeypatch.setattr(repo, "build_notebook_kg", _no_build)
-    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb, progress=None: 0)
 
     repo.settings.kg_llm_base_url = "http://kg.example"
     repo.settings.kg_llm_api_key = "k"
@@ -460,7 +460,7 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted.append(sid))
     rebuild_calls = []
     monkeypatch.setattr(repo, "rebuild_unified_kg",
-                        lambda nb: (rebuild_calls.append(nb), 5)[1])
+                        lambda nb, progress=None: (rebuild_calls.append(nb), 5)[1])
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
     res = bi.run_all(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
@@ -485,7 +485,7 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-flags")
     monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
-    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb, progress=None: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
     configure_calls = []
@@ -494,7 +494,7 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     seen_embed_conc = {}
     real_rebuild = repo.rebuild_unified_kg
 
-    def _spy_rebuild(nb):                            # rebuild 在 try 内 → 此刻应已被覆盖为 conc
+    def _spy_rebuild(nb, progress=None):            # rebuild 在 try 内 → 此刻应已被覆盖为 conc
         seen_embed_conc["during"] = repo.settings.embed_concurrency
         return real_rebuild(nb)
     monkeypatch.setattr(repo, "rebuild_unified_kg", _spy_rebuild)
@@ -536,7 +536,7 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
     extracted = []
     monkeypatch.setattr(repo, "extract_source", lambda sid: extracted.append(sid))
     # process_source 不应被调用(全部走 resume 路径);若被调用会因无 elements 抛错并计 failed
-    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb: 0)
+    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb, progress=None: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
     res = bi.run_all(repo, nb_id, files, workers=2, conc=2)
