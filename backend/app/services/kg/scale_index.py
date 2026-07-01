@@ -285,6 +285,25 @@ def splice_active(
     return combined_ids, (M @ D).tocsr()
 
 
+def fold_arrays(base_node_ids, base_transition, base_idf, base_chunk_index,
+                delta_node_ids, delta_edges, delta_chunk_ids, delta_idf_map):
+    """把 delta splice 进 base 索引数组。base_node_ids 是 combined 的前缀,故 base
+    的 chunk_index 位置不变;新节点追加在后。返回 (node_ids, transition, idf, chunk_index)。"""
+    node_ids, transition = splice_active(list(base_node_ids), base_transition,
+                                         list(delta_node_ids), list(delta_edges))
+    base_n = len(base_node_ids)
+    # idf:前缀复用 base.idf,新节点用 delta_idf_map(缺省 1.0)
+    idf = np.ones(len(node_ids), dtype=np.float64)
+    idf[:base_n] = np.asarray(base_idf, dtype=np.float64)[:base_n]
+    for i in range(base_n, len(node_ids)):
+        idf[i] = float(delta_idf_map.get(node_ids[i], 1.0))
+    # chunk_index:base chunk 位置(前缀不变)+ 新 delta chunk 位置
+    pos = {nid: i for i, nid in enumerate(node_ids)}
+    chunk_index = list(np.asarray(base_chunk_index, dtype=np.int64)) + \
+        [pos[c] for c in delta_chunk_ids if c in pos and pos[c] >= base_n]
+    return node_ids, transition, idf, np.asarray(chunk_index, dtype=np.int32)
+
+
 def viz_core(viz: dict, limit: int) -> dict:
     """折叠 viz 图取度数 top-N + 诱导边。viz: {viz_ids, viz_adj(csr), viz_deg, viz_types}。
     返回 {nodes:[{id,type,degree}], edges:[{source,target}], total_nodes, total_edges, truncated}。"""
