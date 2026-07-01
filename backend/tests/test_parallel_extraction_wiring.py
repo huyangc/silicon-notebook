@@ -9,6 +9,13 @@ def test_settings_concurrency_knobs(monkeypatch):
     assert s2.kg_job_concurrency == 3 and s2.kg_ask_reserve == 16
 
 
+def test_merge_review_batch_size_setting(monkeypatch):
+    from app.core.config import Settings
+    assert Settings().kg_merge_review_batch_size == 30
+    monkeypatch.setenv("KG_MERGE_REVIEW_BATCH_SIZE", "12")
+    assert Settings().kg_merge_review_batch_size == 12
+
+
 def test_llm_client_connection_pool_sized(monkeypatch):
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://example.invalid")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")

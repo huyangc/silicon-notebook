@@ -4565,16 +4565,33 @@ class SQLiteRepository:
         from app.services.concept_merge_review import review_merge_candidates
         autoc = sd.get("auto_candidates", [])
         if autoc and getattr(self.kg_llm_client, "configured", False):
-            cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
-                          for i, (a, b, s) in enumerate(autoc)]
-            decisions = review_merge_candidates(self.kg_llm_client, cand_dicts)
-            by_id = {d["candidate_id"]: d for d in decisions}
-            extra = set()
-            for i, (a, b, s) in enumerate(autoc):
-                d = by_id.get(f"ac{i}")
-                if d and d["decision"] == "merge" and d["confidence"] >= self.settings.kg_merge_confirm_threshold:
-                    extra.add(frozenset((a[2:] if a.startswith("K-") else a,
-                                        b[2:] if b.startswith("K-") else b)))
+            # Optional LLM adjudication is an enhancement — it must NEVER be able to
+            # crash the rebuild. review_merge_candidates is already fail-open (chunked +
+            # defensive parse); this outer guard covers any other unexpected error in the
+            # block so the rebuild always proceeds to write the cluster map.
+            try:
+                cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
+                              for i, (a, b, s) in enumerate(autoc)]
+                # Resolve kg_llm_client here in the main thread (ContextVar-backed) and
+                # pass the resolved object into the parallel chunk workers.
+                decisions = review_merge_candidates(
+                    self.kg_llm_client, cand_dicts,
+                    batch_size=self.settings.kg_merge_review_batch_size,
+                    max_workers=self.settings.kg_job_concurrency,
+                )
+                by_id = {d["candidate_id"]: d for d in decisions}
+                extra = set()
+                for i, (a, b, s) in enumerate(autoc):
+                    d = by_id.get(f"ac{i}")
+                    if d and d["decision"] == "merge" and d["confidence"] >= self.settings.kg_merge_confirm_threshold:
+                        extra.add(frozenset((a[2:] if a.startswith("K-") else a,
+                                            b[2:] if b.startswith("K-") else b)))
+            except Exception:
+                self.event_log.logger.exception(
+                    "unified-KG merge-review adjudication failed for %s; proceeding without it",
+                    notebook_id,
+                )
+                extra = set()
             if extra:
                 confirmed = set(confirmed) | extra
                 # reps/members already in RAM — re-cluster is cheap.
