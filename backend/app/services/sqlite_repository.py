@@ -6498,6 +6498,16 @@ class SQLiteRepository:
             ann_labels = []
             ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
 
+        # Chunk-level ANN vectors/labels (Task 1): chunks that have a row in
+        # chunk_embeddings. Persisted as chunk_ann.bin so query-time chunk
+        # retrieval can ANN-narrow candidates on large persisted-index notebooks.
+        with self._connect() as db:
+            c_ids_raw, c_mat_raw = self._vector_matrix(
+                db, notebook_id, "chunk_embeddings", "chunk_id")
+        chunk_ann_labels = list(c_ids_raw) if c_ids_raw else []
+        chunk_ann_vectors = (np.asarray(c_mat_raw, dtype=np.float32)
+                             if chunk_ann_labels and c_mat_raw is not None else None)
+
         # Folded concept-level viz graph (Task 4 / SP1): derive the EXACT same
         # graph _unified_graph_full(nb, "object") returns (concepts folded to
         # canonical ids via cluster_map, edges deduped) and persist it as compact
@@ -6534,6 +6544,8 @@ class SQLiteRepository:
             viz_types=viz_types,
             viz_names=viz_names,
             viz_payload=viz_payload,
+            chunk_ann_vectors=chunk_ann_vectors,
+            chunk_ann_labels=chunk_ann_labels,
         )
 
     def _build_viz_graph_arrays(self, notebook_id: str):
