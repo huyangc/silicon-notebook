@@ -25,25 +25,36 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _seed_two_doc_moe(repo):
+def _seed_two_doc_moe(repo, suffix=""):
     """Two sources, each with an MoE concept node clustered together, each
-    node's evidence pointing at a chunk in its own source."""
+    node's evidence pointing at a chunk in its own source.
+
+    `suffix` namespaces the globally-unique ids (source/chunk/object/cluster)
+    so the helper can seed a second notebook in the same DB without colliding.
+    The concept canonical_id stays "K-moe" (shared) so cross-notebook concept
+    bridging still works. Default suffix="" keeps existing callers byte-identical.
+    """
     nb = repo.create_notebook(NotebookCreate(name="kb"))
+    sfx = suffix
     with repo._write() as db:
         now = "2026-06-22T00:00:00"
-        for sid, title in [("src-A", "DeepSeek paper"), ("src-B", "GLM paper")]:
+        src_a, src_b = f"src-A{sfx}", f"src-B{sfx}"
+        cA, cB = f"cA{sfx}", f"cB{sfx}"
+        e1, e2 = f"e1{sfx}", f"e2{sfx}"
+        elA, elB = f"elA{sfx}", f"elB{sfx}"
+        for sid, title in [(src_a, "DeepSeek paper"), (src_b, "GLM paper")]:
             db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
                        "VALUES (?,?,?,?,?,?,?)",
                        (sid, nb.id, title, "md", "ready", now, now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                    "VALUES (?,?,?,?,?,?,?)",
-                   ("cA", nb.id, "src-A", "DeepSeek-V3 uses a Mixture-of-Experts (MoE) architecture.",
-                    "Arch", json.dumps(["elA"]), now))
+                   (cA, nb.id, src_a, "DeepSeek-V3 uses a Mixture-of-Experts (MoE) architecture.",
+                    "Arch", json.dumps([elA]), now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                    "VALUES (?,?,?,?,?,?,?)",
-                   ("cB", nb.id, "src-B", "GLM-4.5 is a Mixture-of-Experts (MoE) model.",
-                    "Arch", json.dumps(["elB"]), now))
-        for oid, sid, el in [("e1", "src-A", "elA"), ("e2", "src-B", "elB")]:
+                   (cB, nb.id, src_b, "GLM-4.5 is a Mixture-of-Experts (MoE) model.",
+                    "Arch", json.dumps([elB]), now))
+        for oid, sid, el in [(e1, src_a, elA), (e2, src_b, elB)]:
             ev = json.dumps([{"source_id": sid, "source_title": "", "element_id": el,
                               "element_type": "paragraph", "location_label": "p1",
                               "quoted_span": "MoE", "confidence": 1.0}])
@@ -52,7 +63,7 @@ def _seed_two_doc_moe(repo):
                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (oid, nb.id, "concept", "approved", "",
                         json.dumps({"name": "Mixture-of-Experts (MoE)"}), ev, sid, now, now))
-        for oid in ("e1", "e2"):
+        for oid in (e1, e2):
             db.execute("INSERT INTO concept_clusters "
                        "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
                        "VALUES (?,?,?,?,?,?,?)",
@@ -404,3 +415,28 @@ def test_ask_graph_ppr_no_community_when_none(repo, monkeypatch):
     from app.models.schemas import AskRequest
     resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
     assert not any("Knowledge base theme" in c.label for c in resp.citations)
+
+
+def test_scale_ppr_caches_combined_graph(repo, monkeypatch):
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base.id,))
+
+    active = _seed_two_doc_moe(repo, suffix="-act")
+    repo.rebuild_unified_kg(active.id)
+
+    import app.services.kg.scale_index as si
+    calls = {"n": 0}
+    real_splice = si.splice_active
+    def counting_splice(*a, **k):
+        calls["n"] += 1
+        return real_splice(*a, **k)
+    monkeypatch.setattr(si, "splice_active", counting_splice)
+
+    r1 = repo.scale_ppr(active.id, "Mixture of Experts")
+    n_after_first = calls["n"]
+    r2 = repo.scale_ppr(active.id, "Mixture of Experts")
+    assert calls["n"] == n_after_first          # 第二次命中缓存、不再 splice
+    assert isinstance(r1, list) and isinstance(r2, list)

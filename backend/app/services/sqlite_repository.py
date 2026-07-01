@@ -6347,6 +6347,147 @@ class SQLiteRepository:
             self._gather_kg_graph(notebook_id)
         return node_ids, edges, chunk_ids
 
+    def _scale_xlayer_bridge_edges(self, notebook_id: str, base_indexes,
+                                   active_edges):
+        """Append bounded cross-layer synonym bridge edges to active_edges.
+
+        For each active KG node vector, query each base ANN — if cosine sim >=
+        threshold and the base node id differs from the active node id (no
+        duplicate of the exact-id unification splice_active already does), add
+        an undirected edge (active↔base, weight=cosine). The active node lands
+        in combined_ids via splice_active (new id); the base node is already in
+        combined_ids — so build_transition keeps both endpoints.
+
+        Complexity: |active_kg_nodes| × topk per base (small; no base matmul).
+        NOTE: this depends only on the active node embedding matrix and the base
+        ANN indexes — NOT on the query vector — so it can live inside the cached
+        combined-graph loader. Returns the (possibly extended) active_edges list.
+        """
+        import numpy as np
+        if not self.settings.ppr_emb_synonym_enabled:
+            return active_edges
+        import hnswlib as _hnswlib
+        _syn_k = self.settings.ppr_emb_synonym_topk
+        _syn_thr = self.settings.ppr_emb_synonym_threshold
+        # Fetch the active node embeddings — reused for the bridge (no second query).
+        with self._connect() as _db:
+            _a_ids, _a_mat = self._vector_matrix(
+                _db, notebook_id, "knowledge_embeddings", "object_id")
+        if _a_ids is None or _a_mat is None or len(_a_mat) == 0:
+            return active_edges
+        _a_mat_arr = np.asarray(_a_mat, dtype=np.float32)
+        _bridge_edges: List[Tuple[str, str, float]] = []
+        for _bid, _bidx in base_indexes:
+            if not _bidx.ann_labels:
+                continue
+            _dim = int(_bidx.manifest.get("dim", _a_mat_arr.shape[1]))
+            if _dim != _a_mat_arr.shape[1]:
+                continue
+            try:
+                _ann = _hnswlib.Index(space="cosine", dim=_dim)
+                _ann.load_index(_bidx.ann_path, max_elements=len(_bidx.ann_labels))
+                _ann.set_ef(max(_syn_k + 1, 50))
+            except Exception as _exc:  # noqa: BLE001 — fail-open
+                self._note_model_error(
+                    "scale_ppr_xbridge_load", self.settings.embed_model, _exc)
+                continue
+            for _ai, _a_id in enumerate(_a_ids):
+                _avec = _a_mat_arr[_ai]
+                try:
+                    _k = min(_syn_k, len(_bidx.ann_labels))
+                    _labs, _dists = _ann.knn_query(_avec, k=_k)
+                except Exception as _exc:  # noqa: BLE001 — fail-open
+                    self._note_model_error(
+                        "scale_ppr_xbridge_query",
+                        self.settings.embed_model, _exc)
+                    continue
+                for _lab, _dist in zip(_labs[0], _dists[0]):
+                    _base_nid = _bidx.ann_labels[int(_lab)]
+                    if _base_nid == _a_id:
+                        continue  # exact-id: already unified by splice_active
+                    _sim = max(0.0, 1.0 - float(_dist))
+                    if _sim >= _syn_thr:
+                        _bridge_edges.append((_a_id, _base_nid, _sim))
+                        _bridge_edges.append((_base_nid, _a_id, _sim))
+        if _bridge_edges:
+            active_edges = list(active_edges) + _bridge_edges
+        return active_edges
+
+    def _scale_combined_graph(self, notebook_id: str, base_indexes):
+        """Build (and version-cache) the query-INDEPENDENT combined base⊕active
+        CSR graph used by scale_ppr. Version key = each base's manifest version +
+        the active notebook's _scale_index_version, so the cache invalidates when
+        any participant's KG/embeddings/settings change. Same _vector_cache /
+        version-loader pattern as _ppr_graph.
+
+        Returns dict: combined_ids, combined_A, combined_index,
+        combined_chunk_ids, combined_idf.
+        """
+        import numpy as np
+        from app.services.kg import scale_index as si
+
+        base_ver = tuple(
+            (bid, tuple(idx.manifest.get("version", [])))
+            for bid, idx in base_indexes)
+        active_ver = tuple(self._scale_index_version(notebook_id))
+        version = ("scale_combined", base_ver, active_ver)
+
+        def _load():
+            # 2. Combined graph: start from the first base index, splice remaining
+            #    base indexes' nodes/edges, then splice the active delta.
+            first_id, first = base_indexes[0]
+            combined_ids = list(first.node_ids)
+            combined_A = first.transition
+            # combined_idf aligned to combined node order: base.idf for base nodes,
+            # 1.0 for any node introduced later (extra base nodes / active / hubs).
+            combined_idf_map: Dict[str, float] = {
+                nid: float(first.idf[i]) for i, nid in enumerate(first.node_ids)
+            }
+            # base chunk node ids of the FIRST base (raw chunk_id convention).
+            combined_chunk_ids: set = {
+                first.node_ids[i] for i in first.chunk_index
+                if 0 <= int(i) < len(first.node_ids)
+            }
+            for bid, idx in base_indexes[1:]:
+                # reconstruct this base's edges from its CSR and splice as "active"-style
+                extra_ids, extra_A = si.splice_active(
+                    combined_ids, combined_A, list(idx.node_ids),
+                    si.csr_to_edges(idx.node_ids, idx.transition))
+                combined_ids, combined_A = extra_ids, extra_A
+                for i, nid in enumerate(idx.node_ids):
+                    combined_idf_map.setdefault(nid, float(idx.idf[i]))
+                for i in idx.chunk_index:
+                    if 0 <= int(i) < len(idx.node_ids):
+                        combined_chunk_ids.add(idx.node_ids[int(i)])
+
+            active_node_ids, active_edges, active_chunk_ids = \
+                self._active_kg_delta(notebook_id)
+
+            # 2b. Cross-layer synonym bridge (query-independent; see helper).
+            active_edges = self._scale_xlayer_bridge_edges(
+                notebook_id, base_indexes, active_edges)
+
+            combined_ids, combined_A = si.splice_active(
+                combined_ids, combined_A, active_node_ids, active_edges)
+            combined_index = {nid: i for i, nid in enumerate(combined_ids)}
+            combined_chunk_ids.update(active_chunk_ids)
+
+            # combined_idf array aligned to combined_ids (1.0 for unknown nodes).
+            combined_idf = np.array(
+                [combined_idf_map.get(nid, 1.0) for nid in combined_ids],
+                dtype=np.float64)
+
+            return {
+                "combined_ids": combined_ids,
+                "combined_A": combined_A,
+                "combined_index": combined_index,
+                "combined_chunk_ids": combined_chunk_ids,
+                "combined_idf": combined_idf,
+            }
+
+        return self._vector_cache.get(
+            f"{notebook_id}:scale_combined", version, _load)
+
     def scale_ppr(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
         """规模化 PPR:base 有持久化 scale 索引时,用 ANN 取 base KG 种子(避免
         4GB 暴力 matmul)+ 把 active 增量 splice 进 base CSR 图 → personalized_ppr
@@ -6373,104 +6514,17 @@ class SQLiteRepository:
         if not base_indexes:
             return []
 
-        # 2. Combined graph: start from the first base index, splice remaining
-        #    base indexes' nodes/edges, then splice the active delta.
-        first_id, first = base_indexes[0]
-        combined_ids = list(first.node_ids)
-        combined_A = first.transition
-        # combined_idf aligned to combined node order: base.idf for base nodes,
-        # 1.0 for any node introduced later (extra base nodes / active / hubs).
-        combined_idf_map: Dict[str, float] = {
-            nid: float(first.idf[i]) for i, nid in enumerate(first.node_ids)
-        }
-        # base chunk node ids of the FIRST base (raw chunk_id convention).
-        combined_chunk_ids: set = {
-            first.node_ids[i] for i in first.chunk_index
-            if 0 <= int(i) < len(first.node_ids)
-        }
-        # Per-base ANN seed accumulation (avoids base brute-force matmul): we keep
-        # the (base_id, ScaleIndex) list and query each base's hnswlib index below.
-
-        for bid, idx in base_indexes[1:]:
-            # reconstruct this base's edges from its CSR and splice as "active"-style
-            extra_ids, extra_A = si.splice_active(
-                combined_ids, combined_A, list(idx.node_ids),
-                si.csr_to_edges(idx.node_ids, idx.transition))
-            combined_ids, combined_A = extra_ids, extra_A
-            for i, nid in enumerate(idx.node_ids):
-                combined_idf_map.setdefault(nid, float(idx.idf[i]))
-            for i in idx.chunk_index:
-                if 0 <= int(i) < len(idx.node_ids):
-                    combined_chunk_ids.add(idx.node_ids[int(i)])
-
-        active_node_ids, active_edges, active_chunk_ids = self._active_kg_delta(notebook_id)
-
-        # 2b. Cross-layer synonym bridge (spec: splice 步加有界跨层 synonym 边).
-        #     For each active node vector, query each base ANN — if cosine sim >=
-        #     threshold and the base node id differs from the active node id (no
-        #     duplicate of the exact-id unification already done by splice_active),
-        #     add an undirected edge (active↔base, weight=cosine).  The active node
-        #     will land in combined_ids via splice_active (new id); the base node is
-        #     already in combined_ids — so build_transition keeps both endpoints.
-        #     Complexity: |active_kg_nodes| × topk per base (small; no base matmul).
-        #     NOTE: qvec is not available yet (computed in step 3); bridge only needs
-        #     the active node embedding matrix — no dependency on the query vector.
-        if self.settings.ppr_emb_synonym_enabled:
-            import hnswlib as _hnswlib
-            _syn_k = self.settings.ppr_emb_synonym_topk
-            _syn_thr = self.settings.ppr_emb_synonym_threshold
-            # Fetch the active node embeddings — reused for the bridge (no second query).
-            with self._connect() as _db:
-                _a_ids, _a_mat = self._vector_matrix(
-                    _db, notebook_id, "knowledge_embeddings", "object_id")
-            if _a_ids is not None and _a_mat is not None and len(_a_mat) > 0:
-                import numpy as _np
-                _a_mat_arr = _np.asarray(_a_mat, dtype=np.float32)
-                _bridge_edges: List[Tuple[str, str, float]] = []
-                for _bid, _bidx in base_indexes:
-                    if not _bidx.ann_labels:
-                        continue
-                    _dim = int(_bidx.manifest.get("dim", _a_mat_arr.shape[1]))
-                    if _dim != _a_mat_arr.shape[1]:
-                        continue
-                    try:
-                        _ann = _hnswlib.Index(space="cosine", dim=_dim)
-                        _ann.load_index(_bidx.ann_path, max_elements=len(_bidx.ann_labels))
-                        _ann.set_ef(max(_syn_k + 1, 50))
-                    except Exception as _exc:  # noqa: BLE001 — fail-open
-                        self._note_model_error(
-                            "scale_ppr_xbridge_load", self.settings.embed_model, _exc)
-                        continue
-                    _base_id_set = set(_bidx.node_ids)
-                    for _ai, _a_id in enumerate(_a_ids):
-                        _avec = _a_mat_arr[_ai]
-                        try:
-                            _k = min(_syn_k, len(_bidx.ann_labels))
-                            _labs, _dists = _ann.knn_query(_avec, k=_k)
-                        except Exception as _exc:  # noqa: BLE001 — fail-open
-                            self._note_model_error(
-                                "scale_ppr_xbridge_query",
-                                self.settings.embed_model, _exc)
-                            continue
-                        for _lab, _dist in zip(_labs[0], _dists[0]):
-                            _base_nid = _bidx.ann_labels[int(_lab)]
-                            if _base_nid == _a_id:
-                                continue  # exact-id: already unified by splice_active
-                            _sim = max(0.0, 1.0 - float(_dist))
-                            if _sim >= _syn_thr:
-                                _bridge_edges.append((_a_id, _base_nid, _sim))
-                                _bridge_edges.append((_base_nid, _a_id, _sim))
-                if _bridge_edges:
-                    active_edges = list(active_edges) + _bridge_edges
-
-        combined_ids, combined_A = si.splice_active(
-            combined_ids, combined_A, active_node_ids, active_edges)
-        combined_index = {nid: i for i, nid in enumerate(combined_ids)}
-        combined_chunk_ids.update(active_chunk_ids)
-
-        # combined_idf array aligned to combined_ids (1.0 for unknown nodes).
-        combined_idf = np.array(
-            [combined_idf_map.get(nid, 1.0) for nid in combined_ids], dtype=np.float64)
+        # 2. Combined graph: base⊕active spliced CSR.  This graph is INDEPENDENT
+        #    of the query (the cross-layer synonym bridge uses active node vectors,
+        #    not the query vector), so it is version-cached and reused across
+        #    consecutive queries against the same active notebook — the splice cost
+        #    is paid once per (base versions × active version) instead of per query.
+        graph = self._scale_combined_graph(notebook_id, base_indexes)
+        combined_ids = graph["combined_ids"]
+        combined_A = graph["combined_A"]
+        combined_index = graph["combined_index"]
+        combined_chunk_ids = graph["combined_chunk_ids"]
+        combined_idf = graph["combined_idf"]
 
         # 3. Reset vector.
         reset = np.zeros(len(combined_ids), dtype=np.float64)
