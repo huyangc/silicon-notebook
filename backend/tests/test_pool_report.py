@@ -106,9 +106,9 @@ def test_format_pool_snapshot_exact():
     from collections import Counter
     s = {"window_active": 14, "window_max": 16, "job_active": 8, "job_max": 8}
     embed = Counter({"bg": 6, "pool": 20})
-    line = bi._format_pool_snapshot(45.0, s, embed, 5, 40)
+    line = bi._format_pool_snapshot("17:52:33", s, embed, 5, 40)
     assert line == (
-        "[pool 45s] KG-LLM(window) 14/16 · 源(job) 8/8"
+        "[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8"
         " · embed 6bg+20pool · 源完成 5/40"
     )
 
@@ -116,9 +116,9 @@ def test_format_pool_snapshot_exact():
 def test_format_pool_snapshot_missing_embed_keys_zero():
     from collections import Counter
     s = {"window_active": 0, "window_max": 1, "job_active": 0, "job_max": 1}
-    line = bi._format_pool_snapshot(3.0, s, Counter(), 0, 0)
+    line = bi._format_pool_snapshot("00:00:03", s, Counter(), 0, 0)
     assert line == (
-        "[pool 3s] KG-LLM(window) 0/1 · 源(job) 0/1"
+        "[pool 00:00:03] KG-LLM(window) 0/1 · 源(job) 0/1"
         " · embed 0bg+0pool · 源完成 0/0"
     )
 

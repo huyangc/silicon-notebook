@@ -466,7 +466,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 - `--workers` —— `all` 阶段**同时抽取的文档数**(覆盖 `KG_JOB_CONCURRENCY`);`ingest` 阶段为文件解析并发。
 - `--embed-conc` —— embedding 并发(覆盖 `EMBED_CONCURRENCY`);`all` 阶段 chunk 向量在每篇文档管线的后台跑。
 - `KG_EXTRACT_WORKERS`(`.env`,默认 16)—— KG 抽取 LLM 窗口级的全局总并发,跨所有文档共享(文档内 + 文档间)。
-- `--pool-report-interval` —— `all`/`kg` 阶段每 N 秒打一行**实时线程池占用**(默认 15;`0` 关闭)。并排显示 KG-LLM(抽取窗口)池与 embedding 线程——如 `[pool 45s] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40`——用以确认 embedding 模型与 KG-LLM 在共享算力的模型服务上**同时**打满。
+- `--pool-report-interval` —— `all`/`kg` 阶段每 N 秒打一行**实时线程池占用**(默认 15;`0` 关闭)。并排显示 KG-LLM(抽取窗口)池与 embedding 线程——如 `[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40`——用以确认 embedding 模型与 KG-LLM 在共享算力的模型服务上**同时**打满。
 
 `all` 阶段 embedding 峰值并发 ≈ `--workers × --embed-conc`,两者同时调高易触发服务商 429,谨慎。若某次限流留下缺失向量,事后用 `embed` 子命令补修。
 
