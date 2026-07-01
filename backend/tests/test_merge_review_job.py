@@ -61,3 +61,19 @@ def test_job_failopen_no_infinite_loop(repo, monkeypatch):
 def test_status_idle_when_never_run(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     assert repo.merge_review_job_status(nb)["status"] == "idle"
+
+
+def test_startup_reconciles_stuck_running(repo, tmp_path):
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    # simulate a job left 'running' by a crashed process
+    with repo._write() as db:
+        db.execute("INSERT INTO merge_review_jobs (notebook_id,status,total,done,started_at,updated_at,error) "
+                   "VALUES (?, 'running', 5, 2, '', '', '')", (nb,))
+    # a fresh repository over the SAME db file re-runs _migrate on construction
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    from app.services.embedding import FakeEmbedder
+    repo2 = SQLiteRepository(Settings())
+    repo2.embedder = FakeEmbedder(dim=16)
+    st = repo2.merge_review_job_status(nb)
+    assert st["status"] == "failed"

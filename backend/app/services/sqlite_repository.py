@@ -748,6 +748,14 @@ class SQLiteRepository:
                              tokenize='trigram');
                 """
             )
+            # Startup reconciliation: the backend is single-process and merge-review
+            # jobs run on a daemon thread, so a thread cannot outlive a process
+            # restart. Any row still 'running' at startup is therefore definitionally
+            # stale (left behind by a crash/restart) and would otherwise permanently
+            # block that notebook's single-flight guard. Idempotent — safe every boot.
+            db.execute(
+                "UPDATE merge_review_jobs SET status='failed', "
+                "error='中断:服务重启' WHERE status='running'")
             # Lightweight column migrations for pre-existing databases.
             # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard via PRAGMA so this
             # runs idempotently on every init.
