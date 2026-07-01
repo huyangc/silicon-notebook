@@ -222,3 +222,27 @@ def test_chunk_ann_enabled_default_on():
     """默认开:有索引的库自动走 ANN 核⊕delta;小库无索引自然回退暴力(零影响)。"""
     from app.core.config import Settings
     assert Settings(_env_file=None).chunk_ann_enabled is True
+
+
+def test_chunk_fts_backfill_and_search(repo):
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="b"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("s1", nb.id, "t", "md", "ready", now, now))
+        for cid, txt in [("c1", "XZQW9000 special widget spec"),
+                         ("c2", "unrelated bandgap text")]:
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (cid, nb.id, "s1", txt, "", "[]", now))
+    n = repo.backfill_chunk_fts(nb.id)
+    assert n == 2
+    from app.services.kg.search import chunk_fts_search
+    with repo._connect() as db:
+        hits = chunk_fts_search(db, nb.id, "XZQW9000", k=10)
+    assert "c1" in {h["chunk_id"] for h in hits}   # 罕见词法词命中
+    assert "c2" not in {h["chunk_id"] for h in hits}

@@ -753,6 +753,10 @@ class SQLiteRepository:
                 CREATE VIRTUAL TABLE IF NOT EXISTS kg_objects_fts
                   USING fts5(object_id UNINDEXED, notebook_id UNINDEXED, name,
                              tokenize='trigram');
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
+                  USING fts5(chunk_id UNINDEXED, notebook_id UNINDEXED, text,
+                             tokenize='trigram');
                 """
             )
             # Startup reconciliation: the backend is single-process and merge-review
@@ -1542,6 +1546,7 @@ class SQLiteRepository:
             # (用户可"刷新图谱"重建全部派生索引)。
             try:
                 self.backfill_kg_fts(new_id)
+                self.backfill_chunk_fts(new_id)
             except Exception:
                 self.event_log.logger.exception("copy_notebook: FTS backfill failed for %s", new_id)
             return self.get_notebook(new_id)
@@ -1784,6 +1789,22 @@ class SQLiteRepository:
                     fts_rows,
                 )
         return len(fts_rows) if fts_rows else 0
+
+    def backfill_chunk_fts(self, notebook_id: str) -> int:
+        """从 chunks 重建 chunks_fts(DELETE+re-INSERT)。返回写入行数。
+
+        幂等,best-effort 派生索引:先删本 notebook 的 FTS 行,再从 chunks 全量重插。
+        供 copy_notebook / 刷新图谱等重建派生索引的路径调用。
+        """
+        with self._write() as db:
+            db.execute("DELETE FROM chunks_fts WHERE notebook_id=?", (notebook_id,))
+            rows = db.execute(
+                "SELECT id, text FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchall()
+            if rows:
+                db.executemany(
+                    "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                    [(r["id"], notebook_id, r["text"] or "") for r in rows])
+        return len(rows)
 
     def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
         """ANN semantic search over the notebook's scale index.
@@ -2908,10 +2929,18 @@ class SQLiteRepository:
         rows = [(f"ck-{uuid4().hex[:12]}", notebook_id, source_id, c["text"],
                  c["section_path"], json.dumps(c["element_ids"]), now) for c in chunks]
         with self._write() as db:
+            # chunks_fts 是词法派生索引(无 source_id 列,不随 chunks 的 FK 级联),须同事务
+            # 手动同步:先删本 source 旧 chunk 的 FTS 行(chunks DELETE 前 join 取 id),再重插。
+            db.execute(
+                "DELETE FROM chunks_fts WHERE chunk_id IN "
+                "(SELECT id FROM chunks WHERE source_id=?)", (source_id,))
             db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))  # 级联删 embeddings
             db.executemany(
                 "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                 "VALUES (?,?,?,?,?,?,?)", rows)
+            db.executemany(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                [(r[0], r[1], r[3]) for r in rows])
 
     def _embed_chunks_for_source(self, source_id: str) -> None:
         """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
