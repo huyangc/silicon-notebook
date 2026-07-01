@@ -753,6 +753,17 @@ class SQLiteRepository:
             # mark_notebook_base(). PRAGMA guard keeps this idempotent.
             if "tier" not in nb_cols:
                 db.execute("ALTER TABLE notebooks ADD COLUMN tier TEXT NOT NULL DEFAULT 'personal'")
+            # Notebook sharing (Phase 1): is_shared toggles an opaque share_token
+            # that lets others deep-copy the small library into their own space.
+            # Unique index (partial, NULL 不参与) 保证 token 全局唯一。
+            if "is_shared" not in nb_cols:
+                db.execute("ALTER TABLE notebooks ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0")
+            if "share_token" not in nb_cols:
+                db.execute("ALTER TABLE notebooks ADD COLUMN share_token TEXT DEFAULT NULL")
+                db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_share_token "
+                    "ON notebooks(share_token) WHERE share_token IS NOT NULL"
+                )
             # Per-source document type drives schema/profile selection at extraction.
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
