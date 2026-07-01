@@ -705,6 +705,12 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_source_elements_source ON source_elements(source_id);
                 CREATE INDEX IF NOT EXISTS idx_source_elements_source_created ON source_elements(source_id, created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_type_status ON knowledge_objects(notebook_id, object_type, status);
+                -- Covers list_knowledge's page query ORDER BY created_at, id: without it
+                -- SQLite does USE TEMP B-TREE FOR ORDER BY, reading+sorting ALL matching
+                -- rows (their full payload/evidence via SELECT *) just to return 50 — O(N)
+                -- per page load, catastrophic at 10^5+ objects. With it the ORDER BY is
+                -- index-satisfied and only LIMIT rows are read.
+                CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_type_created ON knowledge_objects(notebook_id, object_type, created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_status ON knowledge_objects(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_source ON knowledge_objects(source_id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_source ON knowledge_relations(notebook_id, source_object_id);
@@ -4744,7 +4750,8 @@ class SQLiteRepository:
             with self._connect() as db:
                 cur = db.execute(
                     "SELECT payload FROM knowledge_objects "
-                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
+                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
+                    "ORDER BY rowid",
                     (notebook_id, object_type))
                 for r in cur:
                     yield _fast_loads(r["payload"] or "{}").get("name", "")
@@ -4756,9 +4763,15 @@ class SQLiteRepository:
         seed_first_name: Dict[str, str] = {}
         buf: List[tuple] = []
         with self._connect() as rdb:
+            # ORDER BY rowid: canonical-name selection here is first-seen per seed
+            # (seed_first_name), so the stream order must be deterministic and
+            # independent of which index the planner happens to pick — otherwise
+            # adding/removing an index silently changes canonical names + desc-cache
+            # keys. rowid = insertion order, matching the historical behaviour.
             cur = rdb.execute(
                 "SELECT id, payload FROM knowledge_objects "
-                "WHERE notebook_id=? AND object_type=? AND status!='deprecated'",
+                "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
+                "ORDER BY rowid",
                 (notebook_id, object_type))
             with self._write() as wdb:
                 for r in cur:

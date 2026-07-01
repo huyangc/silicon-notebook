@@ -1030,6 +1030,7 @@ export default function Home() {
   const [kgSize, setKgSize] = useState({ width: 720, height: 560 });
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
+  const sourcesRef = useRef<SourceSummary[]>([]);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1209,28 +1210,49 @@ export default function Home() {
     };
   }, [accountMenuOpen]);
 
+  // Keep a live ref of `sources` so the poll loop below reads the latest without
+  // re-subscribing (its effect is keyed on the boolean `hasPending`, not the array).
+  sourcesRef.current = sources;
+  const hasPending = sources.some(
+    (source) => !["extracted", "failed"].includes(source.parse_status)
+  );
+
   // Poll non-terminal sources so the UI reflects queued→parsing→…→extracted live.
+  // Keyed on the boolean `hasPending` (not the whole `sources` array) and
+  // self-scheduling with backoff, so a stuck/slow source does NOT re-run this
+  // effect — nor re-render the whole app — on every tick. setSources returns the
+  // previous array unchanged when no parse_status actually moved, so an unchanged
+  // poll costs zero re-renders (the old code always built a new array → the KB
+  // list re-rendered every 1.5s for up to 3min, which is what made it "卡").
   useEffect(() => {
-    if (!currentNotebookId) return;
-    const pending = sources.filter(
-      (source) => !["extracted", "failed"].includes(source.parse_status)
-    );
-    if (pending.length === 0) {
+    if (!currentNotebookId || !hasPending) {
       pollCountRef.current = 0;
       return;
     }
-    if (pollCountRef.current > 120) {
-      setStatusText("处理超时：来源长时间未完成，请查看后端日志 .local/logs/events.jsonl");
-      return; // ~3min safety cap
-    }
-    // Show which stage is pending and how long it has been running so a stuck
-    // upload is visible instead of a silent spinner.
-    const elapsedSec = Math.round((pollCountRef.current * 1500) / 1000);
-    const pendingLabel = pending.map((s) => `${s.file_name || s.title}: ${s.parse_status}`).join("，");
-    setStatusText(`处理中（已 ${elapsedSec}s）：${pendingLabel}`);
     let cancelled = false;
-    const timer = window.setTimeout(async () => {
+    let timer: number | undefined;
+    let delay = 1500;
+    // Immediate feedback (the first fetch is one `delay` away).
+    const first = sourcesRef.current.filter((s) => !["extracted", "failed"].includes(s.parse_status));
+    if (first.length) {
+      setStatusText(`处理中（已 ${Math.round((pollCountRef.current * 1500) / 1000)}s）：${first.map((s) => `${s.file_name || s.title}: ${s.parse_status}`).join("，")}`);
+    }
+    const tick = async () => {
+      if (cancelled) return;
+      const pending = sourcesRef.current.filter(
+        (source) => !["extracted", "failed"].includes(source.parse_status)
+      );
+      if (pending.length === 0) {
+        pollCountRef.current = 0;
+        return; // done — nothing to poll
+      }
+      if (pollCountRef.current > 120) {
+        setStatusText("处理超时：来源长时间未完成，请查看后端日志 .local/logs/events.jsonl");
+        return; // ~3min safety cap
+      }
       pollCountRef.current += 1;
+      const elapsedSec = Math.round((pollCountRef.current * 1500) / 1000);
+      setStatusText(`处理中（已 ${elapsedSec}s）：${pending.map((s) => `${s.file_name || s.title}: ${s.parse_status}`).join("，")}`);
       try {
         const updated = await Promise.all(
           pending.map((source) => api<SourceSummary>(`/sources/${source.id}`))
@@ -1244,9 +1266,15 @@ export default function Home() {
           const previous = pending.find((source) => source.id === item.id);
           return previous && previous.parse_status !== "failed" && item.parse_status === "failed";
         });
-        setSources((previous) =>
-          previous.map((source) => updated.find((item) => item.id === source.id) ?? source)
-        );
+        let changed = false;
+        setSources((previous) => {
+          const next = previous.map((source) => {
+            const item = updated.find((u) => u.id === source.id);
+            if (item && item.parse_status !== source.parse_status) changed = true;
+            return item ?? source;
+          });
+          return changed ? next : previous; // no re-render when nothing moved
+        });
         if (justFailed && !cancelled) {
           setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${justFailed.error_message ? ` — ${justFailed.error_message}` : ""}`);
         }
@@ -1258,12 +1286,17 @@ export default function Home() {
       } catch (error) {
         reportError(error);
       }
-    }, 1500);
+      if (!cancelled) {
+        delay = Math.min(Math.round(delay * 1.5), 15000); // backoff 1.5s→…→15s
+        timer = window.setTimeout(tick, delay);
+      }
+    };
+    timer = window.setTimeout(tick, delay);
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [currentNotebookId, sources]);
+  }, [currentNotebookId, hasPending]);
 
   const visibleNotebooks = useMemo(() => {
     const query = searchQuery.trim();
