@@ -490,3 +490,35 @@ def test_build_scale_index_records_watermark_sources(repo):
     with open(mpath) as fh:
         manifest = json.load(fh)
     assert sorted(manifest["watermark_sources"]) == ["s1", "s2"]
+
+
+def test_index_delta_after_new_source(repo):
+    import json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
+        v = repo.embedder.embed_texts(["c1"])[0]
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                   ("c1", nb.id, json.dumps(v), now))
+    # 未索引 → 全是 delta
+    d0 = repo._index_delta(nb.id)
+    assert d0["indexed"] is False and d0["delta_chunks"] == 1 and d0["delta_sources"] == ["s1"]
+    # 建索引 → delta 清零
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    d1 = repo._index_delta(nb.id)
+    assert d1["indexed"] is True and d1["delta_chunks"] == 0 and d1["delta_sources"] == []
+    # 新增一个 source+chunk → delta=1
+    with repo._write() as db:
+        now2 = "2026-07-02T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s2", nb.id, "t", "md", "ready", now2, now2))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("c2", nb.id, "s2", "y", "", "[]", now2))
+    d2 = repo._index_delta(nb.id)
+    assert d2["indexed"] is True and d2["delta_sources"] == ["s2"] and d2["delta_chunks"] == 1

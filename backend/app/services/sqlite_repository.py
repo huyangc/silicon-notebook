@@ -6887,6 +6887,30 @@ class SQLiteRepository:
             chunk_ann_labels=chunk_ann_labels,
         )
 
+    def _index_delta(self, notebook_id: str) -> dict:
+        """按 manifest 水位算 delta:水位后新增的 source 及其 chunk 数。
+        无 manifest(未索引)→ 全部 source/chunk 视为 delta(语义:纯暴力)。"""
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        mpath = os.path.join(out_dir, "manifest.json")
+        with self._connect() as db:
+            cur_sources = [r["id"] for r in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
+            if not os.path.exists(mpath):
+                nchunks = db.execute(
+                    "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
+                return {"delta_sources": sorted(cur_sources),
+                        "delta_chunks": int(nchunks), "indexed": False}
+            with open(mpath) as fh:
+                watermark = set(json.load(fh).get("watermark_sources", []))
+            delta_sources = sorted(s for s in cur_sources if s not in watermark)
+            if not delta_sources:
+                return {"delta_sources": [], "delta_chunks": 0, "indexed": True}
+            ph = ",".join("?" for _ in delta_sources)
+            nchunks = db.execute(
+                f"SELECT COUNT(*) c FROM chunks WHERE notebook_id=? AND source_id IN ({ph})",
+                (notebook_id, *delta_sources)).fetchone()["c"]
+        return {"delta_sources": delta_sources, "delta_chunks": int(nchunks), "indexed": True}
+
     def scale_index_status(self, notebook_id: str) -> dict:
         """scale 索引状态(供在线重建入口 UX)。exists=磁盘有 manifest;
         stale=manifest 版本 != 当前 _scale_index_version;building=后台重建中;
