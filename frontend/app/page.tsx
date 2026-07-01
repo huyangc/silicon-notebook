@@ -1001,14 +1001,14 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [buildingKg, currentNotebookId]);
   // Scale-index (CSR graph + ANN) status: only meaningful for base-tier libraries.
-  // Load once when a base notebook is selected; the build effect below polls during a rebuild.
+  // 任意库选中时拉一次检索索引状态(与 tier 解耦:大个人库也显示/可建);构建中由下方 effect 轮询。
   useEffect(() => {
     const nb = currentNotebookId;
-    if (!nb || currentNotebook?.tier !== "base") { setScaleIndexStatus(null); return; }
+    if (!nb) { setScaleIndexStatus(null); return; }
     let cancelled = false;
     fetchScaleIndexStatus(nb).then((s) => { if (!cancelled) setScaleIndexStatus(s); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [currentNotebookId, currentNotebook?.tier]);
+  }, [currentNotebookId]);
   // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
   // until building flips false, with a 20min safety cap so the button never spins forever.
   useEffect(() => {
@@ -1044,6 +1044,15 @@ export default function Home() {
         setToast("已开始重建检索索引（后台进行，可能数分钟）；完成后自动更新");
       }
     } catch (e) { reportError(e); setBuildingScaleIndex(false); }
+  };
+  // 点「检索索引」徽章:未建/建议/过期 → 先确认再立即后台构建/重建(与 tier 解耦,大库亦可建)。
+  const confirmBuildScaleIndex = () => {
+    const s = scaleIndexStatus;
+    if (!currentNotebookId || buildingScaleIndex || !s || !s.eligible || s.state === "queued") return;
+    const verb = s.exists ? "重建" : "构建";
+    if (window.confirm(`${verb}检索索引？\n\n为本库建立向量检索索引（CSR 图 + KG/chunk ANN，加速语义检索与严格推理），后台进行，大库可能数分钟。`)) {
+      startScaleIndexRebuild(currentNotebookId, "now");
+    }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
@@ -4046,34 +4055,35 @@ export default function Home() {
                     {unifiedKgStatus.last_rebuild_at && (
                       <span className="tag">上次重建 · {formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
                     )}
-                    <span
-                      className="tag"
-                      role="button"
-                      tabIndex={0}
-                      title={
-                        (unifiedKgStatus.viz_indexed
-                          ? `图谱索引已就绪 · ${unifiedKgStatus.viz_nodes} 节点 / ${unifiedKgStatus.viz_edges} 边`
-                          : unifiedKgStatus.viz_stale
-                            ? "图谱索引待刷新（重新合并后更新）"
-                            : "图谱索引未构建（首次打开图谱将自动构建）") + " · 点击重建（会先确认）"
-                      }
-                      onClick={confirmRefreshUnifiedKg}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmRefreshUnifiedKg(); } }}
-                      style={{
-                        cursor: (kgRefreshBusy || buildingKg) ? "default" : "pointer",
-                        color: unifiedKgStatus.viz_indexed
-                          ? "var(--color-ok, #1a7f5a)"
-                          : unifiedKgStatus.viz_stale
-                            ? "var(--color-warn, #b97a00)"
-                            : undefined,
-                      }}
-                    >
-                      {unifiedKgStatus.viz_indexed
-                        ? `图谱索引：已就绪 · ${unifiedKgStatus.viz_nodes} 节点`
-                        : unifiedKgStatus.viz_stale
-                          ? "图谱索引：待刷新"
-                          : "图谱索引：未构建"}
-                    </span>
+                    {scaleIndexStatus && (() => {
+                      const s = scaleIndexStatus;
+                      const st = s.state ?? (s.building ? "building" : s.exists ? (s.stale ? "stale" : "indexed") : "unindexed");
+                      const clickable = s.eligible && !s.building && st !== "queued";
+                      const label = st === "building" ? "检索索引：构建中…"
+                        : st === "queued" ? "检索索引：已排队（空闲时建）"
+                        : st === "indexed" ? `检索索引：已同步 · ${s.n_nodes} 节点`
+                        : st === "stale" ? "检索索引：已过期"
+                        : st === "suggested" ? "检索索引：建议构建"
+                        : "检索索引：未构建";
+                      const color = (st === "building" || st === "queued" || st === "stale" || st === "suggested")
+                        ? "var(--color-warn, #b97a00)"
+                        : st === "indexed" ? "var(--color-ok, #1a7f5a)" : undefined;
+                      return (
+                        <span
+                          className="tag"
+                          role={clickable ? "button" : undefined}
+                          tabIndex={clickable ? 0 : undefined}
+                          title={clickable
+                            ? (s.exists ? "点击重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                            : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
+                          onClick={clickable ? confirmBuildScaleIndex : undefined}
+                          onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmBuildScaleIndex(); } }) : undefined}
+                          style={{ cursor: clickable ? "pointer" : "default", color }}
+                        >
+                          {label}
+                        </span>
+                      );
+                    })()}
                   </div>
                 )}
               </div>

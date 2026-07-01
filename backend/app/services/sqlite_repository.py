@@ -7190,10 +7190,29 @@ class SQLiteRepository:
                 (notebook_id, *delta_sources)).fetchone()["c"]
         return {"delta_sources": delta_sources, "delta_chunks": int(nchunks), "indexed": True}
 
+    def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
+                              exists: "bool | None" = None, total_chunks: "int | None" = None) -> bool:
+        """能否构建/重建 scale 检索索引 —— **与 tier 解耦**:base-tier / 已建过 / 规模够大
+        (总 chunk > index_suggest_chunk_threshold)任一即可。检索侧已按『索引是否存在』使用
+        (chunk_ann 默认开,indexed notebooks use ANN),不看 tier,故大个人库也应能建。
+        可传入已算好的 tier/exists/total_chunks 复用,避免重复查询。"""
+        if tier is None:
+            tier = self.get_notebook(notebook_id).tier
+        if exists is None:
+            exists = os.path.exists(
+                os.path.join(self.settings.storage_dir, "kg_index", notebook_id, "manifest.json"))
+        if tier == "base" or exists:
+            return True
+        if total_chunks is None:
+            with self._connect() as db:
+                total_chunks = db.execute(
+                    "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
+        return total_chunks > self.settings.index_suggest_chunk_threshold
+
     def scale_index_status(self, notebook_id: str) -> dict:
         """scale 索引状态(供在线重建入口 UX)。exists=磁盘有 manifest;
         stale=manifest 版本失配 或 delta chunk 超阈值;building=后台重建中;
-        eligible=base-tier 或已建过(镜像 CLI 门控)。计数取自 manifest。
+        eligible=base-tier / 已建过 / 规模够大(与 tier 解耦,见 _scale_index_eligible)。计数取自 manifest。
         state 状态机(unindexed|suggested|building|indexed|stale):building 优先,
         未索引按总 chunk 阈值分 unindexed/suggested,已索引按版本失配/delta 阈值分 indexed/stale。"""
         nb = self.get_notebook(notebook_id)  # KeyError → 404
@@ -7205,7 +7224,7 @@ class SQLiteRepository:
         with self._connect() as db:
             total_chunks = db.execute(
                 "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
-        eligible = (nb.tier == "base") or exists
+        eligible = self._scale_index_eligible(notebook_id, tier=nb.tier, exists=exists, total_chunks=total_chunks)
         base = {"exists": exists, "building": building, "eligible": eligible,
                 "delta_chunks": int(delta["delta_chunks"]), "total_chunks": int(total_chunks)}
         queued = notebook_id in self._scale_idle_queue
@@ -7312,11 +7331,9 @@ class SQLiteRepository:
         when="now" 立即后台重建(in-flight 去重);when="idle" 入 _scale_idle_queue、
         懒启动低峰调度器,返回 queued。mode="auto" 时由 _resolve_scale_mode 挑 fold/full。
         默认 when="now"/mode="auto" 保持既有无参调用行为不变。"""
-        nb = self.get_notebook(notebook_id)  # KeyError → 404
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        eligible = (nb.tier == "base") or os.path.exists(os.path.join(out_dir, "manifest.json"))
-        if not eligible:
-            raise ValueError("notebook is not base-tier and has no existing scale index")
+        self.get_notebook(notebook_id)  # KeyError → 404
+        if not self._scale_index_eligible(notebook_id):
+            raise ValueError("notebook too small and not base-tier; scale index not applicable")
         if when == "idle":
             with self._scale_building_lock:
                 self._scale_idle_queue[notebook_id] = mode
