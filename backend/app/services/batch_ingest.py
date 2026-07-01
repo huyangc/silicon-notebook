@@ -29,6 +29,13 @@ SUPPORTED_EXTS = {".md", ".markdown", ".pdf"}
 LogFn = Callable[[dict], None]
 
 
+def _rebuild_progress(phase: str, i: int, n: int) -> None:
+    """CLI progress printer for rebuild_unified_kg sub-phases (e.g. concept_desc:
+    LLM description gen). Overwrites in place until the last item, then newline."""
+    end = "\n" if i >= n else "\r"
+    print(f"  {phase}: {i}/{n}", end=end, flush=True)
+
+
 def iter_files(root: Path, exts: Optional[set] = None) -> List[Path]:
     """递归收集 root 下受支持的文件,按路径稳定排序(保证可恢复遍历顺序)。"""
     allowed = {e.lower() for e in (exts or SUPPORTED_EXTS)}
@@ -240,7 +247,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
 
         # ── Rebuild 阶段 ──────────────────────────────────────────────────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        clusters = repo.rebuild_unified_kg(notebook_id)
+        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress)
         res["clusters"] = clusters
         log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
         print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
@@ -346,7 +353,7 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
 
         # ── 末尾一次:跨文档聚类 → 补节点向量 →(base/已建索引)scale index ────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        clusters = repo.rebuild_unified_kg(notebook_id)
+        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress)
         res["clusters"] = clusters
         log({"phase": "all", "status": "rebuilt", "clusters": clusters})
         print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)

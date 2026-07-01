@@ -144,6 +144,16 @@ _MARKER_RE = re.compile(r"\[(k\d+)\]")
 _LOOSE_MARKER_RE = re.compile(r"\[\s*k\d+\s*\]")
 
 
+def _concept_desc_sig(name: str, quotes: List[str]) -> str:
+    """Deterministic signature of the concept-description LLM input. Same
+    (name, quote-set) => same sig => cached description reused across rebuilds.
+    Quotes are sorted here so the sig is order-insensitive on the set (the
+    caller also sorts, so the prompt text stays byte-stable regardless)."""
+    import hashlib
+    payload = (name or "") + "\x00" + "\x00".join(sorted(quotes))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
 def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
     keys that actually resolved to an anchor):
@@ -581,6 +591,7 @@ class SQLiteRepository:
                   canonical_name TEXT NOT NULL,
                   object_type TEXT NOT NULL DEFAULT 'concept',
                   canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb ON concept_clusters(notebook_id);
@@ -749,6 +760,8 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN object_type TEXT NOT NULL DEFAULT 'concept'")
             if "canonical_description" not in cc_cols:
                 db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_description TEXT NOT NULL DEFAULT ''")
+            if "canonical_desc_sig" not in cc_cols:
+                db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_desc_sig TEXT NOT NULL DEFAULT ''")
             # Community report columns (title/summary/findings).
             comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
             for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
@@ -4474,6 +4487,7 @@ class SQLiteRepository:
                                     seed_to_canonical: Dict[str, str],
                                     canonical_names: Dict[str, str],
                                     desc_by_cid: Optional[Dict[str, str]] = None,
+                                    desc_sig_by_cid: Optional[Dict[str, str]] = None,
                                     run_id: str = "") -> None:
         """Persist concept_clusters rows for one type by streaming
         kg_cluster_scratch (object_id, seed). Matches write_clusters' columns and
@@ -4482,6 +4496,7 @@ class SQLiteRepository:
         Only reads scratch rows matching run_id so concurrent rebuilds don't cross."""
         now = _now()
         desc_by_cid = desc_by_cid or {}
+        desc_sig_by_cid = desc_sig_by_cid or {}
         with self._connect() as rdb:
             cur = rdb.execute(
                 "SELECT object_id, seed FROM kg_cluster_scratch "
@@ -4497,19 +4512,20 @@ class SQLiteRepository:
                         continue
                     buf.append((f"cc-{uuid4().hex[:10]}", notebook_id, cid, r["object_id"],
                                 canonical_names.get(cid, ""), object_type,
-                                desc_by_cid.get(cid, ""), now))
+                                desc_by_cid.get(cid, ""), desc_sig_by_cid.get(cid, ""), now))
                     if len(buf) >= 1000:
                         wdb.executemany(
-                            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
-                            "VALUES (?,?,?,?,?,?,?,?)", buf)
+                            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?)", buf)
                         buf.clear()
                 if buf:
                     wdb.executemany(
-                        "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?)", buf)
+                        "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)", buf)
                     buf.clear()
 
-    def rebuild_unified_kg(self, notebook_id: str) -> int:
+    def rebuild_unified_kg(self, notebook_id: str,
+                           progress: Optional[Callable[[str, int, int], None]] = None) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
         pending candidates (preserving confirmed/rejected). Returns #clusters.
 
@@ -4567,8 +4583,20 @@ class SQLiteRepository:
                                    rep_ann_max=self.settings.kg_cluster_rep_ann_max)
         seed_to_canonical = sd["seed_to_canonical"]
         desc_by_cid: Dict[str, str] = {}
+        desc_sig_by_cid: Dict[str, str] = {}
         if self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False):
             from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
+            # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
+            # so this is bounded by #canonicals (not #members). Reuse fires only on an
+            # exact sig match with a non-empty stored description → fail-safe: any
+            # miss/mismatch just regenerates (worst case = old behavior).
+            old_desc: Dict[str, tuple] = {}
+            with self._connect() as db:
+                for r in db.execute(
+                    "SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig "
+                    "FROM concept_clusters WHERE notebook_id=? AND object_type='concept'",
+                    (notebook_id,)).fetchall():
+                    old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
             # Total members per canonical = Σ members_count over its seeds. Keep
             # only multi-member (cross-doc merged) canonicals — same cost bound as
             # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
@@ -4578,6 +4606,10 @@ class SQLiteRepository:
             for s, cid in seed_to_canonical.items():
                 total_by_cid[cid] = total_by_cid.get(cid, 0) + members_count.get(s, 0)
                 seeds_by_cid.setdefault(cid, []).append(s)
+            # PHASE 1 (serial, cheap DB): fetch quotes per multi-member canonical,
+            # compute its input sig, and either reuse the cached description or
+            # queue an LLM job. DB access stays in the main thread.
+            work: List[tuple] = []
             for cid, total in total_by_cid.items():
                 if total < 2:
                     continue   # only fuse cross-doc merged clusters (cost bound)
@@ -4597,22 +4629,56 @@ class SQLiteRepository:
                         q = (ev.get("quoted_span") or "").strip()
                         if q:
                             quotes.append(q)
-                quotes = list(dict.fromkeys(quotes))[:8]   # dedup, cap
+                # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
+                # rebuilds — scratch row order is otherwise unsorted.
+                quotes = sorted(set(quotes))[:8]
                 if not quotes:
                     continue
                 name = sd["canonical_names"].get(cid, "")
+                sig = _concept_desc_sig(name, quotes)
+                prev = old_desc.get(cid)
+                if prev and prev[0] and prev[1] == sig:
+                    desc_by_cid[cid] = prev[0]          # cache hit: reuse, skip LLM
+                    desc_sig_by_cid[cid] = sig
+                    continue
+                work.append((cid, name, quotes, sig))
+            # PHASE 2 (parallel LLM): the chat_json round-trips are the bottleneck;
+            # run them concurrently. kg_llm_client.chat_json is already invoked
+            # concurrently elsewhere (build_notebook_kg), so per-call thread use is fine.
+            # Resolve the client ONCE in the main thread: kg_llm_client is a property
+            # keyed on the _REQUEST_USER ContextVar, which worker threads don't inherit
+            # (per-user config would otherwise fall back to user-local inside the pool).
+            import concurrent.futures as _cf
+            desc_client = self.kg_llm_client
+            def _gen(item):
+                cid, name, quotes, sig = item
                 block = "\n".join(f"- {q}" for q in quotes)
                 try:
-                    raw = self.kg_llm_client.chat_json(
+                    raw = desc_client.chat_json(
                         [{"role": "user", "content": concept_description_prompt(name, block)}],
                         CONCEPT_DESC_SCHEMA_HINT)
                     desc = (json.loads(raw).get("description") or "").strip()
                 except Exception:
                     desc = ""
-                if desc:
-                    desc_by_cid[cid] = desc
+                return cid, desc, sig
+            if work:
+                workers = max(1, min(self.settings.kg_job_concurrency, len(work)))
+                done_n = 0
+                with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
+                    for fut in _cf.as_completed([pool.submit(_gen, it) for it in work]):
+                        cid, desc, sig = fut.result()
+                        done_n += 1
+                        if desc:
+                            desc_by_cid[cid] = desc
+                            desc_sig_by_cid[cid] = sig
+                        if progress is not None:
+                            try:
+                                progress("concept_desc", done_n, len(work))
+                            except Exception:
+                                pass
         self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
-                                         sd["canonical_names"], desc_by_cid, run_id=run_id)
+                                         sd["canonical_names"], desc_by_cid,
+                                         desc_sig_by_cid, run_id=run_id)
         # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
         # vector near-dup remains concept-only). Each type isolated by id prefix.
         # These types carry no vectors → reps_t is empty → cluster_seeds does only
