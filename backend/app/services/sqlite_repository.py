@@ -7394,8 +7394,13 @@ class SQLiteRepository:
             base_ids = [r["id"] for r in db.execute(
                 "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
                 (notebook_id,)).fetchall()]
-        base_indexes = [(bid, self._scale_index(bid)) for bid in base_ids]
+        base_indexes = [(bid, self._scale_index(bid, allow_stale=True)) for bid in base_ids]
         base_indexes = [(bid, idx) for bid, idx in base_indexes if idx is not None]
+        # P0-00: 自身若有(含 stale)索引,把 self 也当作 participant(self CSR=substrate,
+        # self ANN=种子源)。active splice 由 _active_kg_delta 自动收窄为 self-delta。
+        self_idx = self._scale_index(notebook_id, allow_stale=True)
+        if self_idx is not None:
+            base_indexes = base_indexes + [(notebook_id, self_idx)]
         if not base_indexes:
             return []
 

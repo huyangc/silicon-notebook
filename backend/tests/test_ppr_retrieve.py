@@ -470,3 +470,50 @@ def test_gather_kg_graph_source_scoping(repo):
     assert set(k2) == {"o2"} and set(c2) == {"c2"} and "o1" not in set(n2)
     # 空 source_ids = 空
     assert repo._gather_kg_graph(nb.id, source_ids=[]) == ([], [], [], [], {})
+
+
+def test_scale_ppr_uses_self_index(repo, monkeypatch):
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base.id,))
+    # 没有"别的" base —— 旧行为 base_indexes=[] → return [] → 回退 rustworkx
+    import app.services.kg.ppr as ppr_mod
+    called = {"n": 0}
+    real = ppr_mod.build_ppr_graph
+    monkeypatch.setattr(
+        ppr_mod, "build_ppr_graph",
+        lambda *a, **k: (called.__setitem__("n", called["n"] + 1), real(*a, **k))[1])
+    ranked = repo.scale_ppr(base.id, "Mixture of Experts")
+    assert ranked != []                         # self index 生效,非空
+    # scale_ppr 自身不应触发 rustworkx build_ppr_graph(那是 _ppr_retrieve 的回退)
+    assert called["n"] == 0
+
+
+def test_scale_ppr_self_index_reaches_new_upload(repo):
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base.id,))
+    # build 后新上传一篇(delta),其 chunk 应能经 self-delta splice 参与 PPR
+    import json
+    with repo._write() as db:
+        now = "2026-07-09T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("s-new", base.id, "new", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("c-new", base.id, "s-new", "Mixture of Experts routing", "", "[]", now))
+        ev = json.dumps([{"source_id": "s-new", "source_title": "", "element_id": "c-new",
+                          "element_type": "paragraph", "location_label": "p1",
+                          "quoted_span": "MoE", "confidence": 1.0}])
+        db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+                   "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("o-new", base.id, "concept", "approved", "", json.dumps({"name": "Mixture-of-Experts (MoE)"}),
+                    ev, "s-new", now, now))
+        db.execute("INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+                   "canonical_name,object_type,created_at) VALUES (?,?,?,?,?,?,?)",
+                   ("cl-new", base.id, "K-moe", "o-new", "Mixture-of-Experts (MoE)", "concept", now))
+    ranked = repo.scale_ppr(base.id, "Mixture of Experts")
+    assert "c-new" in {cid for cid, _ in ranked}   # 新上传 chunk 经 self-delta 可达
