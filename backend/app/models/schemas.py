@@ -527,6 +527,9 @@ class ScaleIndexStatus(BaseModel):
     n_ann: int = 0
     n_chunk_ann: int = 0
     has_chunk_ann: bool = False
+    state: str = "unindexed"
+    delta_chunks: int = 0
+    total_chunks: int = 0
 
 
 class MergeReviewRequest(BaseModel):
