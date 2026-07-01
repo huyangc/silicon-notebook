@@ -121,3 +121,28 @@ def test_member_can_read_cannot_write(tmp_path, monkeypatch, repo):
         r = client.request(method.upper(), f"/api/notebooks/{nb}{suffix}", headers=bob_h,
                            json={} if method in ("post", "patch") else None)
         assert r.status_code == 404, (method, suffix, r.status_code)  # 非 owner→404 不泄露
+
+
+# ---------------------------------------------------------------- Task 4
+def test_member_reads_source_but_cannot_delete(tmp_path, monkeypatch, repo):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000003")
+    nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,file_size,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?)", ("src-x", nb, "S", "document", "s.md", "", 0, _now(), _now()))
+    bob_h = _login(client, "b00000004")
+    bob_id = client.get("/api/me", headers=bob_h).json()["id"]
+    repo.add_member(nb, bob_id)
+    assert client.get("/api/sources/src-x", headers=bob_h).status_code == 200      # 成员可读
+    assert client.delete("/api/sources/src-x", headers=bob_h).status_code == 404   # 成员不能删
+
+
+def test_conversation_owner_is_creator_not_notebook_owner(repo):
+    # 先建 owner 用户:notebooks.created_by 有 FK→users.id,漏建会触发 FOREIGN KEY 约束。
+    _mk_user(repo, "user-owner"); _mk_user(repo, "user-mbr")
+    nb = _mk_nb(repo, owner="user-owner")
+    with repo._write() as db:
+        db.execute("INSERT INTO conversations (id,notebook_id,title,created_by,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?)", ("cv-1", nb, "chat", "user-mbr", _now(), _now()))
+    assert repo.conversation_owner("cv-1") == "user-mbr"   # 创建者,不是 notebook owner
