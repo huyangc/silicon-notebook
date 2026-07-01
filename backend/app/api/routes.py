@@ -532,7 +532,7 @@ def search_notebook(
 @router.get(
     "/notebooks/{notebook_id}/kg/search",
     response_model=KgSearchResponse,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_read)],  # 只读 KG 搜索,成员可(与 /search、/graph 一致)
 )
 def kg_search(
     notebook_id: str,
@@ -692,7 +692,7 @@ def delete_conversation(conversation_id: str, user: UserProfile = Depends(get_cu
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
-@router.delete("/notebooks/{notebook_id}/conversations", dependencies=[Depends(require_notebook_access)])
+@router.delete("/notebooks/{notebook_id}/conversations", dependencies=[Depends(require_notebook_read)])  # 仓库层按 created_by scope,成员删自己的旧会话
 def bulk_delete_conversations(notebook_id: str, older_than_days: int = Query(..., ge=1)):
     try:
         deleted = repository().bulk_delete_conversations(notebook_id, older_than_days)
@@ -853,7 +853,7 @@ def relink_kg(notebook_id: str) -> dict:
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
 def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile = Depends(get_current_user)) -> FeedbackResponse:
-    if repository().answer_owner(answer_id) != user.id:
+    if not repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
         raise HTTPException(status_code=404, detail="Answer not found")
     try:
         return repository().submit_feedback(answer_id, payload)
