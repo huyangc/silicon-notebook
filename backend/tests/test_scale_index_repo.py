@@ -468,3 +468,25 @@ def test_scale_index_status_and_rebuild(repo, monkeypatch):
     st = repo.scale_index_status(nb.id)
     assert st["exists"] is True and st["building"] is False and st["stale"] is False
     assert st["n_chunk_ann"] == 2 and st["has_chunk_ann"] is True
+
+
+def test_build_scale_index_records_watermark_sources(repo):
+    import os, json
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        now = "2026-07-01T00:00:00"
+        for sid in ("s1", "s2"):
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
+        v = repo.embedder.embed_texts(["c1"])[0]
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                   ("c1", nb.id, json.dumps(v), now))
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    mpath = os.path.join(repo.settings.storage_dir, "kg_index", nb.id, "manifest.json")
+    with open(mpath) as fh:
+        manifest = json.load(fh)
+    assert sorted(manifest["watermark_sources"]) == ["s1", "s2"]
