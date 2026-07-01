@@ -35,6 +35,7 @@ import {
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
 } from "./model-settings.ts";
 import { AuthGate } from "./AuthGate";
+import { Pagination } from "./Pagination";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -99,6 +100,13 @@ type PaginatedSources = {
   limit: number;
 };
 const SOURCES_PAGE_SIZE = 50;
+
+type PaginatedKnowledge = {
+  items: KnowledgeRecord[];
+  total_count: number;
+  offset: number;
+  limit: number;
+};
 
 type SourceElement = {
   id: string;
@@ -816,6 +824,7 @@ export default function Home() {
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourcesTotal, setSourcesTotal] = useState(0);
+  const [sourcesPage, setSourcesPage] = useState(0);
   const [sourceQuery, setSourceQuery] = useState("");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -866,6 +875,8 @@ export default function Home() {
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
   const [knowledgeStatusFilter, setKnowledgeStatusFilter] = useState("all");
+  const [knowledgeTotal, setKnowledgeTotal] = useState<Record<string, number>>({});
+  const [knowledgePage, setKnowledgePage] = useState<Record<string, number>>({});
   const [duplicates, setDuplicates] = useState<DuplicateGroup[] | null>(null);
   // Promotion queue modal (Track F governance)
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
@@ -1424,14 +1435,16 @@ export default function Home() {
     setSourceModalOpen(true);
   }
 
-  async function loadSourcesPage(notebookId: string, opts: { reset?: boolean; query?: string } = {}) {
-    const q = opts.query ?? sourceQuery;
-    const offset = opts.reset ? 0 : sources.length;
-    const page = await api<PaginatedSources>(
+  async function loadSourcesPage(notebookId: string, opts: { page?: number; q?: string } = {}) {
+    const pageNum = opts.page ?? 0;
+    const q = opts.q ?? sourceQuery;
+    const offset = pageNum * SOURCES_PAGE_SIZE;
+    const result = await api<PaginatedSources>(
       `/notebooks/${notebookId}/sources?offset=${offset}&limit=${SOURCES_PAGE_SIZE}&q=${encodeURIComponent(q)}`,
     );
-    setSourcesTotal(page.total_count);
-    setSources((prev) => (opts.reset ? page.items : [...prev, ...page.items]));
+    setSourcesTotal(result.total_count);
+    setSources(result.items);
+    setSourcesPage(pageNum);
   }
 
   async function openNotebook(notebookId: string) {
@@ -1444,6 +1457,7 @@ export default function Home() {
     setTitleDraft(notebook.name);
     setSources(sourcesPage.items);
     setSourcesTotal(sourcesPage.total_count);
+    setSourcesPage(0);
     setSourceQuery("");
     setBuildingKg(false);
     setTurns([]);
@@ -1882,12 +1896,14 @@ export default function Home() {
   }
 
 
-  async function loadKnowledge(kind: KnowledgeKind) {
+  async function loadKnowledge(kind: KnowledgeKind, opts: { status?: string; page?: number } = {}) {
     if (!currentNotebookId) return;
-    const records = await api<KnowledgeRecord[]>(
-      `/notebooks/${currentNotebookId}/knowledge?type=${encodeURIComponent(kind)}`
+    const pageNum = opts.page ?? 0;
+    const statusParam = (opts.status && opts.status !== "all") ? opts.status : "";
+    const result = await api<PaginatedKnowledge>(
+      `/notebooks/${currentNotebookId}/knowledge?type=${encodeURIComponent(kind)}&status=${encodeURIComponent(statusParam)}&offset=${pageNum * 50}&limit=50`
     );
-    const response: KnowledgeItem[] = records.map((record) => ({
+    const items: KnowledgeItem[] = result.items.map((record) => ({
       id: record.id,
       status: record.status,
       owner: record.owner,
@@ -1897,7 +1913,9 @@ export default function Home() {
       object_type: record.object_type,
       fields: record.fields
     }));
-    setKnowledge((prev) => ({ ...prev, [kind]: response }));
+    setKnowledge((prev) => ({ ...prev, [kind]: items }));
+    setKnowledgeTotal((prev) => ({ ...prev, [kind]: result.total_count }));
+    setKnowledgePage((prev) => ({ ...prev, [kind]: pageNum }));
   }
 
   async function loadKnowledgeTypes() {
@@ -1912,7 +1930,7 @@ export default function Home() {
   async function updateKnowledge(id: string, patch: { status?: string; owner?: string }) {
     if (!currentNotebookId) return;
     await api(`/notebooks/${currentNotebookId}/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
-    await loadKnowledge(knowledgeKind);
+    await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
     await loadKnowledgeTypes();
     await loadNotebookCollection();
     const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
@@ -1924,7 +1942,7 @@ export default function Home() {
     setKnowledgeKind(kind);
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
-    if (knowledge[kind] == null) loadKnowledge(kind).catch(reportError);
+    loadKnowledge(kind, { status: "all", page: 0 }).catch(reportError);
   }
 
   async function findDuplicates(kind: KnowledgeKind) {
@@ -1941,7 +1959,7 @@ export default function Home() {
       method: "POST",
       body: JSON.stringify({ into_id: intoId })
     });
-    await loadKnowledge(knowledgeKind);
+    await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
     await loadKnowledgeTypes();
     await findDuplicates(knowledgeKind);
     setToast("已合并，源条目置为 deprecated");
@@ -2268,7 +2286,7 @@ export default function Home() {
         if (!available.includes(knowledgeKind)) {
           switchKnowledgeKind(types[0].object_type);
         } else if (knowledge[knowledgeKind] == null) {
-          loadKnowledge(knowledgeKind).catch(reportError);
+          loadKnowledge(knowledgeKind, { status: "all", page: 0 }).catch(reportError);
         }
       }).catch(reportError);
     }
@@ -2654,7 +2672,7 @@ export default function Home() {
                   onChange={(e) => setSourceQuery(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && currentNotebookId) {
-                      loadSourcesPage(currentNotebookId, { reset: true, query: sourceQuery }).catch(reportError);
+                      loadSourcesPage(currentNotebookId, { page: 0, q: sourceQuery }).catch(reportError);
                     }
                   }}
                 />
@@ -2699,15 +2717,12 @@ export default function Home() {
                       </div>
                     ))
                   )}
-                  {sources.length > 0 && sources.length < sourcesTotal && (
-                    <button
-                      type="button"
-                      className="add-source-button"
-                      onClick={() => { if (currentNotebookId) loadSourcesPage(currentNotebookId).catch(reportError); }}
-                    >
-                      加载更多（{sources.length}/{sourcesTotal}）
-                    </button>
-                  )}
+                  <Pagination
+                    page={sourcesPage}
+                    pageSize={SOURCES_PAGE_SIZE}
+                    total={sourcesTotal}
+                    onPage={(p) => { if (currentNotebookId) loadSourcesPage(currentNotebookId, { page: p, q: sourceQuery }).catch(reportError); }}
+                  />
                 </div>
               </div>
             </aside>
@@ -2891,14 +2906,20 @@ export default function Home() {
                     duplicates={duplicates}
                     notebookId={currentNotebookId ?? ""}
                     onKind={switchKnowledgeKind}
-                    setStatusFilter={setKnowledgeStatusFilter}
                     onStatus={(id, status) => updateKnowledge(id, { status }).catch(reportError)}
                     onOwner={(id, owner) => updateKnowledge(id, { owner }).catch(reportError)}
                     onFindDuplicates={() => findDuplicates(knowledgeKind).catch(reportError)}
                     onMerge={(sourceId, intoId) => mergeKnowledge(sourceId, intoId).catch(reportError)}
-                    reload={() => loadKnowledge(knowledgeKind).catch(reportError)}
+                    reload={() => loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 }).catch(reportError)}
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
+                    total={knowledgeTotal[knowledgeKind] ?? 0}
+                    page={knowledgePage[knowledgeKind] ?? 0}
+                    onPage={(p) => loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: p }).catch(reportError)}
+                    onStatusFilter={(s) => {
+                      setKnowledgeStatusFilter(s);
+                      loadKnowledge(knowledgeKind, { status: s, page: 0 }).catch(reportError);
+                    }}
                   />
                 )}
               </div>
@@ -4180,14 +4201,17 @@ function KnowledgeBrowser({
   duplicates,
   notebookId,
   onKind,
-  setStatusFilter,
+  onStatusFilter,
   onStatus,
   onOwner,
   onFindDuplicates,
   onMerge,
   reload,
   tier,
-  onPropose
+  onPropose,
+  total,
+  page,
+  onPage,
 }: {
   kind: KnowledgeKind;
   items: KnowledgeItem[] | null;
@@ -4196,7 +4220,7 @@ function KnowledgeBrowser({
   duplicates: DuplicateGroup[] | null;
   notebookId: string;
   onKind: (kind: KnowledgeKind) => void;
-  setStatusFilter: (value: string) => void;
+  onStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
   onOwner: (id: string, owner: string) => void;
   onFindDuplicates: () => void;
@@ -4204,11 +4228,13 @@ function KnowledgeBrowser({
   reload: () => void;
   tier?: string;
   onPropose?: (id: string) => void;
+  total: number;
+  page: number;
+  onPage: (p: number) => void;
 }) {
   const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   useEffect(() => { setCtx({}); }, [kind]);
-  const statuses = ["all", ...Array.from(new Set((items ?? []).map((item) => item.status).filter(Boolean)))];
-  const filtered = (items ?? []).filter((item) => statusFilter === "all" || item.status === statusFilter);
+  const statuses = ["all", ...KNOWLEDGE_STATUS_OPTIONS];
   // Build tabs purely from the dynamic /knowledge-types response.
   const tabs: Array<{ key: string; label: string; count?: number }> = types.map((t) => ({
     key: t.object_type,
@@ -4227,7 +4253,7 @@ function KnowledgeBrowser({
         ))}
       </div>
       <div className="tool-input-row">
-        <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+        <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
           {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : value}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
@@ -4257,11 +4283,11 @@ function KnowledgeBrowser({
       )}
       {items === null ? (
         <p className="tool-hint">加载中…</p>
-      ) : filtered.length === 0 ? (
+      ) : items.length === 0 ? (
         <p className="tool-hint">暂无条目。在审核队列批准对应类型的候选后会出现在这里。</p>
       ) : (
         <div className="stack">
-          {filtered.map((item) => (
+          {items.map((item) => (
             <article className={`item ${item.status === "deprecated" ? "knowledge-deprecated" : ""}`} key={item.id}>
               <div className="knowledge-item-title">
                 <KgTypeMark type={item.object_type ?? kind} />
@@ -4324,6 +4350,7 @@ function KnowledgeBrowser({
           ))}
         </div>
       )}
+      <Pagination page={page} pageSize={50} total={total} onPage={onPage} />
     </div>
   );
 }
