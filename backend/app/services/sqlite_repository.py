@@ -1599,6 +1599,13 @@ class SQLiteRepository:
             ).fetchone()
         return row["owner"] if row else None
 
+    def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
+        """feedback 权限 = 对父 notebook 的读权(owner ∪ 成员)。answers 无 created_by,
+        故按 spec §3.3 用读权放行:成员可对自己看到的答案反馈。"""
+        with self._connect() as db:
+            row = db.execute("SELECT notebook_id FROM answers WHERE id=?", (answer_id,)).fetchone()
+        return bool(row) and self.user_can_read_notebook(row["notebook_id"], user_id)
+
     def update_notebook(self, notebook_id: str, payload: NotebookUpdate) -> NotebookSummary:
         self.get_notebook(notebook_id)
         updates: List[str] = []
@@ -9073,9 +9080,11 @@ class SQLiteRepository:
         one (id `conv-<hex>`, title from the first question)."""
         now = _now()
         if conversation_id:
+            # 只接续**调用者自己**的对话:共享库里成员传入 owner/他人的 conv-id 不命中,
+            # 落到下面新建一条归自己的对话,杜绝跨用户注入回合(read-only 成员经 ask 触达)。
             row = db.execute(
-                "SELECT id FROM conversations WHERE id = ? AND notebook_id = ?",
-                (conversation_id, notebook_id),
+                "SELECT id FROM conversations WHERE id = ? AND notebook_id = ? AND created_by = ?",
+                (conversation_id, notebook_id, self.current_user().id),
             ).fetchone()
             if row is not None:
                 db.execute(

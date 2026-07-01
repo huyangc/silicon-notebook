@@ -198,3 +198,41 @@ def test_shared_by_me_lists_with_members(repo):
     assert items[big]["mode"] == "readonly"
     assert [m["username"] for m in items[big]["members"]] == ["b00000013"]
     assert items[small]["members"] == []           # 小库(copy)无成员
+
+
+def test_ensure_conversation_scoped_to_caller_no_cross_inject(repo):
+    """B1 回归(安全):成员经 ask 传入 owner 的 conversation_id,_ensure_conversation
+    不接续 owner 的对话,而是新建归成员自己的——杜绝跨用户注入回合。"""
+    from app.services.sqlite_repository import set_request_user, reset_request_user
+    from app.models.schemas import UserProfile
+    nb = _mk_nb(repo, owner="user-local")
+    _mk_user(repo, "user-mbr", "m00000001")
+    with repo._write() as db:
+        db.execute("INSERT INTO conversations (id,notebook_id,title,created_by,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?)", ("conv-owner", nb, "owner chat", "user-local", _now(), _now()))
+    mbr = UserProfile(id="user-mbr", email="m@e.test", display_name="m", role="user", username="m00000001")
+    tok = set_request_user(mbr)
+    try:
+        with repo._write() as db:
+            got = repo._ensure_conversation(db, nb, "conv-owner", "member q")
+    finally:
+        reset_request_user(tok)
+    assert got != "conv-owner"   # 没注入 owner 的对话
+    with repo._connect() as db:
+        assert db.execute("SELECT created_by FROM conversations WHERE id=?",
+                          (got,)).fetchone()[0] == "user-mbr"
+        # owner 的对话仍只有原样(没被塞回合/改)
+        assert db.execute("SELECT title FROM conversations WHERE id='conv-owner'").fetchone()[0] == "owner chat"
+
+
+def test_user_can_read_answer_follows_membership(repo):
+    """I1:feedback 权限 = 父 notebook 读权(owner ∪ 成员)。"""
+    nb = _mk_nb(repo, owner="user-local")
+    _mk_user(repo, "user-mbr")
+    with repo._write() as db:
+        db.execute("INSERT INTO answers (id,notebook_id,question,payload,created_at) VALUES (?,?,?,?,?)",
+                   ("ans-1", nb, "q", "{}", _now()))
+    assert repo.user_can_read_answer("ans-1", "user-mbr") is False   # 非成员
+    assert repo.user_can_read_answer("ans-1", "user-local") is True  # owner
+    repo.add_member(nb, "user-mbr")
+    assert repo.user_can_read_answer("ans-1", "user-mbr") is True    # 成员可
