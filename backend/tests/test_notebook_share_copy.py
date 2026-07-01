@@ -56,3 +56,22 @@ def test_copy_thresholds_defaults():
     s = Settings()
     assert s.notebook_copy_max_bytes == 50 * 1024 * 1024
     assert s.notebook_copy_max_rows == 5000
+
+
+def test_share_sets_token_idempotent_then_unshare_clears(repo):
+    nb = _mk_nb(repo, "L")
+    out = repo.share_notebook(nb)
+    assert out["share_token"].startswith("shr-")
+    assert repo.find_notebook_by_share_token(out["share_token"]) == nb
+    # 幂等:再分享返回同一个 token
+    assert repo.share_notebook(nb)["share_token"] == out["share_token"]
+    # 取消 → token 失效
+    repo.unshare_notebook(nb)
+    assert repo.find_notebook_by_share_token(out["share_token"]) is None
+
+
+def test_copy_stats_reports_size_and_copyable(repo):
+    nb = _mk_nb(repo, "L")
+    stats = repo.notebook_copy_stats(nb)
+    assert stats["copyable"] is True          # 空库当然可拷贝
+    assert set(stats["size"]) == {"bytes", "sources", "chunks", "nodes", "edges"}
