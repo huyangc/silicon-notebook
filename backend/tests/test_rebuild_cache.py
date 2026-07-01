@@ -206,3 +206,128 @@ def test_first_rebuild_never_skips(repo, monkeypatch):
     calls = _spy_stream(repo, monkeypatch)
     repo.rebuild_unified_kg(nb.id)
     assert calls["n"] >= 1
+
+
+# --- 7. IN-PLACE edit at fixed cardinality, same wall-clock second -----------
+# These are the adversarial-review repros: at _now()'s 1-second resolution a
+# COUNT+MAX(timestamp) version misses an in-place edit whose timestamp lands in
+# the same second as the prior rebuild (COUNT unchanged, MAX pinned by another
+# row). The fix is a monotonic kg_mutation_seq bumped by _mark_unified_kg_dirty,
+# which moves deterministically regardless of clock granularity. We pin _now to a
+# CONSTANT so no timestamp can move — only the seq can save us.
+
+def _freeze_now(monkeypatch, const="2020-01-01T00:00:00"):
+    """Pin _now() to a constant EVERYWHERE it's used for versioning/mutation."""
+    import app.services.sqlite_repository as repo_mod
+    monkeypatch.setattr(repo_mod, "_now", lambda: const)
+
+
+def _concept_db_id(repo, nb_id, name):
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=? AND object_type='concept' "
+            "AND json_extract(payload,'$.name')=?", (nb_id, name)).fetchone()
+    return row["id"] if row else None
+
+
+def test_rename_same_second_moves_version_and_recomputes(repo, monkeypatch):
+    from app.models.schemas import KnowledgeUpdate
+
+    _freeze_now(monkeypatch)  # every write shares one timestamp — no MAX signal
+    # Two DISTINCT concept names -> two separate canonicals.
+    nb = _make_kg(repo, names=("alpha", "beta"))
+    first = repo.rebuild_unified_kg(nb.id)
+    rows_before = [tuple(r) for r in _cluster_rows(repo, nb.id)]
+    n_canon_before = len({r[2] for r in rows_before})   # canonical_id set
+    assert n_canon_before == 2                          # alpha, beta distinct
+    v0 = repo._cluster_input_version(nb.id)
+
+    # RENAME beta -> alpha (both sources' "beta" objects). Now every concept
+    # normalizes to "alpha" -> the two canonicals MUST collapse to one.
+    for name in ("beta", "beta"):  # both s1 and s2 carry a "beta"
+        oid = _concept_db_id(repo, nb.id, "beta")
+        if oid is None:
+            break
+        repo.update_knowledge(nb.id, oid, KnowledgeUpdate(payload={"name": "alpha", "section_path": "1"}))
+
+    v1 = repo._cluster_input_version(nb.id)
+    assert v1 != v0, "version must move on an in-place rename (same-second)"
+
+    calls = _spy_stream(repo, monkeypatch)
+    second = repo.rebuild_unified_kg(nb.id)             # force=False (automatic path)
+    assert calls["n"] >= 1, "gate must NOT skip after a rename — else stale serve"
+    rows_after = [tuple(r) for r in _cluster_rows(repo, nb.id)]
+    n_canon_after = len({r[2] for r in rows_after})
+    assert n_canon_after == 1, "renamed concepts must collapse to one canonical"
+    assert second == 1
+    assert rows_after != rows_before                    # clustering actually changed
+
+
+def test_decision_flip_same_second_moves_version_and_recomputes(repo, monkeypatch):
+    _freeze_now(monkeypatch)
+    nb = _make_kg(repo)
+    repo.rebuild_unified_kg(nb.id)                      # writes pending candidates
+
+    # Seed a CONFIRMED decision, rebuild so it's baked into the stored version.
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?, 'confirmed', ?, ?)",
+            ("mc-flip", nb.id, "K-foo", "K-bar", 0.9, "2020-01-01T00:00:00", "2020-01-01T00:00:00"),
+        )
+    repo.rebuild_unified_kg(nb.id, force=True)          # bake decision into version
+    v0 = repo._cluster_input_version(nb.id)
+
+    # FLIP confirmed -> rejected via the real mutator (same-second, COUNT fixed).
+    repo.set_merge_decision(nb.id, "mc-flip", "rejected")
+    repo._mark_unified_kg_dirty(nb.id)                  # mirror confirm/reject_merge wrappers
+    v1 = repo._cluster_input_version(nb.id)
+    assert v1 != v0, "version must move on a confirmed<->rejected flip (same-second)"
+
+    calls = _spy_stream(repo, monkeypatch)
+    repo.rebuild_unified_kg(nb.id)                      # automatic path
+    assert calls["n"] >= 1, "gate must NOT skip after a decision flip — else stale"
+
+
+# --- 8. migration: kg_mutation_seq column -----------------------------------
+
+def test_migration_adds_kg_mutation_seq_column(repo):
+    with repo._connect() as db:
+        cols = {r["name"] for r in db.execute(
+            "PRAGMA table_info(unified_kg_state)").fetchall()}
+    assert "kg_mutation_seq" in cols
+
+
+def test_mutation_seq_increments_on_dirty(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+
+    def _seq():
+        with repo._connect() as db:
+            r = db.execute("SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+                           (nb.id,)).fetchone()
+        return int(r["kg_mutation_seq"]) if r else 0
+
+    assert _seq() == 0
+    repo._mark_unified_kg_dirty(nb.id)
+    assert _seq() == 1
+    repo._mark_unified_kg_dirty(nb.id)
+    assert _seq() == 2
+
+
+def test_rebuild_preserves_mutation_seq(repo):
+    """rebuild clears dirty=0 but must NOT reset/bump kg_mutation_seq (else the
+    gate goes permanently dead or a mutation is lost)."""
+    nb = _make_kg(repo)                                 # store_kg -> several dirty bumps
+    with repo._connect() as db:
+        seq_before = int(db.execute(
+            "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (nb.id,)).fetchone()["kg_mutation_seq"])
+    assert seq_before >= 1
+    repo.rebuild_unified_kg(nb.id)
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT dirty, kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (nb.id,)).fetchone()
+    assert row["dirty"] == 0                            # rebuild cleared dirty
+    assert int(row["kg_mutation_seq"]) == seq_before    # seq preserved (not reset/bumped)

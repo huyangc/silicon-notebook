@@ -660,6 +660,12 @@ class SQLiteRepository:
                 CREATE TABLE IF NOT EXISTS unified_kg_state (
                   notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
                   dirty INTEGER NOT NULL DEFAULT 0,
+                  -- Monotonic per-notebook mutation counter, bumped by
+                  -- _mark_unified_kg_dirty on EVERY KG write (the single choke point).
+                  -- It is the primary change signal for _cluster_input_version:
+                  -- deterministic + O(1), with NO clock-granularity hole (a timestamp
+                  -- MAX at 1s resolution misses same-second in-place edits).
+                  kg_mutation_seq INTEGER NOT NULL DEFAULT 0,
                   -- O(1) content-hash of the clustering INPUTS at the last rebuild
                   -- (see _cluster_input_version). rebuild_unified_kg skips the whole
                   -- recompute when this still matches; empty '' means never rebuilt.
@@ -798,6 +804,12 @@ class SQLiteRepository:
             uks_cols = {r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)").fetchall()}
             if "cluster_input_version" not in uks_cols:
                 db.execute("ALTER TABLE unified_kg_state ADD COLUMN cluster_input_version TEXT NOT NULL DEFAULT ''")
+            # kg_mutation_seq: monotonic counter bumped by _mark_unified_kg_dirty.
+            # Additive; pre-existing DBs start at 0. Any prior stored
+            # cluster_input_version was 'v1' (timestamp-based) and won't match the
+            # new 'v2' scheme, so the first post-migration rebuild recomputes — safe.
+            if "kg_mutation_seq" not in uks_cols:
+                db.execute("ALTER TABLE unified_kg_state ADD COLUMN kg_mutation_seq INTEGER NOT NULL DEFAULT 0")
             # Community report columns (title/summary/findings).
             comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
             for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
@@ -4400,58 +4412,73 @@ class SQLiteRepository:
         self._vector_cache.invalidate(f"{notebook_id}:ppr_graph")
 
     def _cluster_input_version(self, notebook_id: str) -> str:
-        """O(1) content-hash of EVERYTHING that changes rebuild_unified_kg's
-        clustering output, so an unchanged version lets rebuild skip the recompute.
+        """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
 
-        COUNT + MAX over indexed columns only (no payload/vector scan). Signals:
-          - knowledge_objects (the objects being clustered): status!='deprecated'
-            mirrors the rebuild's object filter + its final object_count.
-          - decided merge pairs: confirmed/rejected rows — WHERE mirrors
-            decided_pairs() EXACTLY; these force-union/block clusters. PENDING is
-            excluded on purpose (rebuild itself rewrites pending candidates, so
-            counting them would make the version move across a rebuild).
-          - knowledge_embeddings: vectors feed the ANN → change clustering.
-          - settings.embed_dim: a dim change means different vectors are kept.
+        PRIMARY change signal = the monotonic kg_mutation_seq, bumped by
+        _mark_unified_kg_dirty on EVERY KG write (the single choke point all
+        mutations funnel through). It advances deterministically on ANY edit —
+        adds, deletes, AND in-place edits (concept rename, confirmed<->rejected
+        decision flip, re-embed) — with NO dependence on timestamp granularity. An
+        earlier version used COUNT+MAX(updated_at/created_at); at _now()'s 1-second
+        resolution that MISSED same-second in-place edits at fixed cardinality
+        (COUNT unchanged, MAX pinned by another row) and could serve a stale
+        clustering. The seq closes that hole by construction.
 
-        Correctness bias: over-inclusion only forces a (cheap) recompute; a MISSED
-        input would serve a stale clustering — the cardinal sin — so when unsure we
-        include. Clustering SETTINGS (thresholds, rep_ann_max) are intentionally NOT
-        here; the explicit 刷新图谱 path passes force=True to pick those up.
+        BACKSTOP = three COUNTs (objects status!='deprecated'; confirmed/rejected
+        decided pairs — WHERE mirrors decided_pairs() EXACTLY, pending excluded so
+        rebuild's own pending-refresh doesn't move the version; embeddings) plus
+        settings.embed_dim. These are pure belt-and-suspenders: they catch an
+        add/delete that somehow bypassed _mark_unified_kg_dirty. No timestamps.
+
+        Clustering SETTINGS (thresholds, rep_ann_max) are intentionally NOT here;
+        the explicit 刷新图谱 / recluster paths pass force=True to pick those up.
 
         Stable across a rebuild: rebuild writes only concept_clusters + pending
-        concept_merge_candidates, neither of which is in this signature.
+        concept_merge_candidates and preserves kg_mutation_seq (its end-write omits
+        the seq column), so this value is identical before and after a rebuild.
         """
         with self._connect() as db:
-            obj = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-                "FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+            st = db.execute(
+                "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
                 (notebook_id,)).fetchone()
-            dec = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-                "FROM concept_merge_candidates "
+            seq = int(st["kg_mutation_seq"]) if st else 0
+            obj_c = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_objects "
+                "WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,)).fetchone()["c"]
+            dec_c = db.execute(
+                "SELECT COUNT(*) AS c FROM concept_merge_candidates "
                 "WHERE notebook_id=? AND status IN ('confirmed','rejected')",
-                (notebook_id,)).fetchone()
-            emb = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM knowledge_embeddings WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
+                (notebook_id,)).fetchone()["c"]
+            emb_c = db.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
+                (notebook_id,)).fetchone()["c"]
         parts = [
-            "v1", notebook_id,
-            int(obj["c"]), obj["ts"],
-            int(dec["c"]), dec["ts"],
-            int(emb["c"]), emb["ts"],
+            "v2", notebook_id,
+            int(seq),
+            int(obj_c), int(emb_c), int(dec_c),
             int(self.settings.embed_dim),
         ]
         return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
+        # Bump the monotonic mutation counter on every KG write. This is the ONLY
+        # place kg_mutation_seq advances, and every mutation funnels through here,
+        # so _cluster_input_version sees a deterministic change on any edit —
+        # including same-second in-place edits (rename/decision-flip/re-embed) that
+        # a timestamp MAX at 1s resolution would miss. Reference the table's own
+        # current value (+1), NOT excluded, so an existing row increments rather
+        # than resets to the inserted literal (1). First mutation -> seq 1.
         now = _now()
         with self._write() as db:
             db.execute(
                 """
-                INSERT INTO unified_kg_state (notebook_id, dirty, updated_at)
-                VALUES (?, 1, ?)
-                ON CONFLICT(notebook_id) DO UPDATE SET dirty=1, updated_at=excluded.updated_at
+                INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at)
+                VALUES (?, 1, 1, ?)
+                ON CONFLICT(notebook_id) DO UPDATE SET
+                  dirty=1,
+                  kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,
+                  updated_at=excluded.updated_at
                 """,
                 (notebook_id, now),
             )
@@ -5101,6 +5128,12 @@ class SQLiteRepository:
                 "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
                 (notebook_id,),
             ).fetchone()["c"]
+            # CRITICAL: this UPSERT stores cluster_input_version=_ver (captured at
+            # ENTRY, reflecting the seq this rebuild consumed) and clears dirty=0,
+            # but MUST NOT touch kg_mutation_seq — omit it from both the column list
+            # and the SET so an existing row's counter is PRESERVED. Bumping it here
+            # would advance the version past what was just stored (gate never skips);
+            # resetting it would lose mutations that arrived mid-rebuild.
             db.execute(
                 """
                 INSERT INTO unified_kg_state
@@ -5767,6 +5800,12 @@ class SQLiteRepository:
             except Exception:
                 pass
         self._invalidate_unified_cache(row["notebook_id"])
+        # A node edit is a clustering input: a payload/name change moves its
+        # normalized-name seed (→ cross-doc cluster membership), a re-embed changes
+        # its ANN vector, and a status flip changes which objects are clustered.
+        # Mark dirty so kg_mutation_seq advances and rebuild_unified_kg's skip gate
+        # can't serve a stale clustering after an in-place rename/re-embed.
+        self._mark_unified_kg_dirty(row["notebook_id"])
         obj = {
             "id": row["id"],
             "payload": json.loads(row["payload"] or "{}"),
