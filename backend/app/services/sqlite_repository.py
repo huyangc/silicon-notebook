@@ -6789,10 +6789,17 @@ class SQLiteRepository:
                 "viz_edges": int(m.get("n_viz_edges", 0)),
                 "viz_stale": not fresh}
 
-    def _gather_kg_graph(self, notebook_id: str):
+    def _gather_kg_graph(self, notebook_id: str, source_ids=None):
         """Gather all KG nodes/relations/chunks/cluster_groups for a notebook
         and build the undirected edge set used by both build_scale_index and
         _active_kg_delta.  Single source of truth — no duplicated _add_undirected.
+
+        source_ids : None (default) = whole notebook, byte-identical to the
+        pre-scoping behaviour.  A list = only objects/relations/chunks from those
+        sources (delta domain); memberships limited to gathered objects; the
+        variant/synonym extra_edges are skipped (delta is small, connectivity
+        comes from relations/cluster-hub/cross-layer bridges).  An empty list
+        returns ([], [], [], [], {}).
 
         Returns
         -------
@@ -6807,6 +6814,14 @@ class SQLiteRepository:
         import numpy as np
 
         ph = ",".join("?" for _ in USABLE_STATUSES)
+        scoped = source_ids is not None
+        if scoped and not source_ids:
+            return [], [], [], [], {}
+        src_clause, src_params = "", ()
+        if scoped:
+            ph_s = ",".join("?" for _ in source_ids)
+            src_clause = f" AND source_id IN ({ph_s})"
+            src_params = tuple(source_ids)
         kg_nodes: Dict[str, dict] = {}
         relations: list = []
         chunk_ids: list = []
@@ -6815,43 +6830,50 @@ class SQLiteRepository:
         with self._connect() as db:
             for r in db.execute(
                     f"SELECT id, object_type, payload FROM knowledge_objects "
-                    f"WHERE notebook_id=? AND status IN ({ph})",
-                    (notebook_id, *USABLE_STATUSES)).fetchall():
+                    f"WHERE notebook_id=? AND status IN ({ph}){src_clause}",
+                    (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
                 kg_nodes[r["id"]] = {
                     "type": r["object_type"],
                     "name": json.loads(r["payload"] or "{}").get("name", ""),
                 }
             for r in db.execute(
-                    "SELECT source_object_id, target_object_id FROM knowledge_relations "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
+                    f"SELECT source_object_id, target_object_id FROM knowledge_relations "
+                    f"WHERE notebook_id=?{src_clause}", (notebook_id, *src_params)).fetchall():
                 relations.append(dict(r))
             for r in db.execute(
-                    "SELECT id FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchall():
+                    f"SELECT id FROM chunks WHERE notebook_id=?{src_clause}",
+                    (notebook_id, *src_params)).fetchall():
                 chunk_ids.append(r["id"])
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
                     "WHERE notebook_id=?", (notebook_id,)).fetchall():
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
 
-        # Memberships: entity ↔ chunk
+        # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
         ent_chunk_map = self._ent_chunk_map(notebook_id)
-        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items() for cid in cids]
-        membership_counts: Dict[str, int] = {oid: len(cids) for oid, cids in ent_chunk_map.items()}
+        _kg_keys = set(kg_nodes.keys())
+        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items()
+                       if (not scoped or oid in _kg_keys) for cid in cids]
+        membership_counts: Dict[str, int] = {
+            oid: len(cids) for oid, cids in ent_chunk_map.items()
+            if (not scoped or oid in _kg_keys)}
 
-        # Extra edges: variant pairs + optional synonym pairs
-        extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
-        with self._connect() as db:
-            ann_ids_raw, ann_matrix_raw = self._vector_matrix(
-                db, notebook_id, "knowledge_embeddings", "object_id")
-        ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
-        has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
-        if has_vecs and self.settings.ppr_emb_synonym_enabled:
-            extra_edges = extra_edges + emb_synonym_edges(
-                ann_ids, np.asarray(ann_matrix_raw),
-                self.settings.ppr_emb_synonym_threshold,
-                self.settings.ppr_emb_synonym_topk,
-                self.settings.ppr_emb_synonym_max_entities,
-            )
+        # Extra edges: variant pairs + optional synonym pairs (whole-notebook only)
+        extra_edges = []
+        if not scoped:
+            extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
+            with self._connect() as db:
+                ann_ids_raw, ann_matrix_raw = self._vector_matrix(
+                    db, notebook_id, "knowledge_embeddings", "object_id")
+            ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
+            has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
+            if has_vecs and self.settings.ppr_emb_synonym_enabled:
+                extra_edges = extra_edges + emb_synonym_edges(
+                    ann_ids, np.asarray(ann_matrix_raw),
+                    self.settings.ppr_emb_synonym_threshold,
+                    self.settings.ppr_emb_synonym_topk,
+                    self.settings.ppr_emb_synonym_max_entities,
+                )
 
         # node_ids: kg nodes first, then chunk nodes (cluster hubs appended below)
         node_ids: list = list(kg_nodes.keys()) + chunk_ids
@@ -7194,13 +7216,20 @@ class SQLiteRepository:
         return manifest
 
     def _active_kg_delta(self, notebook_id: str):
-        """Gather the ACTIVE notebook's KG delta for splicing onto a base scale
-        index. Delegates to _gather_kg_graph (shared with build_scale_index) so
-        node/edge conventions are guaranteed identical.  Returns
-        (active_node_ids, active_edges, active_chunk_ids).
+        """Gather the ACTIVE/self notebook's KG delta for splicing onto a base or
+        self scale index. Delegates to _gather_kg_graph (shared with
+        build_scale_index) so node/edge conventions are guaranteed identical.
+
+        When the notebook itself is already scale-indexed, only the post-watermark
+        sources (self-delta) are gathered — the index core is already represented
+        by its own CSR participant, so re-splicing the whole self KG would
+        double-count. Otherwise the whole notebook is gathered (unchanged).
+        Returns (active_node_ids, active_edges, active_chunk_ids).
         """
+        delta = self._index_delta(notebook_id)
+        src = delta["delta_sources"] if delta["indexed"] else None
         node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
-            self._gather_kg_graph(notebook_id)
+            self._gather_kg_graph(notebook_id, source_ids=src)
         return node_ids, edges, chunk_ids
 
     def _scale_xlayer_bridge_edges(self, notebook_id: str, base_indexes,

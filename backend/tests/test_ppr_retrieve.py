@@ -441,3 +441,32 @@ def test_scale_ppr_caches_combined_graph(repo, monkeypatch):
     r2 = repo.scale_ppr(active.id, "Mixture of Experts")
     assert calls["n"] == n_after_first          # 第二次命中缓存、不再 splice
     assert isinstance(r1, list) and isinstance(r2, list)
+
+
+def test_gather_kg_graph_source_scoping(repo):
+    from app.models.schemas import NotebookCreate
+    import json
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    def add(sid, oid, cid, name, day):
+        with repo._write() as db:
+            now = f"2026-07-{day:02d}T00:00:00"
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, sid, name, "", "[]", now))
+            ev = json.dumps([{"source_id": sid, "source_title": "", "element_id": cid,
+                              "element_type": "paragraph", "location_label": "p1",
+                              "quoted_span": name, "confidence": 1.0}])
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+                       "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), ev, sid, now, now))
+    add("s1", "o1", "c1", "alpha", 1)
+    add("s2", "o2", "c2", "beta", 2)
+    # 全库(默认 None)= 两个 source 都在
+    node_ids, edges, chunk_ids, kg_ids, _ = repo._gather_kg_graph(nb.id)
+    assert set(kg_ids) == {"o1", "o2"} and set(chunk_ids) == {"c1", "c2"}
+    # 只取 s2 域 = 只有 o2/c2
+    n2, e2, c2, k2, _ = repo._gather_kg_graph(nb.id, source_ids=["s2"])
+    assert set(k2) == {"o2"} and set(c2) == {"c2"} and "o1" not in set(n2)
+    # 空 source_ids = 空
+    assert repo._gather_kg_graph(nb.id, source_ids=[]) == ([], [], [], [], {})
