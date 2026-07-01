@@ -202,7 +202,8 @@ def test_copy_refuses_too_large(repo, client, monkeypatch):
     monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
     src = _seed_full_notebook(repo, owner="user-local")
     token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
-    assert client.get(f"/api/shared/{token}").json()["mode"] == "too_large"
+    # Phase 2:大库预览 mode 由 "too_large" 改为 "readonly"(改走只读共享而非拒绝)。
+    assert client.get(f"/api/shared/{token}").json()["mode"] == "readonly"
     assert client.post(f"/api/shared/{token}/copy").status_code == 409
 
 
