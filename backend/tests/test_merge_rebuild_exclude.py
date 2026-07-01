@@ -58,5 +58,5 @@ def test_rebuild_writes_seed_cols_and_excludes_decided(repo):
                    "WHERE notebook_id=? AND status='pending' AND "
                    "((seed_a=? AND seed_b=?) OR (seed_a=? AND seed_b=?))",
                    (nb, sa, sb, sb, sa))
-    repo.rebuild_unified_kg(nb)
+    repo.rebuild_unified_kg(nb, force=True)
     assert pair not in _pending_pairs(repo, nb)
