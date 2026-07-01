@@ -608,8 +608,19 @@ def test_fold_scale_index_delta(repo):
     repo.build_scale_index(nb.id)
     m0 = repo.scale_index_status(nb.id)
 
-    # delta 一个新 source
+    # delta 一个新 source:o2 是新概念,o3 与 base 的 o1 同名(跨文档同一概念)
     add("s2", "o2", "c2", "bandgap reference special", 2)
+    with repo._write() as db:
+        now = "2026-07-02T00:00:00"
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("o3", nb.id, "concept", "approved", "", json.dumps({"name": "current mirror"}),
+             "[]", "s2", now, now))
+        v = repo.embedder.embed_texts(["current mirror"])[0]
+        db.execute(
+            "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+            ("o3", nb.id, json.dumps(v), now))
     assert repo._index_delta(nb.id)["delta_chunks"] == 1
 
     # fold —— O(delta) 增量收进索引
@@ -630,6 +641,27 @@ def test_fold_scale_index_delta(repo):
     assert idx.manifest["n_nodes"] > m0["n_nodes"]
     assert "o2" in set(idx.node_ids) and "c2" in set(idx.node_ids)
     assert len(idx.idf) == len(idx.node_ids) == idx.transition.shape[0]
+
+    # 跨文档 cluster hub parity(SPEC §4「incremental_fuse 簇」):fold 应把 delta 融进
+    # concept_clusters,使同名的 base o1 与 delta o3 经 cluster: hub 在折叠图里连通。
+    with repo._connect() as db:
+        member_rows = {r["member_object_id"] for r in db.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?", (nb.id,)).fetchall()}
+    assert "o3" in member_rows, "delta 对象未融进 concept_clusters(缺 incremental_fuse)"
+    # 折叠图里应有该 canonical 的 hub,且 hub 与 o1、o3 都有边(跨文档连通)
+    hub_nodes = [n for n in idx.node_ids if isinstance(n, str) and n.startswith("cluster:")]
+    assert hub_nodes, "折叠图缺 cluster: hub 节点"
+    node_index = {n: i for i, n in enumerate(idx.node_ids)}
+    A = idx.transition  # A[j,i] = 边 i->j
+    bridged = False
+    for hub in hub_nodes:
+        h = node_index[hub]
+        # hub 的邻居(列 h 的非零行 = hub->x;行 h 的非零列 = x->hub)——无向图两向都有
+        nbrs = set(A.getcol(h).nonzero()[0].tolist()) | set(A.getrow(h).nonzero()[1].tolist())
+        if node_index.get("o1") in nbrs and node_index.get("o3") in nbrs:
+            bridged = True
+            break
+    assert bridged, "同名跨文档概念 o1/o3 未经 cluster: hub 连通(cross-doc hub 缺失)"
 
     # 新内容经 ANN 可召回(_retrieve_chunks_ann 返回 (scored, ids, mat))
     qv = repo._embed_query("bandgap reference special")
