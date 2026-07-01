@@ -31,10 +31,15 @@ import {
   unshareNotebook,
   previewShared,
   copyShared,
+  joinShared,
+  leaveNotebook,
+  sharedByMe,
+  shareModeLabel,
   parseShareToken,
   buildShareLink,
   type ShareResponse,
   type SharedPreview,
+  type SharedByMeItem,
 } from "./notebook-share";
 import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
@@ -83,6 +88,8 @@ type NotebookSummary = {
   kg_ready?: boolean;
   base_kg_available?: boolean;
   kg_pending_sources?: number;
+  access?: "owner" | "reader"; // "reader" = 只读共享而来(Phase 2)
+  shared_from?: string;        // reader 时 = 原 owner 用户名
 };
 
 type SourceSummary = {
@@ -903,9 +910,13 @@ export default function Home() {
   // 分享(owner 侧):shareModal 存分享结果并驱动分享弹窗;shareBusy 覆盖分享/取消分享请求
   const [shareModal, setShareModal] = useState<ShareResponse | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
-  // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝请求
+  // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
   const [copyBusy, setCopyBusy] = useState(false);
+  // 只读共享(Phase 2):退出共享请求覆盖;已分享总览 modal 的数据与开关
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
+  const [sharedByMeOpen, setSharedByMeOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
@@ -2396,6 +2407,70 @@ export default function Home() {
     }
   }
 
+  // --- 只读共享(Phase 2)-----------------------------------------------
+  // C. 加入(只读):大库不能拷贝 → 加为只读成员 → 选中该库 → 关弹窗
+  async function handleJoinShared(token: string) {
+    setCopyBusy(true);
+    try {
+      const joined = await joinShared(token);
+      await loadNotebookCollection();
+      setCurrentNotebookId(String(joined.id));
+      setSharedPreview(null);
+      setToast("已加入只读共享");
+    } finally {
+      setCopyBusy(false);
+    }
+  }
+
+  // D. 退出共享(只读成员移除自己):刷新列表;若当前被移除则切到第一个自有库
+  async function handleLeaveShared() {
+    if (!currentNotebook) return;
+    const leftId = currentNotebook.id;
+    setLeaveBusy(true);
+    try {
+      await leaveNotebook(leftId);
+      const remaining = await api<NotebookSummary[]>("/notebooks");
+      setNotebooks(remaining);
+      const stillThere = remaining.some((n) => n.id === leftId);
+      if (!stillThere) {
+        const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
+        if (firstOwned) {
+          setCurrentNotebookId(firstOwned.id);
+          setCurrentNotebook(firstOwned);
+          setTitleDraft(firstOwned.name);
+        } else {
+          setCurrentNotebookId(null);
+          setCurrentNotebook(null);
+        }
+      }
+      setToast("已退出只读共享");
+    } finally {
+      setLeaveBusy(false);
+    }
+  }
+
+  // E. owner「已分享总览」:拉取所有我 owner 且已分享的库 → 打开 modal
+  async function openSharedByMe() {
+    setSharedByMeList(null);
+    setSharedByMeOpen(true);
+    const items = await sharedByMe();
+    setSharedByMeList(items);
+  }
+
+  // 总览里「取消分享」:撤销 token(踢全员)→ 重拉总览刷新
+  async function handleUnshareFromOverview(notebookId: string) {
+    setShareBusy(true);
+    try {
+      await unshareNotebook(notebookId);
+      const items = await sharedByMe();
+      setSharedByMeList(items);
+      await loadNotebookCollection();
+      setToast("已取消分享，链接立即失效");
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
   // --- Governance: promotion queue (Track F) ---------------------------
   async function openPromoQueue() {
     const queue = await fetchPromotionQueue();
@@ -2543,6 +2618,8 @@ export default function Home() {
   }
 
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
+  // 只读共享库(Phase 2):无写权,门控写按钮 + 显示只读徽章/退出入口。
+  const isReader = currentNotebook?.access === "reader";
   const menuNotebook = menuNotebookId
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
@@ -2648,6 +2725,9 @@ export default function Home() {
                   ))}
                 </div>
               </div>
+              <button className="sort-button" title="查看我分享出去的知识库及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
+                <Share2 size={15} /> 已分享
+              </button>
               <button className="new-pill" onClick={() => openCreate().catch(reportError)}>＋ 新建</button>
             </div>
           </section>
@@ -2706,22 +2786,39 @@ export default function Home() {
             <div className="workspace-title">
               <button className="notebook-home" onClick={showCollection}>SN</button>
               <div className="workspace-title-main">
-                <input
-                  className="notebook-title-input"
-                  value={titleDraft}
-                  disabled={titleSaveInFlight}
-                  aria-label="Notebook name"
-                  maxLength={80}
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  onBlur={() => saveInlineNotebookName().catch(reportError)}
-                  onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-                    if (event.key === "Enter") event.currentTarget.blur();
-                    if (event.key === "Escape") {
-                      setTitleDraft(currentNotebook.name);
-                      event.currentTarget.blur();
-                    }
-                  }}
-                />
+                {isReader ? (
+                  <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+                    <h1 className="notebook-title-input" style={{ margin: 0 }}>{currentNotebook.name}</h1>
+                    <span className="new-pill" title="只读共享,无写权限">
+                      只读 · 来自 {currentNotebook.shared_from || "他人"}
+                    </span>
+                    <button
+                      className="sort-button"
+                      disabled={leaveBusy}
+                      title="退出该只读共享（仅移除你自己的访问）"
+                      onClick={() => handleLeaveShared().catch(reportError)}
+                    >
+                      {leaveBusy ? "退出中…" : "退出共享"}
+                    </button>
+                  </div>
+                ) : (
+                  <input
+                    className="notebook-title-input"
+                    value={titleDraft}
+                    disabled={titleSaveInFlight}
+                    aria-label="Notebook name"
+                    maxLength={80}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onBlur={() => saveInlineNotebookName().catch(reportError)}
+                    onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                      if (event.key === "Escape") {
+                        setTitleDraft(currentNotebook.name);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                  />
+                )}
               </div>
             </div>
             <div className="workspace-toolbar" aria-label="Notebook actions">
@@ -2730,23 +2827,25 @@ export default function Home() {
                 <span>创建笔记本</span>
               </button>
               <div className="workspace-nav-group">
-                <button className="workspace-nav-button" onClick={() => setInfoModal({
-                  title: "分析",
-                  message: "对当前 notebook 的知识图谱与基准库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
-                  actions: [
-                    ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
-                    ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
-                    ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [{
-                      label: buildingScaleIndex ? "检索索引重建中…" : "重建检索索引",
-                      desc: "重建大库的向量检索索引（CSR 图 + ANN），供 scale 检索使用；后台进行，完成后自动更新",
-                      action: () => { if (currentNotebookId && !buildingScaleIndex) startScaleIndexRebuild(currentNotebookId); },
-                    }] : []),
-                    { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
-                  ]
-                })}>
-                  <BarChart3 size={17} />
-                  <span>分析</span>
-                </button>
+                {!isReader && (
+                  <button className="workspace-nav-button" onClick={() => setInfoModal({
+                    title: "分析",
+                    message: "对当前 notebook 的知识图谱与基准库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
+                    actions: [
+                      ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                      ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [{
+                        label: buildingScaleIndex ? "检索索引重建中…" : "重建检索索引",
+                        desc: "重建大库的向量检索索引（CSR 图 + ANN），供 scale 检索使用；后台进行，完成后自动更新",
+                        action: () => { if (currentNotebookId && !buildingScaleIndex) startScaleIndexRebuild(currentNotebookId); },
+                      }] : []),
+                      { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
+                    ]
+                  })}>
+                    <BarChart3 size={17} />
+                    <span>分析</span>
+                  </button>
+                )}
                 <button className="workspace-nav-button" onClick={() => openAnalytics().catch(reportError)}>
                   <LayoutDashboard size={17} />
                   <span>看板</span>
@@ -2759,10 +2858,12 @@ export default function Home() {
                   <Network size={17} />
                   <span>知识图谱</span>
                 </button>
-                <button className="workspace-nav-button" disabled={shareBusy} onClick={() => openShareModal().catch(reportError)}>
-                  <Share2 size={17} />
-                  <span>分享</span>
-                </button>
+                {!isReader && (
+                  <button className="workspace-nav-button" disabled={shareBusy} onClick={() => openShareModal().catch(reportError)}>
+                    <Share2 size={17} />
+                    <span>分享</span>
+                  </button>
+                )}
                 <button className="workspace-nav-button" onClick={() => openModelPanel()}>
                   <span>模型服务</span>
                 </button>
@@ -2785,10 +2886,12 @@ export default function Home() {
                 <span className="panel-count">{sourcesTotal} 个来源</span>
               </div>
               <div className="workspace-panel-body sources-body">
-                <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); setSourceModalOpen(true); }}>
-                  <Plus size={20} strokeWidth={2.7} /> 添加来源
-                </button>
-                {currentNotebookId && sources.length > 0 && (
+                {!isReader && (
+                  <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); setSourceModalOpen(true); }}>
+                    <Plus size={20} strokeWidth={2.7} /> 添加来源
+                  </button>
+                )}
+                {!isReader && currentNotebookId && sources.length > 0 && (
                   currentNotebook?.kg_ready
                     ? (
                       <>
@@ -2890,9 +2993,11 @@ export default function Home() {
                               <ExternalLink size={13} />
                             </a>
                           ) : null}
-                          <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
-                            <Trash2 size={15} />
-                          </button>
+                          {!isReader && (
+                            <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
+                              <Trash2 size={15} />
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))
@@ -3185,8 +3290,25 @@ export default function Home() {
           className="popover notebook-menu"
           style={{ left: menuPosition.left, top: menuPosition.top }}
         >
-          <button onClick={() => { setEditingNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>编辑信息</button>
-          <button className="danger" onClick={() => { setDeleteNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>删除 notebook</button>
+          {menuNotebook.access === "reader" ? (
+            <button
+              className="danger"
+              onClick={() => {
+                const target = menuNotebook;
+                setMenuNotebookId(null);
+                setMenuPosition(null);
+                leaveNotebook(target.id)
+                  .then(() => loadNotebookCollection())
+                  .then(() => setToast("已退出只读共享"))
+                  .catch(reportError);
+              }}
+            >退出共享</button>
+          ) : (
+            <>
+              <button onClick={() => { setEditingNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>编辑信息</button>
+              <button className="danger" onClick={() => { setDeleteNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>删除 notebook</button>
+            </>
+          )}
         </div>
       )}
 
@@ -3224,7 +3346,7 @@ export default function Home() {
                 <h2>分享「{currentNotebook.name}」</h2>
                 <p>{shareModal.copyable
                   ? "拿到链接的登录用户可将这个知识库整份拷贝到自己的空间。"
-                  : "此库较大，暂只支持生成链接；只读共享访问即将支持。"}</p>
+                  : "此库较大，拿到链接的登录用户可以只读方式加入(浏览/问答/看图，不能修改)。"}</p>
               </div>
               <button className="icon-button" onClick={() => setShareModal(null)} title="Close">×</button>
             </div>
@@ -3241,7 +3363,7 @@ export default function Home() {
                 </div>
               </label>
               <p className="tool-hint" style={{ margin: "2px 0 0" }}>
-                {shareModal.copyable ? "他人可拷贝" : "库较大，暂只支持生成链接（共享访问即将支持）"}
+                {shareModal.copyable ? "他人可拷贝" : "库较大，他人可只读加入"}
                 {` · ${shareModal.size.sources} 来源 · ${shareModal.size.nodes} 节点 · ${shareModal.size.edges} 边 · ${formatFileSize(shareModal.size.bytes)}`}
               </p>
               <div className="tag-row">
@@ -3274,9 +3396,9 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {sharedPreview.mode === "too_large" && (
-                <p className="tool-hint" style={{ margin: "2px 0 0", color: "var(--danger, #c0392b)" }}>
-                  此库过大，暂不支持拷贝（只读共享即将支持）
+              {sharedPreview.mode === "readonly" && (
+                <p className="tool-hint" style={{ margin: "2px 0 0" }}>
+                  此库较大，将以只读方式加入——你可浏览来源、问答、查看知识图谱，但不能修改。
                 </p>
               )}
               <div className="tag-row">
@@ -3292,9 +3414,92 @@ export default function Home() {
                     {copyBusy ? "拷贝中…" : "拷贝到我的空间"}
                   </button>
                 ) : (
-                  <button className="new-pill" disabled title="此库过大，暂不支持拷贝（只读共享即将支持）">拷贝到我的空间</button>
+                  <button
+                    className="new-pill"
+                    disabled={copyBusy}
+                    onClick={() => {
+                      const token = shareTokenRef.current;
+                      if (token) handleJoinShared(token).catch(reportError);
+                    }}
+                  >
+                    {copyBusy ? "加入中…" : "加入(只读)"}
+                  </button>
                 )}
                 <button className="sort-button" onClick={() => setSharedPreview(null)}>取消</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {sharedByMeOpen && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedByMeOpen(false); }}>
+          <div className="utility-modal-card">
+            <div className="source-modal-header">
+              <div>
+                <h2>已分享</h2>
+                <p>你分享出去的知识库。小库可被他人拷贝为独立副本;大库以只读方式共享,下方列出已加入的只读成员。</p>
+              </div>
+              <button className="icon-button" onClick={() => setSharedByMeOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {sharedByMeList === null ? (
+                <p className="tool-hint">加载中…</p>
+              ) : sharedByMeList.length === 0 ? (
+                <article className="source-empty">
+                  <div>▧</div>
+                  <strong>尚未分享任何知识库</strong>
+                  <p>在某个知识库里点「分享」即可生成链接。</p>
+                </article>
+              ) : (
+                <div className="stack">
+                  {sharedByMeList.map((item) => (
+                    <div className="checklist-row" key={item.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+                      <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+                        <span style={{ flex: 1, wordBreak: "break-word", fontWeight: 600 }}>{item.name}</span>
+                        <span className="new-pill" title={item.mode === "readonly" ? "库较大,只读共享" : "库较小,可被拷贝"}>
+                          {shareModeLabel(item.mode)}
+                        </span>
+                      </div>
+                      <div className="tag-row" style={{ marginTop: 2 }}>
+                        <input
+                          readOnly
+                          value={buildShareLink(item.share_token, window.location.origin)}
+                          onFocus={(event) => event.currentTarget.select()}
+                          style={{ flex: 1 }}
+                        />
+                        <button
+                          className="sort-button"
+                          onClick={() => {
+                            const link = buildShareLink(item.share_token, window.location.origin);
+                            navigator.clipboard?.writeText(link)
+                              .then(() => setToast("分享链接已复制"))
+                              .catch(() => { setStatusText(link); setToast("复制失败，链接已显示在状态栏"); });
+                          }}
+                        >复制</button>
+                      </div>
+                      <p className="tool-hint" style={{ margin: "0" }}>
+                        {`${item.size.sources} 来源 · ${item.size.nodes} 节点 · ${item.size.edges} 边 · ${formatFileSize(item.size.bytes)}`}
+                      </p>
+                      {item.mode === "readonly" && (
+                        <p className="tool-hint" style={{ margin: "0" }}>
+                          只读成员:{item.members.length > 0 ? item.members.map((m) => m.username).join("，") : "暂无成员"}
+                        </p>
+                      )}
+                      <div className="tag-row" style={{ marginTop: 2 }}>
+                        <button
+                          className="sort-button"
+                          disabled={shareBusy}
+                          title="撤销分享链接并移除所有只读成员"
+                          onClick={() => handleUnshareFromOverview(item.id).catch(reportError)}
+                        >取消分享</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="tag-row">
+                <button className="new-pill" onClick={() => setSharedByMeOpen(false)}>完成</button>
               </div>
             </div>
           </div>
