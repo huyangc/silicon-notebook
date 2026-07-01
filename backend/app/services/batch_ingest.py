@@ -408,6 +408,10 @@ def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int
             repo._backfill_knowledge_embeddings(db, notebook_id, objects)
     finally:
         repo.settings.embed_concurrency = orig_conc
+    # Backfilling node vectors changes the ANN inputs → mark dirty so the cluster
+    # version's kg_mutation_seq advances (a later force=False rebuild must not skip
+    # on the strength of unchanged object/decided counts alone).
+    repo._mark_unified_kg_dirty(notebook_id)
     return len(objects)
 
 

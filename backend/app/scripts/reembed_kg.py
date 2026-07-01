@@ -23,6 +23,9 @@ def main() -> int:
     items = [{"_oid": r["id"], "payload": json.loads(r["payload"] or "{}")} for r in rows]
     repo._embed_objects_batch(nb, items)        # 干净文本重嵌对象
     repo._backfill_relation_embeddings(nb)      # 关系已清空 → 全量重嵌(名取自干净 _payload_text)
+    # 重嵌改变了对象向量内容(COUNT 不变但内容变)→ 标脏使 kg_mutation_seq 前进,
+    # 这样即便随后跑 force=False 的 rebuild 也不会因「计数未变」而跳过聚类。
+    repo._mark_unified_kg_dirty(nb)
     print(f"[reembed] {nb}: re-embedded {len(items)} objects + relations"); return 0
 
 
