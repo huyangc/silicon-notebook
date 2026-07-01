@@ -166,12 +166,23 @@ def _discriminative_conflict(name_a: str, name_b: str) -> bool:
     return False
 
 
+# Sharding floor: max_reps below this is treated as "too small" and ignored — a
+# single global hnsw is built instead (hnswlib scales to millions). Sharding is
+# an extreme-OOM fallback only; it drops cross-shard synonym pairs, so it must
+# never engage at ordinary sizes. Callers pass kg_cluster_rep_ann_max (default
+# 2M) which is far above this floor; only a deliberately tiny cap disables it.
+# Set well above the old _MAX_REPS (4000) so no real caller silently shards.
+_MIN_SHARD_CAP = 20_000
+
+
 def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
                     k: int = 5, lo: float = 0.82,
                     max_reps: int | None = None) -> List[tuple]:
     """hnswlib 余弦 top-k 近邻候选(sim≥lo), 去重无序对。O(N log N)。
     reps: seed -> 代表向量(未归一化亦可, cosine 空间内部归一)。
-    max_reps: 若 idx_seeds 超过此上限, 分片建索引(每片自洽); 跨片同义对会丢失, 有 WARNING。
+    默认单个全局 hnsw 索引(不分片), 消除跨片丢对。
+    max_reps: 仅作极端 OOM 兜底 —— 唯有 max_reps ≥ _MIN_SHARD_CAP 且 n 超过它时
+    才分片建索引(每片自洽, 跨片同义对会丢失, 有 WARNING); 过小的 max_reps 被忽略。
     """
     import math
     import hnswlib
@@ -211,10 +222,13 @@ def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
                 local_out.append((shard_seeds[a], shard_seeds[b], sim))
         return local_out
 
-    if max_reps is None or n <= max_reps:
+    # Default path: single global index over all seeds — no cross-shard loss.
+    # Sharding only kicks in as an OOM fallback with a realistically large cap.
+    shard_enabled = max_reps is not None and max_reps >= _MIN_SHARD_CAP
+    if not shard_enabled or n <= max_reps:
         return _run_shard(idx_seeds)
 
-    # Sharded path: n exceeds cap — build one index per shard of size <= max_reps.
+    # OOM fallback: n exceeds a large cap — build one index per shard of size <= max_reps.
     n_shards = math.ceil(n / max_reps)
     _log.warning(
         "rep-ANN sharding: %d seeds exceeds cap %d; building in %d shards "
