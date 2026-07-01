@@ -174,6 +174,15 @@ class SharedPreview(BaseModel):
     size: Dict[str, int]
 
 
+class SharedByMeItem(BaseModel):
+    id: str
+    name: str
+    share_token: str
+    mode: str                          # "copy" | "readonly"
+    size: Dict[str, int]
+    members: List[Dict[str, str]]      # [{username, added_at}];仅 readonly 有值
+
+
 class NotebookTemplate(BaseModel):
     id: str
     label: str

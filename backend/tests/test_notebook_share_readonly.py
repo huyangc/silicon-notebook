@@ -179,3 +179,22 @@ def test_join_large_then_leave(tmp_path, monkeypatch, repo):
     assert nb in ids and ids[nb]["access"] == "reader"
     assert client.request("DELETE", f"/api/notebooks/{nb}/membership", headers=bob_h).status_code == 204
     assert nb not in {n["id"] for n in client.get("/api/notebooks", headers=bob_h).json()}
+
+
+def test_shared_by_me_lists_with_members(repo):
+    _mk_user(repo, "user-alice"); _mk_user(repo, "user-bob", "b00000013")  # FK:先建 owner/成员用户
+    small = _mk_nb(repo, owner="user-local", name="Small")
+    big = _mk_nb(repo, owner="user-local", name="Big")
+    other = _mk_nb(repo, owner="user-alice", name="Other")
+    repo.share_notebook(small); repo.share_notebook(big); repo.share_notebook(other)
+    with repo._write() as db:
+        for i in range(3):
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?)", (f"ko-{i}", big, "concept", _now(), _now()))
+    repo.settings.notebook_copy_max_rows = 1  # big→readonly
+    repo.add_member(big, "user-bob")
+    items = {it["id"]: it for it in repo.shared_by_me("user-local")}
+    assert set(items) == {small, big}              # 只我 owner 的、且 is_shared;不含 alice 的
+    assert items[big]["mode"] == "readonly"
+    assert [m["username"] for m in items[big]["members"]] == ["b00000013"]
+    assert items[small]["members"] == []           # 小库(copy)无成员

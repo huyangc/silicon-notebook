@@ -61,6 +61,7 @@ from app.models.schemas import (
     AddUrlSourcesResult,
     SetTierRequest,
     ShareResponse,
+    SharedByMeItem,
     SharedPreview,
     SourceImportRequest,
     SourceSummary,
@@ -224,6 +225,12 @@ def list_notebook_templates() -> List[NotebookTemplate]:
 @router.get("/notebooks", response_model=List[NotebookSummary])
 def list_notebooks() -> List[NotebookSummary]:
     return repository().list_notebooks()
+
+
+# 注意:静态段路由必须在 /notebooks/{notebook_id} 之前注册,否则 "shared-by-me" 被当作 {notebook_id}。
+@router.get("/notebooks/shared-by-me", response_model=List[SharedByMeItem])
+def shared_by_me_route(user: UserProfile = Depends(get_current_user)) -> List[SharedByMeItem]:
+    return [SharedByMeItem(**it) for it in repository().shared_by_me(user.id)]
 
 
 @router.post("/notebooks", response_model=NotebookSummary)

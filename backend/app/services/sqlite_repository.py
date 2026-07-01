@@ -1360,6 +1360,23 @@ class SQLiteRepository:
             "size": stats["size"],
         }
 
+    def shared_by_me(self, user_id: str) -> list:
+        """owner 的「已分享总览」:自己 owner 且 is_shared 的库 + 模式 + 只读成员。"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, name, share_token FROM notebooks "
+                "WHERE created_by=? AND is_shared=1 ORDER BY updated_at DESC", (user_id,)).fetchall()
+        out = []
+        for r in rows:
+            stats = self.notebook_copy_stats(r["id"])
+            readonly = not stats["copyable"]
+            out.append({
+                "id": r["id"], "name": r["name"], "share_token": r["share_token"] or "",
+                "mode": "readonly" if readonly else "copy", "size": stats["size"],
+                "members": self.list_members(r["id"]) if readonly else [],
+            })
+        return out
+
     @staticmethod
     def _insert_row(db, table: str, d: dict) -> None:
         cols = list(d.keys())
