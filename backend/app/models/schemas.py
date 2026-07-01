@@ -499,6 +499,18 @@ class UnifiedKgStatus(BaseModel):
     clusters: int = 0
 
 
+class ScaleIndexStatus(BaseModel):
+    exists: bool
+    stale: bool
+    building: bool
+    eligible: bool
+    n_nodes: int = 0
+    n_chunks: int = 0
+    n_ann: int = 0
+    n_chunk_ann: int = 0
+    has_chunk_ann: bool = False
+
+
 class MergeReviewRequest(BaseModel):
     limit: int = 50
     # 非对称自动落地阈值;省略时由后端 settings 决定(KG_MERGE_CONFIRM/SEPARATE_THRESHOLD)。
