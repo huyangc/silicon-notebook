@@ -1038,6 +1038,41 @@ export default function Home() {
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
+  const [reviewAllRunning, setReviewAllRunning] = useState(false);
+  // Mirror the buildingKg poll: while an "全部预审" job runs, poll status every 6s until it
+  // leaves "running", with a 20min safety cap. Keying on currentNotebookId (captured as `nb`)
+  // means switching notebooks or unmounting cancels this poll instead of clobbering the
+  // now-selected notebook's pendingMerges/unifiedKgStatus with stale data.
+  useEffect(() => {
+    if (!reviewAllRunning || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const job = await fetchMergeReviewJob(nb);
+        if (cancelled) return;
+        setReviewAllJob(job);
+        if (job.status !== "running") {
+          window.clearInterval(poll);
+          setReviewAllRunning(false);
+          const [pend, status] = await Promise.all([
+            fetchPendingMerges(nb),
+            fetchUnifiedKgStatus(nb),
+          ]);
+          if (cancelled) return;
+          setPendingMerges(pend);
+          setUnifiedKgStatus(status);
+          setToast(job.status === "failed"
+            ? `全部预审中止：${job.error || "未知错误"}（已处理 ${job.done}）`
+            : `全部预审完成：已处理 ${job.done} 项`);
+        }
+      } catch { /* transient error; keep polling */ }
+    }, 6000);
+    const cap = window.setTimeout(() => {
+      if (!cancelled) { setReviewAllRunning(false); setToast("全部预审仍在后台进行，请稍后查看"); }
+    }, 20 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+  }, [reviewAllRunning, currentNotebookId]);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
@@ -2273,24 +2308,7 @@ export default function Home() {
     try {
       await reviewAllMergesApi(nb);
       setReviewAllJob({ status: "running", total: pendingMerges.length, done: 0, error: "" });
-      const poll = window.setInterval(async () => {
-        try {
-          const job = await fetchMergeReviewJob(nb);
-          setReviewAllJob(job);
-          if (job.status !== "running") {
-            window.clearInterval(poll);
-            const [pend, status] = await Promise.all([
-              fetchPendingMerges(nb),
-              fetchUnifiedKgStatus(nb),
-            ]);
-            setPendingMerges(pend);
-            setUnifiedKgStatus(status);
-            setToast(job.status === "failed"
-              ? `全部预审中止：${job.error || "未知错误"}（已处理 ${job.done}）`
-              : `全部预审完成：已处理 ${job.done} 项`);
-          }
-        } catch { /* transient; keep polling */ }
-      }, 6000);
+      setReviewAllRunning(true);
     } catch (err) { reportError(err); }
   }
 
