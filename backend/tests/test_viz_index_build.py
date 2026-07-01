@@ -1,5 +1,4 @@
 """build_viz_index:lite 折叠等价 _unified_graph_full('object') + 落盘 + 空图 None。"""
-import json
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
