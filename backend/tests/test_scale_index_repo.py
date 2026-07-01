@@ -522,3 +522,36 @@ def test_index_delta_after_new_source(repo):
                    "VALUES (?,?,?,?,?,?,?)", ("c2", nb.id, "s2", "y", "", "[]", now2))
     d2 = repo._index_delta(nb.id)
     assert d2["indexed"] is True and d2["delta_sources"] == ["s2"] and d2["delta_chunks"] == 1
+
+
+def test_scale_index_status_state_machine(repo, monkeypatch):
+    import json
+    from app.models.schemas import NotebookCreate
+    monkeypatch.setattr(repo.settings, "index_suggest_chunk_threshold", 3)
+    monkeypatch.setattr(repo.settings, "index_stale_delta_threshold", 1)
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    def add_source(sid, cids, day):
+        with repo._write() as db:
+            now = f"2026-07-{day:02d}T00:00:00"
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
+            for cid in cids:
+                db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                           "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, sid, "x", "", "[]", now))
+                v = repo.embedder.embed_texts([cid])[0]
+                db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                           (cid, nb.id, json.dumps(v), now))
+    # 小库 → unindexed
+    add_source("s1", ["c1"], 1)
+    assert repo.scale_index_status(nb.id)["state"] == "unindexed"
+    # 越过建议阈值(3) → suggested
+    add_source("s2", ["c2", "c3", "c4"], 2)
+    assert repo.scale_index_status(nb.id)["state"] == "suggested"
+    # 建索引 → indexed, delta=0
+    repo.rebuild_unified_kg(nb.id); repo.build_scale_index(nb.id)
+    st = repo.scale_index_status(nb.id)
+    assert st["state"] == "indexed" and st["delta_chunks"] == 0
+    # 新增 delta 超阈值(1) → stale
+    add_source("s3", ["c5", "c6"], 3)
+    st2 = repo.scale_index_status(nb.id)
+    assert st2["state"] == "stale" and st2["delta_chunks"] == 2

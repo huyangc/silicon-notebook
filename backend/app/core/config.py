@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
     chunk_ann_enabled: bool = Field(False, env="CHUNK_ANN_ENABLED")  # 大库 chunk 检索走 ANN 候选(默认关,待真机 recall 对照)
+    index_suggest_chunk_threshold: int = Field(2000, env="INDEX_SUGGEST_CHUNK_THRESHOLD")  # 未索引库总 chunk 超此 → 建议建索引
+    index_stale_delta_threshold: int = Field(500, env="INDEX_STALE_DELTA_THRESHOLD")        # 已索引库 delta chunk 超此 → 建议重建
     # qwen3-rerank (DashScope text-rerank) 配置
     rerank_model: str = Field("", env="RERANK_MODEL")
     rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", env="RERANK_BASE_URL")
