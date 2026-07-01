@@ -148,11 +148,30 @@ def test_scale_ppr_uses_base_index_from_active(repo):
     assert all(isinstance(cid, str) and 0.0 <= score <= 1.0 for cid, score in out)
 
 
-def test_scale_ppr_empty_when_multiple_bases_supported(repo):
-    """Dispatch still returns [] (fallback) for a notebook that is itself the
-    only base (no OTHER base index to splice from)."""
+def test_scale_ppr_uses_self_index_when_only_base(repo):
+    """P0-00 fix: a notebook that is itself the only base uses its OWN (allow_stale)
+    scale index as a participant instead of returning [] (which forced a rustworkx
+    fallback). self CSR = substrate, self ANN = seed source."""
     base = _seed_base_with_chunk(repo)
-    assert repo.scale_ppr(base.id, "MOSFET") == []  # excludes self -> no base set
+    out = repo.scale_ppr(base.id, "MOSFET")
+    assert isinstance(out, list) and out, "self-base direct query should use self index"
+    assert "cB" in [cid for cid, _ in out]
+    assert all(isinstance(cid, str) and 0.0 <= score <= 1.0 for cid, score in out)
+
+
+def test_scale_ppr_empty_when_only_base_and_no_index(repo):
+    """Conservative: a self-base notebook with NO scale index (small/legacy) still
+    returns [] (fallback to rustworkx) — self-index path only engages when indexed."""
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    with repo._write() as db:
+        now = "2026-06-29T00:00:00"
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("sN", base.id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)", ("cN", base.id, "sN", "MOSFET gain", "", "[]", now))
+    # never built a scale index -> no self index -> conservative fallback
+    assert repo.scale_ppr(base.id, "MOSFET") == []
 
 
 def test_run_index_builds_for_notebook(repo):
