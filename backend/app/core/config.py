@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
-    chunk_ann_enabled: bool = Field(False, env="CHUNK_ANN_ENABLED")  # 大库 chunk 检索走 ANN 候选(默认关,待真机 recall 对照)
+    chunk_ann_enabled: bool = Field(True, env="CHUNK_ANN_ENABLED")  # 有索引的库 chunk 检索走 ANN 核⊕delta(默认开:大库全量暴力不可扩展;小库无 scale 索引→_scale_index 返 None→自然回退暴力,零影响)。ANN 是语义候选,纯关键词命中缺口待 chunk 侧 FTS(词法∪语义)补;可用 CHUNK_ANN_ENABLED=false 关
     index_suggest_chunk_threshold: int = Field(2000, env="INDEX_SUGGEST_CHUNK_THRESHOLD")  # 未索引库总 chunk 超此 → 建议建索引
     index_stale_delta_threshold: int = Field(500, env="INDEX_STALE_DELTA_THRESHOLD")        # 已索引库 delta chunk 超此 → 建议重建
     # qwen3-rerank (DashScope text-rerank) 配置
