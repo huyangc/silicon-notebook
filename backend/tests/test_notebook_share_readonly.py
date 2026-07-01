@@ -1,6 +1,7 @@
 # backend/tests/test_notebook_share_readonly.py
 import uuid
 import pytest
+from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 
@@ -82,3 +83,41 @@ def test_preview_mode_readonly_for_large(repo, monkeypatch):
     assert repo.shared_preview(nb)["mode"] == "readonly"
     repo.settings.notebook_copy_max_rows = 5000
     assert repo.shared_preview(nb)["mode"] == "copy"
+
+
+# ---------------------------------------------------------------- Task 3
+def _client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+    return TestClient(app)
+
+
+def _login(client, username, password="pw123456"):
+    client.post("/api/auth/register", json={"username": username, "password": password})
+    tok = client.post("/api/auth/login", json={"username": username, "password": password}).json()["token"]
+    return {"Authorization": f"Bearer {tok}"}
+
+
+# 读路由(成员应 200)与写路由(成员应 404)的枚举样本。完整清单见 spec §3.2。
+READ_ROUTES = ["", "/analytics", "/sources", "/graph", "/search?q=x", "/conversations"]
+WRITE_ROUTES = [("patch", ""), ("delete", ""), ("post", "/kg/rebuild"), ("post", "/tier"), ("post", "/share")]
+
+
+def test_member_can_read_cannot_write(tmp_path, monkeypatch, repo):
+    # repo fixture 与 client 共用同一 tmp DB(同 tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000001")
+    nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
+    bob_h = _login(client, "b00000002")
+    bob_id = client.get("/api/me", headers=bob_h).json()["id"]
+    repo.add_member(nb, bob_id)   # bob 成为只读成员
+    for suffix in READ_ROUTES:
+        r = client.get(f"/api/notebooks/{nb}{suffix}", headers=bob_h)
+        assert r.status_code == 200, (suffix, r.status_code)
+    for method, suffix in WRITE_ROUTES:
+        r = client.request(method.upper(), f"/api/notebooks/{nb}{suffix}", headers=bob_h,
+                           json={} if method in ("post", "patch") else None)
+        assert r.status_code == 404, (method, suffix, r.status_code)  # 非 owner→404 不泄露
