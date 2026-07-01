@@ -353,6 +353,7 @@ button {
   font-size: 26px;
   line-height: 1.18;
   font-weight: 560;
+  overflow-wrap: anywhere;
 }
 
 .notebook-card p {
@@ -360,6 +361,7 @@ button {
   color: #555d66;
   font-size: 15px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .notebook-card-footer {
