@@ -130,47 +130,53 @@ def variant_edge_pairs(kg_nodes: Dict[str, dict], weight: float) -> List[Tuple[s
     out: List[Tuple[str, str, float]] = []
     for members in groups.values():
         uniq = sorted(set(members))
-        for i in range(len(uniq)):
-            for j in range(i + 1, len(uniq)):
-                out.append((uniq[i], uniq[j], float(weight)))
+        if len(uniq) < 2:
+            continue
+        rep = uniq[0]
+        for m in uniq[1:]:
+            out.append((rep, m, float(weight)))   # 星型:O(k),连通性经 rep 保持
     return out
 
 
 def emb_synonym_edges(ids, matrix, threshold: float = 0.8, top_k: int = 20,
                       max_entities: int = 50000):
-    """Batched cosine-KNN over entity embeddings → synonym edges (id_a,id_b,cosine).
-    Each node keeps its top_k neighbors with cosine ≥ threshold. Returns [] when
-    n>max_entities (cost guard). `matrix` is an (n, d) float array (rows aligned to
-    `ids`); re-normalized defensively."""
+    """hnswlib ANN KNN over entity embeddings → synonym edges (id_a,id_b,cosine).
+    每节点取 top_k 邻居、cosine ≥ threshold。规模化:超 max_entities 不再返 []
+    而是照常走 ANN(hnswlib 支持百万级);max_entities 仅作签名兼容。`matrix` 是
+    (n, d) float 数组(行对齐 `ids`);防御性重归一化。fail-open:hnswlib 异常返 []。"""
     import numpy as np
+    import hnswlib
     n = len(ids)
     if n < 2 or matrix is None:
         return []
     M = np.asarray(matrix, dtype=np.float32)
     if M.ndim != 2 or M.shape[0] != n:
         return []
-    if n > max_entities:
-        return []
     norms = np.linalg.norm(M, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     M = M / norms
+    dim = int(M.shape[1])
+    try:
+        idx = hnswlib.Index(space="cosine", dim=dim)
+        idx.init_index(max_elements=n, ef_construction=200, M=16, random_seed=42)
+        idx.add_items(M, np.arange(n))
+        idx.set_ef(max(top_k + 1, 64))
+        k = min(top_k + 1, n)                       # +1 因含自身
+        labels, distances = idx.knn_query(M, k=k)
+    except Exception:
+        return []                                   # fail-open:同义边为空,不崩 build
     out, seen = [], set()
-    k = min(top_k, n - 1)
-    bs = 512
-    for start in range(0, n, bs):
-        block = M[start:start + bs] @ M.T
-        for bi in range(block.shape[0]):
-            i = start + bi
-            row = block[bi]
-            row[i] = -1.0
-            cand = np.argpartition(-row, k - 1)[:k]
-            for j in cand:
-                j = int(j)
-                if row[j] >= threshold:
-                    a, b = (i, j) if i < j else (j, i)
-                    if (a, b) not in seen:
-                        seen.add((a, b))
-                        out.append((ids[a], ids[b], float(row[j])))
+    for i in range(n):
+        for lab, dist in zip(labels[i], distances[i]):
+            j = int(lab)
+            if j == i:
+                continue
+            sim = 1.0 - float(dist)
+            if sim >= threshold:
+                a, b = (i, j) if i < j else (j, i)
+                if (a, b) not in seen:
+                    seen.add((a, b))
+                    out.append((ids[a], ids[b], sim))
     return out
 
 
