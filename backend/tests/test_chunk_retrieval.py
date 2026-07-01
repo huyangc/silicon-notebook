@@ -93,6 +93,37 @@ def test_mmr_select_caps_and_subsets(repo):
     assert {p.chunk_id for p in picked} <= {c.chunk_id for c in scored}
 
 
+def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
+    # 10 个 chunk;开 chunk_ann_enabled + recall=3 时只对 ANN 候选(≤3)打分,非全表 10 条
+    nb, _ = _seed_chunks(repo, [f"topic {i} content detail body " * 10 for i in range(10)])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id)
+    assert idx is not None and idx.chunk_ann_labels, "前置:build_scale_index 须产出 chunk ANN"
+
+    monkeypatch.setattr(repo.settings, "chunk_ann_enabled", True)
+    monkeypatch.setattr(repo.settings, "chunk_recall", 3)
+
+    # 拦 sqlite_repository 内 score_chunks 绑定(_retrieve_chunks_ann 内局部导入)记录收到的候选数
+    seen = {}
+    import app.services.retrieval as rmod
+    real = rmod.score_chunks
+    def spy(query, chunks, *a, **k):
+        seen["n"] = len(chunks)
+        return real(query, chunks, *a, **k)
+    monkeypatch.setattr(rmod, "score_chunks", spy)
+    import app.services.sqlite_repository as srepo
+    if hasattr(srepo, "score_chunks"):
+        monkeypatch.setattr(srepo, "score_chunks", spy)
+
+    scored, ids, mat = repo._retrieve_chunks(nb.id, "topic 3 content")
+    assert seen.get("n", 10) <= 3            # 只对 ANN 候选打分,非全部 10 条
+    assert isinstance(scored, list)
+    # ids 为候选子集且 ≤ recall
+    assert len(ids) <= 3
+    assert {c.chunk_id for c in scored} <= set(idx.chunk_ann_labels)
+
+
 class _FakeLLM:
     """配置好的假 LLM:chat_json 回定长 JSON, 内含 [k1] 标记。"""
     configured = True
