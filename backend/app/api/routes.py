@@ -842,7 +842,9 @@ def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile 
 @router.post("/notebooks/{notebook_id}/unified-kg/rebuild", dependencies=[Depends(require_notebook_access)])
 def rebuild_unified_kg(notebook_id: str) -> dict:
     try:
-        clusters = repository().rebuild_unified_kg(notebook_id)
+        # Explicit user action (刷新图谱): force a full recompute so it also picks
+        # up any clustering-settings change the data-version gate can't observe.
+        clusters = repository().rebuild_unified_kg(notebook_id, force=True)
         return {"clusters": clusters}
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")

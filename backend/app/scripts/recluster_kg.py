@@ -10,7 +10,9 @@ def main() -> int:
         print("usage: recluster_kg <notebook_id>"); return 2
     nb = sys.argv[1]
     repo = SQLiteRepository(get_settings())
-    n = repo.rebuild_unified_kg(nb)
+    # Explicit recluster entrypoint → force a full recompute (bypass the
+    # skip-when-unchanged gate; the whole point of this script is to re-cluster).
+    n = repo.rebuild_unified_kg(nb, force=True)
     print(f"[recluster] {nb}: rebuilt unified KG (clusters={n})"); return 0
 
 

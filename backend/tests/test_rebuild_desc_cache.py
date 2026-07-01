@@ -188,10 +188,18 @@ def test_rebuild_regenerates_only_changed_cluster(repo):
             "AND json_extract(payload,'$.name')='MOSFET'", (nb.id,)).fetchone()
         ev = json.loads(row["evidence"])
         ev[0]["quoted_span"] = "mosfet A CHANGED"
-        db.execute("UPDATE knowledge_objects SET evidence=? WHERE id=?",
-                   (json.dumps(ev), row["id"]))
+        # Bump updated_at as any real writer (store_kg/_run_extraction) does — this
+        # is what moves the rebuild's cluster-input version so the skip gate lets
+        # the recompute through. A raw evidence poke that leaves updated_at stale
+        # is not a real mutation in production.
+        from app.services.sqlite_repository import _now as _now_ts
+        db.execute("UPDATE knowledge_objects SET evidence=?, updated_at=? WHERE id=?",
+                   (json.dumps(ev), _now_ts(), row["id"]))
 
-    repo.rebuild_unified_kg(nb.id)
+    # force=True: this test targets the per-canonical description sub-cache, not the
+    # outer skip gate; force ensures the recompute runs even if updated_at collided
+    # at second resolution with the previous rebuild.
+    repo.rebuild_unified_kg(nb.id, force=True)
     # exactly ONE additional description call (the MOSFET cluster only)
     assert llm.calls == 3, f"expected 1 new call, names_seen={llm.names_seen}"
     assert llm.names_seen[-1] == "MOSFET"
