@@ -42,6 +42,19 @@ class Settings(BaseSettings):
         2,
         env="OPENAI_COMPAT_MAX_RETRIES",
     )
+    # 单次输出 token 上限(max_tokens)。全局默认应用到所有 LLM 生成调用(改写/扩展、
+    # 冲突/合并预审、graph-reason、元信息等短输出);0=不传、由服务端默认。答案综合与
+    # KG 抽取输出更长,各自走下方更高的专用上限(answer_max_tokens / kg_extract_max_tokens)。
+    openai_compat_max_tokens: int = Field(
+        8192,
+        validation_alias="OPENAI_COMPAT_MAX_TOKENS",
+    )
+    # 答案综合(chunk/mix/reasoning/graph 最终答案)单次输出上限:长对比表 + 推理散文可能
+    # 很长,给足 headroom 避免截断。注意与大输入共享模型总窗口,不宜盲目再调高。
+    answer_max_tokens: int = Field(
+        16384,
+        validation_alias="ANSWER_MAX_TOKENS",
+    )
 
     # 推理搜索 (mode=reasoning) 专用 LLM 端点（可选）。三项全部非空时推理路径改用此
     # 模型，与全局 OPENAI_COMPAT_* 解耦；任一为空 → 整体回退全局。超时/重试沿用
@@ -78,6 +91,9 @@ class Settings(BaseSettings):
     kg_window_overlap_chars: int = Field(450, env="KG_WINDOW_OVERLAP_CHARS")
     # KG 抽取并发线程数。
     kg_extract_workers: int = Field(16, env="KG_EXTRACT_WORKERS")
+    # KG 抽取单次输出 token 上限:一个窗口可能抽出很多节点/关系(JSON 较大),给足避免
+    # 截断(截断→JSON 坏→静默空抽取)。也是原「输出太大超时」处的上限兜底而非目标。
+    kg_extract_max_tokens: int = Field(51200, validation_alias="KG_EXTRACT_MAX_TOKENS")
     # 抽取自校验: 默认开启(2026-06-18,攻 KG 内容质量瓶颈); 每窗口抽取完再做一次 LLM refine pass 剔幻觉。仅建图时生效。
     kg_refine_enabled: bool = Field(True, env="KG_REFINE_ENABLED")
     # gleaning 补抽: 默认开启(2026-06-18); 每窗口首抽完再多轮让 LLM 补"遗漏的节点"(提 recall)。仅建图时生效。

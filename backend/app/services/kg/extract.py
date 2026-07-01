@@ -6,6 +6,7 @@ constrained to the 4; edges to the vocab."""
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
+from app.core.llm import cap_kwargs
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
@@ -175,6 +176,7 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
             [{"role": "user",
               "content": refine_prompt(section_path, records_block, elements_block)}],
             REFINE_SCHEMA_HINT,
+            **cap_kwargs(client, "kg_extract_max_tokens"),
         )
         data = safe_json(raw)
     except (APIConnectionError, APITimeoutError):
@@ -216,7 +218,8 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
     ]
     for _ in range(max_rounds):
         try:
-            raw = client.chat_json(messages, _KG_SCHEMA_HINT)
+            raw = client.chat_json(messages, _KG_SCHEMA_HINT,
+                                   **cap_kwargs(client, "kg_extract_max_tokens"))
             data = safe_json(raw)
         except Exception:
             return
@@ -262,6 +265,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             [{"role": "user",
               "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
             _KG_SCHEMA_HINT,
+            **cap_kwargs(client, "kg_extract_max_tokens"),
         )
         data = safe_json(raw)
     except (APIConnectionError, APITimeoutError):

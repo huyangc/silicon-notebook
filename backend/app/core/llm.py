@@ -46,6 +46,19 @@ def strip_json_fences(text: str) -> str:
     return cleaned
 
 
+def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
+    """Splat helper for a per-call max_tokens override. Returns
+    ``{"max_tokens": N}`` read from the client's Settings budget ``attr`` (e.g.
+    "answer_max_tokens"), or ``{}`` when the client exposes no settings — e.g. a
+    hand-rolled test double. Callers splat it into ``chat_json`` so answer
+    synthesis / KG extraction can request a higher cap than the global default
+    without breaking duck-typed clients that don't accept the kwarg. A non-positive
+    budget also yields ``{}`` (fall back to chat_json's own default)."""
+    settings = getattr(client, "settings", None)
+    value = getattr(settings, attr, None) if settings is not None else None
+    return {"max_tokens": value} if isinstance(value, int) and value > 0 else {}
+
+
 class OpenAICompatibleClient:
     def __init__(self, settings: Settings, *, base_url: Optional[str] = None,
                  api_key: Optional[str] = None, model: Optional[str] = None,
@@ -150,6 +163,7 @@ class OpenAICompatibleClient:
         # DeepSeek-V4 官方推荐本地部署采样参数: temperature=1.0, top_p=1.0
         temperature: float = 1.0,
         top_p: float = 1.0,
+        max_tokens: Optional[int] = None,
         cancel_event: CancelEvent = None,
     ) -> str:
         if not self.configured:
@@ -185,6 +199,14 @@ class OpenAICompatibleClient:
             "temperature": temperature,
             "top_p": top_p,
         }
+        # Cap the completion length. A per-call max_tokens (answer synthesis / KG
+        # extraction pass a higher budget) overrides the global default; when both
+        # resolve to 0/None the param is omitted so the server default applies.
+        # Set here on the shared kwargs dict so it flows into all three
+        # create() calls (streaming + the two non-stream paths) uniformly.
+        _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
+        if _mt and _mt > 0:
+            kwargs["max_tokens"] = _mt
         logger = self.interaction_logger
         record: Dict[str, Any] = {
             "ts": datetime.now().isoformat(),

@@ -9,8 +9,10 @@ from typing import Dict, List, Optional
 
 
 class KGClient:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120,
+                 max_tokens: int = 0):
         self.base_url, self.api_key, self.model, self.timeout = base_url, api_key, model, timeout
+        self.max_tokens = max_tokens   # 单次输出上限;<=0 则不传,由服务端默认
         self._client = None
 
     @property
@@ -55,10 +57,12 @@ class KGClient:
         last = None
         for attempt in range(retries):
             try:
+                _extra = ({"max_tokens": self.max_tokens}
+                          if self.max_tokens and self.max_tokens > 0 else {})
                 stream = self._ensure().chat.completions.create(
                     model=self.model, temperature=0,
                     response_format={"type": "json_object"}, stream=True,
-                    messages=full_messages)
+                    messages=full_messages, **_extra)
                 parts = []
                 for chunk in stream:
                     if chunk.choices:
@@ -76,8 +80,12 @@ class KGClient:
 
 def make_client(env_prefix: str = "") -> KGClient:
     g = lambda k: os.environ.get(env_prefix + k, "")
+    try:
+        max_tokens = int(g("OPENAI_COMPAT_MAX_TOKENS") or "8192")
+    except ValueError:
+        max_tokens = 8192
     return KGClient(g("OPENAI_COMPAT_BASE_URL"), g("OPENAI_COMPAT_API_KEY"),
-                    g("OPENAI_COMPAT_MODEL"))
+                    g("OPENAI_COMPAT_MODEL"), max_tokens=max_tokens)
 
 
 def safe_json(raw: str) -> dict:
