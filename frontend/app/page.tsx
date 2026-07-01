@@ -302,7 +302,7 @@ type KgOccurrence = { quoted_span?: string; source_title?: string; source_id?: s
 type KgProcedureStep = { name: string; element_text: string };
 type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: KgOccurrence[]; definition: string | null; steps: KgProcedureStep[] | null };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
-type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number };
+type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number; viz_indexed: boolean; viz_nodes: number; viz_edges: number; viz_stale: boolean };
 type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
 type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
@@ -3645,6 +3645,29 @@ export default function Home() {
                     {unifiedKgStatus.last_rebuild_at && (
                       <span className="tag">{formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
                     )}
+                    <span
+                      className="tag"
+                      title={
+                        unifiedKgStatus.viz_indexed
+                          ? `图谱索引已就绪 · ${unifiedKgStatus.viz_nodes} 节点 / ${unifiedKgStatus.viz_edges} 边`
+                          : unifiedKgStatus.viz_stale
+                            ? "图谱索引待刷新（重新合并后更新）"
+                            : "图谱索引未构建（首次打开图谱将自动构建）"
+                      }
+                      style={{
+                        color: unifiedKgStatus.viz_indexed
+                          ? "var(--color-ok, #1a7f5a)"
+                          : unifiedKgStatus.viz_stale
+                            ? "var(--color-warn, #b97a00)"
+                            : undefined,
+                      }}
+                    >
+                      {unifiedKgStatus.viz_indexed
+                        ? `图谱索引：已就绪 · ${unifiedKgStatus.viz_nodes} 节点`
+                        : unifiedKgStatus.viz_stale
+                          ? "图谱索引：待刷新"
+                          : "图谱索引：未构建"}
+                    </span>
                   </div>
                 )}
               </div>
