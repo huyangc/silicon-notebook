@@ -6613,9 +6613,11 @@ class SQLiteRepository:
             self.settings.ppr_emb_synonym_topk,
         ]
 
-    def _scale_index(self, notebook_id: str):
+    def _scale_index(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex (manifest version == current DB version) or None.
-        Process-cached: returns the cached instance when the version still matches."""
+        Process-cached: returns the cached instance when the version still matches.
+        allow_stale=True: 也返回磁盘上已存在但版本漂移的索引(调用方用 ⊕-delta 路径
+        兜新鲜度);stale 实例不写进进程缓存(缓存保持版本精确)。"""
         from app.services.kg import scale_index as si
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
         cur = self._scale_index_version(notebook_id)
@@ -6623,10 +6625,12 @@ class SQLiteRepository:
         if cached is not None and cached.manifest.get("version") == cur:
             return cached
         idx = si.load_scale_index(out_dir)
-        if idx is None or idx.manifest.get("version") != cur:
+        if idx is None:
             return None
-        self._scale_idx_cache[notebook_id] = idx
-        return idx
+        if idx.manifest.get("version") == cur:
+            self._scale_idx_cache[notebook_id] = idx
+            return idx
+        return idx if allow_stale else None
 
     def _viz_index(self, notebook_id: str):
         """Index exposing folded viz arrays for the KG-view fast paths, or None.
@@ -7726,7 +7730,7 @@ class SQLiteRepository:
         recall = recall or self.settings.chunk_recall
         query_vector = self._embed_query(query)
         if self.settings.chunk_ann_enabled and query_vector is not None:
-            idx = self._scale_index(notebook_id)
+            idx = self._scale_index(notebook_id, allow_stale=True)
             if idx is not None and getattr(idx, "chunk_ann_labels", None):
                 ann = self._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
                 if ann is not None:
@@ -7744,7 +7748,7 @@ class SQLiteRepository:
         返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。"""
         import numpy as np, hnswlib
         from app.services.retrieval import score_chunks
-        from app.services.vector_index import build_matrix
+        from app.services.vector_index import build_matrix, query_sims
         labels = idx.chunk_ann_labels
         if not labels:
             return None
@@ -7761,8 +7765,29 @@ class SQLiteRepository:
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
             self._note_model_error("chunk_ann_query", self.settings.embed_model, exc)
             return None
-        cand_ids = [labels[int(l)] for l in labs[0]]
         chunk_sims = {labels[int(l)]: max(0.0, 1.0 - float(d)) for l, d in zip(labs[0], dists[0])}
+        cand_ids = list(chunk_sims.keys())
+
+        # ⊕ delta:水位后新增 source 的 chunk 不在存量 ANN → 暴力补召回(delta 小)。
+        try:
+            delta = self._index_delta(notebook_id)
+            if delta["delta_sources"]:
+                ph_s = ",".join("?" for _ in delta["delta_sources"])
+                with self._connect() as db:
+                    drows = db.execute(
+                        f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
+                        f"WHERE notebook_id=? AND chunk_id IN "
+                        f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                        (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
+                d_sims = query_sims(query_vector, d_ids, d_mat) if d_ids else {}
+                for cid, s in d_sims.items():
+                    if cid not in chunk_sims:
+                        cand_ids.append(cid)
+                    chunk_sims[cid] = s
+        except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
+            self._note_model_error("chunk_ann_delta", self.settings.embed_model, exc)
+
         if not cand_ids:
             return [], [], None
         ph = ",".join("?" for _ in cand_ids)
