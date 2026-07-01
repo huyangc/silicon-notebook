@@ -301,3 +301,38 @@ def test_write_clusters_is_per_type_isolated(repo):
                                  "canonical_name": "A2"}], object_type="concept")
     cm2 = repo.cluster_map(nb.id)
     assert "o2" in cm2 and cm2.get("o1") is None and cm2.get("o1b") == "K-a2"
+
+
+def test_review_pending_merges_fail_open_on_bad_llm_json(repo):
+    """A categorical confidence ("high") from the LLM must not 500 this endpoint.
+
+    The route (routes.py) only catches KeyError; review_merge_candidates must be
+    total so review_pending_merges returns a summary instead of raising ValueError.
+    """
+    from app.services.sqlite_repository import _now
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_merge_candidates "
+            "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?, 'pending', ?, ?)",
+            ("cand-1", nb.id, "K-vco", "K-voltage controlled oscillator", 0.93, now, now),
+        )
+
+    class _BadConfLLM:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint):
+            return json.dumps({"decisions": [
+                {"candidate_id": "cand-1", "decision": "merge",
+                 "canonical_name": "vco", "confidence": "high", "rationale": "r"},
+            ]})
+
+    repo.llm_client = _BadConfLLM()  # inject via setter (system default LLM)
+    summary = repo.review_pending_merges(nb.id)  # must NOT raise / 500
+    assert isinstance(summary, dict)
+    # "high" confidence coerces to 0.0 -> below thresholds -> counted as unsure, not confirmed.
+    assert summary["confirmed"] == 0
+    assert summary["reviewed"] == 1

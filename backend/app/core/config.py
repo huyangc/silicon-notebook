@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     kg_merge_separate_threshold: float = Field(0.80, validation_alias="KG_MERGE_SEPARATE_THRESHOLD")
     # 合并复核(review_merge_candidates)每次送 LLM 的候选批大小。分批=每条回复更短,
     # 规避大候选集时单条回复超输出上限被截断→JSON 解析炸→拖垮 rebuild_unified_kg。
-    kg_merge_review_batch_size: int = Field(30, env="KG_MERGE_REVIEW_BATCH_SIZE")
+    kg_merge_review_batch_size: int = Field(30, validation_alias="KG_MERGE_REVIEW_BATCH_SIZE")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。

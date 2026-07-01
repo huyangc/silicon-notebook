@@ -4064,7 +4064,21 @@ class SQLiteRepository:
         separate = separate_threshold if separate_threshold is not None else self.settings.kg_merge_separate_threshold
         pending = self.pending_merges(notebook_id)[: max(1, min(limit, 200))]
         from app.services.concept_merge_review import review_merge_candidates
-        decisions = review_merge_candidates(self.llm_client, pending)
+        # review_merge_candidates is total (fail-open, chunked); the outer try is
+        # defense-in-depth so this endpoint can never 500 on an LLM deviation (the
+        # route only catches KeyError). Same batching/concurrency as the rebuild site.
+        try:
+            decisions = review_merge_candidates(
+                self.llm_client, pending,
+                batch_size=self.settings.kg_merge_review_batch_size,
+                max_workers=self.settings.kg_job_concurrency,
+            )
+        except Exception:
+            self.event_log.logger.exception(
+                "merge-review adjudication failed for %s; proceeding with no decisions",
+                notebook_id,
+            )
+            decisions = []
         confirmed = rejected = unsure = 0
         now = _now()
         with self._write() as db:
