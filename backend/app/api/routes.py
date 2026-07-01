@@ -342,7 +342,7 @@ async def upload_sources(
 
 @router.get("/sources/{source_id}", response_model=SourceDetail)
 def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceDetail:
-    if repository().source_owner(source_id) != user.id:
+    if not repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return repository().get_source(source_id)
@@ -362,7 +362,7 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
 def source_elements(source_id: str, user: UserProfile = Depends(get_current_user)) -> List[SourceElement]:
-    if repository().source_owner(source_id) != user.id:
+    if not repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return repository().source_elements(source_id)

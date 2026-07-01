@@ -1536,12 +1536,13 @@ class SQLiteRepository:
         return row["owner"] if row else None
 
     def conversation_owner(self, conversation_id: str) -> "str | None":
+        """对话归属 = 其创建者 created_by(非 notebook owner)。共享库里成员各管
+        自己发起的对话:get/rename/delete 按 creator 天然隔离,owner 也管不到成员的对话。
+        自有库里 created_by==owner,对 owner 行为不变。"""
         with self._connect() as db:
             row = db.execute(
-                "SELECT nb.created_by AS owner FROM conversations c "
-                "JOIN notebooks nb ON nb.id = c.notebook_id WHERE c.id = ?",
-                (conversation_id,),
-            ).fetchone()
+                "SELECT created_by AS owner FROM conversations WHERE id = ?",
+                (conversation_id,)).fetchone()
         return row["owner"] if row else None
 
     def answer_owner(self, answer_id: str) -> "str | None":
