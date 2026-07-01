@@ -3850,8 +3850,15 @@ class SQLiteRepository:
                 existing_items = [{"object_id": r["id"],
                                    "name": json.loads(r["payload"] or "{}").get("name", "")} for r in ex]
                 new_vecs = {o["object_id"]: vecs[o["object_id"]] for o in new_objs if o["object_id"] in vecs}
-                # 排除全部已决(confirmed+rejected)+ 已 pending,避免重复入队。
-                exclude = {frozenset((a, b)) for (a, b) in self.decided_pairs(notebook_id)}
+                # 排除全部已决(confirmed+rejected+deferred)+ 已 pending,避免重复入队。
+                # 直接查(含 deferred),而非 decided_pairs()(仅 confirmed/rejected)——否则
+                # deferred 概念对会在新源桥接时被重新入队,违背「deferred 不回流」。
+                with self._connect() as _db:
+                    _decided = _db.execute(
+                        "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+                        "WHERE notebook_id=? AND status IN ('confirmed','rejected','deferred')",
+                        (notebook_id,)).fetchall()
+                exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
                 exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
                 from app.services.kg_merge import detect_bridge_candidates
                 cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, exclude)

@@ -1039,6 +1039,9 @@ export default function Home() {
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
   const [reviewAllRunning, setReviewAllRunning] = useState(false);
+  // Reset on notebook switch so the newly-selected notebook's "全部预审" button doesn't
+  // briefly show the previous notebook's done/total or stay disabled from a stale job.
+  useEffect(() => { setReviewAllJob(null); setReviewAllRunning(false); }, [currentNotebookId]);
   // Mirror the buildingKg poll: while an "全部预审" job runs, poll status every 6s until it
   // leaves "running", with a 20min safety cap. Keying on currentNotebookId (captured as `nb`)
   // means switching notebooks or unmounting cancels this poll instead of clobbering the
