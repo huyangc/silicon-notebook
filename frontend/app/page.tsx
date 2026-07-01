@@ -2236,6 +2236,14 @@ export default function Home() {
     finally { setKgRefreshBusy(false); }
   }
 
+  // 点「待重建」/「图谱索引」徽章的入口:先确认再重建,不直接操作。
+  function confirmRefreshUnifiedKg() {
+    if (kgRefreshBusy || buildingKg) return;
+    if (window.confirm("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新抽取来源，可能耗时若干秒）。")) {
+      refreshUnifiedKg();
+    }
+  }
+
   async function reviewPendingMerges() {
     if (!currentNotebookId) return;
     setKgReviewBusy(true);
@@ -3934,22 +3942,38 @@ export default function Home() {
                 )}
                 {unifiedKgStatus && (
                   <div className="tag-row" style={{ marginTop: 4 }}>
-                    <span className="tag" style={{ color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined }}>
-                      {unifiedKgStatus.dirty ? "待重建" : "已同步"}
+                    <span
+                      className="tag"
+                      role="button"
+                      tabIndex={0}
+                      title="点击重新合并（会先确认）：重算跨文档聚类并刷新图谱索引"
+                      onClick={confirmRefreshUnifiedKg}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmRefreshUnifiedKg(); } }}
+                      style={{
+                        cursor: (kgRefreshBusy || buildingKg) ? "default" : "pointer",
+                        color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined,
+                      }}
+                    >
+                      {kgRefreshBusy ? "重建中…" : unifiedKgStatus.dirty ? "待重建" : "已同步"}
                     </span>
                     {unifiedKgStatus.last_rebuild_at && (
-                      <span className="tag">{formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
+                      <span className="tag">上次重建 · {formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
                     )}
                     <span
                       className="tag"
+                      role="button"
+                      tabIndex={0}
                       title={
-                        unifiedKgStatus.viz_indexed
+                        (unifiedKgStatus.viz_indexed
                           ? `图谱索引已就绪 · ${unifiedKgStatus.viz_nodes} 节点 / ${unifiedKgStatus.viz_edges} 边`
                           : unifiedKgStatus.viz_stale
                             ? "图谱索引待刷新（重新合并后更新）"
-                            : "图谱索引未构建（首次打开图谱将自动构建）"
+                            : "图谱索引未构建（首次打开图谱将自动构建）") + " · 点击重建（会先确认）"
                       }
+                      onClick={confirmRefreshUnifiedKg}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmRefreshUnifiedKg(); } }}
                       style={{
+                        cursor: (kgRefreshBusy || buildingKg) ? "default" : "pointer",
                         color: unifiedKgStatus.viz_indexed
                           ? "var(--color-ok, #1a7f5a)"
                           : unifiedKgStatus.viz_stale
