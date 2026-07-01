@@ -784,6 +784,18 @@ class SQLiteRepository:
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_share_token "
                     "ON notebooks(share_token) WHERE share_token IS NOT NULL"
                 )
+            # Notebook sharing (Phase 2): 大库无法深拷贝 → 改为「只读共享」，他人凭
+            # share_token 加入为只读成员(role='reader')。读权 = owner ∪ 成员;写权仍
+            # owner-only(user_can_access_notebook 不动)。CASCADE 保证删库自动清成员。
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS notebook_members ("
+                "  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,"
+                "  user_id TEXT NOT NULL REFERENCES users(id),"
+                "  role TEXT NOT NULL DEFAULT 'reader',"
+                "  added_at TEXT NOT NULL,"
+                "  PRIMARY KEY (notebook_id, user_id))"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_notebook_members_user ON notebook_members(user_id)")
             # Per-source document type drives schema/profile selection at extraction.
             src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
             if "doc_type" not in src_cols:
@@ -1472,6 +1484,45 @@ class SQLiteRepository:
             row = db.execute(
                 "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
         return bool(row) and row["created_by"] == user_id
+
+    def is_member(self, notebook_id: str, user_id: str) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                (notebook_id, user_id)).fetchone()
+        return row is not None
+
+    def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """读权 = owner ∪ 成员。写权仍用 user_can_access_notebook(owner-only,不动)。"""
+        return self.user_can_access_notebook(notebook_id, user_id) or self.is_member(notebook_id, user_id)
+
+    def user_can_read_source(self, source_id: str, user_id: str) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT notebook_id FROM sources WHERE id=?", (source_id,)).fetchone()
+        return bool(row) and self.user_can_read_notebook(row["notebook_id"], user_id)
+
+    def add_member(self, notebook_id: str, user_id: str) -> None:
+        with self._write() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO notebook_members (notebook_id,user_id,role,added_at) "
+                "VALUES (?,?,'reader',?)", (notebook_id, user_id, _now()))
+
+    def remove_member(self, notebook_id: str, user_id: str) -> None:
+        with self._write() as db:
+            db.execute("DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                       (notebook_id, user_id))
+
+    def kick_all_members(self, notebook_id: str) -> None:
+        with self._write() as db:
+            db.execute("DELETE FROM notebook_members WHERE notebook_id=?", (notebook_id,))
+
+    def list_members(self, notebook_id: str) -> list:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT u.username AS username, m.added_at AS added_at FROM notebook_members m "
+                "JOIN users u ON u.id=m.user_id WHERE m.notebook_id=? ORDER BY m.added_at ASC",
+                (notebook_id,)).fetchall()
+        return [{"username": r["username"], "added_at": r["added_at"]} for r in rows]
 
     def source_owner(self, source_id: str) -> "str | None":
         with self._connect() as db:
