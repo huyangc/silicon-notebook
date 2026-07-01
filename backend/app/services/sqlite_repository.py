@@ -1081,6 +1081,7 @@ class SQLiteRepository:
         notebook_id: str,
         object_type: str,
         statuses: Optional[Iterable[str]] = USABLE_STATUSES,
+        id_filter: Optional[Iterable[str]] = None,
     ) -> List[dict]:
         query = (
             "SELECT * FROM knowledge_objects WHERE notebook_id = ? AND object_type = ?"
@@ -1091,6 +1092,13 @@ class SQLiteRepository:
             placeholders = ",".join("?" for _ in status_list)
             query += f" AND status IN ({placeholders})"
             params.extend(status_list)
+        if id_filter is not None:
+            id_list = list(id_filter)
+            if not id_list:
+                return []
+            phid = ",".join("?" for _ in id_list)
+            query += f" AND id IN ({phid})"
+            params.extend(id_list)
         query += " ORDER BY created_at ASC, id ASC"
         rows = db.execute(query, params).fetchall()
         objects: List[dict] = []
@@ -7687,6 +7695,46 @@ class SQLiteRepository:
         return score_relations(query, relations, query_vector=query_vector,
                                relation_sims=relation_sims,
                                downweight_edges=self.settings.kg_about_downweight_enabled)
+
+    def _kg_object_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
+        """ANN 核候选(idx.ann_path=knowledge_embeddings)⊕ delta 对象暴力。
+        返回 {object_id: sim∈[0,1]}。fail-open 返回 {} 让上层退回全量。"""
+        import numpy as np, hnswlib
+        from app.services.vector_index import build_matrix, query_sims
+        sims: dict = {}
+        labels = getattr(idx, "ann_labels", None)
+        if labels and query_vector is not None:
+            qarr = np.asarray(query_vector, dtype=np.float32)
+            dim = int(idx.manifest.get("dim", qarr.shape[0]))
+            if dim == qarr.shape[0]:
+                try:
+                    ann = hnswlib.Index(space="cosine", dim=dim)
+                    ann.load_index(idx.ann_path, max_elements=len(labels))
+                    ann.set_ef(max(recall + 1, 64))
+                    k = min(recall, len(labels))
+                    labs, dists = ann.knn_query(qarr, k=k)
+                    for l, d in zip(labs[0], dists[0]):
+                        sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
+                except Exception as exc:  # noqa: BLE001 — fail-open
+                    self._note_model_error("kg_obj_ann", self.settings.embed_model, exc)
+                    return {}
+        # ⊕ delta 对象(水位后 source)暴力
+        try:
+            delta = self._index_delta(notebook_id)
+            if delta["delta_sources"] and query_vector is not None:
+                ph_s = ",".join("?" for _ in delta["delta_sources"])
+                with self._connect() as db:
+                    drows = db.execute(
+                        f"SELECT object_id AS vid, vector FROM knowledge_embeddings "
+                        f"WHERE notebook_id=? AND object_id IN "
+                        f"(SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                        (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
+                for oid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
+                    sims[oid] = s
+        except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
+            self._note_model_error("kg_obj_delta", self.settings.embed_model, exc)
+        return sims
 
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
