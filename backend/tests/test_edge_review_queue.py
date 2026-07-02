@@ -144,9 +144,23 @@ def test_set_edge_review_invalid_status_raises(repo):
 
 
 # ── Feedback loop: rejected edges demoted in graph ───────────────────────────
+# C3 (hotpath cleanup): this section used to test the feedback loop through
+# `SqliteRepository._rx_graph`, the single-notebook reasoning-graph loader.
+# `_rx_graph` had zero production callers — `ask_graph`/reasoning always go
+# through `_federated_rx_graph` (base+active merge; a solo personal notebook
+# with no base participants federates to just itself, so it subsumes the
+# single-notebook case) — so `_rx_graph` was deleted as dead code. The cache-
+# invalidation-on-warm-graph and rejected/verified-edge-visibility assertions
+# below were ported to `_federated_rx_graph` (see "Feedback loop × federated
+# graph" section, which already covered rejection + warm-cache invalidation
+# — `test_rejected_personal_edge_excluded_from_federated_graph` implicitly
+# proves a not-yet-rejected edge is visible in a warm graph too). The one
+# genuinely distinct assertion — multihop_subgraph traversal skipping a
+# rejected edge — is ported here as
+# `test_verify_chain_edges_skips_rejected_federated` so no coverage is lost.
 
 def _rx_edge_rel_ids(G) -> set:
-    """Collect all rel_ids present in a PyDiGraph returned by _rx_graph."""
+    """Collect all rel_ids present in a PyDiGraph returned by _federated_rx_graph."""
     rel_ids = set()
     for src_idx in range(G.num_nodes()):
         for tgt_idx in G.successor_indices(src_idx):
@@ -156,76 +170,9 @@ def _rx_edge_rel_ids(G) -> set:
     return rel_ids
 
 
-def test_review_flip_invalidates_warm_rx_graph_cache(repo):
-    """Pin the cache-invalidation guarantee on an already-WARM _rx_graph cache.
-
-    Scenario chosen so the unsound pre-fix MAX(review_status) version key
-    provably would NOT change: two edges are 'verified', then one flips
-    verified→rejected while the other stays verified — MAX remains
-    'verified' (lexically the maximum), so only a sound version key
-    (per-status counts: n_verified 2→1, n_rejected 0→1) or the explicit
-    _invalidate_unified_cache in set_edge_review forces a rebuild. This
-    test fails if BOTH mechanisms are ever broken.
-    """
-    nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
-    assert len(q) >= 2, "need at least two edges"
-    keep_id, flip_id = q[0]["rel_id"], q[1]["rel_id"]
-    repo.set_edge_review(nb_id, keep_id, "verified")
-    repo.set_edge_review(nb_id, flip_id, "verified")
-
-    # Warm the cache: graph with both verified edges is now cached.
-    G_warm, _, _ = repo._rx_graph(nb_id)
-    warm_ids = _rx_edge_rel_ids(G_warm)
-    assert keep_id in warm_ids and flip_id in warm_ids
-
-    # Flip verified→rejected while ANOTHER verified edge remains.
-    repo.set_edge_review(nb_id, flip_id, "rejected")
-
-    G_fresh, _, _ = repo._rx_graph(nb_id)
-    fresh_ids = _rx_edge_rel_ids(G_fresh)
-    assert flip_id not in fresh_ids, (
-        "stale _rx_graph served after verified→rejected flip — "
-        "cache invalidation is broken")
-    assert keep_id in fresh_ids
-
-
-def test_rejected_edge_excluded_from_rx_graph(repo):
-    """A rejected edge must not appear in the version-cached PyDiGraph used by reasoning."""
-    nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
-    rel_id = q[0]["rel_id"]
-    repo.set_edge_review(nb_id, rel_id, "rejected")
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb_id)
-    # Collect all rel_ids from the live graph
-    edge_rel_ids = set()
-    for src_idx in range(G.num_nodes()):
-        for tgt_idx in G.successor_indices(src_idx):
-            payload = G.get_edge_data(src_idx, tgt_idx)
-            if isinstance(payload, dict):
-                edge_rel_ids.add(payload.get("rel_id", ""))
-    assert rel_id not in edge_rel_ids, (
-        f"rejected edge {rel_id} must not appear in the reasoning graph")
-
-
-def test_verified_edge_remains_in_rx_graph(repo):
-    """A verified edge must still appear in the reasoning graph."""
-    nb_id = _seed_graph(repo)
-    q = repo.review_queue(nb_id)
-    rel_id = q[0]["rel_id"]
-    repo.set_edge_review(nb_id, rel_id, "verified")
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb_id)
-    edge_rel_ids = set()
-    for src_idx in range(G.num_nodes()):
-        for tgt_idx in G.successor_indices(src_idx):
-            payload = G.get_edge_data(src_idx, tgt_idx)
-            if isinstance(payload, dict):
-                edge_rel_ids.add(payload.get("rel_id", ""))
-    assert rel_id in edge_rel_ids
-
-
-def test_verify_chain_edges_skips_rejected(repo):
-    """verify_chain_edges in ask_graph: a subgraph traversal on a graph where a
+def test_verify_chain_edges_skips_rejected_federated(repo):
+    """verify_chain_edges in ask_graph: a subgraph traversal on the federated
+    reasoning graph (the live path — see module comment above) where a
     rejected edge has been excluded should not include that edge at all."""
     nb_id = _seed_graph(repo)
     q = repo.review_queue(nb_id)
@@ -234,7 +181,7 @@ def test_verify_chain_edges_skips_rejected(repo):
     repo.set_edge_review(nb_id, rel_id, "rejected")
     # Traverse the graph — rejected edge should not appear in any subgraph
     from app.services.kg.graph_reason import multihop_subgraph, DEFAULT_REASONING_EDGES
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb_id)
+    G, idx_to_oid, oid_to_idx = repo._federated_rx_graph(nb_id)
     all_oids = list(oid_to_idx.keys())
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid,
                             seed_ids=all_oids[:1],
@@ -245,8 +192,9 @@ def test_verify_chain_edges_skips_rejected(repo):
 
 
 # ── Feedback loop × federated graph (Track D integration) ────────────────────
-# ask(mode=graph) now reasons over _federated_rx_graph (base + personal merged),
-# so the rejected-edge demotion MUST apply there too — not only in _rx_graph.
+# ask(mode=graph) reasons over _federated_rx_graph (base + personal merged) —
+# the only reasoning-graph loader in the repo (see module comment above) — so
+# the rejected-edge demotion is proven directly against it.
 
 def _seed_federated(repo):
     """Base notebook (marked base) + personal notebook, one edge each.
@@ -284,12 +232,9 @@ def _seed_federated(repo):
 
 
 def test_rejected_personal_edge_excluded_from_federated_graph(repo):
-    """Rejecting a PERSONAL edge must drop it from a warm federated graph.
-
-    Without the review filter in _federated_rx_graph's loader, the rejected
-    edge keeps flowing into ask(mode=graph) reasoning even though _rx_graph
-    excludes it.
-    """
+    """Rejecting a PERSONAL edge must drop it from a warm federated graph —
+    without the review filter in _federated_rx_graph's loader, the rejected
+    edge would keep flowing into ask(mode=graph) reasoning."""
     base_id, pers_id = _seed_federated(repo)
     pers_rel_id = repo.review_queue(pers_id)[0]["rel_id"]
 

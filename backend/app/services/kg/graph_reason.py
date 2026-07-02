@@ -4,8 +4,9 @@ Nodes carry: object_id, object_type, name.
 Edges carry: edge_type, evidence (list[dict]), confidence (float), tier (str).
 
 build_rx_graph() is a pure function — no I/O, easily unit-tested with a
-synthetic fixture.  The repo wraps it via _rx_graph() with VectorCache
-version-keying (same (COUNT, MAX created_at) pattern as _vector_matrix).
+synthetic fixture.  The repo wraps it via _federated_rx_graph() with
+VectorCache version-keying (same (COUNT, MAX created_at) pattern as
+_vector_matrix).
 """
 from __future__ import annotations
 
@@ -160,7 +161,7 @@ def multihop_subgraph(
     The returned node and edge payloads are shallow COPIES, never the live dicts
     stored inside `G`.  rustworkx's get_edge_data / G[idx] hand back the same
     object held in the graph, and `G` is typically the version-cached PyDiGraph
-    (see SqliteRepository._rx_graph) reused across many asks.  A consumer that
+    (see SqliteRepository._federated_rx_graph) reused across many asks.  A consumer that
     mutates a payload in place — e.g. ask_graph demoting a flagged edge's
     confidence to 0.05 before re-rendering — would otherwise corrupt the cached
     graph and leak that change into every subsequent ask until the next version

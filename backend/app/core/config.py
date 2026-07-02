@@ -216,7 +216,7 @@ class Settings(BaseSettings):
     # hnsw 建索引质量参数(recall/build-time 折衷)。三处共用同一值:build_scale_index
     # 里唯一的一次 KG-embedding hnsw 构建(emb_synonym KNN 复用点 + 持久化 ann.bin)、
     # chunk ANN(save_scale_index 里的 chunk_ann.bin)、emb_synonym_edges 未传
-    # prebuilt_index 时的内部自建 fallback(_rx_graph 联邦路径等)。真机 49 万对象库
+    # prebuilt_index 时的内部自建 fallback(_federated_rx_graph 联邦路径等)。真机 49 万对象库
     # hnsw 构建是流水线里最贵的计算,把该参数暴露出来便于按部署规模调优,不改默认值。
     hnsw_ef_construction: int = Field(200, validation_alias="HNSW_EF_CONSTRUCTION")
     # 跨文档概念合并预审(review_pending_merges)的非对称自动落地阈值。单一 0.95 时

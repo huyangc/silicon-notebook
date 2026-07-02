@@ -3,20 +3,23 @@
 These tests cover the *integration* seam (TD1 already unit-tests build_rx_graph's
 hub construction in test_graph_reason.py):
 
-  1. _rx_graph loads concept_clusters into cluster_groups and passes them to
-     build_rx_graph → a transit-only `cluster:` hub appears when ≥2 members of a
-     canonical are present (and NOT when <2).
-  2. _rx_graph's version cache key includes a concept_clusters (COUNT, MAX
-     created_at) part, so adding a cluster row invalidates the cached graph
-     (rebuild after a rebuild_unified_kg).
-  3. Cross-doc bridge through the REPO path: two objects in two sources with NO
-     direct relation, co-members of one canonical → multihop_subgraph from a1
-     with edge_types including "synonym" reaches b1, and the result contains NO
-     `cluster:` node (TD1 transit-only guarantee, asserted through this path).
-  4. _federated_rx_graph aggregates concept_clusters across ALL participants
+  1. _federated_rx_graph aggregates concept_clusters across ALL participants
      (active + base tier) so a base-side member bridges an active-side member.
-  5. ask_graph's multihop_subgraph call uses edge_types == DEFAULT_REASONING_EDGES
+  2. ask_graph's multihop_subgraph call uses edge_types == DEFAULT_REASONING_EDGES
      | {"synonym"} (the bridge would be dormant without "synonym").
+
+C3 (hotpath cleanup): this file used to also cover the *repo-level* single-
+notebook path via `SqliteRepository._rx_graph` (loads concept_clusters into
+cluster_groups, version-cache invalidation on cluster-row changes, cross-doc
+bridge reachability) — six tests in total. `_rx_graph` had zero production
+callers (grep-confirmed across two review passes; `ask_graph`/reasoning only
+ever go through `_federated_rx_graph`, which merges base+active and subsumes
+the single-notebook case), so it was deleted as dead code and those six
+tests were deleted with it. No unique coverage is lost: the underlying pure
+function (`build_rx_graph`, including cluster-hub construction, transit-only
+guarantees, and version-key soundness reasoning) remains exhaustively unit-
+tested in test_graph_reason.py, and the repo-level integration seam for the
+live code path is covered here via `_federated_rx_graph` (tests 1-2 below).
 """
 import json
 
@@ -76,115 +79,7 @@ def _add_cluster(repo, notebook_id, canonical_id, members, cc_prefix="cc"):
                  canonical_id, "concept", "", _NOW))
 
 
-# ── 1 + 2: _rx_graph loads clusters; version invalidates on cluster change ───
-
-def test_rx_graph_version_invalidates_on_cluster_row(repo):
-    """Adding a concept_clusters row must change the cached graph object
-    (version key now includes concept_clusters COUNT/MAX created_at)."""
-    from app.models.schemas import NotebookCreate
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-
-    G1, _, o2i_1 = repo._rx_graph(nb.id)
-    # Same data → same cached object (sanity: cache hit).
-    G1b, _, _ = repo._rx_graph(nb.id)
-    assert G1 is G1b, "expected a cache hit on identical data"
-
-    # Add a cluster row spanning a1+b1 → version must change → new graph object.
-    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
-    G2, _, o2i_2 = repo._rx_graph(nb.id)
-    assert G2 is not G1, "cluster row did not invalidate the cached graph"
-
-
-def test_rx_graph_passes_cluster_groups_hub_present_when_two_members(repo):
-    """_rx_graph passes cluster_groups → the returned graph contains a
-    `cluster:` hub node when ≥2 members of a canonical are present."""
-    from app.models.schemas import NotebookCreate
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
-
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
-    hub_nodes = [G[i] for i in G.node_indices() if G[i].get("kind") == "cluster"]
-    assert len(hub_nodes) == 1, "expected exactly one transit-only cluster hub"
-    assert hub_nodes[0]["object_id"] == "cluster:K-x"
-
-
-def test_rx_graph_no_hub_when_single_member_present(repo):
-    """A canonical with only 1 present member adds no hub (lone member needs no
-    bridge) — exercised through the repo load path."""
-    from app.models.schemas import NotebookCreate
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-    # canonical references a1 + a ghost object id absent from knowledge_objects
-    _add_cluster(repo, nb.id, "K-solo", ["a1", "ghost-not-an-object"])
-
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
-    hub_nodes = [G[i] for i in G.node_indices() if G[i].get("kind") == "cluster"]
-    assert hub_nodes == [], "no hub expected when <2 members are present"
-
-
-def test_rx_graph_no_clusters_no_hub_and_no_kind(repo):
-    """No concept_clusters rows → no hub, and real nodes carry NO kind tag
-    (None-path stays byte-identical to the pre-hub payload shape)."""
-    from app.models.schemas import NotebookCreate
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
-    assert all(G[i].get("kind") != "cluster" for i in G.node_indices())
-    # cluster_groups should be falsy → build_rx_graph leaves nodes untagged
-    a1 = G[oid_to_idx["a1"]]
-    assert "kind" not in a1, "real node tagged kind without any clusters present"
-
-
-# ── 3: cross-doc bridge through the repo path + transit-only guarantee ───────
-
-def test_rx_graph_synonym_traversal_bridges_cross_doc(repo):
-    """Integration: a1 (src-A) and b1 (src-B) have NO direct relation but share a
-    canonical. Building via _rx_graph + multihop with edge_types incl. "synonym"
-    reaches b1, AND the result contains NO `cluster:` node."""
-    from app.models.schemas import NotebookCreate
-    from app.services.kg.graph_reason import multihop_subgraph
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
-
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
-    sub = multihop_subgraph(
-        G, oid_to_idx, idx_to_oid,
-        seed_ids=["a1"],
-        edge_types={"supports", "synonym"},
-        max_depth=4, max_fan_out=10,
-    )
-    oids = [n["object_id"] for n, _, _ in sub]
-    assert "b1" in oids, "expected to reach cross-doc node b1 via the cluster hub"
-    # transit-only: no hub node ever emitted (TD1 guarantee, via this path)
-    assert all(not str(o).startswith("cluster:") for o in oids)
-    assert all(n.get("kind") != "cluster" for n, _, _ in sub)
-
-
-def test_rx_graph_no_bridge_without_synonym_edge(repo):
-    """Without "synonym" in edge_types, a1 cannot reach b1 (the bridge is
-    dormant — proves the synonym addition is load-bearing)."""
-    from app.models.schemas import NotebookCreate
-    from app.services.kg.graph_reason import multihop_subgraph
-    nb = repo.create_notebook(NotebookCreate(name="kb"))
-    _seed_two_docs(repo, nb.id)
-    _add_cluster(repo, nb.id, "K-x", ["a1", "b1"])
-
-    G, idx_to_oid, oid_to_idx = repo._rx_graph(nb.id)
-    sub = multihop_subgraph(
-        G, oid_to_idx, idx_to_oid,
-        seed_ids=["a1"],
-        edge_types={"supports"},  # no synonym → hub edges not followed
-        max_depth=4, max_fan_out=10,
-    )
-    oids = [n["object_id"] for n, _, _ in sub]
-    assert "b1" not in oids
-
-
-# ── 4: _federated_rx_graph aggregates clusters across participants ───────────
+# ── 1: _federated_rx_graph aggregates clusters across participants ───────────
 
 def test_federated_rx_graph_bridges_base_and_active_via_cluster(repo):
     """_federated_rx_graph spans clusters from ALL participants: a base-tier
@@ -257,7 +152,7 @@ def test_federated_rx_graph_version_invalidates_on_cluster_row(repo):
     assert G2 is not G1, "cluster row on a participant did not invalidate fed graph"
 
 
-# ── 5: ask_graph uses DEFAULT_REASONING_EDGES | {"synonym"} ──────────────────
+# ── 2: ask_graph uses DEFAULT_REASONING_EDGES | {"synonym"} ──────────────────
 
 def test_ask_graph_multihop_call_includes_synonym_edge_type(repo, monkeypatch):
     """ask_graph's multihop_subgraph call must pass edge_types that include
