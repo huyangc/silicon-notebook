@@ -178,7 +178,7 @@ class Settings(BaseSettings):
     # 的 chunk 不做暴力语义补召回。True 时对 delta 额外暴力(强一致,但大库慢),供 opt-in。
     # 配合 scale_auto_fold_on_add:新增内容排增量 fold,使 delta 尽快进索引取代暴力。
     # pydantic-settings v2 下 Field(env=...) 对新字段静默失效,必须用 validation_alias。
-    scale_search_include_delta: bool = Field(False, validation_alias="SCALE_SEARCH_INCLUDE_DELTA")
+    scale_search_include_delta: bool = Field(False, validation_alias="SCALE_SEARCH_INCLUDE_DELTA")  # 已索引库检索是否含水位后 delta:统一门控 chunk(_retrieve_chunks_ann)/KG对象(_kg_object_candidates)/关系(_relation_ann_candidates)/PPR图基底(_active_kg_delta) 四处;默认关=只检索已索引部分(delta 靠 auto-fold 收进,最终一致);开=强一致 delta 暴力(大 delta 不可扩展)
     scale_auto_fold_on_add: bool = Field(True, validation_alias="SCALE_AUTO_FOLD_ON_ADD")            # 已索引库新增内容后自动排增量 fold(idle,合并多次新增),使 delta 尽快进索引
     # 大库自动建/重建检索索引(复用分享/拷贝的「大」定义 notebook_copy_stats().copyable==False):
     # 默认开,写路径(抽取完成/rebuild_unified_kg)与检索回退路径均可触发,入队走既有
