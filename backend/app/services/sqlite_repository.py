@@ -842,6 +842,22 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb_created ON knowledge_embeddings(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_element_embeddings_nb ON element_embeddings(notebook_id);
 
+                -- P0-4 反查表: knowledge_objects.evidence 是 JSON (每条 evidence item
+                -- 携带自己的 source_id — 一个合并后的 object 可引用多个来源), 所以
+                -- "找出引用某 source 的所有 object" 原来要整本 notebook 逐行
+                -- json.loads (490k 行量级)。这张表把 evidence[].source_id 打平成行,
+                -- 让该查询变成一次索引命中的 SQL。Additive, 前向维护见
+                -- store_kg / merge_knowledge / confirm_promotion; 首次使用时对旧库
+                -- 惰性回填(见 _clear_source_extraction_state)。
+                CREATE TABLE IF NOT EXISTS knowledge_object_sources (
+                  object_id TEXT NOT NULL,
+                  source_id TEXT NOT NULL,
+                  notebook_id TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kos_source ON knowledge_object_sources(source_id);
+                CREATE INDEX IF NOT EXISTS idx_kos_object ON knowledge_object_sources(object_id);
+                CREATE INDEX IF NOT EXISTS idx_kos_notebook ON knowledge_object_sources(notebook_id);
+
                 CREATE TABLE IF NOT EXISTS communities (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -970,6 +986,17 @@ class SQLiteRepository:
             # new 'v2' scheme, so the first post-migration rebuild recomputes — safe.
             if "kg_mutation_seq" not in uks_cols:
                 db.execute("ALTER TABLE unified_kg_state ADD COLUMN kg_mutation_seq INTEGER NOT NULL DEFAULT 0")
+            # source_index_backfilled: 0/1 marker — once set, _clear_source_extraction_state
+            # trusts knowledge_object_sources for this notebook and skips the legacy
+            # full-evidence-scan fallback. Set by the backfill-on-first-use scan itself
+            # (the scan callers were already paying becomes the LAST one) or by the
+            # standalone `backfill-source-index` CLI. Additive; pre-existing DBs start
+            # at 0 (never backfilled), so they correctly take the legacy-scan path once.
+            if "source_index_backfilled" not in uks_cols:
+                db.execute(
+                    "ALTER TABLE unified_kg_state ADD COLUMN source_index_backfilled "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             # Community report columns (title/summary/findings).
             comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
             for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
@@ -1156,6 +1183,112 @@ class SQLiteRepository:
         with self._connect() as conn:
             return bool(conn.execute(sql).fetchone()[0])
 
+    @staticmethod
+    def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
+        """PURE: parse an evidence JSON TEXT column value into the set of distinct
+        source_ids it references (Evidence.source_id is present on every item —
+        confirmed in app/models/schemas.py; a merged object's evidence can span
+        multiple sources, which is exactly why a per-object single source_id
+        column is insufficient and this reverse table exists)."""
+        try:
+            items = json.loads(evidence_json or "[]")
+        except json.JSONDecodeError:
+            items = []
+        return {
+            item.get("source_id")
+            for item in items
+            if isinstance(item, dict) and item.get("source_id")
+        }
+
+    def _upsert_knowledge_object_sources(
+        self, db: sqlite3.Connection, object_id: str, notebook_id: str, evidence_json: Optional[str]
+    ) -> None:
+        """Forward maintenance: replace object_id's rows in the reverse index with
+        the source_ids its CURRENT evidence references. Called by every write path
+        that creates/updates a knowledge_objects row with evidence (store_kg,
+        confirm_promotion insert/merge, merge_knowledge). Delete-then-insert keeps
+        this correct even when evidence shrinks (not currently possible, but cheap
+        to keep safe)."""
+        db.execute("DELETE FROM knowledge_object_sources WHERE object_id = ?", (object_id,))
+        source_ids = self._source_ids_from_evidence(evidence_json)
+        if source_ids:
+            db.executemany(
+                "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
+                "VALUES (?, ?, ?)",
+                [(object_id, sid, notebook_id) for sid in source_ids],
+            )
+
+    @staticmethod
+    def _delete_knowledge_object_sources(db: sqlite3.Connection, object_ids: List[str]) -> None:
+        """Deletion coherence: drop reverse-index rows for objects that are
+        actually removed from knowledge_objects (source delete/reparse path).
+        merge_knowledge does NOT call this — it deprecates the losing object
+        in place rather than deleting it, so that object's evidence (now folded
+        into the target too, but still physically present on its own row) must
+        stay indexed until it is truly deleted."""
+        if not object_ids:
+            return
+        placeholders = ",".join("?" for _ in object_ids)
+        db.execute(
+            f"DELETE FROM knowledge_object_sources WHERE object_id IN ({placeholders})",
+            object_ids,
+        )
+
+    def _source_index_backfilled(self, db: sqlite3.Connection, notebook_id: str) -> bool:
+        row = db.execute(
+            "SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row and row["source_index_backfilled"])
+
+    def _mark_source_index_backfilled(self, db: sqlite3.Connection, notebook_id: str) -> None:
+        now = _now()
+        db.execute(
+            """
+            INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, source_index_backfilled, updated_at)
+            VALUES (?, 0, 0, 1, ?)
+            ON CONFLICT(notebook_id) DO UPDATE SET
+              source_index_backfilled=1,
+              updated_at=excluded.updated_at
+            """,
+            (notebook_id, now),
+        )
+
+    def _find_stale_knowledge_ids_for_source(
+        self, db: sqlite3.Connection, source_id: str, notebook_id: str
+    ) -> List[str]:
+        """Return knowledge_objects.id values whose evidence references source_id.
+
+        Fast path (backfilled notebooks): a single indexed SQL lookup against
+        knowledge_object_sources — O(matches), not O(notebook size).
+
+        Legacy path (not yet backfilled): the original full-evidence-JSON scan
+        of every object in the notebook — but the scan the caller was about to
+        pay anyway is reused to populate knowledge_object_sources for every
+        object encountered, and the notebook is marked backfilled, so it is
+        provably the LAST time this notebook pays the O(N) cost (backfill-on-
+        first-use)."""
+        if self._source_index_backfilled(db, notebook_id):
+            rows = db.execute(
+                "SELECT DISTINCT object_id FROM knowledge_object_sources "
+                "WHERE source_id = ? AND notebook_id = ?",
+                (source_id, notebook_id),
+            ).fetchall()
+            return [r["object_id"] for r in rows]
+
+        stale_knowledge_ids: List[str] = []
+        knowledge_rows = db.execute(
+            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchall()
+        for row in knowledge_rows:
+            source_ids = self._source_ids_from_evidence(row["evidence"])
+            self._upsert_knowledge_object_sources(db, row["id"], notebook_id, row["evidence"])
+            if source_id in source_ids:
+                stale_knowledge_ids.append(row["id"])
+        self._mark_source_index_backfilled(db, notebook_id)
+        return stale_knowledge_ids
+
     def _clear_source_extraction_state(
         self,
         db: sqlite3.Connection,
@@ -1164,19 +1297,9 @@ class SQLiteRepository:
         *,
         clear_embeddings: bool,
     ) -> None:
-        # KG writes directly to knowledge_objects; find stale objects by evidence source_id.
-        stale_knowledge_ids: List[str] = []
-        knowledge_rows = db.execute(
-            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchall()
-        for row in knowledge_rows:
-            try:
-                evidence_items = json.loads(row["evidence"] or "[]")
-            except json.JSONDecodeError:
-                evidence_items = []
-            if any(item.get("source_id") == source_id for item in evidence_items if isinstance(item, dict)):
-                stale_knowledge_ids.append(row["id"])
+        # KG writes directly to knowledge_objects; find stale objects by evidence source_id
+        # (see _find_stale_knowledge_ids_for_source for the reverse-index/legacy-scan split).
+        stale_knowledge_ids = self._find_stale_knowledge_ids_for_source(db, source_id, notebook_id)
 
         if stale_knowledge_ids:
             placeholders = ",".join("?" for _ in stale_knowledge_ids)
@@ -1188,6 +1311,7 @@ class SQLiteRepository:
                 f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
                 stale_knowledge_ids,
             )
+            self._delete_knowledge_object_sources(db, stale_knowledge_ids)
         db.execute("DELETE FROM extraction_runs WHERE source_id = ?", (source_id,))
         if clear_embeddings:
             db.execute("DELETE FROM element_embeddings WHERE source_id = ?", (source_id,))
@@ -2946,7 +3070,13 @@ class SQLiteRepository:
                 "(SELECT id FROM knowledge_objects WHERE source_id = ?)",
                 (source_id,),
             )
+            direct_ids = [
+                r["id"] for r in db.execute(
+                    "SELECT id FROM knowledge_objects WHERE source_id = ?", (source_id,)
+                ).fetchall()
+            ]
             db.execute("DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,))
+            self._delete_knowledge_object_sources(db, direct_ids)
             db.execute(
                 """INSERT INTO extraction_runs
                    (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
@@ -3847,6 +3977,21 @@ class SQLiteRepository:
                         "INSERT INTO kg_objects_fts(object_id, notebook_id, name) "
                         "VALUES (?, ?, ?)",
                         fts_rows,
+                    )
+                # Forward maintenance (P0-4 reverse index): fresh inserts never had
+                # prior rows, so a plain batched INSERT suffices (no DELETE-first).
+                kos_rows = [
+                    (o["_oid"], sid, notebook_id)
+                    for o in chunk
+                    for sid in self._source_ids_from_evidence(
+                        json.dumps(o["evidence"], ensure_ascii=False)
+                    )
+                ]
+                if kos_rows:
+                    db.executemany(
+                        "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
+                        "VALUES (?, ?, ?)",
+                        kos_rows,
                     )
         for i in range(0, len(db_relations), CHUNK):
             chunk = db_relations[i:i + CHUNK]
@@ -6659,6 +6804,9 @@ class SQLiteRepository:
                 )
                 base_object_id = base_match_id
                 merged_into = base_match_id
+                self._upsert_knowledge_object_sources(
+                    db, base_object_id, base_nb_id, json.dumps(merged_evidence, ensure_ascii=False)
+                )
             else:
                 # No match: insert a fresh base object at status='approved'.
                 base_object_id = f"ko-{uuid4().hex[:10]}"
@@ -6681,6 +6829,9 @@ class SQLiteRepository:
                     ),
                 )
                 merged_into = ""
+                self._upsert_knowledge_object_sources(
+                    db, base_object_id, base_nb_id, json.dumps(src_evidence, ensure_ascii=False)
+                )
 
             db.execute(
                 "UPDATE promotion_candidates "
@@ -6967,10 +7118,15 @@ class SQLiteRepository:
                 if key not in seen:
                     merged.append(item)
                     seen.add(key)
+            merged_json = json.dumps(merged, ensure_ascii=False)
             db.execute(
                 "UPDATE knowledge_objects SET evidence = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(merged, ensure_ascii=False), now, into_id),
+                (merged_json, now, into_id),
             )
+            # into_id's evidence gained items (possibly new source_ids) from source_id;
+            # source_id itself only flips status (its own evidence/reverse-index rows
+            # are unchanged and stay correct until the object is actually deleted).
+            self._upsert_knowledge_object_sources(db, into_id, notebook_id, merged_json)
             db.execute(
                 "UPDATE knowledge_objects SET status = 'deprecated', last_reviewed = ?, updated_at = ? WHERE id = ?",
                 (now, now, source_id),
