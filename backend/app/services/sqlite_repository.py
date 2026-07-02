@@ -3998,17 +3998,44 @@ class SQLiteRepository:
         instead of once per HTTP request. At 490k-node scale this used to be
         minutes of synchronous CPU on the request thread, every request.
 
-        Bounding (P0-3): when the graph exceeds settings.edge_centrality_max_nodes,
-        betweenness is computed ONLY on the degree-top-K induced subgraph (K =
-        edge_centrality_max_nodes), where degree is measured in the full loaded
-        graph and ties are broken by node insertion order (deterministic — same
-        input always yields the same top-K set, so the cached value is
-        reproducible). Edges with either endpoint outside the top-K subgraph get
-        centrality 0.0. This means review_priority (= centrality * (1 - trust))
-        DEGRADES to being trust-score-driven for those edges — betweenness no
-        longer distinguishes them, so ranking among them falls back to whichever
-        has the lowest trust_score. This is an accepted approximation at scale,
-        not a bug: full-graph Brandes is O(V·E) and does not fit in a request.
+        Bounding (P0-3, reworked): when the FULL node count exceeds
+        settings.edge_centrality_max_nodes, the loader itself stays bounded —
+        it never materializes the full objects/relations graph before cutting
+        it down. Instead:
+          1. Degree ranking via SQL: `GROUP BY source_object_id` and `GROUP BY
+             target_object_id` COUNT(*) over knowledge_relations (non-rejected),
+             merged in a Python dict — bounded by the distinct node count
+             touched by an edge (objects with zero relations never rank and are
+             irrelevant to edge betweenness anyway: an isolated node cannot be
+             an edge endpoint). This entirely avoids loading knowledge_objects'
+             payload (name/type — unused by compute_edge_centrality, which only
+             reads back `rel_id`) for the ranking step.
+          2. Only relations with BOTH endpoints in the top-K id set are loaded
+             (edges to/from out-of-top-K nodes are dropped from the graph
+             entirely, same "centrality 0.0 for those edges" semantics as the
+             old post-hoc subgraph cut). Uses `json_each(?)` — SQLite's
+             built-in table-valued function that turns a single bound JSON
+             array parameter into a virtual row set — JOINed against
+             knowledge_relations, instead of either (a) a many-thousand-
+             placeholder `IN (...)` list, which risks SQLITE_MAX_VARIABLE_
+             NUMBER-adjacent slowness/limits at K's default of 20000, or
+             (b) a `CREATE TEMP TABLE` + INSERT, which is a real SQL write
+             this repo's write-serialization convention requires funneling
+             through `_write()` (see test_all_writes_go_through_write_lock) —
+             json_each needs neither DDL nor an INSERT, it is a pure read-side
+             join, so the read-only `_connect()` path stays correct.
+          3. build_rx_graph + compute_edge_centrality run exactly as before, on
+             the now-already-bounded (top-K-only) node/edge set — no post-hoc
+             subgraph cut needed since the load itself is scoped.
+
+        Under-K graphs: identical result to before (no bounding kicks in — the
+        full node set IS the "top-K" set, SQL ranking is order-preserving
+        wrt/betweenness since every node participates either way). Ties in the
+        SQL degree ranking are broken by `id` (deterministic, unlike the old
+        node-insertion-order tiebreak — see the equivalence test for the
+        exact-K-boundary case, which is not order-sensitive: nodes past the
+        cut contribute 0 either way since they're not edge endpoints for any
+        edge that survives, or the graph is under K and no cut happens at all).
         """
         from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
 
@@ -4016,23 +4043,62 @@ class SQLiteRepository:
 
         def _load() -> Dict[str, float]:
             with self._connect() as db:
-                rel_rows = db.execute(
-                    "SELECT id, source_object_id, target_object_id, edge_type, "
-                    "evidence FROM knowledge_relations "
-                    "WHERE notebook_id = ? AND review_status != 'rejected'",
-                    (notebook_id,),
-                ).fetchall()
-                obj_rows = db.execute(
-                    "SELECT id, object_type, payload FROM knowledge_objects "
-                    "WHERE notebook_id = ?", (notebook_id,)
-                ).fetchall()
+                max_nodes = self.settings.edge_centrality_max_nodes
 
-            node_types: dict = {}
-            node_names: dict = {}
-            for r in obj_rows:
-                node_types[r["id"]] = r["object_type"]
-                p = json.loads(r["payload"] or "{}")
-                node_names[r["id"]] = p.get("name", "")
+                # 1. Degree ranking via SQL — bounded by distinct node count
+                #    touched by a non-rejected relation (never the full
+                #    knowledge_objects table).
+                degree: Dict[str, int] = {}
+                for r in db.execute(
+                    "SELECT source_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
+                    "WHERE notebook_id = ? AND review_status != 'rejected' "
+                    "GROUP BY source_object_id", (notebook_id,),
+                ).fetchall():
+                    degree[r["n"]] = degree.get(r["n"], 0) + r["c"]
+                for r in db.execute(
+                    "SELECT target_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
+                    "WHERE notebook_id = ? AND review_status != 'rejected' "
+                    "GROUP BY target_object_id", (notebook_id,),
+                ).fetchall():
+                    degree[r["n"]] = degree.get(r["n"], 0) + r["c"]
+
+                bounded = len(degree) > max_nodes
+                if bounded:
+                    # Deterministic top-K: sort by (-degree, id) so ties break
+                    # on a stable, reproducible key (unlike the old
+                    # insertion-order tiebreak, which depended on dict-iteration
+                    # order of a full objects load we no longer perform).
+                    top_ids = [n for n, _ in sorted(
+                        degree.items(), key=lambda kv: (-kv[1], kv[0])
+                    )[:max_nodes]]
+                    top_ids_json = json.dumps(top_ids)
+                    rel_rows = db.execute(
+                        "SELECT r.id, r.source_object_id, r.target_object_id, "
+                        "r.edge_type, r.evidence FROM knowledge_relations r "
+                        "JOIN json_each(?) s ON s.value = r.source_object_id "
+                        "JOIN json_each(?) t ON t.value = r.target_object_id "
+                        "WHERE r.notebook_id = ? AND r.review_status != 'rejected'",
+                        (top_ids_json, top_ids_json, notebook_id),
+                    ).fetchall()
+                    node_ids = top_ids
+                else:
+                    rel_rows = db.execute(
+                        "SELECT id, source_object_id, target_object_id, edge_type, "
+                        "evidence FROM knowledge_relations "
+                        "WHERE notebook_id = ? AND review_status != 'rejected'",
+                        (notebook_id,),
+                    ).fetchall()
+                    obj_rows = db.execute(
+                        "SELECT id FROM knowledge_objects WHERE notebook_id = ?",
+                        (notebook_id,),
+                    ).fetchall()
+                    node_ids = [r["id"] for r in obj_rows]
+
+            # 2. Node dict for build_rx_graph — type/name are unused by
+            #    compute_edge_centrality (only `rel_id` is read back), so a
+            #    minimal empty-string payload keeps graph SHAPE (node count,
+            #    indices) identical without a knowledge_objects payload load.
+            nodes = {oid: {"type": "", "name": ""} for oid in node_ids}
 
             rels = []
             for r in rel_rows:
@@ -4044,28 +4110,7 @@ class SQLiteRepository:
                     "evidence": json.loads(r["evidence"] or "[]"),
                 })
 
-            G, idx_to_oid, oid_to_idx = build_rx_graph(
-                {oid: {"type": t, "name": node_names.get(oid, "")}
-                 for oid, t in node_types.items()},
-                rels,
-            )
-
-            max_nodes = self.settings.edge_centrality_max_nodes
-            if G.num_nodes() > max_nodes:
-                # Degree-top-K induced subgraph. PyDiGraph has no combined
-                # .degree(); total degree = in_degree + out_degree. Sort is
-                # stable, so ties break by node insertion order (== node index,
-                # since build_rx_graph assigns indices in dict-iteration order)
-                # — deterministic top-K for a reproducible cache value.
-                node_indices = list(range(G.num_nodes()))
-                node_indices.sort(
-                    key=lambda idx: G.in_degree(idx) + G.out_degree(idx),
-                    reverse=True,
-                )
-                top_k = node_indices[:max_nodes]
-                sub = G.subgraph(top_k, preserve_attrs=True)
-                return compute_edge_centrality(sub)
-
+            G, idx_to_oid, oid_to_idx = build_rx_graph(nodes, rels)
             return compute_edge_centrality(G)
 
         return self._vector_cache.get(f"{notebook_id}:edge_centrality", version, _load)

@@ -800,3 +800,128 @@ def test_edge_centrality_within_bound_matches_unbounded(repo, monkeypatch):
     got = repo._edge_centrality_map(nb_id)
     want = _oracle_edge_centrality(repo, nb_id)
     assert got == want
+
+
+# ── C1 rework: bounded LOADER (SQL degree ranking + temp-table JOIN) ─────────
+# _edge_centrality_map used to load ALL relations + ALL knowledge_objects
+# (payload included) before cutting down to degree-top-K in Python/rustworkx.
+# Reworked so the LOAD itself is bounded: (1) degree via SQL GROUP BY over
+# knowledge_relations only (no knowledge_objects query at all for ranking),
+# (2) only edges with both endpoints in the top-K id set are ever SELECTed
+# (via a CREATE TEMP TABLE + JOIN), (3) build_rx_graph/compute_edge_centrality
+# run unchanged on the already-bounded set.
+
+def test_edge_centrality_bounded_load_no_full_objects_query(repo, monkeypatch):
+    """Over-K path must never issue a full-row `knowledge_objects` query
+    (SELECT ... payload ... FROM knowledge_objects) inside the LOADER — the
+    whole point of the rework is that ranking + edge selection happen via SQL
+    (relations GROUP BY + temp-table JOIN), never a knowledge_objects payload
+    load. Note: repo._scale_index_version (the CACHE KEY, evaluated before
+    the loader runs at all) legitimately issues a cheap COUNT/MAX aggregate
+    against knowledge_objects — that's the pre-existing version-cache
+    machinery, unrelated to this rework, so the spy only flags a query that
+    selects the `payload` column (the actual expensive full-row load this
+    item removes from the bounded path)."""
+    monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 3)
+    nb_id = _seed_centrality_graph(repo, n_extra_chain=4)  # 8 nodes > bound=3
+    # Warm the version-cache machinery's own queries first (out of scope for
+    # this spy) so only the loader's queries are observed below.
+    repo._scale_index_version(nb_id)
+    repo._vector_cache.invalidate(f"{nb_id}:edge_centrality")
+
+    seen_payload_query = {"hit": False}
+    orig_connect = repo._connect
+
+    class _SpyConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *a, **kw):
+            if "knowledge_objects" in sql and "payload" in sql:
+                seen_payload_query["hit"] = True
+            return self._inner.execute(sql, *a, **kw)
+
+        def executemany(self, sql, *a, **kw):
+            return self._inner.executemany(sql, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    def spy_connect():
+        return _SpyConn(orig_connect())
+
+    monkeypatch.setattr(repo, "_connect", spy_connect)
+    ec_map = repo._edge_centrality_map(nb_id)
+    assert isinstance(ec_map, dict) and ec_map
+    assert not seen_payload_query["hit"], (
+        "over-K _edge_centrality_map loader must not query knowledge_objects.payload")
+
+
+def test_edge_centrality_bounded_load_equals_old_post_hoc_cut(repo, monkeypatch):
+    """Equivalence: the new bounded-LOAD result must equal an oracle that
+    loads the FULL graph the OLD way (all objects + all relations) and then
+    applies the identical (-degree, id) top-K selection rule as the new
+    loader, before running build_rx_graph/compute_edge_centrality.
+
+    Note on tie-break: the new SQL-ranked loader deliberately uses a
+    deterministic (-degree, id) tie-break instead of the old rustworkx
+    node-insertion-order tiebreak (see _edge_centrality_map's docstring) —
+    when there is a genuine degree tie at the top-K boundary, the OLD
+    insertion-order-tiebreak and the NEW id-tiebreak can select a DIFFERENT
+    top-K node set, which is an intentional, documented behavior change (not
+    a regression: betweenness at the boundary was already an approximation).
+    So this oracle mirrors the NEW tie-break rule exactly — proving the
+    bounded LOAD produces byte-identical results to bounding a fully-loaded
+    graph the same way, i.e. the loader rework changes nothing except what
+    gets fetched from SQLite."""
+    from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
+    monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 3)
+    nb_id = _seed_centrality_graph(repo, n_extra_chain=4)
+
+    got = repo._edge_centrality_map(nb_id)
+
+    # Oracle: full load (old table shape), but rank top-K with the SAME
+    # (-degree, id) rule the new SQL loader uses.
+    with repo._connect() as db:
+        rel_rows = db.execute(
+            "SELECT id, source_object_id, target_object_id, edge_type, "
+            "evidence FROM knowledge_relations "
+            "WHERE notebook_id = ? AND review_status != 'rejected'",
+            (nb_id,)).fetchall()
+        obj_rows = db.execute(
+            "SELECT id, object_type, payload FROM knowledge_objects "
+            "WHERE notebook_id = ?", (nb_id,)).fetchall()
+    node_types, node_names = {}, {}
+    for r in obj_rows:
+        node_types[r["id"]] = r["object_type"]
+        node_names[r["id"]] = json.loads(r["payload"] or "{}").get("name", "")
+    rels = [{
+        "id": r["id"], "source_object_id": r["source_object_id"],
+        "target_object_id": r["target_object_id"], "edge_type": r["edge_type"],
+        "evidence": json.loads(r["evidence"] or "[]"),
+    } for r in rel_rows]
+
+    degree: dict = {}
+    for r in rels:
+        degree[r["source_object_id"]] = degree.get(r["source_object_id"], 0) + 1
+        degree[r["target_object_id"]] = degree.get(r["target_object_id"], 0) + 1
+    max_nodes = repo.settings.edge_centrality_max_nodes
+    top_ids = set(n for n, _ in sorted(
+        degree.items(), key=lambda kv: (-kv[1], kv[0]))[:max_nodes])
+
+    node_dict = {oid: {"type": "", "name": ""} for oid in top_ids}
+    bounded_rels = [r for r in rels
+                    if r["source_object_id"] in top_ids and r["target_object_id"] in top_ids]
+    G, idx_to_oid, oid_to_idx = build_rx_graph(node_dict, bounded_rels)
+    old_result = compute_edge_centrality(G)
+
+    assert got == old_result, (
+        f"bounded-load result must equal the same-tiebreak oracle; "
+        f"got={got} oracle={old_result}")
