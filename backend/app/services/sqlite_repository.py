@@ -7125,7 +7125,7 @@ class SQLiteRepository:
         kg_node_ids: list = list(kg_nodes.keys())
         return node_ids, edges, chunk_ids, kg_node_ids, membership_counts
 
-    def build_scale_index(self, notebook_id: str) -> dict:
+    def build_scale_index(self, notebook_id: str, on_stage: Optional[Callable[[str, int], None]] = None) -> dict:
         """Offline: read KG from SQLite for ONE notebook, build CSR transition +
         ANN index, write 7 files under {storage_dir}/kg_index/{notebook_id}/.
         Returns the manifest dict.
@@ -7138,6 +7138,16 @@ class SQLiteRepository:
           - synonym pairs from embeddings (cosine weight, if emb_synonym_enabled)
         IDF[i] = 1 / membership_count for KG nodes (1.0 when 0), 1.0 for chunks.
         ANN index = only kg nodes that have a row in knowledge_embeddings.
+
+        `on_stage`: optional callback invoked as `(stage_name, latency_ms)`
+        once per stage (the same 7 stages as the `scale_index_build` events:
+        gather/transition/kg_matrix/chunk_matrix/viz_arrays/persist/total),
+        right when that stage's timing is recorded. Lets a CLI caller
+        (batch_ingest) print real-time per-stage progress on long builds
+        without depending on the events logger, which doesn't print to the
+        terminal. A raising callback is swallowed (logging-only) so it can
+        never break the build — mirrors how event_log.emit isolates its own
+        failures. Default None preserves prior behavior byte-for-byte.
         """
         from app.services.kg import scale_index as si
 
@@ -7155,6 +7165,15 @@ class SQLiteRepository:
         build_started = time.perf_counter()
         timings: dict = {}
 
+        def _notify_stage(stage_name, ms):
+            if on_stage is None:
+                return
+            try:
+                on_stage(stage_name, ms)
+            except Exception:  # noqa: BLE001 — caller's callback must never break the build
+                self.event_log.logger.warning(
+                    "build_scale_index on_stage callback failed for stage %s", stage_name, exc_info=False)
+
         def _timed(stage_name, fn):
             t0 = time.perf_counter()
             out = fn()
@@ -7167,6 +7186,7 @@ class SQLiteRepository:
                 "status": "done",
                 "latency_ms": ms,
             })
+            _notify_stage(stage_name, ms)
             return out
 
         node_ids, edges, chunk_ids, kg_node_ids, membership_counts = \
@@ -7280,6 +7300,7 @@ class SQLiteRepository:
             "status": "done",
             "latency_ms": persist_ms,
         })
+        _notify_stage("persist", persist_ms)
         total_ms = round((time.perf_counter() - build_started) * 1000)
         timings["total"] = total_ms
         self.event_log.emit({
@@ -7289,6 +7310,7 @@ class SQLiteRepository:
             "status": "done",
             "latency_ms": total_ms,
         })
+        _notify_stage("total", total_ms)
         # Return a manifest dict enriched with persist+total (in-memory only;
         # the on-disk manifest.json written above intentionally only has the 5
         # pre-persist stages, since persist's own duration can't be known

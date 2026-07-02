@@ -43,6 +43,16 @@ def _rebuild_progress(phase: str, i: int, n: int) -> None:
     print(f"  {phase}: {i}/{n}", end=end, flush=True)
 
 
+def _index_stage_progress(stage: str, latency_ms: int) -> None:
+    """CLI progress printer for build_scale_index's on_stage callback: one
+    line per stage (gather/transition/kg_matrix/chunk_matrix/viz_arrays/
+    persist/total), printed as it happens — the events logger doesn't print
+    to the terminal, and a scale-index build on the 490k-object library can
+    take tens of minutes, so real-time per-stage output is the only way to
+    tell it isn't stuck."""
+    print(f"  [index] {stage}: {latency_ms}ms", flush=True)
+
+
 def _live_embed_thread_counts() -> Counter:
     """Snapshot of live pool threads by name convention:
       - `embed-<sid>` per-source background embed daemons → "bg"
@@ -372,7 +382,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
             is_base = (nb.tier == "base")
             has_index = (repo._scale_index(notebook_id) is not None)
             if is_base or has_index:
-                manifest = repo.build_scale_index(notebook_id)
+                manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
                 scale_nodes = manifest.get("n_nodes", 0)
                 res["scale_index_nodes"] = scale_nodes
                 log({"phase": "kg", "status": "scale_index_built", "nodes": scale_nodes})
@@ -482,7 +492,7 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
 
             nb = repo.get_notebook(notebook_id)
             if nb.tier == "base" or repo._scale_index(notebook_id) is not None:
-                manifest = repo.build_scale_index(notebook_id)
+                manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
                 scale_nodes = manifest.get("n_nodes", 0)
                 res["scale_index_nodes"] = scale_nodes
                 log({"phase": "all", "status": "scale_index_built", "nodes": scale_nodes})
@@ -497,7 +507,7 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
 def run_index(repo: SQLiteRepository, notebook_id: str) -> dict:
     """Phase 3 (offline): build the scalable-retrieval index for a (base) notebook.
     Static base KGs should re-run this after a rebuild."""
-    manifest = repo.build_scale_index(notebook_id)
+    manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
     return {"indexed_nodes": manifest.get("n_nodes", 0)}
 
 
