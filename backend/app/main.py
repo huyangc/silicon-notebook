@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -9,13 +10,36 @@ from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
 from app.api.deps import get_current_user
 from app.api.routes import router
-from app.core.config import get_settings
+from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
 
 logger = logging.getLogger("silicon_notebook.startup")
 
 
+def _env_file_preflight() -> None:
+    """缺 .env 时提前出声,不让整站静默跑在默认空配置上(embed/LLM 未配置 →
+    chunk 检索静默落进全库暴力路径,大库表现为半小时级「思考中」假死)。
+
+    - 缺 .env 且根目录有改名残骸(如 .env.local)→ 硬报错并点名(Next.js 启动
+      打印的「Environments: .env.local」只代表前端自己读到了,后端只读 .env);
+      纯环境变量部署可设 ALLOW_NO_ENV_FILE=1 显式跳过(降级必须 opt-in)。
+    - 单纯缺失(全新 checkout / 容器注入环境变量)→ 仅告警,可启动。"""
+    env_path, exists, lookalikes = env_file_diagnosis()
+    if exists:
+        return
+    if lookalikes and os.environ.get("ALLOW_NO_ENV_FILE") != "1":
+        raise RuntimeError(
+            f"缺 {env_path},但发现疑似改名残骸: {', '.join(lookalikes)} — "
+            f"后端只读仓库根 .env(Next.js 的「Environments: .env.local」只代表前端)。"
+            f"请改回,例如: mv {env_path.parent / lookalikes[0]} {env_path};"
+            f"若确要仅用系统环境变量启动,设 ALLOW_NO_ENV_FILE=1。")
+    logger.warning(
+        "缺 %s — 仅用系统环境变量+默认值启动(模型未配置时检索/问答会退化);"
+        "参照 .env.example 创建,或忽略本警告(容器纯环境变量部署)。", env_path)
+
+
 def create_app() -> FastAPI:
+    _env_file_preflight()
     settings = get_settings()
 
     # 启动路径日志：一眼可查 DB/storage/日志目录实际解析到哪里（uvicorn 控制台

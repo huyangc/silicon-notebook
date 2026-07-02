@@ -126,6 +126,15 @@ absolute paths (`paths: db=... storage=... log_dir=...`); check it if you're eve
 which `.local/` a given launch is actually using. The offline CLI (`scripts/batch_ingest.py`)
 and both servers below all resolve to the same repo-root `.local/`.
 
+**The launch scripts require a repo-root `.env`** (`npm run dev` / `npm run start`): if it
+is missing they abort with an explicit error instead of silently booting on blank defaults,
+and a renamed leftover such as `.env.local` is called out by name — note that Next.js's own
+"Environments: .env.local" line only means the *frontend* read it; the backend reads `.env`
+only. The backend applies the same check at startup (hard error only when a lookalike file
+exists; a plainly missing `.env` logs a warning and boots, so fresh checkouts and containers
+injecting real environment variables keep working). Set `ALLOW_NO_ENV_FILE=1` to skip the
+check for env-var-only deployments.
+
 ```bash
 # Development — backend (reload-friendly) and frontend together
 npm run dev
