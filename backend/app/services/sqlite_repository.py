@@ -8971,8 +8971,43 @@ class SQLiteRepository:
             self._gather_kg_graph(notebook_id, source_ids=src)
         return node_ids, edges, chunk_ids
 
+    def _delta_vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
+                             table: str, id_col: str, node_ids: List[str]):
+        """Like `_vector_matrix` but scoped to exactly `node_ids` — for hot paths
+        that only need vectors for a bounded delta node set (e.g. the active KG
+        delta spliced onto a base scale index), not the notebook's FULL embedding
+        table. Loads via chunked `IN (...)` (SQLite variable-count safe, see
+        `_IN_CHUNK`) instead of `_vector_matrix`'s `WHERE notebook_id = ?` (which
+        would pull every row in the notebook — 490k×1024 when active IS the
+        indexed big lib). Not version-cached (the delta itself is already
+        version-scoped by the caller's cache key) — bounded by len(node_ids), so
+        a fresh per-call load is cheap. Returns (ids, matrix) via the same
+        `build_matrix` path, so output is bit-identical to filtering the full
+        `_vector_matrix` result down to `node_ids` (same decode, same
+        normalization, same skip-on-invalid semantics)."""
+        from app.services.vector_index import build_matrix
+        if not node_ids:
+            return [], None
+
+        def _rows():
+            ids = list(dict.fromkeys(node_ids))  # de-dupe, preserve order
+            for i in range(0, len(ids), self._IN_CHUNK):
+                batch = ids[i:i + self._IN_CHUNK]
+                ph = ",".join("?" for _ in batch)
+                rows = db.execute(
+                    f"SELECT {id_col} AS vid, vector FROM {table} "
+                    f"WHERE notebook_id = ? AND {id_col} IN ({ph})",
+                    (notebook_id, *batch),
+                ).fetchall()
+                by_id = {r["vid"]: r["vector"] for r in rows}
+                for nid in batch:
+                    if nid in by_id:
+                        yield nid, by_id[nid]
+
+        return build_matrix(_rows())
+
     def _scale_xlayer_bridge_edges(self, notebook_id: str, base_indexes,
-                                   active_edges):
+                                   active_edges, active_node_ids=None):
         """Append bounded cross-layer synonym bridge edges to active_edges.
 
         For each active KG node vector, query each base ANN — if cosine sim >=
@@ -8986,16 +9021,34 @@ class SQLiteRepository:
         NOTE: this depends only on the active node embedding matrix and the base
         ANN indexes — NOT on the query vector — so it can live inside the cached
         combined-graph loader. Returns the (possibly extended) active_edges list.
-        """
+
+        active_node_ids: the ACTIVE DELTA node id set (from `_active_kg_delta`,
+        i.e. the same nodes being spliced onto the combined graph this call).
+        Vectors are loaded scoped to exactly this set via `_delta_vector_matrix`
+        — not the notebook's full `knowledge_embeddings` table — since the
+        bridge only ever needs vectors for delta nodes (post-watermark sources
+        when self is already scale-indexed; the whole notebook otherwise, in
+        which case this is equivalent to the old full load). If None (caller
+        didn't have the delta id set), falls back to the old full-table load
+        for safety."""
         import numpy as np
         if not self.settings.ppr_emb_synonym_enabled:
             return active_edges
         _syn_k = self.settings.ppr_emb_synonym_topk
         _syn_thr = self.settings.ppr_emb_synonym_threshold
-        # Fetch the active node embeddings — reused for the bridge (no second query).
+        # Fetch the active node embeddings — scoped to the delta node set so a
+        # per-version combined-graph rebuild never re-loads the full notebook
+        # embedding table (see `_delta_vector_matrix`).
         with self._connect() as _db:
-            _a_ids, _a_mat = self._vector_matrix(
-                _db, notebook_id, "knowledge_embeddings", "object_id")
+            if active_node_ids is not None:
+                if not active_node_ids:
+                    return active_edges
+                _a_ids, _a_mat = self._delta_vector_matrix(
+                    _db, notebook_id, "knowledge_embeddings", "object_id",
+                    list(active_node_ids))
+            else:
+                _a_ids, _a_mat = self._vector_matrix(
+                    _db, notebook_id, "knowledge_embeddings", "object_id")
         if _a_ids is None or _a_mat is None or len(_a_mat) == 0:
             return active_edges
         _a_mat_arr = np.asarray(_a_mat, dtype=np.float32)
@@ -9083,8 +9136,12 @@ class SQLiteRepository:
                 self._active_kg_delta(notebook_id)
 
             # 2b. Cross-layer synonym bridge (query-independent; see helper).
+            # Delta-scoped: only active_node_ids' vectors are needed (they are
+            # exactly the nodes being spliced this call) — never the full
+            # notebook embedding table (see _scale_xlayer_bridge_edges docstring).
             active_edges = self._scale_xlayer_bridge_edges(
-                notebook_id, base_indexes, active_edges)
+                notebook_id, base_indexes, active_edges,
+                active_node_ids=active_node_ids)
 
             combined_ids, combined_A = si.splice_active(
                 combined_ids, combined_A, active_node_ids, active_edges)
