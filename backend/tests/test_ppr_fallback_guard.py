@@ -346,3 +346,73 @@ def test_chunk_kg_overlay_small_notebook_builds_graph(repo, monkeypatch):
     assert called["n"] == 1
     assert kg_hits  # 命中种子,真走了 overlay
     assert [e for e in events if e.get("kind") == "graph_walk_refused"] == []
+
+
+# ── Fix wave 3: scale_ppr 3b 在 self 已索引时跳过全量矩阵加载 ────────────────
+
+def _spy_vector_matrix(repo, monkeypatch):
+    """Spy on _vector_matrix — records (notebook_id, table) per call, delegates."""
+    calls = []
+    orig = repo._vector_matrix
+
+    def spy(db, notebook_id, table, id_col):
+        calls.append((notebook_id, table))
+        return orig(db, notebook_id, table, id_col)
+
+    monkeypatch.setattr(repo, "_vector_matrix", spy)
+    return calls
+
+
+def _seed_indexed_self_base(repo):
+    """两文档 MoE 库 + 节点向量 + unified KG + scale index + tier=base。
+    返回 notebook。self 即 participant(P0-00),3a 走它自己的 hnsw ANN。"""
+    nb = _seed_two_doc_moe(repo)
+    repo._embed_knowledge("e1", nb.id, {"name": "Mixture-of-Experts (MoE)"})
+    repo._embed_knowledge("e2", nb.id, {"name": "Mixture-of-Experts (MoE)"})
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    return nb
+
+
+def test_scale_ppr_self_indexed_skips_active_brute_force(embed_repo, monkeypatch):
+    """成本分离不变量:self 已建索引(P0-00 self-participant)时,3b 不得再对同一库
+    全量加载 knowledge_embeddings 矩阵(生产 49万×1024 = 数 GB/数十分钟)——
+    self 种子已由 3a 经它自己的 hnsw ANN 覆盖。spy 断言 scale_ppr 全程不调
+    _vector_matrix(knowledge_embeddings);排名仍含 self 的两个 chunk(种子覆盖不丢)。
+    ppr_emb_synonym 关闭以隔离 combined-graph loader 里 _cross_layer_bridge 的
+    同表加载(那是另一处、版本缓存内,见报告 Fix wave 3)。"""
+    repo = embed_repo
+    monkeypatch.setattr(repo.settings, "ppr_emb_synonym_enabled", False)
+    nb = _seed_indexed_self_base(repo)
+
+    calls = _spy_vector_matrix(repo, monkeypatch)
+    ranked = repo.scale_ppr(nb.id, "Mixture of Experts")
+
+    kg_loads = [c for c in calls if c[1] == "knowledge_embeddings"]
+    assert kg_loads == [], (
+        "self-indexed scale_ppr must not brute-force load knowledge_embeddings; "
+        f"got loads: {kg_loads}")
+    # 种子覆盖不劣化:3a(self ANN)已覆盖 self 节点 → 两个 self chunk 仍被排出。
+    ranked_ids = {cid for cid, _ in ranked}
+    assert {"cA", "cB"} <= ranked_ids
+
+
+def test_scale_ppr_self_unindexed_keeps_active_brute_force(embed_repo, monkeypatch):
+    """self 无索引(真正的小 active 库)+ 有 base 索引的联邦场景:3b 行为不变,
+    照常对 active 库做有界暴力余弦(spy 断言 knowledge_embeddings 被加载,且
+    加载的是 active 库自己的)。"""
+    repo = embed_repo
+    monkeypatch.setattr(repo.settings, "ppr_emb_synonym_enabled", False)
+    base = _seed_indexed_self_base(repo)          # 联邦 base(有索引)
+    active = _seed_two_doc_moe(repo, suffix="2")  # 小 active 库,无索引
+    repo._embed_knowledge("e12", active.id, {"name": "Mixture-of-Experts (MoE)"})
+    repo._embed_knowledge("e22", active.id, {"name": "Mixture-of-Experts (MoE)"})
+
+    calls = _spy_vector_matrix(repo, monkeypatch)
+    repo.scale_ppr(active.id, "Mixture of Experts")
+
+    kg_loads = [c for c in calls if c[1] == "knowledge_embeddings"]
+    assert (active.id, "knowledge_embeddings") in kg_loads, (
+        "un-indexed active notebook must keep the bounded brute-force seed pass (3b)")
