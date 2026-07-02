@@ -4735,6 +4735,11 @@ class SQLiteRepository:
         # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph) —
         # evict so a same-second KG edit with an unchanged version tuple cannot serve stale.
         self._vector_cache.invalidate(f"{notebook_id}:ppr_graph")
+        # entity->chunk / element->chunk reverse maps (P0-5) — evict so a same-second
+        # in-place evidence/element_ids edit with an unchanged version tuple cannot
+        # serve a stale membership map to the PPR-fallback / chunk-overlay paths.
+        self._vector_cache.invalidate(f"{notebook_id}:entchunk")
+        self._vector_cache.invalidate(f"{notebook_id}:elemchunk")
 
     def _cluster_input_version(self, notebook_id: str) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
@@ -9399,9 +9404,35 @@ class SQLiteRepository:
         block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
         return block, id_map, node_hits
 
+    def _elem_chunk_map(self, notebook_id: str) -> Dict[str, list]:
+        """Cached {element_id: [chunk_id, ...]} — one chunks scan per version,
+        reused by both _kg_source_chunks (per-query, few object_ids) and
+        _ent_chunk_map (whole-notebook membership for PPR). P0-5: this used to
+        be re-scanned (all chunks, per-row json.loads) on every call of either
+        consumer; now it's version-cached like _vector_matrix/_keyword_token_sets."""
+        version = tuple(self._scale_index_version(notebook_id))
+
+        def _load():
+            with self._connect() as db:
+                chunk_rows = db.execute(
+                    "SELECT id, element_ids FROM chunks WHERE notebook_id=?",
+                    (notebook_id,),
+                ).fetchall()
+            out: Dict[str, list] = {}
+            for cr in chunk_rows:
+                for el in json.loads(cr["element_ids"] or "[]"):
+                    out.setdefault(el, []).append(cr["id"])
+            return out
+
+        return self._vector_cache.get(f"{notebook_id}:elemchunk", version, _load)
+
     def _kg_source_chunks(self, notebook_id: str, object_ids: list) -> list:
         """KG 对象 evidence 的 element_id → 含该 element 的 chunk(LightRAG 源 chunk)。
-        返回 List[RetrievedChunk](relevance 占位 0.3,后续 rerank 重排)。"""
+        返回 List[RetrievedChunk](relevance 占位 0.3,后续 rerank 重排)。
+
+        P0-5: object_ids 是本次查询命中的一小撮 KG 对象(不是全库),所以 evidence
+        只按 IN(...) 取这几行;element_id → chunk 的反查改走缓存的 _elem_chunk_map,
+        不再对 chunks 表做全量扫描 + 逐行 json.loads + 集合交。"""
         from app.services.retrieval import RetrievedChunk
         if not object_ids:
             return []
@@ -9416,46 +9447,60 @@ class SQLiteRepository:
                         elem_ids.add(e["element_id"])
             if not elem_ids:
                 return []
+            elem_map = self._elem_chunk_map(notebook_id)
+            chunk_ids: list = []
+            seen_cid = set()
+            for el in elem_ids:
+                for cid in elem_map.get(el, ()):
+                    if cid not in seen_cid:
+                        seen_cid.add(cid)
+                        chunk_ids.append(cid)
+            if not chunk_ids:
+                return []
+            ph2 = ",".join("?" * len(chunk_ids))
             crows = db.execute(
-                "SELECT id, source_id, text, section_path, element_ids FROM chunks WHERE notebook_id=?",
-                (notebook_id,)).fetchall()
-        out, seen = [], set()
-        for cr in crows:
-            cids = set(json.loads(cr["element_ids"] or "[]"))
-            if cids & elem_ids and cr["id"] not in seen:
-                seen.add(cr["id"])
-                out.append(RetrievedChunk(
-                    chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
-                    section_path=cr["section_path"], text=cr["text"],
-                    element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
+                f"SELECT id, source_id, text, section_path, element_ids FROM chunks WHERE id IN ({ph2})",
+                chunk_ids).fetchall()
+        by_id = {cr["id"]: cr for cr in crows}
+        out = []
+        for cid in chunk_ids:
+            cr = by_id.get(cid)
+            if cr is None:
+                continue
+            out.append(RetrievedChunk(
+                chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
+                section_path=cr["section_path"], text=cr["text"],
+                element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
         return out
 
     def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
         """{object_id: set(chunk_id)} — KG 实体出现在哪些 chunk 里。
         口径同 _kg_source_chunks:evidence[].element_id ∈ chunks.element_ids[]。
-        用于 PPR 的 membership 边 + (P2) specificity 权重分母。"""
-        with self._connect() as db:
-            obj_rows = db.execute(
-                "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchall()
-            chunk_rows = db.execute(
-                "SELECT id, element_ids FROM chunks WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchall()
-        elem_to_chunks: Dict[str, set] = {}
-        for cr in chunk_rows:
-            for el in json.loads(cr["element_ids"] or "[]"):
-                elem_to_chunks.setdefault(el, set()).add(cr["id"])
-        out: Dict[str, set] = {}
-        for orow in obj_rows:
-            chunks: set = set()
-            for e in json.loads(orow["evidence"] or "[]"):
-                if isinstance(e, dict) and e.get("element_id"):
-                    chunks |= elem_to_chunks.get(e["element_id"], set())
-            if chunks:
-                out[orow["id"]] = chunks
-        return out
+        用于 PPR 的 membership 边 + (P2) specificity 权重分母。
+
+        P0-5: version-cached like _vector_matrix — this used to full-scan ALL
+        knowledge_objects.evidence + ALL chunks.element_ids (with per-row
+        json.loads) on every call, uncached, on the PPR-fallback query path."""
+        version = tuple(self._scale_index_version(notebook_id))
+
+        def _load():
+            with self._connect() as db:
+                obj_rows = db.execute(
+                    "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=?",
+                    (notebook_id,),
+                ).fetchall()
+            elem_to_chunks = self._elem_chunk_map(notebook_id)
+            out: Dict[str, set] = {}
+            for orow in obj_rows:
+                chunks: set = set()
+                for e in json.loads(orow["evidence"] or "[]"):
+                    if isinstance(e, dict) and e.get("element_id"):
+                        chunks |= set(elem_to_chunks.get(e["element_id"], ()))
+                if chunks:
+                    out[orow["id"]] = chunks
+            return out
+
+        return self._vector_cache.get(f"{notebook_id}:entchunk", version, _load)
 
     # ── chunk×graph mix ──────────────────────────────────────────────────────
 
