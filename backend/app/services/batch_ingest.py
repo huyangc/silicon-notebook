@@ -11,13 +11,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
@@ -588,11 +590,65 @@ _VECTOR_TABLES = (
 )
 
 _BACKFILL_BATCH_SIZE = 5000
+_BACKFILL_MAP_CHUNKSIZE = 256
+_BACKFILL_DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
+
+
+def _parse_encode(pair: Tuple[str, str]) -> Tuple[str, bytes]:
+    """Module-level, spawn-safe (top-level def, no closures) worker for the
+    vectors-to-blob ProcessPoolExecutor: parse one legacy JSON-text vector row
+    and re-encode it as a raw float32 BLOB. `pair` is (row_id, vector_raw_text).
+
+    Deliberately light imports (orjson + numpy only, no repo/settings/db
+    modules) — this function is pickled and sent to a fresh worker process, so
+    importing the full app graph here would be slow and pointless (workers
+    never touch the DB).
+
+    Never raises: on any parse/encode failure (corrupt JSON, empty text, wrong
+    shape) it returns the same empty-bytes sentinel the serial path already
+    used for `decode_vector`-failures — this preserves the dead-loop guarantee
+    that every selected row moves out of typeof(vector)='text', and it means
+    a single bad row in a chunksize batch can never blow up the whole pool
+    task (BrokenProcessPool is reserved for real crashes, not bad rows)."""
+    vid, raw = pair
+    try:
+        import orjson
+        import numpy as np
+
+        if raw is None or raw == "":
+            return vid, b""
+        vec = orjson.loads(raw)
+        arr = np.asarray(vec, dtype=np.float32)
+        if arr.size == 0:
+            return vid, b""
+        return vid, arr.tobytes()
+    except Exception:  # noqa: BLE001 — any malformed row becomes the sentinel
+        return vid, b""
+
+
+def _parse_encode_batch_serial(rows) -> List[Tuple[bytes, str, str]]:
+    """Serial parse+encode of a batch of rows — the exact pre-parallel code
+    path. Returns [(blob, notebook_id, vid), ...] ready for executemany."""
+    from app.services.vector_index import decode_vector, encode_vector
+
+    updates = []
+    for r in rows:
+        try:
+            arr = decode_vector(r["vector"])
+        except Exception:  # noqa: BLE001 — malformed row, treat as bad
+            arr = None
+        if arr is None:
+            blob = b""  # sentinel: still moves the row to typeof='blob'
+        else:
+            blob = encode_vector(arr)
+        updates.append((blob, r["notebook_id"], r["vid"]))
+    return updates
 
 
 def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
                             table: str, id_col: str,
-                            batch_size: int = _BACKFILL_BATCH_SIZE) -> dict:
+                            batch_size: int = _BACKFILL_BATCH_SIZE,
+                            workers: int = 1) -> dict:
     """把一个 embeddings 表里仍是 JSON TEXT 的 vector 行原地转成 float32 BLOB
     (encode_vector),分批事务提交 + 打印进度。幂等:每轮只选
     typeof(vector)='text' 的行(SQLite 原生类型探测,O(1) 判定、不逐行反序列化),
@@ -602,9 +658,16 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
     一行都转不动的批次(全部 decode_vector 失败,如损坏的 JSON 文本)也必须
     UPDATE 成 blob(空 b'' 哨兵,decode_vector 读回 None——与旧代码里空/无效
     JSON 行的读侧语义一致),否则这些行永远停留在 typeof='text'、
-    下一轮 LIMIT 会重复选中同一批 → 死循环。"""
-    from app.services.vector_index import decode_vector, encode_vector
+    下一轮 LIMIT 会重复选中同一批 → 死循环。
 
+    workers<=1 (default) takes the exact original serial path — zero
+    multiprocessing machinery constructed. workers>1 parses+encodes each batch
+    in a ProcessPoolExecutor (module-level `_parse_encode` worker, light
+    imports only); the main process still owns 100% of the DB reads/writes —
+    SQLite stays single-writer, workers never open a connection. If the pool
+    dies (BrokenProcessPool), the run falls back to the serial path for this
+    batch and every subsequent one (fail-open: a crashed pool must never lose
+    the run, just lose the parallel speedup)."""
     where = "WHERE typeof(vector)='text'"
     params: tuple = ()
     if notebook_id is not None:
@@ -619,52 +682,67 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
         print(f"  [blob] {table}: 0/0 (无待转行)", flush=True)
         return {"table": table, "total": total, "converted": 0, "skipped_bad": 0}
 
-    while True:
-        with repo._write() as db:
-            rows = db.execute(
-                f"SELECT {id_col} AS vid, notebook_id, vector FROM {table} {where} "
-                f"LIMIT {int(batch_size)}", params).fetchall()
-            if not rows:
-                break
-            updates = []
-            for r in rows:
-                try:
-                    arr = decode_vector(r["vector"])
-                except Exception:  # noqa: BLE001 — malformed row, treat as bad
-                    arr = None
-                if arr is None:
-                    skipped_bad += 1
-                    blob = b""  # sentinel: still moves the row to typeof='blob'
+    use_pool = workers > 1
+    executor = ProcessPoolExecutor(max_workers=workers) if use_pool else None
+    try:
+        while True:
+            with repo._write() as db:
+                rows = db.execute(
+                    f"SELECT {id_col} AS vid, notebook_id, vector FROM {table} {where} "
+                    f"LIMIT {int(batch_size)}", params).fetchall()
+                if not rows:
+                    break
+                if use_pool:
+                    try:
+                        pairs = [(r["vid"], r["vector"]) for r in rows]
+                        by_vid = {vid: blob for vid, blob in executor.map(
+                            _parse_encode, pairs, chunksize=_BACKFILL_MAP_CHUNKSIZE)}
+                        updates = [(by_vid[r["vid"]], r["notebook_id"], r["vid"]) for r in rows]
+                    except BrokenProcessPool as exc:
+                        print(f"  [blob] {table}: 进程池崩溃,回退串行(fallback to serial): {exc}",
+                              flush=True)
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        executor = None
+                        use_pool = False
+                        updates = _parse_encode_batch_serial(rows)
                 else:
-                    blob = encode_vector(arr)
-                updates.append((blob, r["notebook_id"], r["vid"]))
-            db.executemany(
-                f"UPDATE {table} SET vector=? WHERE notebook_id=? AND {id_col}=?",
-                updates)
-        converted += len(rows)
-        print(f"  [blob] {table}: {converted}/{total}", flush=True)
-        if len(rows) < batch_size:
-            break
+                    updates = _parse_encode_batch_serial(rows)
+                skipped_bad += sum(1 for blob, _nb, _vid in updates if blob == b"")
+                db.executemany(
+                    f"UPDATE {table} SET vector=? WHERE notebook_id=? AND {id_col}=?",
+                    updates)
+            converted += len(rows)
+            print(f"  [blob] {table}: {converted}/{total}", flush=True)
+            if len(rows) < batch_size:
+                break
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
     return {"table": table, "total": total, "converted": converted, "skipped_bad": skipped_bad}
 
 
 def run_vectors_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
-                        all_notebooks: bool = False) -> dict:
+                        all_notebooks: bool = False, workers: int = 1) -> dict:
     """向量存储 BLOB 化一次性 backfill:把指定 notebook(或 --all-notebooks 时全库)
     embeddings 表里的旧 JSON TEXT 行原地转成 float32 BLOB(encode_vector)。
     分批事务(每批 5000 行)+ 打印进度;typeof(vector)='blob' 的行已跳过 →
     可安全重跑(第二遍 0 行可转)。转换不改 created_at,故 _vector_matrix 的
     (COUNT, MAX created_at) 版本键不变——缓存的矩阵内容仍等价(同向量,只是
     换了编码),不会因 backfill 变脏失效;下次自然过期时重建即得 BLOB 直载收益。
+
+    workers>1 offloads the json.loads/np.tobytes parse+encode stage (the
+    single-core bottleneck at scale) to a ProcessPoolExecutor per table/batch;
+    all DB access (SELECT/UPDATE) stays in this (main) process — see
+    `_backfill_table_to_blob`.
     """
     if not notebook_id and not all_notebooks:
         raise ValueError("run_vectors_to_blob: 需要 notebook_id 或 all_notebooks=True")
     scope = "全部 notebook" if all_notebooks else notebook_id
-    print(f"vectors-to-blob: scope={scope}", flush=True)
+    print(f"vectors-to-blob: scope={scope} workers={workers}", flush=True)
     results = []
     for table, id_col in _VECTOR_TABLES:
         results.append(_backfill_table_to_blob(
-            repo, None if all_notebooks else notebook_id, table, id_col))
+            repo, None if all_notebooks else notebook_id, table, id_col, workers=workers))
     total_converted = sum(r["converted"] for r in results)
     total_bad = sum(r["skipped_bad"] for r in results)
     print(f"vectors-to-blob done: converted={total_converted} skipped_bad={total_bad}", flush=True)
@@ -700,9 +778,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
                    help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
-    p.add_argument("--workers", type=int, default=4,
-                   help="all 阶段同时抽取的文档数(覆盖 KG_JOB_CONCURRENCY);"
-                        "其余阶段为文件级并发。默认 4")
+    p.add_argument("--workers", type=int, default=None,
+                   help="all 阶段同时抽取的文档数(覆盖 KG_JOB_CONCURRENCY,其余摄取阶段为"
+                        "文件级并发,默认 4);vectors-to-blob 阶段为 json.loads/编码并行进程数"
+                        f"(默认 min(8, CPU核数)={_BACKFILL_DEFAULT_WORKERS},<=1 走原串行路径,"
+                        "不启动进程池)")
     p.add_argument("--embed-conc", type=int, default=4,
                    help="embedding 并发(覆盖 EMBED_CONCURRENCY;all 阶段峰值≈workers×此值,"
                         "注意 429)。默认 4")
@@ -723,6 +803,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    # --workers has a phase-dependent default (argparse default is None so we
+    # can tell "omitted" from "explicitly 4"): doc-extraction concurrency for
+    # ingest/all/kg defaults to 4; vectors-to-blob's parse/encode pool defaults
+    # to min(8, cpu_count()) and is resolved separately below.
+    if args.workers is None and args.phase != "vectors-to-blob":
+        args.workers = 4
 
     if args.phase in {"ingest", "all"} and not args.input_dir:
         print("error: --input-dir required for ingest/all", file=sys.stderr)
@@ -761,8 +847,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.phase == "vectors-to-blob":
         # 纯格式转换(已算好的向量 JSON→BLOB),不产出新向量,不需要 EMBED 就绪,
         # 也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
+        blob_workers = args.workers if args.workers is not None else _BACKFILL_DEFAULT_WORKERS
         _t = time.perf_counter()
-        r = run_vectors_to_blob(repo, args.notebook_id, all_notebooks=args.all_notebooks)
+        r = run_vectors_to_blob(repo, args.notebook_id, all_notebooks=args.all_notebooks,
+                                workers=blob_workers)
         print(f"vectors-to-blob done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
         return 0
 
