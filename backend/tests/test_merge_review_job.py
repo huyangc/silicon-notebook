@@ -63,6 +63,44 @@ def test_status_idle_when_never_run(repo):
     assert repo.merge_review_job_status(nb)["status"] == "idle"
 
 
+def test_review_pending_merges_batch_matches_old_slice_order(repo):
+    """review_pending_merges must fetch its batch via SQL LIMIT that preserves
+    the same order the old `pending_merges(nb)[:limit]` Python-slice used
+    (implicit rowid / insertion order), not just any `limit`-sized subset."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _seed_pending(repo, nb, 30)
+    old_slice_ids = [r["id"] for r in repo.pending_merges(nb)[:10]]
+    new_batch_ids = [r["id"] for r in repo._pending_merges_batch(nb, 10)]
+    assert new_batch_ids == old_slice_ids
+
+
+def test_run_merge_review_job_bounded_sql_queries(repo, monkeypatch):
+    """The drain loop's continuation test must be a cheap EXISTS/COUNT, not a
+    full materialization of all pending rows every iteration. On a 250-row
+    queue with batch=100 there are 3 batches; the loop's "is there more work"
+    check must never call the full-scan pending_merges()."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    _seed_pending(repo, nb, 250)
+    monkeypatch.setattr(cmr, "review_merge_candidates",
+                        lambda client, pending, **k: [{"candidate_id": c["id"], "decision": "keep_separate",
+                                                       "confidence": 0.95, "rationale": ""} for c in pending])
+
+    calls = {"pending_merges_full": 0}
+    orig_pending_merges = repo.__class__.pending_merges
+
+    def spy_pending_merges(self, notebook_id):
+        calls["pending_merges_full"] += 1
+        return orig_pending_merges(self, notebook_id)
+
+    monkeypatch.setattr(repo.__class__, "pending_merges", spy_pending_merges)
+    res = repo.run_merge_review_job(nb, batch=100)
+    assert res["status"] == "done"
+    # The fixed loop must not call the full-scan pending_merges() at all for
+    # its continuation check (it uses a cheap EXISTS/COUNT helper instead)
+    # and review_pending_merges must fetch its own batch via SQL LIMIT.
+    assert calls["pending_merges_full"] == 0
+
+
 def test_startup_reconciles_stuck_running(repo, tmp_path):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     # simulate a job left 'running' by a crashed process
