@@ -1,12 +1,20 @@
-"""C1: `_scale_xlayer_bridge_edges` must load vectors scoped to the ACTIVE
-DELTA node id set (the nodes being spliced this call), not the notebook's
-FULL `knowledge_embeddings` table.
+"""C1 (+ fix wave): `_scale_xlayer_bridge_edges` vector-load iteration domain
+is dispatched PER PARTICIPANT:
 
-Equivalence oracle: on a fixture where delta ⊂ all (active notebook has more
-KG nodes than the delta passed to the bridge helper), the delta-scoped load
-must produce bridge edges IDENTICAL to the old full-table-load implementation
-(oracle = call with active_node_ids=None, which still uses the full
-`_vector_matrix` path).
+- participant == self (the active notebook's own scale index): domain = the
+  ACTIVE DELTA node set (core nodes' synonym edges are already baked into
+  self's CSR by build_scale_index — re-bridging into their own index is
+  redundant). This is the C1 saving: the current production shape (one big
+  self-indexed library, no external base) never loads the full 490k×1024
+  embedding matrix.
+- participant != self (EXTERNAL base): domain = ALL active nodes (full
+  `_vector_matrix`, version-cached). Case-B regression pinned below: when
+  self is indexed AND an external base exists, self's core (pre-watermark)
+  nodes are NOT in the delta but their cross-layer bridges to the external
+  base can only be computed at query time — the original delta-only scoping
+  silently severed them (build_scale_index never bakes cross-library
+  bridges; exact-id unification can't help since the two libraries mint
+  different object ids for the same concept).
 """
 import json
 import pytest
@@ -29,156 +37,197 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _seed_base_with_chunk(repo, name="MOSFET"):
-    """Base notebook: one KG concept with an embedding + ANN index built."""
-    base = repo.create_notebook(NotebookCreate(name="base"))
-    repo.mark_notebook_base(base.id)
+def _insert_concept(repo, nb_id, oid, name, sid, day=1):
+    """Insert a source + concept object + embedding directly (deterministic ids)."""
+    now = f"2026-06-{day:02d}T00:00:00"
     with repo._write() as db:
-        now = "2026-06-29T00:00:00"
-        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
-                   "VALUES (?,?,?,?,?,?,?)", ("sB", base.id, "paper", "md", "ready", now, now))
-        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                   "VALUES (?,?,?,?,?,?,?)",
-                   ("cB", base.id, "sB", f"A {name} provides voltage gain.", "S",
-                    json.dumps(["elB"]), now))
-        ev = json.dumps([{"source_id": "sB", "source_title": "", "element_id": "elB",
-                          "element_type": "paragraph", "location_label": "p1",
-                          "quoted_span": name, "confidence": 1.0}])
-        db.execute("INSERT INTO knowledge_objects "
-                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                   ("eB", base.id, "concept", "approved", "",
-                    json.dumps({"name": name}), ev, "sB", now, now))
+        db.execute(
+            "INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)", (sid, nb_id, "t", "md", "ready", now, now))
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (oid, nb_id, "concept", "approved", "", json.dumps({"name": name}), "[]",
+             sid, now, now))
         vec = repo.embedder.embed_query(name)
-        db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
-                   "VALUES (?,?,?,?)", ("eB", base.id, json.dumps(vec), now))
-    repo.rebuild_unified_kg(base.id)
-    repo.build_scale_index(base.id)
-    return base
+        db.execute(
+            "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+            "VALUES (?,?,?,?)", (oid, nb_id, json.dumps(vec), now))
 
 
-def _seed_active_with_extra_nodes(repo, n_extra=5):
-    """Active notebook with several KG concepts (all with embeddings) — the
-    'all' set for the delta ⊂ all equivalence check. Returns
-    (notebook, {name: object_id}) since store_kg re-mints ids (local_id is not
-    the persisted id)."""
+def _build_indexed_base(repo, name="base", concept="MOSFET", oid="eB", sid="sB", mark_base=True):
+    nb = repo.create_notebook(NotebookCreate(name=name))
+    if mark_base:
+        repo.mark_notebook_base(nb.id)
+    _insert_concept(repo, nb.id, oid, concept, sid)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    return nb
+
+
+def _seed_active_unindexed(repo, n_extra=3):
+    """Active notebook (no scale index) with several concepts. Returns
+    (notebook, {name: object_id})."""
     active = repo.create_notebook(NotebookCreate(name="active"))
     names = ["MOSFET"] + [f"concept-{i}" for i in range(n_extra)]
-    objects, relations = [], []
     for i, n in enumerate(names):
-        objects.append({"local_id": f"o{i}", "object_type": "concept",
-                         "payload": {"name": n, "section_path": ""}, "evidence": []})
-    repo.store_kg(active.id, None, objects, relations)
+        _insert_concept(repo, active.id, f"oa{i}", n, "sA")
     repo.rebuild_unified_kg(active.id)
-    # Give every knowledge_object an embedding directly (store_kg alone does not embed).
-    name_to_id = {}
-    with repo._write() as db:
-        rows = db.execute(
-            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
-            (active.id,)).fetchall()
-        now = "2026-06-30T00:00:00"
-        for r in rows:
-            name = json.loads(r["payload"]).get("name", "")
-            name_to_id[name] = r["id"]
-            vec = repo.embedder.embed_query(name)
-            db.execute(
-                "INSERT OR REPLACE INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
-                "VALUES (?,?,?,?)", (r["id"], active.id, json.dumps(vec), now))
+    name_to_id = {n: f"oa{i}" for i, n in enumerate(names)}
     return active, name_to_id
 
 
-def test_bridge_edges_equal_oracle_when_delta_subset_of_all(repo):
-    """delta ⊂ all: scoping to a strict subset of active node ids must produce
-    a subset of the edges the old full-load path (active_node_ids=None) finds
-    — and for the nodes actually included, the SAME edges (byte-identical
-    ids/weights)."""
-    base = _seed_base_with_chunk(repo)
-    active, name_to_id = _seed_active_with_extra_nodes(repo, n_extra=5)
+# ── Case A: active NOT indexed, external base participant ────────────────────
+
+def test_case_a_external_base_uses_full_domain_equals_oracle(repo):
+    """External base participant: domain = ALL active nodes regardless of the
+    active_node_ids value passed — result must equal the full-load oracle
+    (active_node_ids=None). Scoping the caller's delta must NOT reduce
+    external-base bridges (that was the Case-B bug class)."""
+    base = _build_indexed_base(repo)
+    active, name_to_id = _seed_active_unindexed(repo, n_extra=3)
     base_idx = repo._scale_index(base.id, allow_stale=True)
     base_indexes = [(base.id, base_idx)]
 
     all_node_ids, all_edges, _ = repo._active_kg_delta(active.id)
-    assert len(all_node_ids) >= 2, "fixture should have multiple active KG nodes"
+    assert len(all_node_ids) >= 2
 
-    # Oracle: full-table load (old behaviour).
     oracle_edges = repo._scale_xlayer_bridge_edges(
         active.id, base_indexes, list(all_edges), active_node_ids=None)
-
-    # Delta scoped to a strict subset (only the MOSFET-named node).
-    mosfet_id = name_to_id["MOSFET"]
-    delta_ids = [nid for nid in all_node_ids if nid == mosfet_id]
-    assert delta_ids and len(delta_ids) < len(all_node_ids), "delta must be a proper subset"
-    scoped_edges = repo._scale_xlayer_bridge_edges(
-        active.id, base_indexes, list(all_edges), active_node_ids=delta_ids)
-
     oracle_new = set(oracle_edges) - set(all_edges)
+    assert oracle_new, "oracle should find the MOSFET<->base bridge"
+
+    # Even when the caller passes a strict subset as delta, the EXTERNAL base
+    # participant still bridges from the FULL active node set.
+    mosfet_id = name_to_id["MOSFET"]
+    subset = [nid for nid in all_node_ids if nid != mosfet_id][:1]
+    assert subset, "need a non-MOSFET subset node"
+    scoped_edges = repo._scale_xlayer_bridge_edges(
+        active.id, base_indexes, list(all_edges), active_node_ids=subset)
     scoped_new = set(scoped_edges) - set(all_edges)
-
-    # Every scoped bridge edge must appear in the oracle's edge set (no
-    # spurious edges introduced by scoping) — and since delta_ids ⊂ all with
-    # only the MOSFET node included, all oracle edges touching it must be
-    # reproduced.
-    assert scoped_new, "scoped bridge should find at least the mosfet<->base edge"
-    assert scoped_new <= oracle_new, f"scoped edges must be subset of oracle: {scoped_new - oracle_new}"
-    oracle_mosfet_edges = {e for e in oracle_new if e[0] == mosfet_id or e[1] == mosfet_id}
-    assert scoped_new == oracle_mosfet_edges, (
-        f"scoped(delta={{mosfet}}) must equal oracle's mosfet-touching edges; "
-        f"scoped={scoped_new} oracle_mosfet={oracle_mosfet_edges}")
+    assert scoped_new == oracle_new, (
+        f"external-base domain must be the full active set; scoped={scoped_new} "
+        f"oracle={oracle_new}")
 
 
-def test_bridge_edges_empty_delta_no_load(repo, monkeypatch):
-    """Empty active_node_ids → no vector load at all (short-circuit before any
-    DB query), and no bridge edges added."""
-    base = _seed_base_with_chunk(repo)
-    active, _ = _seed_active_with_extra_nodes(repo, n_extra=2)
+# ── Case B regression: self indexed + external base — core nodes keep bridges ─
+
+def test_case_b_self_indexed_plus_external_base_keeps_core_bridges(repo):
+    """Reviewer's reproduction, pinned: self-indexed library contains MOSFET
+    (core, pre-watermark → NOT in delta) + external base contains MOSFET.
+    build_scale_index builds each library in isolation (never bakes
+    cross-library bridges) and exact-id unification can't merge them (the
+    two libraries minted different object ids), so the ONLY cross-layer
+    synonym path is the query-time bridge. The delta-only scoping regression
+    returned set() here; the per-participant dispatch must restore the
+    bidirectional bridge, identical to the pre-delta-scoping oracle."""
+    base = _build_indexed_base(repo, name="ext-base", concept="MOSFET",
+                               oid="eB", sid="sB")
+    # Self: separate notebook, ALSO indexed, with its own MOSFET (different id).
+    selfnb = _build_indexed_base(repo, name="self-lib", concept="MOSFET",
+                                 oid="eS", sid="sS", mark_base=False)
     base_idx = repo._scale_index(base.id, allow_stale=True)
-    base_indexes = [(base.id, base_idx)]
+    self_idx = repo._scale_index(selfnb.id, allow_stale=True)
+    assert base_idx is not None and self_idx is not None
+    # scale_ppr's participant construction: external bases + self (P0-00).
+    base_indexes = [(base.id, base_idx), (selfnb.id, self_idx)]
 
-    calls = {"n": 0}
-    orig = repo._delta_vector_matrix
+    # Self is indexed with no post-watermark sources → delta is empty.
+    delta_ids, delta_edges, _ = repo._active_kg_delta(selfnb.id)
+    assert delta_ids == [], "fixture: self fully indexed, delta must be empty"
 
-    def spy(*a, **kw):
-        calls["n"] += 1
-        return orig(*a, **kw)
+    # Pre-delta-scoping oracle: full domain for every participant.
+    oracle = repo._scale_xlayer_bridge_edges(
+        selfnb.id, base_indexes, [], active_node_ids=None)
+    oracle_set = set(oracle)
+    assert any(a == "eS" and b == "eB" for a, b, _ in oracle_set), (
+        "oracle must contain the self-core -> external-base bridge")
+    assert any(a == "eB" and b == "eS" for a, b, _ in oracle_set), (
+        "oracle must contain the reverse bridge")
 
-    monkeypatch.setattr(repo, "_delta_vector_matrix", spy)
-    result = repo._scale_xlayer_bridge_edges(
-        active.id, base_indexes, [], active_node_ids=[])
-    assert result == []
-    assert calls["n"] == 0, "empty delta must short-circuit before any vector load"
+    # Fixed code path (delta passed, as _scale_combined_graph does).
+    got = repo._scale_xlayer_bridge_edges(
+        selfnb.id, base_indexes, [], active_node_ids=delta_ids)
+    assert set(got) == oracle_set, (
+        f"Case B: core-node bridges to the external base must match the "
+        f"pre-delta-scoping oracle; got={set(got)} oracle={oracle_set}")
 
 
-def test_bridge_edges_spy_no_full_vector_matrix_call(repo, monkeypatch):
-    """Spy on `_vector_matrix` (the full-table loader): when active_node_ids is
-    given (the normal `_scale_combined_graph` call path), the bridge helper
-    must NOT call it — it must use `_delta_vector_matrix` instead."""
-    base = _seed_base_with_chunk(repo)
-    active, _ = _seed_active_with_extra_nodes(repo, n_extra=3)
-    base_idx = repo._scale_index(base.id, allow_stale=True)
-    base_indexes = [(base.id, base_idx)]
+# ── self-only participant: delta domain preserved (the C1 saving) ────────────
 
-    all_node_ids, all_edges, _ = repo._active_kg_delta(active.id)
+def test_self_only_participant_uses_delta_no_full_load(repo, monkeypatch):
+    """Production shape (single self-indexed library, NO external base):
+    iteration domain stays the delta — spy proves the full `_vector_matrix`
+    loader is never touched, and the delta node still bridges into the self
+    core (its synonym edge to the same-name core concept)."""
+    selfnb = _build_indexed_base(repo, name="self-lib", concept="MOSFET",
+                                 oid="eS", sid="sS", mark_base=False)
+    # Post-watermark delta: a new source with a same-name concept.
+    _insert_concept(repo, selfnb.id, "eNew", "MOSFET", "sNew", day=15)
+    self_idx = repo._scale_index(selfnb.id, allow_stale=True)
+    assert self_idx is not None
+    base_indexes = [(selfnb.id, self_idx)]
 
-    calls = {"n": 0}
+    delta_ids, delta_edges, _ = repo._active_kg_delta(selfnb.id)
+    assert "eNew" in delta_ids and "eS" not in delta_ids
+
+    calls = {"full": 0}
     orig = repo._vector_matrix
 
     def spy(*a, **kw):
-        calls["n"] += 1
+        calls["full"] += 1
         return orig(*a, **kw)
 
     monkeypatch.setattr(repo, "_vector_matrix", spy)
-    repo._scale_xlayer_bridge_edges(
-        active.id, base_indexes, list(all_edges), active_node_ids=all_node_ids)
-    assert calls["n"] == 0, "delta-scoped call must not touch the full _vector_matrix loader"
+    got = repo._scale_xlayer_bridge_edges(
+        selfnb.id, base_indexes, list(delta_edges), active_node_ids=delta_ids)
+    assert calls["full"] == 0, (
+        "self-only participant must keep the delta domain (no full matrix load)")
+    new_edges = set(got) - set(delta_edges)
+    assert any(a == "eNew" and b == "eS" for a, b, _ in new_edges), (
+        "delta node must still bridge into the self core")
 
+
+def test_self_only_empty_delta_no_load_at_all(repo, monkeypatch):
+    """Self-only participant with an EMPTY delta: nothing to bridge — neither
+    the delta loader nor the full loader runs, edges unchanged. (Core-node
+    synonym edges are already in self's CSR; with no external base there is
+    no query-time bridging work left.)"""
+    selfnb = _build_indexed_base(repo, name="self-lib", concept="MOSFET",
+                                 oid="eS", sid="sS", mark_base=False)
+    self_idx = repo._scale_index(selfnb.id, allow_stale=True)
+    base_indexes = [(selfnb.id, self_idx)]
+    delta_ids, _, _ = repo._active_kg_delta(selfnb.id)
+    assert delta_ids == []
+
+    calls = {"full": 0, "delta": 0}
+    orig_full, orig_delta = repo._vector_matrix, repo._delta_vector_matrix
+
+    def spy_full(*a, **kw):
+        calls["full"] += 1
+        return orig_full(*a, **kw)
+
+    def spy_delta(*a, **kw):
+        calls["delta"] += 1
+        return orig_delta(*a, **kw)
+
+    monkeypatch.setattr(repo, "_vector_matrix", spy_full)
+    monkeypatch.setattr(repo, "_delta_vector_matrix", spy_delta)
+    got = repo._scale_xlayer_bridge_edges(
+        selfnb.id, base_indexes, [], active_node_ids=[])
+    assert got == []
+    assert calls == {"full": 0, "delta": 0}, (
+        f"empty delta + self-only must load nothing, got {calls}")
+
+
+# ── wiring: the real caller passes the delta id set ──────────────────────────
 
 def test_scale_combined_graph_passes_delta_node_ids(repo, monkeypatch):
-    """End-to-end: `_scale_combined_graph` (the real caller inside scale_ppr)
-    must invoke the bridge helper with active_node_ids set (not None) so the
-    delta-scoped path is what actually runs in production, not just in
-    direct-call tests."""
-    base = _seed_base_with_chunk(repo)
-    active, _ = _seed_active_with_extra_nodes(repo, n_extra=2)
+    """`_scale_combined_graph` (the real caller inside scale_ppr) must invoke
+    the bridge helper with active_node_ids set (not None) so the
+    per-participant dispatch is what actually runs in production."""
+    base = _build_indexed_base(repo)
+    active, _ = _seed_active_unindexed(repo, n_extra=2)
     base_idx = repo._scale_index(base.id, allow_stale=True)
     base_indexes = [(base.id, base_idx)]
 

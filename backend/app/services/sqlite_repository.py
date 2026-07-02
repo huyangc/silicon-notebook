@@ -8919,38 +8919,73 @@ class SQLiteRepository:
 
         active_node_ids: the ACTIVE DELTA node id set (from `_active_kg_delta`,
         i.e. the same nodes being spliced onto the combined graph this call).
-        Vectors are loaded scoped to exactly this set via `_delta_vector_matrix`
-        — not the notebook's full `knowledge_embeddings` table — since the
-        bridge only ever needs vectors for delta nodes (post-watermark sources
-        when self is already scale-indexed; the whole notebook otherwise, in
-        which case this is equivalent to the old full load). If None (caller
-        didn't have the delta id set), falls back to the old full-table load
-        for safety."""
+        None = caller didn't have the delta id set → the pre-delta-scoping
+        full-table load is used for EVERY participant (safety fallback).
+
+        Iteration-domain dispatch is PER PARTICIPANT (semantic fix — the
+        original delta-only scoping dropped edges in Case B below):
+
+        - participant == self (the active notebook's own scale index,
+          P0-00): domain = the DELTA node set. Core (pre-watermark) nodes'
+          synonym edges were already baked into self's CSR by
+          build_scale_index — re-bridging them into their own index would
+          be redundant; only the not-yet-indexed delta nodes need query-time
+          bridges into the self core.
+        - participant != self (an EXTERNAL base notebook): domain = ALL
+          active nodes (full `_vector_matrix` load — the query-path,
+          version-cached loader; consistent with the pre-delta-scoping
+          behavior for this participant class). Case B: when self is
+          indexed AND an external base exists, self's core nodes are NOT in
+          the delta, but their cross-layer bridges to the external base can
+          ONLY be computed at query time — build_scale_index builds each
+          library in isolation and never bakes cross-library bridges, and
+          exact-id unification can't help (the two libraries mint different
+          object ids for the same concept). Restricting the external-base
+          domain to the delta silently severed every core-concept↔external-
+          base synonym path in scale_ppr.
+
+        Net effect: the current production shape (one big self-indexed
+        library, NO external base participants) keeps the full C1 saving —
+        no full-matrix load at all; layered-federation deployments get
+        their cross-layer connectivity back. Both loads happen inside the
+        version-cached combined-graph loader (once per version, not per
+        query)."""
         import numpy as np
         if not self.settings.ppr_emb_synonym_enabled:
             return active_edges
         _syn_k = self.settings.ppr_emb_synonym_topk
         _syn_thr = self.settings.ppr_emb_synonym_threshold
-        # Fetch the active node embeddings — scoped to the delta node set so a
-        # per-version combined-graph rebuild never re-loads the full notebook
-        # embedding table (see `_delta_vector_matrix`).
+
+        _participants = [(bid, bidx) for bid, bidx in base_indexes
+                         if bidx.ann_labels]
+        if not _participants:
+            return active_edges
+        # Which vector domains do we actually need this call?
+        _need_full = (active_node_ids is None) or any(
+            bid != notebook_id for bid, _ in _participants)
+        _need_delta = (active_node_ids is not None and len(active_node_ids) > 0
+                       and any(bid == notebook_id for bid, _ in _participants))
+
+        _full_ids = _full_mat = None
+        _delta_ids = _delta_mat = None
         with self._connect() as _db:
-            if active_node_ids is not None:
-                if not active_node_ids:
-                    return active_edges
-                _a_ids, _a_mat = self._delta_vector_matrix(
+            if _need_full:
+                _full_ids, _full_mat = self._vector_matrix(
+                    _db, notebook_id, "knowledge_embeddings", "object_id")
+            if _need_delta:
+                _delta_ids, _delta_mat = self._delta_vector_matrix(
                     _db, notebook_id, "knowledge_embeddings", "object_id",
                     list(active_node_ids))
-            else:
-                _a_ids, _a_mat = self._vector_matrix(
-                    _db, notebook_id, "knowledge_embeddings", "object_id")
-        if _a_ids is None or _a_mat is None or len(_a_mat) == 0:
-            return active_edges
-        _a_mat_arr = np.asarray(_a_mat, dtype=np.float32)
+
         _bridge_edges: List[Tuple[str, str, float]] = []
-        for _bid, _bidx in base_indexes:
-            if not _bidx.ann_labels:
+        for _bid, _bidx in _participants:
+            if _bid == notebook_id and active_node_ids is not None:
+                _a_ids, _a_mat = _delta_ids, _delta_mat   # self → delta domain
+            else:
+                _a_ids, _a_mat = _full_ids, _full_mat     # external base → full domain
+            if _a_ids is None or _a_mat is None or len(_a_mat) == 0:
                 continue
+            _a_mat_arr = np.asarray(_a_mat, dtype=np.float32)
             _dim = int(_bidx.manifest.get("dim", _a_mat_arr.shape[1]))
             if _dim != _a_mat_arr.shape[1]:
                 continue
