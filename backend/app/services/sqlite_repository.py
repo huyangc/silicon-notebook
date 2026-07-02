@@ -561,6 +561,24 @@ class SQLiteRepository:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                -- _extraction_warning's "SELECT error_message FROM extraction_runs
+                -- WHERE source_id=? ORDER BY created_at DESC LIMIT 1" — paid on
+                -- every source-list page render (_source_from_row, per row). No
+                -- prior index at all on this table; without one, SQLite must scan
+                -- every extraction_runs row for the source and sort in memory to
+                -- satisfy ORDER BY + LIMIT 1 — a full table scan per row of a
+                -- sources page. This composite makes it an index-order scan
+                -- (LIMIT 1 short-circuits after the first matching row). Row-order
+                -- audit: the only other site reading extraction_runs is an
+                -- id-scoped DELETE (order-irrelevant — see
+                -- _delete_relations_for_source's sibling "DELETE FROM
+                -- extraction_runs WHERE source_id=?"); the two writers (INSERT on
+                -- run start, UPDATE on completion/failure) are id/source_id-scoped
+                -- point writes, unaffected by a new index. _extraction_warning
+                -- itself already carries an explicit ORDER BY, so this index only
+                -- makes that ordering cheap to satisfy — it does not change what
+                -- row wins.
+                CREATE INDEX IF NOT EXISTS idx_extraction_runs_source_created ON extraction_runs(source_id, created_at);
 
 
                 CREATE TABLE IF NOT EXISTS element_embeddings (
@@ -618,6 +636,18 @@ class SQLiteRepository:
                   payload TEXT NOT NULL DEFAULT '{}',
                   created_at TEXT NOT NULL
                 );
+                -- notebook_analytics' "SELECT COUNT(*) FROM answers WHERE
+                -- notebook_id=?" — a §16 analytics-page COUNT that previously had
+                -- zero index on this table and did a full table scan. Row-order
+                -- audit: every notebook_id-scoped SELECT against answers already
+                -- carries an explicit ORDER BY (_conversation_history:
+                -- "ORDER BY created_at ASC"; get_conversation: "ORDER BY created_at
+                -- ASC, rowid ASC") or is a single-row id-keyed lookup
+                -- (answer_owner / user_can_read_answer) or a bulk id-scoped DELETE
+                -- (delete_conversation / bulk conversation cleanup) — none rely on
+                -- physical scan order, so this index changes no result ordering,
+                -- only how fast the COUNT is computed.
+                CREATE INDEX IF NOT EXISTS idx_answers_nb ON answers(notebook_id);
 
                 CREATE TABLE IF NOT EXISTS conversations (
                   id TEXT PRIMARY KEY,
@@ -636,6 +666,29 @@ class SQLiteRepository:
                   comment TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
                 );
+                -- notebook_analytics' two §16 COUNTs — "... WHERE notebook_id=? AND
+                -- rating='useful'" / "...rating='not_useful'" — previously zero
+                -- index on this table, full scan + filter each. This composite
+                -- covers both (notebook_id, rating) predicates as an index-range
+                -- scan. Separately, feedback submission (submit_feedback) does a
+                -- single answer_id-keyed point lookup on `answers` (unaffected)
+                -- then an INSERT here — unaffected by a new secondary index.
+                CREATE INDEX IF NOT EXISTS idx_feedback_nb_rating ON feedback(notebook_id, rating);
+                -- feedback.answer_id is a FOREIGN KEY ... ON DELETE CASCADE, but
+                -- SQLite does not auto-index FK columns. Deleting an answer
+                -- (delete_conversation / bulk conversation cleanup: "DELETE FROM
+                -- answers WHERE conversation_id=?", fired once per answer row)
+                -- fires the CASCADE, which — without this index — must full-scan
+                -- feedback per deleted answer to find child rows. This index turns
+                -- that into a point lookup (verified via EXPLAIN QUERY PLAN on the
+                -- DELETE itself, which shows the FK-cascade sub-scan). Row-order
+                -- audit: the notebook_analytics low_rated JOIN (feedback→answers on
+                -- answer_id) carries its own explicit "ORDER BY f.created_at DESC
+                -- LIMIT 10", unaffected by which index the planner picks for the
+                -- join key; the planner may prefer idx_feedback_nb_rating over this
+                -- one for that particular query shape (both are valid access paths
+                -- — this index's role is the FK-cascade scan, not that join).
+                CREATE INDEX IF NOT EXISTS idx_feedback_answer ON feedback(answer_id);
 
                 CREATE TABLE IF NOT EXISTS object_schemas (
                   object_type TEXT PRIMARY KEY,
@@ -895,6 +948,18 @@ class SQLiteRepository:
             answer_cols = {r["name"] for r in db.execute("PRAGMA table_info(answers)").fetchall()}
             if "conversation_id" not in answer_cols:
                 db.execute("ALTER TABLE answers ADD COLUMN conversation_id TEXT")
+            # conversation_id is added via ALTER TABLE above (SQLite has no
+            # "ADD COLUMN ... indexed" shorthand), so its index must live here
+            # rather than in the CREATE TABLE block. _conversation_history /
+            # get_conversation / list_conversations' turn_count and
+            # used_reasoning subqueries all filter on conversation_id — every one
+            # of them already carries its own explicit ORDER BY (see the answers
+            # composite index comment above), so this index changes no result
+            # order, only how those per-conversation scans are located.
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_answers_conversation "
+                "ON answers(conversation_id)"
+            )
             ccols = {r["name"] for r in db.execute("PRAGMA table_info(conversations)").fetchall()}
             if "created_by" not in ccols:
                 db.execute("ALTER TABLE conversations ADD COLUMN created_by TEXT DEFAULT ''")
