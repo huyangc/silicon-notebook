@@ -7,6 +7,7 @@ _scale_building/_scale_idle_queue 去重 —— 本文件只测 maybe_auto_index
 """
 import json
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -160,4 +161,62 @@ def test_ineligible_or_in_progress_trigger_exception_swallowed(repo, monkeypatch
 
     monkeypatch.setattr(repo, "trigger_scale_index_rebuild", _boom)
     repo.maybe_auto_index(nb.id)  # must not raise
+    assert nb.id in repo._auto_index_checked
+
+
+def test_scale_index_auto_when_literal_valid_values(monkeypatch):
+    """SCALE_INDEX_AUTO_WHEN 合法取值(idle/now)都应正常构造。"""
+    monkeypatch.setenv("SCALE_INDEX_AUTO_WHEN", "now")
+    s = Settings()
+    assert s.scale_index_auto_when == "now"
+
+
+def test_scale_index_auto_when_literal_rejects_invalid(monkeypatch):
+    """非法取值(如拼错的 SCALE_INDEX_AUTO_WHEN=nwo)必须在 Settings() 构造期就
+    ValidationError 快速失败,而不是静默落入 trigger_scale_index_rebuild 的 "now"
+    分支(该分支是立即后台重建,代价远高于预期的 "idle" 低峰重建)。"""
+    monkeypatch.setenv("SCALE_INDEX_AUTO_WHEN", "nwo")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_large_chunk_light_unindexed_triggers(repo, monkeypatch):
+    """大库(按 copyable 定义)但 chunk 数未过 index_suggest_chunk_threshold(即
+    scale_index_status 判定为 unindexed)也应触发 —— 产品意图是「大 → 自动建」,
+    大的定义(字节/chunks+nodes)与 chunk 阈值是两把不同的尺子,不应让 chunk 少
+    的大库永远停在 unindexed 不触发。"""
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)  # 一律 copyable=False("大")
+    # index_suggest_chunk_threshold 保持默认(高),使 scale_index_status 判定为 unindexed
+    nb = _seed_nb_with_chunk(repo)
+    assert repo.scale_index_status(nb.id)["state"] == "unindexed"
+    calls = []
+    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+                         lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
+    repo.maybe_auto_index(nb.id)
+    assert len(calls) == 1
+    assert calls[0][0] == nb.id
+
+
+def test_batch_burst_o1_early_exit_skips_copy_stats(repo, monkeypatch):
+    """批量摄取模拟:第一次 maybe_auto_index 入队(idle)后,清空 once-set(模拟
+    _mark_unified_kg_dirty 的逐源 discard),第二次调用必须命中 _scale_building/
+    _scale_idle_queue 的 O(1) 早退,不再调用 notebook_copy_stats(避免每源都重跑
+    5 个 COUNT + scale_index_status)。"""
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
+    monkeypatch.setattr(repo.settings, "index_suggest_chunk_threshold", 0)
+    nb = _seed_nb_with_chunk(repo)
+
+    # First call: real trigger_scale_index_rebuild runs (when=idle -> queued), no stubbing.
+    repo.maybe_auto_index(nb.id)
+    assert nb.id in repo._scale_idle_queue
+
+    # Simulate the per-source once-set discard from _mark_unified_kg_dirty.
+    repo._auto_index_checked.discard(nb.id)
+
+    calls = []
+    orig = repo.notebook_copy_stats
+    monkeypatch.setattr(repo, "notebook_copy_stats",
+                         lambda *a, **k: calls.append(a) or orig(*a, **k))
+    repo.maybe_auto_index(nb.id)
+    assert calls == []
     assert nb.id in repo._auto_index_checked

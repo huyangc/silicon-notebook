@@ -7665,13 +7665,28 @@ class SQLiteRepository:
             return
         if notebook_id in self._auto_index_checked:
             return
+        # 批量摄取早退:多源摄取时 _mark_unified_kg_dirty 逐源 discard 该 nb 的
+        # once-set 命中,导致同一批次每个源都重跑下面的 notebook_copy_stats(5 COUNT)+
+        # scale_index_status(多查询+manifest 读)。已在 building/idle 排队中的 nb
+        # 无需重新评估 —— O(1) 直接短路。锁语义:_scale_building 别处在
+        # _scale_building_lock 下读写,这里为性能故意不加锁做成员检查;是启发式早退,
+        # 漏判/误判的窗口极窄且后果轻(至多多跑一次评估),判定安全(review #4)。
+        if notebook_id in self._scale_building or notebook_id in self._scale_idle_queue:
+            self._auto_index_checked.add(notebook_id)
+            return
         try:
             stats = self.notebook_copy_stats(notebook_id)
             if stats["copyable"]:
                 return  # 小库:行为不变,不自动建索引
             status = self.scale_index_status(notebook_id)
-            if status["state"] not in ("suggested", "stale"):
-                return  # 已索引且新鲜 / 正在构建 / 已排队 / unindexed(未达建议阈值)—— 无需触发
+            if status["state"] not in ("unindexed", "suggested", "stale"):
+                return  # 已索引且新鲜 / 正在构建 / 已排队 —— 无需触发
+            # unindexed 也触发:该分支只在 copyable=False(已判定「大」)之后才到达,
+            # 「大」的定义(字节/chunks+nodes)与 index_suggest_chunk_threshold(仅看
+            # total_chunks)是两把不同的尺子 —— chunk 少但字节/节点多的库会停在
+            # unindexed 永不建议。产品意图是「大 → 自动建」,故此处三态一视同仁,
+            # 交给 trigger_scale_index_rebuild → _scale_index_eligible 做最终把关
+            # (仍不 eligible 会 ValueError,被下面 except 静默吞掉)。
             try:
                 self.trigger_scale_index_rebuild(
                     notebook_id, when=self.settings.scale_index_auto_when, mode="auto")
