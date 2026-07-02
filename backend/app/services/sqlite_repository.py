@@ -8756,6 +8756,11 @@ class SQLiteRepository:
         if self_idx is not None:
             base_indexes = base_indexes + [(notebook_id, self_idx)]
         if not base_indexes:
+            self.event_log.emit({
+                "kind": "scale_ppr_bailout",
+                "notebook_id": notebook_id,
+                "reason": "no_participants",
+            })
             return []
 
         # 2. Combined graph: base⊕active spliced CSR.  This graph is INDEPENDENT
@@ -8774,6 +8779,11 @@ class SQLiteRepository:
         reset = np.zeros(len(combined_ids), dtype=np.float64)
         qvec = self._embed_query(question)
 
+        # Bailout observability (Fix 2): 逐种子源计数,仅在 reset 全零(zero_reset)
+        # bail 时才附带到诊断事件,成功路径零额外开销(计数本身是几个 int 加法,可忽略)。
+        ann_seeds = 0
+        ann_sources_skipped = 0
+
         # 3a. Base KG seeds via ANN (no 4GB matmul): query each base hnswlib index.
         if qvec is not None:
             qarr = np.asarray(qvec, dtype=np.float32)
@@ -8783,9 +8793,11 @@ class SQLiteRepository:
                     continue
                 dim = int(idx.manifest.get("dim", qarr.shape[0]))
                 if dim != qarr.shape[0]:
+                    ann_sources_skipped += 1
                     continue
                 ann = self._open_scale_ann(idx, "kg")
                 if ann is None:
+                    ann_sources_skipped += 1
                     continue
                 try:
                     ann.set_ef(max(top_n + 1, 50))
@@ -8802,9 +8814,11 @@ class SQLiteRepository:
                     sim = max(0.0, 1.0 - float(dist))  # cosine distance → similarity
                     if sim > 0:
                         reset[ci] += sim * combined_idf[ci]
+                        ann_seeds += 1
 
         # 3b. Active KG seeds: bounded brute-force cosine over the small active
         #     notebook's knowledge embeddings (NOT the base — base goes via ANN).
+        active_seeds = 0
         if qvec is not None:
             with self._connect() as db:
                 a_ids, a_mat = self._vector_matrix(
@@ -8818,6 +8832,7 @@ class SQLiteRepository:
                     ci = combined_index.get(oid)
                     if ci is not None and sim > 0:
                         reset[ci] += float(sim) * combined_idf[ci]
+                        active_seeds += 1
 
         # 3c. Chunk seeds: ACTIVE notebook dense chunk seeds (raw chunk_id key —
         #     matches build's chunk node convention). NOTE (v1 follow-up): base
@@ -8826,16 +8841,33 @@ class SQLiteRepository:
         #     propagation from base KG ANN seeds, so they remain rankable.
         scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
         pw = self.settings.ppr_passage_node_weight
+        chunk_seeds = 0
         for c in scored[: self.settings.ppr_chunk_seed_top_n]:
             ci = combined_index.get(c.chunk_id)  # raw chunk_id, no "chunk:" prefix
             if ci is not None and c.relevance > 0:
                 reset[ci] += float(c.relevance) * pw
+                chunk_seeds += 1
 
         # 4. PPR.
         if reset.sum() <= 0:
+            self.event_log.emit({
+                "kind": "scale_ppr_bailout",
+                "notebook_id": notebook_id,
+                "reason": "zero_reset",
+                "ann_seeds": ann_seeds,
+                "active_seeds": active_seeds,
+                "chunk_seeds": chunk_seeds,
+                "embed_ok": bool(qvec),
+                "ann_sources_skipped": ann_sources_skipped,
+            })
             return []
         x = si.personalized_ppr(combined_A, reset, damping=self.settings.ppr_damping)
         if x.sum() <= 0:
+            self.event_log.emit({
+                "kind": "scale_ppr_bailout",
+                "notebook_id": notebook_id,
+                "reason": "zero_ppr_mass",
+            })
             return []
 
         # 5. Chunk rankings: collect chunk node scores, min-max normalize into
@@ -8847,6 +8879,11 @@ class SQLiteRepository:
             if ci is not None:
                 raw.append((cid, float(x[ci])))
         if not raw:
+            self.event_log.emit({
+                "kind": "scale_ppr_bailout",
+                "notebook_id": notebook_id,
+                "reason": "no_chunk_nodes",
+            })
             return []
         vals = [s for _, s in raw]
         lo, hi = min(vals), max(vals)
@@ -8861,10 +8898,25 @@ class SQLiteRepository:
         归一 PPR 分,守 [0,1])。无 KG/无 chunk 时返回 []。
 
         分发:若存在有效 base scale 索引,走规模化 ANN-种子 + CSR PPR 路径
-        (scale_ppr);否则字节不变地回退到原 rustworkx 路径。"""
+        (scale_ppr);否则字节不变地回退到原 rustworkx 路径。
+
+        大库守卫:scale_ppr 返回 [] 时,原本无条件回退 self._ppr_graph(notebook_id)
+        = 全量 rustworkx 图构建(百万级节点/边,Python 边循环 → 数十分钟 + 数 GB 内存,
+        曾在 1.13M 节点库上导致 reasoning 模式冻结)。大库(与分享/拷贝阈值同一「大」
+        定义,not notebook_copy_stats()["copyable"])下拒绝构建该图,发
+        ppr_fallback_refused 事件后返回 []——调用方(reasoning 种子/agent 动作、
+        chunk 模式三路 mix、ask_graph PPR 分支)均已对 [] 容错降级。小库保留旧
+        回退路径,字节不变。"""
         from app.services.kg.ppr import run_ppr
         ranked = self.scale_ppr(notebook_id, question)
         if not ranked:
+            if not self.notebook_copy_stats(notebook_id)["copyable"]:
+                self.event_log.emit({
+                    "kind": "ppr_fallback_refused",
+                    "notebook_id": notebook_id,
+                    "reason": "large_notebook",
+                })
+                return []
             G, key_to_idx, chunk_idx_to_id = self._ppr_graph(notebook_id)
             if G.num_nodes() == 0 or not chunk_idx_to_id:
                 return []
