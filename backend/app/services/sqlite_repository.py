@@ -10172,10 +10172,57 @@ class SQLiteRepository:
                 ann = self._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
                 if ann is not None:
                     return ann
+        # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
+        # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
+        # 绝不落进下面「全表拉文本 + 逐 chunk 纯 Python 分词」——生产 55 万 KG 级
+        # 库曾因 .env 丢失静默走到这里,单问磨半小时「思考中」。降级为 FTS 词法
+        # 候选 + 有界打分(候选内仍关键词+语义融合),发 chunk_bruteforce_skipped
+        # 事件;真解=建 scale 索引(chunk ANN)。小库/关守卫(0)字节不变。
+        threshold = self.settings.chunk_bruteforce_max_chunks
+        if threshold > 0:
+            with self._connect() as db:
+                n_chunks = db.execute(
+                    "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id = ?",
+                    (notebook_id,)).fetchone()["c"]
+            if n_chunks > threshold:
+                return self._retrieve_chunks_fts_degraded(
+                    notebook_id, query, query_vector, recall, n_chunks)
         # ↓ 现有暴力路径保持不变
         with self._connect() as db:
             chunks = self._gather_chunks(db, notebook_id)
             ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
+        chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
+        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        return scored, ids, mat
+
+    def _retrieve_chunks_fts_degraded(self, notebook_id, query, query_vector,
+                                      recall, n_chunks):
+        """大库且 chunk ANN 不可用时的有界降级:FTS5 词法候选(k=recall)→ 只对
+        候选 hydrate 文本+向量,候选内做关键词+语义融合打分。绝不 _gather_chunks
+        全表、不全量分词、不触发全量向量矩阵加载(与 PR#158「查询恒定成本」取向
+        一致)。fail-open:FTS 异常(如旧库缺 chunks_fts)按零候选处理 →
+        ([], [], None),事件携带 fts_error 供 diag_slow.py 定位。"""
+        from app.services.retrieval import score_chunks
+        from app.services.vector_index import query_sims
+        hits, fts_error = [], ""
+        try:
+            from app.services.kg.search import chunk_fts_search
+            with self._connect() as db:
+                hits = chunk_fts_search(db, notebook_id, query, k=recall)
+        except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
+            fts_error = f"{type(exc).__name__}: {exc}"
+        event = {
+            "kind": "chunk_bruteforce_skipped", "notebook_id": notebook_id,
+            "reason": "large_library_no_ann", "n_chunks": n_chunks,
+            "threshold": self.settings.chunk_bruteforce_max_chunks,
+            "fts_hits": len(hits), "embed_ok": query_vector is not None,
+        }
+        if fts_error:
+            event["fts_error"] = fts_error[:120]
+        self.event_log.emit(event)
+        if not hits:
+            return [], [], None
+        chunks, ids, mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
         return scored, ids, mat
@@ -10245,6 +10292,14 @@ class SQLiteRepository:
 
         if not cand_ids:
             return [], [], None
+        chunks, ids, mat = self._hydrate_chunk_candidates(cand_ids)
+        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        return scored, ids, mat
+
+    def _hydrate_chunk_candidates(self, cand_ids):
+        """按候选 id 有界取数:chunk 文本行 + 归一化向量矩阵。候选界定之后的
+        hydrate,ANN 路径与大库 FTS 降级路径共用,绝不全表。返回 (chunks, ids, mat)。"""
+        from app.services.vector_index import build_matrix
         ph = ",".join("?" for _ in cand_ids)
         with self._connect() as db:
             rows = db.execute(
@@ -10259,9 +10314,8 @@ class SQLiteRepository:
             "section_path": r["section_path"], "source_title": r["source_title"],
             "element_ids": json.loads(r["element_ids"] or "[]"),
         } for r in rows]
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
         ids, mat = build_matrix((r["vid"], r["vector"]) for r in vrows)
-        return scored, ids, mat
+        return chunks, ids, mat
 
     def _retrieve_chunks_multi(self, notebook_id, sub_queries):
         """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。

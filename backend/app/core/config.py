@@ -293,6 +293,13 @@ class Settings(BaseSettings):
     chunk_mmr_k: int = Field(16, env="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, env="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, env="CHUNK_ANSWER_BUDGET_CHARS")
+    # 大库 chunk 暴力回退守卫:ANN 不可用(未建 scale 索引/embed 失败/ANN fail-open)
+    # 时,chunk 数超过该阈值的库不再「全表拉文本+全量纯 Python 分词」(生产 55 万 KG
+    # 级库曾因 .env 丢失走到这里,单问磨半小时),改走 FTS 词法候选+有界打分并发
+    # chunk_bruteforce_skipped 事件;真解仍是建 scale 索引(chunk ANN)。
+    # 0 = 关守卫(任何规模都保留全量暴力)。
+    chunk_bruteforce_max_chunks: int = Field(
+        20000, validation_alias="CHUNK_BRUTEFORCE_MAX_CHUNKS")
     # P3 查询改写/扩展: 多子查询上限(0=禁用多子查询); 开关(false→单查询 MMR 原路径)。
     chunk_max_subqueries: int = Field(4, env="CHUNK_MAX_SUBQUERIES")
     query_rewrite_enabled: bool = Field(True, env="QUERY_REWRITE_ENABLED")
