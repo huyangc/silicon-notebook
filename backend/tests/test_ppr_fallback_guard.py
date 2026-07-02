@@ -261,3 +261,88 @@ def test_scale_ppr_success_path_emits_no_bailout_event(repo, monkeypatch):
 
     assert result != []
     assert [e for e in events if e.get("kind") == "scale_ppr_bailout"] == []
+
+
+# ── Fix wave: graph 模式大库建图守卫(ask_graph / _chunk_kg_overlay) ─────────
+
+def _spy_fed_rx_graph(repo, monkeypatch):
+    """Spy on _federated_rx_graph — counts calls, delegates to the original."""
+    called = {"n": 0}
+    orig = repo._federated_rx_graph
+
+    def spy(notebook_id):
+        called["n"] += 1
+        return orig(notebook_id)
+
+    monkeypatch.setattr(repo, "_federated_rx_graph", spy)
+    return called
+
+
+def test_ask_graph_large_notebook_refuses_graph_walk(repo, monkeypatch):
+    """大库(copyable=False)graph 模式端到端:PPR 分支空手(scale_ppr 无索引
+    bail + Fix1 拒绝 rustworkx 回退)后,ask_graph 不得再触发 _federated_rx_graph
+    全量建图 —— 早退带解释的降级回答(deterministic)+ graph_walk_refused 事件。"""
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo, "notebook_copy_stats",
+                        lambda notebook_id: {"copyable": False, "size": {}})
+    called = _spy_fed_rx_graph(repo, monkeypatch)
+    events = _capture_events(repo, monkeypatch)
+
+    from app.models.schemas import AskRequest
+    resp = repo.ask_graph(nb.id, AskRequest(question="DeepSeek MoE 架构?", mode="graph"))
+
+    assert called["n"] == 0, "large notebook must NOT build the federated rustworkx graph"
+    assert resp.mode == "graph"
+    assert resp.llm_mode == "deterministic"
+    assert resp.conclusion  # 有解释文案,不是空答案
+    refused = [e for e in events if e.get("kind") == "graph_walk_refused"]
+    assert len(refused) == 1
+    assert refused[0]["notebook_id"] == nb.id
+    assert refused[0]["reason"] == "large_notebook"
+
+
+def test_ask_graph_small_notebook_builds_graph_unchanged(repo, monkeypatch):
+    """小库 graph 模式行为不变:关掉 PPR 分支走 BFS 图路径,_federated_rx_graph
+    照常被调用,无 graph_walk_refused 事件。"""
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
+    called = _spy_fed_rx_graph(repo, monkeypatch)
+    events = _capture_events(repo, monkeypatch)
+
+    from app.models.schemas import AskRequest
+    resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
+
+    assert called["n"] >= 1, "small notebook keeps the legacy graph walk"
+    assert resp.mode == "graph"
+    assert [e for e in events if e.get("kind") == "graph_walk_refused"] == []
+
+
+def test_chunk_kg_overlay_large_notebook_skips_graph(repo, monkeypatch):
+    """chunk 模式 KG overlay(第二个请求路径调用方):大库跳过 _federated_rx_graph,
+    返回空 overlay(("", {}, []),ask_chunk 继续用向量/PPR chunk 作答)+ 事件。"""
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo, "notebook_copy_stats",
+                        lambda notebook_id: {"copyable": False, "size": {}})
+    called = _spy_fed_rx_graph(repo, monkeypatch)
+    events = _capture_events(repo, monkeypatch)
+
+    block, id_map, kg_hits = repo._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
+
+    assert called["n"] == 0
+    assert (block, id_map, kg_hits) == ("", {}, [])
+    refused = [e for e in events if e.get("kind") == "graph_walk_refused"]
+    assert len(refused) == 1
+    assert refused[0]["reason"] == "large_notebook"
+
+
+def test_chunk_kg_overlay_small_notebook_builds_graph(repo, monkeypatch):
+    """小库 chunk overlay 行为不变:_federated_rx_graph 照常被调用,无拒绝事件。"""
+    nb = _seed_two_doc_moe(repo)
+    called = _spy_fed_rx_graph(repo, monkeypatch)
+    events = _capture_events(repo, monkeypatch)
+
+    block, id_map, kg_hits = repo._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
+
+    assert called["n"] == 1
+    assert kg_hits  # 命中种子,真走了 overlay
+    assert [e for e in events if e.get("kind") == "graph_walk_refused"] == []
