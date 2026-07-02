@@ -376,3 +376,156 @@ def test_kg_source_chunks_return_shape_is_list_for_ordered_consumers(repo):
     out = repo._kg_source_chunks(nb.id, oids)
     assert isinstance(out, list)
     assert out[:] == out  # indexable/sliceable
+
+
+# ── ordering contract (Fix 1) ────────────────────────────────────────────────
+# ask_graph's BFS-fallback path feeds _kg_source_chunks output straight into
+# truncate_by_tokens with NO rerank, so list order decides which chunks survive
+# truncation and how citations are numbered — the order must be deterministic:
+# object_ids order → each object's evidence array order → _elem_chunk_map's
+# per-element chunk list order (chunks scan order). NOT the old implementation's
+# full-table physical scan order (which was never a contract).
+
+def _seed_order_fixture(repo):
+    """3 chunks inserted in table order c1,c2,c3 (element el1,el2,el3 resp.);
+    objB's evidence -> el3 then el2; objA's evidence -> el1. Calling with
+    object_ids=[objB, objA] must yield [c3, c2, c1] (evidence-driven order),
+    while the old physical-scan oracle yields [c1, c2, c3]."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    now = _now()
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", (f"s-{nb.id}", nb.id, "t", "md", "ready", now, now))
+        for i in (1, 2, 3):
+            db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (f"c{i}", nb.id, f"s-{nb.id}", f"text {i}", "sec", json.dumps([f"el{i}"]), now))
+
+        def _ev(*els):
+            return json.dumps([{"source_id": f"s-{nb.id}", "source_title": "", "element_id": el,
+                                "element_type": "paragraph", "location_label": "p",
+                                "quoted_span": "q", "confidence": 1.0} for el in els])
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("objA", nb.id, "concept", "approved", "", json.dumps({"name": "A"}), _ev("el1"),
+                    f"s-{nb.id}", now, now))
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("objB", nb.id, "concept", "approved", "", json.dumps({"name": "B"}), _ev("el3", "el2"),
+                    f"s-{nb.id}", now, now))
+    repo._mark_unified_kg_dirty(nb.id)
+    return nb
+
+
+def test_kg_source_chunks_order_follows_object_ids_then_evidence(repo):
+    nb = _seed_order_fixture(repo)
+    out = repo._kg_source_chunks(nb.id, ["objB", "objA"])
+    # objB first (evidence order el3, el2 -> c3, c2), then objA (el1 -> c1)
+    assert [c.chunk_id for c in out] == ["c3", "c2", "c1"]
+    # flipping object_ids order flips the output order accordingly
+    out2 = repo._kg_source_chunks(nb.id, ["objA", "objB"])
+    assert [c.chunk_id for c in out2] == ["c1", "c3", "c2"]
+    # same multiset as the old full-scan oracle (only the order contract changed)
+    want = _oracle_kg_source_chunks(repo, nb.id, ["objB", "objA"])
+    assert {c.chunk_id for c in out} == {c.chunk_id for c in want}
+
+
+def test_kg_source_chunks_order_stable_across_cache_states(repo):
+    """Cold (loader runs) and warm (cache hit) calls must produce the identical
+    list order — order is part of the contract, not a cache artifact."""
+    nb = _seed_order_fixture(repo)
+    cold = [c.chunk_id for c in repo._kg_source_chunks(nb.id, ["objB", "objA"])]
+    warm = [c.chunk_id for c in repo._kg_source_chunks(nb.id, ["objB", "objA"])]
+    assert cold == warm == ["c3", "c2", "c1"]
+
+
+def test_kg_source_chunks_order_matches_oracle_when_scan_order_agrees(repo):
+    """When object_ids/evidence order happens to agree with the chunks table
+    scan order (the common single-source case), the new deterministic order is
+    position-for-position equal to the old oracle — a full ordered-equality
+    check, not just a multiset check."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    oids = _seed(repo, nb.id, n_objects=3, chunks_per_elem=2)
+    got = repo._kg_source_chunks(nb.id, oids)
+    want = _oracle_kg_source_chunks(repo, nb.id, oids)
+    assert [c.chunk_id for c in got] == [c.chunk_id for c in want]
+
+
+def test_kg_source_chunks_shared_element_dedup_keeps_first_seen_position(repo):
+    """A chunk reachable via two objects' evidence appears once, at the position
+    of its FIRST appearance in the deterministic walk."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    now = _now()
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)", (f"s-{nb.id}", nb.id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("cShared", nb.id, f"s-{nb.id}", "shared", "sec", json.dumps(["elS"]), now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("cOwn", nb.id, f"s-{nb.id}", "own", "sec", json.dumps(["elO"]), now))
+
+        def _ev(*els):
+            return json.dumps([{"source_id": f"s-{nb.id}", "source_title": "", "element_id": el,
+                                "element_type": "paragraph", "location_label": "p",
+                                "quoted_span": "q", "confidence": 1.0} for el in els])
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("objS1", nb.id, "concept", "approved", "", json.dumps({"name": "S1"}), _ev("elS"),
+                    f"s-{nb.id}", now, now))
+        db.execute("INSERT INTO knowledge_objects "
+                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("objS2", nb.id, "concept", "approved", "", json.dumps({"name": "S2"}), _ev("elO", "elS"),
+                    f"s-{nb.id}", now, now))
+    repo._mark_unified_kg_dirty(nb.id)
+    out = repo._kg_source_chunks(nb.id, ["objS1", "objS2"])
+    assert [c.chunk_id for c in out] == ["cShared", "cOwn"]  # cShared first-seen via objS1
+
+
+# ── chunk write path bumps kg_mutation_seq (Fix 2) ──────────────────────────
+
+def _mutation_seq(repo, nb_id):
+    with repo._connect() as db:
+        r = db.execute("SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+                       (nb_id,)).fetchone()
+    return int(r["kg_mutation_seq"]) if r else 0
+
+
+def test_build_chunks_bumps_seq_and_refreshes_elem_chunk_map(repo, monkeypatch):
+    """Reviewer repro (inverted): kg_auto_extract=False (default) + NO existing
+    KG means the extract-path _mark_unified_kg_dirty is never reached — the
+    chunk INSERT choke point itself must bump kg_mutation_seq, or a warm
+    _elem_chunk_map/_ent_chunk_map never sees the new source's chunks (no TTL,
+    no other invalidation)."""
+    monkeypatch.setattr(repo.settings, "kg_auto_extract", False)
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    # warm the cache on the empty notebook
+    assert repo._elem_chunk_map(nb.id) == {}
+
+    # real chunk write path: source + source_elements -> _build_chunks_for_source
+    import uuid
+    sid = f"src-{uuid.uuid4().hex[:8]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                   "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (sid, nb.id, "S", "document", "s.md", "/tmp/s.md", 0, "h", "", "", "extracted", now, now))
+        db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (f"el-{sid}-0001", sid, "paragraph", "p1", "hello " * 60, "{}", now))
+    seq_before = _mutation_seq(repo, nb.id)
+    repo._build_chunks_for_source(sid)
+    assert _mutation_seq(repo, nb.id) > seq_before  # choke point bumped unconditionally
+
+    refreshed = repo._elem_chunk_map(nb.id)
+    assert f"el-{sid}-0001" in refreshed  # warm cache was invalidated by the version bump
+    with repo._connect() as db:
+        cids = {r["id"] for r in db.execute(
+            "SELECT id FROM chunks WHERE source_id=?", (sid,)).fetchall()}
+    assert set(refreshed[f"el-{sid}-0001"]) <= cids and refreshed[f"el-{sid}-0001"]
