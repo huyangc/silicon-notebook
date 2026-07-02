@@ -6808,7 +6808,8 @@ class SQLiteRepository:
                         all_ids, np.vstack(mats),
                         self.settings.ppr_emb_synonym_threshold,
                         self.settings.ppr_emb_synonym_topk,
-                        self.settings.ppr_emb_synonym_max_entities)
+                        self.settings.ppr_emb_synonym_max_entities,
+                        ef_construction=self.settings.hnsw_ef_construction)
             return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
 
         return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
@@ -7018,7 +7019,7 @@ class SQLiteRepository:
                 "viz_edges": int(m.get("n_viz_edges", 0)),
                 "viz_stale": not fresh}
 
-    def _gather_kg_graph(self, notebook_id: str, source_ids=None):
+    def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None):
         """Gather all KG nodes/relations/chunks/cluster_groups for a notebook
         and build the undirected edge set used by both build_scale_index and
         _active_kg_delta.  Single source of truth — no duplicated _add_undirected.
@@ -7029,6 +7030,17 @@ class SQLiteRepository:
         variant/synonym extra_edges are skipped (delta is small, connectivity
         comes from relations/cluster-hub/cross-layer bridges).  An empty list
         returns ([], [], [], [], {}).
+
+        synonym_edges : None (default) = current behaviour — this method loads
+        the KG embedding matrix itself and calls emb_synonym_edges() internally
+        (whole-notebook / unscoped path only). Pass a pre-computed
+        [(id_a,id_b,sim), ...] list (e.g. from build_scale_index, which already
+        loaded the matrix and built the hnsw index once for both the ann.bin
+        persist AND the synonym KNN) to SKIP the internal matrix load + KNN
+        call entirely and merge the given edges into extra_edges instead —
+        avoids doing the single most expensive build step (hnsw construction)
+        twice. Only meaningful when source_ids is None; scoped/delta callers
+        never pass this (variant/synonym edges are already skipped when scoped).
 
         Returns
         -------
@@ -7091,18 +7103,25 @@ class SQLiteRepository:
         extra_edges = []
         if not scoped:
             extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
-            with self._connect() as db:
-                ann_ids_raw, ann_matrix_raw = self._vector_matrix(
-                    db, notebook_id, "knowledge_embeddings", "object_id")
-            ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
-            has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
-            if has_vecs and self.settings.ppr_emb_synonym_enabled:
-                extra_edges = extra_edges + emb_synonym_edges(
-                    ann_ids, np.asarray(ann_matrix_raw),
-                    self.settings.ppr_emb_synonym_threshold,
-                    self.settings.ppr_emb_synonym_topk,
-                    self.settings.ppr_emb_synonym_max_entities,
-                )
+            if synonym_edges is not None:
+                # Caller (build_scale_index) already computed these — reusing
+                # the SAME hnsw build it also persists as ann.bin, instead of
+                # this method loading the matrix + building hnsw again.
+                extra_edges = extra_edges + list(synonym_edges)
+            else:
+                with self._connect() as db:
+                    ann_ids_raw, ann_matrix_raw = self._vector_matrix(
+                        db, notebook_id, "knowledge_embeddings", "object_id")
+                ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
+                has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
+                if has_vecs and self.settings.ppr_emb_synonym_enabled:
+                    extra_edges = extra_edges + emb_synonym_edges(
+                        ann_ids, np.asarray(ann_matrix_raw),
+                        self.settings.ppr_emb_synonym_threshold,
+                        self.settings.ppr_emb_synonym_topk,
+                        self.settings.ppr_emb_synonym_max_entities,
+                        ef_construction=self.settings.hnsw_ef_construction,
+                    )
 
         # node_ids: kg nodes first, then chunk nodes (cluster hubs appended below)
         node_ids: list = list(kg_nodes.keys()) + chunk_ids
@@ -7159,15 +7178,28 @@ class SQLiteRepository:
         IDF[i] = 1 / membership_count for KG nodes (1.0 when 0), 1.0 for chunks.
         ANN index = only kg nodes that have a row in knowledge_embeddings.
 
+        Perf (Task 1, 2026-07-02): the KG-embedding hnsw index used to be built
+        TWICE — once inside emb_synonym_edges (for the KNN synonym-edge pass,
+        discarded after) and once more here for the persisted ann.bin — hnsw
+        construction is the single most expensive step in this pipeline at
+        490k-object scale. Now built ONCE: load the kg matrix first, build one
+        hnsw index (ef_construction configurable), derive synonym edges from it
+        via emb_synonym_edges(prebuilt_index=...), feed those into
+        _gather_kg_graph(synonym_edges=...) (skips its own matrix load + KNN),
+        and finally hand the SAME index to save_scale_index(prebuilt_ann=...)
+        which just save_index()s it (no rebuild).
+
         `on_stage`: optional callback invoked as `(stage_name, latency_ms)`
-        once per stage (the same 7 stages as the `scale_index_build` events:
-        gather/transition/kg_matrix/chunk_matrix/viz_arrays/persist/total),
-        right when that stage's timing is recorded. Lets a CLI caller
-        (batch_ingest) print real-time per-stage progress on long builds
-        without depending on the events logger, which doesn't print to the
-        terminal. A raising callback is swallowed (logging-only) so it can
-        never break the build — mirrors how event_log.emit isolates its own
-        failures. Default None preserves prior behavior byte-for-byte.
+        once per stage (the same 8 stages as the `scale_index_build` events:
+        kg_matrix/ann_build/synonym/gather/transition/chunk_matrix/viz_arrays/
+        persist, plus a final total), right when that stage's timing is
+        recorded. Lets a CLI caller (batch_ingest) print real-time per-stage
+        progress on long builds without depending on the events logger, which
+        doesn't print to the terminal. A raising callback is swallowed
+        (logging-only) so it can never break the build — mirrors how
+        event_log.emit isolates its own failures. Default None preserves prior
+        behavior byte-for-byte (aside from the stage-name/-order changes above,
+        which are observability-only and documented here).
         """
         from app.services.kg import scale_index as si
 
@@ -7176,12 +7208,12 @@ class SQLiteRepository:
         # Validate notebook exists
         self.get_notebook(notebook_id)
 
-        # Per-stage timing (observability only, no behavior change): times the
-        # main internal stages and emits a `scale_index_build` event per stage
-        # so a slow build on a large (e.g. 490k-object) deployment can be
-        # traced to the exact bottleneck (gather / transition / ANN matrices /
-        # viz arrays / persist). Mirrors the pipeline-stage event pattern in
-        # process_source (kind/stage/status/latency_ms).
+        # Per-stage timing (observability only, no behavior change to the
+        # produced artifacts): times the main internal stages and emits a
+        # `scale_index_build` event per stage so a slow build on a large (e.g.
+        # 490k-object) deployment can be traced to the exact bottleneck.
+        # Mirrors the pipeline-stage event pattern in process_source
+        # (kind/stage/status/latency_ms).
         build_started = time.perf_counter()
         timings: dict = {}
 
@@ -7209,8 +7241,60 @@ class SQLiteRepository:
             _notify_stage(stage_name, ms)
             return out
 
+        # ── KG embedding matrix + ONE shared hnsw build ─────────────────────
+        # Loaded/built first (before gather) so the same in-memory hnswlib.Index
+        # can be reused for both the synonym-edge KNN pass and the persisted
+        # ann.bin — see perf note in the docstring above.
+        def _kg_matrix():
+            with self._connect() as db:
+                return self._vector_matrix(
+                    db, notebook_id, "knowledge_embeddings", "object_id")
+
+        ann_ids_raw, ann_matrix_raw = _timed("kg_matrix", _kg_matrix)
+        ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
+        ann_matrix = ann_matrix_raw
+        if ann_ids and ann_matrix is not None:
+            ann_labels = ann_ids
+            ann_vectors = np.asarray(ann_matrix, dtype=np.float32)
+        else:
+            ann_labels = []
+            ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
+
+        def _build_kg_ann():
+            # CRITICAL alignment: ann_labels IS ann_ids from the _kg_matrix()
+            # load above (single source of truth — _vector_matrix returns
+            # (ids, matrix) row-aligned), so labels 0..n-1 assigned here match
+            # ann_labels' row order exactly, which save_scale_index later
+            # verifies via get_current_count() == len(ann_labels).
+            if ann_vectors.shape[0] == 0:
+                return None
+            import hnswlib
+            idx = hnswlib.Index(space="cosine", dim=int(ann_vectors.shape[1]))
+            idx.init_index(max_elements=ann_vectors.shape[0],
+                           ef_construction=self.settings.hnsw_ef_construction,
+                           M=16, random_seed=42)
+            idx.add_items(ann_vectors, np.arange(ann_vectors.shape[0]))
+            return idx
+
+        kg_ann_index = _timed("ann_build", _build_kg_ann)
+
+        def _synonym():
+            if kg_ann_index is None or not self.settings.ppr_emb_synonym_enabled:
+                return []
+            from app.services.kg.ppr import emb_synonym_edges
+            return emb_synonym_edges(
+                ann_labels, ann_vectors,
+                self.settings.ppr_emb_synonym_threshold,
+                self.settings.ppr_emb_synonym_topk,
+                self.settings.ppr_emb_synonym_max_entities,
+                prebuilt_index=kg_ann_index,
+                ef_construction=self.settings.hnsw_ef_construction,
+            )
+
+        synonym_edges = _timed("synonym", _synonym)
+
         node_ids, edges, chunk_ids, kg_node_ids, membership_counts = \
-            _timed("gather", lambda: self._gather_kg_graph(notebook_id))
+            _timed("gather", lambda: self._gather_kg_graph(notebook_id, synonym_edges=synonym_edges))
 
         kg_id_set = set(kg_node_ids)
 
@@ -7230,22 +7314,6 @@ class SQLiteRepository:
 
         # Build CSR transition matrix
         transition, _ = _timed("transition", lambda: si.build_transition(node_ids, edges))
-
-        # ANN vectors/labels: kg nodes with embeddings
-        def _kg_matrix():
-            with self._connect() as db:
-                return self._vector_matrix(
-                    db, notebook_id, "knowledge_embeddings", "object_id")
-
-        ann_ids_raw, ann_matrix_raw = _timed("kg_matrix", _kg_matrix)
-        ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
-        ann_matrix = ann_matrix_raw
-        if ann_ids and ann_matrix is not None:
-            ann_labels = ann_ids
-            ann_vectors = np.asarray(ann_matrix, dtype=np.float32)
-        else:
-            ann_labels = []
-            ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
 
         # Chunk-level ANN vectors/labels (Task 1): chunks that have a row in
         # chunk_embeddings. Persisted as chunk_ann.bin so query-time chunk
@@ -7289,7 +7357,7 @@ class SQLiteRepository:
             # after this dict is serialized to manifest.json by save_scale_index
             # below). The RETURNED manifest gets persist+total appended after
             # save_scale_index returns — see below. Full picture either way is
-            # in the `scale_index_build` events (7 stages incl. persist/total).
+            # in the `scale_index_build` events (8 stages incl. persist/total).
             "build_ms": dict(timings),
         }
         persist_started = time.perf_counter()
@@ -7310,6 +7378,8 @@ class SQLiteRepository:
             viz_payload=viz_payload,
             chunk_ann_vectors=chunk_ann_vectors,
             chunk_ann_labels=chunk_ann_labels,
+            prebuilt_ann=kg_ann_index,
+            ef_construction=self.settings.hnsw_ef_construction,
         )
         persist_ms = round((time.perf_counter() - persist_started) * 1000)
         timings["persist"] = persist_ms

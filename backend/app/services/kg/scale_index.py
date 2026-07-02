@@ -169,6 +169,8 @@ def save_scale_index(
     viz_payload: dict = None,
     chunk_ann_vectors=None,
     chunk_ann_labels: List[str] = None,
+    prebuilt_ann=None,
+    ef_construction: int = 200,
 ) -> dict:
     """把构建好的数组落盘到 out_dir。
 
@@ -179,6 +181,13 @@ def save_scale_index(
 
     当传入折叠 viz 图（viz_ids 非空）时额外写 viz.npz + viz_adj.npz 并把
     manifest["has_viz"]=True，供 unified_graph/neighbors 有界分派直接消费。
+
+    prebuilt_ann: 调用方已建好并 add_items 完毕的 hnswlib.Index（比如
+    emb_synonym_edges 那次 KNN 复用的同一个 index）。传入时跳过本函数自己的
+    init_index+add_items，直接 save_index——避免 490k 节点规模下对同一批
+    KG 向量重复构建 hnsw（流水线里最贵的计算）。防御性对齐检查：其元素数
+    （get_current_count()）必须等于 len(ann_labels)，否则视为不可信（调用方
+    传错/竞态）而回退到本函数自建，绝不静默产出行数错位的 ann.bin。
     """
     import hnswlib
 
@@ -209,10 +218,18 @@ def save_scale_index(
     if dim < 1:
         dim = 1
 
-    idx = hnswlib.Index(space="cosine", dim=dim)
-    idx.init_index(max_elements=max(1, ann_vecs.shape[0]), ef_construction=200, M=16, random_seed=42)
-    if ann_vecs.shape[0] > 0:
-        idx.add_items(ann_vecs, np.arange(ann_vecs.shape[0]))
+    idx = None
+    if prebuilt_ann is not None:
+        try:
+            if int(prebuilt_ann.get_current_count()) == len(ann_labels):
+                idx = prebuilt_ann
+        except Exception:  # noqa: BLE001 — defensive: never trust a broken handle
+            idx = None
+    if idx is None:
+        idx = hnswlib.Index(space="cosine", dim=dim)
+        idx.init_index(max_elements=max(1, ann_vecs.shape[0]), ef_construction=ef_construction, M=16, random_seed=42)
+        if ann_vecs.shape[0] > 0:
+            idx.add_items(ann_vecs, np.arange(ann_vecs.shape[0]))
     idx.save_index(os.path.join(out_dir, "ann.bin"))
 
     # Chunk-level ANN (Task 1). Same hnsw params as the KG ann above; persisted
@@ -222,7 +239,7 @@ def save_scale_index(
         c_vecs = np.asarray(chunk_ann_vectors, dtype=np.float32)
         c_dim = int(c_vecs.shape[1]) if c_vecs.shape[0] > 0 else dim
         c_idx = hnswlib.Index(space="cosine", dim=c_dim)
-        c_idx.init_index(max_elements=max(1, c_vecs.shape[0]), ef_construction=200, M=16, random_seed=42)
+        c_idx.init_index(max_elements=max(1, c_vecs.shape[0]), ef_construction=ef_construction, M=16, random_seed=42)
         if c_vecs.shape[0] > 0:
             c_idx.add_items(c_vecs, np.arange(c_vecs.shape[0]))
         c_idx.save_index(os.path.join(out_dir, "chunk_ann.bin"))
