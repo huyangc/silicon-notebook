@@ -35,8 +35,11 @@ class ScaleIndex:
     viz_edges: list = None        # directed-deduped folded edges [[src,dst,edge_type],...]
     chunk_ann_labels: list = None   # chunk_id 列表(与 chunk_ann.bin 行对齐);无则 None
     chunk_ann_path: str = None      # chunk hnsw 文件路径;无则 None
+    relation_ann_labels: list = None   # relation_id 列表(与 relation_ann.bin 行对齐);无则 None
+    relation_ann_path: str = None      # relation hnsw 文件路径;无则 None
     ann_handle: object = None        # 惰性缓存的 hnswlib KG ANN handle(不落盘)
     chunk_ann_handle: object = None  # 惰性缓存的 chunk ANN handle(不落盘)
+    relation_ann_handle: object = None  # 惰性缓存的 relation ANN handle(不落盘)
 
 
 def load_scale_index(out_dir: str):
@@ -74,6 +77,14 @@ def load_scale_index(out_dir: str):
             chunk_ann_labels = list(np.load(labpath, allow_pickle=True))
             chunk_ann_path = os.path.join(out_dir, "chunk_ann.bin")
 
+    relation_ann_labels = None
+    relation_ann_path = None
+    if manifest.get("has_relation_ann"):
+        rlabpath = os.path.join(out_dir, "relation_ann_labels.npy")
+        if os.path.exists(rlabpath):
+            relation_ann_labels = list(np.load(rlabpath, allow_pickle=True))
+            relation_ann_path = os.path.join(out_dir, "relation_ann.bin")
+
     return ScaleIndex(
         node_ids=node_ids,
         node_index={n: i for i, n in enumerate(node_ids)},
@@ -91,6 +102,8 @@ def load_scale_index(out_dir: str):
         viz_edges=viz_edges,
         chunk_ann_labels=chunk_ann_labels,
         chunk_ann_path=chunk_ann_path,
+        relation_ann_labels=relation_ann_labels,
+        relation_ann_path=relation_ann_path,
     )
 
 
@@ -201,6 +214,8 @@ def save_scale_index(
     viz_payload: dict = None,
     chunk_ann_vectors=None,
     chunk_ann_labels: List[str] = None,
+    relation_ann_vectors=None,
+    relation_ann_labels: List[str] = None,
     prebuilt_ann=None,
     ef_construction: int = 200,
 ) -> dict:
@@ -210,6 +225,13 @@ def save_scale_index(
     ann_labels: 对应 kg 节点 object_id 列表（与 ann_vectors 行对齐）。
     写出 7 个文件：graph.npz, node_ids.npy, idf.npy, chunk_index.npy,
     ann.bin, ann_labels.npy, manifest.json。返回传入的 manifest dict。
+
+    relation_ann_vectors/relation_ann_labels: 镜像 chunk_ann_vectors/labels——
+    只在传入 relation_ann_labels 非空时才写 relation_ann.bin +
+    relation_ann_labels.npy 并置 manifest["has_relation_ann"]=True/
+    n_relation_ann。旧索引（无这两个参数）不受影响——manifest 缺该键，
+    load_scale_index 照常跳过，老索引继续可加载（同 has_chunk_ann 的
+    older-index-stays-valid 性质）。
 
     当传入折叠 viz 图（viz_ids 非空）时额外写 viz.npz + viz_adj.npz 并把
     manifest["has_viz"]=True，供 unified_graph/neighbors 有界分派直接消费。
@@ -277,6 +299,21 @@ def save_scale_index(
         c_idx.save_index(os.path.join(out_dir, "chunk_ann.bin"))
         np.save(os.path.join(out_dir, "chunk_ann_labels.npy"), np.asarray(chunk_ann_labels, dtype=object))
         manifest = {**manifest, "has_chunk_ann": True, "n_chunk_ann": len(chunk_ann_labels)}
+
+    # Relation-level ANN (relation-ann task). Same hnsw params/shape as the
+    # chunk ANN above; persisted only when relation vectors/labels are
+    # provided. manifest flag lets load_scale_index skip when absent (older
+    # indexes stay valid — mirrors has_chunk_ann).
+    if relation_ann_labels:
+        r_vecs = np.asarray(relation_ann_vectors, dtype=np.float32)
+        r_dim = int(r_vecs.shape[1]) if r_vecs.shape[0] > 0 else dim
+        r_idx = hnswlib.Index(space="cosine", dim=r_dim)
+        r_idx.init_index(max_elements=max(1, r_vecs.shape[0]), ef_construction=ef_construction, M=16, random_seed=42)
+        if r_vecs.shape[0] > 0:
+            r_idx.add_items(r_vecs, np.arange(r_vecs.shape[0]))
+        r_idx.save_index(os.path.join(out_dir, "relation_ann.bin"))
+        np.save(os.path.join(out_dir, "relation_ann_labels.npy"), np.asarray(relation_ann_labels, dtype=object))
+        manifest = {**manifest, "has_relation_ann": True, "n_relation_ann": len(relation_ann_labels)}
 
     with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
         json.dump(manifest, fh)

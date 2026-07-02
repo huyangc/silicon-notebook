@@ -481,7 +481,7 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
 
     # Returned manifest: 9 keys (8 stages + total)
     expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
-                       "chunk_matrix", "viz_arrays", "persist"}
+                       "chunk_matrix", "relation_matrix", "viz_arrays", "persist"}
     assert "build_ms" in manifest
     returned_build_ms = manifest["build_ms"]
     assert set(returned_build_ms.keys()) == expected_stages | {"total"}
@@ -503,10 +503,10 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
         disk_manifest = json.load(fh)
     assert set(disk_manifest["build_ms"].keys()) == expected_stages - {"persist"}
 
-    # Events: 9 scale_index_build events (8 stages + total), each with
+    # Events: 10 scale_index_build events (9 stages + total), each with
     # notebook_id/stage/latency_ms.
     scale_events = [e for e in events if e.get("kind") == "scale_index_build"]
-    assert len(scale_events) == 9
+    assert len(scale_events) == 10
     stages_seen = {e["stage"] for e in scale_events}
     assert stages_seen == expected_stages | {"total"}
     for e in scale_events:
@@ -532,8 +532,8 @@ def test_build_scale_index_on_stage_callback(repo):
     manifest = repo.build_scale_index(nb.id, on_stage=lambda stage, ms: calls.append((stage, ms)))
 
     expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
-                       "chunk_matrix", "viz_arrays", "persist", "total"}
-    assert len(calls) == 9
+                       "chunk_matrix", "relation_matrix", "viz_arrays", "persist", "total"}
+    assert len(calls) == 10
     assert {c[0] for c in calls} == expected_stages
     assert calls[-2][0] == "persist"
     assert calls[-1][0] == "total"
@@ -1046,7 +1046,13 @@ def test_build_scale_index_builds_hnsw_once_for_kg_synonym_and_ann(repo, monkeyp
     """End-to-end: when emb_synonym is enabled, hnswlib.Index() must be
     constructed exactly ONCE for the KG embeddings (shared by the synonym-edge
     KNN pass and the persisted ann.bin) — down from 2 before this task. The
-    chunk ANN build is a separate matrix/index and counts separately."""
+    chunk ANN build is a separate matrix/index and counts separately.
+
+    store_kg's db_relations always get embedded via _embed_relations_batch
+    (independent of RELATION_RETRIEVAL_ENABLED), so this fixture's one
+    `depends_on` relation also gets its own relation-ANN hnsw build (relation
+    ANN is a separate index too — same "counts separately" shape as chunk_ann)
+    → total constructions == 2 (KG + relation), not 1."""
     import hnswlib
     nb = repo.create_notebook(NotebookCreate(name="base"))
     # Need >=2 KG objects with embeddings so _vector_matrix has rows and
@@ -1070,8 +1076,9 @@ def test_build_scale_index_builds_hnsw_once_for_kg_synonym_and_ann(repo, monkeyp
 
     # KG-embedding hnsw built once (shared: synonym KNN + persisted ann.bin).
     # No chunks were stored in this fixture → chunk_ann build is skipped
-    # (chunk_ann_labels empty), so total constructions == 1.
-    assert calls["n"] == 1, f"expected exactly 1 hnswlib.Index() construction for KG vectors, got {calls['n']}"
+    # (chunk_ann_labels empty). One relation was stored and auto-embedded by
+    # store_kg → relation-ANN hnsw builds once more → total constructions == 2.
+    assert calls["n"] == 2, f"expected exactly 2 hnswlib.Index() constructions (KG + relation), got {calls['n']}"
     assert manifest["n_nodes"] >= 3
 
 
