@@ -7493,9 +7493,14 @@ class SQLiteRepository:
     def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
                               exists: "bool | None" = None, total_chunks: "int | None" = None) -> bool:
         """能否构建/重建 scale 检索索引 —— **与 tier 解耦**:base-tier / 已建过 / 规模够大
-        (总 chunk > index_suggest_chunk_threshold)任一即可。检索侧已按『索引是否存在』使用
+        (总 chunk > index_suggest_chunk_threshold)/ 分享「大」定义(copyable=False,
+        即字节或 chunks+nodes 超拷贝阈值)任一即可。检索侧已按『索引是否存在』使用
         (chunk_ann 默认开,indexed notebooks use ANN),不看 tier,故大个人库也应能建。
-        可传入已算好的 tier/exists/total_chunks 复用,避免重复查询。"""
+        可传入已算好的 tier/exists/total_chunks 复用,避免重复查询。
+        短路顺序刻意把 notebook_copy_stats(5 个聚合查询)放在最后:常态路径
+        (base/已建过/chunk 多)零新增开销,只有全部前置条件都不满足(非 base、未建、
+        chunk-light)才付这一笔 —— 保证「大 → 可建/自动建」与 maybe_auto_index 的
+        大库判定一致,chunk 少但字节/节点多的库不再被 eligibility 挡死。"""
         if tier is None:
             tier = self.get_notebook(notebook_id).tier
         if exists is None:
@@ -7507,7 +7512,9 @@ class SQLiteRepository:
             with self._connect() as db:
                 total_chunks = db.execute(
                     "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
-        return total_chunks > self.settings.index_suggest_chunk_threshold
+        if total_chunks > self.settings.index_suggest_chunk_threshold:
+            return True
+        return not self.notebook_copy_stats(notebook_id)["copyable"]
 
     def scale_index_status(self, notebook_id: str) -> dict:
         """scale 索引状态(供在线重建入口 UX)。exists=磁盘有 manifest;
