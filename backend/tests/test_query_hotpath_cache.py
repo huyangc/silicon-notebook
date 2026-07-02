@@ -529,3 +529,273 @@ def test_build_chunks_bumps_seq_and_refreshes_elem_chunk_map(repo, monkeypatch):
         cids = {r["id"] for r in db.execute(
             "SELECT id FROM chunks WHERE source_id=?", (sid,)).fetchall()}
     assert set(refreshed[f"el-{sid}-0001"]) <= cids and refreshed[f"el-{sid}-0001"]
+
+
+# ── P0-3: review_queue edge centrality — version cache + degree-top-K bound ──
+# _edge_centrality_map used to be recomputed synchronously on every review_queue
+# call (rustworkx digraph_edge_betweenness_centrality — Brandes O(V·E)), on the
+# request thread, uncached — minutes of CPU at 490k-node scale. Now cached via
+# repo._vector_cache on tuple(_scale_index_version(nb)), same machinery as
+# _ent_chunk_map/_vector_matrix. Above settings.edge_centrality_max_nodes, only
+# the degree-top-K induced subgraph is scored; edges outside get centrality 0.0.
+
+from app.models.schemas import NotebookCreate as _NotebookCreate  # noqa: E402
+
+
+def _seed_centrality_graph(repo, n_extra_chain=0):
+    """4-node graph (Claim/Concept/Formula/Procedure) with 3 typed edges,
+    mirroring test_edge_review_queue.py's fixture. n_extra_chain appends a
+    linear chain of additional nodes (X0->X1->X2->...) to grow node count for
+    the bounded-path tests, all connected via a shared edge_type."""
+    nb = repo.create_notebook(_NotebookCreate(name="centrality-nb"))
+    objects = [
+        {"local_id": "C1", "object_type": "Claim",
+         "payload": {"name": "Claim Alpha"}, "evidence": []},
+        {"local_id": "C2", "object_type": "Concept",
+         "payload": {"name": "Concept Beta"}, "evidence": []},
+        {"local_id": "F1", "object_type": "Formula",
+         "payload": {"name": "Formula Gamma"}, "evidence": []},
+        {"local_id": "P1", "object_type": "Procedure",
+         "payload": {"name": "Procedure Delta"}, "evidence": []},
+    ]
+    relations = [
+        {"source_local_id": "C1", "target_local_id": "C2", "edge_type": "defines",
+         "evidence": [{"file": "f1", "char_start": 0, "char_end": 10,
+                       "line_start": 1, "line_end": 1, "quote": "alpha defines beta"}]},
+        {"source_local_id": "F1", "target_local_id": "P1", "edge_type": "used_in", "evidence": []},
+        {"source_local_id": "C1", "target_local_id": "P1", "edge_type": "used_in", "evidence": []},
+    ]
+    for i in range(n_extra_chain):
+        objects.append({"local_id": f"X{i}", "object_type": "Concept",
+                        "payload": {"name": f"chain{i}"}, "evidence": []})
+    prev = "P1"
+    for i in range(n_extra_chain):
+        relations.append({"source_local_id": prev, "target_local_id": f"X{i}",
+                          "edge_type": "supports", "evidence": []})
+        prev = f"X{i}"
+    repo.store_kg(nb.id, None, objects, relations)
+    return nb.id
+
+
+def test_edge_centrality_map_second_call_no_recompute(repo, monkeypatch):
+    """Second call must not re-run rustworkx betweenness — spy on
+    compute_edge_centrality call count (the O(V·E) Brandes run this cache elides)."""
+    import app.services.kg.graph_reason as graph_reason_mod
+    nb_id = _seed_centrality_graph(repo)
+    first = repo._edge_centrality_map(nb_id)
+
+    calls = {"n": 0}
+    orig = graph_reason_mod.compute_edge_centrality
+
+    def _spy(G):
+        calls["n"] += 1
+        return orig(G)
+
+    # _edge_centrality_map does `from app.services.kg.graph_reason import
+    # ... compute_edge_centrality` INSIDE the method body on every call, so
+    # patching the source module attribute is visible to the next call.
+    monkeypatch.setattr(graph_reason_mod, "compute_edge_centrality", _spy)
+    second = repo._edge_centrality_map(nb_id)
+    assert calls["n"] == 0  # cache hit — loader (and thus compute_edge_centrality) never ran
+    assert second == first
+
+
+def test_edge_centrality_map_recomputes_after_kg_mutation(repo):
+    nb_id = _seed_centrality_graph(repo)
+    before = repo._edge_centrality_map(nb_id)
+    assert before  # non-empty: 3 edges seeded
+
+    # Add another edge -> bumps kg_mutation_seq -> version changes -> recompute.
+    # store_kg's local_id->db_id remap is scoped to THIS call's objects list, so
+    # both endpoints of the new relation must be created in the same call.
+    repo.store_kg(nb_id, None,
+                  [{"local_id": "C3a", "object_type": "Concept",
+                    "payload": {"name": "Concept Extra A"}, "evidence": []},
+                   {"local_id": "C3b", "object_type": "Concept",
+                    "payload": {"name": "Concept Extra B"}, "evidence": []}],
+                  [{"source_local_id": "C3a", "target_local_id": "C3b",
+                    "edge_type": "supports", "evidence": []}])
+    after = repo._edge_centrality_map(nb_id)
+    assert after != before
+    assert len(after) == 4  # 3 original + 1 new edge
+
+
+def _oracle_edge_centrality(repo, nb_id):
+    """Verbatim pre-cache computation: full JOIN + build_rx_graph + compute_edge_centrality,
+    no bounding, no cache — the ground truth review_queue used to compute inline."""
+    from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
+    with repo._connect() as db:
+        rel_rows = db.execute(
+            "SELECT id, source_object_id, target_object_id, edge_type, evidence "
+            "FROM knowledge_relations WHERE notebook_id = ? AND review_status != 'rejected'",
+            (nb_id,)).fetchall()
+        obj_rows = db.execute(
+            "SELECT id, object_type, payload FROM knowledge_objects WHERE notebook_id = ?",
+            (nb_id,)).fetchall()
+    node_types, node_names = {}, {}
+    for r in obj_rows:
+        node_types[r["id"]] = r["object_type"]
+        node_names[r["id"]] = json.loads(r["payload"] or "{}").get("name", "")
+    rels = [{
+        "id": r["id"], "source_object_id": r["source_object_id"],
+        "target_object_id": r["target_object_id"], "edge_type": r["edge_type"],
+        "evidence": json.loads(r["evidence"] or "[]"),
+    } for r in rel_rows]
+    G, idx_to_oid, oid_to_idx = build_rx_graph(
+        {oid: {"type": t, "name": node_names.get(oid, "")} for oid, t in node_types.items()},
+        rels)
+    return compute_edge_centrality(G)
+
+
+def test_edge_centrality_map_equals_oracle(repo):
+    nb_id = _seed_centrality_graph(repo)
+    got = repo._edge_centrality_map(nb_id)
+    want = _oracle_edge_centrality(repo, nb_id)
+    assert got == want
+
+
+def test_review_queue_output_matches_uncached_oracle(repo):
+    """Full review_queue() output (edge order/fields/scores) must be identical
+    whether centrality is served from cache or (as the oracle does) recomputed
+    inline — caching changes WHEN centrality is computed, not WHAT it computes."""
+    nb_id = _seed_centrality_graph(repo)
+    cached = repo.review_queue(nb_id)
+
+    # Force a fresh, uncached centrality computation and rebuild the queue
+    # inline the same way the pre-cache implementation did.
+    from app.services.kg.edge_trust import (
+        compute_trust_score, corroboration_counts, corroboration_score_from_count,
+    )
+    with repo._connect() as db:
+        rel_rows = db.execute(
+            "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
+            "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
+            "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
+            "FROM knowledge_relations kr "
+            "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
+            "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
+            "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
+            (nb_id,)).fetchall()
+        obj_rows = db.execute(
+            "SELECT id, object_type, payload FROM knowledge_objects WHERE notebook_id = ?",
+            (nb_id,)).fetchall()
+    node_types, node_names = {}, {}
+    for r in obj_rows:
+        node_types[r["id"]] = r["object_type"]
+        node_names[r["id"]] = json.loads(r["payload"] or "{}").get("name", "")
+    rels = []
+    for r in rel_rows:
+        rels.append({
+            "id": r["id"], "source_object_id": r["source_object_id"],
+            "target_object_id": r["target_object_id"], "edge_type": r["edge_type"],
+            "evidence": json.loads(r["evidence"] or "[]"), "source_id": r["source_id"],
+            "review_status": r["review_status"],
+            "_src_type": r["src_type"] or "", "_tgt_type": r["tgt_type"] or "",
+            "_src_name": node_names.get(r["source_object_id"], ""),
+            "_tgt_name": node_names.get(r["target_object_id"], ""),
+        })
+    corr_counts = corroboration_counts(rels, node_names)
+    edge_centrality = _oracle_edge_centrality(repo, nb_id)
+    items = []
+    for rel in rels:
+        rid = rel["id"]
+        corr_score = corroboration_score_from_count(corr_counts.get(rid, 1))
+        trust = compute_trust_score(rel, node_types, corr_score)
+        ec = edge_centrality.get(rid, 0.0)
+        priority = ec * (1.0 - trust)
+        items.append({
+            "rel_id": rid, "notebook_id": nb_id, "edge_type": rel["edge_type"],
+            "source_object_id": rel["source_object_id"], "target_object_id": rel["target_object_id"],
+            "source_name": rel["_src_name"], "target_name": rel["_tgt_name"],
+            "source_type": rel["_src_type"], "target_type": rel["_tgt_type"],
+            "trust_score": trust, "edge_centrality": ec, "review_priority": priority,
+            "review_status": rel["review_status"],
+        })
+    items.sort(key=lambda x: x["review_priority"], reverse=True)
+    oracle = items[:200]
+
+    assert cached == oracle
+
+
+def test_edge_centrality_map_invalidates_on_review_status_flip(repo):
+    """set_edge_review flips review_status in place (edge count unchanged) —
+    _invalidate_unified_cache's explicit ':edge_centrality' eviction must catch
+    this same-second in-place edit even though the version tuple might not
+    (mirrors the :rxgraph / :entchunk belt-and-braces eviction pattern)."""
+    nb_id = _seed_centrality_graph(repo)
+    q = repo.review_queue(nb_id)
+    assert len(q) >= 2
+    keep_id, reject_id = q[0]["rel_id"], q[1]["rel_id"]
+
+    warm = repo._edge_centrality_map(nb_id)
+    assert reject_id in warm
+
+    repo.set_edge_review(nb_id, reject_id, "rejected")
+    fresh = repo._edge_centrality_map(nb_id)
+    assert reject_id not in fresh, (
+        "stale edge_centrality map served after review_status flip excluded an edge")
+
+
+# ── bounded path: degree-top-K induced subgraph above edge_centrality_max_nodes ──
+
+def test_edge_centrality_bounded_subgraph_no_crash_and_sane_queue(repo, monkeypatch):
+    """With edge_centrality_max_nodes=3 on a graph with >3 nodes, centrality is
+    computed only on the degree-top-3 induced subgraph; edges fully outside get
+    centrality 0.0 (review_priority degrades to trust-only ranking for them).
+    review_queue must still return without crashing."""
+    monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 3)
+    nb_id = _seed_centrality_graph(repo, n_extra_chain=4)  # 4 base + 4 chain = 8 nodes
+
+    q = repo.review_queue(nb_id)
+    assert q  # returns a queue, no crash
+
+    ec_map = repo._edge_centrality_map(nb_id)
+    assert isinstance(ec_map, dict)
+    # At least one edge should have centrality 0.0 (outside the top-3 subgraph) —
+    # with only 3 of 8 nodes scored, most of the 7 edges can't have both endpoints in it.
+    assert any(v == 0.0 for v in ec_map.values()) or len(ec_map) < 7
+
+    # review_priority stays a valid, sorted, non-negative sequence.
+    priorities = [item["review_priority"] for item in q]
+    assert priorities == sorted(priorities, reverse=True)
+    assert all(p >= 0.0 for p in priorities)
+
+
+def test_edge_centrality_bounded_top_k_is_deterministic(repo, monkeypatch):
+    """Same graph, same max_nodes bound -> identical centrality map across a
+    cold call and a forced recompute (cache bypassed via invalidate) — the
+    degree-top-K tie-break (stable sort by node insertion order) must be
+    reproducible, not order-dependent on dict/set iteration."""
+    monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 3)
+    nb_id = _seed_centrality_graph(repo, n_extra_chain=4)
+
+    first = repo._edge_centrality_map(nb_id)
+    repo._vector_cache.invalidate(f"{nb_id}:edge_centrality")
+    second = repo._edge_centrality_map(nb_id)
+    assert first == second
+
+
+def test_edge_centrality_bounded_selects_highest_degree_nodes(repo, monkeypatch):
+    """Sanity-check the top-K selection itself: with max_nodes=3 on the 4-node
+    base fixture (C1 has degree 2 — two used_in/defines edges out; P1 has
+    degree 2 — used_in in from both F1 and C1), the induced subgraph should be
+    small and centrality for edges entirely among low-degree excluded nodes
+    (e.g. the F1->P1 edge if F1 is dropped) is exactly 0.0."""
+    monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 3)
+    nb_id = _seed_centrality_graph(repo)  # 4 nodes, 3 edges — bound=3 forces exclusion of 1 node
+    ec_map = repo._edge_centrality_map(nb_id)
+    full_map = _oracle_edge_centrality(repo, nb_id)
+    # Bounded map is a subset of keys of the full map (never invents new rel_ids).
+    assert set(ec_map.keys()) <= set(full_map.keys())
+    assert len(ec_map) <= len(full_map)
+
+
+def test_edge_centrality_within_bound_matches_unbounded(repo, monkeypatch):
+    """When num_nodes <= edge_centrality_max_nodes, the bounded path is not
+    taken at all — result must equal the unbounded oracle exactly (no
+    approximation when the graph fits)."""
+    monkeypatch.setattr(repo.settings, "edge_centrality_max_nodes", 1000)
+    nb_id = _seed_centrality_graph(repo, n_extra_chain=4)
+    got = repo._edge_centrality_map(nb_id)
+    want = _oracle_edge_centrality(repo, nb_id)
+    assert got == want

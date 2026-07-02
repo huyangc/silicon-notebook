@@ -218,6 +218,9 @@ class Settings(BaseSettings):
     # 进程级 VectorCache（embedding 矩阵/分词语料/rustworkx 图等 GB 级条目）的
     # LRU 容量上限，防止 fed_rxgraph 等按用户/notebook 线性增长的条目无界占用内存。
     vector_cache_max_entries: int = Field(32, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
+    # review_queue 的边介数中心性(rustworkx Brandes O(V·E))超此节点数时,不再对
+    # 全图跑,改对「度数 top-K 诱导子图」算(见 sqlite_repository._edge_centrality_map)。
+    edge_centrality_max_nodes: int = Field(20000, validation_alias="EDGE_CENTRALITY_MAX_NODES")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
