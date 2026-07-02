@@ -9770,32 +9770,25 @@ class SQLiteRepository:
             self._note_model_error("relation_ann_delta", self.settings.embed_model, exc)
         return sims
 
-    def _relation_matrix_is_warm(self, notebook_id: str) -> bool:
-        """True 若 relation_embeddings 矩阵当前已在 _vector_cache 里(任意版本)——
-        用于最终兜底 guard 判定"真的是冷路径"(已热的缓存重新取用几乎零成本,
-        不该被 guard 拦下)。直接探 VectorCache._store(与 _invalidate_unified_cache
-        清理 `:fed_rxgraph` key 时的同一内部访问模式一致,无公开 peek API)。"""
-        key = f"{notebook_id}:matrix:relation_embeddings"
-        return key in self._vector_cache._store
-
     def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
         """对 notebook 关系按 query 打分(关键词 + 关系索引语义)。镜像 _retrieve_scored;
         关系矩阵是独立索引(dual-index 分离)。
 
         relation-ann task:候选界定优先级从高到低——
-          1. 持久化 relation ANN(idx.relation_ann_labels)存在 → ANN 核 ⊕ delta
-             暴力(_relation_ann_candidates,镜像 _kg_object_candidates),只
+          ① relations 表空 → 早退 [](原有语义不变)。
+          ② 持久化 relation ANN(self scale index allow_stale=True 且
+             has_relation_ann)存在 → ANN 核 ⊕ delta 暴力
+             (_relation_ann_candidates,镜像 _kg_object_candidates),只
              hydrate top-K 候选文本做关键词+语义融合打分。knn_query 的 k 语义
-             与既有 relation_recall 一致(见下)。
-          2. 无 ANN,但矩阵未过冷路径 guard 门槛(见 3)→ 现状行为:全量矩阵
-             top_k_sims(P0-1/2 候选界定,同下方原注释)。
-          3. 无 ANN 且该库 relation 数超 relation_scoring_cold_guard_threshold
-             且矩阵未热(_relation_matrix_is_warm 为 False)→ 最终兜底:跳过
-             语义打分(不 materialize 多 GB 全量矩阵),emit relation_scoring_skipped
-             事件,退化为纯关键词(fail-open,不是空结果)。这是最后手段,不是
-             常态——常态应有持久化 ANN(build/fold 已默认写)。
+             与既有 relation_recall 一致(见下)。这是大库常态路径——ANN 侧路
+             让下面的冷矩阵守卫从常态退位为「无 ANN 大库」的最后兜底。
+          ③ 无 ANN(或 ANN fail-open)→ 大库冷矩阵守卫(见下方「生产事故修复」
+             段,语义原样保留:not copyable + _vector_matrix_warm peek 判冷 →
+             skip + relation_scoring_skipped 事件 + 返回 []);小库/已热 →
+             现状全量矩阵 top_k_sims 路径,字节不变。
+          ④ 无向量覆盖 → 关键词全量 JOIN 分支不动。
 
-        P0-1/2 候选界定(2 的原注释):score_relations 混合关键词(需要 hydrate 的
+        P0-1/2 候选界定(③ 的原注释):score_relations 混合关键词(需要 hydrate 的
         关系文本)+ 语义(向量矩阵),所以不能像 _kg_object_candidates 那样单纯按
         向量 top-K 过滤后完全跳过关键词——否则纯关键词命中(无向量覆盖/embedder
         未配置)会被静默丢弃。折中(镜像 _kg_object_candidates 的 fail-open 哲学):
@@ -9833,10 +9826,11 @@ class SQLiteRepository:
         矩阵加载更便宜。既然两条路径在大库场景下都不「有界」,选择保持
         fail-open 语义最简单、最安全的出口([] + 事件),与本方法既有的
         「关系表为空→[]」早退、以及 federated_retrieve_relations 上层对空结果
-        的既有容错完全一致,不引入新的部分結果语义。真正的修复是给关系建 ANN
-        索引(镜像 chunk_ann,scale index 侧)让候选界定本身有界——这个守卫只
-        是在那之前把 ask 路径钳制在 O(bounded)。已暖(_vector_cache 命中)或
-        小库:字节不变,走原路径。"""
+        的既有容错完全一致,不引入新的部分結果语义。真正的修复——给关系建 ANN
+        索引(镜像 chunk_ann,scale index 侧)让候选界定本身有界——已由上方
+        分支②(relation ANN ⊕ delta)落地:已建索引的大库常态走 ANN,不再
+        触达本守卫;守卫保留为「未建索引的大库」的最后兜底,把 ask 路径钳制
+        在 O(bounded)。已暖(_vector_cache 命中)或小库:字节不变,走原路径。"""
         from app.services.retrieval import score_relations
         from app.services.vector_index import top_k_sims
         with self._connect() as db:
@@ -9845,6 +9839,26 @@ class SQLiteRepository:
                 (notebook_id,)).fetchone()
             if has_any is None:
                 return []
+
+            # ── 分支②: 持久化 relation ANN ⊕ delta(大库常态路径)─────────
+            # 必须先于下面的冷矩阵守卫:ANN 候选界定本身 O(bounded)、不加载
+            # 全量矩阵,已建索引的大库不该被守卫拦下。embed 只在 ANN 真实
+            # 存在时才发生(守卫路径保持 master 原语义:守卫命中时零 embed)。
+            idx = self._scale_index(notebook_id, allow_stale=True)
+            if idx is not None and getattr(idx, "relation_ann_labels", None):
+                query_vector = self._embed_query(query)
+                if query_vector is not None:
+                    cand_sims = self._relation_ann_candidates(
+                        notebook_id, query_vector, idx, self.settings.relation_recall)
+                    if cand_sims:
+                        top_ids = list(cand_sims.keys())
+                        relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
+                        return score_relations(query, relations, query_vector=query_vector,
+                                               relation_sims=cand_sims,
+                                               downweight_edges=self.settings.kg_about_downweight_enabled)
+                # fail-open(embed 失败/空候选/ANN 打开失败)→ 继续走守卫/全量路径。
+
+            # ── 分支③: 大库冷矩阵守卫(#171 语义原样;无 ANN 时的最后兜底)──
             if (not self.notebook_copy_stats(notebook_id)["copyable"]
                     and not self._vector_matrix_warm(db, notebook_id, "relation_embeddings")):
                 self.event_log.emit({
@@ -9854,42 +9868,6 @@ class SQLiteRepository:
                 })
                 return []
             query_vector = self._embed_query(query)
-
-            # ── 优先分支 1: 持久化 relation ANN ⊕ delta ──────────────────
-            idx = self._scale_index(notebook_id, allow_stale=True)
-            if idx is not None and getattr(idx, "relation_ann_labels", None) and query_vector is not None:
-                cand_sims = self._relation_ann_candidates(
-                    notebook_id, query_vector, idx, self.settings.relation_recall)
-                if cand_sims:
-                    top_ids = list(cand_sims.keys())
-                    relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
-                    return score_relations(query, relations, query_vector=query_vector,
-                                           relation_sims=cand_sims,
-                                           downweight_edges=self.settings.kg_about_downweight_enabled)
-                # fail-open(空候选/ANN 打开失败)→ 继续走下面的全量/guard 路径。
-
-            # ── 最终兜底 guard(分支 3):无 ANN + 大库 + 矩阵未热 → 跳过语义
-            # 打分,避免多 GB 全量矩阵在请求线程上 materialize。检查必须在
-            # _vector_matrix() 调用之前——那个调用本身就是会把矩阵放进
-            # _vector_cache 的 loader,调用之后再探"是否已热"永远是 True
-            # （自己刚焐热的），guard 就形同虚设。用一次便宜的 COUNT(*) 探针
-            # 代替(比全量 JOIN/矩阵反序列化便宜几个数量级),不 materialize
-            # 任何向量。ANN 应已覆盖常态(build/fold 默认写 relation_ann),
-            # 这里只是安全网(最后手段,不是常态)。
-            if not self._relation_matrix_is_warm(notebook_id):
-                n_rel_embedded = db.execute(
-                    "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
-                if n_rel_embedded > self.settings.relation_scoring_cold_guard_threshold:
-                    self.event_log.emit({
-                        "kind": "relation_scoring_skipped", "notebook_id": notebook_id,
-                        "n_relations": int(n_rel_embedded), "reason": "large_cold_no_ann",
-                    })
-                    relations = self._relations_with_names(db, notebook_id)
-                    return score_relations(query, relations, query_vector=None,
-                                           relation_sims=None,
-                                           downweight_edges=self.settings.kg_about_downweight_enabled)
-
             rel_ids, rel_mat = self._vector_matrix(
                 db, notebook_id, "relation_embeddings", "relation_id")
             if not rel_ids:
