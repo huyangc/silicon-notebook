@@ -1403,24 +1403,32 @@ class SQLiteRepository:
         statuses: Optional[Iterable[str]] = USABLE_STATUSES,
         id_filter: Optional[Iterable[str]] = None,
     ) -> List[dict]:
-        query = (
+        base_query = (
             "SELECT * FROM knowledge_objects WHERE notebook_id = ? AND object_type = ?"
         )
-        params: List[object] = [notebook_id, object_type]
+        base_params: List[object] = [notebook_id, object_type]
         if statuses is not None:
             status_list = list(statuses)
             placeholders = ",".join("?" for _ in status_list)
-            query += f" AND status IN ({placeholders})"
-            params.extend(status_list)
+            base_query += f" AND status IN ({placeholders})"
+            base_params.extend(status_list)
         if id_filter is not None:
+            # 候选集(id_filter,如 _retrieve_scored 的 cand_sims keys)可能超
+            # _IN_CHUNK(delta 开且候选量大)——按 _in_batches 分批查询,批间用
+            # (created_at,id) 重排合并,保持与单条 IN + ORDER BY 完全一致的输出序。
             id_list = list(id_filter)
             if not id_list:
                 return []
-            phid = ",".join("?" for _ in id_list)
-            query += f" AND id IN ({phid})"
-            params.extend(id_list)
-        query += " ORDER BY created_at ASC, id ASC"
-        rows = db.execute(query, params).fetchall()
+            raw_rows = []
+            for batch in self._in_batches(id_list):
+                phid = ",".join("?" for _ in batch)
+                raw_rows.extend(db.execute(
+                    base_query + f" AND id IN ({phid})",
+                    (*base_params, *batch)).fetchall())
+            rows = sorted(raw_rows, key=lambda row: (row["created_at"], row["id"]))
+        else:
+            query = base_query + " ORDER BY created_at ASC, id ASC"
+            rows = db.execute(query, base_params).fetchall()
         objects: List[dict] = []
         for row in rows:
             keys = row.keys()
@@ -10041,24 +10049,28 @@ class SQLiteRepository:
             # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
             if cand_sims is not None:
                 # 有界:仅按候选对象查边(避免全表扫),element_sims 仅候选证据元素。
-                if candidate_ids:
-                    phc = ",".join("?" for _ in candidate_ids)
-                    rel_rows = db.execute(
+                # candidate_ids 量随 delta 候选无界增长——按 _in_batches 分批,每批
+                # 两个 IN 位置都放该批(并集正确:一条边只要任一端点落在某批即被
+                # 捕获,批间可能重复捕获同一条边,但 rel_rows 只喂 connected_ids
+                # 集合,重复无害)。
+                rel_rows = []
+                for batch in self._in_batches(candidate_ids):
+                    phc = ",".join("?" for _ in batch)
+                    rel_rows.extend(db.execute(
                         f"SELECT source_object_id, target_object_id FROM knowledge_relations "
                         f"WHERE notebook_id=? AND (source_object_id IN ({phc}) OR target_object_id IN ({phc}))",
-                        (notebook_id, *candidate_ids, *candidate_ids)).fetchall()
-                else:
-                    rel_rows = []
+                        (notebook_id, *batch, *batch)).fetchall())
                 elem_id_set = {ev.element_id for o in all_kg_objs
                                for ev in o.get("evidence", []) if getattr(ev, "element_id", None)}
-                if elem_id_set:
-                    phe = ",".join("?" for _ in elem_id_set)
-                    erows = db.execute(
+                # elem_id_set 同理分批;各批互不相交(_in_batches 去重保序切片),
+                # extend 不会产生跨批重复行。
+                erows = []
+                for batch in self._in_batches(elem_id_set):
+                    phe = ",".join("?" for _ in batch)
+                    erows.extend(db.execute(
                         f"SELECT element_id AS vid, vector FROM element_embeddings "
                         f"WHERE notebook_id=? AND element_id IN ({phe})",
-                        (notebook_id, *elem_id_set)).fetchall()
-                else:
-                    erows = []
+                        (notebook_id, *batch)).fetchall())
             else:
                 rel_rows = db.execute(
                     "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = ?",
@@ -10377,17 +10389,21 @@ class SQLiteRepository:
 
     def _hydrate_chunk_candidates(self, cand_ids):
         """按候选 id 有界取数:chunk 文本行 + 归一化向量矩阵。候选界定之后的
-        hydrate,ANN 路径与大库 FTS 降级路径共用,绝不全表。返回 (chunks, ids, mat)。"""
+        hydrate,ANN 路径与大库 FTS 降级路径共用,绝不全表。返回 (chunks, ids, mat)。
+        cand_ids 随 delta⊕词法补召回可无界增长——按 _in_batches 分批,防超 SQLite
+        变量上限(调用方按构造去重,_in_batches 亦去重保序,extend 不产生重复行)。"""
         from app.services.vector_index import build_matrix
-        ph = ",".join("?" for _ in cand_ids)
+        rows, vrows = [], []
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-                f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
-                f"WHERE c.id IN ({ph})", cand_ids).fetchall()
-            vrows = db.execute(
-                f"SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE chunk_id IN ({ph})",
-                cand_ids).fetchall()
+            for batch in self._in_batches(cand_ids):
+                ph = ",".join("?" for _ in batch)
+                rows.extend(db.execute(
+                    f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
+                    f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+                    f"WHERE c.id IN ({ph})", batch).fetchall())
+                vrows.extend(db.execute(
+                    f"SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE chunk_id IN ({ph})",
+                    batch).fetchall())
         chunks = [{
             "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
             "section_path": r["section_path"], "source_title": r["source_title"],
