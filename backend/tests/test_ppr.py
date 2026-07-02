@@ -149,3 +149,139 @@ def test_emb_synonym_edges_ann_beyond_cutoff():
     pairs = {frozenset((a, b)) for a, b, _ in edges}
     assert frozenset(("e0", "e1")) in pairs
     assert edges != []                              # 关键:超 5 万不再返 []
+
+
+# ── Task 1: hnsw 只建一次 + 去归一化拷贝 + 向量化去重 (build_scale_index perf) ──
+
+
+def _old_emb_synonym_edges(ids, matrix, threshold=0.8, top_k=20, max_entities=50000):
+    """Oracle copy of the PRE-optimization emb_synonym_edges implementation
+    (explicit `M = M / norms` copy + Python set-based row-major dedup, first
+    row-major occurrence's sim kept). Kept test-local so the vectorized
+    rewrite can be checked for exact output-set equivalence against the
+    historical behavior — see docs/superpowers/plans/2026-07-02-scale-build-perf.md."""
+    import numpy as np
+    import hnswlib
+    n = len(ids)
+    if n < 2 or matrix is None:
+        return []
+    M = np.asarray(matrix, dtype=np.float32)
+    if M.ndim != 2 or M.shape[0] != n:
+        return []
+    norms = np.linalg.norm(M, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    M = M / norms
+    dim = int(M.shape[1])
+    try:
+        idx = hnswlib.Index(space="cosine", dim=dim)
+        idx.init_index(max_elements=n, ef_construction=200, M=16, random_seed=42)
+        idx.add_items(M, np.arange(n))
+        idx.set_ef(max(top_k + 1, 64))
+        k = min(top_k + 1, n)
+        labels, distances = idx.knn_query(M, k=k)
+    except Exception:
+        return []
+    out, seen = [], set()
+    for i in range(n):
+        for lab, dist in zip(labels[i], distances[i]):
+            j = int(lab)
+            if j == i:
+                continue
+            sim = 1.0 - float(dist)
+            if sim >= threshold:
+                a, b = (i, j) if i < j else (j, i)
+                if (a, b) not in seen:
+                    seen.add((a, b))
+                    out.append((ids[a], ids[b], sim))
+    return out
+
+
+def _synonym_fixture(n=40, dim=12, seed=3):
+    import numpy as np
+    rng = np.random.RandomState(seed)
+    M = rng.randn(n, dim).astype(np.float32)
+    # Force several near-duplicate clusters so KNN produces reciprocal
+    # neighbor pairs (i finds j AND j finds i) — this is what exercises the
+    # dedup path (old Python `seen` set / new vectorized min*n+max encoding).
+    for a, b in [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)]:
+        M[b] = M[a] + 0.001 * rng.randn(dim)
+    ids = [f"e{i}" for i in range(n)]
+    return ids, M
+
+
+def test_emb_synonym_edges_matches_oracle_output_set():
+    """New implementation's output SET (id_a,id_b,sim) must equal the old
+    (pre-optimization) implementation's, for a fixed small dataset."""
+    from app.services.kg.ppr import emb_synonym_edges
+    ids, M = _synonym_fixture()
+    old = _old_emb_synonym_edges(ids, M, threshold=0.8, top_k=10)
+    new = emb_synonym_edges(ids, M, threshold=0.8, top_k=10)
+    assert {(a, b) for a, b, _ in new} == {(a, b) for a, b, _ in old}
+    old_by_pair = {(a, b): s for a, b, s in old}
+    new_by_pair = {(a, b): s for a, b, s in new}
+    for pair, sim in new_by_pair.items():
+        assert abs(sim - old_by_pair[pair]) < 1e-4
+
+
+def test_emb_synonym_edges_output_pairs_are_ordered_and_deduped():
+    """(a,b) pairs are emitted with a<b (stable ordering) and no duplicate
+    unordered pair appears twice, even though hnsw KNN is reciprocal (i finds
+    j in its row AND j finds i in its row)."""
+    from app.services.kg.ppr import emb_synonym_edges
+    ids, M = _synonym_fixture()
+    edges = emb_synonym_edges(ids, M, threshold=0.8, top_k=10)
+    seen = set()
+    for a, b, sim in edges:
+        ia, ib = ids.index(a), ids.index(b)
+        assert ia < ib, f"pair not ordered: {a},{b}"
+        assert (a, b) not in seen, f"duplicate pair: {a},{b}"
+        seen.add((a, b))
+        assert 0.8 <= sim <= 1.0001
+
+
+def test_emb_synonym_edges_does_not_mutate_input_matrix():
+    """No more `M = M / norms` normalized COPY of the whole matrix — the
+    function must not mutate the caller's array in place either (hnswlib
+    space='cosine' normalizes internally at both index-build and query time,
+    so an explicit normalization pass is redundant and is dropped)."""
+    from app.services.kg.ppr import emb_synonym_edges
+    ids, M = _synonym_fixture()
+    before = M.copy()
+    emb_synonym_edges(ids, M, threshold=0.8, top_k=10)
+    assert (M == before).all()
+
+
+def test_emb_synonym_edges_prebuilt_index_matches_self_built():
+    """Passing a caller-built hnswlib.Index (prebuilt_index=) must produce the
+    same edge set as letting the function build its own (same data/params)."""
+    import hnswlib
+    from app.services.kg.ppr import emb_synonym_edges
+    ids, M = _synonym_fixture()
+    dim = M.shape[1]
+    idx = hnswlib.Index(space="cosine", dim=dim)
+    idx.init_index(max_elements=len(ids), ef_construction=200, M=16, random_seed=42)
+    idx.add_items(M, list(range(len(ids))))
+
+    self_built = emb_synonym_edges(ids, M, threshold=0.8, top_k=10)
+    prebuilt = emb_synonym_edges(ids, M, threshold=0.8, top_k=10, prebuilt_index=idx)
+    assert {(a, b) for a, b, _ in self_built} == {(a, b) for a, b, _ in prebuilt}
+
+
+def test_emb_synonym_edges_ef_construction_param_used_when_self_building(monkeypatch):
+    """ef_construction is forwarded to init_index instead of the module
+    hardcoding 200 — ppr.py stays a pure function (no settings import), the
+    caller (sqlite_repository) passes the configured value."""
+    import hnswlib
+    from app.services.kg.ppr import emb_synonym_edges
+    ids, M = _synonym_fixture()
+
+    seen_kwargs = {}
+    real_init = hnswlib.Index.init_index
+
+    def spy_init(self, *a, **kw):
+        seen_kwargs.update(kw)
+        return real_init(self, *a, **kw)
+
+    monkeypatch.setattr(hnswlib.Index, "init_index", spy_init)
+    emb_synonym_edges(ids, M, threshold=0.8, top_k=10, ef_construction=77)
+    assert seen_kwargs.get("ef_construction") == 77

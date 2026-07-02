@@ -452,12 +452,15 @@ def test_build_scale_index_writes_chunk_ann(repo):
 
 
 def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
-    """build_scale_index must time each internal stage (gather/transition/
-    kg_matrix/chunk_matrix/viz_arrays/persist) and emit a scale_index_build
-    event per stage plus a final total — for locating the bottleneck stage on
-    large (490k-object) deployments. Disk manifest.json carries the 5
-    pre-persist stages (persist/total aren't known until after the file is
-    written); the RETURNED manifest dict additionally carries persist+total."""
+    """build_scale_index must time each internal stage (kg_matrix/ann_build/
+    synonym/gather/transition/chunk_matrix/viz_arrays/persist) and emit a
+    scale_index_build event per stage plus a final total — for locating the
+    bottleneck stage on large (490k-object) deployments. Task 1 reordered the
+    pipeline so the KG matrix loads and the ONE shared hnsw build happen
+    before gather (ann_build/synonym are new stages; gather no longer builds
+    its own hnsw). Disk manifest.json carries the pre-persist stages
+    (persist/total aren't known until after the file is written); the
+    RETURNED manifest dict additionally carries persist+total."""
     nb = repo.create_notebook(NotebookCreate(name="base"))
     repo.store_kg(nb.id, None, [
         {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
@@ -476,8 +479,9 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
 
     manifest = repo.build_scale_index(nb.id)
 
-    # Returned manifest: 7 keys (6 stages + total)
-    expected_stages = {"gather", "transition", "kg_matrix", "chunk_matrix", "viz_arrays", "persist"}
+    # Returned manifest: 9 keys (8 stages + total)
+    expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
+                       "chunk_matrix", "viz_arrays", "persist"}
     assert "build_ms" in manifest
     returned_build_ms = manifest["build_ms"]
     assert set(returned_build_ms.keys()) == expected_stages | {"total"}
@@ -492,17 +496,17 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
     assert manifest["n_nodes"] >= 2
     assert "version" in manifest
 
-    # Disk manifest.json: only the 5 pre-persist stages (persist/total unknown
+    # Disk manifest.json: only the pre-persist stages (persist/total unknown
     # until after the file itself is written).
     d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
     with open(os.path.join(d, "manifest.json")) as fh:
         disk_manifest = json.load(fh)
     assert set(disk_manifest["build_ms"].keys()) == expected_stages - {"persist"}
 
-    # Events: 7 scale_index_build events (6 stages + total), each with
+    # Events: 9 scale_index_build events (8 stages + total), each with
     # notebook_id/stage/latency_ms.
     scale_events = [e for e in events if e.get("kind") == "scale_index_build"]
-    assert len(scale_events) == 7
+    assert len(scale_events) == 9
     stages_seen = {e["stage"] for e in scale_events}
     assert stages_seen == expected_stages | {"total"}
     for e in scale_events:
@@ -513,10 +517,10 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
 
 def test_build_scale_index_on_stage_callback(repo):
     """build_scale_index(on_stage=...) must invoke the callback once per
-    stage — the same 7 stages as the scale_index_build events — right when
-    each stage's timing is recorded, so a CLI caller can print real-time
-    per-stage progress on long (490k-object) builds without depending on the
-    events logger (which doesn't print to the terminal)."""
+    stage — the same 8 stages as the scale_index_build events, plus total —
+    right when each stage's timing is recorded, so a CLI caller can print
+    real-time per-stage progress on long (490k-object) builds without
+    depending on the events logger (which doesn't print to the terminal)."""
     nb = repo.create_notebook(NotebookCreate(name="base"))
     repo.store_kg(nb.id, None, [
         {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
@@ -527,8 +531,9 @@ def test_build_scale_index_on_stage_callback(repo):
     calls = []
     manifest = repo.build_scale_index(nb.id, on_stage=lambda stage, ms: calls.append((stage, ms)))
 
-    expected_stages = {"gather", "transition", "kg_matrix", "chunk_matrix", "viz_arrays", "persist", "total"}
-    assert len(calls) == 7
+    expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
+                       "chunk_matrix", "viz_arrays", "persist", "total"}
+    assert len(calls) == 9
     assert {c[0] for c in calls} == expected_stages
     assert calls[-2][0] == "persist"
     assert calls[-1][0] == "total"
@@ -915,3 +920,165 @@ def test_scale_ann_handle_cached(repo, monkeypatch):
     h2 = repo._open_scale_ann(idx, "kg")
     assert h1 is not None and h1 is h2   # 同一 handle 复用
     assert calls["n"] == 1               # 只 load 一次
+
+
+# ── Task 1: hnsw 只建一次 + ef_construction 可配 (build_scale_index perf) ────
+
+
+def test_save_scale_index_prebuilt_ann_used_directly(tmp_path):
+    """save_scale_index(prebuilt_ann=idx) must persist that EXACT index (skip
+    its own init_index+add_items) — loaded back, its knn results must agree
+    with an index built independently from the same ann_vectors."""
+    import hnswlib
+    import scipy.sparse as sp
+    from app.services.kg import scale_index as si
+
+    rng = np.random.RandomState(1)
+    n, dim = 30, 8
+    vecs = rng.randn(n, dim).astype(np.float32)
+    labels = [f"o{i}" for i in range(n)]
+
+    prebuilt = hnswlib.Index(space="cosine", dim=dim)
+    prebuilt.init_index(max_elements=n, ef_construction=200, M=16, random_seed=42)
+    prebuilt.add_items(vecs, np.arange(n))
+
+    out_dir = str(tmp_path / "idx")
+    manifest = si.save_scale_index(
+        out_dir,
+        node_ids=labels,
+        transition=sp.csr_matrix((n, n)),
+        idf=[1.0] * n,
+        chunk_index=[],
+        ann_vectors=vecs,           # ignored when prebuilt_ann is given
+        ann_labels=labels,
+        manifest={"version": "v1", "dim": dim},
+        prebuilt_ann=prebuilt,
+    )
+    assert manifest["version"] == "v1"  # manifest passthrough unchanged
+
+    loaded = hnswlib.Index(space="cosine", dim=dim)
+    loaded.load_index(os.path.join(out_dir, "ann.bin"), max_elements=n)
+    loaded.set_ef(50)
+
+    independent = hnswlib.Index(space="cosine", dim=dim)
+    independent.init_index(max_elements=n, ef_construction=200, M=16, random_seed=42)
+    independent.add_items(vecs, np.arange(n))
+    independent.set_ef(50)
+
+    q = vecs[0]
+    lab_loaded, _ = loaded.knn_query(q, k=5)
+    lab_indep, _ = independent.knn_query(q, k=5)
+    assert set(lab_loaded[0].tolist()) == set(lab_indep[0].tolist())
+    assert lab_loaded[0][0] == lab_indep[0][0] == 0    # top1 (self) agrees
+
+
+def test_save_scale_index_prebuilt_ann_element_count_mismatch_falls_back(tmp_path):
+    """If prebuilt_ann's element count != len(ann_labels), save_scale_index must
+    defensively fall back to building fresh from ann_vectors (never emit a
+    corrupt/misaligned ann.bin)."""
+    import hnswlib
+    import scipy.sparse as sp
+    from app.services.kg import scale_index as si
+
+    rng = np.random.RandomState(2)
+    n, dim = 10, 8
+    vecs = rng.randn(n, dim).astype(np.float32)
+    labels = [f"o{i}" for i in range(n)]
+
+    mismatched = hnswlib.Index(space="cosine", dim=dim)
+    mismatched.init_index(max_elements=5, ef_construction=200, M=16, random_seed=42)
+    mismatched.add_items(vecs[:5], np.arange(5))   # only 5 elements, but ann_labels has 10
+
+    out_dir = str(tmp_path / "idx2")
+    si.save_scale_index(
+        out_dir,
+        node_ids=labels,
+        transition=sp.csr_matrix((n, n)),
+        idf=[1.0] * n,
+        chunk_index=[],
+        ann_vectors=vecs,
+        ann_labels=labels,
+        manifest={"version": "v1", "dim": dim},
+        prebuilt_ann=mismatched,
+    )
+    loaded = hnswlib.Index(space="cosine", dim=dim)
+    loaded.load_index(os.path.join(out_dir, "ann.bin"), max_elements=n)
+    loaded.set_ef(50)
+    lab, _ = loaded.knn_query(vecs[9], k=1)
+    assert lab[0][0] == 9   # element 9 only exists if the fallback (full) build ran
+
+
+def test_save_scale_index_ef_construction_forwarded(tmp_path, monkeypatch):
+    """save_scale_index's own (non-prebuilt) hnsw build must forward
+    ef_construction to init_index instead of hardcoding 200."""
+    import hnswlib
+    import scipy.sparse as sp
+    from app.services.kg import scale_index as si
+
+    rng = np.random.RandomState(3)
+    n, dim = 6, 4
+    vecs = rng.randn(n, dim).astype(np.float32)
+    labels = [f"o{i}" for i in range(n)]
+
+    seen_kwargs = []
+    real_init = hnswlib.Index.init_index
+
+    def spy_init(self, *a, **kw):
+        seen_kwargs.append(kw)
+        return real_init(self, *a, **kw)
+
+    monkeypatch.setattr(hnswlib.Index, "init_index", spy_init)
+    si.save_scale_index(
+        str(tmp_path / "idx3"),
+        node_ids=labels,
+        transition=sp.csr_matrix((n, n)),
+        idf=[1.0] * n,
+        chunk_index=[],
+        ann_vectors=vecs,
+        ann_labels=labels,
+        manifest={"version": "v1", "dim": dim},
+        ef_construction=99,
+    )
+    assert any(kw.get("ef_construction") == 99 for kw in seen_kwargs)
+
+
+def test_build_scale_index_builds_hnsw_once_for_kg_synonym_and_ann(repo, monkeypatch):
+    """End-to-end: when emb_synonym is enabled, hnswlib.Index() must be
+    constructed exactly ONCE for the KG embeddings (shared by the synonym-edge
+    KNN pass and the persisted ann.bin) — down from 2 before this task. The
+    chunk ANN build is a separate matrix/index and counts separately."""
+    import hnswlib
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    # Need >=2 KG objects with embeddings so _vector_matrix has rows and
+    # emb_synonym_edges actually runs the ANN build path (not the n<2 short-circuit).
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+        {"local_id": "c", "object_type": "concept", "payload": {"name": "op-amp", "section_path": ""}, "evidence": []},
+    ], [{"source_local_id": "b", "target_local_id": "a", "edge_type": "depends_on", "evidence": []}])
+    repo.rebuild_unified_kg(nb.id)
+
+    calls = {"n": 0}
+    real_init = hnswlib.Index.__init__
+
+    def spy_init(self, *a, **kw):
+        calls["n"] += 1
+        return real_init(self, *a, **kw)
+
+    monkeypatch.setattr(hnswlib.Index, "__init__", spy_init)
+    manifest = repo.build_scale_index(nb.id)
+
+    # KG-embedding hnsw built once (shared: synonym KNN + persisted ann.bin).
+    # No chunks were stored in this fixture → chunk_ann build is skipped
+    # (chunk_ann_labels empty), so total constructions == 1.
+    assert calls["n"] == 1, f"expected exactly 1 hnswlib.Index() construction for KG vectors, got {calls['n']}"
+    assert manifest["n_nodes"] >= 3
+
+
+def test_hnsw_ef_construction_default_and_env(monkeypatch):
+    from app.core.config import Settings
+    s = Settings()
+    assert s.hnsw_ef_construction == 200
+    monkeypatch.setenv("HNSW_EF_CONSTRUCTION", "77")
+    s2 = Settings()
+    assert s2.hnsw_ef_construction == 77

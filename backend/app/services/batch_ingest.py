@@ -45,11 +45,13 @@ def _rebuild_progress(phase: str, i: int, n: int) -> None:
 
 def _index_stage_progress(stage: str, latency_ms: int) -> None:
     """CLI progress printer for build_scale_index's on_stage callback: one
-    line per stage (gather/transition/kg_matrix/chunk_matrix/viz_arrays/
-    persist/total), printed as it happens — the events logger doesn't print
-    to the terminal, and a scale-index build on the 490k-object library can
-    take tens of minutes, so real-time per-stage output is the only way to
-    tell it isn't stuck."""
+    line per stage (kg_matrix/ann_build/synonym/gather/transition/
+    chunk_matrix/viz_arrays/persist/total), printed as it happens — the
+    events logger doesn't print to the terminal, and a scale-index build on
+    the 490k-object library can take tens of minutes, so real-time per-stage
+    output is the only way to tell it isn't stuck. Generic over stage name/
+    order, so pipeline reorders (e.g. Task 1's hnsw-build-once restructure)
+    never require a change here."""
     print(f"  [index] {stage}: {latency_ms}ms", flush=True)
 
 

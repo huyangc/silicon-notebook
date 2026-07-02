@@ -182,6 +182,12 @@ class Settings(BaseSettings):
     # 孤立(度为0)KG 节点的检索排序降权乘子。仅压 score 不动 relevance([0,1]/tau 守恒)。
     # 1.0=不降权(no-op); 0.5=孤立节点 score 减半;与 _EDGE_TYPE_RANK_WEIGHT 同模式。
     kg_isolated_rank_penalty: float = Field(0.5, validation_alias="KG_ISOLATED_RANK_PENALTY")
+    # hnsw 建索引质量参数(recall/build-time 折衷)。三处共用同一值:build_scale_index
+    # 里唯一的一次 KG-embedding hnsw 构建(emb_synonym KNN 复用点 + 持久化 ann.bin)、
+    # chunk ANN(save_scale_index 里的 chunk_ann.bin)、emb_synonym_edges 未传
+    # prebuilt_index 时的内部自建 fallback(_rx_graph 联邦路径等)。真机 49 万对象库
+    # hnsw 构建是流水线里最贵的计算,把该参数暴露出来便于按部署规模调优,不改默认值。
+    hnsw_ef_construction: int = Field(200, validation_alias="HNSW_EF_CONSTRUCTION")
     # 跨文档概念合并预审(review_pending_merges)的非对称自动落地阈值。单一 0.95 时
     # 绝大多数 LLM 判定落入 unsure → 队列永不清空。改为非对称:auto-merge 需更高置信
     # (误并污染图、不可逆),auto-keep-separate 可低些(误判仅多留一对待审、无害)。
