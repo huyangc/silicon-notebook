@@ -2965,6 +2965,14 @@ class SQLiteRepository:
             db.executemany(
                 "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
                 [(r[0], r[1], r[3]) for r in rows])
+        # Unconditionally bump kg_mutation_seq: chunk rows just changed, and every
+        # chunk-derived cache (:elemchunk/:entchunk/:ppr_graph/scale-index version)
+        # keys off the seq. Without this, kg_auto_extract=False (default) + no
+        # existing KG never reaches the extract-path _mark_unified_kg_dirty, so a
+        # freshly uploaded source's chunks stay invisible to warm caches forever
+        # (no TTL, no other invalidation). Dirty=1 is also semantically right for
+        # a pure chunk upload: a new source means the unified KG is stale anyway.
+        self._mark_unified_kg_dirty(notebook_id)
 
     def _embed_chunks_for_source(self, source_id: str) -> None:
         """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
@@ -9396,19 +9404,32 @@ class SQLiteRepository:
 
         P0-5: object_ids 是本次查询命中的一小撮 KG 对象(不是全库),所以 evidence
         只按 IN(...) 取这几行;element_id → chunk 的反查改走缓存的 _elem_chunk_map,
-        不再对 chunks 表做全量扫描 + 逐行 json.loads + 集合交。"""
+        不再对 chunks 表做全量扫描 + 逐行 json.loads + 集合交。
+
+        输出序 = 确定性 first-seen 序:按 object_ids 顺序 → 各对象 evidence 内
+        element 顺序 → _elem_chunk_map 内 chunk 列表序(即 chunks 扫描序)。
+        消费方 ask_graph 的 BFS 兜底路径无 rerank,顺序直接决定
+        truncate_by_tokens 的截断存活集和引用编号,所以序必须确定(旧实现的
+        「chunks 全表扫描序」依赖表物理序,本就不是契约)。"""
         from app.services.retrieval import RetrievedChunk
         if not object_ids:
             return []
         with self._connect() as db:
             ph = ",".join("?" * len(object_ids))
             erows = db.execute(
-                f"SELECT evidence FROM knowledge_objects WHERE id IN ({ph})", list(object_ids)).fetchall()
-            elem_ids = set()
-            for r in erows:
-                for e in json.loads(r["evidence"] or "[]"):
-                    if isinstance(e, dict) and e.get("element_id"):
-                        elem_ids.add(e["element_id"])
+                f"SELECT id, evidence FROM knowledge_objects WHERE id IN ({ph})",
+                list(object_ids)).fetchall()
+            # SQL IN(...) 不保证返回序 — 按 object_ids 输入序重放,evidence 内保持
+            # JSON 数组序,element_id 有序去重(dict.fromkeys 语义)。
+            ev_by_id = {r["id"]: r["evidence"] for r in erows}
+            elem_ids: list = []
+            seen_el = set()
+            for oid in object_ids:
+                for e in json.loads(ev_by_id.get(oid) or "[]"):
+                    el = e.get("element_id") if isinstance(e, dict) else None
+                    if el and el not in seen_el:
+                        seen_el.add(el)
+                        elem_ids.append(el)
             if not elem_ids:
                 return []
             elem_map = self._elem_chunk_map(notebook_id)
