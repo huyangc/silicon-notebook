@@ -18,9 +18,14 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def test_kg_object_candidates_core_and_delta(repo):
+def test_kg_object_candidates_core_and_delta(repo, monkeypatch):
+    """opt-in delta brute-force: with scale_search_include_delta=True, a KG
+    object added AFTER the watermark is still recalled via the delta matmul
+    path. (Default is now OFF — see test_indexed_only_principle.py — so this
+    test explicitly enables the opt-in to exercise the brute-force branch.)"""
     import json
     from app.models.schemas import NotebookCreate
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     nb = repo.create_notebook(NotebookCreate(name="base"))
     def add(sid, oid, name, day):
         with repo._write() as db:
@@ -50,8 +55,12 @@ def test_kg_object_candidates_core_and_delta(repo):
 
 
 def test_retrieve_scored_bounded_when_indexed(repo, monkeypatch):
+    """opt-in delta brute-force: with scale_search_include_delta=True, a
+    delta KG object is still recalled and the candidate set stays bounded.
+    (Default is now OFF — see test_indexed_only_principle.py.)"""
     import json
     from app.models.schemas import NotebookCreate
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     nb = repo.create_notebook(NotebookCreate(name="base"))
     def add(sid, oid, name, day):
         with repo._write() as db:
