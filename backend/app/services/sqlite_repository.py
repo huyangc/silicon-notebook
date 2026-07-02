@@ -7895,14 +7895,21 @@ class SQLiteRepository:
 
     def _open_scale_ann(self, idx, kind: str):
         """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例(进程缓存,版本变→新实例→重开)。
-        kind='kg'→ann.bin/ann_labels;'chunk'→chunk_ann.bin/chunk_ann_labels。失败/无工件→None。"""
+        kind='kg'→ann.bin/ann_labels;'chunk'→chunk_ann.bin/chunk_ann_labels;
+        'relation'→relation_ann.bin/relation_ann_labels。失败/无工件→None。"""
         import hnswlib
-        attr = "ann_handle" if kind == "kg" else "chunk_ann_handle"
+        _attr_by_kind = {"kg": "ann_handle", "chunk": "chunk_ann_handle",
+                         "relation": "relation_ann_handle"}
+        _path_by_kind = {"kg": "ann_path", "chunk": "chunk_ann_path",
+                         "relation": "relation_ann_path"}
+        _labels_by_kind = {"kg": "ann_labels", "chunk": "chunk_ann_labels",
+                          "relation": "relation_ann_labels"}
+        attr = _attr_by_kind[kind]
         cached = getattr(idx, attr, None)
         if cached is not None:
             return cached
-        path = idx.ann_path if kind == "kg" else getattr(idx, "chunk_ann_path", None)
-        labels = idx.ann_labels if kind == "kg" else getattr(idx, "chunk_ann_labels", None)
+        path = getattr(idx, _path_by_kind[kind], None)
+        labels = getattr(idx, _labels_by_kind[kind], None)
         if not path or not labels:
             return None
         dim = int(idx.manifest.get("dim", self.settings.embed_dim))
@@ -8298,11 +8305,12 @@ class SQLiteRepository:
             manifest fields derived from it are computed.
 
         `on_stage`: optional callback invoked as `(stage_name, latency_ms)`
-        once per stage (the same 9 stages as the `scale_index_build` events:
-        kg_matrix/ann_build/synonym/gather/transition/chunk_matrix/viz_arrays/
-        persist, plus a final total), right when that stage's timing is
-        recorded. Lets a CLI caller (batch_ingest) print real-time per-stage
-        progress on long builds without depending on the events logger, which
+        once per stage (the same 10 stages as the `scale_index_build` events:
+        kg_matrix/ann_build/synonym/gather/transition/chunk_matrix/
+        relation_matrix/viz_arrays/persist, plus a final total), right when
+        that stage's timing is recorded. Lets a CLI caller (batch_ingest)
+        print real-time per-stage progress on long builds without depending
+        on the events logger, which
         doesn't print to the terminal. A raising callback is swallowed
         (logging-only) so it can never break the build — mirrors how
         event_log.emit isolates its own failures. Default None preserves prior
@@ -8474,7 +8482,32 @@ class SQLiteRepository:
         chunk_ann_vectors = (np.asarray(c_mat_raw, dtype=np.float32)
                              if chunk_ann_labels and c_mat_raw is not None else None)
         del c_ids_raw, c_mat_raw
-        gc.collect()  # chunk matrix load scratch, before viz-graph arrays stage
+        gc.collect()  # chunk matrix load scratch, before relation matrix stage
+
+        # Relation-level ANN vectors/labels (relation-ann task): relations that
+        # have a row in relation_embeddings. Persisted as relation_ann.bin so
+        # _retrieve_relations_scored can ANN-narrow candidates on large
+        # persisted-index notebooks instead of the full-matrix top_k_sims path
+        # (which is the thing the #171-style cold-matrix guard exists to avoid
+        # on multi-GB relation matrices). Direct load: same rationale as
+        # _kg_matrix/_chunk_matrix above — bypasses _vector_matrix()/
+        # _vector_cache so this matrix never becomes a cache entry.
+        def _relation_matrix():
+            with self._connect() as db:
+                n_hint = db.execute(
+                    "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()["c"]
+                rows = db.execute(
+                    "SELECT relation_id AS vid, vector FROM relation_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchall()
+                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint)
+
+        rel_ids_raw, rel_mat_raw = _timed("relation_matrix", _relation_matrix)
+        relation_ann_labels = list(rel_ids_raw) if rel_ids_raw else []
+        relation_ann_vectors = (np.asarray(rel_mat_raw, dtype=np.float32)
+                                if relation_ann_labels and rel_mat_raw is not None else None)
+        del rel_ids_raw, rel_mat_raw
+        gc.collect()  # relation matrix load scratch, before viz-graph arrays stage
 
         # Folded concept-level viz graph (Task 4 / SP1): derive the EXACT same
         # graph _unified_graph_full(nb, "object") returns (concepts folded to
@@ -8527,6 +8560,8 @@ class SQLiteRepository:
             viz_payload=viz_payload,
             chunk_ann_vectors=chunk_ann_vectors,
             chunk_ann_labels=chunk_ann_labels,
+            relation_ann_vectors=relation_ann_vectors,
+            relation_ann_labels=relation_ann_labels,
             prebuilt_ann=kg_ann_index,
             ef_construction=self.settings.hnsw_ef_construction,
         )
