@@ -301,7 +301,7 @@ type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 
 type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
 type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
-type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[]; total_nodes?: number; total_edges?: number; truncated?: boolean };
+type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[]; total_nodes?: number; total_edges?: number; truncated?: boolean; viz_building?: boolean };
 type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number; element_text?: string };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
 type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
@@ -309,7 +309,7 @@ type KgOccurrence = { quoted_span?: string; source_title?: string; source_id?: s
 type KgProcedureStep = { name: string; element_text: string };
 type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: KgOccurrence[]; definition: string | null; steps: KgProcedureStep[] | null };
 type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
-type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number; viz_indexed: boolean; viz_nodes: number; viz_edges: number; viz_stale: boolean };
+type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number; viz_indexed: boolean; viz_nodes: number; viz_edges: number; viz_stale: boolean; viz_building?: boolean };
 type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
 type MergeReviewJob = { status: string; total: number; done: number; error: string };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
@@ -933,6 +933,9 @@ export default function Home() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
+  // 大库首次可视化索引在后台构建时，GET /unified-kg 返回占位 viz_building:true；
+  // 这里驱动图区「构建中」提示 + 轮询，直到索引建好后自动换真图。
+  const [vizBuilding, setVizBuilding] = useState(false);
   // 服务端搜索结果 — 搜索时用这个叠加层，不再懒加载全量图
   const [kgSearchHits, setKgSearchHits] = useState<KgSearchHit[]>([]);
   const [kgSearchBusy, setKgSearchBusy] = useState(false);
@@ -1031,6 +1034,29 @@ export default function Home() {
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [buildingScaleIndex, currentNotebookId]);
+  // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
+  // building for a large notebook, poll every 6s until it flips false, then swap in the
+  // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
+  // so closing the view (or switching notebooks) cancels the poll.
+  useEffect(() => {
+    if (!vizBuilding || !kgViewOpen || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const g = await fetchUnifiedGraph(nb, kgLimit);
+        if (cancelled) return;
+        if (g.viz_building) return;
+        setUGraph(g);
+        setVizBuilding(false);
+        fetchUnifiedKgStatus(nb).then((status) => { if (!cancelled) setUnifiedKgStatus(status); }).catch(() => {});
+      } catch { /* transient error; keep polling */ }
+    }, 6000);
+    const cap = window.setTimeout(() => {
+      if (!cancelled) { setVizBuilding(false); setToast("图谱索引仍在后台构建，请稍后重新打开查看"); }
+    }, 20 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+  }, [vizBuilding, kgViewOpen, currentNotebookId, kgLimit]);
   // Kick off a scale-index rebuild; the effect above then polls until it's ready.
   const startScaleIndexRebuild = async (nb: string, when: "now" | "idle" = "now") => {
     setBuildingScaleIndex(true);
@@ -2234,6 +2260,7 @@ export default function Home() {
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
+      setVizBuilding(Boolean(g.viz_building));
     } catch (err) { reportError(err); }
   }
 
@@ -2262,7 +2289,9 @@ export default function Home() {
     setKgLimit(limit);
     setKgRangeBusy(true);
     try {
-      setUGraph(await fetchUnifiedGraph(currentNotebookId, limit));
+      const g = await fetchUnifiedGraph(currentNotebookId, limit);
+      setUGraph(g);
+      setVizBuilding(Boolean(g.viz_building));
     } catch (err) { reportError(err); }
     finally { setKgRangeBusy(false); }
   }
@@ -2279,6 +2308,7 @@ export default function Home() {
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
       setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
+      setVizBuilding(Boolean(g.viz_building));
     } catch (err) { reportError(err); }
     finally { setRelinkingKg(false); }
   }
@@ -2294,6 +2324,7 @@ export default function Home() {
         fetchUnifiedKgStatus(currentNotebookId),
       ]);
       setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setPendingMerges(pend); setUnifiedKgStatus(status);
+      setVizBuilding(Boolean(g.viz_building));
     } catch (err) { reportError(err); }
     finally { setKgRefreshBusy(false); }
   }
@@ -3028,29 +3059,37 @@ export default function Home() {
                       </>
                     )
                 )}
-                {currentNotebook?.tier === "base" && scaleIndexStatus && (
-                  <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                    检索索引：{
-                      (() => {
-                        const labels: Record<ScaleIndexState, string> = {
-                          unindexed: "未索引",
-                          suggested: "建议建索引",
-                          queued: "已排队（空闲时建）",
-                          building: "构建中…",
-                          indexed: "已同步",
-                          stale: "建议重建",
-                        };
-                        // Prefer the backend six-state field; fall back to legacy booleans.
-                        const state: ScaleIndexState = scaleIndexStatus.state
-                          ?? (scaleIndexStatus.building ? "building"
-                            : !scaleIndexStatus.exists ? "unindexed"
-                            : scaleIndexStatus.stale ? "stale" : "indexed");
-                        return labels[state];
-                      })()
-                    }
-                    {scaleIndexStatus.exists && ` · 节点 ${scaleIndexStatus.n_nodes} · chunk ${scaleIndexStatus.n_chunks}`}
-                  </p>
-                )}
+                {scaleIndexStatus && (scaleIndexStatus.eligible || scaleIndexStatus.exists) && (() => {
+                  // 检索索引与 tier 解耦：任意达标库（含大个人库）均显示，可点构建/重建。
+                  // 六态 label/颜色与 KG 视图徽章（kg-rail-section 内）保持一致。
+                  const s = scaleIndexStatus;
+                  const st = s.state ?? (s.building ? "building" : s.exists ? (s.stale ? "stale" : "indexed") : "unindexed");
+                  const clickable = s.eligible && !s.building && st !== "queued";
+                  const label = st === "building" ? "检索索引：构建中…"
+                    : st === "queued" ? "检索索引：已排队（空闲时建）"
+                    : st === "indexed" ? `检索索引：已同步 · ${s.n_nodes} 节点`
+                    : st === "stale" ? "检索索引：已过期"
+                    : st === "suggested" ? "检索索引：建议构建"
+                    : "检索索引：未构建";
+                  const color = (st === "building" || st === "queued" || st === "stale" || st === "suggested")
+                    ? "var(--color-warn, #b97a00)"
+                    : st === "indexed" ? "var(--color-ok, #1a7f5a)" : undefined;
+                  return (
+                    <p
+                      className="tool-hint"
+                      role={clickable ? "button" : undefined}
+                      tabIndex={clickable ? 0 : undefined}
+                      title={clickable
+                        ? (s.exists ? "点击重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                        : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
+                      onClick={clickable ? confirmBuildScaleIndex : undefined}
+                      onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmBuildScaleIndex(); } }) : undefined}
+                      style={{ margin: "2px 2px 8px", cursor: clickable ? "pointer" : "default", color }}
+                    >
+                      {label}
+                    </p>
+                  );
+                })()}
                 <input
                   className="source-search"
                   type="search"
@@ -4141,7 +4180,12 @@ export default function Home() {
               </div>
             </aside>
             <div className="kg-canvas" ref={kgCanvasRef}>
-              {uGraph === null ? <p className="tool-hint kg-canvas-empty">加载中…</p> : fgData.nodes.length === 0 ? (
+              {uGraph === null ? <p className="tool-hint kg-canvas-empty">加载中…</p> : vizBuilding ? (
+                <div className="tool-hint kg-canvas-empty">
+                  <strong>图谱索引构建中，首次构建大库可能需要几分钟…</strong>
+                  <p style={{ marginTop: 6 }}>建成后会自动刷新为完整图谱</p>
+                </div>
+              ) : fgData.nodes.length === 0 ? (
                 <p className="tool-hint kg-canvas-empty">没有匹配的节点。清空搜索后可查看完整图谱。</p>
               ) : (
                 <ForceGraph2D
