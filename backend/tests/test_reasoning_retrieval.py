@@ -831,3 +831,95 @@ def test_run_expand_summary_uses_node_name_not_id(rrepo):
     assert claim.object_id not in expand.summary           # 不再暴露裸 id
     assert expand.detail.get("name") == "RTL到GDSII流程概述"  # detail 带 name
     assert expand.detail.get("object_id") == claim.object_id  # detail 仍保留 id(机器/调试)
+
+
+def test_run_duplicate_subquery_skipped_not_rerun(rrepo, monkeypatch):
+    """add_subquery 重复已试过的子查询(含与初始 plan 重复、归一化等价)→ 硬跳过:
+    不再执行 search,记 skip trace(reason=duplicate_subquery)。治「反复补充同一条
+    子查询白烧检索」;跳过属零新增,stale 熔断语义不变。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+
+    class _RepeatLLM:
+        configured = True
+
+        def __init__(self):
+            self._reflects = [
+                # 与 plan 子查询同文本 → 应跳过
+                {"next_action": "add_subquery",
+                 "new_sub_query": {"query": "RTL到GDSII流程"}},
+                # 仅大小写/空白差异,归一化后仍重复 → 也应跳过
+                {"next_action": "add_subquery",
+                 "new_sub_query": {"query": "  rtl到gdsii流程 "}},
+                {"next_action": "answer", "sufficient": True},
+            ]
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+            nxt = self._reflects.pop(0) if self._reflects else {
+                "next_action": "answer", "sufficient": True}
+            return json.dumps(nxt)
+
+    rrepo.llm_client = _RepeatLLM()
+    retriever = ReasoningRetriever(rrepo, rrepo.settings)
+    calls: list[str] = []
+    orig_search = retriever.search
+
+    def _spy(nb_id, query, types=None, prefer="balanced"):
+        calls.append(query)
+        return orig_search(nb_id, query, types, prefer)
+
+    monkeypatch.setattr(retriever, "search", _spy)
+    steps = []
+    retriever.run(nb.id, "RTL到GDSII流程", "", on_step=steps.append)
+
+    # search 只在初检索执行 1 次;两次重复 add_subquery 均被跳过、未重跑
+    assert calls == ["RTL到GDSII流程"]
+    skips = [s for s in steps if s.step_type == "skip"
+             and s.detail.get("reason") == "duplicate_subquery"]
+    assert len(skips) == 2
+    assert "跳过重复子查询" in skips[0].summary
+
+
+def test_run_feeds_attempted_subqueries_to_reflect(rrepo):
+    """已执行过的子查询账目(文本+新增证据数+尝试次数)必须回喂 reflect prompt:
+    ①首轮即含初始 plan 的子查询与各自新增数(治「plan 对 reflect 不可见→首轮就
+    复述 plan 已跑过的」);②重复被跳过后,下一轮 prompt 含尝试次数(账目变化使
+    prompt 非不动点,LLM 缓存不会原样吐回上一轮决策)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+
+    captured: list[str] = []
+
+    class _RecordingRepeatLLM:
+        configured = True
+
+        def __init__(self):
+            self._reflects = [
+                {"next_action": "add_subquery",
+                 "new_sub_query": {"query": "RTL到GDSII流程"}},  # 重复 plan → 跳过
+                {"next_action": "answer", "sufficient": True},
+            ]
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [
+                    {"query": "RTL到GDSII流程"}, {"query": "时序收敛方法"}]})
+            captured.append(messages[-1]["content"])
+            nxt = self._reflects.pop(0) if self._reflects else {
+                "next_action": "answer", "sufficient": True}
+            return json.dumps(nxt)
+
+    rrepo.llm_client = _RecordingRepeatLLM()
+    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+
+    assert len(captured) == 2
+    # ① 首轮:初始 plan 两条子查询都在账目里,且带新增数与去重告诫
+    assert "已执行过的子查询" in captured[0]
+    assert "RTL到GDSII流程" in captured[0] and "时序收敛方法" in captured[0]
+    assert "新增" in captured[0] and "勿重复" in captured[0]
+    assert "已试" not in captured[0]          # 首轮各 1 次,不显示次数
+    # ② 重复被跳过后:该条账目显示已试 2 次 → 两轮 prompt 必不同(破缓存不动点)
+    assert "已试2次" in captured[1]
+    assert captured[0] != captured[1]
