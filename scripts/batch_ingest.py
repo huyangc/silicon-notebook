@@ -6,6 +6,8 @@
   PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxx [--limit 50]
   PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxx
   PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir DIR --notebook-name NAME
+  PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --notebook-id nb-xxx
+  PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --all-notebooks
 """
 from app.services.batch_ingest import main
 
