@@ -10528,7 +10528,27 @@ class SQLiteRepository:
 
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
         """种子(节点∪关系端点)→1-hop 子图→渲染。返回 (block, id_map, kg_hits)。
-        kg_hits=种子命中(带 .relevance),供 grounding。无 KG/种子 → ("", {}, [])。"""
+        kg_hits=种子命中(带 .relevance),供 grounding。无 KG/种子 → ("", {}, [])。
+
+        生产事故修复(2026-07):大库守卫必须在任何检索之前 —— 种子收集本身
+        (federated_retrieve + federated_retrieve_relations)不是免费的:后者
+        branch-3(_retrieve_relations_scored 向量覆盖非空场景)会加载
+        _vector_matrix(nb, "relation_embeddings") 全量关系向量矩阵,生产环境
+        百万级行 × 1024 维即数 GB(若行仍是回填中的 JSON 文本更是灾难级解析
+        耗时/挂起)。守卫若留在种子收集之后,大库场景这些种子会被立即丢弃
+        (直接 return ("", {}, []))——白算 + 可能挂起。挪到顶部后大库行为
+        字节不变(同样的空 overlay + 同样的 graph_walk_refused 事件),只是不
+        再触发任何检索;小库字节不变。真正的修复是给关系建 ANN 索引(镜像
+        chunk_ann,scale index 侧)——这个守卫只是在那之前把 ask 路径钳制在
+        O(bounded)。"""
+        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+            self.event_log.emit({
+                "kind": "graph_walk_refused",
+                "notebook_id": notebook_id,
+                "reason": "large_notebook",
+                "site": "chunk_kg_overlay",
+            })
+            return "", {}, []
         from app.services.kg.graph_reason import multihop_subgraph, render_subgraph_context
         node_hits = self.federated_retrieve(notebook_id, query)[: self._MIX_NODE_SEEDS]
         rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[: self._MIX_REL_SEEDS]
@@ -10537,17 +10557,6 @@ class SQLiteRepository:
             seeds.extend((r.source_object_id, r.target_object_id))
         seeds = list(dict.fromkeys(s for s in seeds if s))
         if not seeds:
-            return "", {}, []
-        # 大库守卫(同 ask_graph):chunk 模式的 KG overlay 也走 _federated_rx_graph
-        # 全库 rustworkx 建图,大库直接跳过 → 返回空 overlay(与既有「无种子/空图」
-        # 降级完全同形),ask_chunk 继续用向量/PPR chunk 作答,不挂起。
-        if not self.notebook_copy_stats(notebook_id)["copyable"]:
-            self.event_log.emit({
-                "kind": "graph_walk_refused",
-                "notebook_id": notebook_id,
-                "reason": "large_notebook",
-                "site": "chunk_kg_overlay",
-            })
             return "", {}, []
         G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         if G is None or G.num_nodes() == 0:
