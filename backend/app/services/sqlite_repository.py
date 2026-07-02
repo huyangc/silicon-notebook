@@ -505,6 +505,25 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
                 CREATE INDEX IF NOT EXISTS idx_chunks_nb ON chunks(notebook_id);
+                -- _scale_index_version's "SELECT COUNT(*), MAX(created_at) FROM
+                -- chunks WHERE notebook_id=?" — same cold-miss cost as the other
+                -- three version-probe aggregates (idx_chunks_nb above is
+                -- single-column, not covering for MAX(created_at)). Row-order
+                -- audit (PR#136 lesson, re-verified rather than assumed): every
+                -- `FROM chunks` site without ORDER BY is either an
+                -- aggregate/EXISTS/DELETE, an id-keyed `id IN (...)` hydration, a
+                -- JOIN feeding score_chunks (unordered candidate pool, ranked by
+                -- score not position), or copy_notebook's full per-row remap-copy
+                -- (every row is included, not positionally truncated). The one
+                -- borderline site, _elem_chunk_map's per-element chunk list (built
+                -- from an unordered `SELECT id, element_ids FROM chunks WHERE
+                -- notebook_id=?`), was explicitly decoupled from chunks physical
+                -- scan order by the immediately-preceding commit (_kg_source_chunks
+                -- determinism now comes from object_ids/evidence array order, not
+                -- table scan order — see that method's and test_query_hotpath_
+                -- cache.py's "NOT ... a contract" comments), so it does not need an
+                -- ORDER BY pin here either.
+                CREATE INDEX IF NOT EXISTS idx_chunks_nb_created ON chunks(notebook_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS chunk_embeddings (
                   chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
@@ -746,10 +765,63 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_type_created ON knowledge_objects(notebook_id, object_type, created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_status ON knowledge_objects(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_objects_source ON knowledge_objects(source_id);
+                -- _scale_index_version's "SELECT COUNT(*), MAX(updated_at) FROM
+                -- knowledge_objects WHERE notebook_id=?" (cold-cache path, fired by
+                -- every concurrent KG-page/status/rebuild caller before the P1-8 memo
+                -- is warm) otherwise walks idx_knowledge_objects_nb_status then hits
+                -- the base table per row for updated_at — a full per-row fetch over a
+                -- GB-scale table (measured 96-147s overlapping on a 490k-object
+                -- deployment). This composite makes it a covering index scan for
+                -- both the COUNT and the MAX. Row-order audit (PR#136 lesson): every
+                -- other `FROM knowledge_objects` site without ORDER BY is either an
+                -- aggregate/EXISTS/DELETE (order-irrelevant) or an id-keyed/`WHERE
+                -- id IN (...)` hydration (order-irrelevant); the two order-sensitive
+                -- streaming sites (_stream_seed_reps's alias-map + canonical-name
+                -- passes) already pin `ORDER BY rowid` explicitly, so they are
+                -- immune to this index's row order regardless of which index the
+                -- planner picks for the WHERE clause.
+                CREATE INDEX IF NOT EXISTS idx_knowledge_objects_nb_updated ON knowledge_objects(notebook_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_source ON knowledge_relations(notebook_id, source_object_id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_target ON knowledge_relations(notebook_id, target_object_id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_source ON knowledge_relations(source_id);
+                -- _scale_index_version's "SELECT COUNT(*), MAX(created_at) FROM
+                -- knowledge_relations WHERE notebook_id=?" — same cold-miss cost as
+                -- the knowledge_objects aggregate above; this is knowledge_relations'
+                -- FIRST composite index (previously only single-column nb_source /
+                -- nb_target existed, neither covering for a bare notebook_id COUNT).
+                -- Row-order audit: every `FROM knowledge_relations` site without
+                -- ORDER BY is an aggregate/COUNT/EXISTS/DELETE, an id-keyed hydration
+                -- (`source_object_id IN (...)` / `target_object_id IN (...)` — the
+                -- caller folds results into a dict/set keyed by object id, order
+                -- irrelevant), or a full per-notebook scan whose consumer builds an
+                -- rx_graph / PPR node-edge list from unordered dict/list accumulation
+                -- (edge identity, not position, carries meaning) — none are
+                -- order-sensitive, so no ORDER BY needs to be pinned.
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_created ON knowledge_relations(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb ON knowledge_embeddings(notebook_id);
+                -- _scale_index_version's "SELECT COUNT(*), MAX(created_at) FROM
+                -- knowledge_embeddings WHERE notebook_id=?" — same cold-miss cost.
+                -- knowledge_embeddings' FIRST composite index (idx_knowledge_embeddings_nb
+                -- above is single-column, not covering for MAX(created_at)). Row-order
+                -- audit: build_scale_index's `_kg_matrix()` ("SELECT object_id AS vid,
+                -- vector FROM knowledge_embeddings WHERE notebook_id=?", no ORDER BY)
+                -- feeds build_matrix() → its row enumeration order becomes ann_labels'
+                -- persisted order and the hnsw index's internal insertion-id order
+                -- (0..n-1). This does NOT break internal alignment (ids/vectors stay
+                -- zipped by build_matrix regardless of order) and does NOT cause
+                -- manifest staleness (manifest["version"] is _scale_index_version's
+                -- COUNT/MAX tuple, which does not encode row order — a pre-existing
+                -- on-disk index built before this migration still matches). It CAN
+                -- change hnsw's approximate KNN tie-breaking among equally-similar
+                -- neighbors between a from-scratch rebuild before vs. after this
+                -- index exists — but hnsw builds were never guaranteed byte-identical
+                -- across rebuilds anyway (approximate by construction), so this is
+                -- not a new risk class; no test/manifest asserts row-order equality
+                -- here. _vector_matrix (the other knowledge_embeddings reader, used
+                -- by retrieval fallback paths) is likewise order-agnostic: it
+                -- version-caches on (COUNT, MAX(created_at)) and returns an
+                -- (ids, matrix) pair consumed by id-keyed lookups, not position.
+                CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb_created ON knowledge_embeddings(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_element_embeddings_nb ON element_embeddings(notebook_id);
 
                 CREATE TABLE IF NOT EXISTS communities (
