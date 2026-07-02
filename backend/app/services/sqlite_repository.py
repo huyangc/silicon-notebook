@@ -624,6 +624,13 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb ON concept_clusters(notebook_id);
                 CREATE INDEX IF NOT EXISTS idx_clusters_member ON concept_clusters(member_object_id);
+                -- _scale_index_version's per-call "SELECT COUNT(*), MAX(created_at)
+                -- FROM concept_clusters WHERE notebook_id=?" (called every retrieval
+                -- / PPR / status request) otherwise walks idx_clusters_nb then
+                -- back to the table row for created_at. This composite index makes
+                -- it a covering index scan (no row lookups) for both the COUNT and
+                -- the MAX.
+                CREATE INDEX IF NOT EXISTS idx_clusters_nb_created ON concept_clusters(notebook_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS concept_merge_candidates (
                   id TEXT PRIMARY KEY,
