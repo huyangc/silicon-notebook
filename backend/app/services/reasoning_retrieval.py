@@ -43,6 +43,20 @@ NO_NEW_EVIDENCE_NOTE = (
 )
 
 
+def _norm_query(q: str) -> str:
+    """子查询防重的归一化键:压空白 + casefold。保守精确匹配、不做语义归一——
+    宁可放过真改写的近似查询(由回喂账目提示模型约束),不误杀新角度。"""
+    return " ".join(str(q).split()).casefold()
+
+
+@dataclass
+class _QueryAttempt:
+    """单条子查询的执行账目:原文、带来的新增证据数、尝试次数(含被跳过的重复)。"""
+    query: str
+    new: int = 0
+    tries: int = 0
+
+
 @dataclass
 class SubQuery:
     query: str
@@ -223,13 +237,22 @@ class ReasoningRetriever:
             except Exception:
                 return []
 
+        # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
+        # 每轮回喂 reflect(模型能看到试过什么、哪条是干的),add_subquery 对
+        # 重复键硬跳过 —— 治「反复补充同一条子查询」的两层根源。
+        attempted: Dict[str, _QueryAttempt] = {}
         if subqueries:
             with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
                 # map 保序:第 i 个结果对应第 i 个子查询,与提交顺序一致。
-                for hits in ex.map(_run_search, subqueries):
+                for sq, hits in zip(subqueries, ex.map(_run_search, subqueries)):
                     raise_if_cancelled(self.cancel_event)
+                    rec = attempted.setdefault(_norm_query(sq.query),
+                                               _QueryAttempt(query=sq.query))
+                    rec.tries += 1
                     for h in hits:
-                        collected.setdefault(h.object_id, h)
+                        if h.object_id not in collected:
+                            collected[h.object_id] = h
+                            rec.new += 1
         record(TraceStep(step_type="retrieve",
                          summary=f"初检索得到 {len(collected)} 个候选节点",
                          detail={"count": len(collected)}))
@@ -272,6 +295,17 @@ class ReasoningRetriever:
                     f"{str(collected[o].payload.get('name', o)) if o in collected else o}"
                     for o in visited)
                 summary = f"{summary}\n\n（已展开过的节点，勿重复 expand_graph 请求它们: {vis}）"
+            # 已执行过的子查询账目回喂 reflect(镜像 visited 回喂,治"反复补充同
+            # 一条子查询"):模型据此区分"没查过"与"查过但没捞到";账目含尝试次数,
+            # 重复被跳过时 prompt 仍变化 → 不再是不动点,LLM 缓存不会逐字重放决策。
+            if attempted:
+                tried = "、".join(
+                    f"「{a.query}」(新增{a.new}条"
+                    + (f",已试{a.tries}次" if a.tries > 1 else "") + ")"
+                    for a in attempted.values())
+                summary = (f"{summary}\n\n（已执行过的子查询及各自新增证据数: {tried}。"
+                           "勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,"
+                           "或改用其他动作。）")
             decision = self.reflect(question, summary)
             raise_if_cancelled(self.cancel_event)
             record(TraceStep(step_type="reflect",
@@ -319,14 +353,31 @@ class ReasoningRetriever:
                                      detail={"reason": "missing_new_sub_query"}))
                 else:
                     sq = decision.new_sub_query
-                    for h in self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
-                        raise_if_cancelled(self.cancel_event)
-                        collected.setdefault(h.object_id, h)
-                    if sq.query not in used_queries:
-                        used_queries.append(sq.query)
-                    record(TraceStep(step_type="retrieve",
-                                     summary=f"补充子查询: {sq.query}",
-                                     detail={"query": sq.query}))
+                    key = _norm_query(sq.query)
+                    if key in attempted:
+                        # 重复子查询硬跳过(镜像 expand_graph 的 visited 守卫):
+                        # 不重跑检索;tries 递增让回喂账目(与 prompt)随之变化。
+                        attempted[key].tries += 1
+                        record(TraceStep(step_type="skip",
+                                         summary=f"跳过重复子查询: {sq.query}",
+                                         detail={"query": sq.query,
+                                                 "reason": "duplicate_subquery",
+                                                 "tries": attempted[key].tries}))
+                    else:
+                        added = 0
+                        for h in self.search(notebook_id, sq.query,
+                                             sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
+                            raise_if_cancelled(self.cancel_event)
+                            if h.object_id not in collected:
+                                collected[h.object_id] = h
+                                added += 1
+                        attempted[key] = _QueryAttempt(query=sq.query,
+                                                       new=added, tries=1)
+                        if sq.query not in used_queries:
+                            used_queries.append(sq.query)
+                        record(TraceStep(step_type="retrieve",
+                                         summary=f"补充子查询: {sq.query}",
+                                         detail={"query": sq.query, "new": added}))
             elif decision.next_action == "search_elements":
                 if elements_searches >= self.settings.reasoning_max_element_searches:
                     record(TraceStep(step_type="skip",
