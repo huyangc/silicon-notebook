@@ -1027,3 +1027,133 @@ def test_main_vectors_to_blob_passes_workers_through(repo, monkeypatch, capsys):
     rc = bi.main(["vectors-to-blob", "--notebook-id", nb_id, "--workers", "2"])
     assert rc == 0
     assert captured["workers"] == 2
+# --- backfill-source-index CLI (P0-4 proactive reverse-index backfill) -------
+
+def _seed_node_with_evidence(repo, nb_id, oid, source_ids):
+    now = "2026-01-01T00:00:00"
+    evidence = [
+        {"source_id": sid, "source_title": "Doc", "element_id": f"el-{sid}",
+         "element_type": "paragraph", "location_label": "p1",
+         "quoted_span": "span", "confidence": 1.0}
+        for sid in source_ids
+    ]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (oid, nb_id, "concept", "active",
+             json.dumps({"name": f"name-{oid}"}),
+             json.dumps(evidence), source_ids[0] if source_ids else "", now, now))
+
+
+def test_run_backfill_source_index_populates_reverse_index_and_marks(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a", "src-b"])  # merged object
+    _seed_node_with_evidence(repo, nb_id, "ko-2", ["src-b"])
+    _seed_node_with_evidence(repo, nb_id, "ko-3", [])                  # no evidence
+
+    out = bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    assert out["objects"] == 3
+    assert out["rows"] == 3   # ko-1 x2 + ko-2 x1
+
+    with repo._connect() as db:
+        rows = {(r["object_id"], r["source_id"]) for r in db.execute(
+            "SELECT object_id, source_id FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,)).fetchall()}
+        assert repo._source_index_backfilled(db, nb_id)
+    assert rows == {("ko-1", "src-a"), ("ko-1", "src-b"), ("ko-2", "src-b")}
+
+
+def test_run_backfill_source_index_is_idempotent(repo):
+    """Re-running does not duplicate rows — each run clears-then-rebuilds this
+    notebook's slice of knowledge_object_sources."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
+
+    bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+
+    with repo._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,)).fetchone()["c"]
+    assert count == 1
+
+
+def test_run_backfill_source_index_requires_notebook_id_or_all(repo):
+    with pytest.raises(ValueError):
+        bi.run_backfill_source_index(repo, None, all_notebooks=False)
+
+
+def test_run_backfill_source_index_all_notebooks_covers_every_notebook(repo):
+    nb_a = bi.ensure_notebook(repo, None, "nb-a")
+    nb_b = bi.ensure_notebook(repo, None, "nb-b")
+    _seed_node_with_evidence(repo, nb_a, "ko-a", ["src-a"])
+    _seed_node_with_evidence(repo, nb_b, "ko-b", ["src-b"])
+
+    out = bi.run_backfill_source_index(repo, None, all_notebooks=True)
+    assert out["objects"] == 2
+    assert out["rows"] == 2
+
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, nb_a)
+        assert repo._source_index_backfilled(db, nb_b)
+
+
+def test_run_backfill_source_index_paginates_in_batches(repo, monkeypatch):
+    """Bounded-memory backfill: with a tiny batch size, a notebook with more
+    objects than one batch is still fully covered (pagination via id > last_id
+    doesn't skip or duplicate rows)."""
+    monkeypatch.setattr(bi, "_KOS_BACKFILL_BATCH_SIZE", 2)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(5):
+        _seed_node_with_evidence(repo, nb_id, f"ko-{i}", [f"src-{i}"])
+
+    out = bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    assert out["objects"] == 5
+    assert out["rows"] == 5
+    with repo._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,)).fetchone()["c"]
+    assert count == 5
+
+
+def test_main_backfill_source_index_requires_notebook_or_all(repo, capsys):
+    rc = bi.main(["backfill-source-index"])
+    assert rc == 2
+    assert "backfill-source-index" in capsys.readouterr().err
+
+
+def test_main_backfill_source_index_end_to_end(repo, capsys):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
+
+    rc = bi.main(["backfill-source-index", "--notebook-id", nb_id])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "backfill-source-index done" in out
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, nb_id)
+
+
+def test_main_backfill_source_index_does_not_require_embedder_configured(repo, monkeypatch, capsys):
+    """Pure SQL derivation from existing evidence — must work even when
+    EMBED_* is unset, like vectors-to-blob."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
+
+    monkeypatch.setenv("EMBED_PROVIDER", "")  # main() builds a fresh unconfigured repo
+    rc = bi.main(["backfill-source-index", "--notebook-id", nb_id])
+    assert rc == 0
+    with repo._connect() as db:
+        assert repo._source_index_backfilled(db, nb_id)
+
+
+def test_arg_parser_backfill_source_index_phase():
+    args = bi.build_arg_parser().parse_args(["backfill-source-index", "--notebook-id", "nb-x"])
+    assert args.phase == "backfill-source-index"
+    assert args.all_notebooks is False
+
+    args2 = bi.build_arg_parser().parse_args(["backfill-source-index", "--all-notebooks"])
+    assert args2.all_notebooks is True
