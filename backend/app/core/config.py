@@ -1,13 +1,21 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, List, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# 仓库根锚点：backend/app/core/config.py -> parents[3] = 仓库根。与
+# event_logging.py 的 _ROOT_DIR 同口径。相对路径类的设置项（storage_dir、
+# database_url 的 sqlite 路径部分）统一在下面的 model_validator 里锚定到此处，
+# 使其与进程启动时的 CWD 无关（根治 `npm run dev`（cd backend/ 再起 uvicorn）
+# 与离线 CLI（仓库根跑）解析到两个不同 .local 目录的「双 .local」问题）。
+_ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=("../.env", ".env"),
+        env_file=str(_ROOT_DIR / ".env"),
         case_sensitive=False,
         extra="ignore",
     )
@@ -354,6 +362,28 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _anchor_relative_paths_to_repo_root(self) -> "Settings":
+        """storage_dir 与 database_url（仅 sqlite:/// 且路径部分相对时）统一
+        锚定到仓库根，与默认值/env 覆盖是否相对无关，与进程 CWD 无关。
+
+        - 绝对路径（默认或 env 覆盖）原样保留，不重锚。
+        - 非 sqlite 的 database_url（postgres://、mysql:// 等）不动。
+        - sqlite:/// 的拼写规则：`sqlite:///relative/path`（三斜杠+相对路径）
+          与 `sqlite:////abs/path`（三斜杠分隔符 + 绝对路径本身以 / 开头，
+          视觉上四个斜杠）；判断标准是把 `sqlite:///` 前缀去掉后剩余部分是否
+          是绝对路径，而非数斜杠。
+        """
+        if self.storage_dir and not Path(self.storage_dir).is_absolute():
+            self.storage_dir = str(_ROOT_DIR / self.storage_dir)
+
+        prefix = "sqlite:///"
+        if self.database_url.startswith(prefix):
+            raw_path = self.database_url[len(prefix):]
+            if raw_path and not Path(raw_path).is_absolute():
+                self.database_url = f"{prefix}{_ROOT_DIR / raw_path}"
+        return self
 
     @property
     def llm_configured(self) -> bool:
