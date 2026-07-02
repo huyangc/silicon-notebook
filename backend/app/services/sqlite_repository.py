@@ -297,6 +297,19 @@ class SQLiteRepository:
         # the 5 COUNT/MAX aggregates and return the cached list (same format —
         # no on-disk manifest.version invalidation).
         self._scale_ver_cache: Dict[str, Any] = {}
+        # Single-flight for _scale_index_version's cold path (memo miss / seq
+        # changed): N concurrent callers for the SAME notebook must compute the
+        # four non-cluster COUNT/MAX aggregates exactly once, not N times in
+        # parallel. Simpler variant of VectorCache's per-key lock table (no
+        # refcount eviction — the key space here is bounded by #notebooks, not
+        # per-request cache keys, so an unbounded-but-small dict is fine). Lock
+        # ordering mirrors VectorCache: _scale_ver_lock only ever guards
+        # structural access to _scale_ver_locks (the lock table itself) — the
+        # aggregate computation runs under the per-nb lock WITHOUT holding
+        # _scale_ver_lock, so a thread never holds the global lock while
+        # waiting on a per-nb lock (no lock-ordering cycle).
+        self._scale_ver_lock = threading.Lock()
+        self._scale_ver_locks: Dict[str, threading.Lock] = {}
         self._viz_idx_cache: Dict[str, Any] = {}
         self._vector_cache = VectorCache(max_entries=self.settings.vector_cache_max_entries)
         self._write_lock = threading.RLock()
@@ -7019,6 +7032,58 @@ class SQLiteRepository:
 
     # ── scale index (offline build) ──────────────────────────────────────────
 
+    def _probe_scale_version_signal(self, notebook_id: str):
+        """Cheap probe: (seq, cluster_key, settings_tail) for `notebook_id`. O(1)
+        seq read + 2 cluster aggregates — always run, never single-flighted (it's
+        the signal used to decide whether the expensive cold path is needed at
+        all, so it must never itself block on another thread's cold compute)."""
+        settings_tail = (
+            self.settings.ppr_variant_edge_weight,
+            self.settings.ppr_emb_synonym_enabled,
+            self.settings.ppr_emb_synonym_threshold,
+            self.settings.ppr_emb_synonym_topk,
+        )
+        with self._connect() as db:
+            st = db.execute(
+                "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()
+            seq = int(st["kg_mutation_seq"]) if st else 0
+            # Clusters are ALWAYS re-read (rebuild moves them without bumping seq).
+            clu_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
+        clu_key = (int(clu_ver["c"]), clu_ver["ts"])
+        return seq, clu_key, settings_tail
+
+    def _compute_scale_version_cold(self, notebook_id: str, seq: int, clu_key: tuple,
+                                     settings_tail: tuple) -> list:
+        """The expensive four-table cold path (eight aggregate columns) — only
+        ever called from inside _scale_index_version's per-nb single-flight
+        lock, never directly."""
+        with self._connect() as db:
+            obj_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
+                "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)).fetchone()
+            rel_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM knowledge_relations WHERE notebook_id=?", (notebook_id,)).fetchone()
+            chunk_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
+            emb_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
+        return [
+            notebook_id,
+            int(obj_ver["c"]), obj_ver["ts"],
+            int(rel_ver["c"]), rel_ver["ts"],
+            int(chunk_ver["c"]), chunk_ver["ts"],
+            clu_key[0], clu_key[1],
+            int(emb_ver["c"]), emb_ver["ts"],
+            *settings_tail,
+        ]
+
     def _scale_index_version(self, notebook_id: str) -> list:
         """JSON-serializable version key for the scale index of one notebook.
 
@@ -7044,55 +7109,74 @@ class SQLiteRepository:
         never elide the cluster aggregates: seq elides only the four non-cluster
         tables' eight aggregate columns, and clusters are checked every call. Net
         fast path = 1 O(1) seq read + 2 cluster aggregates instead of 10.
+
+        Single-flight cold path: on a memo miss (cold cache or seq/cluster/
+        settings changed) this used to run the four non-cluster COUNT/MAX
+        aggregates directly, so N concurrent callers for the same notebook each
+        ran their own full table scan in parallel — measured 96-147s overlapping
+        on a 490k-object deployment when the KG page fires 3-5 concurrent
+        requests, and PR#157 makes every chunk write bump kg_mutation_seq (so
+        every upload re-triggers this for every concurrent viewer). Now a cold
+        miss takes a per-notebook lock (VectorCache's lock-table pattern,
+        simplified: no refcount eviction — the key space is #notebooks, not
+        per-request keys) and double-checks the memo inside the lock, so N
+        concurrent cold callers for the SAME notebook compute the four
+        aggregates exactly once; the rest observe the winner's result. Loader
+        exceptions propagate to every caller that raced into the cold path (the
+        Python exception itself isn't shared across threads — each waiter that
+        loses the double-check re-runs _compute_scale_version_cold itself after
+        acquiring the lock, so a failure is retried per-caller, never
+        cross-contaminates the memo, and a fixed-up retry succeeds).
+
+        Lock ordering: _scale_ver_lock only guards structural access to the
+        _scale_ver_locks table (get-or-create the per-nb Lock; entries are never
+        evicted — the key space is bounded by #notebooks, unlike VectorCache's
+        per-request cache keys, so an unbounded-but-notebook-scoped dict is
+        acceptable); it is NEVER held while the per-nb lock is held or while the
+        aggregate computation runs — so a thread can never hold the global lock
+        while blocked waiting on a per-nb lock (no cycle). Audited: no existing
+        caller of _scale_index_version (directly, or via _scale_index /
+        _viz_index / _viz_index_probe / scale_index_status) holds _write_lock,
+        _scale_building_lock, or a _vector_cache per-key lock while calling in —
+        every call site is a plain read with no lock held around it (see
+        callers' grep in the PR description). A loader that re-enters
+        _scale_index_version for a DIFFERENT notebook while this notebook's
+        per-nb lock is held is safe (different lock objects, no shared state
+        touched outside the lock table); this is defensive — no current
+        production path actually nests like this.
         """
-        settings_tail = (
-            self.settings.ppr_variant_edge_weight,
-            self.settings.ppr_emb_synonym_enabled,
-            self.settings.ppr_emb_synonym_threshold,
-            self.settings.ppr_emb_synonym_topk,
-        )
-        with self._connect() as db:
-            st = db.execute(
-                "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchone()
-            seq = int(st["kg_mutation_seq"]) if st else 0
-            # Clusters are ALWAYS re-read (rebuild moves them without bumping seq).
-            clu_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
-            clu_key = (int(clu_ver["c"]), clu_ver["ts"])
+        seq, clu_key, settings_tail = self._probe_scale_version_signal(notebook_id)
+        cached = self._scale_ver_cache.get(notebook_id)
+        if (cached is not None and cached[0] == seq
+                and cached[1] == clu_key and cached[2] == settings_tail):
+            # seq + cluster aggregates + settings unchanged → skip the four
+            # non-cluster tables' eight aggregate columns entirely (no lock).
+            return list(cached[3])
+
+        # Cold path: get-or-create this notebook's lock (global lock held only
+        # for this dict lookup/insert, never across the computation below).
+        with self._scale_ver_lock:
+            nb_lock = self._scale_ver_locks.get(notebook_id)
+            if nb_lock is None:
+                nb_lock = threading.Lock()
+                self._scale_ver_locks[notebook_id] = nb_lock
+
+        with nb_lock:
+            # Double-check: another thread may have finished computing while we
+            # waited for the lock. Re-probe (seq/clusters may also have moved).
+            seq, clu_key, settings_tail = self._probe_scale_version_signal(notebook_id)
             cached = self._scale_ver_cache.get(notebook_id)
             if (cached is not None and cached[0] == seq
                     and cached[1] == clu_key and cached[2] == settings_tail):
-                # seq + cluster aggregates + settings unchanged → skip the four
-                # non-cluster tables' eight aggregate columns.
                 return list(cached[3])
-            obj_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-                "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)).fetchone()
-            rel_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM knowledge_relations WHERE notebook_id=?", (notebook_id,)).fetchone()
-            chunk_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
-            emb_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
-        version = [
-            notebook_id,
-            int(obj_ver["c"]), obj_ver["ts"],
-            int(rel_ver["c"]), rel_ver["ts"],
-            int(chunk_ver["c"]), chunk_ver["ts"],
-            clu_key[0], clu_key[1],
-            int(emb_ver["c"]), emb_ver["ts"],
-            *settings_tail,
-        ]
-        # Memoize keyed on (seq, cluster aggregates, settings). Store a copy so a
-        # caller mutating the returned list can't corrupt the cache.
-        self._scale_ver_cache[notebook_id] = (seq, clu_key, settings_tail, list(version))
-        return version
+            # Exceptions from here propagate uncaught (nothing cached on
+            # failure); the lock releases via `with`, so a retry by this or
+            # another thread re-attempts the computation cleanly.
+            version = self._compute_scale_version_cold(notebook_id, seq, clu_key, settings_tail)
+            # Memoize keyed on (seq, cluster aggregates, settings). Store a copy
+            # so a caller mutating the returned list can't corrupt the cache.
+            self._scale_ver_cache[notebook_id] = (seq, clu_key, settings_tail, list(version))
+            return version
 
     def _scale_index(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex (manifest version == current DB version) or None.
