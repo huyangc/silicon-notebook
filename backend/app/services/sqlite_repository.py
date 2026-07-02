@@ -1782,8 +1782,10 @@ class SQLiteRepository:
             #     chunks_fts 是派生词法索引,直接从已重映射好的 objects_out /
             #     chunks_out 构造,拷完即搜、无需事后对整个副本表做 DELETE+全量
             #     重插。与主体拷贝同样分块,不长持锁。
+            # 与 backfill_kg_fts 口径一致:deprecated 对象不进词法索引(hydration
+            # 层反正会丢弃,这里滤掉让两条构建路径的产物一致)。
             fts_kg_rows = [(d["id"], new_id, (json.loads(d["payload"]).get("name") or "").strip())
-                           for d in objects_out]
+                           for d in objects_out if d.get("status") != "deprecated"]
             fts_kg_rows = [(oid, nid, name) for (oid, nid, name) in fts_kg_rows if name]
             for i in range(0, len(fts_kg_rows), _COPY_CHUNK):
                 chunk = fts_kg_rows[i:i + _COPY_CHUNK]
