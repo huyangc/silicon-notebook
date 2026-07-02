@@ -279,3 +279,50 @@ def test_small_lib_element_search_unchanged(repo):
     _insert_source_element(repo, nb.id, "sE", "eE", "obj 4")
     hits = repo._retrieve_elements(nb.id, "obj 4")
     assert "eE" in {h.element_id for h in hits}
+
+
+# ── 候选集下游 IN 分批(终审发现:_knowledge_objects id_filter / 边查询 /
+# element_embeddings 查询 / _retrieve_chunks_ann hydrate 四处仍单条 IN 内联)──
+
+
+def _build_indexed_nb_with_multi_delta_objects(repo, n=4):
+    """source A('obj 0')进水位;source B 在 build 之后一次插入 n 个 KG 对象
+    (oB1..oBn),每个 embedding 都与查询词 'bravo' 最匹配、payload 名字与查询词
+    无词法重叠 → 全部只可能经 delta 语义暴力被检回。单一 post-watermark source
+    (delta_sources 只有 1 项,批量压力来自候选对象 id 数,不是 delta source 数)。
+    返回 (nb, [oB1..oBn])。"""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    _insert_source_with_object(repo, nb.id, 0)          # sA: 'obj 0'
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)                        # watermark = {s0}
+    sid = "sB"
+    now = "2026-07-02T00:00:00"
+    oids = [f"oB{i}" for i in range(1, n + 1)]
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                   (sid, nb.id, "t", "md", "ready", now, now))
+        for oid in oids:
+            db.execute("INSERT INTO knowledge_objects (id,notebook_id,source_id,object_type,payload,evidence,status,owner,last_reviewed,created_at,updated_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                       (oid, nb.id, sid, "claim", json.dumps({"name": f"zzz {oid}"}), "[]",
+                        "approved", "", "", now, now))
+            v = repo.embedder.embed_query("bravo")
+            db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                       (oid, nb.id, json.dumps(v), now))
+    return nb, oids
+
+
+def test_flag_on_big_delta_multibatch_no_sql_variable_blowup(repo, monkeypatch):
+    """flag 开 + _IN_CHUNK 压到 2(4 个 delta 对象 + 1 核对象 → candidate_ids/
+    id_filter/elem_id_set 都 >_IN_CHUNK)强制 _knowledge_objects id_filter 分支、
+    _retrieve_scored 边查询、element_embeddings 查询三处走多批。批后不抛异常,
+    且全部 4 个 delta 对象 id 都在结果里(与单批语义等价 —— 见 PR 报告里记录的
+    分批前/后两次结果对照,充当 RED/GREEN 替代证据:_IN_CHUNK=2 时现有单条 IN
+    在 5 个变量下本就不会撞真实 SQLite 上限,这条测试真正验证的是"批与不批
+    结果一致",不是"不批会抛异常")。"""
+    nb, oids = _build_indexed_nb_with_multi_delta_objects(repo, n=4)
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
+    monkeypatch.setattr(SQLiteRepository, "_IN_CHUNK", 2)
+    hits = repo._retrieve_scored(nb.id, "bravo")
+    hit_ids = {h.object_id for h in hits}
+    assert set(oids) <= hit_ids
