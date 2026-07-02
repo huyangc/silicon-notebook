@@ -116,10 +116,22 @@ def test_format_pool_snapshot_exact():
 def test_format_pool_snapshot_missing_embed_keys_zero():
     from collections import Counter
     s = {"window_active": 0, "window_max": 1, "job_active": 0, "job_max": 1}
+    # total=0 且无 label → 尾部无「源完成」(该段仅抽取期显示);此处重点验 embed 缺键→0bg+0pool。
     line = bi._format_pool_snapshot("00:00:03", s, Counter(), 0, 0)
     assert line == (
         "[pool 00:00:03] KG-LLM(window) 0/1 · 源(job) 0/1"
-        " · embed 0bg+0pool · 源完成 0/0"
+        " · embed 0bg+0pool"
+    )
+
+
+def test_format_pool_snapshot_label_when_no_source_total():
+    """非抽取阶段(total=0)带 label(如 rebuild)→ 尾部显示 label 而非源完成。"""
+    from collections import Counter
+    s = {"window_active": 2, "window_max": 16, "job_active": 0, "job_max": 8}
+    line = bi._format_pool_snapshot("00:00:03", s, Counter({"pool": 3}), 0, 0, label="rebuild 阶段")
+    assert line == (
+        "[pool 00:00:03] KG-LLM(window) 2/16 · 源(job) 0/8"
+        " · embed 0bg+3pool · rebuild 阶段"
     )
 
 
