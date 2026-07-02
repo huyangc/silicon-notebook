@@ -13,14 +13,41 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 
 
-def build_matrix(rows: Iterable[Tuple[str, str]]) -> Tuple[List[str], np.ndarray]:
+def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0) -> Tuple[List[str], np.ndarray]:
     """rows: iterable of (id, json_vector_text). Returns (ids, normalized float32
     matrix [N, dim]). Rows with empty/invalid/wrong-dim vectors are skipped.
     Each vector is parsed straight to float32 and stored L2-normalized — no Python
-    float lists are retained."""
+    float lists are retained.
+
+    n_hint: optional upper-bound estimate of the number of rows (e.g. a COUNT(*)
+    the caller already ran). When given, this preallocates one (n_hint, dim)
+    float32 array on the first valid row and fills it in place — avoiding the
+    default path's 490k-small-ndarrays-then-vstack pattern (2x peak memory at
+    scale.py-file scope). If the actual valid-row count exceeds n_hint (some
+    rows were skipped from the estimate, or the hint was wrong), it falls back
+    to appending the overflow into a plain Python list and concatenates at the
+    end — never truncates output. Output is bit-identical to the no-hint path
+    regardless of hint accuracy; n_hint is purely an allocation hint."""
     ids: List[str] = []
-    vecs: List[np.ndarray] = []
     dim = None
+    prealloc: np.ndarray = None
+    n_filled = 0
+    overflow_vecs: List[np.ndarray] = []
+    vecs: List[np.ndarray] = []  # only used when n_hint <= 0 (no prealloc)
+
+    def _append(arr: np.ndarray) -> None:
+        nonlocal prealloc, n_filled
+        if n_hint > 0:
+            if prealloc is None:
+                prealloc = np.empty((n_hint, arr.size), dtype=np.float32)
+            if n_filled < n_hint:
+                prealloc[n_filled] = arr
+                n_filled += 1
+            else:
+                overflow_vecs.append(arr)
+        else:
+            vecs.append(arr)
+
     for vid, raw in rows:
         if not raw:
             continue
@@ -38,9 +65,16 @@ def build_matrix(rows: Iterable[Tuple[str, str]]) -> Tuple[List[str], np.ndarray
         if norm > 0:
             arr = arr / norm
         ids.append(vid)
-        vecs.append(arr)
-    if not vecs:
+        _append(arr)
+
+    if not ids:
         return [], np.zeros((0, 0), dtype=np.float32)
+
+    if n_hint > 0:
+        mat = prealloc[:n_filled]
+        if overflow_vecs:
+            mat = np.vstack([mat, np.vstack(overflow_vecs)])
+        return ids, mat
     return ids, np.vstack(vecs)
 
 

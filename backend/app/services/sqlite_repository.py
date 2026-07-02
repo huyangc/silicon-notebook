@@ -7019,7 +7019,8 @@ class SQLiteRepository:
                 "viz_edges": int(m.get("n_viz_edges", 0)),
                 "viz_stale": not fresh}
 
-    def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None):
+    def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None,
+                          as_arrays: bool = False):
         """Gather all KG nodes/relations/chunks/cluster_groups for a notebook
         and build the undirected edge set used by both build_scale_index and
         _active_kg_delta.  Single source of truth — no duplicated _add_undirected.
@@ -7029,7 +7030,7 @@ class SQLiteRepository:
         sources (delta domain); memberships limited to gathered objects; the
         variant/synonym extra_edges are skipped (delta is small, connectivity
         comes from relations/cluster-hub/cross-layer bridges).  An empty list
-        returns ([], [], [], [], {}).
+        returns ([], [], [], [], {}) (as_arrays=True: ([], (empty arrays), [], [], {})).
 
         synonym_edges : None (default) = current behaviour — this method loads
         the KG embedding matrix itself and calls emb_synonym_edges() internally
@@ -7042,11 +7043,29 @@ class SQLiteRepository:
         twice. Only meaningful when source_ids is None; scoped/delta callers
         never pass this (variant/synonym edges are already skipped when scoped).
 
+        as_arrays : False (default) = current behaviour, edges as a Python
+        list of (str,str,float) tuples plus a `seen_undir` tuple set for
+        dedup — byte-identical to before, used by every existing caller
+        (_active_kg_delta, scoped/delta paths, etc). True (build_scale_index
+        only) = same node_ids, but edges come back as three int32/int32/
+        float32 numpy arrays (src_idx, tgt_idx, w) already encoded against
+        `index = {nid: i for i, nid in enumerate(node_ids)}`, deduped via an
+        encoded-pair-key np.unique instead of a Python tuple set — avoids the
+        ~5GB of Python-object overhead a 10M+-edge notebook's `edges` list +
+        `seen_undir` set costs. Dedup keeps the FIRST-seen weight for a given
+        undirected pair, matching the string path's `if key in seen_undir:
+        return` short-circuit (relations → memberships → extra_edges →
+        cluster-hub insertion order, exactly as below). Both directions are
+        present in the output arrays, self-loops are dropped, and cluster hub
+        ids are appended to node_ids BEFORE edge assembly (so the index dict
+        is complete for one array-encoding pass instead of growing mid-way).
+
         Returns
         -------
         (node_ids, edges, chunk_ids, kg_node_ids, membership_counts)
           node_ids          : list[str]  — kg node ids + chunk_ids + cluster hub ids
           edges             : list[(str,str,float)] — undirected (both dirs, deduped)
+                               OR (as_arrays=True) (src:int32[], tgt:int32[], w:float32[])
           chunk_ids         : list[str]  — raw chunk ids (stable subset of node_ids)
           kg_node_ids       : list[str]  — KG object ids (for idf / n_kg_nodes)
           membership_counts : dict[str,int] — {object_id: len(chunks)} for IDF
@@ -7057,6 +7076,9 @@ class SQLiteRepository:
         ph = ",".join("?" for _ in USABLE_STATUSES)
         scoped = source_ids is not None
         if scoped and not source_ids:
+            if as_arrays:
+                empty = np.empty(0, dtype=np.int32)
+                return [], (empty, empty, np.empty(0, dtype=np.float32)), [], [], {}
             return [], [], [], [], {}
         src_clause, src_params = "", ()
         if scoped:
@@ -7098,6 +7120,7 @@ class SQLiteRepository:
         membership_counts: Dict[str, int] = {
             oid: len(cids) for oid, cids in ent_chunk_map.items()
             if (not scoped or oid in _kg_keys)}
+        del ent_chunk_map, _kg_keys
 
         # Extra edges: variant pairs + optional synonym pairs (whole-notebook only)
         extra_edges = []
@@ -7123,9 +7146,94 @@ class SQLiteRepository:
                         ef_construction=self.settings.hnsw_ef_construction,
                     )
 
-        # node_ids: kg nodes first, then chunk nodes (cluster hubs appended below)
+        # node_ids: kg nodes first, then chunk nodes, then cluster hubs.
+        # Hubs are pre-appended HERE (before edge assembly) rather than
+        # discovered while walking cluster_groups interleaved with
+        # _add_undirected calls — final node_ids content/order is identical
+        # either way (hub eligibility only depends on `members` vs the
+        # kg+chunk node_ids_set, never on edges), but the array path needs a
+        # COMPLETE id→index map before it can encode any edge, so both paths
+        # share this single hub-discovery pass.
         node_ids: list = list(kg_nodes.keys()) + chunk_ids
         node_ids_set: set = set(node_ids)
+        hub_members: List[Tuple[str, str]] = []  # (hub_id, member_id) pairs to wire as edges below
+        for canonical_id, members in cluster_groups.items():
+            present = [m for m in members if m in node_ids_set]
+            if not present:
+                continue
+            hub_id = f"cluster:{canonical_id}"
+            if hub_id not in node_ids_set:
+                node_ids.append(hub_id)
+                node_ids_set.add(hub_id)
+            for m in present:
+                hub_members.append((hub_id, m))
+        del cluster_groups
+
+        if as_arrays:
+            index = {nid: i for i, nid in enumerate(node_ids)}
+            n = len(node_ids)
+            # Collect all directed (a,b,w) contributions in encoding order —
+            # relations → memberships → extra_edges → hub_members — same
+            # precedence order as the string path's _add_undirected calls,
+            # so first-seen-wins dedup below picks the same winning weight.
+            a_list: List[int] = []
+            b_list: List[int] = []
+            w_list: List[float] = []
+            for rel in relations:
+                sa = index.get(rel["source_object_id"])
+                sb = index.get(rel["target_object_id"])
+                if sa is not None and sb is not None and sa != sb:
+                    a_list.append(sa); b_list.append(sb); w_list.append(1.0)
+            del relations
+            for oid, cid in memberships:
+                sa = index.get(oid); sb = index.get(cid)
+                if sa is not None and sb is not None and sa != sb:
+                    a_list.append(sa); b_list.append(sb); w_list.append(1.0)
+            del memberships
+            for a, b, w in extra_edges:
+                sa = index.get(a); sb = index.get(b)
+                if sa is not None and sb is not None and sa != sb:
+                    a_list.append(sa); b_list.append(sb); w_list.append(float(w))
+            del extra_edges
+            for hub_id, m in hub_members:
+                sa = index.get(hub_id); sb = index.get(m)
+                if sa is not None and sb is not None and sa != sb:
+                    a_list.append(sa); b_list.append(sb); w_list.append(1.0)
+            del hub_members
+
+            if not a_list:
+                empty = np.empty(0, dtype=np.int32)
+                kg_node_ids: list = list(kg_nodes.keys())
+                return node_ids, (empty, empty, np.empty(0, dtype=np.float32)), chunk_ids, kg_node_ids, membership_counts
+
+            a_arr = np.asarray(a_list, dtype=np.int64)
+            b_arr = np.asarray(b_list, dtype=np.int64)
+            w_arr = np.asarray(w_list, dtype=np.float64)
+            del a_list, b_list, w_list
+            # Undirected dedup: canonical (lo,hi) pair encoded as one int64 key
+            # (lo*n + hi); np.unique(..., return_index=True) keeps the FIRST
+            # occurrence of each key — matches the string path's `if key in
+            # seen_undir: return` (first-wins) semantics exactly, given the
+            # same relations→memberships→extra→hub encoding order above.
+            lo = np.minimum(a_arr, b_arr)
+            hi = np.maximum(a_arr, b_arr)
+            keys = lo * n + hi
+            _, first_idx = np.unique(keys, return_index=True)
+            first_idx.sort()  # np.unique sorts by key value, not first-seen order — restore it
+            src_u = a_arr[first_idx]
+            tgt_u = b_arr[first_idx]
+            w_u = w_arr[first_idx]
+            del a_arr, b_arr, w_arr, lo, hi, keys, first_idx
+
+            # Emit both directions (src->tgt and tgt->src), matching the
+            # string path's edges.append((a,b,w)); edges.append((b,a,w)).
+            src_final = np.concatenate([src_u, tgt_u]).astype(np.int32, copy=False)
+            tgt_final = np.concatenate([tgt_u, src_u]).astype(np.int32, copy=False)
+            w_final = np.concatenate([w_u, w_u]).astype(np.float32, copy=False)
+            del src_u, tgt_u, w_u
+
+            kg_node_ids = list(kg_nodes.keys())
+            return node_ids, (src_final, tgt_final, w_final), chunk_ids, kg_node_ids, membership_counts
 
         # Build undirected edges (single _add_undirected closure, shared state)
         edges: List[Tuple[str, str, float]] = []
@@ -7147,19 +7255,8 @@ class SQLiteRepository:
             _add_undirected(oid, cid, 1.0)
         for a, b, w in extra_edges:
             _add_undirected(a, b, w)
-
-        # Cluster synonym bridges: virtual hub node "cluster:{canonical_id}"
-        # for each concept cluster that has ≥1 member present in node_ids.
-        for canonical_id, members in cluster_groups.items():
-            present = [m for m in members if m in node_ids_set]
-            if not present:
-                continue
-            hub_id = f"cluster:{canonical_id}"
-            if hub_id not in node_ids_set:
-                node_ids.append(hub_id)
-                node_ids_set.add(hub_id)
-            for m in present:
-                _add_undirected(hub_id, m, 1.0)
+        for hub_id, m in hub_members:
+            _add_undirected(hub_id, m, 1.0)
 
         kg_node_ids: list = list(kg_nodes.keys())
         return node_ids, edges, chunk_ids, kg_node_ids, membership_counts
@@ -7189,6 +7286,34 @@ class SQLiteRepository:
         and finally hand the SAME index to save_scale_index(prebuilt_ann=...)
         which just save_index()s it (no rebuild).
 
+        Perf (Task 2, 2026-07-02 — memory diet, real-world 490k-object build
+        OOM-killed a 64GB box): four more changes here, all output-preserving:
+          - Both embedding matrices (kg + chunk) load DIRECTLY via
+            vector_index.build_matrix(rows, n_hint=COUNT(*)) instead of through
+            _vector_matrix()/_vector_cache — a build's ~2-4GB matrices never
+            enter the LRU cache (they'd just evict/outlive useful query-time
+            entries and add another live copy); n_hint preallocates instead of
+            the 490k-small-ndarrays-then-vstack pattern (was a 2x peak itself).
+          - _gather_kg_graph(..., as_arrays=True): edges come back as int32/
+            float32 numpy arrays instead of a Python (str,str,float) tuple
+            list + tuple `seen_undir` set (~5GB of Python-object overhead at
+            10M+ edges) — see that method's docstring for the equivalence
+            argument.
+          - build_transition_arrays(): CSR construction directly off those
+            int arrays (no index.get() Python dict lookups per edge).
+          - `del` of edge arrays / relations / memberships / ent_chunk_map as
+            soon as each is consumed, plus gc.collect() between the heavy
+            stages (kg matrix+ann → gather+transition → chunk matrix → viz)
+            so freed numpy/hnsw memory is actually returned to the allocator
+            before the next stage's peak, not just unreferenced.
+          - IMPORTANT — what must stay alive: `ann_vectors` is kept alive all
+            the way through save_scale_index(), because its prebuilt_ann
+            fallback (misaligned/broken prebuilt hnsw handle) rebuilds the
+            index from ann_vectors — dropping it early would silently corrupt
+            that safety net. Everything else (edges, relations, memberships,
+            ent_chunk_map, id_to_idx) is build-scoped and freed once the CSR/
+            manifest fields derived from it are computed.
+
         `on_stage`: optional callback invoked as `(stage_name, latency_ms)`
         once per stage (the same 8 stages as the `scale_index_build` events:
         kg_matrix/ann_build/synonym/gather/transition/chunk_matrix/viz_arrays/
@@ -7202,7 +7327,9 @@ class SQLiteRepository:
         which are observability-only and documented here).
         """
         from app.services.kg import scale_index as si
+        from app.services.vector_index import build_matrix
 
+        import gc
         import numpy as np
 
         # Validate notebook exists
@@ -7245,10 +7372,21 @@ class SQLiteRepository:
         # Loaded/built first (before gather) so the same in-memory hnswlib.Index
         # can be reused for both the synonym-edge KNN pass and the persisted
         # ann.bin — see perf note in the docstring above.
+        #
+        # Direct load (Task 2): bypasses _vector_matrix()/_vector_cache on
+        # purpose — a build's kg/chunk matrices are multi-GB, single-use, and
+        # would otherwise sit in the LRU cache outliving the build (or evict
+        # useful query-time entries). n_hint=COUNT(*) lets build_matrix
+        # preallocate instead of accumulating 490k+ small ndarrays pre-vstack.
         def _kg_matrix():
             with self._connect() as db:
-                return self._vector_matrix(
-                    db, notebook_id, "knowledge_embeddings", "object_id")
+                n_hint = db.execute(
+                    "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()["c"]
+                rows = db.execute(
+                    "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchall()
+                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint)
 
         ann_ids_raw, ann_matrix_raw = _timed("kg_matrix", _kg_matrix)
         ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
@@ -7277,6 +7415,7 @@ class SQLiteRepository:
             return idx
 
         kg_ann_index = _timed("ann_build", _build_kg_ann)
+        gc.collect()  # hnsw's internal add_items copy (if any) + build scratch, before synonym/gather
 
         def _synonym():
             if kg_ann_index is None or not self.settings.ppr_emb_synonym_enabled:
@@ -7293,8 +7432,15 @@ class SQLiteRepository:
 
         synonym_edges = _timed("synonym", _synonym)
 
-        node_ids, edges, chunk_ids, kg_node_ids, membership_counts = \
-            _timed("gather", lambda: self._gather_kg_graph(notebook_id, synonym_edges=synonym_edges))
+        # as_arrays=True (Task 2): edges come back as int32/float32 numpy
+        # arrays instead of a (str,str,float) tuple list — see
+        # _gather_kg_graph's docstring for the equivalence argument. Only
+        # build_scale_index uses this path; every other caller keeps the
+        # default string-tuple path unchanged.
+        node_ids, (edge_src, edge_tgt, edge_w), chunk_ids, kg_node_ids, membership_counts = \
+            _timed("gather", lambda: self._gather_kg_graph(
+                notebook_id, synonym_edges=synonym_edges, as_arrays=True))
+        del synonym_edges
 
         kg_id_set = set(kg_node_ids)
 
@@ -7311,22 +7457,41 @@ class SQLiteRepository:
                 idf.append(1.0 / cnt if cnt > 0 else 1.0)
             else:
                 idf.append(1.0)
+        del kg_id_set, membership_counts
 
-        # Build CSR transition matrix
-        transition, _ = _timed("transition", lambda: si.build_transition(node_ids, edges))
+        # Build CSR transition matrix — array fast-path (Task 2): CSR built
+        # directly off the int-indexed edge arrays (no per-edge index.get()
+        # Python dict round trips). id_to_idx here is recomputed inside
+        # build_transition_arrays from node_ids (cheap dict comprehension);
+        # not reused from the one above to keep the two call sites independent.
+        transition, _ = _timed(
+            "transition", lambda: si.build_transition_arrays(node_ids, edge_src, edge_tgt, edge_w))
+        del edge_src, edge_tgt, edge_w
+        gc.collect()  # edge arrays + CSR construction scratch, before chunk matrix load
 
         # Chunk-level ANN vectors/labels (Task 1): chunks that have a row in
         # chunk_embeddings. Persisted as chunk_ann.bin so query-time chunk
         # retrieval can ANN-narrow candidates on large persisted-index notebooks.
+        # Direct load (Task 2): same rationale as _kg_matrix above — bypasses
+        # _vector_matrix()/_vector_cache so this multi-GB matrix never becomes
+        # a cache entry, and loads as late as possible (right before the ANN
+        # build that consumes it) rather than living for the whole build.
         def _chunk_matrix():
             with self._connect() as db:
-                return self._vector_matrix(
-                    db, notebook_id, "chunk_embeddings", "chunk_id")
+                n_hint = db.execute(
+                    "SELECT COUNT(*) AS c FROM chunk_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()["c"]
+                rows = db.execute(
+                    "SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchall()
+                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint)
 
         c_ids_raw, c_mat_raw = _timed("chunk_matrix", _chunk_matrix)
         chunk_ann_labels = list(c_ids_raw) if c_ids_raw else []
         chunk_ann_vectors = (np.asarray(c_mat_raw, dtype=np.float32)
                              if chunk_ann_labels and c_mat_raw is not None else None)
+        del c_ids_raw, c_mat_raw
+        gc.collect()  # chunk matrix load scratch, before viz-graph arrays stage
 
         # Folded concept-level viz graph (Task 4 / SP1): derive the EXACT same
         # graph _unified_graph_full(nb, "object") returns (concepts folded to
@@ -7335,6 +7500,7 @@ class SQLiteRepository:
         # without re-folding the full graph at request time.
         (viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload) = \
             _timed("viz_arrays", lambda: self._build_viz_graph_arrays(notebook_id))
+        gc.collect()  # viz-graph build scratch, before persist (writes transition/ann/viz to disk)
 
         n_kg = len(kg_node_ids)
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)

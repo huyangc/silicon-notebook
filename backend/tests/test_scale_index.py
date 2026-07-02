@@ -49,6 +49,72 @@ def test_build_transition_drops_dangling_endpoints():
     assert A.shape == (2, 2)
 
 
+def test_build_transition_arrays_matches_string_path():
+    from app.services.kg.scale_index import build_transition_arrays
+    node_ids = ["a", "b", "c", "d"]
+    index = {nid: i for i, nid in enumerate(node_ids)}
+    edges = [("a", "b", 1.0), ("b", "a", 1.0), ("b", "c", 2.0), ("c", "b", 2.0),
+              ("a", "zzz", 5.0)]  # dangling — must be dropped by both paths
+    A_str, idx_str = build_transition(node_ids, edges)
+
+    # Caller already has an int-pair edge set (dangling endpoints pre-filtered
+    # out, since the arrays path never had a string id for "zzz" to encode).
+    src = np.array([index[s] for s, t, _ in edges if t != "zzz"], dtype=np.int32)
+    tgt = np.array([index[t] for s, t, _ in edges if t != "zzz"], dtype=np.int32)
+    w = np.array([wt for s, t, wt in edges if t != "zzz"], dtype=np.float32)
+    A_arr, idx_arr = build_transition_arrays(node_ids, src, tgt, w)
+
+    assert idx_str == idx_arr == index
+    assert A_arr.shape == A_str.shape
+    np.testing.assert_allclose(A_arr.toarray(), A_str.toarray())
+
+
+def test_build_transition_arrays_empty():
+    from app.services.kg.scale_index import build_transition_arrays
+    A, index = build_transition_arrays(["x", "y", "z"], np.array([], dtype=np.int32),
+                                        np.array([], dtype=np.int32),
+                                        np.array([], dtype=np.float32))
+    assert A.shape == (3, 3)
+    assert A.nnz == 0
+    assert index == {"x": 0, "y": 1, "z": 2}
+
+
+def test_build_transition_arrays_peak_memory_below_string_path():
+    """Soft sanity check (not a hard gate — tracemalloc totals are noisy and
+    allocator-dependent): the array fast-path's construction peak should not
+    exceed the string-tuple path's, at a size large enough for the ~24-byte-
+    per-Python-object tuple/dict overhead to show up. Guards against a future
+    edit accidentally reintroducing a Python-object intermediate in the
+    array path (e.g. building a dict or tuple list before the CSR call)."""
+    import tracemalloc
+    n = 4000
+    node_ids = [f"n{i}" for i in range(n)]
+    index = {nid: i for i, nid in enumerate(node_ids)}
+    rng = np.random.default_rng(11)
+    a_idx = rng.integers(0, n, size=20000)
+    b_idx = rng.integers(0, n, size=20000)
+    keep = a_idx != b_idx
+    a_idx, b_idx = a_idx[keep], b_idx[keep]
+    edges_str = [(node_ids[a], node_ids[b], 1.0) for a, b in zip(a_idx, b_idx)]
+    edges_str += [(node_ids[b], node_ids[a], 1.0) for a, b in zip(a_idx, b_idx)]
+    src = a_idx.astype(np.int32)
+    tgt = b_idx.astype(np.int32)
+    w = np.ones(len(src), dtype=np.float32)
+
+    tracemalloc.start()
+    build_transition(node_ids, edges_str)
+    _, peak_str = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    tracemalloc.start()
+    build_transition_arrays(node_ids, src, tgt, w)
+    _, peak_arr = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert peak_arr <= peak_str, f"array path peak ({peak_arr}) exceeded string path peak ({peak_str})"
+
+
+from app.services.kg.scale_index import build_transition_arrays
 import rustworkx as rx
 
 

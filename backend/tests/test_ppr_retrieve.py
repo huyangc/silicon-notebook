@@ -472,6 +472,92 @@ def test_gather_kg_graph_source_scoping(repo):
     assert repo._gather_kg_graph(nb.id, source_ids=[]) == ([], [], [], [], {})
 
 
+def test_gather_kg_graph_as_arrays_matches_string_path(repo):
+    """Oracle test: as_arrays=True must produce the SAME graph as the default
+    string path — same node_ids (order included, since chunk_index/idf in
+    build_scale_index are positional against it), and edges that decode back
+    to the identical (undirected, deduped, first-wins-weight) edge set. Uses
+    _seed_two_doc_moe (2 sources, a relation-free concept cluster) plus an
+    explicit knowledge_relations row so relations/memberships/hub edges are
+    all exercised, and a *duplicate* relation row to prove first-wins dedup
+    (both paths must keep the FIRST weight, not overwrite)."""
+    import numpy as np
+    nb = _seed_two_doc_moe(repo)
+    with repo._write() as db:
+        now = "2026-06-22T00:00:00"
+        db.execute(
+            "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
+            "target_object_id,edge_type,evidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("r1", nb.id, "src-A", "e1", "e2", "related_to", "[]", now))
+        # Duplicate relation (same unordered pair) — first-wins dedup must
+        # keep the row processed first (SQLite returns insertion order here).
+        db.execute(
+            "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
+            "target_object_id,edge_type,evidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("r2", nb.id, "src-A", "e2", "e1", "related_to", "[]", now))
+
+    node_ids_s, edges_s, chunk_ids_s, kg_ids_s, mc_s = repo._gather_kg_graph(nb.id)
+    node_ids_a, (src_a, tgt_a, w_a), chunk_ids_a, kg_ids_a, mc_a = \
+        repo._gather_kg_graph(nb.id, as_arrays=True)
+
+    # node_ids identical (content AND order — array path indexes positionally).
+    assert node_ids_a == node_ids_s
+    assert chunk_ids_a == chunk_ids_s
+    assert kg_ids_a == kg_ids_s
+    assert mc_a == mc_s
+    assert src_a.dtype == np.int32 and tgt_a.dtype == np.int32 and w_a.dtype == np.float32
+
+    # Decode array edges back to (str,str,float) using the string path's
+    # own node_ids order, and compare as SETS (both directions present in
+    # both paths, so set-equality is the right equivalence check).
+    decoded = {(node_ids_s[a], node_ids_s[b], float(w))
+               for a, b, w in zip(src_a.tolist(), tgt_a.tolist(), w_a.tolist())}
+    expected = {(a, b, float(w)) for a, b, w in edges_s}
+    assert decoded == expected
+    assert len(decoded) > 0  # sanity: graph actually has edges (relations+memberships+hub)
+    # first-wins dedup: e1<->e2 duplicate relation collapsed to ONE undirected
+    # pair (both directions present, but with the same single weight — 1.0).
+    assert ("e1", "e2", 1.0) in decoded and ("e2", "e1", 1.0) in decoded
+
+
+def test_gather_kg_graph_as_arrays_empty(repo):
+    from app.models.schemas import NotebookCreate
+    import numpy as np
+    nb = repo.create_notebook(NotebookCreate(name="empty"))
+    node_ids, (src, tgt, w), chunk_ids, kg_ids, mc = repo._gather_kg_graph(nb.id, as_arrays=True)
+    assert node_ids == [] and chunk_ids == [] and kg_ids == [] and mc == {}
+    assert src.size == 0 and tgt.size == 0 and w.size == 0
+
+
+def test_gather_kg_graph_as_arrays_source_scoped_empty(repo):
+    import numpy as np
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="kb2"))
+    node_ids, (src, tgt, w), chunk_ids, kg_ids, mc = \
+        repo._gather_kg_graph(nb.id, source_ids=[], as_arrays=True)
+    assert node_ids == [] and chunk_ids == [] and kg_ids == [] and mc == {}
+    assert src.size == 0 and tgt.size == 0 and w.size == 0
+
+
+def test_build_scale_index_does_not_populate_vector_cache(repo):
+    """Task 2 (memory diet): build_scale_index must load its kg/chunk
+    embedding matrices DIRECTLY (COUNT-hinted build_matrix), never through
+    _vector_matrix()/_vector_cache — a build's multi-GB matrices are
+    single-use and must not become long-lived cache entries (they'd either
+    evict useful query-time entries or just sit there after the build
+    process/request is done). Assert no `{nb}:matrix:*` key appears in
+    _vector_cache._store after a build. The QUERY path (_vector_matrix
+    itself, used by e.g. ask_chunk/hybrid retrieval) is untouched and still
+    caches — covered by other tests; this test only guards the build path."""
+    nb = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(nb.id)
+    before_keys = {k for k in repo._vector_cache._store if ":matrix:" in k}
+    repo.build_scale_index(nb.id)
+    after_keys = {k for k in repo._vector_cache._store if ":matrix:" in k}
+    new_keys = after_keys - before_keys
+    assert not new_keys, f"build_scale_index must not populate VectorCache matrix entries: {new_keys}"
+
+
 def test_scale_ppr_uses_self_index(repo, monkeypatch):
     base = _seed_two_doc_moe(repo)
     repo.rebuild_unified_kg(base.id)
