@@ -226,6 +226,11 @@ class _UnconfiguredLLMClient:
 
 _UNCONFIGURED_LLM = _UnconfiguredLLMClient()
 
+# copy_notebook's per-table chunk size (perf-audit P1-4): mirrors store_kg's
+# CHUNK=1000 local constant, but module-level so tests can shrink it to force
+# multiple chunk-boundary transactions without seeding thousands of rows.
+_COPY_CHUNK = 1000
+
 
 class SQLiteRepository:
     def __init__(self, settings: Settings):
@@ -1371,12 +1376,17 @@ class SQLiteRepository:
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
 
     def list_notebooks(self) -> List[NotebookSummary]:
-        """自有库(access=owner)∪ 经只读共享加入的库(access=reader)。"""
+        """自有库(access=owner)∪ 经只读共享加入的库(access=reader)。
+
+        status='copying' 是 copy_notebook 分批写入期间的哨兵状态(P1-4),半拷贝
+        的副本必须排除,不然用户能看到/点进一个字段还没写全的空壳 notebook。
+        """
         uid = self.current_user().id
         out: List[NotebookSummary] = []
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM notebooks WHERE created_by = ? ORDER BY created_at ASC",
+                "SELECT * FROM notebooks WHERE created_by = ? AND status != 'copying' "
+                "ORDER BY created_at ASC",
                 (uid,),
             ).fetchall()
             for row in rows:
@@ -1387,7 +1397,8 @@ class SQLiteRepository:
                 "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
                 "JOIN notebooks nb ON nb.id = m.notebook_id "
                 "LEFT JOIN users u ON u.id = nb.created_by "
-                "WHERE m.user_id = ? ORDER BY m.added_at ASC", (uid,)).fetchall()
+                "WHERE m.user_id = ? AND nb.status != 'copying' "
+                "ORDER BY m.added_at ASC", (uid,)).fetchall()
             for row in joined:
                 nb = self._notebook_from_row(db, row)
                 nb.access = "reader"
@@ -1431,8 +1442,14 @@ class SQLiteRepository:
             return self._notebook_from_row(db, row)
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary:
+        """status='copying' rows (copy_notebook's in-progress sentinel, P1-4)
+        are treated as not-yet-existing: every other repository method guards
+        with self.get_notebook(...) before acting, and a half-copied notebook
+        must not be usable by any of them until the copy finishes."""
         with self._connect() as db:
-            row = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
+            row = db.execute(
+                "SELECT * FROM notebooks WHERE id = ? AND status != 'copying'",
+                (notebook_id,)).fetchone()
             if row is None:
                 raise KeyError(notebook_id)
             return self._notebook_from_row(db, row)
@@ -1527,11 +1544,52 @@ class SQLiteRepository:
             [d[c] for c in cols],
         )
 
+    def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
+        """Self-heal: delete notebook rows stuck in status='copying' (a prior
+        copy_notebook crashed mid-copy). These rows are never returned by
+        get_notebook/list_notebooks (see the WHERE status!='copying' guards
+        there), so they're inert garbage — but their child rows keep
+        occupying space until swept. Cascades via ON DELETE CASCADE for every
+        child table except knowledge_embeddings (no FK there — same gap
+        delete_notebook already works around), so that table gets an explicit
+        cleanup first. Runs at the START of copy_notebook (perf-audit P1-4
+        integrity design) so a retry after a crash starts from a clean slate.
+        Returns the number of stuck notebooks removed."""
+        with self._write() as db:
+            if created_by is not None:
+                rows = db.execute(
+                    "SELECT id FROM notebooks WHERE status='copying' AND created_by=?",
+                    (created_by,)).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id FROM notebooks WHERE status='copying'").fetchall()
+            stuck_ids = [r["id"] for r in rows]
+            if not stuck_ids:
+                return 0
+            placeholders = ",".join("?" for _ in stuck_ids)
+            db.execute(
+                f"DELETE FROM knowledge_embeddings WHERE notebook_id IN ({placeholders})",
+                stuck_ids)
+            db.execute(f"DELETE FROM notebooks WHERE id IN ({placeholders})", stuck_ids)
+        return len(stuck_ids)
+
     def copy_notebook(self, source_notebook_id: str, *, new_owner_id: str,
                       new_name: "str | None" = None) -> "NotebookSummary":
         """把 notebook 深拷贝成归 new_owner_id 的新库:全表 id 重映射(列 + JSON)+ 磁盘文件复制
-        + 完整性自检,单事务、失败回滚 + 清理文件。不拷 conversations/answers/feedback/派生索引。
-        调用方负责 size 门与 is_shared 校验。"""
+        + 完整性自检 + 清理文件。不拷 conversations/answers/feedback/派生索引。
+        调用方负责 size 门与 is_shared 校验。
+
+        分批事务(perf-audit P1-4):每张表按 _COPY_CHUNK 行一个 _write() 事务,
+        使全局写锁在块间释放(而非整拷单个长事务通吃全站写)。代价=丢单事务原子性
+        ——为此新 notebook 行以 status='copying' 哨兵**最先**插入(FK 要求父行
+        先于子行存在),get_notebook/list_notebooks 对该状态不可见(_notebook_
+        visible_where),故半拷贝期间副本对任何读者都是"不存在"的。全部块写完、
+        完整性自检通过后才把 status 拨正,副本才可见。若中途抛异常,already-
+        written 的子行仍挂在这个不可见的 notebook 行下(FK 保证不会有真正悬空
+        的孤儿行)——self._sweep_stuck_copies() 在下次 copy_notebook 开头把它
+        连同子行一并清掉(级联覆盖除 knowledge_embeddings 外的全部子表,该表
+        无 FK,同 delete_notebook 一样显式删)。"""
+        self._sweep_stuck_copies()
         src = self.get_notebook(source_notebook_id)  # KeyError if missing
         new_id = f"nb-{uuid4().hex[:10]}"
         now = _now()
@@ -1541,6 +1599,13 @@ class SQLiteRepository:
             prefix = old.split("-", 1)[0] if old else "id"
             return f"{prefix}-{uuid4().hex[:10]}"
 
+        def _chunked_insert(table: str, rows: List[dict]) -> None:
+            for i in range(0, len(rows), _COPY_CHUNK):
+                chunk = rows[i:i + _COPY_CHUNK]
+                with self._write() as db:
+                    for d in chunk:
+                        self._insert_row(db, table, d)
+
         src_dir = self.storage_dir / "notebooks" / source_notebook_id
         dst_dir = self.storage_dir / "notebooks" / new_id
         copied_files = False
@@ -1548,88 +1613,165 @@ class SQLiteRepository:
             if src_dir.exists():
                 shutil.copytree(src_dir, dst_dir)
                 copied_files = True
-            with self._write() as db:
-                # 1) notebooks 行:动态复制全列,覆盖关键字段
+
+            # 1) notebooks 行:status='copying' 哨兵,最先插入(FK 要求父行先于
+            #    子行);读者一律看不到它(见 get_notebook/list_notebooks 的
+            #    status!='copying' 过滤),故半拷贝期间副本不可发现。
+            with self._connect() as db:
                 nb = dict(db.execute("SELECT * FROM notebooks WHERE id=?", (source_notebook_id,)).fetchone())
-                nb.update(id=new_id, name=name, created_by=new_owner_id, tier="personal",
-                          is_shared=0, share_token=None, created_at=now, updated_at=now)
+            nb.update(id=new_id, name=name, created_by=new_owner_id, tier="personal",
+                      is_shared=0, share_token=None, status="copying", created_at=now, updated_at=now)
+            with self._write() as db:
                 self._insert_row(db, "notebooks", nb)
 
-                smap, emap, cmap, omap, rmap = {}, {}, {}, {}, {}
+            smap, emap, cmap, omap, rmap = {}, {}, {}, {}, {}
 
-                # 2) sources(+ file_path 指向新目录)
-                for r in db.execute("SELECT * FROM sources WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["id"] = smap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
-                    if d.get("file_path"):
-                        d["file_path"] = str(dst_dir / Path(d["file_path"]).name)
-                    self._insert_row(db, "sources", d)
+            # 2) sources(+ file_path 指向新目录)——只读快照,块写不持锁
+            with self._connect() as db:
+                src_sources = db.execute(
+                    "SELECT * FROM sources WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            sources_out = []
+            for r in src_sources:
+                d = dict(r); d["id"] = smap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                if d.get("file_path"):
+                    d["file_path"] = str(dst_dir / Path(d["file_path"]).name)
+                sources_out.append(d)
+            _chunked_insert("sources", sources_out)
 
-                # 3) source_elements(经 source_id 关联;无 notebook_id 列)
-                for r in db.execute(
+            # 3) source_elements(经 source_id 关联;无 notebook_id 列)
+            with self._connect() as db:
+                src_elements = db.execute(
                     "SELECT se.* FROM source_elements se JOIN sources s ON s.id=se.source_id "
-                    "WHERE s.notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["id"] = emap.setdefault(r["id"], _nid(r["id"]))
-                    d["source_id"] = smap[r["source_id"]]
-                    self._insert_row(db, "source_elements", d)
+                    "WHERE s.notebook_id=?", (source_notebook_id,)).fetchall()
+            elements_out = []
+            for r in src_elements:
+                d = dict(r); d["id"] = emap.setdefault(r["id"], _nid(r["id"]))
+                d["source_id"] = smap[r["source_id"]]
+                elements_out.append(d)
+            _chunked_insert("source_elements", elements_out)
 
-                jmaps = {"element_id": emap, "element_ids": emap, "source_id": smap, "object_id": omap}
+            jmaps = {"element_id": emap, "element_ids": emap, "source_id": smap, "object_id": omap}
 
-                # 4) chunks(element_ids 是裸 JSON 数组:包成 {"element_ids": [...]} 走 element_ids
-                #    路由后再取出,因为 _remap_json_ids 的数组重写按「键名」触发,而非顶层裸数组)
-                for r in db.execute("SELECT * FROM chunks WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["id"] = cmap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
-                    d["source_id"] = smap[r["source_id"]]
-                    d["element_ids"] = json.dumps(_remap_json_ids(
-                        {"element_ids": json.loads(d.get("element_ids") or "[]")}, jmaps)["element_ids"])
-                    self._insert_row(db, "chunks", d)
+            # 4) chunks(element_ids 是裸 JSON 数组:包成 {"element_ids": [...]} 走 element_ids
+            #    路由后再取出,因为 _remap_json_ids 的数组重写按「键名」触发,而非顶层裸数组)
+            with self._connect() as db:
+                src_chunks = db.execute(
+                    "SELECT * FROM chunks WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            chunks_out = []
+            for r in src_chunks:
+                d = dict(r); d["id"] = cmap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                d["source_id"] = smap[r["source_id"]]
+                d["element_ids"] = json.dumps(_remap_json_ids(
+                    {"element_ids": json.loads(d.get("element_ids") or "[]")}, jmaps)["element_ids"])
+                chunks_out.append(d)
+            _chunked_insert("chunks", chunks_out)
 
-                # 5) knowledge_objects(source_id / source_candidate_id + evidence/payload JSON)
-                for r in db.execute("SELECT * FROM knowledge_objects WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["id"] = omap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
-                    d["source_id"] = smap.get(r["source_id"], r["source_id"])
-                    if d.get("source_candidate_id"):
-                        d["source_candidate_id"] = smap.get(r["source_candidate_id"], r["source_candidate_id"])
-                    d["payload"] = json.dumps(_remap_json_ids(json.loads(d.get("payload") or "{}"), jmaps))
-                    d["evidence"] = json.dumps(_remap_json_ids(json.loads(d.get("evidence") or "[]"), jmaps))
-                    self._insert_row(db, "knowledge_objects", d)
+            # 5) knowledge_objects(source_id / source_candidate_id + evidence/payload JSON)
+            with self._connect() as db:
+                src_objects = db.execute(
+                    "SELECT * FROM knowledge_objects WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            objects_out = []
+            for r in src_objects:
+                d = dict(r); d["id"] = omap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                d["source_id"] = smap.get(r["source_id"], r["source_id"])
+                if d.get("source_candidate_id"):
+                    d["source_candidate_id"] = smap.get(r["source_candidate_id"], r["source_candidate_id"])
+                d["payload"] = json.dumps(_remap_json_ids(json.loads(d.get("payload") or "{}"), jmaps))
+                d["evidence"] = json.dumps(_remap_json_ids(json.loads(d.get("evidence") or "[]"), jmaps))
+                objects_out.append(d)
+            _chunked_insert("knowledge_objects", objects_out)
 
-                # 6) knowledge_relations(两端 object + source + evidence JSON)
-                for r in db.execute("SELECT * FROM knowledge_relations WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["id"] = rmap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
-                    d["source_id"] = smap.get(r["source_id"], r["source_id"])
-                    d["source_object_id"] = omap[r["source_object_id"]]
-                    d["target_object_id"] = omap[r["target_object_id"]]
-                    d["evidence"] = json.dumps(_remap_json_ids(json.loads(d.get("evidence") or "[]"), jmaps))
-                    self._insert_row(db, "knowledge_relations", d)
+            # 6) knowledge_relations(两端 object + source + evidence JSON)
+            with self._connect() as db:
+                src_relations = db.execute(
+                    "SELECT * FROM knowledge_relations WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            relations_out = []
+            for r in src_relations:
+                d = dict(r); d["id"] = rmap.setdefault(r["id"], _nid(r["id"])); d["notebook_id"] = new_id
+                d["source_id"] = smap.get(r["source_id"], r["source_id"])
+                d["source_object_id"] = omap[r["source_object_id"]]
+                d["target_object_id"] = omap[r["target_object_id"]]
+                d["evidence"] = json.dumps(_remap_json_ids(json.loads(d.get("evidence") or "[]"), jmaps))
+                relations_out.append(d)
+            _chunked_insert("knowledge_relations", relations_out)
 
-                # 7) embeddings(主键=外键,按映射改)
-                for r in db.execute("SELECT * FROM chunk_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["chunk_id"] = cmap[r["chunk_id"]]; d["notebook_id"] = new_id
-                    self._insert_row(db, "chunk_embeddings", d)
-                for r in db.execute(
+            # 7) embeddings(主键=外键,按映射改)
+            with self._connect() as db:
+                src_chunk_emb = db.execute(
+                    "SELECT * FROM chunk_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            chunk_emb_out = []
+            for r in src_chunk_emb:
+                d = dict(r); d["chunk_id"] = cmap[r["chunk_id"]]; d["notebook_id"] = new_id
+                chunk_emb_out.append(d)
+            _chunked_insert("chunk_embeddings", chunk_emb_out)
+
+            with self._connect() as db:
+                src_elem_emb = db.execute(
                     "SELECT ee.* FROM element_embeddings ee JOIN sources s ON s.id=ee.source_id "
-                    "WHERE s.notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["element_id"] = emap[r["element_id"]]; d["source_id"] = smap[r["source_id"]]; d["notebook_id"] = new_id
-                    self._insert_row(db, "element_embeddings", d)
-                for r in db.execute("SELECT * FROM knowledge_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["object_id"] = omap[r["object_id"]]; d["notebook_id"] = new_id
-                    self._insert_row(db, "knowledge_embeddings", d)
-                for r in db.execute("SELECT * FROM relation_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["relation_id"] = rmap[r["relation_id"]]; d["notebook_id"] = new_id
-                    self._insert_row(db, "relation_embeddings", d)
+                    "WHERE s.notebook_id=?", (source_notebook_id,)).fetchall()
+            elem_emb_out = []
+            for r in src_elem_emb:
+                d = dict(r); d["element_id"] = emap[r["element_id"]]; d["source_id"] = smap[r["source_id"]]; d["notebook_id"] = new_id
+                elem_emb_out.append(d)
+            _chunked_insert("element_embeddings", elem_emb_out)
 
-                # 8) concept_clusters(canonical_id / member_object_id → object 映射)
-                for r in db.execute("SELECT * FROM concept_clusters WHERE notebook_id=?", (source_notebook_id,)).fetchall():
-                    d = dict(r); d["id"] = _nid(r["id"]); d["notebook_id"] = new_id
-                    d["canonical_id"] = omap.get(r["canonical_id"], r["canonical_id"])
-                    d["member_object_id"] = omap.get(r["member_object_id"], r["member_object_id"])
-                    self._insert_row(db, "concept_clusters", d)
+            with self._connect() as db:
+                src_kg_emb = db.execute(
+                    "SELECT * FROM knowledge_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            kg_emb_out = []
+            for r in src_kg_emb:
+                d = dict(r); d["object_id"] = omap[r["object_id"]]; d["notebook_id"] = new_id
+                kg_emb_out.append(d)
+            _chunked_insert("knowledge_embeddings", kg_emb_out)
 
-                # 9) object_schemas 不拷:其主键是**全局唯一**的 object_type(非按 notebook
-                #    作用域),原样拷会撞 UNIQUE 约束使整库拷贝回滚。自定义 schema 是全局定义,
-                #    副本对象的 object_type 直接解析到既有全局 schema,无需随库带。
+            with self._connect() as db:
+                src_rel_emb = db.execute(
+                    "SELECT * FROM relation_embeddings WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            rel_emb_out = []
+            for r in src_rel_emb:
+                d = dict(r); d["relation_id"] = rmap[r["relation_id"]]; d["notebook_id"] = new_id
+                rel_emb_out.append(d)
+            _chunked_insert("relation_embeddings", rel_emb_out)
 
-                # 10) 完整性自检:行数一致 + 关系无悬空
+            # 8) concept_clusters(canonical_id / member_object_id → object 映射)
+            with self._connect() as db:
+                src_clusters = db.execute(
+                    "SELECT * FROM concept_clusters WHERE notebook_id=?", (source_notebook_id,)).fetchall()
+            clusters_out = []
+            for r in src_clusters:
+                d = dict(r); d["id"] = _nid(r["id"]); d["notebook_id"] = new_id
+                d["canonical_id"] = omap.get(r["canonical_id"], r["canonical_id"])
+                d["member_object_id"] = omap.get(r["member_object_id"], r["member_object_id"])
+                clusters_out.append(d)
+            _chunked_insert("concept_clusters", clusters_out)
+
+            # 9) object_schemas 不拷:其主键是**全局唯一**的 object_type(非按 notebook
+            #    作用域),原样拷会撞 UNIQUE 约束使整库拷贝回滚。自定义 schema 是全局定义,
+            #    副本对象的 object_type 直接解析到既有全局 schema,无需随库带。
+
+            # 10) FTS 增量插入(仅本次拷贝的 id,非全表 backfill):kg_objects_fts /
+            #     chunks_fts 是派生词法索引,直接从已重映射好的 objects_out /
+            #     chunks_out 构造,拷完即搜、无需事后对整个副本表做 DELETE+全量
+            #     重插。与主体拷贝同样分块,不长持锁。
+            fts_kg_rows = [(d["id"], new_id, (json.loads(d["payload"]).get("name") or "").strip())
+                           for d in objects_out]
+            fts_kg_rows = [(oid, nid, name) for (oid, nid, name) in fts_kg_rows if name]
+            for i in range(0, len(fts_kg_rows), _COPY_CHUNK):
+                chunk = fts_kg_rows[i:i + _COPY_CHUNK]
+                with self._write() as db:
+                    db.executemany(
+                        "INSERT INTO kg_objects_fts(object_id, notebook_id, name) VALUES (?,?,?)",
+                        chunk)
+            fts_chunk_rows = [(d["id"], new_id, d.get("text") or "") for d in chunks_out]
+            for i in range(0, len(fts_chunk_rows), _COPY_CHUNK):
+                chunk = fts_chunk_rows[i:i + _COPY_CHUNK]
+                with self._write() as db:
+                    db.executemany(
+                        "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                        chunk)
+
+            # 11) 完整性自检:行数一致 + 关系无悬空(自检本身只读,不需要写锁)
+            with self._connect() as db:
                 for t in ("sources", "chunks", "knowledge_objects", "knowledge_relations", "concept_clusters"):
                     a = db.execute(f"SELECT COUNT(*) FROM {t} WHERE notebook_id=?", (new_id,)).fetchone()[0]
                     b = db.execute(f"SELECT COUNT(*) FROM {t} WHERE notebook_id=?", (source_notebook_id,)).fetchone()[0]
@@ -1642,14 +1784,12 @@ class SQLiteRepository:
                     (new_id, new_id, new_id)).fetchone()[0]
                 if dangling:
                     raise RuntimeError("copy_notebook: 关系存在悬空引用")
-            # 词法搜索索引(kg_objects_fts)是派生数据:从拷好的 knowledge_objects 重建,使副本
-            # "拷完即搜"。幂等、best-effort——在拷贝事务提交后单独跑,失败不回滚已成的拷贝
-            # (用户可"刷新图谱"重建全部派生索引)。
-            try:
-                self.backfill_kg_fts(new_id)
-                self.backfill_chunk_fts(new_id)
-            except Exception:
-                self.event_log.logger.exception("copy_notebook: FTS backfill failed for %s", new_id)
+
+            # 12) 自检通过 → 把 status 从哨兵 'copying' 拨正为源库原状态,副本这才
+            #     对 get_notebook/list_notebooks 可见(唯一的可见性开关翻转点)。
+            with self._write() as db:
+                db.execute("UPDATE notebooks SET status=?, updated_at=? WHERE id=?",
+                           (src.status, _now(), new_id))
             return self.get_notebook(new_id)
         except Exception:
             if copied_files:
