@@ -136,6 +136,14 @@ except ImportError:  # pragma: no cover
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
 
+
+class KnowledgeGraphTooLargeError(Exception):
+    """Raised by knowledge_graph() (legacy GET /notebooks/{id}/graph) when the
+    notebook exceeds settings.viz_sync_build_max_objects — that endpoint has
+    no bounded fallback (unlike unified_graph), so it refuses outright rather
+    than materializing an unbounded in-memory graph. The route maps this to
+    HTTP 413."""
+
 # Default notebook-name placeholders the frontend creates; name auto-fill only
 # overwrites these (never a user-chosen name).
 _DEFAULT_NOTEBOOK_NAMES = {"", "未命名笔记本", "Untitled notebook"}
@@ -3800,8 +3808,33 @@ class SQLiteRepository:
 
     def knowledge_graph(self, notebook_id: str) -> KnowledgeGraph:
         """KG-native graph: nodes = non-deprecated knowledge objects (4 KG types),
-        edges = knowledge_relations rows."""
+        edges = knowledge_relations rows.
+
+        Legacy endpoint (GET /notebooks/{id}/graph) — superseded by
+        /unified-kg's bounded/paginated graph view; no frontend caller uses
+        this route anymore. It never had a large-notebook guard: unlike
+        unified_graph (which falls back to the persisted, bounded viz index
+        above settings.viz_sync_build_max_objects), this method always pulls
+        EVERY non-deprecated knowledge_objects row (full payload, for
+        _kg_headline) into Python objects with no cap — a 490k-object
+        deployment would materialize the whole KG in memory synchronously on
+        the request thread. Since there's no bounded variant for this legacy
+        shape to fall back to (unlike unified_graph), guard by outright
+        rejecting large notebooks with a clear pointer to the real endpoint,
+        rather than silently truncating a "complete" graph response into a
+        misleadingly-partial one."""
         self.get_notebook(notebook_id)
+        with self._connect() as db:
+            nb_count = db.execute(
+                "SELECT COUNT(*) c FROM knowledge_objects "
+                "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)).fetchone()["c"]
+        if int(nb_count) > self.settings.viz_sync_build_max_objects:
+            raise KnowledgeGraphTooLargeError(
+                f"notebook {notebook_id} has {nb_count} objects "
+                f"(> {self.settings.viz_sync_build_max_objects}); the legacy "
+                "/graph endpoint has no bounded fallback for large notebooks — "
+                "use /notebooks/{id}/unified-kg instead (bounded/paginated)."
+            )
         with self._connect() as db:
             rows = db.execute(
                 "SELECT id, object_type, status, payload FROM knowledge_objects "

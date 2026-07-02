@@ -14,6 +14,7 @@ from app.api.deps import (
     require_notebook_write, get_current_user,
 )
 from app.core.config import get_settings
+from app.services.sqlite_repository import KnowledgeGraphTooLargeError
 from app.models.schemas import (
     AskRequest,
     AskResponse,
@@ -508,6 +509,8 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
         return repository().knowledge_graph(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except KnowledgeGraphTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
 
 
 @router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_access)])
