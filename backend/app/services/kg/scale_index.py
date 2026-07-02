@@ -151,6 +151,38 @@ def build_transition(
     return (M @ D).tocsr(), index
 
 
+def build_transition_arrays(
+    node_ids: List[str],
+    src: "np.ndarray",
+    tgt: "np.ndarray",
+    w: "np.ndarray",
+) -> Tuple["sp.csr_matrix", Dict[str, int]]:
+    """Array fast-path of build_transition: edges already as int-indexed
+    (src, tgt, w) numpy arrays (int32/int32/float32-or-float64) instead of
+    (str, str, float) tuples — skips the Python-level id→index dict lookups
+    per edge that build_transition does via index.get(s, -1)/index.get(t, -1)
+    generator expressions (490k+ edges at scale, each a Python-object round
+    trip). Caller is responsible for encoding edges against `index =
+    {nid: i for i, nid in enumerate(node_ids)}` and for dropping/keeping
+    dangling endpoints as it sees fit (this function does NOT re-validate
+    src/tgt bounds — pass already-valid indices only). Output is element-wise
+    identical to build_transition given the same node_ids and the same
+    (decoded) edge set.
+    """
+    index = {nid: i for i, nid in enumerate(node_ids)}
+    n = len(node_ids)
+    if src.size == 0:
+        return sp.csr_matrix((n, n), dtype=np.float64), index
+    src64 = src.astype(np.int64, copy=False)
+    tgt64 = tgt.astype(np.int64, copy=False)
+    w64 = w.astype(np.float64, copy=False)
+    M = sp.csr_matrix((w64, (tgt64, src64)), shape=(n, n), dtype=np.float64)  # A[j,i]=i->j
+    colsum = np.asarray(M.sum(axis=0)).ravel()
+    colsum[colsum == 0] = 1.0
+    D = sp.diags(1.0 / colsum)
+    return (M @ D).tocsr(), index
+
+
 def save_scale_index(
     out_dir: str,
     *,

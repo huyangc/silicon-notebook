@@ -51,3 +51,55 @@ def test_query_sims_edge_cases():
 def test_build_matrix_empty():
     ids, mat = build_matrix([])
     assert ids == [] and mat.size == 0
+
+
+def _rows(n):
+    rng = np.random.default_rng(3)
+    return [(f"id{i}", json.dumps(rng.normal(size=4).tolist())) for i in range(n)]
+
+
+def test_build_matrix_n_hint_exact_matches_no_hint():
+    rows = _rows(10)
+    ids0, mat0 = build_matrix(rows)
+    ids1, mat1 = build_matrix(rows, n_hint=10)
+    assert ids0 == ids1
+    assert mat0.dtype == mat1.dtype == np.float32
+    assert np.array_equal(mat0, mat1)
+
+
+def test_build_matrix_n_hint_oversized_trims():
+    rows = _rows(5)
+    ids0, mat0 = build_matrix(rows)
+    ids1, mat1 = build_matrix(rows, n_hint=50)
+    assert ids0 == ids1
+    assert mat1.shape == mat0.shape
+    assert np.array_equal(mat0, mat1)
+
+
+def test_build_matrix_n_hint_undersized_falls_back():
+    rows = _rows(8)
+    ids0, mat0 = build_matrix(rows)
+    ids1, mat1 = build_matrix(rows, n_hint=3)  # too small — must not truncate output
+    assert ids0 == ids1
+    assert mat1.shape == mat0.shape
+    assert np.array_equal(mat0, mat1)
+
+
+def test_build_matrix_n_hint_with_skipped_rows():
+    rows = [
+        ("a", json.dumps([3.0, 4.0])),
+        ("bad", ""),                 # skipped — n_hint counts raw rows, not valid ones
+        ("b", json.dumps([1.0, 0.0])),
+    ]
+    ids0, mat0 = build_matrix(rows)
+    ids1, mat1 = build_matrix(rows, n_hint=3)
+    assert ids0 == ids1 == ["a", "b"]
+    assert np.array_equal(mat0, mat1)
+
+
+def test_build_matrix_n_hint_zero_or_none_like_no_hint():
+    rows = _rows(4)
+    ids0, mat0 = build_matrix(rows)
+    ids1, mat1 = build_matrix(rows, n_hint=0)
+    assert ids0 == ids1
+    assert np.array_equal(mat0, mat1)
