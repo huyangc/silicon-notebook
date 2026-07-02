@@ -58,16 +58,19 @@ def _live_embed_thread_counts() -> Counter:
     return c
 
 
-def _format_pool_snapshot(ts: str, s: dict, embed: Counter, done: int, total: int) -> str:
+def _format_pool_snapshot(ts: str, s: dict, embed: Counter, done: int, total: int,
+                          label: str = "") -> str:
     """Pure one-line snapshot of pool utilization. `ts` is the wall-clock time of
     the snapshot (so it lines up with the model-call logs); `s` is
     scheduler.stats(); `embed` is _live_embed_thread_counts(). Shows KG-LLM(window)
     vs embed concurrency side by side so a shared-compute model service can be
-    confirmed to run both pools at once."""
+    confirmed to run both pools at once. 抽取期(total>0)显示「源完成 done/total」;
+    其它有 LLM 的阶段(如 rebuild,total=0)显示阶段名 label。"""
+    tail = f" · 源完成 {done}/{total}" if total > 0 else (f" · {label}" if label else "")
     return (f"[pool {ts}] KG-LLM(window) {s['window_active']}/{s['window_max']}"
             f" · 源(job) {s['job_active']}/{s['job_max']}"
             f" · embed {embed.get('bg', 0)}bg+{embed.get('pool', 0)}pool"
-            f" · 源完成 {done}/{total}")
+            + tail)
 
 
 class _PoolReporter:
@@ -77,10 +80,12 @@ class _PoolReporter:
     Exception-guarded: a bad stats read / print / log never breaks ingest.
     Update `.done` from the driving loop; `__exit__` stops and joins (timeout)."""
 
-    def __init__(self, interval: float, total: int, log: Optional[LogFn] = None):
+    def __init__(self, interval: float, total: int, log: Optional[LogFn] = None,
+                 label: str = ""):
         self.interval = interval
         self.total = total
         self.log = log
+        self.label = label   # total=0 的阶段(如 rebuild)在快照尾部显示的阶段名
         self.done = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -99,10 +104,11 @@ class _PoolReporter:
                 s = _sched.stats()
                 line = _format_pool_snapshot(
                     time.strftime("%H:%M:%S"), s,
-                    _live_embed_thread_counts(), self.done, self.total)
+                    _live_embed_thread_counts(), self.done, self.total, self.label)
                 print(line, flush=True)
                 if self.log:
-                    self.log({"phase": "pool", **s, "done": self.done, "total": self.total})
+                    self.log({"phase": "pool", **s, "done": self.done,
+                              "total": self.total, "label": self.label})
             except Exception:   # noqa: BLE001 — observability must never break ingest
                 pass
 
@@ -336,27 +342,28 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
         if no_rebuild:
             return res
 
-        # ── Rebuild 阶段 ──────────────────────────────────────────────────────
+        # ── Rebuild 阶段(有 LLM:概念描述/merge-review)→ 同样开 pool 自报 ────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        # force=rebuild_only:rebuild_only 是显式「只重建」入口(用户主动重聚),
-        # 必须重算;普通 kg 阶段走门控(force=False),无新文件时跳过重聚(本次优化点)。
-        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
-                                           force=rebuild_only)
-        res["clusters"] = clusters
-        log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
-        print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-        res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+        with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
+            # force=rebuild_only:rebuild_only 是显式「只重建」入口(用户主动重聚),
+            # 必须重算;普通 kg 阶段走门控(force=False),无新文件时跳过重聚(本次优化点)。
+            clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
+                                               force=rebuild_only)
+            res["clusters"] = clusters
+            log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
+            print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
+            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
 
-        # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────────
-        nb = repo.get_notebook(notebook_id)
-        is_base = (nb.tier == "base")
-        has_index = (repo._scale_index(notebook_id) is not None)
-        if is_base or has_index:
-            manifest = repo.build_scale_index(notebook_id)
-            scale_nodes = manifest.get("n_nodes", 0)
-            res["scale_index_nodes"] = scale_nodes
-            log({"phase": "kg", "status": "scale_index_built", "nodes": scale_nodes})
-            print(f"scale index built (nodes={scale_nodes})", flush=True)
+            # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────
+            nb = repo.get_notebook(notebook_id)
+            is_base = (nb.tier == "base")
+            has_index = (repo._scale_index(notebook_id) is not None)
+            if is_base or has_index:
+                manifest = repo.build_scale_index(notebook_id)
+                scale_nodes = manifest.get("n_nodes", 0)
+                res["scale_index_nodes"] = scale_nodes
+                log({"phase": "kg", "status": "scale_index_built", "nodes": scale_nodes})
+                print(f"scale index built (nodes={scale_nodes})", flush=True)
 
     finally:
         repo.settings.kg_incremental_fusion_enabled = orig_fusion   # 还原,避免污染 repo 实例
@@ -448,24 +455,25 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
                     log({"phase": "all", "source_id": sid, "status": "failed", "error": str(exc)})
                 reporter.done = i
 
-        # ── 末尾一次:跨文档聚类 → 补节点向量 →(base/已建索引)scale index ────────
+        # ── 末尾一次(有 LLM:概念描述/merge-review)→ 同样开 pool 自报 ───────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        # 门控(force=False):自动收尾重聚。无新增/变更时(如重跑同一批)输入版本
-        # 未变 → 跳过整段重聚,直接返回缓存簇数(本次优化点)。
-        clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
-                                           force=False)
-        res["clusters"] = clusters
-        log({"phase": "all", "status": "rebuilt", "clusters": clusters})
-        print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-        res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+        with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
+            # 门控(force=False):自动收尾重聚。无新增/变更时(如重跑同一批)输入版本
+            # 未变 → 跳过整段重聚,直接返回缓存簇数(本次优化点)。
+            clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
+                                               force=False)
+            res["clusters"] = clusters
+            log({"phase": "all", "status": "rebuilt", "clusters": clusters})
+            print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
+            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
 
-        nb = repo.get_notebook(notebook_id)
-        if nb.tier == "base" or repo._scale_index(notebook_id) is not None:
-            manifest = repo.build_scale_index(notebook_id)
-            scale_nodes = manifest.get("n_nodes", 0)
-            res["scale_index_nodes"] = scale_nodes
-            log({"phase": "all", "status": "scale_index_built", "nodes": scale_nodes})
-            print(f"scale index built (nodes={scale_nodes})", flush=True)
+            nb = repo.get_notebook(notebook_id)
+            if nb.tier == "base" or repo._scale_index(notebook_id) is not None:
+                manifest = repo.build_scale_index(notebook_id)
+                scale_nodes = manifest.get("n_nodes", 0)
+                res["scale_index_nodes"] = scale_nodes
+                log({"phase": "all", "status": "scale_index_built", "nodes": scale_nodes})
+                print(f"scale index built (nodes={scale_nodes})", flush=True)
     finally:
         repo.settings.kg_auto_extract = orig_auto
         repo.settings.kg_incremental_fusion_enabled = orig_fusion
