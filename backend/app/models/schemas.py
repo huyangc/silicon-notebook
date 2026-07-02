@@ -515,6 +515,7 @@ class UnifiedKgStatus(BaseModel):
     viz_nodes: int = 0
     viz_edges: int = 0
     viz_stale: bool = False
+    viz_building: bool = False
 
 
 class MergeReviewJob(BaseModel):

@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     scale_index_offpeak_start_hour: int = Field(2, env="SCALE_INDEX_OFFPEAK_START_HOUR")    # 低峰窗口起(含)
     scale_index_offpeak_end_hour: int = Field(6, env="SCALE_INDEX_OFFPEAK_END_HOUR")        # 低峰窗口止(不含);start>end 视为跨零点
     scale_index_scheduler_poll_seconds: int = Field(300, env="SCALE_INDEX_SCHEDULER_POLL_SECONDS")  # 调度器轮询间隔
+    # KG 视图 viz 索引:notebook 有效对象数(status!='deprecated')≤ 此阈值时,首次打开 KG 视图
+    # 仍同步懒建(现有行为,小库瞬时);> 阈值则后台构建 + GET 立即返回 viz_building 占位,避免
+    # 分钟级全图折叠拖垮请求线程(真机 49 万对象库卡死的根因)。pydantic-settings v2 下
+    # Field(env=...) 对新字段静默失效,必须用 validation_alias。
+    viz_sync_build_max_objects: int = Field(20000, validation_alias="VIZ_SYNC_BUILD_MAX_OBJECTS")
     # qwen3-rerank (DashScope text-rerank) 配置
     rerank_model: str = Field("", env="RERANK_MODEL")
     rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", env="RERANK_BASE_URL")
