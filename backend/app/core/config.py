@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     rerank_api_style: str = Field("dashscope", env="RERANK_API_STYLE")
     relation_retrieval_enabled: bool = Field(False, env="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, env="RELATION_SEED_TOP_N")
+    # P0-1/2: 关系候选池上限(有关系向量时,先按向量 sim 取 top-N 候选再 hydrate 文本
+    # 做关键词+语义融合打分;镜像 chunk_recall 的"猛召回池"语义,非最终截断
+    # 的 relation_seed_top_n/_MIX_REL_SEEDS——池要显著大于两者才不伤召回)。
+    relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, env="GRAPH_PPR_ENABLED")
     ppr_damping: float = Field(0.5, env="PPR_DAMPING")               # rx.pagerank alpha

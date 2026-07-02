@@ -8540,17 +8540,42 @@ class SQLiteRepository:
                 citations.append(_citation(label, evidence))
         return citations
 
-    def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+    # SQLite default SQLITE_MAX_VARIABLE_NUMBER-safe chunk size for `IN (...)`
+    # placeholder lists (mirrors the ~900 convention used elsewhere in this file).
+    _IN_CHUNK = 900
+
+    def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str,
+                              relation_ids: Optional[List[str]] = None) -> List[dict]:
         """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
-        (端点不在 knowledge_objects),与图节点过滤一致。"""
+        (端点不在 knowledge_objects),与图节点过滤一致。
+
+        relation_ids=None(默认): 全量(现状,仍是 _backfill_relation_embeddings 等
+        维护路径的正确语义 — 全库补全向量必须看到每一条关系)。
+        relation_ids=[...]: 只 JOIN 这些 id(P0-1/2 候选界定 — 热路径调用方先按
+        向量 sim 定好候选集,这里只 hydrate 需要打分的那几行文本),chunk 在
+        `_IN_CHUNK` 防止超 SQLite 变量数上限;空列表直接返回 []。"""
         from app.services.retrieval import relation_embed_text, _payload_text
-        rows = db.execute(
+        base_sql = (
             "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
             "r.edge_type AS et, r.evidence AS ev, so.payload AS sp, tp.payload AS tpl "
             "FROM knowledge_relations r "
             "JOIN knowledge_objects so ON so.id = r.source_object_id "
             "JOIN knowledge_objects tp ON tp.id = r.target_object_id "
-            "WHERE r.notebook_id = ?", (notebook_id,)).fetchall()
+            "WHERE r.notebook_id = ?"
+        )
+        if relation_ids is not None:
+            if not relation_ids:
+                return []
+            rows = []
+            ids = list(relation_ids)
+            for i in range(0, len(ids), self._IN_CHUNK):
+                batch = ids[i:i + self._IN_CHUNK]
+                ph = ",".join("?" for _ in batch)
+                rows.extend(db.execute(
+                    base_sql + f" AND r.id IN ({ph})",
+                    (notebook_id, *batch)).fetchall())
+        else:
+            rows = db.execute(base_sql, (notebook_id,)).fetchall()
         out = []
         for r in rows:
             spans = [e.get("quoted_span", "") for e in json.loads(r["ev"] or "[]")
@@ -8566,15 +8591,51 @@ class SQLiteRepository:
 
     def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
         """对 notebook 关系按 query 打分(关键词 + 关系索引语义)。镜像 _retrieve_scored;
-        关系矩阵是独立索引(dual-index 分离)。"""
+        关系矩阵是独立索引(dual-index 分离)。
+
+        P0-1/2 候选界定:score_relations 混合关键词(需要 hydrate 的关系文本)+
+        语义(向量矩阵),所以不能像 _kg_object_candidates 那样单纯按向量 top-K
+        过滤后完全跳过关键词——否则纯关键词命中(无向量覆盖/embedder 未配置)会
+        被静默丢弃。折中(镜像 _kg_object_candidates 的 fail-open 哲学):
+          - notebook 该库 relations 表本身为空 → 早退 [](零 JOIN,COUNT(*) 探针
+            比全量 JOIN 便宜几个数量级,这是空库/关系检索关闭部署的主收益)。
+          - relations 非空但 relation_embeddings 整体为空(无 embedder 或未
+            回填)→ 向量矩阵提供不了候选界定信号,回退全量 JOIN(现状行为,
+            保关键词等价 —— 例如 test_mix_overlay.py 的 fixture 场景)。
+          - relation_embeddings 非空 → 向量覆盖是真实的候选信号:走
+            `top_k_sims`(matrix @ q 后 np.argpartition 直接取 top-K 索引,
+            不 materialize 全量 {id: float} dict —— 生产部署关系可达百万级,
+            query_sims 的全量 dict 本身就是 GB 级分配,argpartition 是 O(N)
+            但只产出 K 个 (id, sim) 元组)→ 只 hydrate 这 K 个 id 的文本做
+            关键词+语义融合打分。"""
         from app.services.retrieval import score_relations
-        from app.services.vector_index import query_sims
+        from app.services.vector_index import top_k_sims
         with self._connect() as db:
-            relations = self._relations_with_names(db, notebook_id)
+            has_any = db.execute(
+                "SELECT 1 FROM knowledge_relations WHERE notebook_id = ? LIMIT 1",
+                (notebook_id,)).fetchone()
+            if has_any is None:
+                return []
             query_vector = self._embed_query(query)
             rel_ids, rel_mat = self._vector_matrix(
                 db, notebook_id, "relation_embeddings", "relation_id")
-        relation_sims = query_sims(query_vector, rel_ids, rel_mat) if query_vector else None
+            if not rel_ids:
+                # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
+                relations = self._relations_with_names(db, notebook_id)
+                relation_sims = None
+            else:
+                top_pairs = top_k_sims(query_vector, rel_ids, rel_mat,
+                                       self.settings.relation_recall) if query_vector else []
+                if top_pairs:
+                    top_ids = [rid for rid, _ in top_pairs]
+                    relation_sims = dict(top_pairs)   # only K entries, not N
+                else:
+                    # no query_vector (embed_query 失败/未配置) → sim 界定不了,
+                    # 但向量覆盖存在时仍以 relation_recall 为界(取矩阵前 N 个 id,
+                    # 保持"有界"而非退回全量;顺序对无 sim 场景无关紧要)。
+                    top_ids = rel_ids[: self.settings.relation_recall]
+                    relation_sims = {}
+                relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
         return score_relations(query, relations, query_vector=query_vector,
                                relation_sims=relation_sims,
                                downweight_edges=self.settings.kg_about_downweight_enabled)
