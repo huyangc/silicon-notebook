@@ -9987,6 +9987,17 @@ class SQLiteRepository:
         seeds = list(dict.fromkeys(s for s in seeds if s))
         if not seeds:
             return "", {}, []
+        # 大库守卫(同 ask_graph):chunk 模式的 KG overlay 也走 _federated_rx_graph
+        # 全库 rustworkx 建图,大库直接跳过 → 返回空 overlay(与既有「无种子/空图」
+        # 降级完全同形),ask_chunk 继续用向量/PPR chunk 作答,不挂起。
+        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+            self.event_log.emit({
+                "kind": "graph_walk_refused",
+                "notebook_id": notebook_id,
+                "reason": "large_notebook",
+                "site": "chunk_kg_overlay",
+            })
+            return "", {}, []
         G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         if G is None or G.num_nodes() == 0:
             return "", {}, []
@@ -10656,6 +10667,39 @@ class SQLiteRepository:
                     raise_if_cancelled(cancel_event)
                     resp.answer_id = self._save_answer(notebook_id, question, resp, conversation_id)
                     return resp
+
+            # 大库守卫(与 _ppr_retrieve 的 Fix 1 同一「大」定义):下方
+            # _federated_rx_graph 是全库 rustworkx 建图(Python 边循环),在百万级
+            # 节点库上=数十分钟 + 数 GB 内存(与 1.13M 节点 reasoning 冻结同机制)。
+            # 空图喂给 multihop_subgraph 的下游是 subgraph=[] → src_chunks=[] →
+            # id_map={} → 不调答案 LLM → 只剩 "Graph traversal found 0 node(s)"
+            # 的空壳 deterministic 文案 —— 对用户等于空答案。故大库直接早退一条
+            # 带解释的降级回答(镜像上方无 KG 时的 deterministic 回答形态),
+            # 并发 graph_walk_refused 事件;顺带省掉 _graph_seed_fusion 的
+            # expand_query LLM 调用。放在 PPR 分支之后:大库若有 scale 索引,
+            # PPR 分支仍可正常出跨文档答案,不受此守卫影响。
+            if not self.notebook_copy_stats(notebook_id)["copyable"]:
+                self.event_log.emit({
+                    "kind": "graph_walk_refused",
+                    "notebook_id": notebook_id,
+                    "reason": "large_notebook",
+                    "site": "ask_graph",
+                })
+                response = AskResponse(
+                    answer_id="",
+                    conclusion="该知识库规模过大,graph 模式的全图漫游在此库上不可用"
+                               "(已跳过以避免长时间无响应)。请改用 chunk 或 reasoning "
+                               "模式提问;若已构建规模化检索索引(scale index),"
+                               "graph 模式的跨文档 PPR 检索仍可正常工作。",
+                    conversation_id=conversation_id, retrieval_query=question,
+                    llm_mode="deterministic",
+                )
+                response.mode = "graph"
+                response.model_errors = [ModelError(**e) for e in _err_sink]
+                raise_if_cancelled(cancel_event)
+                response.answer_id = self._save_answer(
+                    notebook_id, question, response, conversation_id)
+                return response
 
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
             raise_if_cancelled(cancel_event)
