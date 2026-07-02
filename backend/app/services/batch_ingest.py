@@ -674,6 +674,9 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
         where += " AND notebook_id=?"
         params = (notebook_id,)
 
+    # typeof() 无法走索引 → 这个 COUNT 是全表扫描,大表(如百万级 relation_embeddings)
+    # 要几分钟。先出声,免得上一张表打完 N/N 后长时间静默被当成"卡死"。
+    print(f"  [blob] {table}: 扫描待转行(大表可能数分钟,无输出≠卡死)…", flush=True)
     with repo._connect() as db:
         total = db.execute(f"SELECT COUNT(*) c FROM {table} {where}", params).fetchone()["c"]
     converted = 0
