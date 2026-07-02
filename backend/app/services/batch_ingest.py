@@ -749,6 +749,89 @@ def run_vectors_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
     return {"tables": results, "converted": total_converted, "skipped_bad": total_bad}
 
 
+_KOS_BACKFILL_BATCH_SIZE = 2000
+
+
+def _backfill_source_index_for_notebook(repo: SQLiteRepository, notebook_id: str) -> dict:
+    """Proactively populate knowledge_object_sources for ONE notebook (P0-4).
+
+    Idempotent + restartable: clears any partial rows for this notebook first,
+    then re-derives them from knowledge_objects.evidence in batches (bounded
+    memory — never loads the whole notebook's evidence at once, unlike the
+    legacy scan this table replaces), and marks
+    unified_kg_state.source_index_backfilled=1 at the end so the online
+    _clear_source_extraction_state fast path activates immediately (no need to
+    wait for a source delete/reparse to trigger the first-use backfill)."""
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_object_sources WHERE notebook_id=?", (notebook_id,))
+        total = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["c"]
+    if total == 0:
+        with repo._write() as db:
+            repo._mark_source_index_backfilled(db, notebook_id)
+        print(f"  [source-index] {notebook_id}: 0/0 (无 knowledge_objects)", flush=True)
+        return {"notebook_id": notebook_id, "objects": 0, "rows": 0}
+
+    processed = 0
+    rows_written = 0
+    last_id = ""
+    while True:
+        with repo._write() as db:
+            batch = db.execute(
+                "SELECT id, evidence FROM knowledge_objects "
+                "WHERE notebook_id=? AND id > ? ORDER BY id LIMIT ?",
+                (notebook_id, last_id, _KOS_BACKFILL_BATCH_SIZE),
+            ).fetchall()
+            if not batch:
+                break
+            kos_rows = [
+                (row["id"], sid, notebook_id)
+                for row in batch
+                for sid in repo._source_ids_from_evidence(row["evidence"])
+            ]
+            if kos_rows:
+                db.executemany(
+                    "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
+                    "VALUES (?, ?, ?)",
+                    kos_rows,
+                )
+                rows_written += len(kos_rows)
+        processed += len(batch)
+        last_id = batch[-1]["id"]
+        print(f"  [source-index] {notebook_id}: {processed}/{total}", flush=True)
+        if len(batch) < _KOS_BACKFILL_BATCH_SIZE:
+            break
+    with repo._write() as db:
+        repo._mark_source_index_backfilled(db, notebook_id)
+    return {"notebook_id": notebook_id, "objects": processed, "rows": rows_written}
+
+
+def run_backfill_source_index(repo: SQLiteRepository, notebook_id: Optional[str],
+                              all_notebooks: bool = False) -> dict:
+    """Proactive backfill CLI (P0-4 fast-follow): populate knowledge_object_sources
+    ahead of the first source delete/reparse, so that operation is never the one
+    paying the legacy full-evidence-scan cost online. Purely additive/idempotent —
+    safe to re-run (each notebook's rows are cleared and rebuilt from the current
+    knowledge_objects.evidence, then re-marked backfilled)."""
+    if not notebook_id and not all_notebooks:
+        raise ValueError("run_backfill_source_index: 需要 notebook_id 或 all_notebooks=True")
+    if all_notebooks:
+        with repo._connect() as db:
+            targets = [r["id"] for r in db.execute("SELECT id FROM notebooks ORDER BY id").fetchall()]
+    else:
+        repo.get_notebook(notebook_id)  # KeyError if missing
+        targets = [notebook_id]
+    print(f"backfill-source-index: scope={'全部 notebook (' + str(len(targets)) + ')' if all_notebooks else notebook_id}",
+          flush=True)
+    results = [_backfill_source_index_for_notebook(repo, nb_id) for nb_id in targets]
+    total_objects = sum(r["objects"] for r in results)
+    total_rows = sum(r["rows"] for r in results)
+    print(f"backfill-source-index done: notebooks={len(results)} objects={total_objects} rows={total_rows}",
+          flush=True)
+    return {"notebooks": results, "objects": total_objects, "rows": total_rows}
+
+
 def _make_logger(manifest_path: Optional[Path]) -> LogFn:
     if manifest_path is None:
         return lambda _e: None
@@ -769,11 +852,12 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
-    p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob"])
+    p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
+                                      "backfill-source-index"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--all-notebooks", action="store_true",
-                   help="vectors-to-blob 专用:转换全库全部 notebook,忽略 --notebook-id")
+                   help="vectors-to-blob / backfill-source-index 专用:作用于全库全部 notebook,忽略 --notebook-id")
     p.add_argument("--notebook-name", default=None,
                    help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
@@ -828,6 +912,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: vectors-to-blob 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
         return 2
 
+    if args.phase == "backfill-source-index" and not args.notebook_id and not args.all_notebooks:
+        print("error: backfill-source-index 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
+        return 2
+
     if args.dry_run:
         files = iter_files(args.input_dir) if args.input_dir else []
         print(f"[dry-run] {len(files)} files under {args.input_dir}", flush=True)
@@ -852,6 +940,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         r = run_vectors_to_blob(repo, args.notebook_id, all_notebooks=args.all_notebooks,
                                 workers=blob_workers)
         print(f"vectors-to-blob done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+        return 0
+
+    if args.phase == "backfill-source-index":
+        # 纯 SQL 派生索引重建(evidence JSON → knowledge_object_sources),不需要
+        # EMBED 就绪,也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
+        _t = time.perf_counter()
+        r = run_backfill_source_index(repo, args.notebook_id, all_notebooks=args.all_notebooks)
+        print(f"backfill-source-index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
         return 0
 
     # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
