@@ -197,9 +197,22 @@ def test_share_preview_copy_end_to_end(repo, client):
     assert client.post(f"/api/shared/{token}/copy").status_code == 404
 
 
-def test_copy_refuses_too_large(repo, client, monkeypatch):
-    # 首个 client 请求才触发 repository() 重建(conftest 已清缓存),此时读到 =1
+def test_copy_refuses_too_large(repo, tmp_path, monkeypatch):
+    # ⚠ 不能用 `client` fixture:它在测试体执行前就已 resolve(fixture 先于测试体运行),
+    # 而 `from app.main import app` 只在本进程"首次"导入 app.main 时才跑 create_app()→
+    # get_settings()(lru_cache,模块级单例、只执行一次)。若本测试恰是本进程第一个用到
+    # client 的测试(单跑 / -k 子串命中如 "fuse" 恰好只选中本测试时),fixture 阶段就把
+    # NOTEBOOK_COPY_MAX_ROWS=5000(默认值)缓存进 get_settings(),
+    # 随后测试体里再 setenv 已经来不及——deps.repository() 读到的仍是旧缓存,
+    # notebook_copy_stats() 判定「可拷贝」而非期望的「过大」。
+    # 全量跑之所以侥幸通过：更早的测试已经导入过 app.main,create_app() 早跑完了,
+    # 本测试的 setenv 发生在 repository() 真正首次调用之前,恰好读到新值——顺序耦合。
+    # 修法(与 test_notebook_share_readonly.py::test_join_large_then_leave 一致的写法):
+    # 在任何 HTTP 请求(即任何 client/app 构建)之前先设好阈值,再在测试体内现建 client。
     monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
+    _env(monkeypatch, tmp_path)
+    from app.main import app
+    client = TestClient(app)
     src = _seed_full_notebook(repo, owner="user-local")
     token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
     # Phase 2:大库预览 mode 由 "too_large" 改为 "readonly"(改走只读共享而非拒绝)。
