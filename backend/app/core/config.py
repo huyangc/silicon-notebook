@@ -190,6 +190,9 @@ class Settings(BaseSettings):
     # 合并复核(review_merge_candidates)每次送 LLM 的候选批大小。分批=每条回复更短,
     # 规避大候选集时单条回复超输出上限被截断→JSON 解析炸→拖垮 rebuild_unified_kg。
     kg_merge_review_batch_size: int = Field(30, validation_alias="KG_MERGE_REVIEW_BATCH_SIZE")
+    # 进程级 VectorCache（embedding 矩阵/分词语料/rustworkx 图等 GB 级条目）的
+    # LRU 容量上限，防止 fed_rxgraph 等按用户/notebook 线性增长的条目无界占用内存。
+    vector_cache_max_entries: int = Field(32, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
     answer_context_budget_chars: int = Field(6000, env="ANSWER_CONTEXT_BUDGET_CHARS")
     answer_context_min_items: int = Field(3, env="ANSWER_CONTEXT_MIN_ITEMS")
     # grounded 三档阈值（作用于融合相关度 .relevance ∈[0,1]）。
