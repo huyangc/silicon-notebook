@@ -298,7 +298,7 @@ class SQLiteRepository:
         # no on-disk manifest.version invalidation).
         self._scale_ver_cache: Dict[str, Any] = {}
         self._viz_idx_cache: Dict[str, Any] = {}
-        self._vector_cache = VectorCache()
+        self._vector_cache = VectorCache(max_entries=self.settings.vector_cache_max_entries)
         self._write_lock = threading.RLock()
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
