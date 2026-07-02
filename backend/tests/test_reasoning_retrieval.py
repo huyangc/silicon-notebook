@@ -951,3 +951,11 @@ def test_summarize_shows_recent_tail_when_over_window(rrepo):
     small = {f"ko-{i}": _mk_rk(f"ko-{i}", f"节点{i}") for i in range(30)}
     out2 = r._summarize(small, [], [])
     assert "省略" not in out2 and "节点29" in out2
+
+
+def test_reflect_prompt_warns_against_resubmitting_tried_subqueries():
+    """静态指令层也要有勿重复告诫(动态账目回喂之外的第二层):expand_graph
+    文案明写可反复展开,add_subquery 原本连'勿重复'都没有——治理不对称。"""
+    from app.services.prompts import reflect_prompt
+    p = reflect_prompt("q", "s")
+    assert "Never re-submit" in p
