@@ -757,27 +757,31 @@ button {
   min-height: 0;
 }
 
-/* 侧栏收起把手(展开态,右边缘,hover 浮出) */
+/* 侧栏收起把手(展开态,标题栏右侧,常驻) */
+.sources-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .sources-collapse-handle {
-  position: absolute;
-  top: 14px;
-  right: 10px;
-  z-index: 3;
-  width: 26px;
-  height: 26px;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(34, 48, 68, 0.14);
-  border-radius: 8px;
+  border: 1px solid rgba(34, 48, 68, 0.16);
+  border-radius: 9px;
   background: #fff;
   color: #475467;
   cursor: pointer;
-  opacity: 0.32;
-  transition: opacity 140ms ease, background 140ms ease, color 140ms ease;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
 }
-.sources-panel:hover .sources-collapse-handle { opacity: 1; }
-.sources-collapse-handle:hover { background: #f3f5f9; color: #101828; }
+.sources-collapse-handle:hover {
+  background: #f3f5f9;
+  color: #101828;
+  border-color: rgba(34, 48, 68, 0.28);
+}
 
 /* 收起态:左列压到 0,来源面板隐藏,对话区铺满 */
 .workspace-grid.sources-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
@@ -792,36 +796,38 @@ button {
   overflow: hidden;
 }
 
-/* 展开 rail(收起态,左边缘常驻,hover 浮出圆钮) */
+/* 展开 rail(收起态,左边缘常驻圆钮) */
 .sources-reveal-rail {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
-  width: 16px;
+  width: 44px;
   z-index: 4;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   border: 0;
-  padding: 0;
+  padding: 0 0 0 6px;
   cursor: pointer;
-  background: linear-gradient(to right, rgba(34, 48, 68, 0.06), transparent);
+  background: transparent;
 }
 .sources-reveal-rail > svg {
-  width: 26px;
-  height: 26px;
-  padding: 4px;
-  border: 1px solid rgba(34, 48, 68, 0.14);
-  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
+  border: 1px solid rgba(34, 48, 68, 0.16);
+  border-radius: 9px;
   background: #fff;
   color: #475467;
-  box-shadow: 0 6px 18px rgba(31, 42, 58, 0.12);
-  opacity: 0;
-  transform: translateX(-4px);
-  transition: opacity 140ms ease, transform 140ms ease;
+  box-shadow: 0 6px 18px rgba(31, 42, 58, 0.14);
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
-.sources-reveal-rail:hover > svg { opacity: 1; transform: translateX(0); }
+.sources-reveal-rail:hover > svg {
+  background: #f3f5f9;
+  color: #101828;
+  box-shadow: 0 8px 22px rgba(31, 42, 58, 0.18);
+}
 
 .add-source-button {
   min-height: 44px;

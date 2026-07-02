@@ -3010,18 +3010,20 @@ export default function Home() {
 
           <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}`}>
             <aside className="workspace-panel sources-panel">
-              <button
-                type="button"
-                className="sources-collapse-handle"
-                aria-label="收起来源栏"
-                title="收起来源栏"
-                onClick={() => setSourcesCollapsed(true)}
-              >
-                <PanelLeftClose size={16} />
-              </button>
               <div className="workspace-panel-header">
                 <h2>Source Stack</h2>
-                <span className="panel-count">{sourcesTotal} 个来源</span>
+                <div className="sources-header-right">
+                  <span className="panel-count">{sourcesTotal} 个来源</span>
+                  <button
+                    type="button"
+                    className="sources-collapse-handle"
+                    aria-label="收起来源栏"
+                    title="收起来源栏"
+                    onClick={() => setSourcesCollapsed(true)}
+                  >
+                    <PanelLeftClose size={18} />
+                  </button>
+                </div>
               </div>
               <div className="workspace-panel-body sources-body">
                 {!isReader && (
@@ -3188,7 +3190,7 @@ export default function Home() {
                 title="展开来源栏"
                 onClick={() => setSourcesCollapsed(false)}
               >
-                <PanelLeftOpen size={16} />
+                <PanelLeftOpen size={18} />
               </button>
             )}
 
