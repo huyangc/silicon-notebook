@@ -4031,8 +4031,21 @@ class SQLiteRepository:
                     "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
                     "AND object_type='concept' AND status!='deprecated' AND source_id!=?",
                     (notebook_id, source_id)).fetchall()
-            # Tier2 成本护栏:已有 concept 过多则跳过桥接检测(Tier1 已 append),镜像 emb_synonym 的 max_entities。
-            if len(ex) <= self.settings.kg_incremental_tier2_max_entities:
+            # Tier2 桥接候选来源三分支(P1-3,perf audit):
+            #   1) 有可用 kg ANN(即使版本漂移/stale,advisory 桥接可接受)→ ANN 近邻查询,
+            #      任意规模可用,恢复大库(> max_entities)上一直被静默跳过的跨文档桥接。
+            #      stale 索引只缺"新↔新"对象自身(下轮重建后补),"新↔存量"这一主场景
+            #      不受影响(见 _tier2_bridge_candidates_ann 文档)。
+            #   2) 无索引且已有 concept 数 ≤ max_entities → 原暴力 O(new×existing) 余弦(不动)。
+            #   3) 无索引且已有 concept 数 > max_entities → 跳过,但显式发 tier2_skipped 事件
+            #      (P1-3 修复点:旧代码这里静默跳过,大库上 Tier2 从未真正跑过)。
+            idx = self._scale_index(notebook_id, allow_stale=True)
+            ann = self._open_scale_ann(idx, "kg") if (idx is not None and idx.ann_labels) else None
+            cands: list = []
+            if ann is not None:
+                cands = self._tier2_bridge_candidates_ann(
+                    notebook_id, idx, ann, new_objs, cmap)
+            elif len(ex) <= self.settings.kg_incremental_tier2_max_entities:
                 with self._connect() as db:
                     vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
                                        (notebook_id,)).fetchall()
@@ -4062,14 +4075,19 @@ class SQLiteRepository:
                 exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
                 from app.services.kg_merge import detect_bridge_candidates
                 cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, exclude)
-                if cands:
-                    now = _now()
-                    with self._write() as db:
-                        for c in cands:
-                            db.execute(
-                                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
-                                "VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                                (f"cm-{uuid4().hex[:10]}", notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
+            else:
+                self.event_log.emit({
+                    "kind": "tier2_skipped", "notebook_id": notebook_id,
+                    "entities": len(ex), "reason": "no_index_over_threshold",
+                })
+            if cands:
+                now = _now()
+                with self._write() as db:
+                    for c in cands:
+                        db.execute(
+                            "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+                            "VALUES (?,?,?,?,?, 'pending', ?, ?)",
+                            (f"cm-{uuid4().hex[:10]}", notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
         from app.services.kg_merge import seed_claim, seed_formula, seed_procedure
         _TYPES = {"claim": (seed_claim, "KL-"), "formula": (seed_formula, "KF-"),
                   "procedure": (seed_procedure, "KP-")}
@@ -4089,6 +4107,120 @@ class SQLiteRepository:
                                          seed_fn=lambda o, _s=sfn: _s(o), id_prefix=prefix)
             self.append_clusters(notebook_id, trows_w, object_type=t)
         self._invalidate_unified_cache(notebook_id)
+
+    def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann, new_objs: list,
+                                     cluster_map_: Dict[str, str]) -> list:
+        """ANN-backed Tier2 bridge candidate detection (P1-3, perf audit).
+
+        Same candidate-set semantics as `kg_merge.detect_bridge_candidates`
+        (lo=0.82 similarity floor, top_k=5 per new object, exclude same-canonical
+        hits and already-decided/pending pairs) but sourced from the notebook's
+        persisted kg hnsw ANN instead of a brute-force cosine over every existing
+        concept embedding — the only way Tier2 stays usable once a library's
+        concept count exceeds `kg_incremental_tier2_max_entities` (production:
+        490k+ entities, where the brute-force path silently no-ops today).
+
+        `idx` may be STALE (`_scale_index(nb, allow_stale=True)` returned a disk
+        index whose version predates this source's own new objects/embeddings).
+        This is acceptable: bridging is advisory (candidates only ever land in
+        concept_merge_candidates as 'pending', reviewed by a human — never
+        auto-merged), and a stale ANN is only missing objects newer than its
+        build watermark. The query side (this source's newly-fused concepts) is
+        always fresh — it's read straight from knowledge_embeddings, not from
+        the index. So "new↔existing" bridges (the main incremental-upload
+        scenario: a freshly uploaded concept syncing against the library's prior
+        knowledge) work correctly even on a stale index; only "new↔new" bridges
+        between two concepts uploaded in the same still-unindexed window are
+        deferred to the next scale-index rebuild. That gap already exists today
+        for anything beyond a single upload cycle (the index only refreshes on
+        rebuild), so this doesn't regress the status quo.
+
+        Thread-safety: `_open_scale_ann`'s hnswlib handle is memoized on the
+        ScaleIndex instance (PR#147) and hnswlib's `knn_query` is safe for
+        concurrent read-only queries against one index handle, so calling this
+        from extraction job worker threads (where incremental_fuse_source runs)
+        needs no extra locking.
+        """
+        import numpy as np
+        from app.services.vector_index import decode_vector
+
+        topk = 5     # mirrors detect_bridge_candidates' top_k default
+        lo = 0.82    # mirrors detect_bridge_candidates' lo default
+        dim = self.settings.embed_dim
+
+        with self._connect() as db:
+            new_rows = db.execute(
+                "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=? "
+                "AND object_id IN ({})".format(",".join("?" for _ in new_objs)),
+                (notebook_id, *[o["object_id"] for o in new_objs])
+            ).fetchall() if new_objs else []
+            _decided = db.execute(
+                "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+                "WHERE notebook_id=? AND status IN ('confirmed','rejected','deferred','pending')",
+                (notebook_id,)).fetchall()
+        exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
+        new_vecs = {}
+        for r in new_rows:
+            arr = decode_vector(r["vector"])
+            if arr is not None and arr.size == dim:
+                new_vecs[r["object_id"]] = arr
+
+        idx_dim = int(idx.manifest.get("dim", dim))
+        if idx_dim != dim or not new_vecs:
+            return []
+
+        name_by_obj = {o["object_id"]: o.get("name", "") for o in new_objs}
+        out: list = []
+        seen: set = set()
+        n_labels = len(idx.ann_labels)
+        # Legacy semantics (kg_merge.detect_bridge_candidates): rank the top_k
+        # NEAREST existing concepts by raw similarity, THEN apply the lo floor /
+        # same-canonical / decided-pair filters — filtering never backfills more
+        # candidates to make up for a dropped one. The kg ANN index spans every
+        # object type plus cluster hub nodes, so we over-fetch (pad_factor) to
+        # reliably recover top_k CONCEPT hits after discarding self/cluster/
+        # non-concept noise from the raw neighbor list, then trim back to top_k —
+        # same fixed-size-then-filter behavior as the brute-force oracle.
+        pad_factor = 4
+        for oid, qvec in new_vecs.items():
+            from app.services.kg_merge import _norm
+            my_cid = "K-" + _norm(name_by_obj.get(oid, ""))
+            try:
+                k = min(max(topk * pad_factor, topk + 1), n_labels)
+                ann.set_ef(max(k + 1, 50))
+                labels, distances = ann.knn_query(np.asarray(qvec, dtype=np.float32), k=k)
+            except Exception as exc:  # noqa: BLE001 — fail-open, mirrors other ANN call sites
+                self._note_model_error("tier2_bridge_ann_query", self.settings.embed_model, exc)
+                continue
+            hits = sorted(zip(labels[0], distances[0]), key=lambda ld: ld[1])
+            eligible: list = []  # [(node_id, sim)] — concept-typed, not self, not cluster hub
+            for lab, dist in hits:
+                if len(eligible) >= topk:
+                    break
+                node_id = idx.ann_labels[int(lab)]
+                if node_id.startswith("cluster:") or node_id == oid:
+                    continue
+                # Type filter (mirrors legacy path, which only ever loads
+                # object_type='concept' rows into existing_items): the kg ANN
+                # index spans ALL object types, but concept canonical ids are
+                # always "K-"-prefixed (never "KL-"/"KF-"/"KP-" — claim/formula/
+                # procedure), so this string check is exact and needs no extra
+                # DB lookup per hit.
+                other_cid = cluster_map_.get(node_id)
+                if not other_cid or not other_cid.startswith("K-"):
+                    continue
+                eligible.append((node_id, other_cid, max(0.0, 1.0 - float(dist))))
+            for node_id, other_cid, sim in eligible:
+                if sim < lo:
+                    break  # eligible is distance-sorted ascending -> sim descending
+                if other_cid == my_cid:
+                    continue
+                a, b = sorted((my_cid, other_cid))
+                if frozenset((a, b)) in exclude or (a, b) in seen:
+                    continue
+                seen.add((a, b))
+                out.append({"canonical_a": a, "canonical_b": b, "score": sim})
+        return out
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         """Cached {member_object_id: canonical_id} — one concept_clusters scan per
