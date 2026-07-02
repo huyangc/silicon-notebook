@@ -4176,40 +4176,89 @@ class SQLiteRepository:
         # Legacy semantics (kg_merge.detect_bridge_candidates): rank the top_k
         # NEAREST existing concepts by raw similarity, THEN apply the lo floor /
         # same-canonical / decided-pair filters — filtering never backfills more
-        # candidates to make up for a dropped one. The kg ANN index spans every
-        # object type plus cluster hub nodes, so we over-fetch (pad_factor) to
-        # reliably recover top_k CONCEPT hits after discarding self/cluster/
-        # non-concept noise from the raw neighbor list, then trim back to top_k —
-        # same fixed-size-then-filter behavior as the brute-force oracle.
-        pad_factor = 4
+        # candidates to make up for a dropped one. The kg ANN index spans EVERY
+        # object type (production ratio: ~310k claims vs ~70k concepts of 470k
+        # vectors), so a FIXED over-fetch window can come back mostly claims —
+        # squeezing concepts out entirely and systematically under-bridging.
+        # Type-aware iterative over-fetch instead: start at k = top_k *
+        # pad_factor; while fewer than top_k concept hits survive the filters
+        # AND the raw neighbor tail is still >= the lo threshold (anything past
+        # a below-lo tail is even further away and would be threshold-filtered
+        # regardless — expanding cannot help) AND k < min(n_labels, hard cap),
+        # double k and re-query (hnsw knn_query is cheap; a fresh query is
+        # simpler and safer than incremental cursors).
+        pad_factor = max(1, int(self.settings.kg_tier2_ann_pad_factor))
+        hard_cap = min(n_labels, 4096)
+        # Deprecated alignment: the legacy path's existing_items query filters
+        # status!='deprecated'; ann_labels carries no status, so raw hits are
+        # batch-validated per knn round (one small IN query, cached across new
+        # objects) and deprecated/vanished objects are skipped BEFORE they can
+        # consume an eligible slot — matching the legacy pool, where deprecated
+        # rows never entered the ranking at all.
+        status_alive: Dict[str, bool] = {}
+
+        def _check_alive(ids: list) -> None:
+            unknown = [i for i in ids if i not in status_alive]
+            if not unknown:
+                return
+            with self._connect() as db:
+                ph = ",".join("?" for _ in unknown)
+                rows = db.execute(
+                    f"SELECT id FROM knowledge_objects WHERE id IN ({ph}) AND status!='deprecated'",
+                    unknown).fetchall()
+            alive = {r["id"] for r in rows}
+            for i in unknown:
+                status_alive[i] = i in alive
+
         for oid, qvec in new_vecs.items():
             from app.services.kg_merge import _norm
             my_cid = "K-" + _norm(name_by_obj.get(oid, ""))
-            try:
-                k = min(max(topk * pad_factor, topk + 1), n_labels)
-                ann.set_ef(max(k + 1, 50))
-                labels, distances = ann.knn_query(np.asarray(qvec, dtype=np.float32), k=k)
-            except Exception as exc:  # noqa: BLE001 — fail-open, mirrors other ANN call sites
-                self._note_model_error("tier2_bridge_ann_query", self.settings.embed_model, exc)
-                continue
-            hits = sorted(zip(labels[0], distances[0]), key=lambda ld: ld[1])
-            eligible: list = []  # [(node_id, sim)] — concept-typed, not self, not cluster hub
-            for lab, dist in hits:
+            q = np.asarray(qvec, dtype=np.float32)
+            k = min(max(topk * pad_factor, topk + 1), n_labels)
+            eligible: list = []  # [(node_id, canonical_id, sim)] — alive concepts, not self
+            query_failed = False
+            while True:
+                try:
+                    ann.set_ef(max(k + 1, 50))
+                    labels, distances = ann.knn_query(q, k=k)
+                except Exception as exc:  # noqa: BLE001 — fail-open, mirrors other ANN call sites
+                    self._note_model_error("tier2_bridge_ann_query", self.settings.embed_model, exc)
+                    query_failed = True
+                    break
+                hits = sorted(zip(labels[0], distances[0]), key=lambda ld: ld[1])
+                raw_ids = [idx.ann_labels[int(lab)] for lab, _ in hits]
+                _check_alive([nid for nid in raw_ids if not nid.startswith("cluster:")])
+                eligible = []
+                for nid, (_lab, dist) in zip(raw_ids, hits):
+                    if len(eligible) >= topk:
+                        break
+                    # Defensive invariant guard: cluster hub nodes have no
+                    # knowledge_embeddings row, so by construction they never
+                    # appear in ann_labels — this filter only protects against
+                    # a future index-format change; it is not load-bearing.
+                    if nid.startswith("cluster:") or nid == oid:
+                        continue
+                    if not status_alive.get(nid, False):
+                        continue  # deprecated or vanished object (legacy pool parity)
+                    # Type filter (mirrors legacy path, which only ever loads
+                    # object_type='concept' rows into existing_items): concept
+                    # canonical ids are always "K-"-prefixed (never "KL-"/"KF-"/
+                    # "KP-" — claim/formula/procedure), so this string check is
+                    # exact and needs no extra DB lookup per hit.
+                    other_cid = cluster_map_.get(nid)
+                    if not other_cid or not other_cid.startswith("K-"):
+                        continue
+                    eligible.append((nid, other_cid, max(0.0, 1.0 - float(dist))))
                 if len(eligible) >= topk:
                     break
-                node_id = idx.ann_labels[int(lab)]
-                if node_id.startswith("cluster:") or node_id == oid:
-                    continue
-                # Type filter (mirrors legacy path, which only ever loads
-                # object_type='concept' rows into existing_items): the kg ANN
-                # index spans ALL object types, but concept canonical ids are
-                # always "K-"-prefixed (never "KL-"/"KF-"/"KP-" — claim/formula/
-                # procedure), so this string check is exact and needs no extra
-                # DB lookup per hit.
-                other_cid = cluster_map_.get(node_id)
-                if not other_cid or not other_cid.startswith("K-"):
-                    continue
-                eligible.append((node_id, other_cid, max(0.0, 1.0 - float(dist))))
+                if k >= hard_cap:
+                    break
+                tail_sim = max(0.0, 1.0 - float(hits[-1][1])) if hits else 0.0
+                if tail_sim < lo:
+                    break  # everything beyond the tail is below threshold anyway
+                k = min(k * 2, hard_cap)
+            if query_failed:
+                continue
             for node_id, other_cid, sim in eligible:
                 if sim < lo:
                     break  # eligible is distance-sorted ascending -> sim descending
