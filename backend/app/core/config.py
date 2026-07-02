@@ -194,6 +194,14 @@ class Settings(BaseSettings):
     # 做关键词+语义融合打分;镜像 chunk_recall 的"猛召回池"语义,非最终截断
     # 的 relation_seed_top_n/_MIX_REL_SEEDS——池要显著大于两者才不伤召回)。
     relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
+    # relation-ann task:_retrieve_relations_scored 全量矩阵 top_k_sims 回退的
+    # 最终兜底门槛——仅当「无持久化 relation ANN」且「该库 relation 数超此阈值」
+    # 同时成立才触发(跳过打分 + relation_scoring_skipped 事件,fail-open 退化为
+    # 纯关键词);未过阈值/已有 ANN 时全量矩阵路径行为不变。镜像
+    # index_suggest_chunk_threshold 的量级与语义,防多 GB 关系矩阵在大库冷路径
+    # 直接把请求线程炸内存(#171 式守卫,现由 ANN 侧路作为常态优先分支绕开)。
+    relation_scoring_cold_guard_threshold: int = Field(
+        200_000, validation_alias="RELATION_SCORING_COLD_GUARD_THRESHOLD")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, env="GRAPH_PPR_ENABLED")
     ppr_damping: float = Field(0.5, env="PPR_DAMPING")               # rx.pagerank alpha

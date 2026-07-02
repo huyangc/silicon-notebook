@@ -9726,14 +9726,79 @@ class SQLiteRepository:
             })
         return out
 
+    def _relation_ann_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
+        """ANN 核候选(idx.relation_ann_path=relation_embeddings)⊕ delta 关系暴力。
+        镜像 _kg_object_candidates,relation 版。返回 {relation_id: sim∈[0,1]}。
+        fail-open 返回 {} 让上层退回全量矩阵/guard 路径。"""
+        import numpy as np
+        from app.services.vector_index import build_matrix, query_sims
+        sims: dict = {}
+        labels = getattr(idx, "relation_ann_labels", None)
+        if labels and query_vector is not None:
+            qarr = np.asarray(query_vector, dtype=np.float32)
+            dim = int(idx.manifest.get("dim", qarr.shape[0]))
+            if dim == qarr.shape[0]:
+                ann = self._open_scale_ann(idx, "relation")
+                if ann is None:
+                    return {}
+                try:
+                    ann.set_ef(max(recall + 1, 64))
+                    k = min(recall, len(labels))
+                    labs, dists = ann.knn_query(qarr, k=k)
+                    for l, d in zip(labs[0], dists[0]):
+                        sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
+                except Exception as exc:  # noqa: BLE001 — fail-open
+                    self._note_model_error("relation_ann_query", self.settings.embed_model, exc)
+                    return {}
+        # ⊕ delta 关系(水位后 source)暴力:small id-scoped 向量加载(IN-chunked
+        # 由 _relations_with_names/build_matrix 自然承载,这里量级由 delta 决定,
+        # 通常远小于全库)。
+        try:
+            delta = self._index_delta(notebook_id)
+            if delta["delta_sources"] and query_vector is not None:
+                ph_s = ",".join("?" for _ in delta["delta_sources"])
+                with self._connect() as db:
+                    drows = db.execute(
+                        f"SELECT relation_id AS vid, vector FROM relation_embeddings "
+                        f"WHERE notebook_id=? AND relation_id IN "
+                        f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                        (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
+                for rid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
+                    sims[rid] = s
+        except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
+            self._note_model_error("relation_ann_delta", self.settings.embed_model, exc)
+        return sims
+
+    def _relation_matrix_is_warm(self, notebook_id: str) -> bool:
+        """True 若 relation_embeddings 矩阵当前已在 _vector_cache 里(任意版本)——
+        用于最终兜底 guard 判定"真的是冷路径"(已热的缓存重新取用几乎零成本,
+        不该被 guard 拦下)。直接探 VectorCache._store(与 _invalidate_unified_cache
+        清理 `:fed_rxgraph` key 时的同一内部访问模式一致,无公开 peek API)。"""
+        key = f"{notebook_id}:matrix:relation_embeddings"
+        return key in self._vector_cache._store
+
     def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
         """对 notebook 关系按 query 打分(关键词 + 关系索引语义)。镜像 _retrieve_scored;
         关系矩阵是独立索引(dual-index 分离)。
 
-        P0-1/2 候选界定:score_relations 混合关键词(需要 hydrate 的关系文本)+
-        语义(向量矩阵),所以不能像 _kg_object_candidates 那样单纯按向量 top-K
-        过滤后完全跳过关键词——否则纯关键词命中(无向量覆盖/embedder 未配置)会
-        被静默丢弃。折中(镜像 _kg_object_candidates 的 fail-open 哲学):
+        relation-ann task:候选界定优先级从高到低——
+          1. 持久化 relation ANN(idx.relation_ann_labels)存在 → ANN 核 ⊕ delta
+             暴力(_relation_ann_candidates,镜像 _kg_object_candidates),只
+             hydrate top-K 候选文本做关键词+语义融合打分。knn_query 的 k 语义
+             与既有 relation_recall 一致(见下)。
+          2. 无 ANN,但矩阵未过冷路径 guard 门槛(见 3)→ 现状行为:全量矩阵
+             top_k_sims(P0-1/2 候选界定,同下方原注释)。
+          3. 无 ANN 且该库 relation 数超 relation_scoring_cold_guard_threshold
+             且矩阵未热(_relation_matrix_is_warm 为 False)→ 最终兜底:跳过
+             语义打分(不 materialize 多 GB 全量矩阵),emit relation_scoring_skipped
+             事件,退化为纯关键词(fail-open,不是空结果)。这是最后手段,不是
+             常态——常态应有持久化 ANN(build/fold 已默认写)。
+
+        P0-1/2 候选界定(2 的原注释):score_relations 混合关键词(需要 hydrate 的
+        关系文本)+ 语义(向量矩阵),所以不能像 _kg_object_candidates 那样单纯按
+        向量 top-K 过滤后完全跳过关键词——否则纯关键词命中(无向量覆盖/embedder
+        未配置)会被静默丢弃。折中(镜像 _kg_object_candidates 的 fail-open 哲学):
           - notebook 该库 relations 表本身为空 → 早退 [](零 JOIN,COUNT(*) 探针
             比全量 JOIN 便宜几个数量级,这是空库/关系检索关闭部署的主收益)。
           - relations 非空但 relation_embeddings 整体为空(无 embedder 或未
@@ -9789,6 +9854,42 @@ class SQLiteRepository:
                 })
                 return []
             query_vector = self._embed_query(query)
+
+            # ── 优先分支 1: 持久化 relation ANN ⊕ delta ──────────────────
+            idx = self._scale_index(notebook_id, allow_stale=True)
+            if idx is not None and getattr(idx, "relation_ann_labels", None) and query_vector is not None:
+                cand_sims = self._relation_ann_candidates(
+                    notebook_id, query_vector, idx, self.settings.relation_recall)
+                if cand_sims:
+                    top_ids = list(cand_sims.keys())
+                    relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
+                    return score_relations(query, relations, query_vector=query_vector,
+                                           relation_sims=cand_sims,
+                                           downweight_edges=self.settings.kg_about_downweight_enabled)
+                # fail-open(空候选/ANN 打开失败)→ 继续走下面的全量/guard 路径。
+
+            # ── 最终兜底 guard(分支 3):无 ANN + 大库 + 矩阵未热 → 跳过语义
+            # 打分,避免多 GB 全量矩阵在请求线程上 materialize。检查必须在
+            # _vector_matrix() 调用之前——那个调用本身就是会把矩阵放进
+            # _vector_cache 的 loader,调用之后再探"是否已热"永远是 True
+            # （自己刚焐热的），guard 就形同虚设。用一次便宜的 COUNT(*) 探针
+            # 代替(比全量 JOIN/矩阵反序列化便宜几个数量级),不 materialize
+            # 任何向量。ANN 应已覆盖常态(build/fold 默认写 relation_ann),
+            # 这里只是安全网(最后手段,不是常态)。
+            if not self._relation_matrix_is_warm(notebook_id):
+                n_rel_embedded = db.execute(
+                    "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()["c"]
+                if n_rel_embedded > self.settings.relation_scoring_cold_guard_threshold:
+                    self.event_log.emit({
+                        "kind": "relation_scoring_skipped", "notebook_id": notebook_id,
+                        "n_relations": int(n_rel_embedded), "reason": "large_cold_no_ann",
+                    })
+                    relations = self._relations_with_names(db, notebook_id)
+                    return score_relations(query, relations, query_vector=None,
+                                           relation_sims=None,
+                                           downweight_edges=self.settings.kg_about_downweight_enabled)
+
             rel_ids, rel_mat = self._vector_matrix(
                 db, notebook_id, "relation_embeddings", "relation_id")
             if not rel_ids:
