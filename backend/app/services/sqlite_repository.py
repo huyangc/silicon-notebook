@@ -7457,6 +7457,19 @@ class SQLiteRepository:
             "element_ids": json.loads(r["element_ids"] or "[]"),
         } for r in rows]
 
+    def _vector_matrix_version(self, db: sqlite3.Connection, notebook_id: str, table: str):
+        """(table, count, max created_at) version tuple for a notebook's `table`
+        embeddings — the same cheap aggregate query _vector_matrix uses to key
+        its cache. Factored out so callers can `peek()` cache warmth (e.g. the
+        large-notebook cold-matrix guard in _retrieve_relations_scored) without
+        duplicating the SQL or paying for the (potentially GB-scale) loader."""
+        ver = db.execute(
+            f"SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+            f"FROM {table} WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchone()
+        return (table, ver["c"], ver["ts"])
+
     def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
                        table: str, id_col: str):
         """Cached (ids, normalized float32 matrix) for a notebook's embeddings.
@@ -7468,12 +7481,7 @@ class SQLiteRepository:
         after (re)ingest. `table`/`id_col` are internal constants (not user input)."""
         from app.services.vector_index import build_matrix
 
-        ver = db.execute(
-            f"SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
-            f"FROM {table} WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchone()
-        version = (table, ver["c"], ver["ts"])
+        version = self._vector_matrix_version(db, notebook_id, table)
 
         def _load():
             rows = db.execute(
@@ -7483,6 +7491,13 @@ class SQLiteRepository:
             return build_matrix((r["vid"], r["vector"]) for r in rows)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
+
+    def _vector_matrix_warm(self, db: sqlite3.Connection, notebook_id: str, table: str) -> bool:
+        """True 当且仅当 `table` 的向量矩阵已经暖在 _vector_cache 里(版本匹配当前
+        数据)—— 不触发 loader,只是 peek。供大库场景「加载前先问值不值得」的
+        守卫使用(见 _retrieve_relations_scored)。"""
+        version = self._vector_matrix_version(db, notebook_id, table)
+        return self._vector_cache.peek(f"{notebook_id}:matrix:{table}", version)
 
     def _keyword_token_sets(self, db, notebook_id: str, objects: list) -> dict:
         """Cached {object_id: frozenset(haystack_tokens)} for keyword scoring.
@@ -9679,7 +9694,28 @@ class SQLiteRepository:
         但向量表空"仍回退全量 JOIN(上面第二条),而 _kg_object_candidates 是"存在
         持久化 scale ANN 索引"才收窄,否则 fail-open 返回 {} 让上层退回全量。两者
         触发候选界定的前提不同(有向量 vs 有持久 ANN),但都遵循同一 fail-open
-        哲学:信号不足时宁可付全量代价也不静默丢候选。"""
+        哲学:信号不足时宁可付全量代价也不静默丢候选。
+
+        生产事故修复(2026-07)——大库冷矩阵守卫:branch-3(本方法向量覆盖非空
+        场景)在 top_k_sims 之前要 _vector_matrix(nb, "relation_embeddings"),
+        这本身是 O(N_relations × dim) 内存(生产环境百万级关系 × 1024 维即数
+        GB,矩阵未 BLOB 化时还要逐行 json.loads,是灾难级耗时)。这条加载绝不能
+        在 ask 路径上对大库懒触发——保护全部调用方(reasoning
+        _relation_seed_fusion、chunk overlay、graph)。守卫:大库
+        (not notebook_copy_stats(nb)["copyable"]) 且矩阵未暖在 _vector_cache
+        (_vector_matrix_warm 纯 peek,不触发 loader)→ 跳过语义打分,发
+        relation_scoring_skipped 事件,返回 []。
+
+        选择返回 [] 而非退化到 branch-2 的关键词专用路径:branch-2 的
+        _relations_with_names(relation_ids=None) 本身是对 knowledge_relations
+        的无界全量 JOIN——对大库同样是内存/耗时炸弹,只是换了张表,并不比冷
+        矩阵加载更便宜。既然两条路径在大库场景下都不「有界」,选择保持
+        fail-open 语义最简单、最安全的出口([] + 事件),与本方法既有的
+        「关系表为空→[]」早退、以及 federated_retrieve_relations 上层对空结果
+        的既有容错完全一致,不引入新的部分結果语义。真正的修复是给关系建 ANN
+        索引(镜像 chunk_ann,scale index 侧)让候选界定本身有界——这个守卫只
+        是在那之前把 ask 路径钳制在 O(bounded)。已暖(_vector_cache 命中)或
+        小库:字节不变,走原路径。"""
         from app.services.retrieval import score_relations
         from app.services.vector_index import top_k_sims
         with self._connect() as db:
@@ -9687,6 +9723,14 @@ class SQLiteRepository:
                 "SELECT 1 FROM knowledge_relations WHERE notebook_id = ? LIMIT 1",
                 (notebook_id,)).fetchone()
             if has_any is None:
+                return []
+            if (not self.notebook_copy_stats(notebook_id)["copyable"]
+                    and not self._vector_matrix_warm(db, notebook_id, "relation_embeddings")):
+                self.event_log.emit({
+                    "kind": "relation_scoring_skipped",
+                    "notebook_id": notebook_id,
+                    "reason": "large_matrix_cold",
+                })
                 return []
             query_vector = self._embed_query(query)
             rel_ids, rel_mat = self._vector_matrix(
