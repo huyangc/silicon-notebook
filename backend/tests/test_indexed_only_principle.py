@@ -244,3 +244,38 @@ def test_small_lib_bruteforce_unchanged(repo):
     _sid, _cid, oid = _insert_source_with_object(repo, nb.id, 2)
     hits = repo._retrieve_scored(nb.id, "obj 2")       # 小库全量路径不受影响
     assert oid in {h.object_id for h in hits}
+
+
+# ── element 侧(fallback layer 2)大库守卫 ───────────────────────────────────
+
+
+def _insert_source_element(repo, nb_id, sid, eid, text):
+    """一个 source + 一个 source_element(带 embedding)。"""
+    now = "2026-07-01T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                   (sid, nb_id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (eid, sid, "paragraph", "p1", text, "{}", now))
+        v = repo.embedder.embed_query(text)
+        db.execute("INSERT INTO element_embeddings (element_id,source_id,notebook_id,vector,created_at) VALUES (?,?,?,?,?)",
+                   (eid, sid, nb_id, json.dumps(v), now))
+
+
+def test_big_lib_element_search_skipped(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    _insert_source_with_object(repo, nb.id, 3)
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
+    assert repo._retrieve_elements(nb.id, "anything") == []
+    assert any(e.get("kind") == "element_scoring_skipped" for e in events)
+
+
+def test_small_lib_element_search_unchanged(repo):
+    """小库路径不受影响:_retrieve_elements 仍全表扫并返回打分元素。"""
+    nb = repo.create_notebook(NotebookCreate(name="small-elem"))
+    _insert_source_element(repo, nb.id, "sE", "eE", "obj 4")
+    hits = repo._retrieve_elements(nb.id, "obj 4")
+    assert "eE" in {h.element_id for h in hits}

@@ -10222,6 +10222,15 @@ class SQLiteRepository:
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
+        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+            # source_elements 没有索引模态,本方法=全表扫+逐行向量解码(生产
+            # 17 万元素×4096 维=数 GB/次)。大库跳过并发事件,返回 [] ——
+            # 调用方(reasoning search_elements、chunk 兜底层)均容错空结果。
+            self.event_log.emit({
+                "kind": "element_scoring_skipped", "notebook_id": notebook_id,
+                "site": "_retrieve_elements", "reason": "large_notebook",
+            })
+            return []
         query_vector = self._embed_query(query)
         with self._connect() as db:
             elements = self._gather_elements(db, notebook_id, with_vectors=True)

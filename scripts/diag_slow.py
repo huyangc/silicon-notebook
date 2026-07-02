@@ -33,7 +33,7 @@ SECRET_MARKERS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
 INTEREST_KINDS = (
     "scale_ppr_bailout", "ppr_fallback_refused", "graph_walk_refused",
     "relation_scoring_skipped", "tier2_skipped", "chunk_bruteforce_skipped",
-    "kg_bruteforce_refused", "scale_index_build",
+    "kg_bruteforce_refused", "element_scoring_skipped", "scale_index_build",
     "model_error", "ask_stage", "pipeline",
 )
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
@@ -220,7 +220,8 @@ def report_events(local_dir, since):
                     last_bail_diag.append((e.get("ts", "")[:19], diag))
             elif k in ("ppr_fallback_refused", "graph_walk_refused",
                        "relation_scoring_skipped", "tier2_skipped",
-                       "chunk_bruteforce_skipped", "kg_bruteforce_refused"):
+                       "chunk_bruteforce_skipped", "kg_bruteforce_refused",
+                       "element_scoring_skipped"):
                 refuse_sites[f"{k}:{e.get('site', e.get('reason', ''))}"] += 1
             elif k == "model_error":
                 key = f"{e.get('stage','?')}/{e.get('model','?')}"
