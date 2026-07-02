@@ -3110,7 +3110,7 @@ export default function Home() {
                     >
                       {label}
                       {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                        <span title="新增内容尚未纳入语义检索索引，将在下次增量索引（空闲时自动重建，或手动重建）后可被语义检索；当前仍可关键词命中">
+                        <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「重建索引」或等待自动增量收进后可见">
                           {` · ${s.unindexed_sources} 源待索引`}
                         </span>
                       )}
@@ -4160,7 +4160,7 @@ export default function Home() {
                         >
                           {label}
                           {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                            <span title="新增内容尚未纳入语义检索索引，将在下次增量索引（空闲时自动重建，或手动重建）后可被语义检索；当前仍可关键词命中">
+                            <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「重建索引」或等待自动增量收进后可见">
                               {` · ${s.unindexed_sources} 源待索引`}
                             </span>
                           )}
