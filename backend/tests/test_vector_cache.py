@@ -245,6 +245,48 @@ def test_invalidate_under_concurrency():
     assert result == "v"
 
 
+def test_peek_true_when_warm_and_version_matches():
+    """peek 命中当且仅当 key 已缓存且版本匹配——不触发 loader。"""
+    calls = {"n": 0}
+
+    def loader():
+        calls["n"] += 1
+        return {"e1": [1.0]}
+
+    c = VectorCache()
+    assert c.peek("nb1", version=("count=1", "ts=10")) is False
+    assert calls["n"] == 0, "peek 绝不应该触发 loader"
+
+    c.get("nb1", version=("count=1", "ts=10"), loader=loader)
+    assert calls["n"] == 1
+    assert c.peek("nb1", version=("count=1", "ts=10")) is True
+    assert calls["n"] == 1, "peek 命中后仍不应触发 loader"
+
+
+def test_peek_false_when_version_stale():
+    """已缓存但版本不匹配(数据已变)→ peek 返回 False,不算暖。"""
+    c = VectorCache()
+    c.get("nb1", version=("count=1", "ts=10"), loader=lambda: {"e1": [1.0]})
+    assert c.peek("nb1", version=("count=2", "ts=20")) is False
+
+
+def test_peek_does_not_disturb_lru_order():
+    """peek 是纯只读探测:不 move_to_end,不影响 LRU 淘汰序。"""
+    c = VectorCache(max_entries=2)
+    c.get("a", version=1, loader=lambda: "va")
+    c.get("b", version=1, loader=lambda: "vb")
+    assert list(c._store.keys()) == ["a", "b"]
+
+    # peek "a"（最旧的）不应该把它刷新为最新。
+    assert c.peek("a", version=1) is True
+    assert list(c._store.keys()) == ["a", "b"]
+
+    # 插入第三个 key 触发淘汰：仍应淘汰 "a"（peek 未刷新其新鲜度）。
+    c.get("c", version=1, loader=lambda: "vc")
+    assert "a" not in c._store
+    assert "b" in c._store and "c" in c._store
+
+
 def test_store_iteration_compat():
     """_store 要保持 dict-like，可直接迭代 key 做 endswith 过滤，兼容
     sqlite_repository._invalidate_unified_cache 的用法。"""

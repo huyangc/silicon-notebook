@@ -86,6 +86,17 @@ class VectorCache:
         with self._global_lock:
             self._store.pop(key, None)
 
+    def peek(self, key: str, version: Hashable) -> bool:
+        """True 当且仅当 key 已缓存且版本匹配当前 version —— 不触发 loader、
+        不做 single-flight、不 move_to_end(不影响 LRU 新鲜度/淘汰序,纯只读
+        探测)。用于「加载前先问一句值不值得加载」的调用点(如大库场景下
+        relation_embeddings 矩阵是否已经暖在缓存里,冷则宁可跳过语义打分也
+        不要现懒加载 GB 级矩阵)。version 计算本身通常很便宜(COUNT/MAX 聚合
+        查询),peek 省的是 loader() 本身(JSON 解析 + build_matrix)。"""
+        with self._global_lock:
+            cached = self._store.get(key)
+            return cached is not None and cached[0] == version
+
 
 class LRUProcessCache:
     """Thread-safe, bounded dict-like LRU cache — the plain-dict-with-no-cap
