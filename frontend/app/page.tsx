@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -856,6 +856,7 @@ export default function Home() {
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourcesTotal, setSourcesTotal] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
+  const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
   const [sourceQuery, setSourceQuery] = useState("");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -979,6 +980,15 @@ export default function Home() {
       ],
     });
   };
+  // 侧栏收起状态持久化(localStorage;隐私模式等读写失败静默降级)
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("sn.sourcesCollapsed") === "1") setSourcesCollapsed(true);
+    } catch { /* ignore */ }
+  }, []);
+  useEffect(() => {
+    try { window.localStorage.setItem("sn.sourcesCollapsed", sourcesCollapsed ? "1" : "0"); } catch { /* ignore */ }
+  }, [sourcesCollapsed]);
   // Relink isolated nodes: additive/synchronous, no confirm needed.
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView，完成后按当前范围重拉）。
   // While a build runs, poll the notebook until kg_ready flips — the build can
@@ -2998,8 +3008,17 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="workspace-grid">
+          <section className={`workspace-grid${sourcesCollapsed ? " sources-collapsed" : ""}`}>
             <aside className="workspace-panel sources-panel">
+              <button
+                type="button"
+                className="sources-collapse-handle"
+                aria-label="收起来源栏"
+                title="收起来源栏"
+                onClick={() => setSourcesCollapsed(true)}
+              >
+                <PanelLeftClose size={16} />
+              </button>
               <div className="workspace-panel-header">
                 <h2>Source Stack</h2>
                 <span className="panel-count">{sourcesTotal} 个来源</span>
@@ -3160,6 +3179,18 @@ export default function Home() {
                 </div>
               </div>
             </aside>
+
+            {sourcesCollapsed && (
+              <button
+                type="button"
+                className="sources-reveal-rail"
+                aria-label="展开来源栏"
+                title="展开来源栏"
+                onClick={() => setSourcesCollapsed(false)}
+              >
+                <PanelLeftOpen size={16} />
+              </button>
+            )}
 
             <section className="workspace-panel chat-panel">
               <div className="workspace-panel-header">
