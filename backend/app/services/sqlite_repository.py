@@ -304,6 +304,10 @@ class SQLiteRepository:
         self._scale_building_lock = threading.Lock()
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
         self._scale_scheduler_started = False
+        # KG-view viz index background build (mirrors _scale_building exactly):
+        # guarded set of notebook_ids currently being folded by _spawn_viz_build.
+        self._viz_building: set = set()
+        self._viz_building_lock = threading.Lock()
         self._migrate()
         self._seed()
 
@@ -4772,9 +4776,10 @@ class SQLiteRepository:
                 (notebook_id,),
             ).fetchone()["c"]
         viz = self._viz_index_probe(notebook_id)
+        viz_building = notebook_id in self._viz_building
         if row is None:
             return {"dirty": False, "last_rebuild_at": "", "objects": 0, "relations": 0,
-                    "clusters": int(clusters), **viz}
+                    "clusters": int(clusters), **viz, "viz_building": viz_building}
         return {
             "dirty": bool(row["dirty"]),
             "last_rebuild_at": row["last_rebuild_at"],
@@ -4782,6 +4787,7 @@ class SQLiteRepository:
             "relations": int(row["relation_count"]),
             "clusters": int(row["cluster_count"] or clusters),
             **viz,
+            "viz_building": viz_building,
         }
 
     def unified_graph(self, notebook_id: str, level: str = "concept",
@@ -4800,6 +4806,14 @@ class SQLiteRepository:
             idx = self._viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
                 return self._unified_graph_bounded(idx, limit)
+            if idx is None and notebook_id in self._viz_building:
+                # Large notebook: a background build was spawned inside
+                # _viz_index instead of blocking this request on a
+                # minutes-long full-graph fold. Surface a placeholder the
+                # frontend can poll on instead of the (also expensive)
+                # _unified_graph_full fallback below.
+                return {"nodes": [], "edges": [], "total_nodes": 0,
+                        "total_edges": 0, "truncated": False, "viz_building": True}
         full = self._unified_graph_full(notebook_id, level)
         total_nodes, total_edges = len(full["nodes"]), len(full["edges"])
         from app.services.kg_merge import limit_graph_by_degree
@@ -6861,12 +6875,41 @@ class SQLiteRepository:
         setattr(idx, attr, h)
         return h
 
+    def _spawn_viz_build(self, notebook_id: str) -> None:
+        """Kick off a background (de-duplicated) viz-index build. Mirrors
+        _run_scale_op exactly: guard-add inside the lock, discard in finally,
+        exceptions only logged. build_viz_index is read-only DB + no model
+        calls, so a plain daemon thread is safe (no GIL-holding native call,
+        no shared mutable state beyond the cache dict it writes on success)."""
+        with self._viz_building_lock:
+            if notebook_id in self._viz_building:
+                return
+            self._viz_building.add(notebook_id)
+
+        def _run():
+            try:
+                self.build_viz_index(notebook_id)
+            except Exception:  # noqa: BLE001 — background task, failure only logged
+                try:
+                    self.event_log.logger.exception("viz index build failed for %s", notebook_id)
+                except Exception:
+                    pass
+            finally:
+                with self._viz_building_lock:
+                    self._viz_building.discard(notebook_id)
+        threading.Thread(target=_run, name=f"vizidx-{notebook_id}", daemon=True).start()
+
     def _viz_index(self, notebook_id: str):
         """Index exposing folded viz arrays for the KG-view fast paths, or None.
 
         Priority: (1) a valid full scale index (base library — already carries the
         viz arrays); (2) a persisted viz-only index whose version matches; (3)
-        lazily build one (synchronous) + persist. None only for an empty graph."""
+        disk has a STALE viz index — serve it immediately (display staleness is
+        benign) and spawn a background refresh; (4) nothing at all — small
+        notebooks (≤ viz_sync_build_max_objects effective objects) still build
+        synchronously (legacy behavior); large notebooks spawn a background build
+        and return None (caller surfaces a "building" placeholder instead of
+        blocking the request thread on a minutes-long full-graph fold)."""
         scale = self._scale_index(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
             return scale
@@ -6876,11 +6919,26 @@ class SQLiteRepository:
         if cached is not None and cached.manifest.get("version") == cur:
             return cached
         idx = vi.load_viz_index(self._viz_index_dir(notebook_id))
-        if idx is not None and idx.manifest.get("version") == cur:
-            self._viz_idx_cache[notebook_id] = idx
+        if idx is not None:
+            if idx.manifest.get("version") == cur:
+                self._viz_idx_cache[notebook_id] = idx
+                return idx
+            # Stale on disk: benign to serve immediately, refresh in the
+            # background. Do NOT cache the stale instance as if it were fresh —
+            # leaving _viz_idx_cache untouched means the version check above
+            # keeps failing and we keep re-probing disk (simplest correct
+            # option; mirrors _scale_index's allow_stale non-caching).
+            self._spawn_viz_build(notebook_id)
             return idx
-        self.build_viz_index(notebook_id)   # sync lazy build; sets cache on success
-        return self._viz_idx_cache.get(notebook_id)
+        with self._connect() as db:
+            count = db.execute(
+                "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,)).fetchone()["c"]
+        if int(count) <= self.settings.viz_sync_build_max_objects:
+            self.build_viz_index(notebook_id)   # sync lazy build; sets cache on success
+            return self._viz_idx_cache.get(notebook_id)
+        self._spawn_viz_build(notebook_id)
+        return None
 
     def _viz_index_probe(self, notebook_id: str) -> dict:
         """Read-only viz-index status — NEVER builds. Returns
