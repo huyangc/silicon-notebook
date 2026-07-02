@@ -563,3 +563,29 @@ def test_rebuild_progress_item_prints_ratio(capsys):
     bi._rebuild_progress("concept_desc", 2, 5)
     out = capsys.readouterr().out
     assert "concept_desc" in out and "2/5" in out
+
+
+# --- run_index real-time per-stage terminal output ---------------------------
+
+def test_run_index_prints_stage_timings(repo, monkeypatch, capsys):
+    """run_index must pass an on_stage callback into build_scale_index that
+    prints each stage's latency to the terminal in real time — the events
+    logger alone doesn't surface progress on a CLI run that can take tens of
+    minutes on a large (490k-object) library."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+
+    def fake_build_scale_index(notebook_id, on_stage=None):
+        assert notebook_id == nb_id
+        assert on_stage is not None
+        for stage, ms in [("gather", 12), ("transition", 3), ("kg_matrix", 5),
+                           ("chunk_matrix", 4), ("viz_arrays", 7), ("persist", 9),
+                           ("total", 40)]:
+            on_stage(stage, ms)
+        return {"n_nodes": 2}
+
+    monkeypatch.setattr(repo, "build_scale_index", fake_build_scale_index)
+    res = bi.run_index(repo, nb_id)
+    out = capsys.readouterr().out
+    assert res["indexed_nodes"] == 2
+    assert "  [index] gather: 12ms" in out
+    assert "  [index] total: 40ms" in out

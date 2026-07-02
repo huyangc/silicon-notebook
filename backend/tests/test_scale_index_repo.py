@@ -511,6 +511,52 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
         assert e["latency_ms"] >= 0
 
 
+def test_build_scale_index_on_stage_callback(repo):
+    """build_scale_index(on_stage=...) must invoke the callback once per
+    stage — the same 7 stages as the scale_index_build events — right when
+    each stage's timing is recorded, so a CLI caller can print real-time
+    per-stage progress on long (490k-object) builds without depending on the
+    events logger (which doesn't print to the terminal)."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [{"source_local_id": "b", "target_local_id": "a", "edge_type": "depends_on", "evidence": []}])
+    repo.rebuild_unified_kg(nb.id)
+
+    calls = []
+    manifest = repo.build_scale_index(nb.id, on_stage=lambda stage, ms: calls.append((stage, ms)))
+
+    expected_stages = {"gather", "transition", "kg_matrix", "chunk_matrix", "viz_arrays", "persist", "total"}
+    assert len(calls) == 7
+    assert {c[0] for c in calls} == expected_stages
+    assert calls[-2][0] == "persist"
+    assert calls[-1][0] == "total"
+    for stage, ms in calls:
+        assert isinstance(ms, int)
+        assert ms >= 0
+    assert manifest["n_nodes"] >= 2
+
+
+def test_build_scale_index_on_stage_exception_does_not_break_build(repo):
+    """A raising on_stage callback must never break the build — mirrors how
+    event_log.emit failures are isolated (logging-only, never propagated)."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+
+    def _boom(stage, ms):
+        raise RuntimeError(f"boom at {stage}")
+
+    manifest = repo.build_scale_index(nb.id, on_stage=_boom)
+    assert manifest["n_nodes"] >= 1
+    d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
+    assert os.path.exists(os.path.join(d, "manifest.json"))
+    assert os.path.exists(os.path.join(d, "graph.npz"))
+
+
 def test_scale_index_status_and_rebuild(repo, monkeypatch):
     import json, time
     from app.models.schemas import NotebookCreate
