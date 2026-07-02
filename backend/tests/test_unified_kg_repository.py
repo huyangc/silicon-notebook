@@ -3,6 +3,7 @@ import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
+from app.services.vector_index import decode_vector
 from app.models.schemas import NotebookCreate
 
 @pytest.fixture
@@ -31,7 +32,10 @@ def test_store_kg_batch_embeds_nodes(repo):
     with repo._connect() as db:
         rows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchall()
     assert len(rows) == 2                      # both nodes embedded
-    assert len(json.loads(rows[0]["vector"])) == 16
+    # New writes are BLOB (float32 tobytes), not JSON text — decode_vector
+    # dual-reads either format; here it must hit the bytes branch.
+    assert isinstance(rows[0]["vector"], (bytes, bytearray))
+    assert decode_vector(rows[0]["vector"]).size == 16
 
 def test_cluster_and_candidate_crud(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

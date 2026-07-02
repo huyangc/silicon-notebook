@@ -579,6 +579,98 @@ def run_embed(repo: SQLiteRepository, notebook_id, conc=4) -> dict:
     }
 
 
+# (table, id_column) for every embeddings table the BLOB backfill covers.
+_VECTOR_TABLES = (
+    ("chunk_embeddings", "chunk_id"),
+    ("knowledge_embeddings", "object_id"),
+    ("element_embeddings", "element_id"),
+    ("relation_embeddings", "relation_id"),
+)
+
+_BACKFILL_BATCH_SIZE = 5000
+
+
+def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
+                            table: str, id_col: str,
+                            batch_size: int = _BACKFILL_BATCH_SIZE) -> dict:
+    """把一个 embeddings 表里仍是 JSON TEXT 的 vector 行原地转成 float32 BLOB
+    (encode_vector),分批事务提交 + 打印进度。幂等:每轮只选
+    typeof(vector)='text' 的行(SQLite 原生类型探测,O(1) 判定、不逐行反序列化),
+    跑第二遍时天然 0 行可转、直接返回——可安全重跑/中断重启。
+    notebook_id=None 时覆盖全表(--all-notebooks)。
+
+    一行都转不动的批次(全部 decode_vector 失败,如损坏的 JSON 文本)也必须
+    UPDATE 成 blob(空 b'' 哨兵,decode_vector 读回 None——与旧代码里空/无效
+    JSON 行的读侧语义一致),否则这些行永远停留在 typeof='text'、
+    下一轮 LIMIT 会重复选中同一批 → 死循环。"""
+    from app.services.vector_index import decode_vector, encode_vector
+
+    where = "WHERE typeof(vector)='text'"
+    params: tuple = ()
+    if notebook_id is not None:
+        where += " AND notebook_id=?"
+        params = (notebook_id,)
+
+    with repo._connect() as db:
+        total = db.execute(f"SELECT COUNT(*) c FROM {table} {where}", params).fetchone()["c"]
+    converted = 0
+    skipped_bad = 0
+    if total == 0:
+        print(f"  [blob] {table}: 0/0 (无待转行)", flush=True)
+        return {"table": table, "total": total, "converted": 0, "skipped_bad": 0}
+
+    while True:
+        with repo._write() as db:
+            rows = db.execute(
+                f"SELECT {id_col} AS vid, notebook_id, vector FROM {table} {where} "
+                f"LIMIT {int(batch_size)}", params).fetchall()
+            if not rows:
+                break
+            updates = []
+            for r in rows:
+                try:
+                    arr = decode_vector(r["vector"])
+                except Exception:  # noqa: BLE001 — malformed row, treat as bad
+                    arr = None
+                if arr is None:
+                    skipped_bad += 1
+                    blob = b""  # sentinel: still moves the row to typeof='blob'
+                else:
+                    blob = encode_vector(arr)
+                updates.append((blob, r["notebook_id"], r["vid"]))
+            db.executemany(
+                f"UPDATE {table} SET vector=? WHERE notebook_id=? AND {id_col}=?",
+                updates)
+        converted += len(rows)
+        print(f"  [blob] {table}: {converted}/{total}", flush=True)
+        if len(rows) < batch_size:
+            break
+    return {"table": table, "total": total, "converted": converted, "skipped_bad": skipped_bad}
+
+
+def run_vectors_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
+                        all_notebooks: bool = False) -> dict:
+    """向量存储 BLOB 化一次性 backfill:把指定 notebook(或 --all-notebooks 时全库)
+    embeddings 表里的旧 JSON TEXT 行原地转成 float32 BLOB(encode_vector)。
+    分批事务(每批 5000 行)+ 打印进度;typeof(vector)='blob' 的行已跳过 →
+    可安全重跑(第二遍 0 行可转)。转换不改 created_at,故 _vector_matrix 的
+    (COUNT, MAX created_at) 版本键不变——缓存的矩阵内容仍等价(同向量,只是
+    换了编码),不会因 backfill 变脏失效;下次自然过期时重建即得 BLOB 直载收益。
+    """
+    if not notebook_id and not all_notebooks:
+        raise ValueError("run_vectors_to_blob: 需要 notebook_id 或 all_notebooks=True")
+    scope = "全部 notebook" if all_notebooks else notebook_id
+    print(f"vectors-to-blob: scope={scope}", flush=True)
+    results = []
+    for table, id_col in _VECTOR_TABLES:
+        results.append(_backfill_table_to_blob(
+            repo, None if all_notebooks else notebook_id, table, id_col))
+    total_converted = sum(r["converted"] for r in results)
+    total_bad = sum(r["skipped_bad"] for r in results)
+    print(f"vectors-to-blob done: converted={total_converted} skipped_bad={total_bad}", flush=True)
+    return {"tables": results, "converted": total_converted, "skipped_bad": total_bad}
+
+
 def _make_logger(manifest_path: Optional[Path]) -> LogFn:
     if manifest_path is None:
         return lambda _e: None
@@ -599,9 +691,11 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
-    p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed"])
+    p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
+    p.add_argument("--all-notebooks", action="store_true",
+                   help="vectors-to-blob 专用:转换全库全部 notebook,忽略 --notebook-id")
     p.add_argument("--notebook-name", default=None,
                    help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
@@ -644,6 +738,10 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    if args.phase == "vectors-to-blob" and not args.notebook_id and not args.all_notebooks:
+        print("error: vectors-to-blob 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
+        return 2
+
     if args.dry_run:
         files = iter_files(args.input_dir) if args.input_dir else []
         print(f"[dry-run] {len(files)} files under {args.input_dir}", flush=True)
@@ -659,6 +757,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     repo = SQLiteRepository(Settings())
+
+    if args.phase == "vectors-to-blob":
+        # 纯格式转换(已算好的向量 JSON→BLOB),不产出新向量,不需要 EMBED 就绪,
+        # 也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
+        _t = time.perf_counter()
+        r = run_vectors_to_blob(repo, args.notebook_id, all_notebooks=args.all_notebooks)
+        print(f"vectors-to-blob done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+        return 0
+
     # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
     allow_no_embed = args.allow_no_embed and args.phase != "embed"
     if not repo.settings.embedder_configured:

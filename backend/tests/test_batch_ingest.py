@@ -589,3 +589,249 @@ def test_run_index_prints_stage_timings(repo, monkeypatch, capsys):
     assert res["indexed_nodes"] == 2
     assert "  [index] gather: 12ms" in out
     assert "  [index] total: 40ms" in out
+
+
+# --- vectors-to-blob backfill CLI --------------------------------------------
+
+def _seed_json_vector(repo, table, id_col, vid, nb_id, dim=16, created_at="2026-01-01T00:00:00"):
+    """Insert a legacy JSON-text vector row directly (bypasses encode_vector,
+    simulating a pre-migration row)."""
+    vec = [float(i) for i in range(dim)]
+    with repo._write() as db:
+        db.execute(
+            f"INSERT INTO {table} ({id_col},notebook_id,vector,created_at) VALUES (?,?,?,?)",
+            (vid, nb_id, json.dumps(vec), created_at),
+        )
+    return vec
+
+
+def test_backfill_table_to_blob_converts_json_rows(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    vec = _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    out = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id")
+    assert out == {"table": "knowledge_embeddings", "total": 1, "converted": 1, "skipped_bad": 0}
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT vector, typeof(vector) AS ty, created_at FROM knowledge_embeddings "
+            "WHERE object_id=?", ("ko-1",)).fetchone()
+    assert row["ty"] == "blob"
+    from app.services.vector_index import decode_vector
+    assert decode_vector(row["vector"]).tolist() == vec
+    assert row["created_at"] == "2026-01-01T00:00:00"  # backfill must not touch created_at
+
+
+def test_backfill_table_to_blob_idempotent_second_run_noop(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    out1 = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id")
+    assert out1["converted"] == 1
+
+    # Re-run: typeof(vector)='text' filter finds 0 rows now (all BLOB) — idempotent.
+    out2 = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id")
+    assert out2 == {"table": "knowledge_embeddings", "total": 0, "converted": 0, "skipped_bad": 0}
+
+
+def test_backfill_table_to_blob_batches_across_txn_boundary(repo):
+    """batch_size smaller than the row count must still convert every row across
+    multiple batched transactions (each _write() call is its own commit)."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(7):
+        oid = f"ko-{i}"
+        _seed_node(repo, nb_id, oid)
+        _seed_json_vector(repo, "knowledge_embeddings", "object_id", oid, nb_id)
+
+    out = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id", batch_size=3)
+    assert out["total"] == 7
+    assert out["converted"] == 7
+
+    with repo._connect() as db:
+        remaining_text = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_embeddings WHERE notebook_id=? "
+            "AND typeof(vector)='text'", (nb_id,)).fetchone()["c"]
+    assert remaining_text == 0
+
+
+def test_backfill_table_to_blob_scoped_to_notebook(repo):
+    """--notebook-id scopes the conversion; another notebook's JSON rows are untouched."""
+    nb_a = bi.ensure_notebook(repo, None, "nb-a")
+    nb_b = bi.ensure_notebook(repo, None, "nb-b")
+    _seed_node(repo, nb_a, "ko-a")
+    _seed_node(repo, nb_b, "ko-b")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-a", nb_a)
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-b", nb_b)
+
+    out = bi._backfill_table_to_blob(repo, nb_a, "knowledge_embeddings", "object_id")
+    assert out["converted"] == 1
+
+    with repo._connect() as db:
+        ty_a = db.execute("SELECT typeof(vector) t FROM knowledge_embeddings WHERE object_id=?",
+                          ("ko-a",)).fetchone()["t"]
+        ty_b = db.execute("SELECT typeof(vector) t FROM knowledge_embeddings WHERE object_id=?",
+                          ("ko-b",)).fetchone()["t"]
+    assert ty_a == "blob"
+    assert ty_b == "text"  # untouched — different notebook
+
+
+def test_backfill_table_to_blob_malformed_row_does_not_loop_forever(repo):
+    """A row whose vector text isn't valid JSON must still be moved out of the
+    typeof='text' selection set (as an empty-BLOB sentinel) — otherwise a batch
+    made entirely of unparseable rows would be re-selected by the same LIMIT
+    query forever (regression: an early version left bad rows untouched and
+    hung). batch_size=1 forces every row into its own batch so a single bad
+    row would be the *entire* batch, maximally exercising this path."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-good")
+    _seed_node(repo, nb_id, "ko-bad")
+    good_vec = _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-good", nb_id)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+            "VALUES (?,?,?,?)", ("ko-bad", nb_id, "not-valid-json{{{", "2026-01-01T00:00:00"))
+
+    out = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id", batch_size=1)
+    assert out["total"] == 2
+    assert out["converted"] == 2       # loop terminated after exactly 2 rows, not forever
+    assert out["skipped_bad"] == 1
+
+    with repo._connect() as db:
+        rows = {r["object_id"]: (r["ty"], r["vector"]) for r in db.execute(
+            "SELECT object_id, typeof(vector) AS ty, vector FROM knowledge_embeddings "
+            "WHERE notebook_id=?", (nb_id,)).fetchall()}
+    assert rows["ko-good"][0] == "blob"
+    assert rows["ko-bad"][0] == "blob"      # sentinel moved it out of typeof='text'
+    from app.services.vector_index import decode_vector
+    assert decode_vector(rows["ko-good"][1]).tolist() == good_vec
+    assert decode_vector(rows["ko-bad"][1]) is None   # empty-blob sentinel decodes to None
+
+
+def test_run_vectors_to_blob_covers_all_embeddings_tables(repo, tmp_path, capsys):
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=1)  # chunk_embeddings via real path (BLOB already)
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    # Force one chunk_embeddings row back to legacy JSON text to exercise that table too.
+    with repo._connect() as db:
+        cid = db.execute("SELECT chunk_id FROM chunk_embeddings WHERE notebook_id=? LIMIT 1",
+                         (nb_id,)).fetchone()["chunk_id"]
+    with repo._write() as db:
+        db.execute("UPDATE chunk_embeddings SET vector=? WHERE chunk_id=?",
+                   (json.dumps([0.1] * 16), cid))
+
+    out = bi.run_vectors_to_blob(repo, nb_id, all_notebooks=False)
+    tables_seen = {t["table"] for t in out["tables"]}
+    assert tables_seen == {"chunk_embeddings", "knowledge_embeddings",
+                           "element_embeddings", "relation_embeddings"}
+    assert out["converted"] >= 2  # the seeded knowledge row + the forced-JSON chunk row
+
+    with repo._connect() as db:
+        remaining_text = db.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM chunk_embeddings WHERE notebook_id=? AND typeof(vector)='text') + "
+            "(SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=? AND typeof(vector)='text') "
+            "AS c", (nb_id, nb_id)).fetchone()["c"]
+    assert remaining_text == 0
+    out_str = capsys.readouterr().out
+    assert "[blob] chunk_embeddings:" in out_str
+    assert "[blob] knowledge_embeddings:" in out_str
+
+
+def test_run_vectors_to_blob_requires_notebook_id_or_all(repo):
+    with pytest.raises(ValueError):
+        bi.run_vectors_to_blob(repo, None, all_notebooks=False)
+
+
+def test_run_vectors_to_blob_all_notebooks_covers_every_notebook(repo):
+    nb_a = bi.ensure_notebook(repo, None, "nb-a")
+    nb_b = bi.ensure_notebook(repo, None, "nb-b")
+    _seed_node(repo, nb_a, "ko-a")
+    _seed_node(repo, nb_b, "ko-b")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-a", nb_a)
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-b", nb_b)
+
+    out = bi.run_vectors_to_blob(repo, None, all_notebooks=True)
+    assert out["converted"] >= 2
+
+    with repo._connect() as db:
+        ty_a = db.execute("SELECT typeof(vector) t FROM knowledge_embeddings WHERE object_id=?",
+                          ("ko-a",)).fetchone()["t"]
+        ty_b = db.execute("SELECT typeof(vector) t FROM knowledge_embeddings WHERE object_id=?",
+                          ("ko-b",)).fetchone()["t"]
+    assert ty_a == "blob" and ty_b == "blob"
+
+
+def test_main_vectors_to_blob_requires_notebook_or_all(repo, capsys):
+    rc = bi.main(["vectors-to-blob"])
+    assert rc == 2
+    assert "vectors-to-blob" in capsys.readouterr().err
+
+
+def test_main_vectors_to_blob_end_to_end(repo, capsys):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    rc = bi.main(["vectors-to-blob", "--notebook-id", nb_id])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "vectors-to-blob done" in out
+    with repo._connect() as db:
+        ty = db.execute("SELECT typeof(vector) t FROM knowledge_embeddings WHERE object_id=?",
+                        ("ko-1",)).fetchone()["t"]
+    assert ty == "blob"
+
+
+def test_main_vectors_to_blob_does_not_require_embedder_configured(repo, tmp_path, monkeypatch, capsys):
+    """Pure format conversion — must work even when EMBED_* is unset (no new
+    vectors are computed, only re-encoded), unlike ingest/kg/embed phases."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")  # build with EMBED configured
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    monkeypatch.setenv("EMBED_PROVIDER", "")  # main() builds a fresh unconfigured repo
+    rc = bi.main(["vectors-to-blob", "--notebook-id", nb_id])
+    assert rc == 0
+    with repo._connect() as db:
+        ty = db.execute("SELECT typeof(vector) t FROM knowledge_embeddings WHERE object_id=?",
+                        ("ko-1",)).fetchone()["t"]
+    assert ty == "blob"
+
+
+def test_arg_parser_vectors_to_blob_phase():
+    args = bi.build_arg_parser().parse_args(["vectors-to-blob", "--notebook-id", "nb-x"])
+    assert args.phase == "vectors-to-blob"
+    assert args.all_notebooks is False
+
+    args2 = bi.build_arg_parser().parse_args(["vectors-to-blob", "--all-notebooks"])
+    assert args2.all_notebooks is True
+
+
+def test_backfill_does_not_change_vector_matrix_version_key(repo):
+    """_vector_matrix's cache version is (COUNT, MAX(created_at)) — backfill
+    rewrites vector bytes in place without touching created_at, so the version
+    tuple is unchanged after backfill. This is benign because the content is
+    unchanged (same vectors, new encoding), documented in the report."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    with repo._connect() as db:
+        ver_before = db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+            "FROM knowledge_embeddings WHERE notebook_id=?", (nb_id,)).fetchone()
+        ver_before = (ver_before["c"], ver_before["ts"])
+
+    bi.run_vectors_to_blob(repo, nb_id, all_notebooks=False)
+
+    with repo._connect() as db:
+        ver_after = db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+            "FROM knowledge_embeddings WHERE notebook_id=?", (nb_id,)).fetchone()
+        ver_after = (ver_after["c"], ver_after["ts"])
+    assert ver_before == ver_after

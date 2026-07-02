@@ -1,23 +1,50 @@
 """Per-notebook vector matrices for fast, low-memory retrieval.
 
-Vectors live in SQLite as JSON text. Loading thousands of them as Python float
-lists blows up memory (each float is a ~24-byte Python object). This module
-streams them into ONE L2-normalized float32 numpy matrix (~4 bytes/float), so
+Vectors live in SQLite either as legacy JSON text or (new writes / backfilled
+rows) as raw float32 BLOBs (`encode_vector`/`decode_vector` below). BLOB rows
+skip json.loads entirely — `np.frombuffer` reinterprets the bytes in place,
+which is the dominant win at scale (490k x 1024-dim rows: JSON parsing is the
+serial bottleneck of a matrix load). This module streams whichever format a
+row has into ONE L2-normalized float32 numpy matrix (~4 bytes/float), so
 per-query cosine similarity is a single matmul with low, bounded memory.
 """
 from __future__ import annotations
 
 import json
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 
 
+def encode_vector(vec) -> bytes:
+    """Encode a vector (list/tuple/ndarray of floats) as a raw float32 BLOB.
+    This is the canonical write-path format — every embeddings INSERT/UPDATE
+    should store `encode_vector(vec)` instead of `json.dumps(vec)`."""
+    return np.asarray(vec, dtype=np.float32).tobytes()
+
+
+def decode_vector(raw: Union[bytes, bytearray, memoryview, str, None]) -> Optional[np.ndarray]:
+    """Decode a `vector` column value regardless of stored format:
+      - bytes/bytearray/memoryview (new BLOB rows) -> np.frombuffer(dtype=float32),
+        copied so the array can outlive the source buffer/row.
+      - str (legacy JSON rows) -> json.loads then np.asarray(dtype=float32).
+      - None/empty -> None.
+    Raises nothing on malformed input — callers that need skip-on-error
+    semantics should catch around this call (mirrors build_matrix's existing
+    try/except skip behavior)."""
+    if raw is None or (isinstance(raw, (str, bytes, bytearray, memoryview)) and len(raw) == 0):
+        return None
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return np.frombuffer(raw, dtype=np.float32).copy()
+    return np.asarray(json.loads(raw), dtype=np.float32)
+
+
 def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0) -> Tuple[List[str], np.ndarray]:
-    """rows: iterable of (id, json_vector_text). Returns (ids, normalized float32
-    matrix [N, dim]). Rows with empty/invalid/wrong-dim vectors are skipped.
-    Each vector is parsed straight to float32 and stored L2-normalized — no Python
-    float lists are retained.
+    """rows: iterable of (id, vector_raw) where vector_raw is either legacy JSON
+    text or a raw float32 BLOB (bytes/memoryview) — see `decode_vector`. Returns
+    (ids, normalized float32 matrix [N, dim]). Rows with empty/invalid/wrong-dim
+    vectors are skipped. Each vector is parsed straight to float32 and stored
+    L2-normalized — no Python float lists are retained.
 
     n_hint: optional upper-bound estimate of the number of rows (e.g. a COUNT(*)
     the caller already ran). When given, this preallocates one (n_hint, dim)
@@ -52,8 +79,10 @@ def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0) -> Tuple[List
         if not raw:
             continue
         try:
-            arr = np.asarray(json.loads(raw), dtype=np.float32)
+            arr = decode_vector(raw)
         except Exception:  # noqa: BLE001 — skip unparseable rows
+            continue
+        if arr is None:
             continue
         if arr.ndim != 1 or arr.size == 0:
             continue

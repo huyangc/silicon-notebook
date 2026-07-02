@@ -9,6 +9,7 @@ from collections import defaultdict
 import numpy as np
 
 from app.services.kg_merge import cluster_concepts, _discriminative_conflict, _norm
+from app.services.vector_index import decode_vector
 
 DB = "/Users/hzf/workspace/silicon_notebook/.local/silicon_notebook.db"
 NB = "nb-012fb94249"
@@ -41,7 +42,11 @@ crows = con.execute(
 vrows = con.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (NB,)).fetchall()
 con.close()
 concepts = [{"object_id": r["id"], "name": json.loads(r["payload"] or "{}").get("name", "")} for r in crows]
-vectors = {r["object_id"]: json.loads(r["vector"]) for r in vrows}
+vectors = {}
+for r in vrows:
+    arr = decode_vector(r["vector"])
+    if arr is not None:
+        vectors[r["object_id"]] = arr.tolist()
 vectors = {k: v for k, v in vectors.items() if len(v) == DIM}
 print(f"  concepts={len(concepts)}  with_vec={len(vectors)}")
 

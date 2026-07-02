@@ -2802,11 +2802,12 @@ class SQLiteRepository:
                 rows.extend(part)
         now = _now()
         if rows:
+            from app.services.vector_index import encode_vector
             with self._write() as db:
                 db.executemany(
                     "INSERT OR REPLACE INTO element_embeddings "
                     "(element_id, source_id, notebook_id, vector, created_at) VALUES (?,?,?,?,?)",
-                    [(eid, source_id, notebook_id, json.dumps(vec), now) for eid, vec in rows],
+                    [(eid, source_id, notebook_id, encode_vector(vec), now) for eid, vec in rows],
                 )
         self.event_log.logger.info(
             "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
@@ -2829,6 +2830,7 @@ class SQLiteRepository:
             vector = self.embedder.embed_query(text[:2000])
         except Exception:
             return
+        from app.services.vector_index import encode_vector
         with self._write() as db:
             db.execute(
                 """
@@ -2836,7 +2838,7 @@ class SQLiteRepository:
                 (object_id, notebook_id, vector, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (object_id, notebook_id, json.dumps(vector), _now()),
+                (object_id, notebook_id, encode_vector(vector), _now()),
             )
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
@@ -2881,11 +2883,12 @@ class SQLiteRepository:
                 rows.extend(part)
         if not rows:
             return
+        from app.services.vector_index import encode_vector
         now = _now()
         with self._write() as db:
             db.executemany(
                 "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                [(oid, notebook_id, json.dumps(vec), now) for oid, vec in rows],
+                [(oid, notebook_id, encode_vector(vec), now) for oid, vec in rows],
             )
 
     def _embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
@@ -2923,11 +2926,12 @@ class SQLiteRepository:
                 rows.extend(part)
         if not rows:
             return
+        from app.services.vector_index import encode_vector
         now = _now()
         with self._write() as db:
             db.executemany(
                 "INSERT OR REPLACE INTO relation_embeddings (relation_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                [(rid, notebook_id, json.dumps(vec), now) for rid, vec in rows])
+                [(rid, notebook_id, encode_vector(vec), now) for rid, vec in rows])
 
     def _build_chunks_for_source(self, source_id: str) -> None:
         """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
@@ -3016,11 +3020,12 @@ class SQLiteRepository:
                 out.extend(part)
         if not out:
             return
+        from app.services.vector_index import encode_vector
         now = _now()
         with self._write() as db:
             db.executemany(
                 "INSERT OR REPLACE INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
-                [(cid, notebook_id, json.dumps(v), now) for cid, v in out])
+                [(cid, notebook_id, encode_vector(v), now) for cid, v in out])
 
     def _knowledge_vectors(
         self,
@@ -3031,15 +3036,19 @@ class SQLiteRepository:
         """Map object_id -> payload embedding. Lazily backfills missing vectors
         for the given objects (one-time per object) so pre-existing / seed
         knowledge also gains payload-level semantic recall."""
+        from app.services.vector_index import decode_vector
+
         rows = db.execute(
             "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id = ?",
             (notebook_id,),
         ).fetchall()
-        vectors: Dict[str, List[float]] = {
-            row["object_id"]: json.loads(row["vector"])
-            for row in rows
-            if row["vector"]
-        }
+        vectors: Dict[str, List[float]] = {}
+        for row in rows:
+            if not row["vector"]:
+                continue
+            arr = decode_vector(row["vector"])
+            if arr is not None:
+                vectors[row["object_id"]] = arr.tolist()
         if not self.settings.embedder_configured:
             return vectors
         pending_ids, pending_texts = [], []
@@ -3057,6 +3066,7 @@ class SQLiteRepository:
             new_vectors = self.embedder.embed_texts(pending_texts)
         except Exception:
             return vectors  # backfill best-effort; never block search
+        from app.services.vector_index import encode_vector
         now = _now()
         for object_id, vector in zip(pending_ids, new_vectors):
             vectors[object_id] = vector
@@ -3066,7 +3076,7 @@ class SQLiteRepository:
                 (object_id, notebook_id, vector, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (object_id, notebook_id, json.dumps(vector), now),
+                (object_id, notebook_id, encode_vector(vector), now),
             )
         return vectors
 
@@ -3909,12 +3919,13 @@ class SQLiteRepository:
                         "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
                         "WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
                 # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量)。
+                from app.services.vector_index import decode_vector
                 dim = self.settings.embed_dim
                 vecs = {}
                 for r in vrows:
-                    v = json.loads(r["vector"])
-                    if len(v) == dim:
-                        vecs[r["object_id"]] = v
+                    arr = decode_vector(r["vector"])
+                    if arr is not None and arr.size == dim:
+                        vecs[r["object_id"]] = arr.tolist()
                 existing_items = [{"object_id": r["id"],
                                    "name": json.loads(r["payload"] or "{}").get("name", "")} for r in ex]
                 new_vecs = {o["object_id"]: vecs[o["object_id"]] for o in new_objs if o["object_id"] in vecs}
@@ -4323,11 +4334,14 @@ class SQLiteRepository:
         embeddings: dict | None = None
         if vec_rows:
             try:
-                embeddings = {
-                    r["object_id"]: json.loads(r["vector"])
-                    for r in vec_rows
-                    if r["vector"]
-                }
+                from app.services.vector_index import decode_vector
+                embeddings = {}
+                for r in vec_rows:
+                    if not r["vector"]:
+                        continue
+                    arr = decode_vector(r["vector"])
+                    if arr is not None:
+                        embeddings[r["object_id"]] = arr.tolist()
             except Exception:  # noqa: BLE001
                 self.event_log.logger.debug(
                     "resolve_notebook_conflicts: failed to load embeddings for %s; "
@@ -5139,6 +5153,8 @@ class SQLiteRepository:
         if not compute_reps:
             return {}, members_count, seed_first_name
 
+        from app.services.vector_index import decode_vector
+
         rep_sum: Dict[str, "np.ndarray"] = {}
         rep_cnt: Dict[str, int] = {}
         with self._connect() as db:
@@ -5150,10 +5166,16 @@ class SQLiteRepository:
                 "WHERE e.notebook_id=?",
                 (run_id, notebook_id))
             for r in cur:
-                v = _fast_loads(r["vector"])
-                if len(v) != embed_dim:
+                # decode_vector: bytes(BLOB)->frombuffer zero-parse, str(legacy
+                # JSON)->_fast_loads-equivalent json path. Mirrors build_matrix.
+                raw = r["vector"]
+                if isinstance(raw, (bytes, bytearray, memoryview)):
+                    arr = decode_vector(raw)
+                else:
+                    v = _fast_loads(raw)
+                    arr = np.asarray(v, dtype=np.float32)
+                if arr is None or arr.size != embed_dim:
                     continue
-                arr = np.asarray(v, dtype=np.float32)
                 seed = r["seed"]
                 if seed in rep_sum:
                     rep_sum[seed] += arr
@@ -6425,6 +6447,8 @@ class SQLiteRepository:
 
     def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
                          with_vectors: bool = True) -> List[dict]:
+        from app.services.vector_index import decode_vector
+
         rows = db.execute(
             """
             SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
@@ -6438,6 +6462,10 @@ class SQLiteRepository:
         ).fetchall()
         elements: List[dict] = []
         for row in rows:
+            vector = None
+            if with_vectors and row["vector"]:
+                arr = decode_vector(row["vector"])
+                vector = arr.tolist() if arr is not None else None
             elements.append(
                 {
                     "element_id": row["id"],
@@ -6446,8 +6474,7 @@ class SQLiteRepository:
                     "location_label": row["location_label"],
                     "element_type": row["element_type"],
                     "text": row["text"],
-                    "vector": (json.loads(row["vector"]) if row["vector"] else None)
-                    if with_vectors else None,
+                    "vector": vector,
                 }
             )
         return elements
@@ -7315,7 +7342,7 @@ class SQLiteRepository:
             manifest fields derived from it are computed.
 
         `on_stage`: optional callback invoked as `(stage_name, latency_ms)`
-        once per stage (the same 8 stages as the `scale_index_build` events:
+        once per stage (the same 9 stages as the `scale_index_build` events:
         kg_matrix/ann_build/synonym/gather/transition/chunk_matrix/viz_arrays/
         persist, plus a final total), right when that stage's timing is
         recorded. Lets a CLI caller (batch_ingest) print real-time per-stage
@@ -7523,7 +7550,7 @@ class SQLiteRepository:
             # after this dict is serialized to manifest.json by save_scale_index
             # below). The RETURNED manifest gets persist+total appended after
             # save_scale_index returns — see below. Full picture either way is
-            # in the `scale_index_build` events (8 stages incl. persist/total).
+            # in the `scale_index_build` events (9 stages incl. persist/total).
             "build_ms": dict(timings),
         }
         persist_started = time.perf_counter()
@@ -7568,7 +7595,7 @@ class SQLiteRepository:
         })
         _notify_stage("total", total_ms)
         # Return a manifest dict enriched with persist+total (in-memory only;
-        # the on-disk manifest.json written above intentionally only has the 5
+        # the on-disk manifest.json written above intentionally only has the 7
         # pre-persist stages, since persist's own duration can't be known
         # before the file itself is written).
         return {**saved_manifest, "build_ms": dict(timings)}
