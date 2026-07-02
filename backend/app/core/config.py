@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     # 分钟级全图折叠拖垮请求线程(真机 49 万对象库卡死的根因)。pydantic-settings v2 下
     # Field(env=...) 对新字段静默失效,必须用 validation_alias。
     viz_sync_build_max_objects: int = Field(20000, validation_alias="VIZ_SYNC_BUILD_MAX_OBJECTS")
+    # 大库(> viz_sync_build_max_objects)unified_graph 请求缺省 limit 时的服务端兜底上限。
+    # 折叠视图本就是 object 级有界核心图,防止「不传 limit」的旧前端/裸调用绕过大库守卫
+    # 落到 _unified_graph_full(全量拉取+多 GB 缓存,49 万对象库会打满 64GB 内存)。
+    viz_default_limit: int = Field(300, validation_alias="VIZ_DEFAULT_LIMIT")
     # qwen3-rerank (DashScope text-rerank) 配置
     rerank_model: str = Field("", env="RERANK_MODEL")
     rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", env="RERANK_BASE_URL")
