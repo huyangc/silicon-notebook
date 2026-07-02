@@ -4036,6 +4036,12 @@ class SQLiteRepository:
                     (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
                      r["member_object_id"], r["canonical_name"], object_type,
                      r.get("canonical_description", ""), now))
+        # P1-2: this DELETE+INSERT can land on the SAME second as a prior write to
+        # this notebook (COUNT/MAX(created_at) unchanged for that (notebook_id,
+        # object_type) slice, or even notebook-wide if this is the only cluster
+        # write) — a version-keyed cache would then serve a stale cluster_map.
+        # Explicit invalidation, not the version tuple, is what's load-bearing here.
+        self._invalidate_unified_cache(notebook_id)
 
     def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept") -> int:
         """追加写 concept_clusters(不 DELETE);member_object_id 幂等(已在则跳过)。返回新增数。"""
@@ -4054,6 +4060,16 @@ class SQLiteRepository:
                     (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"],
                      r["canonical_name"], object_type, "", now))
                 added += 1
+        # P1-2: self-invalidate rather than rely on every caller remembering to.
+        # incremental_fuse_source (the only production caller) already invalidates
+        # at its own end too — invalidation is idempotent, so this is pure defense
+        # against a future caller that forgets, and against the same-second
+        # INSERT-only-COUNT-moves-not-MAX hazard (append adds a row with `now`,
+        # which CAN still tie MAX(created_at) to an existing row's timestamp when
+        # called twice within the same second, e.g. via incremental_fuse_source's
+        # own two append_clusters calls).
+        if added:
+            self._invalidate_unified_cache(notebook_id)
         return added
 
     def incremental_fuse_source(self, notebook_id: str, source_id: str) -> None:
@@ -4069,6 +4085,17 @@ class SQLiteRepository:
                 "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
                 (notebook_id, notebook_id))
         from app.services.kg_merge import place_new_concepts, _norm
+        # P1-2: one shared cluster_map load for the whole fuse call (Tier1/Tier2
+        # concept pass below + the non-concept claim/formula/procedure pass at the
+        # end). cluster_map is cache-hit-cheap after the first call within this
+        # method (concept_clusters isn't invalidated until _invalidate_unified_cache
+        # at the very end), so this is defensive rather than a correctness
+        # requirement — but it also means we never pay the cache-lookup+version-probe
+        # overhead twice. Reusing the pre-Tier1-append snapshot for the non-concept
+        # pass is safe: canonical ids are namespaced by type-specific prefixes
+        # (K-/KL-/KF-/KP-), so place_new_concepts' collision check for claims/
+        # formulas/procedures never depends on concepts Tier1 just appended.
+        cmap = self.cluster_map(notebook_id)
         with self._connect() as db:
             new = db.execute(
                 "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
@@ -4080,7 +4107,6 @@ class SQLiteRepository:
         new_objs = [{"object_id": r["id"],
                      "name": json.loads(r["payload"] or "{}").get("name", "")} for r in new]
         if new_objs:
-            cmap = self.cluster_map(notebook_id)
             canon_names = {r["canonical_id"]: r["canonical_name"] for r in cn}
             rows = place_new_concepts(new_objs, cmap, canon_names,
                                       seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
@@ -4144,15 +4170,30 @@ class SQLiteRepository:
             if not tnew:
                 continue
             tcanon = {r["canonical_id"]: r["canonical_name"] for r in tcn}
-            trows_w = place_new_concepts(tnew, self.cluster_map(notebook_id), tcanon,
+            trows_w = place_new_concepts(tnew, cmap, tcanon,
                                          seed_fn=lambda o, _s=sfn: _s(o), id_prefix=prefix)
             self.append_clusters(notebook_id, trows_w, object_type=t)
         self._invalidate_unified_cache(notebook_id)
 
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
-        with self._connect() as db:
-            rows = db.execute("SELECT member_object_id, canonical_id FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchall()
-        return {r["member_object_id"]: r["canonical_id"] for r in rows}
+        """Cached {member_object_id: canonical_id} — one concept_clusters scan per
+        version, reused by unified_graph/viz build/kg_neighbors fallback/answer-context
+        fold/incremental_fuse_source etc. P1-2: this used to be re-scanned (ALL member
+        rows, at production scale millions) on every call of every consumer; now it's
+        version-cached like _vector_matrix/_ent_chunk_map/_elem_chunk_map. All known
+        consumers only .get() from the returned dict (never mutate it in place), so a
+        single cached dict object is safe to hand out to every caller."""
+        version = tuple(self._scale_index_version(notebook_id))
+
+        def _load():
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT member_object_id, canonical_id FROM concept_clusters WHERE notebook_id=?",
+                    (notebook_id,),
+                ).fetchall()
+            return {r["member_object_id"]: r["canonical_id"] for r in rows}
+
+        return self._vector_cache.get(f"{notebook_id}:clustermap", version, _load)
 
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
         now = _now()
@@ -4913,6 +4954,11 @@ class SQLiteRepository:
         # same-second in-place edit (e.g. review_status flip) with an unchanged
         # version tuple cannot serve a stale centrality map.
         self._vector_cache.invalidate(f"{notebook_id}:edge_centrality")
+        # cluster_map (member_object_id -> canonical_id, P1-2) — evict so a
+        # same-second concept_clusters rewrite (rename / rebuild's DELETE+INSERT,
+        # which can land COUNT and MAX(created_at) on the same values as before)
+        # with an unchanged version tuple cannot serve a stale membership map.
+        self._vector_cache.invalidate(f"{notebook_id}:clustermap")
 
     def _cluster_input_version(self, notebook_id: str) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
