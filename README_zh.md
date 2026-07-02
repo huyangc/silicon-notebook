@@ -109,19 +109,36 @@ SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 
 **没有迁移 / seed 步骤**——首次启动时后端会自建 SQLite 表结构,并创建 `.local/storage`
 与 `.local/logs` 目录,只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
-进行中的抽取后台任务,让上传卡在 `extracting`。从 `backend/` 启动,它才会加载 `.env`
-并把数据库解析到仓库根的 `.local/`。
+进行中的抽取后台任务,让上传卡在 `extracting`。
+
+所有相对路径(数据库、存储、日志、`.env`)都在**代码里锚定到仓库根**,与启动脚本
+`cd` 进哪个目录无关——启动目录从此不重要。后端首行日志会打印解析后的绝对路径
+(`paths: db=... storage=... log_dir=...`),不确定某次启动到底用的哪个 `.local/`
+时看它即可。离线 CLI(`scripts/batch_ingest.py`)与下面两种服务启动方式,解析到的
+都是同一个仓库根 `.local/`。
 
 ```bash
-# 开发 —— 前后端一起
+# 开发 —— 前后端一起(后端支持 reload)
 npm run dev
 ```
 
 ```bash
-# 生产
-( cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 )   # 置于反向代理之后
-( cd frontend && npm run build && npm run start )                              # 在 :3000 提供 UI
+# 生产 —— 先 build 前端,再同时提供两个服务(后端单进程)
+npm run start
 ```
+
+`npm run start` 调用 `scripts/prod.sh`:前端 `next build` + `next start`,后端
+`uvicorn --workers 1`,两者日志都落 `.local/logs/`。设 `SKIP_BUILD=1` 可复用已构建好
+的 `frontend/.next`(如预构建镜像场景)。可用 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT`
+覆盖监听地址/端口。
+
+> **一次性迁移注意**——如果你此前用 `npm run dev`(或手动 `cd backend && uvicorn ...`)
+> 在路径锚定上线之前的版本启动过,数据可能落在 `backend/.local` 而非仓库根的
+> `.local`。升级后二选一:①合并进去(在仓库根执行 `mv backend/.local/* .local/`,先
+> 检查有无冲突);②用绝对路径 env 显式保留原位置
+> (`SILICON_NOTEBOOK_STORAGE_DIR=/abs/path/storage`、
+> `DATABASE_URL=sqlite:////abs/path/silicon_notebook.db`——绝对 sqlite 路径注意四条
+> 斜杠)——绝对路径的 env 值永远原样尊重,不会被重新锚定。
 
 ### 4 · 验证
 

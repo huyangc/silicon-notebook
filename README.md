@@ -117,19 +117,39 @@ reachable from other machines.
 There is **no migration or seed step** — on first boot the backend creates the SQLite
 schema and the `.local/storage` and `.local/logs` directories, and seeds only the local
 user. Always run the backend **without `--reload`**: a reload restart kills in-flight
-ingestion background tasks and leaves uploads stuck at `extracting`. Start it from
-`backend/` so it loads `.env` and resolves the database to the repo-root `.local/`.
+ingestion background tasks and leaves uploads stuck at `extracting`.
+
+All relative paths (database, storage, logs, `.env`) are **anchored to the repo root in
+code**, regardless of which directory a script `cd`s into to launch a process — the
+launch directory no longer matters. The backend's first log line prints the resolved
+absolute paths (`paths: db=... storage=... log_dir=...`); check it if you're ever unsure
+which `.local/` a given launch is actually using. The offline CLI (`scripts/batch_ingest.py`)
+and both servers below all resolve to the same repo-root `.local/`.
 
 ```bash
-# Development — backend and frontend together
+# Development — backend (reload-friendly) and frontend together
 npm run dev
 ```
 
 ```bash
-# Production
-( cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 )   # behind a reverse proxy
-( cd frontend && npm run build && npm run start )                              # serves the UI on :3000
+# Production — builds the frontend, then serves both (single backend worker)
+npm run start
 ```
+
+`npm run start` runs `scripts/prod.sh`: `next build` + `next start` for the frontend,
+`uvicorn --workers 1` for the backend, both logging to `.local/logs/`. Set `SKIP_BUILD=1`
+to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
+`BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports.
+
+> **One-time migration** — if you previously launched with `npm run dev` (or manually `cd
+> backend && uvicorn ...`) on a version before path-anchoring landed, your data may be
+> sitting under `backend/.local` instead of the repo-root `.local`. Either merge it in
+> (`mv backend/.local/* .local/` from the repo root, checking for conflicts first) or keep
+> the old location by pointing at it explicitly with absolute-path env vars
+> (`SILICON_NOTEBOOK_STORAGE_DIR=/abs/path/storage`,
+> `DATABASE_URL=sqlite:////abs/path/silicon_notebook.db` — note the four slashes for an
+> absolute sqlite path) — absolute env values are always respected as-is and never
+> re-anchored.
 
 ### 4 · Verify
 
