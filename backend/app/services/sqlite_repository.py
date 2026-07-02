@@ -2278,6 +2278,11 @@ class SQLiteRepository:
                 self.event_log.logger.exception(
                     "build_notebook_kg: relink failed for %s", notebook_id
                 )
+        # Content-add settle point: enqueue an idle incremental fold if this
+        # notebook already has a scale index, so the newly-extracted sources
+        # become semantically searchable (fold only, never a fresh build).
+        # Fail-safe: helper never raises.
+        self._maybe_enqueue_scale_fold(notebook_id)
         return result
 
     def rebuild_notebook_kg(self, notebook_id: str) -> dict:
@@ -2503,6 +2508,12 @@ class SQLiteRepository:
                 summary="Parsing failed; see source error.",
                 error_message=str(exc),
             )
+        # Content-add settle point: if this notebook already has a scale index,
+        # enqueue an idle incremental fold so the new (post-watermark) source
+        # becomes semantically searchable. Idle queue coalesces batch runs (many
+        # process_source calls) into a single fold. Never builds a fresh index;
+        # helper is fail-safe (never raises).
+        self._maybe_enqueue_scale_fold(source.notebook_id)
         return self.get_source(source_id)
 
     def parse_source(self, source_id: str) -> SourceSummary:
@@ -7796,7 +7807,12 @@ class SQLiteRepository:
                 "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
         eligible = self._scale_index_eligible(notebook_id, tier=nb.tier, exists=exists, total_chunks=total_chunks)
         base = {"exists": exists, "building": building, "eligible": eligible,
-                "delta_chunks": int(delta["delta_chunks"]), "total_chunks": int(total_chunks)}
+                "delta_chunks": int(delta["delta_chunks"]), "total_chunks": int(total_chunks),
+                # N sources added since the index (post-watermark); their semantic
+                # vectors are searchable only if delta_searchable, else pending the
+                # next fold (scale_auto_fold_on_add). Present on ALL return paths.
+                "unindexed_sources": len(delta["delta_sources"]),
+                "delta_searchable": bool(self.settings.scale_search_include_delta)}
         queued = notebook_id in self._scale_idle_queue
         if building:
             base["state"] = "building"
@@ -7913,6 +7929,22 @@ class SQLiteRepository:
             return {"status": "already_building", "notebook_id": notebook_id}
         self._run_scale_op(notebook_id, mode)
         return {"status": "building", "notebook_id": notebook_id}
+
+    def _maybe_enqueue_scale_fold(self, notebook_id: str) -> None:
+        """After content is added, if the notebook ALREADY has a scale index and
+        auto-fold is enabled, enqueue an idle incremental fold so the new
+        (post-watermark) sources get indexed and become semantically searchable
+        without a manual rebuild. Idle queue coalesces multiple adds into one
+        fold. NEVER builds a fresh index (that stays a user decision above the
+        suggest threshold). Fail-safe: never raises."""
+        if not self.settings.scale_auto_fold_on_add:
+            return
+        try:
+            if self._scale_index(notebook_id, allow_stale=True) is None:
+                return   # not indexed yet → don't auto-build; leave to user/suggest
+            self.trigger_scale_index_rebuild(notebook_id, when="idle", mode="fold")
+        except Exception:
+            self.event_log.logger.exception("auto scale-fold enqueue failed for %s", notebook_id)
 
     def maybe_auto_index(self, notebook_id: str) -> None:
         """大库自动建/重建检索索引 —— fail-open,绝不向调用方抛异常。
@@ -8846,25 +8878,29 @@ class SQLiteRepository:
         chunk_sims = {labels[int(l)]: max(0.0, 1.0 - float(d)) for l, d in zip(labs[0], dists[0])}
         cand_ids = list(chunk_sims.keys())
 
-        # ⊕ delta:水位后新增 source 的 chunk 不在存量 ANN → 暴力补召回(delta 小)。
-        try:
-            delta = self._index_delta(notebook_id)
-            if delta["delta_sources"]:
-                ph_s = ",".join("?" for _ in delta["delta_sources"])
-                with self._connect() as db:
-                    drows = db.execute(
-                        f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
-                        f"WHERE notebook_id=? AND chunk_id IN "
-                        f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                        (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
-                d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
-                d_sims = query_sims(query_vector, d_ids, d_mat) if d_ids else {}
-                for cid, s in d_sims.items():
-                    if cid not in chunk_sims:
-                        cand_ids.append(cid)
-                    chunk_sims[cid] = s
-        except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
-            self._note_model_error("chunk_ann_delta", self.settings.embed_model, exc)
+        # ⊕ delta(opt-in via scale_search_include_delta):水位后新增 source 的 chunk 不在
+        # 存量 ANN → 暴力补召回(delta 小)。默认关 —— 大库 delta 暴力不可扩展,改由
+        # scale_auto_fold_on_add 排增量 fold 把 delta 收进索引(下方 FTS 词法块始终覆盖
+        # 全部 chunk,delta 关时新内容仍词法可寻)。True 时保持强一致的暴力补召回(慢)。
+        if self.settings.scale_search_include_delta:
+            try:
+                delta = self._index_delta(notebook_id)
+                if delta["delta_sources"]:
+                    ph_s = ",".join("?" for _ in delta["delta_sources"])
+                    with self._connect() as db:
+                        drows = db.execute(
+                            f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
+                            f"WHERE notebook_id=? AND chunk_id IN "
+                            f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                            (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                    d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
+                    d_sims = query_sims(query_vector, d_ids, d_mat) if d_ids else {}
+                    for cid, s in d_sims.items():
+                        if cid not in chunk_sims:
+                            cand_ids.append(cid)
+                        chunk_sims[cid] = s
+            except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
+                self._note_model_error("chunk_ann_delta", self.settings.embed_model, exc)
 
         # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
         try:

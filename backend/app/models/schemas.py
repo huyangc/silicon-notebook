@@ -538,6 +538,8 @@ class ScaleIndexStatus(BaseModel):
     state: str = "unindexed"
     delta_chunks: int = 0
     total_chunks: int = 0
+    unindexed_sources: int = 0
+    delta_searchable: bool = False
 
 
 class RebuildScaleIndexRequest(BaseModel):

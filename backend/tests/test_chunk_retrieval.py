@@ -125,8 +125,13 @@ def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
 
 
 def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):
+    """opt-in delta brute-force: with scale_search_include_delta=True, a source
+    added AFTER the watermark (not in chunk_ann.bin) is still recalled via the
+    delta matmul path. (Default is now OFF — see test_scale_delta_policy.py — so
+    this test explicitly enables the opt-in to exercise the brute-force branch.)"""
     import json
     from app.models.schemas import NotebookCreate
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     nb = repo.create_notebook(NotebookCreate(name="base"))
     def add_source(sid, pairs, day):  # pairs: [(chunk_id, text)]
         with repo._write() as db:
