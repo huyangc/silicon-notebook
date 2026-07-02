@@ -2319,7 +2319,7 @@ class SQLiteRepository:
                 "SELECT * FROM sources WHERE notebook_id = ? ORDER BY created_at ASC",
                 (notebook_id,),
             ).fetchall()
-            return [self._source_from_row(db, row) for row in rows]
+            return self._sources_from_rows(db, rows)
 
     def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
                           q: str = "") -> PaginatedSources:
@@ -2342,7 +2342,7 @@ class SQLiteRepository:
                 f"SELECT * FROM sources {where} ORDER BY created_at ASC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             ).fetchall()
-            items = [self._source_from_row(db, row) for row in rows]
+            items = self._sources_from_rows(db, rows)
         return PaginatedSources(items=items, total_count=total, offset=offset, limit=limit)
 
     def get_source(self, source_id: str) -> SourceDetail:
@@ -6663,7 +6663,11 @@ class SQLiteRepository:
         """List promotion candidates across all notebooks (the curator sees
         everything). Defaults to the active queue (proposed + under_review);
         pass status_filter to view a single status. Denormalises payload +
-        evidence from knowledge_objects for display."""
+        evidence from knowledge_objects for display.
+
+        Batched (house pattern, see _hydrate_search_hits): one `id IN (...)`
+        knowledge_objects lookup for the whole queue instead of a per-row
+        SELECT — was N+1 (one round-trip per candidate)."""
         with self._connect() as db:
             if status_filter:
                 rows = db.execute(
@@ -6677,12 +6681,19 @@ class SQLiteRepository:
                     "WHERE status IN ('proposed','under_review') "
                     "ORDER BY created_at ASC, id ASC"
                 ).fetchall()
+            object_ids = list(dict.fromkeys(r["object_id"] for r in rows))
+            obj_by_id: Dict[str, sqlite3.Row] = {}
+            for i in range(0, len(object_ids), self._IN_CHUNK):
+                batch = object_ids[i:i + self._IN_CHUNK]
+                ph = ",".join("?" for _ in batch)
+                for r in db.execute(
+                    f"SELECT id, payload, evidence FROM knowledge_objects WHERE id IN ({ph})",
+                    batch,
+                ).fetchall():
+                    obj_by_id[r["id"]] = r
             out: List[dict] = []
             for row in rows:
-                obj = db.execute(
-                    "SELECT payload, evidence FROM knowledge_objects WHERE id=?",
-                    (row["object_id"],),
-                ).fetchone()
+                obj = obj_by_id.get(row["object_id"])
                 payload = json.loads(obj["payload"] or "{}") if obj else {}
                 evidence = (
                     [Evidence(**e) for e in json.loads(obj["evidence"] or "[]")]
@@ -11491,15 +11502,39 @@ class SQLiteRepository:
             source_status_counts=source_status_counts,
         )
 
+    # object_type -> counts-dict key mapping shared by _notebook_from_row and
+    # its batched sibling _knowledge_type_counts_for_notebooks (C5: N+1 fix —
+    # was 6 separate _count_knowledge COUNT(*) queries per notebook, one per
+    # object_type; a single GROUP BY object_type query gets all 6 in one
+    # round trip, restricted to USABLE_STATUSES same as the old per-type
+    # queries).
+    _NOTEBOOK_COUNT_TYPES: Dict[str, str] = {
+        "rule": "rules", "case": "cases", "checklist": "checklist_items",
+        "method": "methods", "risk": "risks", "glossary": "glossary",
+    }
+
+    def _knowledge_type_counts(self, db: sqlite3.Connection, notebook_id: str) -> Dict[str, int]:
+        """{counts-dict key: count} for the 6 knowledge object_types
+        _notebook_from_row surfaces, via ONE GROUP BY query instead of 6
+        separate _count_knowledge calls. Same USABLE_STATUSES filter and same
+        zero-default for absent types as the old per-type COUNT(*) calls."""
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        rows = db.execute(
+            f"SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
+            f"WHERE notebook_id = ? AND status IN ({placeholders}) "
+            f"GROUP BY object_type",
+            (notebook_id, *USABLE_STATUSES),
+        ).fetchall()
+        by_type = {r["object_type"]: int(r["c"]) for r in rows}
+        return {
+            key: by_type.get(otype, 0)
+            for otype, key in self._NOTEBOOK_COUNT_TYPES.items()
+        }
+
     def _notebook_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> NotebookSummary:
         counts = {
             "sources": self._count(db, "sources", "notebook_id", row["id"]),
-            "rules": self._count_knowledge(db, row["id"], "rule"),
-            "cases": self._count_knowledge(db, row["id"], "case"),
-            "checklist_items": self._count_knowledge(db, row["id"], "checklist"),
-            "methods": self._count_knowledge(db, row["id"], "method"),
-            "risks": self._count_knowledge(db, row["id"], "risk"),
-            "glossary": self._count_knowledge(db, row["id"], "glossary"),
+            **self._knowledge_type_counts(db, row["id"]),
         }
         keys = row.keys()
 
@@ -11532,6 +11567,9 @@ class SQLiteRepository:
         )
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
+        """Single-row path (get_source) — 3 point queries. list_sources /
+        list_sources_page use the batched _sources_from_rows sibling instead
+        (C5: was 3 queries * N rows per page — now 3 total per page)."""
         element_count = self._count(db, "source_elements", "source_id", row["id"])
         return SourceSummary(
             id=row["id"],
@@ -11551,6 +11589,84 @@ class SQLiteRepository:
             extraction_warning=self._extraction_warning(db, row["id"]),
             kg_extracted=self._source_has_kg(db, row["id"]),
         )
+
+    def _sources_from_rows(self, db: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[SourceSummary]:
+        """Batched sibling of _source_from_row for a PAGE of source rows (house
+        pattern, see _hydrate_search_hits): the 3 per-row lookups
+        (source_elements COUNT, latest extraction_runs error_message,
+        knowledge_objects EXISTS) each become ONE `id IN (...)` query for the
+        whole page instead of one query per row — was 3*N round-trips.
+
+        extraction_warning tie-break equivalence: when two extraction_runs
+        rows for the same source share `created_at` (rare but possible at
+        second-granularity timestamps), a per-row "ORDER BY created_at DESC
+        LIMIT 1" and this batched "ORDER BY source_id, created_at DESC" over
+        the SAME idx_extraction_runs_source_created index resolve the tie
+        identically — both walk the same physical index order, so the first
+        row seen per source_id in the batched scan is the same row LIMIT 1
+        would have picked per-id (verified: both orderings are driven by the
+        same btree, whose tie order is deterministic and independent of
+        whether the WHERE clause scopes one id or many via IN)."""
+        if not rows:
+            return []
+        source_ids = [r["id"] for r in rows]
+        element_counts: Dict[str, int] = {}
+        kg_extracted_ids: set = set()
+        latest_error: Dict[str, str] = {}
+        for i in range(0, len(source_ids), self._IN_CHUNK):
+            batch = source_ids[i:i + self._IN_CHUNK]
+            ph = ",".join("?" for _ in batch)
+            for r in db.execute(
+                f"SELECT source_id, COUNT(*) AS c FROM source_elements "
+                f"WHERE source_id IN ({ph}) GROUP BY source_id", batch,
+            ).fetchall():
+                element_counts[r["source_id"]] = int(r["c"])
+            for r in db.execute(
+                f"SELECT DISTINCT source_id FROM knowledge_objects "
+                f"WHERE source_id IN ({ph}) AND source_id != ''", batch,
+            ).fetchall():
+                kg_extracted_ids.add(r["source_id"])
+            for r in db.execute(
+                f"SELECT source_id, error_message FROM extraction_runs "
+                f"WHERE source_id IN ({ph}) ORDER BY source_id, created_at DESC",
+                batch,
+            ).fetchall():
+                latest_error.setdefault(r["source_id"], r["error_message"] or "")
+
+        def _warning(source_id: str) -> Optional[str]:
+            if source_id not in latest_error:
+                return None
+            m = re.search(r"windows_failed=(\d+)/(\d+)", latest_error[source_id])
+            if not m:
+                return None
+            fw = int(m.group(1))
+            if fw <= 0:
+                return None
+            tw = int(m.group(2))
+            return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
+
+        out: List[SourceSummary] = []
+        for row in rows:
+            sid = row["id"]
+            out.append(SourceSummary(
+                id=sid,
+                notebook_id=row["notebook_id"],
+                title=row["title"],
+                type=row["source_type"],
+                status=row["status"],
+                summary=row["summary"],
+                element_count=element_counts.get(sid, 0),
+                file_name=row["file_name"],
+                file_size=row["file_size"],
+                file_hash=row["file_hash"],
+                parse_status=row["parse_status"],
+                created_label=_created_label(row["created_at"]),
+                doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
+                source_url=row["source_url"] if "source_url" in row.keys() else "",
+                extraction_warning=_warning(sid),
+                kg_extracted=sid in kg_extracted_ids,
+            ))
+        return out
 
     def _extraction_warning(self, db: sqlite3.Connection, source_id: str) -> Optional[str]:
         """Surface a user-facing warning when the latest KG extraction left

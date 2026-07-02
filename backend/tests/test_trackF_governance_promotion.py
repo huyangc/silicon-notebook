@@ -10,7 +10,7 @@ import json
 import pytest
 
 from app.core.config import Settings
-from app.models.schemas import KnowledgeUpdate, NotebookCreate
+from app.models.schemas import Evidence, KnowledgeUpdate, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import USABLE_STATUSES, SQLiteRepository
 
@@ -132,6 +132,81 @@ class TestPromotionStateMachine:
         cand = next(c for c in queue if c["object_id"] == oid)
         assert cand["payload"]["name"] == "the denormalised payload claim"
         assert isinstance(cand["evidence"], list)
+
+    def test_list_promotion_queue_batches_object_lookup_not_n_plus_1(self, repo, monkeypatch):
+        """C5: list_promotion_queue must issue ONE batched knowledge_objects
+        lookup for the whole queue, not one SELECT per candidate row (was N+1).
+        Spy on connection.execute call count for the notebook_id-independent
+        knowledge_objects payload query."""
+        nb = _make_personal_nb(repo)
+        _make_base_nb(repo)
+        oids = [_insert_claim(repo, nb.id, f"claim {i}") for i in range(12)]
+        for oid in oids:
+            repo.propose_promotion(nb.id, oid)
+
+        # sqlite3.Connection is a C type — its .execute cannot be monkeypatched
+        # directly — so wrap at the repo._connect() boundary instead.
+        calls = {"knowledge_objects_selects": 0}
+        orig_connect = repo._connect
+
+        class _SpyConn:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *a, **kw):
+                if "FROM knowledge_objects" in sql and "payload" in sql:
+                    calls["knowledge_objects_selects"] += 1
+                return self._inner.execute(sql, *a, **kw)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        monkeypatch.setattr(repo, "_connect", lambda: _SpyConn(orig_connect()))
+        queue = repo.list_promotion_queue()
+        assert len(queue) == 12
+        assert calls["knowledge_objects_selects"] == 1, (
+            f"expected exactly 1 batched knowledge_objects query for 12 "
+            f"candidates, got {calls['knowledge_objects_selects']} (N+1 regression)")
+
+    def test_list_promotion_queue_equals_per_row_oracle(self, repo):
+        """Output equality oracle: batched list_promotion_queue must return the
+        SAME payload/evidence per candidate as the old per-row-SELECT
+        implementation (recomputed here verbatim)."""
+        nb = _make_personal_nb(repo)
+        _make_base_nb(repo)
+        oids = [_insert_claim(repo, nb.id, f"oracle claim {i}") for i in range(5)]
+        for oid in oids:
+            repo.propose_promotion(nb.id, oid)
+
+        got = repo.list_promotion_queue()
+
+        with repo._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM promotion_candidates "
+                "WHERE status IN ('proposed','under_review') "
+                "ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+            oracle = []
+            for row in rows:
+                obj = db.execute(
+                    "SELECT payload, evidence FROM knowledge_objects WHERE id=?",
+                    (row["object_id"],),
+                ).fetchone()
+                payload = json.loads(obj["payload"] or "{}") if obj else {}
+                evidence = (
+                    [Evidence(**e) for e in json.loads(obj["evidence"] or "[]")]
+                    if obj else []
+                )
+                oracle.append(repo._promotion_row_to_dict(row, payload=payload, evidence=evidence))
+
+        assert got == oracle
 
     def test_approve_promotion_copies_object_to_base_corpus(self, repo):
         nb = _make_personal_nb(repo)
