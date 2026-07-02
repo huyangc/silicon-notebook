@@ -8070,33 +8070,37 @@ class SQLiteRepository:
                 empty = np.empty(0, dtype=np.int32)
                 return [], (empty, empty, np.empty(0, dtype=np.float32)), [], [], {}
             return [], [], [], [], {}
-        src_clause, src_params = "", ()
+        clauses = [("", ())]
         if scoped:
-            ph_s = ",".join("?" for _ in source_ids)
-            src_clause = f" AND source_id IN ({ph_s})"
-            src_params = tuple(source_ids)
+            clauses = [
+                (f" AND source_id IN ({','.join('?' for _ in b)})", tuple(b))
+                for b in self._in_batches(source_ids)
+            ]
         kg_nodes: Dict[str, dict] = {}
         relations: list = []
         chunk_ids: list = []
         cluster_groups: Dict[str, list] = {}
 
         with self._connect() as db:
-            for r in db.execute(
-                    f"SELECT id, object_type, payload FROM knowledge_objects "
-                    f"WHERE notebook_id=? AND status IN ({ph}){src_clause}",
-                    (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
-                kg_nodes[r["id"]] = {
-                    "type": r["object_type"],
-                    "name": json.loads(r["payload"] or "{}").get("name", ""),
-                }
-            for r in db.execute(
-                    f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                    f"WHERE notebook_id=?{src_clause}", (notebook_id, *src_params)).fetchall():
-                relations.append(dict(r))
-            for r in db.execute(
-                    f"SELECT id FROM chunks WHERE notebook_id=?{src_clause}",
-                    (notebook_id, *src_params)).fetchall():
-                chunk_ids.append(r["id"])
+            for src_clause, src_params in clauses:
+                for r in db.execute(
+                        f"SELECT id, object_type, payload FROM knowledge_objects "
+                        f"WHERE notebook_id=? AND status IN ({ph}){src_clause}",
+                        (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
+                    kg_nodes[r["id"]] = {
+                        "type": r["object_type"],
+                        "name": json.loads(r["payload"] or "{}").get("name", ""),
+                    }
+            for src_clause, src_params in clauses:
+                for r in db.execute(
+                        f"SELECT source_object_id, target_object_id FROM knowledge_relations "
+                        f"WHERE notebook_id=?{src_clause}", (notebook_id, *src_params)).fetchall():
+                    relations.append(dict(r))
+            for src_clause, src_params in clauses:
+                for r in db.execute(
+                        f"SELECT id FROM chunks WHERE notebook_id=?{src_clause}",
+                        (notebook_id, *src_params)).fetchall():
+                    chunk_ids.append(r["id"])
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
                     "WHERE notebook_id=?", (notebook_id,)).fetchall():
@@ -8652,13 +8656,17 @@ class SQLiteRepository:
             def _delta_vecs(table, col, ids):
                 if not ids:
                     return [], []
-                ph = ",".join("?" for _ in ids)
-                with self._connect() as db:
-                    rows = db.execute(
-                        f"SELECT {col} AS vid, vector FROM {table} "
-                        f"WHERE notebook_id=? AND {col} IN ({ph})",
-                        (notebook_id, *ids)).fetchall()
-                return build_matrix((r["vid"], r["vector"]) for r in rows)
+
+                def _rows():
+                    with self._connect() as db:
+                        for batch in self._in_batches(ids):
+                            ph = ",".join("?" for _ in batch)
+                            for r in db.execute(
+                                    f"SELECT {col} AS vid, vector FROM {table} "
+                                    f"WHERE notebook_id=? AND {col} IN ({ph})",
+                                    (notebook_id, *batch)).fetchall():
+                                yield r["vid"], r["vector"]
+                return build_matrix(_rows())
 
             # ANN(KG 对象):增量 add delta 对象向量
             kg_vids, kg_mat = _delta_vecs("knowledge_embeddings", "object_id", list(kg_set))
@@ -8686,12 +8694,14 @@ class SQLiteRepository:
             # 镜像上面 chunk ANN 的 fold 处理,delta relation id 取自水位后
             # source(与 _relation_ann_candidates 的 delta 暴力分支同一 IN 条件)。
             if idx.relation_ann_path and idx.relation_ann_labels is not None:
+                d_relation_ids = []
                 with self._connect() as db:
-                    ph_s = ",".join("?" for _ in delta["delta_sources"])
-                    d_relation_ids = [r["id"] for r in db.execute(
-                        f"SELECT id FROM knowledge_relations "
-                        f"WHERE notebook_id=? AND source_id IN ({ph_s})",
-                        (notebook_id, *delta["delta_sources"])).fetchall()] if delta["delta_sources"] else []
+                    for batch in self._in_batches(delta["delta_sources"]):
+                        ph_s = ",".join("?" for _ in batch)
+                        d_relation_ids.extend(r["id"] for r in db.execute(
+                            f"SELECT id FROM knowledge_relations "
+                            f"WHERE notebook_id=? AND source_id IN ({ph_s})",
+                            (notebook_id, *batch)).fetchall())
                 rel_vids, rel_mat = _delta_vecs("relation_embeddings", "relation_id", d_relation_ids)
                 rann = si.add_items_to_ann(
                     idx.relation_ann_path, dim, rel_mat if len(rel_mat) else [],
@@ -8759,10 +8769,12 @@ class SQLiteRepository:
             delta_sources = sorted(s for s in cur_sources if s not in watermark)
             if not delta_sources:
                 return {"delta_sources": [], "delta_chunks": 0, "indexed": True}
-            ph = ",".join("?" for _ in delta_sources)
-            nchunks = db.execute(
-                f"SELECT COUNT(*) c FROM chunks WHERE notebook_id=? AND source_id IN ({ph})",
-                (notebook_id, *delta_sources)).fetchone()["c"]
+            nchunks = 0
+            for batch in self._in_batches(delta_sources):
+                ph = ",".join("?" for _ in batch)
+                nchunks += db.execute(
+                    f"SELECT COUNT(*) c FROM chunks WHERE notebook_id=? AND source_id IN ({ph})",
+                    (notebook_id, *batch)).fetchone()["c"]
         return {"delta_sources": delta_sources, "delta_chunks": int(nchunks), "indexed": True}
 
     def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
@@ -9681,6 +9693,14 @@ class SQLiteRepository:
     # placeholder lists (mirrors the ~900 convention used elsewhere in this file).
     _IN_CHUNK = 900
 
+    def _in_batches(self, ids):
+        """把 id 列表切成 ≤_IN_CHUNK 的批(去重保序)。所有把 id 列表内联成
+        SQL IN 占位符的 delta 位点必须经它——SQLite 3.32+ 变量上限 32,766,
+        生产 48,739 delta source 已真实打爆(too many SQL variables)。"""
+        ids = list(dict.fromkeys(ids))
+        for i in range(0, len(ids), self._IN_CHUNK):
+            yield ids[i:i + self._IN_CHUNK]
+
     def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str,
                               relation_ids: Optional[List[str]] = None) -> List[dict]:
         """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
@@ -9756,13 +9776,15 @@ class SQLiteRepository:
         try:
             delta = self._index_delta(notebook_id)
             if delta["delta_sources"] and query_vector is not None:
-                ph_s = ",".join("?" for _ in delta["delta_sources"])
+                drows = []
                 with self._connect() as db:
-                    drows = db.execute(
-                        f"SELECT relation_id AS vid, vector FROM relation_embeddings "
-                        f"WHERE notebook_id=? AND relation_id IN "
-                        f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                        (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                    for batch in self._in_batches(delta["delta_sources"]):
+                        ph_s = ",".join("?" for _ in batch)
+                        drows.extend(db.execute(
+                            f"SELECT relation_id AS vid, vector FROM relation_embeddings "
+                            f"WHERE notebook_id=? AND relation_id IN "
+                            f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                            (notebook_id, notebook_id, *batch)).fetchall())
                 d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
                 for rid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
                     sims[rid] = s
@@ -9921,13 +9943,15 @@ class SQLiteRepository:
         try:
             delta = self._index_delta(notebook_id)
             if delta["delta_sources"] and query_vector is not None:
-                ph_s = ",".join("?" for _ in delta["delta_sources"])
+                drows = []
                 with self._connect() as db:
-                    drows = db.execute(
-                        f"SELECT object_id AS vid, vector FROM knowledge_embeddings "
-                        f"WHERE notebook_id=? AND object_id IN "
-                        f"(SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                        (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                    for batch in self._in_batches(delta["delta_sources"]):
+                        ph_s = ",".join("?" for _ in batch)
+                        drows.extend(db.execute(
+                            f"SELECT object_id AS vid, vector FROM knowledge_embeddings "
+                            f"WHERE notebook_id=? AND object_id IN "
+                            f"(SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                            (notebook_id, notebook_id, *batch)).fetchall())
                 d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
                 for oid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
                     sims[oid] = s
@@ -10261,13 +10285,15 @@ class SQLiteRepository:
             try:
                 delta = self._index_delta(notebook_id)
                 if delta["delta_sources"]:
-                    ph_s = ",".join("?" for _ in delta["delta_sources"])
+                    drows = []
                     with self._connect() as db:
-                        drows = db.execute(
-                            f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
-                            f"WHERE notebook_id=? AND chunk_id IN "
-                            f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                            (notebook_id, notebook_id, *delta["delta_sources"])).fetchall()
+                        for batch in self._in_batches(delta["delta_sources"]):
+                            ph_s = ",".join("?" for _ in batch)
+                            drows.extend(db.execute(
+                                f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
+                                f"WHERE notebook_id=? AND chunk_id IN "
+                                f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                                (notebook_id, notebook_id, *batch)).fetchall())
                     d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
                     d_sims = query_sims(query_vector, d_ids, d_mat) if d_ids else {}
                     for cid, s in d_sims.items():
