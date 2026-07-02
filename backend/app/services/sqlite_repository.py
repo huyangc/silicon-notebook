@@ -10013,6 +10013,22 @@ class SQLiteRepository:
                     notebook_id, query_vector, idx, self.settings.chunk_recall)
                 if not cand_sims:
                     cand_sims = None   # fail-open → 全量
+        if cand_sims is None and not self.notebook_copy_stats(notebook_id)["copyable"]:
+            # 大库拿不到 ANN 候选(未建索引/ANN 打不开/维度失配/embed 失败)——
+            # 一个原则:绝不全量暴力(全表 json 解析 + 全量分词 + GB 级矩阵,
+            # 49 万对象生产实测数十分钟)。FTS 词法有界兜底:kg_objects_fts 覆盖
+            # 全部对象(含 delta),候选的语义分仍由下方按候选 evidence 元素向量
+            # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
+            from app.services.kg.search import fts_search
+            with self._connect() as db:
+                lex = fts_search(db, notebook_id, query, k=self.settings.chunk_recall)
+            self.event_log.emit({
+                "kind": "kg_bruteforce_refused", "notebook_id": notebook_id,
+                "site": "_retrieve_scored", "lexical_candidates": len(lex),
+            })
+            if not lex:
+                return []
+            cand_sims = {h["object_id"]: 0.0 for h in lex}
         from app.services.vector_index import query_sims, build_matrix
         with self._connect() as db:
             id_filter = set(cand_sims.keys()) if cand_sims is not None else None

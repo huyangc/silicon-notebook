@@ -281,8 +281,18 @@ def _spy_fed_rx_graph(repo, monkeypatch):
 def test_ask_graph_large_notebook_refuses_graph_walk(repo, monkeypatch):
     """大库(copyable=False)graph 模式端到端:PPR 分支空手(scale_ppr 无索引
     bail + Fix1 拒绝 rustworkx 回退)后,ask_graph 不得再触发 _federated_rx_graph
-    全量建图 —— 早退带解释的降级回答(deterministic)+ graph_walk_refused 事件。"""
+    全量建图 —— 早退带解释的降级回答(deterministic)+ graph_walk_refused 事件。
+
+    大库分支下 federated_retrieve/_retrieve_scored 也已改走 FTS 词法有界兜底
+    (kg_bruteforce_refused 守卫);_seed_two_doc_moe 用裸 SQL 插入 knowledge_objects,
+    绕过了真实入库管线维护 kg_objects_fts 的那一步,故这里手工补一行 FTS 记录
+    (镜像真实入库行为),让 federated_retrieve 仍能词法命中种子对象、
+    ask_graph 得以推进到本测试真正要验证的 graph_walk_refused 守卫,
+    而不是提前落到"无匹配知识"的更早退出分支。"""
     nb = _seed_two_doc_moe(repo)
+    with repo._write() as db:
+        db.execute("INSERT INTO kg_objects_fts (object_id, notebook_id, name) VALUES (?,?,?)",
+                   ("e1", nb.id, "DeepSeek MoE 架构?"))
     monkeypatch.setattr(repo, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
     called = _spy_fed_rx_graph(repo, monkeypatch)

@@ -214,3 +214,33 @@ def test_fold_threshold_env_alias(monkeypatch, tmp_path):
     monkeypatch.setenv("SCALE_FOLD_MAX_DELTA_SOURCES", "7")
     from app.core.config import Settings
     assert Settings().scale_fold_max_delta_sources == 7
+
+
+# ── 大库无 ANN 候选拒绝全量暴力(FTS 词法有界兜底)───────────────────────────
+
+
+def test_big_unindexed_lib_refuses_bruteforce(repo, monkeypatch):
+    """大库 + 无索引:不做全量矩阵加载,FTS 词法兜底 + kg_bruteforce_refused 事件。"""
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    _sid, _cid, oid = _insert_source_with_object(repo, nb.id, 1)   # payload 名 'obj 1'
+    with repo._write() as db:
+        db.execute("INSERT INTO kg_objects_fts (notebook_id, object_id, name) VALUES (?,?,?)",
+                   (nb.id, oid, "obj 1"))
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)   # 一切皆「大」
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
+
+    def _boom(*a, **k):
+        raise AssertionError("大库不得触发全量向量矩阵加载")
+    monkeypatch.setattr(repo, "_vector_matrix", _boom)
+
+    hits = repo._retrieve_scored(nb.id, "obj 1")
+    assert oid in {h.object_id for h in hits}          # FTS 词法兜底仍可命中
+    assert any(e.get("kind") == "kg_bruteforce_refused" for e in events)
+
+
+def test_small_lib_bruteforce_unchanged(repo):
+    nb = repo.create_notebook(NotebookCreate(name="small"))
+    _sid, _cid, oid = _insert_source_with_object(repo, nb.id, 2)
+    hits = repo._retrieve_scored(nb.id, "obj 2")       # 小库全量路径不受影响
+    assert oid in {h.object_id for h in hits}
