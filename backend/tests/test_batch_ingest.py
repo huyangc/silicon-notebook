@@ -835,3 +835,195 @@ def test_backfill_does_not_change_vector_matrix_version_key(repo):
             "FROM knowledge_embeddings WHERE notebook_id=?", (nb_id,)).fetchone()
         ver_after = (ver_after["c"], ver_after["ts"])
     assert ver_before == ver_after
+
+
+# --- vectors-to-blob: --workers parallel parse/encode ------------------------
+
+def test_parse_encode_worker_is_module_level_pure_function():
+    """_parse_encode must be a top-level function (spawn-safe: picklable, no
+    closures) taking (id, vector_raw_text) and returning (id, blob_bytes)."""
+    import inspect
+    assert inspect.isfunction(bi._parse_encode)
+    assert bi._parse_encode.__module__ == bi.__name__
+    assert bi._parse_encode.__qualname__ == "_parse_encode"  # not nested/closure
+
+
+def test_parse_encode_worker_valid_json():
+    vid, blob = bi._parse_encode(("ko-1", json.dumps([1.0, 2.0, 3.0])))
+    assert vid == "ko-1"
+    import numpy as np
+    assert np.frombuffer(blob, dtype=np.float32).tolist() == [1.0, 2.0, 3.0]
+
+
+def test_parse_encode_worker_corrupt_json_returns_sentinel():
+    vid, blob = bi._parse_encode(("ko-bad", "not-valid-json{{{"))
+    assert vid == "ko-bad"
+    assert blob == b""
+
+
+def test_parse_encode_worker_empty_string_returns_sentinel():
+    vid, blob = bi._parse_encode(("ko-empty", ""))
+    assert vid == "ko-empty"
+    assert blob == b""
+
+
+def _seed_many_json_vectors(repo, table, id_col, nb_id, n, dim=8, bad_every=None, prefix="ko"):
+    """Seed n legacy JSON-text vector rows (plus optional corrupt rows every
+    `bad_every`-th index) for parallel-vs-serial comparison tests."""
+    rows = []
+    with repo._write() as db:
+        for i in range(n):
+            vid = f"{prefix}-{i}"
+            if bad_every and i % bad_every == 0:
+                text = "not-valid-json{{{"
+            else:
+                vec = [float(i), float(i + 1), float(dim - i % dim)]
+                text = json.dumps(vec)
+            db.execute(
+                f"INSERT INTO {table} ({id_col},notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                (vid, nb_id, text, "2026-01-01T00:00:00"))
+            rows.append(vid)
+    return rows
+
+
+def test_backfill_parallel_output_byte_identical_to_serial(repo):
+    """workers=2 must produce byte-identical BLOB rows to the workers=1 (default)
+    serial path, on a mixed fixture of valid + corrupt rows."""
+    nb_serial = bi.ensure_notebook(repo, None, "nb-serial")
+    nb_par = bi.ensure_notebook(repo, None, "nb-par")
+    for i in range(37):
+        _seed_node(repo, nb_serial, f"kos-{i}")
+        _seed_node(repo, nb_par, f"kop-{i}")
+    _seed_many_json_vectors(repo, "knowledge_embeddings", "object_id", nb_serial, 37,
+                            bad_every=5, prefix="kos")
+    _seed_many_json_vectors(repo, "knowledge_embeddings", "object_id", nb_par, 37,
+                            bad_every=5, prefix="kop")
+
+    out_serial = bi._backfill_table_to_blob(repo, nb_serial, "knowledge_embeddings", "object_id",
+                                            batch_size=10, workers=1)
+    out_par = bi._backfill_table_to_blob(repo, nb_par, "knowledge_embeddings", "object_id",
+                                         batch_size=10, workers=2)
+
+    assert out_serial["converted"] == out_par["converted"] == 37
+    assert out_serial["skipped_bad"] == out_par["skipped_bad"]
+
+    with repo._connect() as db:
+        # strip the nb-specific prefix ("kos-"/"kop-") so both sides compare on
+        # the same logical index (both fixtures encode identical vector values
+        # at each index — only the id prefix differs to avoid the global
+        # knowledge_objects.id uniqueness constraint across notebooks).
+        rows_serial = {r["object_id"].split("-", 1)[1]: r["vector"] for r in db.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            (nb_serial,)).fetchall()}
+        rows_par = {r["object_id"].split("-", 1)[1]: r["vector"] for r in db.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            (nb_par,)).fetchall()}
+    assert rows_serial.keys() == rows_par.keys()
+    for k in rows_serial:
+        assert bytes(rows_serial[k]) == bytes(rows_par[k]), f"mismatch at {k}"
+
+
+def test_backfill_parallel_idempotent_second_run_converts_zero(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(20):
+        _seed_node(repo, nb_id, f"ko-{i}")
+    _seed_many_json_vectors(repo, "knowledge_embeddings", "object_id", nb_id, 20, bad_every=7)
+
+    out1 = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id",
+                                      batch_size=6, workers=2)
+    assert out1["converted"] == 20
+
+    out2 = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id",
+                                      batch_size=6, workers=2)
+    assert out2 == {"table": "knowledge_embeddings", "total": 0, "converted": 0, "skipped_bad": 0}
+
+
+def test_backfill_workers_le_1_never_imports_process_pool_executor(repo, monkeypatch):
+    """workers<=1 must take the exact current serial path — zero multiprocessing
+    machinery. Spy on ProcessPoolExecutor to assert it's never constructed."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    calls = []
+    import concurrent.futures as cf
+
+    class _SpyExecutor:
+        def __init__(self, *a, **kw):
+            calls.append((a, kw))
+            raise AssertionError("ProcessPoolExecutor must not be constructed when workers<=1")
+
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", _SpyExecutor)
+    monkeypatch.setattr(bi, "ProcessPoolExecutor", _SpyExecutor, raising=False)
+
+    out = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id", workers=1)
+    assert out["converted"] == 1
+    assert calls == []
+
+
+def test_backfill_broken_process_pool_falls_back_to_serial(repo, monkeypatch, capsys):
+    """If the pool dies mid-run (BrokenProcessPool), the batch must fall back to
+    serial parse/encode for the remaining rows rather than losing the run."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(5):
+        _seed_node(repo, nb_id, f"ko-{i}")
+    _seed_many_json_vectors(repo, "knowledge_embeddings", "object_id", nb_id, 5)
+
+    from concurrent.futures.process import BrokenProcessPool
+
+    def _broken_map(*a, **kw):
+        raise BrokenProcessPool("simulated pool crash")
+
+    monkeypatch.setattr(
+        "concurrent.futures.ProcessPoolExecutor.map", _broken_map, raising=True)
+
+    out = bi._backfill_table_to_blob(repo, nb_id, "knowledge_embeddings", "object_id",
+                                     batch_size=10, workers=2)
+    assert out["converted"] == 5
+    assert out["skipped_bad"] == 0
+    warn = capsys.readouterr().out
+    assert "fallback" in warn.lower() or "回退" in warn or "serial" in warn.lower()
+
+    with repo._connect() as db:
+        remaining_text = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_embeddings WHERE notebook_id=? AND typeof(vector)='text'",
+            (nb_id,)).fetchone()["c"]
+    assert remaining_text == 0
+
+
+def test_run_vectors_to_blob_accepts_workers_param(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    out = bi.run_vectors_to_blob(repo, nb_id, all_notebooks=False, workers=2)
+    assert out["converted"] >= 1
+
+
+def test_arg_parser_vectors_to_blob_workers_default():
+    """--workers omitted on vectors-to-blob resolves to min(8, cpu_count) at
+    dispatch time (argparse default itself may be None; main() resolves it)."""
+    args = bi.build_arg_parser().parse_args(["vectors-to-blob", "--notebook-id", "nb-x"])
+    assert args.workers is None or isinstance(args.workers, int)
+
+    args2 = bi.build_arg_parser().parse_args(
+        ["vectors-to-blob", "--notebook-id", "nb-x", "--workers", "3"])
+    assert args2.workers == 3
+
+
+def test_main_vectors_to_blob_passes_workers_through(repo, monkeypatch, capsys):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, nb_id, "ko-1")
+    _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
+
+    captured = {}
+    orig = bi.run_vectors_to_blob
+
+    def _spy(repo_, notebook_id, all_notebooks=False, workers=1):
+        captured["workers"] = workers
+        return orig(repo_, notebook_id, all_notebooks=all_notebooks, workers=workers)
+
+    monkeypatch.setattr(bi, "run_vectors_to_blob", _spy)
+    rc = bi.main(["vectors-to-blob", "--notebook-id", nb_id, "--workers", "2"])
+    assert rc == 0
+    assert captured["workers"] == 2
