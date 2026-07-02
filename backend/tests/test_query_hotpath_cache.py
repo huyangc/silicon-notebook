@@ -719,9 +719,10 @@ def test_review_queue_output_matches_uncached_oracle(repo):
 
 def test_edge_centrality_map_invalidates_on_review_status_flip(repo):
     """set_edge_review flips review_status in place (edge count unchanged) —
-    _invalidate_unified_cache's explicit ':edge_centrality' eviction must catch
-    this same-second in-place edit even though the version tuple might not
-    (mirrors the :rxgraph / :entchunk belt-and-braces eviction pattern)."""
+    the version tuple does NOT move (relations 无 updated_at 列,in-place UPDATE
+    不动 COUNT/MAX),所以 _invalidate_unified_cache 的显式 ':edge_centrality'
+    eviction 是这里【唯一】的失效机制——不同于 :rxgraph(其版本键内嵌各
+    review_status 计数,自身就能捕捉翻转,显式 eviction 才真是 belt-and-braces)。"""
     nb_id = _seed_centrality_graph(repo)
     q = repo.review_queue(nb_id)
     assert len(q) >= 2
