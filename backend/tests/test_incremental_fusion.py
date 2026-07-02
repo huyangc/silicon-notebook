@@ -462,3 +462,157 @@ def test_tier2_ann_bridge_survives_stale_index(repo, monkeypatch):
         n = db.execute("SELECT count(*) c FROM concept_merge_candidates WHERE notebook_id=?",
                        (nb.id,)).fetchone()["c"]
     assert n >= 1   # stale 索引仍能桥接「新↔存量」
+
+
+# ── Fix wave(审查后):claim 密集库召回 / deprecated 对齐 / 早停有界 ────────────
+
+def _seed_typed(repo, nb_id, oid, name, otype, src, vec, now, cid_prefix):
+    """Seed a knowledge object of any type with an embedding + its own cluster row."""
+    from app.services.kg_merge import _norm
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+            "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (oid, nb_id, otype, "approved", "", json.dumps({"name": name}), "[]", src, now, now))
+        db.execute(
+            "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+            (oid, nb_id, json.dumps(vec), now))
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (f"cc-{oid}", nb_id, cid_prefix + _norm(name), oid, name, otype, "", now))
+
+
+def test_tier2_ann_claim_dense_overfetch_matches_concept_only_oracle(repo, monkeypatch):
+    """生产形态回归:kg ANN 是全类型索引(47万向量里 ~31万 claim、仅 ~7万 concept)。
+    固定 k=topk*pad 的近邻窗可能全被更近的 claim 占满,类型过滤后 concept 不足
+    top_k → 系统性欠桥接。类型感知迭代过取(k 倍增重查)必须凑够 top_k 个 concept,
+    候选集合与 concept-only 暴力 oracle 一致。"""
+    from app.models.schemas import NotebookCreate as _NC
+    nb = repo.create_notebook(_NC(name="kb"))
+    now = "2026-07-02T00:00:00"
+    dim = 16
+    # 40 claims all EXTREMELY close to the new concept's vector (sim ~0.999) —
+    # they occupy the entire initial k = topk*pad_factor = 20 neighbor window.
+    for i in range(40):
+        v = [0.0] * dim
+        v[0] = 0.995
+        v[1 + i % 15] = 0.03 + 0.001 * i   # distinct small noise per claim
+        _seed_typed(repo, nb.id, f"kl-c{i}", f"claim {i}", "claim", "src-A", v, now, "KL-")
+    # 5 concepts at sim exactly 0.9 to e0 (above lo=0.82, but strictly farther
+    # than every claim -> ranked 41..45 in the raw ANN ordering).
+    concepts = []
+    for i in range(5):
+        v = [0.0] * dim
+        v[0] = 0.9
+        v[1 + i] = (1 - 0.9 ** 2) ** 0.5   # unit norm -> cosine to e0 is exactly 0.9
+        concepts.append((f"ko-e{i}", f"Concept {i}", v))
+        _seed_concept(repo, nb.id, f"ko-e{i}", f"Concept {i}", "src-A", v, now)
+    _build_small_base(repo, nb.id, concepts, now)
+    repo.build_scale_index(nb.id)
+
+    new_items = [("ko-new", "MoE Gating", _unit(dim, 0))]
+    for oid, name, vec in new_items:
+        _seed_concept(repo, nb.id, oid, name, "src-B", vec, now)
+    monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
+    repo.incremental_fuse_source(nb.id, "src-B")
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT canonical_a, canonical_b FROM concept_merge_candidates WHERE notebook_id=?",
+            (nb.id,)).fetchall()
+    got_pairs = {tuple(sorted((r["canonical_a"], r["canonical_b"]))) for r in rows}
+    want = _oracle_bridge_candidates(concepts, new_items, dim)   # concept-only oracle
+    assert len(want) == 5          # sanity: all 5 concepts are >= lo, all should bridge
+    assert got_pairs == want       # iterative over-fetch recovered ALL concepts past the claims
+    for a, b in got_pairs:         # and no claim canonical ever leaked in
+        assert not a.startswith("KL-") and not b.startswith("KL-")
+
+
+class _CountingAnn:
+    """Proxy around a real hnswlib handle counting knn_query rounds."""
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = 0
+
+    def set_ef(self, ef):
+        return self._inner.set_ef(ef)
+
+    def knn_query(self, *a, **kw):
+        self.calls += 1
+        return self._inner.knn_query(*a, **kw)
+
+
+def test_tier2_ann_early_stop_below_threshold_bounds_knn_calls(repo, monkeypatch):
+    """迭代过取的早停:当近邻窗尾部 sim 已低于 lo 阈值时,再扩 k 取到的只会更远
+    (必被阈值筛掉)→ 必须停止倍增。断言 knn_query 只跑一轮,且高分 concept 照常出候选。"""
+    from app.models.schemas import NotebookCreate as _NC
+    nb = repo.create_notebook(_NC(name="kb"))
+    now = "2026-07-02T00:00:00"
+    dim = 16
+    # 2 claims very near (would be hits 1-2), 1 concept at 0.9 (hit 3),
+    # 30 claims far away (sim ~0.1 — pad the index so n_labels > initial k=20,
+    # making the tail of the first window below lo while k < n_labels).
+    for i in range(2):
+        v = [0.0] * dim; v[0] = 0.995; v[1 + i] = 0.05
+        _seed_typed(repo, nb.id, f"kl-near{i}", f"near claim {i}", "claim", "src-A", v, now, "KL-")
+    good = ("ko-good", "Expert Routing", _mk_vec(dim, 0, 0.9, 1, (1 - 0.9 ** 2) ** 0.5))
+    _seed_concept(repo, nb.id, "ko-good", "Expert Routing", "src-A", good[2], now)
+    _build_small_base(repo, nb.id, [good], now)
+    for i in range(30):
+        v = [0.0] * dim; v[0] = 0.1; v[2 + i % 13] = 0.99
+        _seed_typed(repo, nb.id, f"kl-far{i}", f"far claim {i}", "claim", "src-A", v, now, "KL-")
+    repo.build_scale_index(nb.id)
+
+    _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _unit(dim, 0), now)
+    repo._mark_unified_kg_dirty(nb.id)
+
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    assert idx is not None and idx.ann_labels
+    real_ann = repo._open_scale_ann(idx, "kg")
+    assert real_ann is not None
+    proxy = _CountingAnn(real_ann)
+    cmap = repo.cluster_map(nb.id)
+    new_objs = [{"object_id": "ko-new", "name": "MoE Gating"}]
+    cands = repo._tier2_bridge_candidates_ann(nb.id, idx, proxy, new_objs, cmap)
+
+    # n_labels = 33 > initial k = 20, tail of the first window is a far claim
+    # (sim ~0.1 < lo) -> early stop after exactly ONE knn round, no doubling.
+    assert proxy.calls == 1
+    pairs = {tuple(sorted((c["canonical_a"], c["canonical_b"]))) for c in cands}
+    from app.services.kg_merge import _norm
+    assert pairs == {tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))}
+
+
+def test_tier2_ann_skips_deprecated_concepts(repo, monkeypatch):
+    """旧路径 existing_items 过滤 status!='deprecated';ANN 分支的命中必须做同样校验:
+    指向 deprecated concept 的 hit 不产生候选(且不挤占 eligible 槽位)。"""
+    from app.models.schemas import NotebookCreate as _NC
+    from app.services.kg_merge import _norm
+    nb = repo.create_notebook(_NC(name="kb"))
+    now = "2026-07-02T00:00:00"
+    dim = 16
+    # Deprecated concept NEARER to the query than the alive one — if the ANN
+    # branch forgot the status check it would bridge to the deprecated cluster.
+    dep_vec = _mk_vec(dim, 0, 0.99, 1, 0.02)
+    alive_vec = _mk_vec(dim, 0, 0.9, 2, (1 - 0.9 ** 2) ** 0.5)
+    _seed_concept(repo, nb.id, "ko-dep", "Old Routing", "src-A", dep_vec, now)
+    _seed_concept(repo, nb.id, "ko-alive", "Expert Routing", "src-A", alive_vec, now)
+    _build_small_base(repo, nb.id, [("ko-dep", "Old Routing", dep_vec),
+                                    ("ko-alive", "Expert Routing", alive_vec)], now)
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id='ko-dep'")
+    repo.build_scale_index(nb.id)
+
+    _seed_concept(repo, nb.id, "ko-new", "MoE Gating", "src-B", _unit(dim, 0), now)
+    monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
+    repo.incremental_fuse_source(nb.id, "src-B")
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT canonical_a, canonical_b FROM concept_merge_candidates WHERE notebook_id=?",
+            (nb.id,)).fetchall()
+    pairs = {tuple(sorted((r["canonical_a"], r["canonical_b"]))) for r in rows}
+    dep_cid = "K-" + _norm("Old Routing")
+    assert all(dep_cid not in p for p in pairs)   # deprecated 概念绝不入候选
+    assert pairs == {tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))}
