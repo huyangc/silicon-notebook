@@ -4389,6 +4389,32 @@ class SQLiteRepository:
             rows = db.execute("SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
         return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
 
+    def _pending_merges_batch(self, notebook_id: str, limit: int) -> List[dict]:
+        """Bounded fetch of pending merge candidates, LIMITed in SQL instead of
+        materializing the whole pending set and Python-slicing it (perf-audit
+        P1-1). No ORDER BY is specified — SQLite returns rows in rowid order
+        by default absent one, matching the implicit order the old
+        `pending_merges(nb)[:limit]` slice relied on, so this is order-locked
+        to the previous behavior for equal-size batches."""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending' LIMIT ?",
+                (notebook_id, limit),
+            ).fetchall()
+        return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
+
+    def _has_pending_merges(self, notebook_id: str) -> bool:
+        """Cheap continuation test for the merge-review drain loop — EXISTS
+        instead of materializing all pending rows just to check non-emptiness
+        (perf-audit P1-1)."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM concept_merge_candidates WHERE notebook_id=? AND status='pending') AS e",
+                (notebook_id,),
+            ).fetchone()
+        return bool(row["e"])
+
     def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
         if status not in ("confirmed", "rejected"):
             raise ValueError(f"invalid merge status: {status!r}")
@@ -4938,7 +4964,7 @@ class SQLiteRepository:
         # 可低些(误判仅多留一对待审)。未显式传入则取 settings 默认(0.90 / 0.80)。
         confirm = confirm_threshold if confirm_threshold is not None else self.settings.kg_merge_confirm_threshold
         separate = separate_threshold if separate_threshold is not None else self.settings.kg_merge_separate_threshold
-        pending = self.pending_merges(notebook_id)[: max(1, min(limit, 200))]
+        pending = self._pending_merges_batch(notebook_id, max(1, min(limit, 200)))
         from app.services.concept_merge_review import review_merge_candidates
         # review_merge_candidates is total (fail-open, chunked); the outer try is
         # defense-in-depth so this endpoint can never 500 on an LLM deviation (the
@@ -5024,7 +5050,7 @@ class SQLiteRepository:
         max_batches = (total // max(1, batch)) + 3
         try:
             for _ in range(max_batches):
-                if not self.pending_merges(notebook_id):
+                if not self._has_pending_merges(notebook_id):
                     break
                 summary = self.review_pending_merges(notebook_id, limit=batch)
                 reviewed = int(summary.get("reviewed", 0))
