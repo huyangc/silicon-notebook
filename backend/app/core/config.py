@@ -180,6 +180,7 @@ class Settings(BaseSettings):
     # pydantic-settings v2 下 Field(env=...) 对新字段静默失效,必须用 validation_alias。
     scale_search_include_delta: bool = Field(False, validation_alias="SCALE_SEARCH_INCLUDE_DELTA")  # 已索引库检索是否含水位后 delta:统一门控 chunk(_retrieve_chunks_ann)/KG对象(_kg_object_candidates)/关系(_relation_ann_candidates)/PPR图基底(_active_kg_delta) 四处;默认关=只检索已索引部分(delta 靠 auto-fold 收进,最终一致);开=强一致 delta 暴力(大 delta 不可扩展)
     scale_auto_fold_on_add: bool = Field(True, validation_alias="SCALE_AUTO_FOLD_ON_ADD")            # 已索引库新增内容后自动排增量 fold(idle,合并多次新增),使 delta 尽快进索引
+    scale_fold_max_delta_sources: int = Field(500, validation_alias="SCALE_FOLD_MAX_DELTA_SOURCES")  # fold(含 auto 解析出的)在 delta 源数超此值时升级 full 全量重建:fold 逐源 incremental_fuse 是 O(delta) 但常数大(生产 48k 源 delta 实测不可行),大 delta 全量重建反而有界
     # 大库自动建/重建检索索引(复用分享/拷贝的「大」定义 notebook_copy_stats().copyable==False):
     # 默认开,写路径(抽取完成/rebuild_unified_kg)与检索回退路径均可触发,入队走既有
     # trigger_scale_index_rebuild 去重/状态机,零前端改动。pydantic-settings v2 下
