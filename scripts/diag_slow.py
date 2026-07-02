@@ -32,8 +32,8 @@ SECRET_MARKERS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
 # 这些事件是历次事故修复埋的观测点,出现即是直接证据。
 INTEREST_KINDS = (
     "scale_ppr_bailout", "ppr_fallback_refused", "graph_walk_refused",
-    "relation_scoring_skipped", "tier2_skipped", "scale_index_build",
-    "model_error", "ask_stage", "pipeline",
+    "relation_scoring_skipped", "tier2_skipped", "chunk_bruteforce_skipped",
+    "scale_index_build", "model_error", "ask_stage", "pipeline",
 )
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
 BIG_NB_ROWS = 20_000
@@ -218,7 +218,8 @@ def report_events(local_dir, since):
                              "embed_ok", "ann_sources_skipped") if kk in e}
                     last_bail_diag.append((e.get("ts", "")[:19], diag))
             elif k in ("ppr_fallback_refused", "graph_walk_refused",
-                       "relation_scoring_skipped", "tier2_skipped"):
+                       "relation_scoring_skipped", "tier2_skipped",
+                       "chunk_bruteforce_skipped"):
                 refuse_sites[f"{k}:{e.get('site', e.get('reason', ''))}"] += 1
             elif k == "model_error":
                 key = f"{e.get('stage','?')}/{e.get('model','?')}"
@@ -513,6 +514,7 @@ def report_env(root):
             return
     interesting = (
         "RELATION_RETRIEVAL_ENABLED", "CHUNK_KG_OVERLAY_ENABLED", "CHUNK_ANN_ENABLED",
+        "CHUNK_BRUTEFORCE_MAX_CHUNKS",
         "SCALE_INDEX_AUTO_ENABLED", "SCALE_INDEX_AUTO_WHEN",
         "SCALE_SEARCH_INCLUDE_DELTA", "SCALE_AUTO_FOLD_ON_ADD",
         "SCALE_INDEX_OFFPEAK_START_HOUR", "SCALE_INDEX_OFFPEAK_END_HOUR",
