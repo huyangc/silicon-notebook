@@ -9123,6 +9123,12 @@ class SQLiteRepository:
         Returns (active_node_ids, active_edges, active_chunk_ids).
         """
         delta = self._index_delta(notebook_id)
+        if delta["indexed"] and not self.settings.scale_search_include_delta:
+            # 同一原则第四处:已索引库的图基底只含已索引部分(核心 CSR 本身),水位后
+            # delta 由 auto-fold 收进索引后自然可达。未索引的 active 小库(下方
+            # src=None 整库 gather)是 two-tier 联邦的 active 层,不是 delta,
+            # 不受此门控。
+            return [], [], []
         src = delta["delta_sources"] if delta["indexed"] else None
         node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
             self._gather_kg_graph(notebook_id, source_ids=src)
@@ -9294,7 +9300,11 @@ class SQLiteRepository:
             (bid, tuple(idx.manifest.get("version", [])))
             for bid, idx in base_indexes)
         active_ver = tuple(self._scale_index_version(notebook_id))
-        version = ("scale_combined", base_ver, active_ver)
+        # flag 只入这个组合图缓存的 version 元组(不进 _scale_index_version 的
+        # settings_tail——那会让所有存量索引 manifest 失配变 stale)。翻转开关即
+        # 自然使这个缓存失效,不需要显式 invalidate。
+        version = ("scale_combined", base_ver, active_ver,
+                   bool(self.settings.scale_search_include_delta))
 
         def _load():
             # 2. Combined graph: start from the first base index, splice remaining
@@ -9335,8 +9345,9 @@ class SQLiteRepository:
                 notebook_id, base_indexes, active_edges,
                 active_node_ids=active_node_ids)
 
-            combined_ids, combined_A = si.splice_active(
-                combined_ids, combined_A, active_node_ids, active_edges)
+            if active_node_ids or active_edges:
+                combined_ids, combined_A = si.splice_active(
+                    combined_ids, combined_A, active_node_ids, active_edges)
             combined_index = {nid: i for i, nid in enumerate(combined_ids)}
             combined_chunk_ids.update(active_chunk_ids)
 
