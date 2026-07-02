@@ -8854,10 +8854,20 @@ class SQLiteRepository:
 
     def _resolve_scale_mode(self, notebook_id: str, mode: str) -> str:
         """把 mode 解析为具体操作:fold|full。
-        auto = 有(含 stale)索引 → fold,否则 → full。"""
-        if mode in ("fold", "full"):
-            return mode
-        return "fold" if self._scale_index(notebook_id, allow_stale=True) is not None else "full"
+        auto = 有(含 stale)索引 → fold,否则 → full。
+        fold(显式或 auto 解析出)在 delta 源数超 scale_fold_max_delta_sources 时
+        升级 full:fold 的逐源 incremental_fuse + 增量 splice 常数大(生产 48k 源
+        delta 实测十几小时不可行),大 delta 全量重建反而有界(~1h)。"""
+        if mode not in ("fold", "full"):
+            mode = "fold" if self._scale_index(notebook_id, allow_stale=True) is not None else "full"
+        if mode == "fold":
+            try:
+                delta = self._index_delta(notebook_id)
+                if len(delta["delta_sources"]) > self.settings.scale_fold_max_delta_sources:
+                    return "full"
+            except Exception:  # noqa: BLE001 — 探测失败不挡操作,维持 fold
+                pass
+        return mode
 
     def _run_scale_op(self, notebook_id: str, mode: str) -> None:
         """后台执行(guarded):按 mode 跑 fold_scale_index_delta 或 build_scale_index。

@@ -194,3 +194,23 @@ def test_ppr_splice_includes_self_delta_when_opted_in(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     ranked = dict(repo.scale_ppr(nb.id, "bravo"))
     assert d_cid in ranked
+
+
+# ── fold 自动升级 full(delta 超阈值)────────────────────────────────────────
+
+
+def test_resolve_scale_mode_upgrades_big_delta_fold_to_full(repo, monkeypatch):
+    nb, _oid = _build_indexed_nb_with_delta_object(repo)   # 1 个 delta source
+    monkeypatch.setattr(repo.settings, "scale_fold_max_delta_sources", 0)
+    assert repo._resolve_scale_mode(nb.id, "fold") == "full"
+    assert repo._resolve_scale_mode(nb.id, "auto") == "full"
+    monkeypatch.setattr(repo.settings, "scale_fold_max_delta_sources", 500)
+    assert repo._resolve_scale_mode(nb.id, "fold") == "fold"
+
+
+def test_fold_threshold_env_alias(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("SCALE_FOLD_MAX_DELTA_SOURCES", "7")
+    from app.core.config import Settings
+    assert Settings().scale_fold_max_delta_sources == 7
