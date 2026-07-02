@@ -8682,6 +8682,27 @@ class SQLiteRepository:
                 manifest["has_chunk_ann"] = True
                 manifest["n_chunk_ann"] = len(ch_labels)
 
+            # relation ANN:增量 add delta relation 向量(若原有 relation_ann)——
+            # 镜像上面 chunk ANN 的 fold 处理,delta relation id 取自水位后
+            # source(与 _relation_ann_candidates 的 delta 暴力分支同一 IN 条件)。
+            if idx.relation_ann_path and idx.relation_ann_labels is not None:
+                with self._connect() as db:
+                    ph_s = ",".join("?" for _ in delta["delta_sources"])
+                    d_relation_ids = [r["id"] for r in db.execute(
+                        f"SELECT id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND source_id IN ({ph_s})",
+                        (notebook_id, *delta["delta_sources"])).fetchall()] if delta["delta_sources"] else []
+                rel_vids, rel_mat = _delta_vecs("relation_embeddings", "relation_id", d_relation_ids)
+                rann = si.add_items_to_ann(
+                    idx.relation_ann_path, dim, rel_mat if len(rel_mat) else [],
+                    len(idx.relation_ann_labels))
+                rann.save_index(os.path.join(tmp_dir, "relation_ann.bin"))
+                rel_labels = list(idx.relation_ann_labels) + list(rel_vids)
+                np.save(os.path.join(tmp_dir, "relation_ann_labels.npy"),
+                        np.asarray(rel_labels, dtype=object))
+                manifest["has_relation_ann"] = True
+                manifest["n_relation_ann"] = len(rel_labels)
+
             # viz:保持旧(UI-only,可 stale)——从旧目录拷 viz 文件到 tmp(若有)
             for f in ("viz.npz", "viz_adj.npz"):
                 src = os.path.join(out_dir, f)
