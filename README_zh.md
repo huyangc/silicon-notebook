@@ -117,6 +117,13 @@ SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 时看它即可。离线 CLI(`scripts/batch_ingest.py`)与下面两种服务启动方式,解析到的
 都是同一个仓库根 `.local/`。
 
+**启动脚本要求仓库根存在 `.env`**(`npm run dev` / `npm run start`):缺失时直接报错
+退出,而不是悄悄用空白默认值启动;如果发现改名残骸(如 `.env.local`)会点名提示改回
+——注意 Next.js 自己打印的「Environments: .env.local」只代表**前端**读到了它,后端只读
+`.env`。后端进程启动时也做同样检查(仅当存在残骸文件才硬报错;单纯缺 `.env` 只告警并
+照常启动,全新 checkout 与容器纯环境变量部署不受影响)。纯环境变量部署可设
+`ALLOW_NO_ENV_FILE=1` 显式跳过。
+
 ```bash
 # 开发 —— 前后端一起(后端支持 reload)
 npm run dev

@@ -13,6 +13,24 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
+def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[str]]":
+    """启动预检用:(期望的 .env 路径, 是否存在, 疑似改名残骸文件名列表)。
+
+    pydantic-settings 对缺失的 env_file 静默跳过——曾把「.env 被改名成
+    .env.local」演成整站默认空配置、embed 未配置、chunk 检索静默落进全库
+    暴力路径的半小时假死。lookalike 只在 .env 缺失时收集(在位时留备份是
+    合法习惯);.env.example 是提交进仓库的模板,永远排除。"""
+    root = root or _ROOT_DIR
+    env_path = root / ".env"
+    if env_path.is_file():
+        return env_path, True, []
+    lookalikes = sorted(
+        p.name for p in root.glob(".env.*")
+        if p.is_file() and p.name != ".env.example"
+    )
+    return env_path, False, lookalikes
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(_ROOT_DIR / ".env"),
