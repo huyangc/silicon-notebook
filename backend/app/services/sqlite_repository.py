@@ -8816,10 +8816,15 @@ class SQLiteRepository:
                         reset[ci] += sim * combined_idf[ci]
                         ann_seeds += 1
 
-        # 3b. Active KG seeds: bounded brute-force cosine over the small active
-        #     notebook's knowledge embeddings (NOT the base — base goes via ANN).
+        # 3b. Active KG seeds — 仅当 self 没有 scale 索引(self_idx is None,即
+        #     active 是真正的小 delta 库)时才做有界暴力余弦。self 已建索引的
+        #     P0-00 self-participant 情形(用户直接查询已索引的大库本身),self
+        #     的种子已在 3a 经它自己的 hnsw ANN 产出;这里再 _vector_matrix 全量
+        #     加载同一库的 knowledge_embeddings(生产 49万×1024:未 BLOB 化 =
+        #     ~36 分钟 JSON 解析 + 数 GB;BLOB 化也要 ~2GB 常驻)是纯重复,且违反
+        #     成本分离不变量(base/已索引库离线 ANN,暴力只留给小 active)→ 跳过。
         active_seeds = 0
-        if qvec is not None:
+        if qvec is not None and self_idx is None:
             with self._connect() as db:
                 a_ids, a_mat = self._vector_matrix(
                     db, notebook_id, "knowledge_embeddings", "object_id")
