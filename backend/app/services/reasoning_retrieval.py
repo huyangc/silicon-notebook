@@ -188,15 +188,37 @@ class ReasoningRetriever:
                 per_q.append({})
         return quota_fuse(collected, per_q, top_n)
 
+    @staticmethod
+    def _window(items, head, tail):
+        """头+尾窗口:超窗时保留最早 head 条 + 最新 tail 条,返回 (头段, 尾段, 省略数)。
+        collected/elements/chunks 都按插入序只增不删,纯前缀窗口会让"最近新增"
+        落在窗口外:reflect 看到的 summary 不变,误判无进展、重复请求。"""
+        if len(items) <= head + tail:
+            return list(items), [], 0
+        return list(items[:head]), list(items[-tail:]), len(items) - head - tail
+
     def _summarize(self, collected, elements, chunks):
         lines = []
-        for rk in list(collected.values())[:30]:
+
+        def _kg_line(rk):
             name = str(rk.payload.get("name", "")).strip() or rk.object_id
-            lines.append(f"- [{rk.object_type}] {name} (id={rk.object_id})")
-        for el in elements[:10]:
-            lines.append(f"- [element] {el.source_title} · {el.location_label}: {el.text[:80]}")
-        for c in chunks[:10]:
-            lines.append(f"- [chunk] {c.source_title} · {c.section_path}: {c.text[:80]}")
+            return f"- [{rk.object_type}] {name} (id={rk.object_id})"
+
+        def _el_line(el):
+            return f"- [element] {el.source_title} · {el.location_label}: {el.text[:80]}"
+
+        def _ch_line(c):
+            return f"- [chunk] {c.source_title} · {c.section_path}: {c.text[:80]}"
+
+        for items, render, head_n, tail_n, noun in (
+                (list(collected.values()), _kg_line, 20, 10, "条较早候选"),
+                (elements, _el_line, 6, 4, "段较早原文"),
+                (chunks, _ch_line, 6, 4, "段较早原文")):
+            head, tail, omitted = self._window(items, head_n, tail_n)
+            lines.extend(render(x) for x in head)
+            if omitted:
+                lines.append(f"-（省略中间 {omitted} {noun},以下为最近加入）")
+            lines.extend(render(x) for x in tail)
         return "\n".join(lines) if lines else "(no candidates yet)"
 
     def run(self, notebook_id, question, history="", on_step=None):

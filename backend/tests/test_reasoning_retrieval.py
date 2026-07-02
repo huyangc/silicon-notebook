@@ -923,3 +923,31 @@ def test_run_feeds_attempted_subqueries_to_reflect(rrepo):
     # ② 重复被跳过后:该条账目显示已试 2 次 → 两轮 prompt 必不同(破缓存不动点)
     assert "已试2次" in captured[1]
     assert captured[0] != captured[1]
+
+
+def test_window_helper_head_tail_split():
+    """_window: 超窗保留最早 head 条+最新 tail 条并报省略数;不超窗原样返回。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    head, tail, omitted = ReasoningRetriever._window(list(range(15)), 6, 4)
+    assert head == list(range(6))
+    assert tail == [11, 12, 13, 14]
+    assert omitted == 5
+    head, tail, omitted = ReasoningRetriever._window(list(range(10)), 6, 4)
+    assert head == list(range(10)) and tail == [] and omitted == 0
+
+
+def test_summarize_shows_recent_tail_when_over_window(rrepo):
+    """collected 超 30 条时,summary 必须含最近加入的尾段(修「新增证据落在
+    前 30 条窗口外 → summary 不变 → reflect 误判无进展/重复请求」盲区);
+    ≤30 条时输出与旧行为完全一致(无省略标记)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    r = ReasoningRetriever(rrepo, rrepo.settings)
+    big = {f"ko-{i}": _mk_rk(f"ko-{i}", f"节点{i}") for i in range(45)}
+    out = r._summarize(big, [], [])
+    assert "节点0" in out and "节点19" in out        # 头段(最早 20 条)
+    assert "节点35" in out and "节点44" in out       # 尾段(最新 10 条)
+    assert "节点25" not in out                       # 中间被省略
+    assert "省略中间 15 条" in out
+    small = {f"ko-{i}": _mk_rk(f"ko-{i}", f"节点{i}") for i in range(30)}
+    out2 = r._summarize(small, [], [])
+    assert "省略" not in out2 and "节点29" in out2
