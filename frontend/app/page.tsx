@@ -613,6 +613,7 @@ const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: num
 type ScaleIndexState = "unindexed" | "suggested" | "queued" | "building" | "indexed" | "stale";
 type ScaleIndexStatus = { exists: boolean; stale: boolean; building: boolean; eligible: boolean;
   state?: ScaleIndexState;
+  delta_chunks?: number; unindexed_sources?: number; delta_searchable?: boolean;
   n_nodes: number; n_chunks: number; n_ann: number; n_chunk_ann: number; has_chunk_ann: boolean };
 const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now") =>
   api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when }) });
@@ -3087,6 +3088,11 @@ export default function Home() {
                       style={{ margin: "2px 2px 8px", cursor: clickable ? "pointer" : "default", color }}
                     >
                       {label}
+                      {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
+                        <span title="新增内容尚未纳入语义检索索引，将在下次增量索引（空闲时自动重建，或手动重建）后可被语义检索；当前仍可关键词命中">
+                          {` · ${s.unindexed_sources} 源待索引`}
+                        </span>
+                      )}
                     </p>
                   );
                 })()}
@@ -4120,6 +4126,11 @@ export default function Home() {
                           style={{ cursor: clickable ? "pointer" : "default", color }}
                         >
                           {label}
+                          {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
+                            <span title="新增内容尚未纳入语义检索索引，将在下次增量索引（空闲时自动重建，或手动重建）后可被语义检索；当前仍可关键词命中">
+                              {` · ${s.unindexed_sources} 源待索引`}
+                            </span>
+                          )}
                         </span>
                       );
                     })()}
