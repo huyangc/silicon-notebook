@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "bash scripts/dev.sh",
+    "start": "bash scripts/prod.sh",
     "check": "bash scripts/check.sh",
     "dev:backend": "cd backend && ${PYTHON_BIN:-/opt/homebrew/Caskroom/miniconda/base/bin/python} -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
     "dev:backend:reload": "cd backend && ${PYTHON_BIN:-/opt/homebrew/Caskroom/miniconda/base/bin/python} -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000",

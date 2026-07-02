@@ -6,10 +6,10 @@
 #   scripts/backend.sh restart   停当前 + 启 silicon-notebook(":8000 起错服务" 最常用)
 #   scripts/backend.sh status    看 :8000 现在跑的是什么 + notebook 数
 #
-# 为什么需要它:后端从 backend/ 目录启动才会自动加载 ../.env(模型/CHUNK_MMR_K/DB),
-# 且 DB 解析到 仓库根/.local/silicon_notebook.db(你的真实库)。若 :8000 被别的服务
-# (如 "EDA Agent")占用,前端调 /api/notebooks 会 404,notebook 看起来像"全没了"——
-# status/restart 能立刻识别并纠正。详见 scripts/README.md。
+# 为什么需要它:路径(DB/storage/.env)在代码里(Settings)已锚定到仓库根,与启动
+# 目录无关——DB 解析到 仓库根/.local/silicon_notebook.db(你的真实库)。若 :8000 被
+# 别的服务(如 "EDA Agent")占用,前端调 /api/notebooks 会 404,notebook 看起来像
+# "全没了"——status/restart 能立刻识别并纠正。详见 scripts/README.md。
 #
 # 可用环境变量:PYTHON_BIN HOST PORT LOG_FILE
 set -euo pipefail
@@ -68,7 +68,7 @@ cmd_start() {
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "启动 silicon-notebook 后端…"
   echo "  python = $PYTHON_BIN"
-  echo "  cwd    = $ROOT_DIR/backend  (→ 自动加载 ../.env;DB=$ROOT_DIR/.local/silicon_notebook.db)"
+  echo "  cwd    = $ROOT_DIR/backend  (路径已锚定仓库根,与 cwd 无关;.env/DB=$ROOT_DIR/.local/silicon_notebook.db)"
   echo "  listen = http://$HOST:$PORT   日志 = $LOG_FILE"
   ( cd "$ROOT_DIR/backend" && nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 & )
   echo -n "  等待就绪"

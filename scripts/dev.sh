@@ -31,6 +31,8 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 # BACKEND_HOST=0.0.0.0 to expose the API beyond localhost (e.g. server deploys).
+# Paths (db/storage/env_file) are anchored to the repo root in code (Settings), not to
+# the launch directory — the `cd` below is only so Python resolves the `app` package.
 cd "$ROOT_DIR/backend"
 "$PYTHON_BIN" -m uvicorn app.main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000 &
 BACKEND_PID=$!
