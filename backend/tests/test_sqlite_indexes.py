@@ -99,3 +99,138 @@ def test_knowledge_embeddings_version_aggregate_uses_covering_index(repo):
             ("nb-1",),
         )
     assert "idx_knowledge_embeddings_nb_created" in plan, plan
+
+
+# ---------------------------------------------------------------------------
+# C4 (hotpath cleanup, 4th index-bundle pass): answers/feedback/extraction_runs
+# had ZERO indexes at all — notebook_analytics' three §16 COUNTs and the
+# low_rated JOIN, and _extraction_warning's per-source-list-row ORDER BY +
+# LIMIT 1, all forced a full table scan. See the CREATE INDEX comments in
+# sqlite_repository.py's schema block for the per-index row-order audit.
+# ---------------------------------------------------------------------------
+
+def test_answers_feedback_extraction_runs_indexes_exist(repo):
+    assert "idx_answers_nb" in _index_names(repo, "answers")
+    assert "idx_answers_conversation" in _index_names(repo, "answers")
+    assert "idx_feedback_nb_rating" in _index_names(repo, "feedback")
+    assert "idx_feedback_answer" in _index_names(repo, "feedback")
+    assert "idx_extraction_runs_source_created" in _index_names(repo, "extraction_runs")
+
+
+def test_answers_notebook_count_uses_index(repo):
+    with repo._connect() as db:
+        plan = _plan(
+            db,
+            "SELECT COUNT(*) FROM answers WHERE notebook_id=?",
+            ("nb-1",),
+        )
+    assert "idx_answers_nb" in plan, plan
+
+
+def test_answers_conversation_lookup_uses_index(repo):
+    with repo._connect() as db:
+        plan = _plan(
+            db,
+            "SELECT question, payload FROM answers WHERE conversation_id = ? "
+            "ORDER BY created_at ASC",
+            ("conv-1",),
+        )
+    assert "idx_answers_conversation" in plan, plan
+
+
+def test_feedback_notebook_rating_count_uses_index(repo):
+    with repo._connect() as db:
+        plan = _plan(
+            db,
+            "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'useful'",
+            ("nb-1",),
+        )
+    assert "idx_feedback_nb_rating" in plan, plan
+
+
+def test_feedback_answer_fk_cascade_uses_index(repo):
+    """feedback.answer_id is FK ... ON DELETE CASCADE with no SQLite auto-index
+    on FK columns — idx_feedback_answer is what lets the cascade (fired by
+    delete_conversation's per-answer DELETE FROM answers) find child feedback
+    rows without a full table scan. Verified via EXPLAIN QUERY PLAN on the
+    DELETE itself, which surfaces the FK-cascade sub-scan plan."""
+    with repo._connect() as db:
+        plan = _plan(db, "DELETE FROM answers WHERE id=?", ("a-1",))
+    assert "idx_feedback_answer" in plan, plan
+
+
+def test_extraction_runs_latest_by_source_uses_index(repo):
+    with repo._connect() as db:
+        plan = _plan(
+            db,
+            "SELECT error_message FROM extraction_runs WHERE source_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            ("src-1",),
+        )
+    assert "idx_extraction_runs_source_created" in plan, plan
+
+
+# ---------------------------------------------------------------------------
+# Row-order audit sanity: notebook_analytics + _extraction_warning must return
+# byte-identical results with the new indexes in place (they always existed on
+# a fresh DB in this test process, but the assertion below pins the actual
+# ordering behavior — LIMIT 1 picks the most-recent row, not an arbitrary one).
+# ---------------------------------------------------------------------------
+
+def test_extraction_warning_picks_most_recent_run(repo):
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("s1", nb.id, "t", "md", "ready", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs (id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("r1", nb.id, "s1", "kg", "completed", "windows_failed=1/3",
+             "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs (id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("r2", nb.id, "s1", "kg", "completed", "",
+             "2026-01-02T00:00:00", "2026-01-02T00:00:00"),
+        )
+    with repo._connect() as db:
+        warning = repo._extraction_warning(db, "s1")
+    # The most recent run (r2, created_at later) has no windows_failed token,
+    # so the warning must be None — proves the index-backed ORDER BY DESC
+    # LIMIT 1 still returns the newest row, not r1 (which would produce a
+    # warning string if incorrectly selected).
+    assert warning is None, (
+        f"expected None (most recent run r2 has no failure token), got {warning!r}")
+
+
+def test_notebook_analytics_counts_match_manual_tally(repo):
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        for i in range(3):
+            db.execute(
+                "INSERT INTO answers (id,notebook_id,question,payload,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (f"a{i}", nb.id, f"q{i}", "{}", now),
+            )
+        db.execute(
+            "INSERT INTO feedback (id,answer_id,notebook_id,rating,comment,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("f0", "a0", nb.id, "useful", "", now),
+        )
+        db.execute(
+            "INSERT INTO feedback (id,answer_id,notebook_id,rating,comment,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("f1", "a1", nb.id, "not_useful", "", now),
+        )
+    analytics = repo.notebook_analytics(nb.id)
+    assert analytics.answers_total == 3
+    assert analytics.feedback_useful == 1
+    assert analytics.feedback_not_useful == 1
+    assert analytics.low_rated_questions == ["q1"]
