@@ -359,20 +359,25 @@ def test_relation_ann_partial_coverage_matches_matrix_semantics(repo):
     assert set(idx.relation_ann_labels) == {only_id}
 
 
-# ── large + cold + no-ANN still hits the guard (last resort) ───────────────
+# ── #171 guard (master's large+cold cold-matrix guard) vs the ANN branch ───
+# 守卫本体的行为矩阵由 tests/test_relation_scoring_cold_matrix_guard.py(随
+# #171 合入 master)覆盖;这里只测「守卫与 ANN 分支的相互次序」——ANN 在前、
+# 守卫退位为无 ANN 大库的最后兜底。
 
 
 def test_relation_scoring_skipped_guard_when_large_cold_no_ann(repo, monkeypatch):
-    """No persisted relation ANN + notebook over the size guard + relation
-    matrix not already warm in _vector_cache → skip full-matrix scoring and
-    emit relation_scoring_skipped, falling back to keyword-only (never crash
-    on a multi-GB in-memory matrix). This is the LAST resort, after (1) ANN
-    path and (2) small-matrix full top_k_sims both don't apply."""
+    """No persisted relation ANN + large notebook (copyable=False, master's
+    #171 largeness criterion) + relation matrix cold → the #171 guard fires:
+    emit relation_scoring_skipped(reason=large_matrix_cold) and return []
+    (master's semantics — NOT a keyword fallback; branch-② ANN is what makes
+    this path rare). This is the LAST resort, after (1) ANN path and (2)
+    small/warm full top_k_sims both don't apply."""
     nb = _seed_relation(repo)
     _backfill_relation_vector(repo, nb.id)
-    # No build_scale_index() call → no ANN. Force the "large" guard threshold
-    # down to 1 so our 1-relation notebook counts as "large" for the test.
-    monkeypatch.setattr(repo.settings, "relation_scoring_cold_guard_threshold", 0)
+    # No build_scale_index() call → no ANN. Force "large" the same way
+    # master's guard tests do (copyable=False == over the copy thresholds).
+    monkeypatch.setattr(repo, "notebook_copy_stats",
+                        lambda notebook_id: {"copyable": False, "size": {}})
 
     events = []
     orig_emit = repo.event_log.emit
@@ -387,13 +392,42 @@ def test_relation_scoring_skipped_guard_when_large_cold_no_ann(repo, monkeypatch
     skip_events = [e for e in events if e.get("kind") == "relation_scoring_skipped"]
     assert skip_events, "expected relation_scoring_skipped event when large+cold+no-ANN"
     assert skip_events[0]["notebook_id"] == nb.id
-    # Still returns keyword-only hits (fail-open, not an empty crash).
-    assert isinstance(hits, list)
+    assert skip_events[0]["reason"] == "large_matrix_cold"
+    assert hits == []   # master's guard semantics: [] + event (fail-open exit)
+
+
+def test_relation_scoring_ann_bypasses_large_cold_guard(repo, monkeypatch):
+    """Large (copyable=False) + cold matrix + persisted relation ANN → the
+    ANN branch (②) runs BEFORE the #171 guard (③): semantic hits come back,
+    no relation_scoring_skipped event — the guard is demoted from the common
+    case to the no-ANN last resort."""
+    nb = _seed_relation(repo)
+    _backfill_relation_vector(repo, nb.id)
+    repo.build_scale_index(nb.id)
+    # Evict any matrix warmth so ONLY the ANN branch can explain a non-skip.
+    repo._vector_cache.invalidate(f"{nb.id}:matrix:relation_embeddings")
+    monkeypatch.setattr(repo, "notebook_copy_stats",
+                        lambda notebook_id: {"copyable": False, "size": {}})
+
+    events = []
+    orig_emit = repo.event_log.emit
+
+    def spy_emit(event, **kw):
+        events.append(event)
+        return orig_emit(event, **kw)
+
+    monkeypatch.setattr(repo.event_log, "emit", spy_emit)
+
+    hits = repo._retrieve_relations_scored(nb.id, "MOSFET current mirror")
+    skip_events = [e for e in events if e.get("kind") == "relation_scoring_skipped"]
+    assert not skip_events, "ANN branch must pre-empt the #171 guard"
+    assert hits
 
 
 def test_relation_scoring_small_no_ann_uses_full_matrix_not_guard(repo, monkeypatch):
-    """Small notebook + no ANN must NOT hit the guard — current full-matrix
-    top_k_sims path stays the behavior for small/no-index notebooks."""
+    """Small notebook (copyable=True) + no ANN must NOT hit the guard —
+    current full-matrix top_k_sims path stays the behavior for small/no-index
+    notebooks (#171's byte-for-byte-unchanged promise)."""
     nb = _seed_relation(repo)
     _backfill_relation_vector(repo, nb.id)
 
