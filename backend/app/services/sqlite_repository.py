@@ -4211,8 +4211,8 @@ class SQLiteRepository:
         Allowed statuses: 'pending', 'verified', 'rejected'.
         Raises ValueError for unknown statuses.
         Raises KeyError if the relation does not exist in this notebook.
-        Invalidates the _rx_graph cache so the next graph-reasoning call sees
-        the updated set of active edges.
+        Invalidates the federated reasoning graph cache so the next
+        graph-reasoning call sees the updated set of active edges.
         """
         if status not in self._REVIEW_STATUSES:
             raise ValueError(
@@ -4229,9 +4229,9 @@ class SQLiteRepository:
         # monotonic seq so seq-keyed fast paths (_scale_index_version /
         # _cluster_input_version) don't serve a stale version for this edit.
         self._mark_unified_kg_dirty(notebook_id)
-        # Invalidate cached graph so _rx_graph rebuilds on next access
-        # (belt-and-braces: _rx_graph's per-status-count version key would
-        # also catch the flip on its own).
+        # Invalidate cached graph so _federated_rx_graph rebuilds on next access
+        # (belt-and-braces: its per-status-count version key would also catch
+        # the flip on its own).
         self._invalidate_unified_cache(notebook_id)
 
     def _delete_relations_for_source(self, db, source_id: str) -> None:
@@ -5354,9 +5354,6 @@ class SQLiteRepository:
         for table in ("knowledge_embeddings", "element_embeddings"):
             self._vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
         self._vector_cache.invalidate(f"{notebook_id}:kwtok")
-        # In-memory reasoning graph (built from knowledge_relations) — evict so a
-        # re-ingest/delete with an unchanged version tuple cannot serve a stale graph.
-        self._vector_cache.invalidate(f"{notebook_id}:rxgraph")
         # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
         # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
         # (e.g. a base notebook) may affect any federated graph that includes it,
@@ -7216,88 +7213,6 @@ class SQLiteRepository:
 
         return self._vector_cache.get(f"{notebook_id}:kwtok", version, _load)
 
-    def _rx_graph(self, notebook_id: str):
-        """Return the cached rustworkx PyDiGraph for `notebook_id`.
-
-        Version-keyed on (COUNT, MAX created_at, per-review-status counts) of
-        knowledge_relations (COUNT/MAX pattern as _vector_matrix at
-        :3020-3045).  Graph is rebuilt on new ingest/delete and on any edge
-        review flip.  Returned tuple: (G, idx_to_oid, oid_to_idx).
-        Nodes are the USABLE_STATUSES knowledge_objects (same filter as the
-        retrieval path); dangling edges (endpoint not a node) are dropped.
-        """
-        from app.services.kg.graph_reason import build_rx_graph
-        with self._connect() as db:
-            ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
-                "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
-                "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
-                "FROM knowledge_relations WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchone()
-            # Track E: per-status counts make the version key sound — any
-            # single-edge flip between pending/verified/rejected changes at
-            # least one of (n_rejected, n_verified), so a curation verdict
-            # invalidates the cached graph even when (COUNT, MAX created_at)
-            # is unchanged. (MAX(review_status) was NOT sound: statuses
-            # compare lexically, so e.g. verified→rejected with another
-            # verified edge present left MAX='verified'.) set_edge_review's
-            # explicit _invalidate_unified_cache remains as belt-and-braces.
-            #
-            # TD2: concept_clusters (COUNT, MAX created_at) is also part of the
-            # key — the cross-doc cluster hubs are built from cluster_groups, so
-            # a rebuild_unified_kg that rewrites concept_clusters (without
-            # touching knowledge_relations) must still invalidate the graph.
-            clu_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
-                "FROM concept_clusters WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchone()
-            version = ("rxgraph", ver["c"], ver["ts"], ver["n_rej"], ver["n_ver"],
-                       clu_ver["c"], clu_ver["ts"])
-
-            def _load():
-                ph = ",".join("?" for _ in USABLE_STATUSES)
-                obj_rows = db.execute(
-                    "SELECT id, object_type, payload FROM knowledge_objects "
-                    f"WHERE notebook_id = ? AND status IN ({ph})",
-                    (notebook_id, *USABLE_STATUSES),
-                ).fetchall()
-                nodes = {}
-                for r in obj_rows:
-                    p = json.loads(r["payload"] or "{}")
-                    nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
-                # Track E: rejected edges are excluded from the reasoning graph
-                # (curation feedback loop). Bare filter, same as review_queue:
-                # the column is NOT NULL DEFAULT 'pending' (migration runs in
-                # __init__), so NULL is impossible.
-                rel_rows = db.execute(
-                    "SELECT id, source_object_id, target_object_id, edge_type, evidence "
-                    "FROM knowledge_relations "
-                    "WHERE notebook_id = ? AND review_status != 'rejected'",
-                    (notebook_id,),
-                ).fetchall()
-                relations = [dict(r) for r in rel_rows]
-                # TD2: load concept-cluster membership so build_rx_graph can add
-                # transit-only cross-doc hubs (kind="cluster") for canonicals
-                # with ≥2 present members. Same SELECT/aggregation as _ppr_graph.
-                cluster_groups: dict = {}
-                for r in db.execute(
-                    "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id = ?",
-                    (notebook_id,),
-                ).fetchall():
-                    cluster_groups.setdefault(r["canonical_id"], []).append(
-                        r["member_object_id"])
-                # `or None`: with zero clusters, pass None so build_rx_graph's
-                # None-path holds (real nodes carry NO kind tag → byte-identical
-                # to the pre-hub payload shape). An empty dict would be falsy too,
-                # but be explicit.
-                return build_rx_graph(
-                    nodes, relations, cluster_groups=cluster_groups or None)
-
-            return self._vector_cache.get(f"{notebook_id}:rxgraph", version, _load)
-
     def _federated_rx_graph(self, active_notebook_id: str):
         """Return a federated PyDiGraph merging base notebook(s) + active notebook.
 
@@ -7308,9 +7223,9 @@ class SQLiteRepository:
         an edge review flip (Track E) — triggers a rebuild even without an
         explicit eviction.  Cache key: "{active_id}:fed_rxgraph".
 
-        Track E: relations with review_status = 'rejected' are excluded, same
-        as _rx_graph — a curator's rejection must not flow into reasoning via
-        the federated path either.
+        Track E: relations with review_status = 'rejected' are excluded — a
+        curator's rejection must not flow into reasoning via the federated
+        path either.
 
         Each relation row is tagged with its notebook_id before passing to
         build_rx_graph so per-edge tier stamping works.
@@ -7339,9 +7254,9 @@ class SQLiteRepository:
             # object-only changes (deprecate / status flip / payload edit)
             # rebuild the graph. Track E: the per-status counts (n_rej, n_ver)
             # make a single edge flip between pending/verified/rejected change
-            # the version even when (COUNT, MAX created_at) is unchanged — same
-            # soundness argument as _rx_graph; set_edge_review's explicit
-            # evict-all-fed_rxgraph remains as belt-and-braces. TD2: the
+            # the version even when (COUNT, MAX created_at) is unchanged.
+            # set_edge_review's explicit evict-all-fed_rxgraph remains as
+            # belt-and-braces. TD2: the
             # concept_clusters part means a rebuild_unified_kg on ANY participant
             # (which rewrites clusters without touching relations) invalidates
             # the federated graph, so the cross-doc hubs are rebuilt.
@@ -7388,10 +7303,9 @@ class SQLiteRepository:
                         p = json.loads(r["payload"] or "{}")
                         nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
                     # Track E: rejected edges are excluded from the federated
-                    # reasoning graph too (curation feedback loop) — same bare
-                    # filter as _rx_graph; the column is NOT NULL DEFAULT
-                    # 'pending' (migration runs in __init__), so NULL is
-                    # impossible.
+                    # reasoning graph too (curation feedback loop) — bare
+                    # filter; the column is NOT NULL DEFAULT 'pending'
+                    # (migration runs in __init__), so NULL is impossible.
                     rel_rows = db.execute(
                         "SELECT id, source_object_id, target_object_id, edge_type, evidence "
                         "FROM knowledge_relations "
