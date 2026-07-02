@@ -4803,22 +4803,51 @@ class SQLiteRepository:
         more nodes, return only the `limit` most-connected ones (core subgraph) so
         the UI doesn't choke; `total_nodes`/`total_edges`/`truncated` let the
         frontend offer "widen range". The full graph is still derived + cached;
-        the limit is a cheap slice applied after the cache."""
-        # Bounded fast-path: when a limit is requested AND a valid scale index with
-        # a persisted folded viz graph exists, serve the degree-top-N core straight
-        # from the compact arrays (no full re-fold). EQUIVALENT to the legacy slice
-        # below (same node-id set / totals / shape). Small notebooks with no index
-        # fall through unchanged.
+        the limit is a cheap slice applied after the cache.
+
+        Large-notebook guard (checked FIRST, before any other branching): for a
+        notebook whose non-deprecated object count exceeds
+        settings.viz_sync_build_max_objects, _unified_graph_full must NEVER be
+        called — it pulls every knowledge_objects row (full payloads) into
+        Python dicts AND caches the multi-GB result in self._unified_cache,
+        which is how a 490k-object production library fills 64GB RAM. This
+        applies regardless of `limit`/`level`: a missing `limit` (old frontend,
+        bare API calls, curl/tests) gets a server-side default cap
+        (settings.viz_default_limit), and level='concept' is treated like
+        'object' (the persisted folded viz graph is object-level only — the
+        frontend always sends level=object, but we still defend the API for
+        level=concept / no-level callers that would otherwise slip through)."""
+        with self._connect() as db:
+            nb_count = db.execute(
+                "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,)).fetchone()["c"]
+        if int(nb_count) > self.settings.viz_sync_build_max_objects:
+            effective_limit = limit if limit is not None else self.settings.viz_default_limit
+            idx = self._viz_index(notebook_id)
+            if idx is not None and getattr(idx, "viz_ids", None) is not None:
+                return self._unified_graph_bounded(idx, effective_limit)
+            # No index available yet: either a background build was just
+            # spawned inside _viz_index, or (rare race) it isn't tracked as
+            # building anymore. Either way, large notebooks never fall
+            # through to _unified_graph_full below.
+            return {"nodes": [], "edges": [], "total_nodes": 0,
+                    "total_edges": 0, "truncated": False, "viz_building": True}
+
+        # Bounded fast-path (small notebooks only, from here down): when a
+        # limit is requested AND a valid scale index with a persisted folded
+        # viz graph exists, serve the degree-top-N core straight from the
+        # compact arrays (no full re-fold). EQUIVALENT to the legacy slice
+        # below (same node-id set / totals / shape). Small notebooks with no
+        # index fall through unchanged.
         if limit is not None and level != "concept":
             idx = self._viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
                 return self._unified_graph_bounded(idx, limit)
             if idx is None and notebook_id in self._viz_building:
-                # Large notebook: a background build was spawned inside
-                # _viz_index instead of blocking this request on a
-                # minutes-long full-graph fold. Surface a placeholder the
-                # frontend can poll on instead of the (also expensive)
-                # _unified_graph_full fallback below.
+                # A background build was spawned inside _viz_index instead of
+                # blocking this request on a minutes-long full-graph fold.
+                # Surface a placeholder the frontend can poll on instead of
+                # the (also expensive) _unified_graph_full fallback below.
                 return {"nodes": [], "edges": [], "total_nodes": 0,
                         "total_edges": 0, "truncated": False, "viz_building": True}
         full = self._unified_graph_full(notebook_id, level)
