@@ -85,3 +85,61 @@ class VectorCache:
     def invalidate(self, key: str) -> None:
         with self._global_lock:
             self._store.pop(key, None)
+
+
+class LRUProcessCache:
+    """Thread-safe, bounded dict-like LRU cache — the plain-dict-with-no-cap
+    sibling of VectorCache for callers that don't need version-keying or
+    single-flight (VectorCache's `get(key, version, loader)` contract), just
+    `.get`/`[key] = value`/`.pop` semantics with an eviction cap.
+
+    Used for _scale_idx_cache / _viz_idx_cache (sqlite_repository.py):
+    each entry is a ScaleIndex/VizIndex — numpy arrays + a memoized hnsw
+    handle, tens-of-MB to GB per notebook. Before this class they were plain
+    dicts: every notebook ever touched stayed resident until process
+    restart. Eviction here just drops the Python reference (GC frees the
+    numpy arrays; hnswlib.Index has no explicit close()/context-manager API —
+    dropping the last reference is the correct and only cleanup it needs).
+
+    move_to_end on both read (`get`) and write (`__setitem__`) hits refresh
+    recency; `popitem(last=False)` evicts the least-recently-used entry once
+    size exceeds `max_entries` on insert. `pop` mirrors dict.pop's signature
+    (used by cache-invalidation call sites, e.g. after an atomic on-disk
+    index swap)."""
+
+    def __init__(self, max_entries: int = 8) -> None:
+        self._store: "OrderedDict[str, object]" = OrderedDict()
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+
+    def get(self, key: str, default=None):
+        with self._lock:
+            if key in self._store:
+                self._store.move_to_end(key)
+                return self._store[key]
+            return default
+
+    def __setitem__(self, key: str, value) -> None:
+        with self._lock:
+            self._store[key] = value
+            self._store.move_to_end(key)
+            while len(self._store) > self._max_entries:
+                self._store.popitem(last=False)
+
+    def __getitem__(self, key: str):
+        with self._lock:
+            value = self._store[key]  # raises KeyError, matches dict semantics
+            self._store.move_to_end(key)
+            return value
+
+    def __contains__(self, key: str) -> bool:
+        with self._lock:
+            return key in self._store
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._store)
+
+    def pop(self, key: str, default=None):
+        with self._lock:
+            return self._store.pop(key, default)

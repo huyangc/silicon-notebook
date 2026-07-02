@@ -62,7 +62,7 @@ from app.models.schemas import (
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.vector_cache import VectorCache
+from app.services.vector_cache import VectorCache, LRUProcessCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -304,7 +304,12 @@ class SQLiteRepository:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
         self._user_model_cfg_cache: Dict[str, dict] = {}
-        self._scale_idx_cache: Dict[str, Any] = {}
+        # C7: bounded LRU (was an unbounded plain dict — every notebook ever
+        # touched stayed resident for the life of the process; each entry is
+        # numpy arrays + a memoized hnsw handle, tens-of-MB to GB). Eviction
+        # just drops the reference — GC frees the arrays, and hnswlib.Index
+        # has no explicit close() to call (see LRUProcessCache docstring).
+        self._scale_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
         # P1-8: memoize _scale_index_version keyed on kg_mutation_seq. Maps
         # notebook_id -> (last_seq, version_list). When seq is unchanged we skip
         # the 5 COUNT/MAX aggregates and return the cached list (same format —
@@ -323,7 +328,8 @@ class SQLiteRepository:
         # waiting on a per-nb lock (no lock-ordering cycle).
         self._scale_ver_lock = threading.Lock()
         self._scale_ver_locks: Dict[str, threading.Lock] = {}
-        self._viz_idx_cache: Dict[str, Any] = {}
+        # C7: same bounded-LRU rework as _scale_idx_cache above.
+        self._viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
         self._vector_cache = VectorCache(max_entries=self.settings.vector_cache_max_entries)
         self._write_lock = threading.RLock()
         self._scale_building: set = set()

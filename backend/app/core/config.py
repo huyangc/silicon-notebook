@@ -230,6 +230,11 @@ class Settings(BaseSettings):
     # 进程级 VectorCache（embedding 矩阵/分词语料/rustworkx 图等 GB 级条目）的
     # LRU 容量上限，防止 fed_rxgraph 等按用户/notebook 线性增长的条目无界占用内存。
     vector_cache_max_entries: int = Field(32, validation_alias="VECTOR_CACHE_MAX_ENTRIES")
+    # 进程级 scale/viz 索引缓存(_scale_idx_cache/_viz_idx_cache;每条目 = numpy
+    # 数组 + memoized hnsw handle,单条目可达数十 MB~GB)的 LRU 容量上限——此前是
+    # 无界 plain dict,每个访问过的 notebook 常驻一条目直到进程重启。8 = 典型部署
+    # 同时活跃的库数量级(远小于 VectorCache 的 32,因单条目体量大得多)。
+    scale_idx_cache_max: int = Field(8, validation_alias="SCALE_IDX_CACHE_MAX")
     # review_queue 的边介数中心性(rustworkx Brandes O(V·E))超此节点数时,不再对
     # 全图跑,改对「度数 top-K 诱导子图」算(见 sqlite_repository._edge_centrality_map)。
     edge_centrality_max_nodes: int = Field(20000, validation_alias="EDGE_CENTRALITY_MAX_NODES")
