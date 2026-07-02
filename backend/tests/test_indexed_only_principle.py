@@ -1,7 +1,7 @@
-"""KG 对象侧/关系侧 delta 门控(SCALE_SEARCH_INCLUDE_DELTA):已索引库检索默认
-只搜已索引部分,水位后新增的 KG 对象/关系(delta)默认不被语义暴力检回 —— 与
-chunk 侧(_retrieve_chunks_ann)同一原则。flag 开时保持强一致的 delta 暴力
-(今日行为)。
+"""KG 对象侧/关系侧/PPR 图基底 delta 门控(SCALE_SEARCH_INCLUDE_DELTA):已索引库
+检索默认只搜已索引部分,水位后新增的 KG 对象/关系/self-delta(PPR 组合图 splice)
+默认不被语义暴力检回 —— 与 chunk 侧(_retrieve_chunks_ann)同一原则。flag 开时
+保持强一致的 delta 暴力(今日行为)。
 """
 import json
 import pytest
@@ -145,3 +145,52 @@ def test_relation_delta_included_when_opted_in(repo, monkeypatch):
         nb.id, repo.embedder.embed_query("bravo"),
         repo._scale_index(nb.id, allow_stale=True), 10)
     assert rid in sims
+
+
+# ── PPR 图基底 self-delta splice(第四处门控)─────────────────────────────────
+
+
+def _insert_source_chunk(repo, nb_id, sid, cid, text, embed_text, day):
+    """同 tests/test_scale_delta_policy.py 的同名 helper:插入一个 source + 一个
+    chunk + 该 chunk 的 embedding(embedding 取自 embed_text,可与 chunk 词法文本
+    独立摆动,用于让 chunk 只能经语义路径被检回,不能经 FTS)。"""
+    with repo._write() as db:
+        now = f"2026-07-{day:02d}T00:00:00"
+        db.execute(
+            "INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)", (sid, nb_id, "t", "md", "ready", now, now))
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)", (cid, nb_id, sid, text, "", "[]", now))
+        v = repo.embedder.embed_query(embed_text)
+        db.execute(
+            "INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+            (cid, nb_id, json.dumps(v), now))
+
+
+def _build_indexed_nb_with_delta_chunk(repo):
+    """source A('alpha')进水位 build_scale_index;source B('bravo')之后插入,
+    其 chunk embedding 与查询词 'bravo' 最匹配、chunk 文本与查询词无词法重叠 →
+    只可能经 self-delta splice 被 scale_ppr 排名收录。返回 (nb, delta_chunk_id)。"""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    _insert_source_chunk(repo, nb.id, "sA", "cA", "alpha content here", "alpha", 1)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)  # watermark = {sA}
+    _insert_source_chunk(repo, nb.id, "sB", "cB", "unrelated words xxyyzz", "bravo", 2)
+    return nb, "cB"
+
+
+def test_ppr_splice_excludes_self_delta_by_default(repo):
+    """已索引库的 PPR 图基底默认不 splice 水位后 delta:delta chunk 不出现在
+    scale_ppr 排名里;开 flag 后出现。用 test_scale_delta_policy 同款构造:
+    delta source 的 chunk embedding 与查询最匹配。"""
+    nb, d_cid = _build_indexed_nb_with_delta_chunk(repo)
+    ranked = dict(repo.scale_ppr(nb.id, "bravo"))
+    assert d_cid not in ranked
+
+
+def test_ppr_splice_includes_self_delta_when_opted_in(repo, monkeypatch):
+    nb, d_cid = _build_indexed_nb_with_delta_chunk(repo)
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
+    ranked = dict(repo.scale_ppr(nb.id, "bravo"))
+    assert d_cid in ranked

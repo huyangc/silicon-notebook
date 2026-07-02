@@ -159,7 +159,14 @@ def test_self_only_participant_uses_delta_no_full_load(repo, monkeypatch):
     """Production shape (single self-indexed library, NO external base):
     iteration domain stays the delta — spy proves the full `_vector_matrix`
     loader is never touched, and the delta node still bridges into the self
-    core (its synonym edge to the same-name core concept)."""
+    core (its synonym edge to the same-name core concept).
+
+    opt-in self-delta: `_active_kg_delta` only returns a non-empty self-delta
+    when scale_search_include_delta=True (default OFF — see
+    test_indexed_only_principle.py); this test explicitly opts in so the
+    delta-domain scoping being verified here (vs. the full-table load) has a
+    non-empty delta to scope."""
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     selfnb = _build_indexed_base(repo, name="self-lib", concept="MOSFET",
                                  oid="eS", sid="sS", mark_base=False)
     # Post-watermark delta: a new source with a same-name concept.

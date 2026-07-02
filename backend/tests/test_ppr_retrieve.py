@@ -577,7 +577,13 @@ def test_scale_ppr_uses_self_index(repo, monkeypatch):
     assert called["n"] == 0
 
 
-def test_scale_ppr_self_index_reaches_new_upload(repo):
+def test_scale_ppr_self_index_reaches_new_upload(repo, monkeypatch):
+    """opt-in self-delta splice: with scale_search_include_delta=True, a
+    newly-uploaded (post-watermark) source's chunk is still reachable via the
+    self-delta splice onto the PPR combined graph. (Default is now OFF — see
+    test_indexed_only_principle.py — so this test explicitly enables the
+    opt-in to exercise the splice branch.)"""
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     base = _seed_two_doc_moe(repo)
     repo.rebuild_unified_kg(base.id)
     repo.build_scale_index(base.id)
