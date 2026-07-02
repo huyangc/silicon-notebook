@@ -304,6 +304,11 @@ class SQLiteRepository:
         self._scale_building_lock = threading.Lock()
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
         self._scale_scheduler_started = False
+        # 大库自动建索引(maybe_auto_index)的 O(1) once-set:notebook_id 一旦被评估
+        # (无论「已入队/建成」还是「判定不需要」)即加入,读路径兜底靠它避免每查询都
+        # 算 notebook_copy_stats() 的 5 个 COUNT。_mark_unified_kg_dirty 在每次 KG
+        # 写时 discard,使下一轮变更重新触发评估。
+        self._auto_index_checked: set = set()
         # KG-view viz index background build (mirrors _scale_building exactly):
         # guarded set of notebook_ids currently being folded by _spawn_viz_build.
         self._viz_building: set = set()
@@ -2726,6 +2731,10 @@ class SQLiteRepository:
                 self.incremental_fuse_source(source.notebook_id, source.id)
             except Exception:
                 self.event_log.logger.exception("incremental_fuse_source failed for %s", source_id)
+            try:
+                self.maybe_auto_index(source.notebook_id)
+            except Exception:
+                self.event_log.logger.exception("maybe_auto_index failed for %s", source.notebook_id)
             fw, tw = graph.failed_windows, graph.total_windows
             with self._write() as db:
                 db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
@@ -4773,6 +4782,11 @@ class SQLiteRepository:
                 """,
                 (notebook_id, now),
             )
+        # Re-arm maybe_auto_index's once-set: the index this nb was previously
+        # judged against (fresh/absent) is now stale by construction (KG just
+        # changed), so the next write-path or read-path fallback call should
+        # re-evaluate rather than trust a stale "checked" verdict.
+        self._auto_index_checked.discard(notebook_id)
 
     def unified_kg_status(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)
@@ -5508,6 +5522,12 @@ class SQLiteRepository:
         except Exception:
             self.event_log.logger.warning(
                 "build_viz_index failed after rebuild for %s", notebook_id, exc_info=True)
+        # rebuild 后检索索引必然 stale(clusters/objects 已变)—— 大库自动重建/入队。
+        # maybe_auto_index 自身 fail-open,这里再包一层只是双保险。
+        try:
+            self.maybe_auto_index(notebook_id)
+        except Exception:
+            self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
@@ -7624,6 +7644,47 @@ class SQLiteRepository:
         self._run_scale_op(notebook_id, mode)
         return {"status": "building", "notebook_id": notebook_id}
 
+    def maybe_auto_index(self, notebook_id: str) -> None:
+        """大库自动建/重建检索索引 —— fail-open,绝不向调用方抛异常。
+
+        「大」复用分享/拷贝的定义:notebook_copy_stats()["copyable"] is False
+        (字节 > NOTEBOOK_COPY_MAX_BYTES 或 chunks+nodes > NOTEBOOK_COPY_MAX_ROWS)。
+
+        Called from two kinds of call sites:
+          - 写路径(_run_extraction 收尾、rebuild_unified_kg 收尾):每次都可能被
+            调用,但仍先过 once-set,避免同一 nb 连续写入反复入队。
+          - 读路径兜底(检索遇到无 ANN 回退时):必须 O(1) —— once-set 命中就直接
+            return,不做任何 DB 查询。
+
+        once-set 语义:一旦被"评估过"(无论结论是"已入队/建成"还是"不需要"),就
+        加入 self._auto_index_checked,后续调用直接短路。让集合过期重新评估的唯一
+        入口是 _mark_unified_kg_dirty(每次 KG 写都会 discard 该 nb) —— 这样索引
+        后续因新内容变 stale 时,下一轮写入/检索会重新评估而不是被旧判定永久挡住。
+        """
+        if not self.settings.scale_index_auto_enabled:
+            return
+        if notebook_id in self._auto_index_checked:
+            return
+        try:
+            stats = self.notebook_copy_stats(notebook_id)
+            if stats["copyable"]:
+                return  # 小库:行为不变,不自动建索引
+            status = self.scale_index_status(notebook_id)
+            if status["state"] not in ("suggested", "stale"):
+                return  # 已索引且新鲜 / 正在构建 / 已排队 / unindexed(未达建议阈值)—— 无需触发
+            try:
+                self.trigger_scale_index_rebuild(
+                    notebook_id, when=self.settings.scale_index_auto_when, mode="auto")
+            except Exception:  # noqa: BLE001 — 不 eligible/并发冲突等,auto 路径静默跳过
+                pass
+        except Exception:  # noqa: BLE001 — 读路径兜底绝不能因此拖垮请求
+            try:
+                self.event_log.logger.exception("maybe_auto_index failed for %s", notebook_id)
+            except Exception:
+                pass
+        finally:
+            self._auto_index_checked.add(notebook_id)
+
     def _build_viz_graph_arrays(self, notebook_id: str):
         """Full-payload derivation (used by build_scale_index). Delegates the
         array math to _viz_arrays_from_graph so build_viz_index can reuse it with
@@ -8243,7 +8304,14 @@ class SQLiteRepository:
         cand_sims = None
         if query_vector is not None:
             idx = self._scale_index(notebook_id, allow_stale=True)
-            if idx is not None and getattr(idx, "ann_labels", None):
+            if idx is None:
+                # 无 ANN 核 → 本次退回全量暴力(O(N))。O(1) once-set 兜底:大库应
+                # 自动建索引,避免长期停留在暴力回退稳态。fail-open,不影响本次检索。
+                try:
+                    self.maybe_auto_index(notebook_id)
+                except Exception:
+                    pass
+            elif getattr(idx, "ann_labels", None):
                 cand_sims = self._kg_object_candidates(
                     notebook_id, query_vector, idx, self.settings.chunk_recall)
                 if not cand_sims:

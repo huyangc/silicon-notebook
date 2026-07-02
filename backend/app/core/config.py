@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     scale_index_offpeak_start_hour: int = Field(2, env="SCALE_INDEX_OFFPEAK_START_HOUR")    # 低峰窗口起(含)
     scale_index_offpeak_end_hour: int = Field(6, env="SCALE_INDEX_OFFPEAK_END_HOUR")        # 低峰窗口止(不含);start>end 视为跨零点
     scale_index_scheduler_poll_seconds: int = Field(300, env="SCALE_INDEX_SCHEDULER_POLL_SECONDS")  # 调度器轮询间隔
+    # 大库自动建/重建检索索引(复用分享/拷贝的「大」定义 notebook_copy_stats().copyable==False):
+    # 默认开,写路径(抽取完成/rebuild_unified_kg)与检索回退路径均可触发,入队走既有
+    # trigger_scale_index_rebuild 去重/状态机,零前端改动。pydantic-settings v2 下
+    # Field(env=...) 对新字段静默失效,必须用 validation_alias。
+    scale_index_auto_enabled: bool = Field(True, validation_alias="SCALE_INDEX_AUTO_ENABLED")
+    # "idle"=默认低峰窗口重建(避免高峰抢核);"now"=立即后台重建。
+    scale_index_auto_when: str = Field("idle", validation_alias="SCALE_INDEX_AUTO_WHEN")
     # KG 视图 viz 索引:notebook 有效对象数(status!='deprecated')≤ 此阈值时,首次打开 KG 视图
     # 仍同步懒建(现有行为,小库瞬时);> 阈值则后台构建 + GET 立即返回 viz_building 占位,避免
     # 分钟级全图折叠拖垮请求线程(真机 49 万对象库卡死的根因)。pydantic-settings v2 下
