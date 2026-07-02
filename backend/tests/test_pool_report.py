@@ -203,3 +203,41 @@ def test_pool_reporter_exception_in_loop_never_raises(capsys, monkeypatch):
         r.done = 0
         time.sleep(0.06)
     # 到这里没炸即通过
+
+
+# ── rebuild 期 LLM 池(概念描述/merge-review,独立线程池非 scheduler window)──────
+
+def test_rebuild_llm_pools_counted_and_shown():
+    """rebuild 的概念描述(kg-desc)/merge-review(kg-review)走独立 ThreadPoolExecutor,
+    不经 scheduler window 池;按线程名统计 + 快照单列,使 rebuild 期也能看到真实并发。"""
+    from collections import Counter
+    # 线程名统计:起 kg-desc/kg-review 线程 → 计入 desc/review
+    base = bi._live_embed_thread_counts()
+    release = threading.Event()
+    started = [threading.Event() for _ in range(2)]
+
+    def blk(ev):
+        ev.set()
+        release.wait(2)
+
+    ts = [threading.Thread(target=blk, args=(started[0],), name="kg-desc_0", daemon=True),
+          threading.Thread(target=blk, args=(started[1],), name="kg-review_0", daemon=True)]
+    for t in ts:
+        t.start()
+    for ev in started:
+        assert ev.wait(2)
+    try:
+        c = bi._live_embed_thread_counts()
+        assert c["desc"] >= base.get("desc", 0) + 1
+        assert c["review"] >= base.get("review", 0) + 1
+    finally:
+        release.set()
+        for t in ts:
+            t.join(2)
+
+    # 快照:desc/review>0 时单列;抽取期(无)不出现,不加噪
+    s = {"window_active": 0, "window_max": 16, "job_active": 0, "job_max": 8}
+    line = bi._format_pool_snapshot("00:00:03", s, Counter({"desc": 8, "review": 2}), 0, 0, label="rebuild 阶段")
+    assert "概念描述(LLM) 8" in line and "merge-review(LLM) 2" in line
+    line2 = bi._format_pool_snapshot("00:00:03", s, Counter({"pool": 4}), 5, 10)
+    assert "概念描述" not in line2 and "merge-review" not in line2

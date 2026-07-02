@@ -44,9 +44,11 @@ def _rebuild_progress(phase: str, i: int, n: int) -> None:
 
 
 def _live_embed_thread_counts() -> Counter:
-    """Snapshot of live embedding threads by name convention:
+    """Snapshot of live pool threads by name convention:
       - `embed-<sid>` per-source background embed daemons → "bg"
-      - `emb-el`/`emb-ck`/`emb-kg`/`emb-rel` pool workers → "pool"
+      - `emb-el`/`emb-ck`/`emb-kg`/`emb-rel` embed pool workers → "pool"
+      - `kg-desc` 概念描述生成 LLM 池 → "desc"(rebuild 阶段;不经 scheduler window 池)
+      - `kg-review` merge-review 预审 LLM 池 → "review"(rebuild 阶段;同上)
     Best-effort observability only; racy by nature (threads come and go)."""
     c: Counter = Counter()
     for t in threading.enumerate():
@@ -55,6 +57,10 @@ def _live_embed_thread_counts() -> Counter:
             c["bg"] += 1
         elif n.startswith("emb-"):
             c["pool"] += 1
+        elif n.startswith("kg-desc"):
+            c["desc"] += 1
+        elif n.startswith("kg-review"):
+            c["review"] += 1
     return c
 
 
@@ -65,12 +71,19 @@ def _format_pool_snapshot(ts: str, s: dict, embed: Counter, done: int, total: in
     scheduler.stats(); `embed` is _live_embed_thread_counts(). Shows KG-LLM(window)
     vs embed concurrency side by side so a shared-compute model service can be
     confirmed to run both pools at once. 抽取期(total>0)显示「源完成 done/total」;
-    其它有 LLM 的阶段(如 rebuild,total=0)显示阶段名 label。"""
+    其它有 LLM 的阶段(如 rebuild,total=0)显示阶段名 label。
+    rebuild 期的概念描述/merge-review LLM 走独立线程池(非 scheduler window),按线程名单列
+    「概念描述(LLM) N」「merge-review(LLM) N」——仅在活跃(>0)时出现,否则不加噪。"""
     tail = f" · 源完成 {done}/{total}" if total > 0 else (f" · {label}" if label else "")
+    llm = ""
+    if embed.get("desc", 0):
+        llm += f" · 概念描述(LLM) {embed['desc']}"
+    if embed.get("review", 0):
+        llm += f" · merge-review(LLM) {embed['review']}"
     return (f"[pool {ts}] KG-LLM(window) {s['window_active']}/{s['window_max']}"
             f" · 源(job) {s['job_active']}/{s['job_max']}"
             f" · embed {embed.get('bg', 0)}bg+{embed.get('pool', 0)}pool"
-            + tail)
+            + llm + tail)
 
 
 class _PoolReporter:
