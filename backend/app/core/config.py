@@ -144,6 +144,12 @@ class Settings(BaseSettings):
     scale_index_offpeak_start_hour: int = Field(2, env="SCALE_INDEX_OFFPEAK_START_HOUR")    # 低峰窗口起(含)
     scale_index_offpeak_end_hour: int = Field(6, env="SCALE_INDEX_OFFPEAK_END_HOUR")        # 低峰窗口止(不含);start>end 视为跨零点
     scale_index_scheduler_poll_seconds: int = Field(300, env="SCALE_INDEX_SCHEDULER_POLL_SECONDS")  # 调度器轮询间隔
+    # 已索引大库检索策略:默认只搜已索引部分(ANN 核 ∪ FTS 词法);delta(水位后新增 source)
+    # 的 chunk 不做暴力语义补召回。True 时对 delta 额外暴力(强一致,但大库慢),供 opt-in。
+    # 配合 scale_auto_fold_on_add:新增内容排增量 fold,使 delta 尽快进索引取代暴力。
+    # pydantic-settings v2 下 Field(env=...) 对新字段静默失效,必须用 validation_alias。
+    scale_search_include_delta: bool = Field(False, validation_alias="SCALE_SEARCH_INCLUDE_DELTA")
+    scale_auto_fold_on_add: bool = Field(True, validation_alias="SCALE_AUTO_FOLD_ON_ADD")            # 已索引库新增内容后自动排增量 fold(idle,合并多次新增),使 delta 尽快进索引
     # 大库自动建/重建检索索引(复用分享/拷贝的「大」定义 notebook_copy_stats().copyable==False):
     # 默认开,写路径(抽取完成/rebuild_unified_kg)与检索回退路径均可触发,入队走既有
     # trigger_scale_index_rebuild 去重/状态机,零前端改动。pydantic-settings v2 下
