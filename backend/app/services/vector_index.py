@@ -120,3 +120,35 @@ def query_sims(query_vector, ids: List[str], matrix: np.ndarray) -> Dict[str, fl
     q = q / qn
     sims = matrix @ q
     return {i: float(s) for i, s in zip(ids, sims)}
+
+
+def top_k_sims(query_vector, ids: List[str], matrix: np.ndarray, k: int) -> List[Tuple[str, float]]:
+    """Top-`k` (id, cosine_sim) pairs, sorted desc, WITHOUT materializing a full
+    {id: sim} dict over all N rows — at N in the millions that dict itself is a
+    GB-scale allocation (millions of (str, float) pairs). Stays numpy end to
+    end: matrix @ q -> np.argpartition selects the top-k *indices* in O(N)
+    without a full sort, then only those k rows are turned into (id, float)
+    tuples. Same cosine-similarity semantics/values as query_sims — this is
+    purely a materialization-avoiding variant for the top-k case.
+
+    Degenerate inputs (empty query_vector/ids/matrix, dim mismatch, k<=0)
+    return []. A zero-norm query_vector returns the first k ids at sim=0.0
+    (mirrors query_sims' zero-norm fallback, arbitrary order tie-break)."""
+    if not query_vector or not ids or matrix.size == 0 or k <= 0:
+        return []
+    q = np.asarray(query_vector, dtype=np.float32)
+    if q.ndim != 1 or q.shape[0] != matrix.shape[1]:
+        return []
+    n = len(ids)
+    kk = min(k, n)
+    qn = float(np.linalg.norm(q))
+    if qn == 0:
+        return [(i, 0.0) for i in ids[:kk]]
+    q = q / qn
+    sims = matrix @ q
+    if kk >= n:
+        top_idx = np.argsort(-sims)
+    else:
+        part = np.argpartition(-sims, kk - 1)[:kk]
+        top_idx = part[np.argsort(-sims[part])]
+    return [(ids[int(i)], float(sims[int(i)])) for i in top_idx]

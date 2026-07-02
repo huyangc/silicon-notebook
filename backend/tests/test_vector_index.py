@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-from app.services.vector_index import build_matrix, query_sims, encode_vector, decode_vector
+from app.services.vector_index import build_matrix, query_sims, top_k_sims, encode_vector, decode_vector
 from app.services.retrieval import cosine
 
 
@@ -204,3 +204,56 @@ def test_query_sims_matches_cosine_blob_rows():
     sims = query_sims(q, ids, mat)
     for k in ids:
         assert math.isclose(sims[k], cosine(q, raw[k]), abs_tol=1e-5)
+
+
+# ── top_k_sims: numpy argpartition top-K, no full {id: float} dict ──────────
+# (P0-1/2: at millions-of-relations scale, query_sims' full {id: float} dict is
+# itself a GB-scale allocation; top_k_sims stays numpy end-to-end and only
+# materializes the K winners.)
+
+def _rand_matrix_rows(n, dim, seed=0):
+    rng = np.random.default_rng(seed)
+    return [(f"id{i}", encode_vector(rng.normal(size=dim).astype(np.float32))) for i in range(n)]
+
+
+def test_top_k_sims_matches_query_sims_top_slice():
+    rows = _rand_matrix_rows(50, 8, seed=1)
+    ids, mat = build_matrix(rows)
+    q = [0.3, -0.1, 0.2, 0.5, -0.4, 0.1, 0.05, -0.2]
+    k = 7
+    full = query_sims(q, ids, mat)
+    want = sorted(full.items(), key=lambda kv: kv[1], reverse=True)[:k]
+    got = top_k_sims(q, ids, mat, k)
+    assert [g[0] for g in got] == [w[0] for w in want]
+    for (gid, gs), (wid, ws) in zip(got, want):
+        assert gid == wid
+        assert math.isclose(gs, ws, abs_tol=1e-5)
+
+
+def test_top_k_sims_k_exceeds_n_returns_all_sorted():
+    rows = _rand_matrix_rows(5, 4, seed=2)
+    ids, mat = build_matrix(rows)
+    q = [1.0, 0.0, 0.0, 0.0]
+    got = top_k_sims(q, ids, mat, k=100)
+    assert len(got) == 5
+    scores = [s for _, s in got]
+    assert scores == sorted(scores, reverse=True)
+    assert {i for i, _ in got} == set(ids)
+
+
+def test_top_k_sims_degenerate_inputs_return_empty():
+    rows = _rand_matrix_rows(3, 4, seed=3)
+    ids, mat = build_matrix(rows)
+    q = [1.0, 0.0, 0.0, 0.0]
+    assert top_k_sims(None, ids, mat, 2) == []
+    assert top_k_sims(q, [], mat, 2) == []
+    assert top_k_sims(q, ids, np.zeros((0, 0), dtype=np.float32), 2) == []
+    assert top_k_sims(q, ids, mat, 0) == []
+    assert top_k_sims([1.0, 0.0], ids, mat, 2) == []   # dim mismatch
+
+
+def test_top_k_sims_zero_norm_query_returns_first_k_at_zero():
+    rows = _rand_matrix_rows(4, 4, seed=4)
+    ids, mat = build_matrix(rows)
+    got = top_k_sims([0.0, 0.0, 0.0, 0.0], ids, mat, 2)
+    assert got == [(ids[0], 0.0), (ids[1], 0.0)]
