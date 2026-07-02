@@ -84,6 +84,8 @@ import ast, pathlib
 
 
 def test_offline_clis_parse():
+    # 锚定测试文件位置,不依赖 pytest 启动时的 CWD(仓库根/backend 均可跑)
+    scripts_dir = pathlib.Path(__file__).resolve().parents[1] / "app" / "scripts"
     for f in ("reembed_kg.py", "recluster_kg.py"):
-        p = pathlib.Path("app/scripts") / f
+        p = scripts_dir / f
         ast.parse(p.read_text(encoding="utf-8"))
