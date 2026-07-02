@@ -18,7 +18,7 @@ scripts/backend.sh restart    # 停当前 + 启 silicon-notebook
 - **"重启后 notebook 全没了 / 一直 404"** —— 多半是 :8000 被**别的服务**(如 `EDA Agent`,它有 `/v1/chat/completions` 但没有 `/api/notebooks`)占了。先 `scripts/backend.sh status`:若显示不是 silicon-notebook,`scripts/backend.sh restart` 一键换回。**数据不会丢**——notebook 都在 `.local/silicon_notebook.db`,这只是"端口上跑错了服务"。
 - 改了 `.env`(模型 / `CHUNK_MMR_K` / DB 等)需要让后端重新加载 → `restart`(后端**没带 `--reload`**,改 config/代码必须重启才生效)。
 
-**关键:** 脚本从 `backend/` 目录启动 uvicorn,所以:① 自动加载 `../.env`(即仓库根 `.env`:`OPENAI_COMPAT_MODEL` / `CHUNK_MMR_K` / key 等);② DB 解析到 `仓库根/.local/silicon_notebook.db`(你的真实库)。**不要从别的目录手敲 uvicorn**,否则可能连到空库 / 不加载 .env。
+**关键:** DB / storage / `.env` 的相对路径已在代码层锚定到**仓库根**(见 `backend/app/core/config.py` 的 `_ROOT_DIR`),从哪个目录启动 uvicorn 都指向同一套 `仓库根/.local` 与根 `.env`——后端启动日志首行会打印解析后的绝对路径,可一眼核对。脚本仍从 `backend/` 目录启动只是为了模块导入(`app.main`)。注意:多 worktree 时各 worktree 锚各自的根(`.local` 互相独立)。生产启动用仓库根的 `npm run start`(scripts/prod.sh:前端 build+start + 后端单进程)。
 
 环境变量:`PYTHON_BIN` `HOST`(默认 127.0.0.1) `PORT`(默认 8000) `LOG_FILE`。
 例:换端口 `PORT=8001 scripts/backend.sh start`。
