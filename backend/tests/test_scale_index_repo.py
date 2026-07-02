@@ -451,6 +451,66 @@ def test_build_scale_index_writes_chunk_ann(repo):
     assert idx.chunk_ann_path.endswith("chunk_ann.bin")
 
 
+def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
+    """build_scale_index must time each internal stage (gather/transition/
+    kg_matrix/chunk_matrix/viz_arrays/persist) and emit a scale_index_build
+    event per stage plus a final total — for locating the bottleneck stage on
+    large (490k-object) deployments. Disk manifest.json carries the 5
+    pre-persist stages (persist/total aren't known until after the file is
+    written); the RETURNED manifest dict additionally carries persist+total."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [{"source_local_id": "b", "target_local_id": "a", "edge_type": "depends_on", "evidence": []}])
+    repo.rebuild_unified_kg(nb.id)
+
+    events = []
+    orig_emit = repo.event_log.emit
+
+    def spy_emit(event, **kw):
+        events.append(event)
+        return orig_emit(event, **kw)
+
+    monkeypatch.setattr(repo.event_log, "emit", spy_emit)
+
+    manifest = repo.build_scale_index(nb.id)
+
+    # Returned manifest: 7 keys (6 stages + total)
+    expected_stages = {"gather", "transition", "kg_matrix", "chunk_matrix", "viz_arrays", "persist"}
+    assert "build_ms" in manifest
+    returned_build_ms = manifest["build_ms"]
+    assert set(returned_build_ms.keys()) == expected_stages | {"total"}
+    for k, v in returned_build_ms.items():
+        assert isinstance(v, int)
+        assert v >= 0
+    assert returned_build_ms["total"] >= max(
+        v for k, v in returned_build_ms.items() if k != "total"
+    )
+
+    # Existing manifest keys untouched
+    assert manifest["n_nodes"] >= 2
+    assert "version" in manifest
+
+    # Disk manifest.json: only the 5 pre-persist stages (persist/total unknown
+    # until after the file itself is written).
+    d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
+    with open(os.path.join(d, "manifest.json")) as fh:
+        disk_manifest = json.load(fh)
+    assert set(disk_manifest["build_ms"].keys()) == expected_stages - {"persist"}
+
+    # Events: 7 scale_index_build events (6 stages + total), each with
+    # notebook_id/stage/latency_ms.
+    scale_events = [e for e in events if e.get("kind") == "scale_index_build"]
+    assert len(scale_events) == 7
+    stages_seen = {e["stage"] for e in scale_events}
+    assert stages_seen == expected_stages | {"total"}
+    for e in scale_events:
+        assert e["notebook_id"] == nb.id
+        assert isinstance(e["latency_ms"], int)
+        assert e["latency_ms"] >= 0
+
+
 def test_scale_index_status_and_rebuild(repo, monkeypatch):
     import json, time
     from app.models.schemas import NotebookCreate

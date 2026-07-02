@@ -7146,8 +7146,31 @@ class SQLiteRepository:
         # Validate notebook exists
         self.get_notebook(notebook_id)
 
+        # Per-stage timing (observability only, no behavior change): times the
+        # main internal stages and emits a `scale_index_build` event per stage
+        # so a slow build on a large (e.g. 490k-object) deployment can be
+        # traced to the exact bottleneck (gather / transition / ANN matrices /
+        # viz arrays / persist). Mirrors the pipeline-stage event pattern in
+        # process_source (kind/stage/status/latency_ms).
+        build_started = time.perf_counter()
+        timings: dict = {}
+
+        def _timed(stage_name, fn):
+            t0 = time.perf_counter()
+            out = fn()
+            ms = round((time.perf_counter() - t0) * 1000)
+            timings[stage_name] = ms
+            self.event_log.emit({
+                "kind": "scale_index_build",
+                "notebook_id": notebook_id,
+                "stage": stage_name,
+                "status": "done",
+                "latency_ms": ms,
+            })
+            return out
+
         node_ids, edges, chunk_ids, kg_node_ids, membership_counts = \
-            self._gather_kg_graph(notebook_id)
+            _timed("gather", lambda: self._gather_kg_graph(notebook_id))
 
         kg_id_set = set(kg_node_ids)
 
@@ -7166,12 +7189,15 @@ class SQLiteRepository:
                 idf.append(1.0)
 
         # Build CSR transition matrix
-        transition, _ = si.build_transition(node_ids, edges)
+        transition, _ = _timed("transition", lambda: si.build_transition(node_ids, edges))
 
         # ANN vectors/labels: kg nodes with embeddings
-        with self._connect() as db:
-            ann_ids_raw, ann_matrix_raw = self._vector_matrix(
-                db, notebook_id, "knowledge_embeddings", "object_id")
+        def _kg_matrix():
+            with self._connect() as db:
+                return self._vector_matrix(
+                    db, notebook_id, "knowledge_embeddings", "object_id")
+
+        ann_ids_raw, ann_matrix_raw = _timed("kg_matrix", _kg_matrix)
         ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
         ann_matrix = ann_matrix_raw
         if ann_ids and ann_matrix is not None:
@@ -7184,9 +7210,12 @@ class SQLiteRepository:
         # Chunk-level ANN vectors/labels (Task 1): chunks that have a row in
         # chunk_embeddings. Persisted as chunk_ann.bin so query-time chunk
         # retrieval can ANN-narrow candidates on large persisted-index notebooks.
-        with self._connect() as db:
-            c_ids_raw, c_mat_raw = self._vector_matrix(
-                db, notebook_id, "chunk_embeddings", "chunk_id")
+        def _chunk_matrix():
+            with self._connect() as db:
+                return self._vector_matrix(
+                    db, notebook_id, "chunk_embeddings", "chunk_id")
+
+        c_ids_raw, c_mat_raw = _timed("chunk_matrix", _chunk_matrix)
         chunk_ann_labels = list(c_ids_raw) if c_ids_raw else []
         chunk_ann_vectors = (np.asarray(c_mat_raw, dtype=np.float32)
                              if chunk_ann_labels and c_mat_raw is not None else None)
@@ -7197,7 +7226,7 @@ class SQLiteRepository:
         # arrays so unified_graph(limit=N)/neighbors can serve a bounded core
         # without re-folding the full graph at request time.
         (viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload) = \
-            self._build_viz_graph_arrays(notebook_id)
+            _timed("viz_arrays", lambda: self._build_viz_graph_arrays(notebook_id))
 
         n_kg = len(kg_node_ids)
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
@@ -7216,8 +7245,15 @@ class SQLiteRepository:
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
             "watermark_sources": watermark_sources,
+            # Pre-persist stage timings only (persist/total aren't known until
+            # after this dict is serialized to manifest.json by save_scale_index
+            # below). The RETURNED manifest gets persist+total appended after
+            # save_scale_index returns — see below. Full picture either way is
+            # in the `scale_index_build` events (7 stages incl. persist/total).
+            "build_ms": dict(timings),
         }
-        return si.save_scale_index(
+        persist_started = time.perf_counter()
+        saved_manifest = si.save_scale_index(
             out_dir,
             node_ids=node_ids,
             transition=transition,
@@ -7235,6 +7271,29 @@ class SQLiteRepository:
             chunk_ann_vectors=chunk_ann_vectors,
             chunk_ann_labels=chunk_ann_labels,
         )
+        persist_ms = round((time.perf_counter() - persist_started) * 1000)
+        timings["persist"] = persist_ms
+        self.event_log.emit({
+            "kind": "scale_index_build",
+            "notebook_id": notebook_id,
+            "stage": "persist",
+            "status": "done",
+            "latency_ms": persist_ms,
+        })
+        total_ms = round((time.perf_counter() - build_started) * 1000)
+        timings["total"] = total_ms
+        self.event_log.emit({
+            "kind": "scale_index_build",
+            "notebook_id": notebook_id,
+            "stage": "total",
+            "status": "done",
+            "latency_ms": total_ms,
+        })
+        # Return a manifest dict enriched with persist+total (in-memory only;
+        # the on-disk manifest.json written above intentionally only has the 5
+        # pre-persist stages, since persist's own duration can't be known
+        # before the file itself is written).
+        return {**saved_manifest, "build_ms": dict(timings)}
 
     def fold_scale_index_delta(self, notebook_id: str, _assume_locked: bool = False) -> dict:
         """O(delta) 增量 fold:delta splice 进现有索引(ANN add_items、CSR splice),
