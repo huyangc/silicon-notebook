@@ -3723,12 +3723,94 @@ class SQLiteRepository:
     # --- Track E: edge trust review queue + curation feedback loop ----------
     _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
 
+    def _edge_centrality_map(self, notebook_id: str) -> Dict[str, float]:
+        """Cached {rel_id: edge_betweenness_centrality} over the live (non-rejected)
+        graph, keyed on tuple(_scale_index_version(nb)) — version-cached like
+        _vector_matrix/_ent_chunk_map so review_queue's O(V·E) Brandes run
+        (rustworkx digraph_edge_betweenness_centrality) pays once per KG version
+        instead of once per HTTP request. At 490k-node scale this used to be
+        minutes of synchronous CPU on the request thread, every request.
+
+        Bounding (P0-3): when the graph exceeds settings.edge_centrality_max_nodes,
+        betweenness is computed ONLY on the degree-top-K induced subgraph (K =
+        edge_centrality_max_nodes), where degree is measured in the full loaded
+        graph and ties are broken by node insertion order (deterministic — same
+        input always yields the same top-K set, so the cached value is
+        reproducible). Edges with either endpoint outside the top-K subgraph get
+        centrality 0.0. This means review_priority (= centrality * (1 - trust))
+        DEGRADES to being trust-score-driven for those edges — betweenness no
+        longer distinguishes them, so ranking among them falls back to whichever
+        has the lowest trust_score. This is an accepted approximation at scale,
+        not a bug: full-graph Brandes is O(V·E) and does not fit in a request.
+        """
+        from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
+
+        version = tuple(self._scale_index_version(notebook_id))
+
+        def _load() -> Dict[str, float]:
+            with self._connect() as db:
+                rel_rows = db.execute(
+                    "SELECT id, source_object_id, target_object_id, edge_type, "
+                    "evidence FROM knowledge_relations "
+                    "WHERE notebook_id = ? AND review_status != 'rejected'",
+                    (notebook_id,),
+                ).fetchall()
+                obj_rows = db.execute(
+                    "SELECT id, object_type, payload FROM knowledge_objects "
+                    "WHERE notebook_id = ?", (notebook_id,)
+                ).fetchall()
+
+            node_types: dict = {}
+            node_names: dict = {}
+            for r in obj_rows:
+                node_types[r["id"]] = r["object_type"]
+                p = json.loads(r["payload"] or "{}")
+                node_names[r["id"]] = p.get("name", "")
+
+            rels = []
+            for r in rel_rows:
+                rels.append({
+                    "id": r["id"],
+                    "source_object_id": r["source_object_id"],
+                    "target_object_id": r["target_object_id"],
+                    "edge_type": r["edge_type"],
+                    "evidence": json.loads(r["evidence"] or "[]"),
+                })
+
+            G, idx_to_oid, oid_to_idx = build_rx_graph(
+                {oid: {"type": t, "name": node_names.get(oid, "")}
+                 for oid, t in node_types.items()},
+                rels,
+            )
+
+            max_nodes = self.settings.edge_centrality_max_nodes
+            if G.num_nodes() > max_nodes:
+                # Degree-top-K induced subgraph. PyDiGraph has no combined
+                # .degree(); total degree = in_degree + out_degree. Sort is
+                # stable, so ties break by node insertion order (== node index,
+                # since build_rx_graph assigns indices in dict-iteration order)
+                # — deterministic top-K for a reproducible cache value.
+                node_indices = list(range(G.num_nodes()))
+                node_indices.sort(
+                    key=lambda idx: G.in_degree(idx) + G.out_degree(idx),
+                    reverse=True,
+                )
+                top_k = node_indices[:max_nodes]
+                sub = G.subgraph(top_k, preserve_attrs=True)
+                return compute_edge_centrality(sub)
+
+            return compute_edge_centrality(G)
+
+        return self._vector_cache.get(f"{notebook_id}:edge_centrality", version, _load)
+
     def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
         """Return edges ranked by review priority = edge_centrality * (1 - trust_score).
 
         Only edges with review_status != 'rejected' are included (rejected edges are
         excluded from reasoning and need no further review).
-        Centrality is computed over the FULL graph (including non-rejected edges).
+        Centrality is computed over the FULL graph (including non-rejected edges),
+        version-cached via _edge_centrality_map — see that method's docstring for
+        the degree-top-K bounding behavior above edge_centrality_max_nodes.
         trust_score combines evidence anchoring + cross-doc corroboration + type validity.
         """
         import json as _json
@@ -3736,7 +3818,6 @@ class SQLiteRepository:
             compute_trust_score, corroboration_counts,
             corroboration_score_from_count,
         )
-        from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
 
         self.get_notebook(notebook_id)
         with self._connect() as db:
@@ -3782,13 +3863,8 @@ class SQLiteRepository:
         # Corroboration counts (batched over all edges)
         corr_counts = corroboration_counts(rels, node_names)
 
-        # Edge centrality from the live graph (non-rejected edges only)
-        G, idx_to_oid, oid_to_idx = build_rx_graph(
-            {oid: {"type": t, "name": node_names.get(oid, "")}
-             for oid, t in node_types.items()},
-            rels,
-        )
-        edge_centrality = compute_edge_centrality(G)
+        # Edge centrality — version-cached, see _edge_centrality_map docstring.
+        edge_centrality = self._edge_centrality_map(notebook_id)
 
         items = []
         for rel in rels:
@@ -4737,6 +4813,10 @@ class SQLiteRepository:
         # serve a stale membership map to the PPR-fallback / chunk-overlay paths.
         self._vector_cache.invalidate(f"{notebook_id}:entchunk")
         self._vector_cache.invalidate(f"{notebook_id}:elemchunk")
+        # review_queue's edge betweenness centrality map (P0-3) — evict so a
+        # same-second in-place edit (e.g. review_status flip) with an unchanged
+        # version tuple cannot serve a stale centrality map.
+        self._vector_cache.invalidate(f"{notebook_id}:edge_centrality")
 
     def _cluster_input_version(self, notebook_id: str) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
@@ -8575,7 +8655,13 @@ class SQLiteRepository:
             不 materialize 全量 {id: float} dict —— 生产部署关系可达百万级,
             query_sims 的全量 dict 本身就是 GB 级分配,argpartition 是 O(N)
             但只产出 K 个 (id, sim) 元组)→ 只 hydrate 这 K 个 id 的文本做
-            关键词+语义融合打分。"""
+            关键词+语义融合打分。
+
+        注:与 _kg_object_candidates 的界定条件不对称,是有意的——这里"关系表非空
+        但向量表空"仍回退全量 JOIN(上面第二条),而 _kg_object_candidates 是"存在
+        持久化 scale ANN 索引"才收窄,否则 fail-open 返回 {} 让上层退回全量。两者
+        触发候选界定的前提不同(有向量 vs 有持久 ANN),但都遵循同一 fail-open
+        哲学:信号不足时宁可付全量代价也不静默丢候选。"""
         from app.services.retrieval import score_relations
         from app.services.vector_index import top_k_sims
         with self._connect() as db:
@@ -8601,6 +8687,9 @@ class SQLiteRepository:
                     # no query_vector (embed_query 失败/未配置) → sim 界定不了,
                     # 但向量覆盖存在时仍以 relation_recall 为界(取矩阵前 N 个 id,
                     # 保持"有界"而非退回全量;顺序对无 sim 场景无关紧要)。
+                    # 注:这是退化路径(model_error 兜底),不追求与"有 query_vector"
+                    # 分支等价——矩阵内前 N 个 id 是任意切片,不是相关性排序;只保证
+                    # 有界不炸内存,排序质量让位于可用性。
                     top_ids = rel_ids[: self.settings.relation_recall]
                     relation_sims = {}
                 relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
