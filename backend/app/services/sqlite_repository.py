@@ -9770,26 +9770,29 @@ class SQLiteRepository:
                 except Exception as exc:  # noqa: BLE001 — fail-open
                     self._note_model_error("relation_ann_query", self.settings.embed_model, exc)
                     return {}
-        # ⊕ delta 关系(水位后 source)暴力:small id-scoped 向量加载(IN-chunked
-        # 由 _relations_with_names/build_matrix 自然承载,这里量级由 delta 决定,
-        # 通常远小于全库)。
-        try:
-            delta = self._index_delta(notebook_id)
-            if delta["delta_sources"] and query_vector is not None:
-                drows = []
-                with self._connect() as db:
-                    for batch in self._in_batches(delta["delta_sources"]):
-                        ph_s = ",".join("?" for _ in batch)
-                        drows.extend(db.execute(
-                            f"SELECT relation_id AS vid, vector FROM relation_embeddings "
-                            f"WHERE notebook_id=? AND relation_id IN "
-                            f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                            (notebook_id, notebook_id, *batch)).fetchall())
-                d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
-                for rid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
-                    sims[rid] = s
-        except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
-            self._note_model_error("relation_ann_delta", self.settings.embed_model, exc)
+        # ⊕ delta 关系(水位后 source)暴力 —— opt-in(scale_search_include_delta,
+        # 默认关):与 chunk/KG对象侧同一原则「已索引的库只检索已索引部分」,delta
+        # 由 scale_auto_fold_on_add 的增量 fold 收进索引(最终一致)。True 时保持
+        # 强一致暴力(small id-scoped 向量加载,IN-chunked 由 build_matrix 自然
+        # 承载,这里量级由 delta 决定,通常远小于全库,但仍随 delta 无界增长)。
+        if self.settings.scale_search_include_delta:
+            try:
+                delta = self._index_delta(notebook_id)
+                if delta["delta_sources"] and query_vector is not None:
+                    drows = []
+                    with self._connect() as db:
+                        for batch in self._in_batches(delta["delta_sources"]):
+                            ph_s = ",".join("?" for _ in batch)
+                            drows.extend(db.execute(
+                                f"SELECT relation_id AS vid, vector FROM relation_embeddings "
+                                f"WHERE notebook_id=? AND relation_id IN "
+                                f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph_s}))",
+                                (notebook_id, notebook_id, *batch)).fetchall())
+                    d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
+                    for rid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
+                        sims[rid] = s
+            except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
+                self._note_model_error("relation_ann_delta", self.settings.embed_model, exc)
         return sims
 
     def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:

@@ -283,10 +283,13 @@ def test_retrieve_relations_scored_returns_valid_scores(repo):
 # ── core ⊕ delta merge: post-watermark relation retrievable ────────────────
 
 
-def test_retrieve_relations_ann_plus_delta_finds_post_watermark_relation(repo):
-    """After build_scale_index (core ANN), add a NEW source with a new
-    relation (post-watermark, not in the ANN) — it must still be retrievable
-    via the small id-scoped delta brute-force path."""
+def test_retrieve_relations_ann_plus_delta_finds_post_watermark_relation(repo, monkeypatch):
+    """opt-in delta brute-force: with scale_search_include_delta=True, a NEW
+    source's relation (post-watermark, not in the ANN) is still retrievable
+    via the small id-scoped delta brute-force path. (Default is now OFF —
+    see test_indexed_only_principle.py — so this test explicitly enables the
+    opt-in to exercise the brute-force branch.)"""
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     nb = repo.create_notebook(NotebookCreate(name="base"))
     repo.store_kg(nb.id, None, [
         {"local_id": "a", "object_type": "concept",
