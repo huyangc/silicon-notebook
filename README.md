@@ -285,6 +285,18 @@ SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local
 RETRIEVAL_TOP_N         # top-N hits before 1-hop expansion (default 12)
 ```
 
+**Scalable-retrieval index:** notebooks large enough to be non-copyable (the same size
+threshold used to gate notebook copy/sharing — bytes or chunk+node count over the
+configured limit) get their scale index built or refreshed automatically, no manual
+button/CLI step required: on source extraction, on KG rebuild, and as a fallback the first
+time a query finds no index. By default the build is queued for a low-traffic off-peak
+window rather than run immediately.
+
+```text
+SCALE_INDEX_AUTO_ENABLED   # auto-build/refresh the scale index for large notebooks (default true)
+SCALE_INDEX_AUTO_WHEN      # "idle"=queue for the off-peak window (default) | "now"=build immediately
+```
+
 **Retrieval / KG enhancements (GraphRAG + ToG-3 borrow, Phase 1+2):**
 
 A mix of opt-in (default off) and on-by-default knobs. On by default: `ANSWER_CONTEXT_*`,
@@ -491,7 +503,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --lim
 PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --rebuild-only
 ```
 
-`--limit` bounds only how many sources are *extracted* this run; the final clustering always covers the whole notebook. After a `kg` rebuild on a base-tier notebook the scalable-retrieval index is rebuilt automatically (so it never goes stale). `KG_CLUSTER_REP_ANN_MAX` (default 2,000,000) caps the rep-ANN size — above it the index is built in shards with a warning (never silently truncated).
+`--limit` bounds only how many sources are *extracted* this run; the final clustering always covers the whole notebook. After a `kg` rebuild on a large notebook (see `SCALE_INDEX_AUTO_ENABLED` above) the scalable-retrieval index is rebuilt automatically (so it never goes stale). `KG_CLUSTER_REP_ANN_MAX` (default 2,000,000) caps the rep-ANN size — above it the index is built in shards with a warning (never silently truncated).
 
 **Concurrency tuning.** Three knobs control throughput (and 429 pressure):
 
