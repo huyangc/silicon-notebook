@@ -1484,19 +1484,48 @@ class SQLiteRepository:
         return row["id"] if row else None
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
-        """便宜的大小盘点 + 是否在拷贝阈值内。"""
-        with self._connect() as db:
-            def one(sql):
-                return db.execute(sql, (notebook_id,)).fetchone()[0]
-            b = one("SELECT COALESCE(SUM(file_size),0) FROM sources WHERE notebook_id=?")
-            src = one("SELECT COUNT(*) FROM sources WHERE notebook_id=?")
-            ch = one("SELECT COUNT(*) FROM chunks WHERE notebook_id=?")
-            nd = one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?")
-            eg = one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id=?")
-        copyable = (b <= self.settings.notebook_copy_max_bytes) \
-            and ((ch + nd) <= self.settings.notebook_copy_max_rows)
-        return {"copyable": copyable,
-                "size": {"bytes": b, "sources": src, "chunks": ch, "nodes": nd, "edges": eg}}
+        """便宜的大小盘点 + 是否在拷贝阈值内。
+
+        perf-audit A3:现挂在 ask 路径守卫(_scale_index_eligible/maybe_auto_index
+        的兜底分支)+ 分享/拷贝路径上,每次都是 5 个聚合查询。按
+        _scale_index_version(nb) 版本 memo(同 edge_centrality/clustermap 范式)。
+
+        已知的新鲜度窗口(记录而非修复,判定为良性):_scale_index_version 由
+        kg_mutation_seq(objects/relations/chunks/embeddings 的统一脏标记)+
+        concept_clusters 聚合构成,**不含 sources 表**。一次「只插入 sources 行、
+        chunk 还没写完」的上传中间态(source 行已落地但对应 chunk 尚未生成)不会
+        移动版本 key,故这个瞬间 bytes/sources 计数可能读到 memo 里的旧值。后果
+        =守卫/分享判定用的 size 短暂偏旧,量级是「一次上传的这一个 source」,窗口
+        是"上传中"到"chunk 写完(_build_chunks_for_source 触发 dirty)"这几秒——
+        不影响正确性(不会导致误判可拷贝的库变不可拷贝并卡死,只会让边界值判定
+        晚几秒生效),视为可接受的良性陈旧。
+
+        版本 key 额外附上拷贝阈值设置(notebook_copy_max_bytes/_max_rows):
+        _scale_index_version 的 settings_tail 只覆盖 PPR 相关项,不含这两个,
+        而 copyable 判定直接读它们——运行期改阈值(测试常这么做来复现「大库」
+        场景;生产是启动期一次性 env 配置,基本不变但不能假设)必须能让 memo
+        失效,否则会把旧阈值下算出的 copyable 结果错误地服务给新阈值。"""
+        version = (
+            tuple(self._scale_index_version(notebook_id)),
+            self.settings.notebook_copy_max_bytes,
+            self.settings.notebook_copy_max_rows,
+        )
+
+        def _load() -> dict:
+            with self._connect() as db:
+                def one(sql):
+                    return db.execute(sql, (notebook_id,)).fetchone()[0]
+                b = one("SELECT COALESCE(SUM(file_size),0) FROM sources WHERE notebook_id=?")
+                src = one("SELECT COUNT(*) FROM sources WHERE notebook_id=?")
+                ch = one("SELECT COUNT(*) FROM chunks WHERE notebook_id=?")
+                nd = one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?")
+                eg = one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id=?")
+            copyable = (b <= self.settings.notebook_copy_max_bytes) \
+                and ((ch + nd) <= self.settings.notebook_copy_max_rows)
+            return {"copyable": copyable,
+                    "size": {"bytes": b, "sources": src, "chunks": ch, "nodes": nd, "edges": eg}}
+
+        return self._vector_cache.get(f"{notebook_id}:copystats", version, _load)
 
     def shared_preview(self, notebook_id: str) -> dict:
         nb = self.get_notebook(notebook_id)
@@ -5306,6 +5335,10 @@ class SQLiteRepository:
         # which can land COUNT and MAX(created_at) on the same values as before)
         # with an unchanged version tuple cannot serve a stale membership map.
         self._vector_cache.invalidate(f"{notebook_id}:clustermap")
+        # notebook_copy_stats memo (perf-audit A3) — evict so a same-second
+        # in-place edit with an unchanged version tuple cannot serve a stale
+        # size/copyable verdict to the ask-path guards / share paths.
+        self._vector_cache.invalidate(f"{notebook_id}:copystats")
 
     def _cluster_input_version(self, notebook_id: str) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
