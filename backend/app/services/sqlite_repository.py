@@ -6594,8 +6594,31 @@ class SQLiteRepository:
                     # Legacy fallback: group sibling procedure nodes by exact section_path
                     # (precedes edges are sparse). Two distinct procedures sharing a heading
                     # would merge — acceptable for inspection.
-                    prows = db.execute(
-                        "SELECT id, payload, evidence FROM knowledge_objects WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated'", (notebook_id,)).fetchall()
+                    #
+                    # P2-3: this used to scan EVERY procedure object in the notebook
+                    # (regardless of section) and filter in Python — O(procedures in
+                    # notebook) per call. When the target node's own section_path is
+                    # known (the common case — payload.get("section_path") above),
+                    # bind the query to it directly in SQL via json_extract (JSON1,
+                    # already used elsewhere in this file), so SQLite only reads
+                    # matching rows. section_path is free text (not a dedicated
+                    # column) so this is the only way to push the filter down without
+                    # a schema change. If section_path is unavailable (rare: an old
+                    # or malformed payload), fall back to a bounded LIMIT — this path
+                    # is a display-only legacy fallback, not a correctness-critical
+                    # query, so an arbitrary-but-bounded sample is acceptable.
+                    if section:
+                        prows = db.execute(
+                            "SELECT id, payload, evidence FROM knowledge_objects "
+                            "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
+                            "AND json_extract(payload,'$.section_path')=?",
+                            (notebook_id, section)).fetchall()
+                    else:
+                        prows = db.execute(
+                            "SELECT id, payload, evidence FROM knowledge_objects "
+                            "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
+                            "LIMIT 500",
+                            (notebook_id,)).fetchall()
                     candidate_steps = []
                     for pr in prows:
                         ppay = json.loads(pr["payload"] or "{}")
