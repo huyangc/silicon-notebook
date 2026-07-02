@@ -197,6 +197,30 @@ def test_large_chunk_light_unindexed_triggers(repo, monkeypatch):
     assert calls[0][0] == nb.id
 
 
+def test_large_chunk_light_eligible_and_really_enqueues(repo, monkeypatch):
+    """大(分享定义 copyable=False)而 chunk 少(< suggest 阈值)的非 base 未建库:
+    eligibility 必须与「大 → 可建/自动建」的产品语义一致 ——
+    scale_index_status()["eligible"] 为 True(前端手动徽章可点),且 maybe_auto_index
+    走真实 trigger_scale_index_rebuild 真正入队(不再被 eligibility ValueError 吞掉)。"""
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)  # copyable=False("大")
+    # index_suggest_chunk_threshold 保持默认(2000)→ chunk-light,state=unindexed
+    nb = _seed_nb_with_chunk(repo)
+    st = repo.scale_index_status(nb.id)
+    assert st["state"] == "unindexed"
+    assert st["eligible"] is True
+    repo.maybe_auto_index(nb.id)  # real trigger, no spy/stub
+    assert nb.id in repo._scale_idle_queue
+
+
+def test_small_nb_not_eligible(repo):
+    """小库(copyable=True)、非 base、未建过、chunk 少 → eligible 仍 False(行为不变),
+    且手动 trigger 仍被 eligibility 把关拒绝。"""
+    nb = _seed_nb_with_chunk(repo)
+    assert repo.scale_index_status(nb.id)["eligible"] is False
+    with pytest.raises(ValueError):
+        repo.trigger_scale_index_rebuild(nb.id)
+
+
 def test_batch_burst_o1_early_exit_skips_copy_stats(repo, monkeypatch):
     """批量摄取模拟:第一次 maybe_auto_index 入队(idle)后,清空 once-set(模拟
     _mark_unified_kg_dirty 的逐源 discard),第二次调用必须命中 _scale_building/
