@@ -3,6 +3,7 @@
 > 日期:2026-07-03 · 状态:设计草案,待需求方评审。纯文档,无代码改动。
 > 关联:[docs/kg-perf-audit-16c64g.md](../../kg-perf-audit-16c64g.md)(动因)、[2026-07-01-index-lifecycle-redesign.md](2026-07-01-index-lifecycle-redesign.md)(索引生命周期,本 spec 沿用其状态机词汇)、[2026-06-29-base-kg-scale-retrieval-design.md](2026-06-29-base-kg-scale-retrieval-design.md)(CSR+PPR 基底)。
 > 规模标尺:单库 10⁶ 节点 / 百万级 chunk / 百万级关系;16C/64G 单机起步;多用户。
+> **2026-07-03 修订(真机实况)**:生产 `EMBED_DIM=4096`(Qwen3-Embedding-8B),非早稿假设的 1024;实测 kg 向量矩阵单项 ~8.3GB、DB 112GB。**4096 维超 pgvector HNSW 索引维度上限(vector ≤2000;halfvec ≤4000)—— 向量切换(P2)存在阻断级前置决策,见 §5.5「向量维度策略」。** 全文尺寸估算以此部署实测为准。
 
 ---
 
@@ -12,6 +13,7 @@
 - **不做什么**:不引 Neo4j(有界多跳 + 静态 PPR,CSR+scipy 已 0.019s);不做分布式 / 多机 / 读写分离;不换 KG 抽取管线。
 - **保留什么**:`kg/scale_index.py` 的 **CSR + 个性化 PPR 旁挂件保留**,但**改为从 PG 构建**、瘦身为**纯图件**(`graph.npz` / `node_ids` / viz 数组)。向量部分(kg/chunk/relation ANN 旁挂 bin、向量 BLOB、进程内向量矩阵缓存)**整体退役**,由 pgvector 承接。
 - **最大取舍**:数据访问层 **psycopg3 raw SQL 平移**(不引 SQLAlchemy),配 `DATABASE_URL` 驱动的**双后端骨架 + 一次性硬切迁移工具**;双跑期短(仅 P0/P1 内部对照),不长期维护两套生产路径。
+- **阻断级前置(P2 gate)**:生产向量是 **4096 维**,超 pgvector HNSW 索引上限(2000/halfvec 4000)。**推荐 MRL 降维**:Qwen3-Embedding 是 MRL 弹性维度系列,迁移工具本地**截断现有 4096 向量前 N 维 + re-normalize**(免全量重嵌 API 成本),索引维 1024(vector)或 2048(halfvec)由截断质量 spike 定 —— 见 §5.5。
 - **验收基线 = 本周事故清单**:矩阵加载/OOM、旁挂索引生命周期、版本探针、全局写锁、workers=1、evidence 反查、typeof 全表扫 —— §9 逐条映射「迁移后如何消失/简化」。
 - **分期**:P0 抽象层收口 + PG 双跑骨架 → P1 关系型切换 → P2 向量切换 + 向量旁挂退役 → P3 多 worker + 清理。每期独立可交付、可回滚。
 
@@ -33,7 +35,7 @@
 
 - **Neo4j / 图数据库**:PPR 是静态个性化 PageRank,scipy CSR 幂迭代已达 0.019s 且零 JVM/GDS 运维;引 Neo4j 只增运维面不增能力。**排除。**
 - **分布式 / 多机 / 分片 / 读写分离**:标尺是单机 16C/64G;PG 单实例 + 连接池足以承载百万级。多机留给未来,不在本 spec。
-- **换向量库**(Milvus/Qdrant/Weaviate):pgvector 让向量与关系数据同事务、同备份、同权限,免去两存储一致性问题;百万×1024 维在单机 pgvector HNSW 可行(§8 需 spike 验证建索引成本)。**本 spec 只用 pgvector。**
+- **换向量库**(Milvus/Qdrant/Weaviate):pgvector 让向量与关系数据同事务、同备份、同权限,免去两存储一致性问题;百万行×(MRL 降维后的)1024/2048 维在单机 pgvector HNSW 可行(§5.5 维度策略;§8 需 spike 验证建索引成本)。**本 spec 只用 pgvector。**
 - **ORM 全量重写业务逻辑**:不引 SQLAlchemy ORM 模型层(见 §4)。
 
 ### 1.3 保留边界:CSR PPR 旁挂 —— hnswlib 只在图件内?还是 PPR 种子也改 pgvector?
@@ -83,9 +85,9 @@
 
 | 进程内缓存 | 现状 | 迁移后 |
 |---|---|---|
-| `_vector_matrix`(kg/chunk/element 矩阵,~4-6GB) | 全量物化 + `VectorCache` 版本键 | **退役**。向量 KNN 走 pgvector,不再进程内矩阵。 |
+| `_vector_matrix`(kg/chunk/element 矩阵;部署实测 4096 维下 **kg 矩阵单项 ~8.3GB**,三矩阵合计更高) | 全量物化 + `VectorCache` 版本键 | **退役**。向量 KNN 走 pgvector,不再进程内矩阵。 |
 | `:kwtok` 关键词 token 集(GB 级) | `_keyword_token_sets` 缓存 | **退役**(见 §2.2 kwtok 去向)。 |
-| 向量 BLOB(`encode_vector`/`decode_vector`) | SQLite BLOB / 遗留 JSON | **退役**,列改 `vector(1024)` pgvector 原生类型。 |
+| 向量 BLOB(`encode_vector`/`decode_vector`) | SQLite BLOB / 遗留 JSON | **退役**,列改 pgvector 原生类型(存储维/索引维见 §5.5)。 |
 | `_scale_idx_cache` / `_viz_idx_cache`(LRU) | 图件 + memoized hnsw handle | **保留图件部分**;删 hnsw handle memo(`_open_scale_ann`)。 |
 | `_scale_ver_cache` / `_scale_ver_lock`(版本探针 memo + 单飞) | `kg_mutation_seq` 键控 5 聚合 | **简化**(§3.4 版本探针)。 |
 | `fed_rxgraph` / `ppr_graph` / `rxgraph`(rustworkx 全图,多 GB) | 版本缓存,体积未实测 | **收敛到 CSR**(§5.2):PPR 统一走 `scale_index.py` 的 scipy CSR,退役 rustworkx 全内存图。 |
@@ -112,7 +114,7 @@
 |---|---|---|
 | `users` / `auth_sessions` / `user_profiles` | 平移 | `TEXT` id → `TEXT`(保留,不改 UUID 类型,避免全量 id 重映射);`created_at` 等 `TEXT` 时间戳 → **`timestamptz`**(见 §3.3)。 |
 | `notebooks` / `sources` / `source_elements` / `chunks` | 平移 | `element_ids TEXT '[]'` → **`jsonb`**;`metadata TEXT '{}'` → `jsonb`;外键 `ON DELETE CASCADE` 原样(PG 一等支持)。 |
-| `chunk_embeddings` / `element_embeddings` / `knowledge_embeddings` / `relation_embeddings` | **重构** | `vector TEXT/BLOB` → **`vector(1024)`**(pgvector);删 `created_at` 版本探针依赖(§3.4);每表建 **HNSW 索引**(§5.3)。 |
+| `chunk_embeddings` / `element_embeddings` / `knowledge_embeddings` / `relation_embeddings` | **重构** | `vector TEXT/BLOB` → pgvector 原生类型(**存储维 4096 / 索引维 1024 或 2048,见 §5.5 维度策略**);删 `created_at` 版本探针依赖(§3.4);每表建 **HNSW 索引**(§5.3、§5.5)。 |
 | `extraction_runs` | 平移 | 已有 `(source_id, created_at)` 索引,直接映射。 |
 | `knowledge_objects` | 平移 | `payload TEXT` / `evidence TEXT` → **`jsonb`**;`evidence` 上建 **GIN**(§3.2 反查)。 |
 | `knowledge_relations` | 平移 | 是 CSR 图构建的边源(§5.2);现有 `(nb, source_object_id)`/`(nb, target_object_id)` 索引映射。 |
@@ -230,6 +232,58 @@
 - **canonical 选取来源盲**(kg_merge.py:318,分层锚定 memory 标注的硬缺口):PG 迁移**不趁机改**其选取逻辑,但把「靠 rowid 定基数」显式换成确定列排序,顺带消除「同 rowid 序假设」脆弱性。
 - 契约测试:等价性套件断言「同输入 → 同 canonical / 同 top-k 序」,跨 SQLite/PG 双后端跑一致。
 
+### 5.5 向量维度策略(P2 前置决策,阻断级)【2026-07-03 修订】
+
+**问题陈述**:生产部署 `EMBED_DIM=4096`(Qwen3-Embedding-8B),而 pgvector 的限制是:
+
+- `vector` 类型**可存储**至 16,000 维 —— 存 4096 没问题;
+- 但 **HNSW / IVFFlat 索引上限:`vector` ≤ 2000 维,`halfvec`(fp16)≤ 4000 维** —— **两者都容不下 4096**。
+
+即:按现配置,P2 向量切换期**根本建不了 ANN 索引**,pgvector 只能顺序扫(等于把「暴力 matmul」搬进 DB 且更慢)。这是 spec 的阻断级前置缺口,必须在 P2 前拍板维度策略。
+
+**方案对比**:
+
+| 方案 | 做法 | 评估 |
+|---|---|---|
+| **a. MRL 降维(推荐候选)** | Qwen3-Embedding 系列按官方口径支持 Matryoshka(MRL)弹性输出维度(8B 档 32–4096 自定义);MRL 训练下**截断前 N 维即有效低维表示**,截断到 1024/2048 质量损失小 | **推荐**。两条实施路线见下:纯本地截断 vs 全量重嵌 |
+| b. halfvec(≤4000) | fp16 半精度可索引到 4000 维 | **不解决**:4096 > 4000,仍差 96 维。略。 |
+| c. 二值/标量量化 + 重排(`bit` 类型 + Hamming 粗召回 + 原向量 re-rank) | `bit` 索引可到 64,000 维 | 召回风险高、检索路径复杂化(粗召回+重排两跳),`[0,1]`/tau 等价性难保。**列为备选**,仅当 MRL 截断质量 spike 不达标再议。 |
+| d. 换嵌入模型(≤2000 维原生) | 换模型 + 全库重嵌 + 所有历史向量作废 | 代价最大(全量重嵌 + 检索质量重新基线 + 与既有 KG ANN/同义边阈值全部重调)。**不推荐**。 |
+
+**方案 a 内部:截断现有向量 vs 全量重嵌**
+
+| 路线 | 成本 | 前提 |
+|---|---|---|
+| **a1. 本地截断现有 4096 向量前 N 维 + re-normalize(推荐)** | 纯本地 numpy/SQL 变换,迁移工具顺手做,零 API 成本、零速率限制,分钟~小时级 | **须 spike 核实**(见下 spike 项):① Qwen3-Embedding 确为 MRL 训练、截断前缀即官方「自定义维度」的等价物(而非服务端另有投影);② 截断后必须 **re-normalize**(cosine 语义;前缀截断破坏单位范数) |
+| a2. 全量重嵌(API 传 `dimensions=N`) | 部署实测规模 506k KG + 129k chunk + 百万级 relation + element 向量 ≈ **200 万+ 条**;按 batch 10 = 20 万+ 请求,受 QPS/429 限流,天级 + API 费用 | 无需核实截断等价性,但成本高一个量级 |
+
+> **推荐:a1 截断为主,spike 不达标再退 a2 重嵌。** spike 内容:对同一评测查询集,「截断 1024 / 截断 2048 vs 原 4096 暴力」的检索召回对照(recall@k / 融合分排序稳定性);同时核实 re-normalize 后 cosine 与 API 原生低维输出的一致性。
+
+**索引维选择(1024 vs 2048)**:
+
+- **1024 + `vector` HNSW**:更省(4KB/行,百万行 ~4GB 向量列 + 索引),建索更快;质量损失需 spike 确认可接受。
+- **2048 + `halfvec` HNSW**(fp16,4KB/行同 1024 fp32):在 2000 上限外靠 halfvec 容纳,精度换维度。
+- **推荐顺序:先按 1024 spike,达标取 1024;不达标升 2048 halfvec。**
+
+**存储维 vs 索引维分离(EMBED_DIM 语义)**:
+
+- **存储保留原 4096 向量列**(`vector(4096)`,不索引):它是真相源 —— 日后可再截断到别的维度、可做 exact re-rank,免去「截断后想换维度只能重嵌」;存储成本 16KB/行(百万行 ~16GB,DB 已在 112GB 量级,可承受,但列入容量规划)。
+- **索引走截断维**:两种实现,P2 时择一 —— ① 独立低维列(迁移工具写入截断+归一后的 `vector(1024)`/`halfvec(2048)`,写路径双写);② **表达式索引**(pgvector ≥0.7 的 `subvector()`:`CREATE INDEX ... USING hnsw ((subvector(vector, 1, N)::halfvec(N)) halfvec_cosine_ops)`,查询端用同表达式;免双写但须核实 subvector 后的归一化处理)。倾向 ①(查询语义直白、re-normalize 显式可控)。
+- **配置语义**:`EMBED_DIM` 保持「模型输出/存储维」;新增 `PGVECTOR_INDEX_DIM`(索引/截断维,默认 = `EMBED_DIM` 当其 ≤2000,否则必须显式配置 —— 启动期校验,超限未配即报错退出,**不静默降级**)。
+- **查询侧**:query 向量同样截断前 N 维 + re-normalize 后进 `<=>`,与索引列/表达式维度一致。
+
+**尺寸重算(以部署实测为准:4096 维,kg 矩阵 8.3GB,DB 112GB)**:
+
+| 项 | 4096 维现状 | 截断 1024(fp32) | 截断 2048(halfvec) |
+|---|---|---|---|
+| 每向量 | 16 KB | 4 KB | 4 KB |
+| kg(506k) | ~8.3 GB(实测矩阵) | ~2.1 GB | ~2.1 GB |
+| chunk(129k) | ~2.1 GB | ~0.5 GB | ~0.5 GB |
+| relation(百万级,若全嵌) | ~16 GB/百万 | ~4 GB/百万 | ~4 GB/百万 |
+| 原 4096 存储列(保留) | —(即现状) | +16 KB/行(保留原列) | 同左 |
+
+> 连锁利好:HNSW 建索引成本随维度线性下降 —— §8.2 的建索 spike 按截断后的 **1024/2048 维**重估,与早稿按 1024 假设的估算量级一致(维度问题不恶化建索成本);进程内矩阵退役的收益则比早稿更大(kg 单项 8.3GB 而非审计口径的 4-6GB 合计)。
+
 ---
 
 ## 6. 迁移工具与运维
@@ -238,7 +292,7 @@
 
 - **形态**:`scripts/migrate_sqlite_to_pg.py`(复用现有 CLI 心智,README 补文档 —— 见 memory「CLI 要进 README」)。
 - **分表分批**:按表拓扑序(users → notebooks → sources → … → embeddings → 派生表),每表 `CHUNK=1000` 批量 `COPY`/`executemany`(仿 `store_kg` 分块),避免单大事务(百万行)。
-- **向量转换**:`vector TEXT/BLOB`(`decode_vector`)→ pgvector `vector(1024)` 字面量;跳过维度不符/空向量(沿用 `build_matrix` 的 skip 语义,**记数而非静默** —— 见 memory「CLI 拒绝静默降级」)。
+- **向量转换**:`vector TEXT/BLOB`(`decode_vector`)→ pgvector 原生列:原 4096 向量原样入 `vector(4096)` 存储列;**同趟做 MRL 截断前 N 维 + re-normalize** 写入索引列(§5.5 a1 路线,N=`PGVECTOR_INDEX_DIM`);跳过维度不符/空向量(沿用 `build_matrix` 的 skip 语义,**记数而非静默** —— 见 memory「CLI 拒绝静默降级」)。
 - **JSON → JSONB**:`payload`/`evidence`/`element_ids`/`metadata` 原样搬入 jsonb(PG 解析)。
 - **时间戳**:ISO `TEXT` → `timestamptz` 显式 parse。
 - **校验**:每表 **搬运后 `COUNT(*)` 双边比对** + **抽样行内容比对**(随机 N 行 diff)+ **向量抽样 cosine 自比对**(搬运前后同 id 向量点积≈1)。任一不符 → 报错退出,不静默。
@@ -268,7 +322,7 @@
 
 - 在 `NotebookRepository` Protocol 下补 **SQL 方言收口层**(占位符/`RETURNING`/`ON CONFLICT`/jsonb helper);抽出 `PostgresRepository` 骨架(psycopg3)。
 - `DATABASE_URL` scheme 路由双后端;搭等价性测试骨架(同套件双跑)。
-- 建 PG schema(建表 DDL 从 SQLite `executescript` 翻译,pgvector 扩展 + `vector(1024)` 列 + HNSW 索引 DDL 就位,先不切流量)。
+- 建 PG schema(建表 DDL 从 SQLite `executescript` 翻译,pgvector 扩展 + 向量列(存储维 4096 + 索引维列,§5.5)+ HNSW 索引 DDL 就位,先不切流量)。
 - **验收**:PG schema 建成、pgvector 扩展可用;双后端骨架下现有测试对 SQLite 全绿;PG 侧空库建表 + 建 HNSW 索引成功;`DATABASE_URL` 切换不崩。
 - **风险**:方言收口层遗漏位点(§8 深坑清单驱动 grep 全覆盖)。
 
@@ -282,12 +336,13 @@
 
 ### P2 — 向量切换 + 向量旁挂退役
 
-- 四张 embeddings 表切 pgvector;检索热路径向量 KNN 下推 PG(`_vector_matrix`/`top_k_sims` 进程内路径退役);kwtok 按 §2.2 处理。
+- **前置 gate:向量维度策略落定**(§5.5):MRL 截断质量 spike(1024/2048 vs 原 4096 召回对照)+ 截断等价性核实通过,`PGVECTOR_INDEX_DIM` 拍板 —— **不通过则 P2 不启动**(退 a2 重嵌或 c 量化备选)。
+- 四张 embeddings 表切 pgvector(存储维 4096 + 索引维截断列);检索热路径向量 KNN 下推 PG(`_vector_matrix`/`top_k_sims` 进程内路径退役);kwtok 按 §2.2 处理。
 - `scale_index.py` 瘦身:删 `ann_*`/`chunk_ann_*`/`*_handle`;PPR 种子改 pgvector KNN;CSR 从 PG 构建;`save_scale_index`/`_open_scale_ann`/`add_items_to_ann` 向量部分退役。
 - rustworkx 全图收敛到 CSR(§5.2)。
 - 版本探针简化(§3.4:向量/kwtok 版本键退役)。
 - **验收**:召回对照(§5.3)pgvector HNSW ≥ 现 hnswlib;矩阵加载/OOM 场景消失(RSS 实测下降);旁挂 build 时间下降(无双 hnswlib 构建);delta 随写即可查(pgvector 增量,无需 fold);PPR top-k 对照 rustworkx 等价。
-- **风险**:pgvector HNSW 在 1024 维百万行的**建索引时间/内存未知**(§8 需 spike);召回近似差异超阈值。
+- **风险**:MRL 截断质量不达标(gate 失败退备选);pgvector HNSW 在截断维(1024/2048)百万行的**建索引时间/内存未知**(§8 需 spike);召回近似差异超阈值。
 
 ### P3 — 多 worker + 清理
 
@@ -322,8 +377,10 @@
 
 ### 8.2 性能未知点(需 spike 验证)
 
-- **pgvector HNSW 在 1024 维 × 百万行的建索引时间与内存**:单大库四表向量总量可达数百万行;HNSW 建索引在 PG 内的耗时/峰值内存需实测,决定是否分批建、是否需 `maintenance_work_mem` 调大、能否在线建(`CONCURRENTLY`)。**这是最大未知,P2 前必须 spike。**
+- **MRL 截断质量对照(P2 gate,§5.5)**:截断 1024 / 2048 vs 原 4096 暴力的检索召回(recall@k、融合分排序稳定性);同时核实 ① Qwen3-Embedding 截断前缀 + re-normalize 是否等价其 API 原生低维输出(MRL 训练口径),② 表达式索引 `subvector()` 路线的归一化处理。**不达标则 P2 维度策略退 a2 全量重嵌或 c 量化备选。**
+- **pgvector HNSW 在截断维(1024/2048)× 百万行的建索引时间与内存**:单大库四表向量总量可达数百万行;HNSW 建索引在 PG 内的耗时/峰值内存需实测,决定是否分批建、是否需 `maintenance_work_mem` 调大、能否在线建(`CONCURRENTLY`)。**P2 前必须 spike。**(按 §5.5 修订:早稿按 1024 维假设 —— 生产 4096 维经 MRL 截断后索引维恰回到 1024/2048,建索成本估算反而利好:比索引原 4096(即便可行)快 2-4 倍、省 2-4 倍内存。)
 - **pgvector 查询延迟 vs 现进程内 matmul**:现暴力 matmul 对已缓存矩阵是纯 CPU;pgvector 走 DB round-trip + HNSW。需确认单查询延迟不劣化(尤其 multi-query 扇出 ×5 时的连接/往返成本)。
+- **`EMBED_DIM` 迁移期语义(存储维 vs 索引维分离,§5.5)**:`EMBED_DIM`=模型输出/存储维(4096 不变);新增 `PGVECTOR_INDEX_DIM`=索引/截断维;启动期校验 `EMBED_DIM>2000 且未配索引维 → 报错退出`,不静默降级。查询/写入两侧的截断+re-normalize 必须共用同一 helper(维度不一致=静默零召回,须有守卫测试)。
 - **evidence `@>` GIN 选择率**(§3.2):决定反查表能否退役。
 - **connection pool 上限**:多 worker × 每查询多次向量查询,`max_connections` 与 pool 大小需按 `--workers N × 扇出` 配。
 
@@ -339,7 +396,7 @@
 
 | 本周事故 | 根因(SQLite 时代) | 迁移后 | 兑现分期 |
 |---|---|---|---|
-| **矩阵加载 / OOM** | `_vector_matrix` 全量物化 4-6GB + `top_k_sims` GB 级 dict(P0-7) | **消失**:向量 KNN 下推 pgvector,进程不再物化矩阵 | P2 |
+| **矩阵加载 / OOM** | `_vector_matrix` 全量物化(部署实测 4096 维:kg 矩阵单项 ~8.3GB)+ `top_k_sims` GB 级 dict(P0-7) | **消失**:向量 KNN 下推 pgvector,进程不再物化矩阵 | P2 |
 | **旁挂索引生命周期**(build/fold/stale/自动触发) | 向量部分(ann.bin/chunk_ann.bin)需 build→fold→stale→自动 rebuild 全套 | **大幅简化**:向量随写进 pgvector HNSW,无 fold/stale;旁挂只余 CSR 图件(仍需 rebuild,但轻) | P2 |
 | **版本探针** | 5 个 `COUNT/MAX` 聚合 + `kg_mutation_seq` 单调计数器 + 单飞 | **向量/kwtok 探针退役**(pgvector 同事务最新);只余 rebuild 的 `kg_mutation_seq` 闸 | P2/P3 |
 | **全局写锁** | `_write()` 进程级 RLock,长事务全站阻塞(P1-5) | **退役**:PG 行级锁 + MVCC,并发写不互斥 | P3 |
@@ -361,6 +418,8 @@
 | Q6 | id 类型:保持 TEXT vs 转 uuid? | **保持 TEXT**(避 copy_notebook 全表 id+内嵌 element_ids 重映射复杂化)(§3.3) |
 | Q7 | 建 HNSW:离线全量 vs `CONCURRENTLY` 在线? | **spike 后定**;迁移期离线全量(停机窗口),日常增量随写(§8.2) |
 | Q8 | rustworkx 全图收敛到 CSR 是否随 P2 一起? | **随 P2**(与向量退役同期,共享等价性对照)(§5.2) |
+| Q9 | 4096 维超 HNSW 上限:MRL 截断 vs 重嵌 vs 量化 vs 换模型? | **MRL 本地截断 + re-normalize(a1)**,spike 不达标退 a2 重嵌;量化(c)备选、换模型(d)不推荐(§5.5) |
+| Q10 | 索引维 1024(vector)vs 2048(halfvec)?独立列 vs `subvector()` 表达式索引? | **先按 1024 spike,不达标升 2048 halfvec;倾向独立截断列**(re-normalize 显式可控)(§5.5) |
 
 ## 11. 不做 / YAGNI
 
