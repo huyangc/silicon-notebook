@@ -4630,12 +4630,19 @@ class SQLiteRepository:
                         "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
                         "WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
                 # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量)。
-                from app.services.vector_index import decode_vector
+                # 运行时截断旁路(计划 §1.2 旁路 2):两步分离、顺序不可反 ——
+                # ①先按存储原生维过滤(既有语义,异维残留出局);②通过后 truncate_vec
+                # 截断到运行时空间(聚类/融合空间拍板统一 1024,与 ANN 分支同空间,
+                # 否则同功能两分支 lo=0.82 语义分裂)。new_vecs 派生自 vecs,一并覆盖。
+                from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
                 dim = self.settings.embed_dim
+                rd = resolve_runtime_dim(self.settings)
                 vecs = {}
                 for r in vrows:
                     arr = decode_vector(r["vector"])
                     if arr is not None and arr.size == dim:
+                        if rd:
+                            arr = truncate_vec(arr, rd)
                         vecs[r["object_id"]] = arr.tolist()
                 existing_items = [{"object_id": r["id"],
                                    "name": json.loads(r["payload"] or "{}").get("name", "")} for r in ex]
@@ -4719,11 +4726,15 @@ class SQLiteRepository:
         needs no extra locking.
         """
         import numpy as np
-        from app.services.vector_index import decode_vector
+        from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
 
         topk = 5     # mirrors detect_bridge_candidates' top_k default
         lo = 0.82    # mirrors detect_bridge_candidates' lo default
         dim = self.settings.embed_dim
+        # 运行时截断旁路(计划 §1.2 旁路 3):查询侧向量读自 knowledge_embeddings
+        # (存储原生维),须截断到运行时空间才能进(切换后同为运行时维的)持久 kg ANN。
+        rd = resolve_runtime_dim(self.settings)
+        eff_dim = rd or dim   # 运行时生效维:守卫比它而非 embed_dim(否则截断后恒 [] 静默跳过)
 
         with self._connect() as db:
             new_rows = db.execute(
@@ -4739,11 +4750,13 @@ class SQLiteRepository:
         new_vecs = {}
         for r in new_rows:
             arr = decode_vector(r["vector"])
-            if arr is not None and arr.size == dim:
+            if arr is not None and arr.size == dim:   # ①先按存储维过滤(既有语义)
+                if rd:
+                    arr = truncate_vec(arr, rd)       # ②通过后截断(运行时空间)
                 new_vecs[r["object_id"]] = arr
 
-        idx_dim = int(idx.manifest.get("dim", dim))
-        if idx_dim != dim or not new_vecs:
+        idx_dim = int(idx.manifest.get("dim", eff_dim))
+        if idx_dim != eff_dim or not new_vecs:
             return []
 
         name_by_obj = {o["object_id"]: o.get("name", "") for o in new_objs}
@@ -5251,17 +5264,26 @@ class SQLiteRepository:
         }
 
         # 3. Build embeddings dict; log + skip on any error
+        # 运行时截断旁路(计划 §1.2,conflict 同步接线):此处原先连存储维过滤都
+        # 没有 —— conflict_detect._cosine_sim 虽已改混维零容忍,这里仍须①先按
+        # 存储原生维过滤(异维残留出局)②通过后截断到运行时空间,保证语义策略
+        # 收到的向量同维可比(而非靠下游把混维对静默判 0 丢召回)。
         embeddings: dict | None = None
         if vec_rows:
             try:
-                from app.services.vector_index import decode_vector
+                from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
+                _dim = self.settings.embed_dim
+                _rd = resolve_runtime_dim(self.settings)
                 embeddings = {}
                 for r in vec_rows:
                     if not r["vector"]:
                         continue
                     arr = decode_vector(r["vector"])
-                    if arr is not None:
-                        embeddings[r["object_id"]] = arr.tolist()
+                    if arr is None or arr.size != _dim:
+                        continue
+                    if _rd:
+                        arr = truncate_vec(arr, _rd)
+                    embeddings[r["object_id"]] = arr.tolist()
             except Exception:  # noqa: BLE001
                 self.event_log.logger.debug(
                     "resolve_notebook_conflicts: failed to load embeddings for %s; "
@@ -6092,8 +6114,13 @@ class SQLiteRepository:
         if not compute_reps:
             return {}, members_count, seed_first_name
 
-        from app.services.vector_index import decode_vector
+        from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
 
+        # 运行时截断旁路(计划 §1.2 旁路 4):Pass B 的 legacy-JSON 分支绕过
+        # decode_vector,是点名的已知漏点 —— 两分支在共同的存储维过滤(既有语义,
+        # 先过滤)之后、rep 累加之前统一截断到运行时空间(seed rep 内存亦 ÷4)。
+        rd = resolve_runtime_dim(self.settings)
+        rep_dim = rd if (rd and rd < embed_dim) else embed_dim   # 截断后的确定维(R9)
         rep_sum: Dict[str, "np.ndarray"] = {}
         rep_cnt: Dict[str, int] = {}
         with self._connect() as db:
@@ -6115,6 +6142,12 @@ class SQLiteRepository:
                     arr = np.asarray(v, dtype=np.float32)
                 if arr is None or arr.size != embed_dim:
                     continue
+                if rd:
+                    arr = truncate_vec(arr, rd)
+                # R9 守卫:BLOB/legacy-JSON 双分支统一维后才允许累加 ——
+                # 混维 += 在 numpy 下是硬错,某分支漏截时在此现形而非静默。
+                assert arr.size == rep_dim, \
+                    f"seed rep dim {arr.size} != {rep_dim} (branch missed truncation?)"
                 seed = r["seed"]
                 if seed in rep_sum:
                     rep_sum[seed] += arr
@@ -7448,8 +7481,12 @@ class SQLiteRepository:
 
     def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
                          with_vectors: bool = True) -> List[dict]:
-        from app.services.vector_index import decode_vector
+        # 运行时截断旁路(计划 §1.2 旁路 1):element 兜底不走 build_matrix,逐向量
+        # 进 retrieval.cosine 与 _embed_query(已截断,T2)比较 —— cosine 对 len 不等
+        # 静默返 0.0,漏截 = 全部 element 静默零相似度。
+        from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
 
+        rd = resolve_runtime_dim(self.settings)
         rows = db.execute(
             """
             SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
@@ -7466,6 +7503,8 @@ class SQLiteRepository:
             vector = None
             if with_vectors and row["vector"]:
                 arr = decode_vector(row["vector"])
+                if arr is not None and rd:
+                    arr = truncate_vec(arr, rd)
                 vector = arr.tolist() if arr is not None else None
             elements.append(
                 {
