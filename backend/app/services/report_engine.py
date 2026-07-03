@@ -11,6 +11,7 @@ import contextvars
 import json
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
@@ -85,12 +86,13 @@ class ReportEngine:
                  "sub_queries": [s.query for s in ex.sub_queries][:4] or [question]}]
 
     # --- Stage B(单节):完整 reasoning 深挖 ---
-    def _deep_dive(self, notebook_id: str, section: dict, question: str):
+    def _deep_dive(self, notebook_id, section, question, depth=None, on_step=None):
         from app.services.reasoning_retrieval import ReasoningRetriever
         sec_question = (f"{question}\n[报告章节] {section['title']}: {section['scope']}\n"
                         f"[本节检索方向] " + "; ".join(section["sub_queries"]))
         return ReasoningRetriever(self.repo, self.settings, self.cancel_event).run(
-            notebook_id, sec_question, top_n=self.settings.report_section_top_n)
+            notebook_id, sec_question, on_step=on_step,
+            top_n=self.settings.report_section_top_n, max_steps=depth)
 
     # --- Stage C(单节):撰写 ---
     def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
@@ -125,41 +127,79 @@ class ReportEngine:
                     for h in result.top_hits[:_TOP_CONCEPTS_PER_SECTION]]}
 
     # --- Stage B+C 并行编排 ---
-    def _run_sections(self, notebook_id: str, rid: str, outline: List[dict],
-                      question: str) -> List[dict]:
-        done_count = {"n": 0}
+    def _run_sections(self, notebook_id, rid, outline, question, depth):
+        status = [{"title": s["title"], "phase": "排队", "step": 0} for s in outline]
+        lock = threading.Lock()
+        last = [0.0]
 
-        def _one(section: dict) -> dict:
+        def persist(force=False):
+            now = time.monotonic()
+            with lock:
+                if not force and now - last[0] < 2.0:
+                    return
+                last[0] = now
+                snap = [dict(x) for x in status]
+            done = sum(1 for x in snap if x["phase"] in ("完成", "失败"))
+            running = sum(1 for x in snap if x["phase"] not in ("排队", "完成", "失败"))
+            self.repo.update_report(
+                notebook_id, rid, section_status=snap,
+                progress=f"章节 {done}/{len(outline)} 完成 · {running} 进行中")
+
+        _PHASE = {"plan": "规划", "reflect": "深挖", "retrieve": "深挖", "expand": "深挖",
+                  "ppr": "深挖", "fallback": "深挖"}
+
+        def _one(i, section):
             raise_if_cancelled(self.cancel_event)
+            with lock:
+                status[i]["phase"] = "规划"
+            persist(force=True)
+
+            def on_step(step, _i=i):
+                with lock:
+                    ph = _PHASE.get(step.step_type)
+                    if ph:
+                        status[_i]["phase"] = ph
+                    if step.step_type == "reflect":
+                        status[_i]["step"] += 1
+                persist()
+
             try:
-                result = self._deep_dive(notebook_id, section, question)
+                result = self._deep_dive(notebook_id, section, question, depth, on_step)
+                with lock:
+                    status[i]["phase"] = "撰写"
+                persist(force=True)
                 drafted = self._draft_section(notebook_id, section, question, result)
+                with lock:
+                    status[i]["phase"] = "完成"
             except AskCancelled:
+                with lock:
+                    status[i]["phase"] = "失败"
+                persist(force=True)
                 raise
             except Exception as exc:
                 drafted = {"title": section["title"], "scope": section["scope"],
                            "markdown": "", "grounded": False, "failed": True,
                            "error": str(exc)[:300], "id_map": {},
                            "attempted": [], "top_concepts": []}
-            done_count["n"] += 1
-            self.repo.update_report(notebook_id, rid,
-                                    progress=f"章节深挖 {done_count['n']}/{len(outline)}")
+                with lock:
+                    status[i]["phase"] = "失败"
+            persist(force=True)
             return drafted
 
-        workers = max(1, int(self.settings.kg_job_concurrency))
-        with ThreadPoolExecutor(max_workers=min(workers, len(outline))) as pool:
-            futures = [pool.submit(contextvars.copy_context().run, _one, s)
-                       for s in outline]
-            return [f.result() for f in futures]     # 保大纲序
+        workers = max(1, min(len(outline), int(self.settings.kg_job_concurrency)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, _one, i, s)
+                       for i, s in enumerate(outline)]
+            return [f.result() for f in futures]
 
     # --- 入口 ---
-    def run(self, notebook_id: str, rid: str, question: str, history: str = "") -> None:
+    def run(self, notebook_id: str, rid: str, question: str, history: str = "", depth: int = 2) -> None:
         try:
             self.repo.update_report(notebook_id, rid, status="running", progress="大纲规划中")
             outline = self._plan_outline(notebook_id, question, history)
             self.repo.update_report(notebook_id, rid, outline=outline,
                                     progress=f"大纲就绪({len(outline)} 节),章节深挖 0/{len(outline)}")
-            sections = self._run_sections(notebook_id, rid, outline, question)
+            sections = self._run_sections(notebook_id, rid, outline, question, depth)
             # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
             self.repo.update_report(notebook_id, rid, progress="汇总中")
             content_md, gaps, references = self._assemble(
