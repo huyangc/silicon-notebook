@@ -682,6 +682,8 @@ class SQLiteRepository:
                   sections_json TEXT NOT NULL DEFAULT '[]',
                   gaps_json TEXT NOT NULL DEFAULT '[]',
                   references_json TEXT NOT NULL DEFAULT '[]',
+                  depth INTEGER NOT NULL DEFAULT 2,
+                  section_status_json TEXT NOT NULL DEFAULT '[]',
                   content_md TEXT NOT NULL DEFAULT '',
                   status TEXT NOT NULL DEFAULT 'pending',
                   progress TEXT NOT NULL DEFAULT '',
@@ -12178,13 +12180,15 @@ class SQLiteRepository:
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
-                      gaps=None, references=None, content_md=None) -> None:
+                      gaps=None, references=None, content_md=None,
+                      section_status=None) -> None:
         sets, args = ["updated_at = ?"], [_now()]
         for col, val, dump in (("status", status, False), ("progress", progress, False),
                                ("error", error, False), ("content_md", content_md, False),
                                ("outline_json", outline, True),
                                ("sections_json", sections, True), ("gaps_json", gaps, True),
-                               ("references_json", references, True)):
+                               ("references_json", references, True),
+                               ("section_status_json", section_status, True)):
             if val is not None:
                 sets.append(f"{col} = ?")
                 args.append(json.dumps(val, ensure_ascii=False) if dump else val)
@@ -12196,13 +12200,14 @@ class SQLiteRepository:
         d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
              "status": row["status"], "progress": row["progress"], "error": row["error"],
              "created_by": row["created_by"], "created_at": row["created_at"],
-             "updated_at": row["updated_at"],
+             "updated_at": row["updated_at"], "depth": row["depth"],
              "section_count": len(json.loads(row["outline_json"] or "[]"))}
         if full:
             d.update(outline=json.loads(row["outline_json"] or "[]"),
                      sections=json.loads(row["sections_json"] or "[]"),
                      gaps=json.loads(row["gaps_json"] or "[]"),
                      references=json.loads(row["references_json"] or "[]"),
+                     section_status=json.loads(row["section_status_json"] or "[]"),
                      content_md=row["content_md"])
         return d
 

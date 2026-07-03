@@ -143,7 +143,7 @@ def test_engine_runs_sections_in_parallel_and_tolerates_one_failure(repo, monkey
     # stub 每节深挖:不跑真检索,返回空 ReasoningResult(编排测试与检索解耦)
     from app.services.reasoning_retrieval import ReasoningResult
     monkeypatch.setattr(eng, "_deep_dive",
-                        lambda nb_id, section, question: ReasoningResult())
+                        lambda nb_id, section, question, depth=None, on_step=None: ReasoningResult())
     rid = repo.create_report(nb.id, "q")
     eng.run(nb.id, rid, "q", "")
     detail = repo.get_report(nb.id, rid)
@@ -165,7 +165,7 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
     repo.llm_client = llm
     eng = ReportEngine(repo, repo.settings, cancel_event=cancel)
     from app.services.reasoning_retrieval import ReasoningResult
-    def _dd(nb_id, section, question):
+    def _dd(nb_id, section, question, depth=None, on_step=None):
         cancel.set()                                # 深挖中途被取消
         from app.services.cancellation import raise_if_cancelled
         raise_if_cancelled(cancel)
@@ -263,3 +263,59 @@ def test_assemble_no_citations_omits_references(repo):
     md, gaps, references = eng._assemble(nb.id, rid := repo.create_report(nb.id, "q"),
                                          "q", outline, sections)
     assert references == [] and "## 参考文献" not in md
+
+
+# ---------------------------------------------------------------------------
+# Task 2(perf): depth 穿透 + 并发复用 kg_job_concurrency + 节内实时进度
+# ---------------------------------------------------------------------------
+
+def test_run_sections_concurrency_uses_kg_job_concurrency(repo, monkeypatch):
+    """并发 = min(节数, kg_job_concurrency);节数≤上限时全并行。"""
+    monkeypatch.setattr(repo.settings, "kg_job_concurrency", 5)
+    eng = _mk_engine(repo, _OutlineLLM())
+    seen = {"max": 0, "cur": 0}
+    import threading as _t
+    lk = _t.Lock()
+    # 4 节全部到齐才放行 —— 确定性地观测真并行度(否则极快 stub 会逐个跑完不重叠)。
+    barrier = _t.Barrier(4, timeout=5)
+    from app.services.reasoning_retrieval import ReasoningResult
+    def _dd(nb_id, section, question, depth=None, on_step=None):
+        with lk:
+            seen["cur"] += 1; seen["max"] = max(seen["max"], seen["cur"])
+        try:
+            barrier.wait()
+            return ReasoningResult()
+        finally:
+            with lk: seen["cur"] -= 1
+    monkeypatch.setattr(eng, "_deep_dive", _dd)
+    nb = _mk_nb(repo); rid = repo.create_report(nb.id, "q")
+    outline = [{"title": f"S{i}", "scope": "s", "sub_queries": ["q"]} for i in range(4)]
+    eng._run_sections(nb.id, rid, outline, "q", depth=2)
+    assert seen["max"] == 4          # 4 节 ≤ 上限5 → 全并行
+
+
+def test_deep_dive_passes_depth_as_max_steps(repo, monkeypatch):
+    eng = _mk_engine(repo, _OutlineLLM())
+    captured = {}
+    from app.services.reasoning_retrieval import ReasoningResult
+    class _R:
+        def __init__(self, *a): pass
+        def run(self, nb_id, q, **kw):
+            captured.update(kw); return ReasoningResult()
+    monkeypatch.setattr("app.services.reasoning_retrieval.ReasoningRetriever", _R)
+    eng._deep_dive("nb", {"title": "t", "scope": "s", "sub_queries": ["q"]}, "Q", depth=3, on_step=None)
+    assert captured.get("max_steps") == 3
+
+
+def test_run_sections_writes_section_status(repo, monkeypatch):
+    """每节完成后 section_status 落库,各节 phase=完成。"""
+    eng = _mk_engine(repo, _OutlineLLM())
+    from app.services.reasoning_retrieval import ReasoningResult
+    monkeypatch.setattr(eng, "_deep_dive", lambda *a, **k: ReasoningResult())
+    nb = _mk_nb(repo); rid = repo.create_report(nb.id, "q")
+    outline = [{"title": "A", "scope": "s", "sub_queries": ["q"]},
+               {"title": "B", "scope": "s", "sub_queries": ["q"]}]
+    eng._run_sections(nb.id, rid, outline, "q", depth=2)
+    detail = repo.get_report(nb.id, rid)
+    assert len(detail["section_status"]) == 2
+    assert all(x["phase"] == "完成" for x in detail["section_status"])
