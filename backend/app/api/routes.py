@@ -57,6 +57,9 @@ from app.models.schemas import (
     PromotionCandidate,
     PaginatedSources,
     PromotionRejectRequest,
+    ReportCreate,
+    ReportDetail,
+    ReportSummary,
     SourceDetail,
     SourceElement,
     AddUrlSourcesRequest,
@@ -854,6 +857,84 @@ def relink_kg(notebook_id: str) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     return repo.relink_notebook_kg(notebook_id)
+
+
+# --- 深度报告(异步后台 job,轮询取状态) -------------------------------
+
+
+def _report_llm_ready(repo) -> bool:
+    return bool(getattr(repo.reasoning_llm_client, "configured", False))
+
+
+def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history: str) -> None:
+    from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
+    cancel = register_cancel(rid)
+    ctx = contextvars.copy_context()          # per-user 模型经 ContextVar 传播
+
+    def worker():
+        try:
+            ReportEngine(repo, repo.settings, cancel_event=cancel).run(
+                notebook_id, rid, question, history)
+        finally:
+            unregister_cancel(rid)
+
+    threading.Thread(target=lambda: ctx.run(worker),
+                     name=f"report-{rid}", daemon=True).start()
+
+
+@router.post("/notebooks/{notebook_id}/reports",
+             dependencies=[Depends(require_notebook_write)])
+def create_report(notebook_id: str, payload: ReportCreate) -> dict:
+    repo = repository()
+    if not payload.question.strip():
+        raise HTTPException(status_code=422, detail="question required")
+    if not _report_llm_ready(repo):
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        rid = repo.create_report(notebook_id, payload.question.strip())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    _launch_report_job(repo, notebook_id, rid, payload.question.strip(), payload.history)
+    return {"report_id": rid, "status": "pending"}
+
+
+@router.get("/notebooks/{notebook_id}/reports",
+            dependencies=[Depends(require_notebook_read)])
+def list_reports(notebook_id: str) -> List[ReportSummary]:
+    # repo 行含 notebook_id/updated_at 等多余键 → 按模型字段过滤(仓库无 extra=ignore 风格)
+    return [ReportSummary(**{k: v for k, v in r.items() if k in ReportSummary.model_fields})
+            for r in repository().list_reports(notebook_id)]
+
+
+@router.get("/notebooks/{notebook_id}/reports/{report_id}",
+            dependencies=[Depends(require_notebook_read)])
+def get_report(notebook_id: str, report_id: str) -> ReportDetail:
+    try:
+        r = repository().get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return ReportDetail(**{k: v for k, v in r.items() if k in ReportDetail.model_fields})
+
+
+@router.post("/notebooks/{notebook_id}/reports/{report_id}/cancel",
+             dependencies=[Depends(require_notebook_write)])
+def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
+    from app.services.report_engine import cancel_report as _cancel
+    live = _cancel(report_id)
+    if not live:                               # 线程已结束/不存在:直接落库标记
+        try:
+            repository().update_report(notebook_id, report_id, status="cancelled",
+                                       progress="已取消")
+        except Exception:
+            raise HTTPException(status_code=404, detail="Report not found")
+    return {"status": "cancelling" if live else "cancelled"}
+
+
+@router.delete("/notebooks/{notebook_id}/reports/{report_id}",
+               dependencies=[Depends(require_notebook_write)])
+def delete_report(notebook_id: str, report_id: str) -> dict:
+    repository().delete_report(notebook_id, report_id)
+    return {"status": "deleted"}
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)

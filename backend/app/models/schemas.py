@@ -183,6 +183,29 @@ class SharedByMeItem(BaseModel):
     members: List[Dict[str, str]]      # [{username, added_at}];仅 readonly 有值
 
 
+class ReportCreate(BaseModel):
+    question: str
+    history: str = ""
+
+
+class ReportSummary(BaseModel):
+    id: str
+    question: str
+    status: str
+    progress: str = ""
+    section_count: int = 0
+    created_at: str = ""
+    created_by: str = ""
+
+
+class ReportDetail(ReportSummary):
+    outline: List[dict] = Field(default_factory=list)
+    sections: List[dict] = Field(default_factory=list)
+    gaps: List[str] = Field(default_factory=list)
+    content_md: str = ""
+    error: str = ""
+
+
 class NotebookTemplate(BaseModel):
     id: str
     label: str

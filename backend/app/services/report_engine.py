@@ -9,6 +9,7 @@
 from __future__ import annotations
 import contextvars
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
@@ -17,6 +18,31 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 
 _GAP_PAIR_CAP = 40          # 跨节概念连通性检查的最大 pair 数(成本护栏)
 _TOP_CONCEPTS_PER_SECTION = 3
+
+# --- 取消注册表:report_id → threading.Event(活动后台 job 才在册) ---
+_ACTIVE_CANCELS: Dict[str, threading.Event] = {}
+_CANCELS_LOCK = threading.Lock()
+
+
+def register_cancel(report_id: str) -> threading.Event:
+    ev = threading.Event()
+    with _CANCELS_LOCK:
+        _ACTIVE_CANCELS[report_id] = ev
+    return ev
+
+
+def cancel_report(report_id: str) -> bool:
+    with _CANCELS_LOCK:
+        ev = _ACTIVE_CANCELS.get(report_id)
+    if ev is not None:
+        ev.set()
+        return True
+    return False
+
+
+def unregister_cancel(report_id: str) -> None:
+    with _CANCELS_LOCK:
+        _ACTIVE_CANCELS.pop(report_id, None)
 
 
 class ReportEngine:
