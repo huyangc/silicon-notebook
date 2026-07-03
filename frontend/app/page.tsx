@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
@@ -358,6 +358,8 @@ type InfoModal = {
   actions: Array<{
     label: string;
     desc?: string;
+    // 按钮旁的上下文注记(如「当前基准库:名字」),渲染为描述下方的小徽标
+    note?: string;
     primary?: boolean;
     danger?: boolean;
     action: () => void;
@@ -2962,12 +2964,18 @@ export default function Home() {
               </button>
               <div className="workspace-nav-group">
                 {!isReader && (
-                  <button className="workspace-nav-button" onClick={() => setInfoModal({
+                  <button className="workspace-nav-button" onClick={() => {
+                    const tier = tierActionState(currentNotebook, notebooks);
+                    // 有基准库时把它的名字带进弹窗:别处是 base → replace(otherBaseName);当前就是 base → unset(自己的名字)
+                    const currentBaseName = tier.action === "replace" ? tier.otherBaseName
+                      : tier.action === "unset" ? currentNotebook?.name
+                      : undefined;
+                    setInfoModal({
                     title: "分析",
                     message: "对当前 notebook 的知识图谱与基准库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
-                      ...(currentUser?.role === "admin" ? [{ label: tierActionState(currentNotebook, notebooks).label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", note: currentBaseName ? `当前基准库：${currentBaseName}` : undefined, action: () => handleTierAction().catch(reportError) }] : []),
                       ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [
                         {
                           label: buildingScaleIndex ? "检索索引重建中…" : "立即重建检索索引",
@@ -2982,7 +2990,8 @@ export default function Home() {
                       ] : []),
                       { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
                     ]
-                  })}>
+                    });
+                  }}>
                     <BarChart3 size={17} />
                     <span>分析</span>
                   </button>
@@ -3881,18 +3890,26 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {infoModal.actions.map((action) =>
-                action.desc ? (
-                  <div key={action.label} className="info-action-row">
-                    <button
-                      className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
-                      onClick={() => { setInfoModal(null); action.action(); }}
-                    >
-                      {action.label}
-                    </button>
-                    <span className="info-action-desc">{action.desc}</span>
-                  </div>
-                ) : (
+              {infoModal.actions.some((action) => action.desc || action.note) ? (
+                // 带描述的动作(分析弹窗):网格布局 —— 按钮列共享最宽标签宽度做到等宽对齐,描述/注记跟随右列
+                <div className="info-action-grid">
+                  {infoModal.actions.map((action) => (
+                    <Fragment key={action.label}>
+                      <button
+                        className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
+                        onClick={() => { setInfoModal(null); action.action(); }}
+                      >
+                        {action.label}
+                      </button>
+                      <div className="info-action-desc-cell">
+                        {action.desc && <span className="info-action-desc">{action.desc}</span>}
+                        {action.note && <span className="info-action-note">{action.note}</span>}
+                      </div>
+                    </Fragment>
+                  ))}
+                </div>
+              ) : (
+                infoModal.actions.map((action) => (
                   <button
                     key={action.label}
                     className={action.danger ? "new-pill danger-pill" : action.primary ? "new-pill" : "sort-button"}
@@ -3900,7 +3917,7 @@ export default function Home() {
                   >
                     {action.label}
                   </button>
-                )
+                ))
               )}
             </div>
           </div>
