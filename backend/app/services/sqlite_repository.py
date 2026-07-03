@@ -2327,6 +2327,9 @@ class SQLiteRepository:
             import numpy as np
             dim = int(idx.manifest.get("dim", len(qvec)))
             if dim != len(qvec):
+                self.event_log.emit({
+                    "kind": "dim_mismatch", "notebook_id": notebook_id, "site": "kg_semantic_search",
+                    "manifest_dim": dim, "query_dim": len(qvec)})
                 return []
             ann = self._open_scale_ann(idx, "kg")
             if ann is None:
@@ -3545,7 +3548,11 @@ class SQLiteRepository:
         notebook_id: str,
         objects: List[dict],
     ) -> Dict[str, List[float]]:
-        """Map object_id -> payload embedding. Lazily backfills missing vectors
+        """⚠ 死代码(全仓无调用者,2026-07-03 核实)——若复活用于相似度计算,
+        必须对 decode_vector 结果接 truncate_vec(运行时截断),否则查询/语料混空间
+        静默零召回(见 tests/test_dim_invariants.py 的白名单与风险登记 R2)。
+
+        Map object_id -> payload embedding. Lazily backfills missing vectors
         for the given objects (one-time per object) so pre-existing / seed
         knowledge also gains payload-level semantic recall."""
         from app.services.vector_index import decode_vector
@@ -10472,6 +10479,9 @@ class SQLiteRepository:
         qarr = np.asarray(query_vector, dtype=np.float32)
         dim = int(idx.manifest.get("dim", qarr.shape[0]))
         if dim != qarr.shape[0]:
+            self.event_log.emit({
+                "kind": "dim_mismatch", "notebook_id": notebook_id, "site": "chunk_ann",
+                "manifest_dim": dim, "query_dim": int(qarr.shape[0])})
             return None
         ann = self._open_scale_ann(idx, "chunk")
         if ann is None:

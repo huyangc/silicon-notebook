@@ -145,3 +145,25 @@ def test_build_pops_stale_cache_same_process(repo, monkeypatch):
     repo.build_scale_index(nb.id)                            # full 重建
     idx_new = repo._scale_index(nb.id, allow_stale=True)     # 必须是新实例
     assert idx_new.manifest["dim"] == 16                    # 不是缓存里的旧 32
+
+
+# ── T7:dim_mismatch 事件 ─────────────────────────────────────────────────────
+
+def test_chunk_ann_dim_mismatch_emits_event(repo, monkeypatch):
+    """chunk ANN 遇 manifest dim ≠ 查询维 → 发 dim_mismatch 事件(不静默跳过)。"""
+    nb = _seed(repo)
+    _set_runtime(repo, monkeypatch, 0)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    events = []
+    orig = repo.event_log.emit
+    monkeypatch.setattr(repo.event_log, "emit",
+                        lambda e, **k: (events.append(e), orig(e, **k))[1])
+    import numpy as np
+    # 手造 16 维查询向量(与 manifest dim=32 失配)直调 _retrieve_chunks_ann
+    q16 = np.random.default_rng(1).normal(size=16).astype(np.float32).tolist()
+    out = repo._retrieve_chunks_ann(nb.id, "q", q16, idx, recall=5)
+    assert out is None
+    dm = [e for e in events if e.get("kind") == "dim_mismatch" and e.get("site") == "chunk_ann"]
+    assert len(dm) == 1 and dm[0]["manifest_dim"] == 32 and dm[0]["query_dim"] == 16

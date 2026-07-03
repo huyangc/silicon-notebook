@@ -74,7 +74,11 @@ cp .env.example .env
 - **LLM**(抽取、作答、文章研究)—— `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` /
   `OPENAI_COMPAT_MODEL`;任意 OpenAI 兼容端点。
 - **嵌入**(语义检索;否则仅关键词)—— `EMBED_PROVIDER=dashscope` 加 `EMBED_MODEL` /
-  `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM`(必须等于模型输出维度)。
+  `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM`(必须等于模型输出维度)。可选
+  `EMBED_RUNTIME_DIM`(默认 `0`=关)把相似度空间截断到前 N 维 + re-normalize(MRL),
+  使进程内矩阵 / ANN 内存约 `EMBED_DIM/N`× 缩减,而库内原生向量保留为真相源。开关它需
+  重建 scale 索引,见 [docs/runtime-dim-truncation-runbook.md](docs/runtime-dim-truncation-runbook.md)。
+  **切勿改小 `EMBED_DIM` 来降维** —— 那会把全部存量向量当异维丢弃。
 - **PDF 高保真**(可选)—— 一个 MinerU 端点,见 [用 MinerU 解析 PDF](#用-mineru-解析-pdf);
   保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
 
