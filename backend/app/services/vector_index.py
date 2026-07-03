@@ -39,7 +39,32 @@ def decode_vector(raw: Union[bytes, bytearray, memoryview, str, None]) -> Option
     return np.asarray(json.loads(raw), dtype=np.float32)
 
 
-def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0) -> Tuple[List[str], np.ndarray]:
+def resolve_runtime_dim(settings=None) -> int:
+    """生效的运行时截断维;0 = 关闭(不截断)。settings 缺省读全局 get_settings()。
+    语义:EMBED_DIM 恒为存储/原生维,EMBED_RUNTIME_DIM 是相似度空间维
+    (MRL 前缀截断,见 docs/superpowers/specs/2026-07-03-runtime-dim-1024-plan.md)。"""
+    if settings is None:
+        from app.core.config import get_settings
+        settings = get_settings()
+    return int(getattr(settings, "embed_runtime_dim", 0) or 0)
+
+
+def truncate_vec(arr: np.ndarray, runtime_dim: int) -> np.ndarray:
+    """MRL 运行时截断:取前 runtime_dim 维 + L2 re-normalize。全仓唯一截断语义
+    (截后归一,原子操作),与 app.eval.mrl_truncation.truncated_sims 的口径由
+    测试锁死等价。runtime_dim<=0 或向量本就不长于 runtime_dim → 原样返回
+    (短于运行时维的异维残留留给下游 dim 检查按既有语义跳过)。"""
+    if runtime_dim <= 0 or arr.size <= runtime_dim:
+        return arr
+    out = arr[:runtime_dim]
+    norm = float(np.linalg.norm(out))
+    if norm > 0:
+        out = out / norm
+    return out.astype(np.float32, copy=False)
+
+
+def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0,
+                 runtime_dim: "Optional[int]" = None) -> Tuple[List[str], np.ndarray]:
     """rows: iterable of (id, vector_raw) where vector_raw is either legacy JSON
     text or a raw float32 BLOB (bytes/memoryview) — see `decode_vector`. Returns
     (ids, normalized float32 matrix [N, dim]). Rows with empty/invalid/wrong-dim
@@ -54,7 +79,13 @@ def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0) -> Tuple[List
     rows were skipped from the estimate, or the hint was wrong), it falls back
     to appending the overflow into a plain Python list and concatenates at the
     end — never truncates output. Output is bit-identical to the no-hint path
-    regardless of hint accuracy; n_hint is purely an allocation hint."""
+    regardless of hint accuracy; n_hint is purely an allocation hint.
+
+    runtime_dim: MRL 运行时截断维 — None(默认)= 读 settings 的 EMBED_RUNTIME_DIM;
+    显式 0 = 不截断(真相源工具/测试用)。截断发生在逐行 decode 之后、首行定维
+    判定**之前**(否则原生维首行会把已截断的后续行整批当异维丢),且在预分配
+    矩阵之前生效 —— 峰值内存按截断维计,这是大库 fold/build 峰值 ÷4 的前提。"""
+    rd = resolve_runtime_dim() if runtime_dim is None else int(runtime_dim)
     ids: List[str] = []
     dim = None
     prealloc: np.ndarray = None
@@ -86,6 +117,8 @@ def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0) -> Tuple[List
             continue
         if arr.ndim != 1 or arr.size == 0:
             continue
+        if rd > 0:
+            arr = truncate_vec(arr, rd)     # 必须先于定维判定(见 docstring)
         if dim is None:
             dim = int(arr.size)
         elif arr.size != dim:

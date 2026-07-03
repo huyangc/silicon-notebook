@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     embed_base_url: str = Field("", env="EMBED_BASE_URL")
     embed_api_key: str = Field("", env="EMBED_API_KEY")
     embed_dim: int = Field(1024, env="EMBED_DIM")
+    # 运行时向量维度(MRL 前缀截断 + re-normalize):所有相似度/矩阵/ANN 在截断后
+    # 空间进行;0 = 关闭(不截断,行为零变化)。EMBED_DIM 语义固定为「存储/模型原生
+    # 维」——**绝对禁止用改 EMBED_DIM 实现降维**:存量向量按 EMBED_DIM 过滤,改小
+    # 会把全部原生维向量当异维残留丢光(全库静默失忆)。真相源永远按原生维落库,
+    # 截断只在读取/构建/查询侧(见 docs/superpowers/specs/2026-07-03-runtime-dim-1024-plan.md)。
+    embed_runtime_dim: int = Field(0, validation_alias="EMBED_RUNTIME_DIM")
     llm_cache_enabled: bool = Field(False, env="LLM_CACHE_ENABLED")
     llm_cache_path: str = Field(".local/llm_cache.db", env="LLM_CACHE_PATH")
 
@@ -411,6 +417,21 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _validate_runtime_dim(self) -> "Settings":
+        """EMBED_RUNTIME_DIM 越界即硬错(呼应 PR#175 预检哲学:配置错误出声,
+        不静默降级)。收口在 Settings 构造处 → 后端 create_app、离线 CLI
+        (batch_ingest)、eval 三类入口一处全覆盖。"""
+        if self.embed_runtime_dim < 0:
+            raise ValueError(
+                f"EMBED_RUNTIME_DIM={self.embed_runtime_dim} 非法(须 ≥0;0=关闭截断)")
+        if self.embed_runtime_dim > 0 and self.embed_runtime_dim > self.embed_dim:
+            raise ValueError(
+                f"EMBED_RUNTIME_DIM={self.embed_runtime_dim} > EMBED_DIM={self.embed_dim} —— "
+                f"运行时维不能超过存储/原生维。若想提高运行时维,先确认存量向量原生维;"
+                f"绝对不要反过来改小 EMBED_DIM(存量按 EMBED_DIM 过滤,改小=全库向量被当异维残留丢光)")
+        return self
 
     @model_validator(mode="after")
     def _anchor_relative_paths_to_repo_root(self) -> "Settings":
