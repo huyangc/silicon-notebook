@@ -174,3 +174,34 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
     rid = repo.create_report(nb.id, "q")
     eng.run(nb.id, rid, "q", "")
     assert repo.get_report(nb.id, rid)["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Stage D 汇总——执行摘要 + 参考 + 知识缺口 + 分析计划
+# ---------------------------------------------------------------------------
+
+def test_assemble_builds_full_report_with_gaps(repo, monkeypatch):
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]},
+               {"title": "B", "scope": "sb", "sub_queries": ["qb"]}]
+    sections = [
+        {"title": "A", "scope": "sa", "markdown": "## A\nbody [k1]", "grounded": True,
+         "id_map_sources": ["Razavi"], "attempted": [
+             {"query": "qa", "new": 3, "tries": 1},
+             {"query": "qa-dry", "new": 0, "tries": 2}],
+         "top_concepts": [{"object_id": "ko-1", "name": "Bandgap"}]},
+        {"title": "B", "scope": "sb", "markdown": "## B\n【通识】x", "grounded": False,
+         "id_map_sources": [], "attempted": [],
+         "top_concepts": [{"object_id": "ko-2", "name": "Packaging Stress"}]},
+    ]
+    monkeypatch.setattr(eng.repo, "_retrieve_neighbors", lambda *a, **k: [])  # 两概念无边
+    rid = repo.create_report(nb.id, "q")
+    md, gaps = eng._assemble(nb.id, rid, "q", outline, sections)
+    assert "## 执行摘要" in md and "总结" in md
+    assert "## A" in md and "## B" in md
+    assert "## 知识缺口" in md and "qa-dry" in md            # 零命中子查询
+    assert "Bandgap" in md and "Packaging Stress" in md      # 无边概念对
+    assert "## 参考文献" in md and "Razavi" in md
+    assert "## 分析计划" in md and "qa" in md
+    assert any("qa-dry" in g for g in gaps)
