@@ -1,0 +1,411 @@
+/**
+ * report-view.tsx
+ *
+ * 「深度报告」tab:生成 / 列表 / 进度轮询 / 查看 / 取消 / 下载 .md。
+ * page.tsx 已过大,面板逻辑集中在这里;page.tsx 只负责接线
+ * (类型化 api 函数 + chat-body 里的 <ReportsPanel …/> 分支)。
+ *
+ * 轮询约定(镜像 page.tsx 的 kg 构建轮询写法):
+ * - 列表视图:存在非终态(pending/running)报告时每 6s 刷一次列表,终态即停;
+ * - 详情视图:打开的报告非终态时每 6s 刷一次详情,到终态后再同步一次列表;
+ * - 组件卸载/依赖变化时清理 interval。
+ */
+"use client";
+
+import { useEffect, useState } from "react";
+import { ArrowLeft, Download, Square, Trash2 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
+
+// ---------------------------------------------------------------------------
+// 类型(与 backend/app/models/schemas.py 的 ReportSummary/ReportDetail 对齐)
+// ---------------------------------------------------------------------------
+
+export type ReportSummaryT = {
+  id: string;
+  question: string;
+  status: string; // pending | running | done | failed | cancelled
+  progress: string;
+  section_count: number;
+  created_at: string;
+  created_by: string;
+};
+
+export type ReportDetailT = ReportSummaryT & {
+  outline: { title: string; scope: string; sub_queries: string[] }[];
+  sections: { title: string; markdown: string; grounded: boolean; failed?: boolean }[];
+  gaps: string[];
+  content_md: string;
+  error: string;
+};
+
+// 终态判定:pending/running 之外一律视为终态,未知状态不会无限轮询。
+const isReportActive = (status: string) => status === "pending" || status === "running";
+
+const STATUS_LABELS: Record<string, string> = {
+  pending: "排队中",
+  running: "生成中",
+  done: "完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+// 与 page.tsx 的 formatRelativeTime 同款(page.tsx 未导出,报告面板本地复刻)。
+function formatReportTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "";
+  const diffSec = Math.round((Date.now() - then) / 1000);
+  if (diffSec < 60) return "刚刚";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
+  return new Date(then).toLocaleDateString();
+}
+
+// 计划指定的导出方式:Blob → 临时 URL → 触发下载。
+function downloadMd(r: ReportDetailT) {
+  const blob = new Blob([r.content_md], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `report-${r.id}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---------------------------------------------------------------------------
+// ReportMarkdown:复用 answer-markdown.tsx 同款渲染栈,但不带 citations 插件。
+// 报告正文里的 [k1] 为节内证据编号,按纯文本呈现即可(参考文献节有说明)。
+// ---------------------------------------------------------------------------
+
+export function ReportMarkdown({ markdown }: { markdown: string }) {
+  const components = {
+    // 代码块/表格沿用问答区现有样式 class,保持全站观感一致。
+    pre({ children }: { children?: React.ReactNode }) {
+      return <pre className="answer-code">{children}</pre>;
+    },
+    table({ children }: { children?: React.ReactNode }) {
+      return (
+        <div className="answer-table-wrap">
+          <table className="answer-table">{children}</table>
+        </div>
+      );
+    },
+    a({ href, children }: { href?: string; children?: React.ReactNode }) {
+      return (
+        <a href={href} target="_blank" rel="noreferrer">
+          {children}
+        </a>
+      );
+    },
+  } as Parameters<typeof ReactMarkdown>[0]["components"];
+  return (
+    <div className="report-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={components}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 状态徽章:pending/running 亮色(running 附 progress 文字),终态沉色。
+// ---------------------------------------------------------------------------
+
+function ReportStatusBadge({ status, progress }: { status: string; progress: string }) {
+  const live = isReportActive(status);
+  return (
+    <span className={`report-status ${status}`} title={progress || undefined}>
+      {live && <span className="report-status-dot" aria-hidden />}
+      <span className="report-status-label">{STATUS_LABELS[status] ?? status}</span>
+      {live && progress && <span className="report-status-progress">{progress}</span>}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ReportsPanel
+// ---------------------------------------------------------------------------
+
+export interface ReportsPanelProps {
+  notebookId: string;
+  listReports: (nb: string) => Promise<ReportSummaryT[]>;
+  getReport: (nb: string, rid: string) => Promise<ReportDetailT>;
+  createReport: (nb: string, question: string) => Promise<{ report_id: string }>;
+  cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
+  deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
+  setToast: (message: string) => void;
+}
+
+export function ReportsPanel({
+  notebookId,
+  listReports,
+  getReport,
+  createReport,
+  cancelReport,
+  deleteReport,
+  setToast,
+}: ReportsPanelProps) {
+  const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
+  const [active, setActive] = useState<ReportDetailT | null>(null);
+  const [question, setQuestion] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const surfaceError = (error: unknown) =>
+    setToast(`报告操作失败：${error instanceof Error ? error.message : String(error)}`);
+
+  // 进 tab / 切换 notebook:重置视图并拉一次列表。
+  useEffect(() => {
+    let cancelled = false;
+    setReports(null);
+    setActive(null);
+    setQuestion("");
+    setConfirmDelete(false);
+    listReports(notebookId)
+      .then((rows) => { if (!cancelled) setReports(rows); })
+      .catch((error) => { if (!cancelled) { setReports([]); surfaceError(error); } });
+    return () => { cancelled = true; };
+    // surfaceError 仅包装 setToast,不入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notebookId, listReports]);
+
+  // 列表轮询:列表视图下存在非终态报告时每 6s 刷新;终态即停,卸载清理。
+  const hasLiveReports = (reports ?? []).some((r) => isReportActive(r.status));
+  const detailOpen = active !== null;
+  useEffect(() => {
+    if (!hasLiveReports || detailOpen) return;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const rows = await listReports(notebookId);
+        if (!cancelled) setReports(rows);
+      } catch { /* 瞬时失败:下一轮继续 */ }
+    }, 6000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [hasLiveReports, detailOpen, notebookId, listReports]);
+
+  // 详情轮询:打开的报告非终态时每 6s 刷新;到终态再同步一次列表徽章。
+  const activeId = active?.id ?? null;
+  const activeLive = active ? isReportActive(active.status) : false;
+  useEffect(() => {
+    if (!activeId || !activeLive) return;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const detail = await getReport(notebookId, activeId);
+        if (cancelled) return;
+        setActive((cur) => (cur && cur.id === activeId ? detail : cur));
+        if (!isReportActive(detail.status)) {
+          listReports(notebookId)
+            .then((rows) => { if (!cancelled) setReports(rows); })
+            .catch(() => {});
+        }
+      } catch { /* 瞬时失败:下一轮继续 */ }
+    }, 6000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [activeId, activeLive, notebookId, getReport, listReports]);
+
+  // 删除二次确认 4s 后自动复位,避免按钮长期停在危险态。
+  useEffect(() => {
+    if (!confirmDelete) return;
+    const timer = window.setTimeout(() => setConfirmDelete(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [confirmDelete]);
+
+  async function submitCreate() {
+    const q = question.trim();
+    if (!q || creating) return;
+    setCreating(true);
+    try {
+      await createReport(notebookId, q);
+      setQuestion("");
+      setToast("已开始生成深度报告（后台进行，约 5–15 分钟）");
+      setReports(await listReports(notebookId));
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function openReport(rid: string) {
+    try {
+      setConfirmDelete(false);
+      setActive(await getReport(notebookId, rid));
+    } catch (error) {
+      surfaceError(error);
+    }
+  }
+
+  function backToList() {
+    setActive(null);
+    setConfirmDelete(false);
+    listReports(notebookId).then(setReports).catch(() => {});
+  }
+
+  async function requestCancel() {
+    if (!active || actionBusy) return;
+    setActionBusy(true);
+    try {
+      await cancelReport(notebookId, active.id);
+      setToast("已请求取消，报告将停在当前进度");
+      const detail = await getReport(notebookId, active.id);
+      setActive((cur) => (cur && cur.id === detail.id ? detail : cur));
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function requestDelete() {
+    if (!active || actionBusy) return;
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    setActionBusy(true);
+    try {
+      await deleteReport(notebookId, active.id);
+      setToast("报告已删除");
+      setActive(null);
+      setConfirmDelete(false);
+      setReports(await listReports(notebookId));
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // ---- 详情视图 ----
+  if (active) {
+    return (
+      <div className="report-panel report-detail">
+        <div className="report-detail-head">
+          <button className="report-action" type="button" onClick={backToList}>
+            <ArrowLeft size={14} /> 返回列表
+          </button>
+          <div className="report-detail-actions">
+            {isReportActive(active.status) && (
+              <button
+                className="report-action"
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void requestCancel()}
+              >
+                <Square size={12} /> 取消生成
+              </button>
+            )}
+            {active.content_md && (
+              <button className="report-action" type="button" onClick={() => downloadMd(active)}>
+                <Download size={14} /> 下载 .md
+              </button>
+            )}
+            <button
+              className={`report-action ${confirmDelete ? "danger" : ""}`}
+              type="button"
+              disabled={actionBusy}
+              onClick={() => void requestDelete()}
+            >
+              <Trash2 size={14} /> {confirmDelete ? "确认删除" : "删除"}
+            </button>
+          </div>
+        </div>
+        <div className="report-detail-title">
+          <h2 title={active.question}>{active.question}</h2>
+          <div className="report-detail-meta">
+            <ReportStatusBadge status={active.status} progress={active.progress} />
+            <small>
+              {formatReportTime(active.created_at)}
+              {active.section_count > 0 && ` · ${active.section_count} 节`}
+            </small>
+          </div>
+        </div>
+        {active.status === "failed" && active.error && (
+          <div className="report-error">生成失败：{active.error}</div>
+        )}
+        {isReportActive(active.status) && (
+          <div className="report-running-hint">
+            <p>正在后台生成，此页每 6 秒自动刷新；也可以先去其他 tab，随时回来查看。</p>
+            {active.outline.length > 0 && (
+              <>
+                <span className="report-outline-caption">研究大纲（{active.outline.length} 节）</span>
+                <ol className="report-outline">
+                  {active.outline.map((o, index) => (
+                    <li key={`${o.title}-${index}`} title={o.scope || undefined}>{o.title}</li>
+                  ))}
+                </ol>
+              </>
+            )}
+          </div>
+        )}
+        {active.content_md ? (
+          <ReportMarkdown markdown={active.content_md} />
+        ) : (
+          !isReportActive(active.status) && active.status !== "failed" && (
+            <p className="tool-hint">该报告没有正文内容（可能在完成前被取消）。</p>
+          )
+        )}
+      </div>
+    );
+  }
+
+  // ---- 列表视图 ----
+  return (
+    <div className="report-panel">
+      <div className="report-compose">
+        <textarea
+          className="report-compose-input"
+          rows={2}
+          placeholder="想深入研究什么？例如：对比库内各时序收敛方法的适用场景、代价与已知坑"
+          value={question}
+          disabled={creating}
+          onChange={(event) => setQuestion(event.target.value)}
+        />
+        <div className="report-compose-actions">
+          <span className="report-compose-hint">后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页</span>
+          <button
+            className="button"
+            type="button"
+            disabled={creating || !question.trim()}
+            onClick={() => void submitCreate()}
+          >
+            {creating ? "提交中…" : "生成深度报告"}
+          </button>
+        </div>
+      </div>
+      {reports === null ? (
+        <p className="tool-hint">加载中…</p>
+      ) : reports.length === 0 ? (
+        <div className="chat-session-empty">还没有深度报告。输入研究问题，生成第一份带出处的长文报告。</div>
+      ) : (
+        <div className="report-list">
+          {reports.map((r) => (
+            <article className="chat-session-card report-card" key={r.id}>
+              <button
+                className="chat-session-card-main"
+                type="button"
+                title={r.question}
+                onClick={() => void openReport(r.id)}
+              >
+                <span>{r.question}</span>
+                <small>
+                  {formatReportTime(r.created_at)}
+                  {r.section_count > 0 && ` · ${r.section_count} 节`}
+                </small>
+              </button>
+              <ReportStatusBadge status={r.status} progress={r.progress} />
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
