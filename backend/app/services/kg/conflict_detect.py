@@ -312,7 +312,17 @@ def detect_conflict_candidates(
 
 
 def _cosine_sim(va: List[float], vb: List[float]) -> float:
-    """Compute cosine similarity between two plain-list vectors."""
+    """Compute cosine similarity between two plain-list vectors.
+
+    混维零容忍(runtime-dim 截断项目 T4):len 不等时 zip 会静默按短边截断算出
+    错误相似度(≠0 的假信号)——显式返 0.0 并 warning。正常路径不该走到这里:
+    resolve_notebook_conflicts 装载 embeddings 时已按存储维过滤+统一截断。"""
+    if len(va) != len(vb):
+        _log.warning(
+            "_cosine_sim: dim mismatch %d vs %d — treating as 0.0 "
+            "(mixed-dim residue should have been filtered upstream)",
+            len(va), len(vb))
+        return 0.0
     dot = sum(x * y for x, y in zip(va, vb))
     na = math.sqrt(sum(x * x for x in va))
     nb = math.sqrt(sum(y * y for y in vb))
