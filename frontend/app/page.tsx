@@ -186,6 +186,7 @@ type AskResponse = {
   reasoning_trace?: ReasoningTraceStep[];
   mode?: AskModeId;
   model_errors?: { stage: string; model: string; message: string }[];
+  index_required?: boolean;
 };
 
 type ChatTurn = { question: string; response: AskResponse };
@@ -3359,6 +3360,8 @@ export default function Home() {
                             feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
                             onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
                             onOpenKnowledgeGraph={(objectId) => openKgView(objectId)}
+                            notebookId={currentNotebookId}
+                            onBuildScaleIndex={(nb) => { startScaleIndexRebuild(nb, "now").catch(reportError); }}
                           />
                         </div>
                       </div>
@@ -5264,12 +5267,16 @@ function AnswerView({
   answer,
   feedbackSent,
   onFeedback,
-  onOpenKnowledgeGraph
+  onOpenKnowledgeGraph,
+  notebookId,
+  onBuildScaleIndex
 }: {
   answer: AskResponse;
   feedbackSent: string;
   onFeedback: (rating: "useful" | "not_useful") => void;
   onOpenKnowledgeGraph: (objectId?: string) => void;
+  notebookId: string | null;
+  onBuildScaleIndex: (nb: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
@@ -5312,6 +5319,19 @@ function AnswerView({
           </div>
         );
       })()}
+      {answer.index_required && (
+        <div className="answer-model-error" title="大库检索强制走索引;未建索引时仅有降级结果">
+          <span>此知识库较大且尚未建立检索索引，当前检索能力受限。</span>
+          <button
+            type="button"
+            className="mode-engine"
+            style={{ marginLeft: 6 }}
+            onClick={() => { if (notebookId) onBuildScaleIndex(notebookId); }}
+          >
+            构建索引
+          </button>
+        </div>
+      )}
       {(() => {
         const lvl = answer.evidence_level ?? (answer.grounded ? "grounded" : "inferred");
         const meta =
