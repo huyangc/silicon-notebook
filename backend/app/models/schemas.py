@@ -186,6 +186,7 @@ class SharedByMeItem(BaseModel):
 class ReportCreate(BaseModel):
     question: str
     history: str = ""
+    depth: int = 2
 
 
 class ReportSummary(BaseModel):
@@ -203,6 +204,8 @@ class ReportDetail(ReportSummary):
     sections: List[dict] = Field(default_factory=list)
     gaps: List[str] = Field(default_factory=list)
     references: List[dict] = Field(default_factory=list)
+    depth: int = 2
+    section_status: List[dict] = Field(default_factory=list)
     content_md: str = ""
     error: str = ""
 
