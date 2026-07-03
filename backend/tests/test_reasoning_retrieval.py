@@ -80,6 +80,23 @@ def test_reflect_prompt_contains_summary_and_schema():
         assert a in REFLECT_SCHEMA_HINT
 
 
+def test_answer_prompt_has_derivation_rigor_rules():
+    """机理/推导题三条严谨性条款:分层组织+推断桥接、量纲一致+电路可实现形式、单源数值给区间。"""
+    from app.services.prompts import answer_prompt
+    p = answer_prompt("q", "ctx")
+    assert "layer by layer" in p
+    assert "dimensionally consistent" in p
+    assert "that source's stated value" in p
+
+
+def test_reflect_prompt_checks_coverage_aspect_by_aspect():
+    """sufficient 判据升级为逐层/逐方面核查;ppr 指引扩到跨文档多层推导。"""
+    from app.services.prompts import reflect_prompt
+    p = reflect_prompt("q", "s")
+    assert "aspect by aspect" in p
+    assert "multi-layer derivation" in p
+
+
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
