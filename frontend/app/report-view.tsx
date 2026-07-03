@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Download, Square, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckSquare, Download, Square, Trash2 } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -228,6 +228,7 @@ export interface ReportsPanelProps {
   createReport: (nb: string, question: string, depth: number) => Promise<{ report_id: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
+  downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
   setToast: (message: string) => void;
 }
 
@@ -238,6 +239,7 @@ export function ReportsPanel({
   createReport,
   cancelReport,
   deleteReport,
+  downloadReportsZip,
   setToast,
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
@@ -249,6 +251,12 @@ export function ReportsPanel({
   const [creating, setCreating] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // 列表单篇下载:记录正在下载的 rid,禁用该行按钮防重复点击。
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  // 多选批量下载:是否处于多选模式 + 已选 rid 集合 + zip 下载中标志。
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [zipBusy, setZipBusy] = useState(false);
 
   const surfaceError = (error: unknown) =>
     setToast(`报告操作失败：${error instanceof Error ? error.message : String(error)}`);
@@ -260,6 +268,8 @@ export function ReportsPanel({
     setActive(null);
     setQuestion("");
     setConfirmDelete(false);
+    setSelectMode(false);
+    setSelectedIds(new Set());
     listReports(notebookId)
       .then((rows) => { if (!cancelled) setReports(rows); })
       .catch((error) => { if (!cancelled) { setReports([]); surfaceError(error); } });
@@ -390,6 +400,57 @@ export function ReportsPanel({
       surfaceError(error);
     } finally {
       setActionBusy(false);
+    }
+  }
+
+  // 列表内单篇下载:拉详情拿 content_md,复用 downloadMd;瞬时禁用防重复点击。
+  async function downloadOne(rid: string) {
+    if (downloadingId) return;
+    setDownloadingId(rid);
+    try {
+      const detail = await getReport(notebookId, rid);
+      if (!detail.content_md) {
+        setToast("该报告没有正文内容，无法下载");
+        return;
+      }
+      downloadMd(detail);
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setDownloadingId(null);
+    }
+  }
+
+  // 进入/退出多选模式;退出时清空已选。
+  function toggleSelectMode() {
+    setSelectMode((on) => {
+      if (on) setSelectedIds(new Set());
+      return !on;
+    });
+  }
+
+  // 勾选/取消勾选单行(仅 done 行会调用)。
+  function toggleSelected(rid: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(rid)) next.delete(rid);
+      else next.add(rid);
+      return next;
+    });
+  }
+
+  // 批量下载:导出选中报告为 reports.zip;成功后退出多选并清空。
+  async function downloadSelectedZip() {
+    if (zipBusy || selectedIds.size === 0) return;
+    setZipBusy(true);
+    try {
+      await downloadReportsZip(notebookId, Array.from(selectedIds));
+      setSelectMode(false);
+      setSelectedIds(new Set());
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setZipBusy(false);
     }
   }
 
@@ -554,25 +615,95 @@ export function ReportsPanel({
       ) : reports.length === 0 ? (
         <div className="chat-session-empty">还没有深度报告。输入研究问题，生成第一份带出处的长文报告。</div>
       ) : (
-        <div className="report-list">
-          {reports.map((r) => (
-            <article className="chat-session-card report-card" key={r.id}>
-              <button
-                className="chat-session-card-main"
-                type="button"
-                title={r.question}
-                onClick={() => void openReport(r.id)}
-              >
-                <span>{r.question}</span>
-                <small>
-                  {formatReportTime(r.created_at)}
-                  {r.section_count > 0 && ` · ${r.section_count} 节`}
-                </small>
-              </button>
-              <ReportStatusBadge status={r.status} progress={r.progress} />
-            </article>
-          ))}
-        </div>
+        <>
+          {(() => {
+            const doneCount = reports.filter((r) => r.status === "done").length;
+            return (
+              <div className={`report-list-toolbar${selectMode ? " select" : ""}`}>
+                {selectMode ? (
+                  <>
+                    <span className="report-select-count">已选 {selectedIds.size} 篇</span>
+                    <div className="report-select-actions">
+                      <button
+                        className="report-action"
+                        type="button"
+                        disabled={zipBusy || selectedIds.size === 0}
+                        onClick={() => void downloadSelectedZip()}
+                      >
+                        <Download size={14} /> {zipBusy ? "打包中…" : "下载 zip"}
+                      </button>
+                      <button className="report-action" type="button" onClick={toggleSelectMode}>
+                        取消
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <button
+                    className="report-list-select-toggle"
+                    type="button"
+                    disabled={doneCount === 0}
+                    onClick={toggleSelectMode}
+                  >
+                    <CheckSquare size={14} /> 批量下载
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+          <div className="report-list">
+            {reports.map((r) => {
+              const isDone = r.status === "done";
+              const checked = selectedIds.has(r.id);
+              return (
+                <article
+                  className={`chat-session-card report-card${selectMode && isDone ? " selectable" : ""}${checked ? " selected" : ""}`}
+                  key={r.id}
+                >
+                  {selectMode && isDone && (
+                    <label className="report-card-check" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSelected(r.id)}
+                        aria-label={`选择报告：${r.question}`}
+                      />
+                    </label>
+                  )}
+                  <button
+                    className="chat-session-card-main"
+                    type="button"
+                    title={r.question}
+                    onClick={() => (selectMode && isDone ? toggleSelected(r.id) : void openReport(r.id))}
+                  >
+                    <span>{r.question}</span>
+                    <small>
+                      {formatReportTime(r.created_at)}
+                      {r.section_count > 0 && ` · ${r.section_count} 节`}
+                    </small>
+                  </button>
+                  <div className="report-card-tail">
+                    <ReportStatusBadge status={r.status} progress={r.progress} />
+                    {isDone && !selectMode && (
+                      <button
+                        className="report-card-download"
+                        type="button"
+                        title="下载 .md"
+                        aria-label="下载 .md"
+                        disabled={downloadingId === r.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void downloadOne(r.id);
+                        }}
+                      >
+                        <Download size={16} />
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
