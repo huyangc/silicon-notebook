@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildAnswerReferences,
   parseMarkdownBlocks,
+  referenceByCitationKey,
   renderTextWithReferenceNumbers,
   splitInlineLatex,
 } from "./answer-formatting.ts";
@@ -79,6 +80,17 @@ test("parses code fences, display formulas, and markdown tables", () => {
 test("preserves anchor tier on built references", () => {
   const references = buildAnswerReferences("看 [k2]。", anchors, []);
   assert.equal(references[0].anchor?.tier, "base");
+});
+
+test("maps display citation numbers to references for numeric model citations", () => {
+  const references = buildAnswerReferences("没有 anchor。", [], [
+    { label: "A", source_id: "s", element_id: "e1", location_label: "p.1", quoted_span: "quote 1" },
+    { label: "B", source_id: "s", element_id: "e2", location_label: "p.2", quoted_span: "quote 2" },
+  ]);
+
+  const byCitationKey = referenceByCitationKey(references);
+  assert.equal(byCitationKey["1"]?.id, references[0].id);
+  assert.equal(byCitationKey["2"]?.id, references[1].id);
 });
 
 test("parses a single-line $$...$$ as a display formula block", () => {

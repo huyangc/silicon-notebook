@@ -14,7 +14,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import {
   buildAnswerReferences,
-  referenceByAnchorKey,
+  referenceByCitationKey,
   type AnswerAnchorLike,
   type CitationLike,
   type AnswerReference,
@@ -50,7 +50,7 @@ export function AnswerMarkdown({
 }: AnswerMarkdownProps) {
   // 构建 key→reference 映射，供 remarkCitations 插件和 <a> 组件使用
   const references = buildAnswerReferences(answer, anchors, citations);
-  const refsByKey = referenceByAnchorKey(references);
+  const refsByCitationKey = referenceByCitationKey(references);
 
   // -----------------------------------------------------------------------
   // 自定义 <a> 渲染：cite: 开头 → 引用徽章；其余 → 普通新标签链接
@@ -60,7 +60,7 @@ export function AnswerMarkdown({
     a({ href, children }: { href?: string; children?: React.ReactNode }) {
       if (href?.startsWith("cite:")) {
         const key = href.slice(5);
-        const reference = refsByKey[key];
+        const reference = refsByCitationKey[key];
         if (reference) {
           const isSelected = selectedReferenceId === reference.id;
           return (
@@ -106,7 +106,7 @@ export function AnswerMarkdown({
         remarkPlugins={[
           remarkGfm,
           remarkMath,
-          [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+          [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
         ]}
         rehypePlugins={[rehypeKatex]}
         // 默认 urlTransform 会清掉非常规协议（含我们的 cite:），导致引用徽章 href 丢失。
