@@ -976,3 +976,24 @@ def test_reflect_prompt_warns_against_resubmitting_tried_subqueries():
     from app.services.prompts import reflect_prompt
     p = reflect_prompt("q", "s")
     assert "Never re-submit" in p
+
+
+def test_run_exposes_attempted_ledger_and_top_n_override(rrepo):
+    """报告管线依赖:run() 返回 attempted 账目(query/new/tries),且 top_n 参数
+    覆盖 settings.retrieval_top_n(每节独立预算)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+
+    class _PlanOnlyLLM:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+            return json.dumps({"next_action": "answer", "sufficient": True})
+
+    rrepo.llm_client = _PlanOnlyLLM()
+    result = ReasoningRetriever(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "", top_n=1)
+    assert len(result.top_hits) <= 1                       # top_n 覆盖生效
+    assert result.attempted and result.attempted[0]["query"] == "RTL到GDSII流程"
+    assert set(result.attempted[0]) == {"query", "new", "tries"}
