@@ -3415,19 +3415,26 @@ button.chat-session-card {
   overflow-wrap: anywhere;
 }
 
-/* 分析弹窗:带解释性描述的动作行 —— 按钮等宽左列 + 描述跟随,整组纵向堆叠 */
-.info-action-row {
+/* 分析弹窗:带解释性描述的动作 —— 网格布局,按钮列取「最宽标签」等宽对齐,描述/注记跟随右列 */
+.info-action-grid {
   flex: 1 0 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(132px, max-content) 1fr;
   align-items: center;
-  gap: 12px;
+  gap: 14px 16px;
 }
 
-.info-action-row > button {
-  flex: 0 0 auto;
-  min-width: 132px;
+.info-action-grid > button {
+  /* 网格默认 justify-items:stretch → 每个按钮撑满第一列(=最宽标签宽度),从而列宽一致 */
   justify-content: center;
   text-align: center;
+}
+
+.info-action-desc-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 .info-action-desc {
@@ -3435,6 +3442,34 @@ button.chat-session-card {
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+/* 「当前基准库:名字」注记 —— 描述下方的小徽标,带指示点,名字随徽标突出 */
+.info-action-note {
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 11px;
+  border-radius: 999px;
+  background: #eef2fb;
+  border: 1px solid #dbe3f4;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.info-action-note::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2563eb;
 }
 
 .source-detail-card {
