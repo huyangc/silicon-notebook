@@ -92,9 +92,7 @@ class Settings(BaseSettings):
     # 【通识】层:允许报告引入库外参数知识(行内标注,仅报告管线读取)。
     report_allow_parametric: bool = Field(
         True, validation_alias="REPORT_ALLOW_PARAMETRIC")
-    # 节间并行度(节深挖无耦合;尊重全局限流退避)。
-    report_section_concurrency: int = Field(
-        3, validation_alias="REPORT_SECTION_CONCURRENCY")
+    # 节间并行度复用 kg_job_concurrency(节深挖无耦合;尊重全局限流退避)。
 
     # 推理搜索 (mode=reasoning) 专用 LLM 端点（可选）。三项全部非空时推理路径改用此
     # 模型，与全局 OPENAI_COMPAT_* 解耦；任一为空 → 整体回退全局。超时/重试沿用

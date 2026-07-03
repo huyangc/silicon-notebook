@@ -997,3 +997,22 @@ def test_run_exposes_attempted_ledger_and_top_n_override(rrepo):
     assert len(result.top_hits) <= 1                       # top_n 覆盖生效
     assert result.attempted and result.attempted[0]["query"] == "RTL到GDSII流程"
     assert set(result.attempted[0]) == {"query", "new", "tries"}
+
+
+def test_run_max_steps_override_caps_reflect_loop(rrepo):
+    """max_steps 覆盖 settings.reasoning_max_steps,封顶 reflect 轮数(报告滑块用)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    calls = {"reflect": 0}
+
+    class _LoopLLM:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+            calls["reflect"] += 1
+            return json.dumps({"next_action": "search_elements", "elements_query": "q"})  # 永不 answer
+
+    rrepo.llm_client = _LoopLLM()
+    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
+    assert calls["reflect"] <= 2      # 被 max_steps=2 封顶(而非 settings 的 50)

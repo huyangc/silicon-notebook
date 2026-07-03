@@ -146,7 +146,7 @@ class ReportEngine:
                                     progress=f"章节深挖 {done_count['n']}/{len(outline)}")
             return drafted
 
-        workers = max(1, int(self.settings.report_section_concurrency))
+        workers = max(1, int(self.settings.kg_job_concurrency))
         with ThreadPoolExecutor(max_workers=min(workers, len(outline))) as pool:
             futures = [pool.submit(contextvars.copy_context().run, _one, s)
                        for s in outline]
