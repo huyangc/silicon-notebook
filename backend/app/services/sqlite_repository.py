@@ -5703,11 +5703,15 @@ class SQLiteRepository:
             emb_c = db.execute(
                 "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
                 (notebook_id,)).fetchone()["c"]
+        # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
+        # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
+        from app.services.vector_index import resolve_runtime_dim
         parts = [
             "v2", notebook_id,
             int(seq),
             int(obj_c), int(emb_c), int(dec_c),
             int(self.settings.embed_dim),
+            resolve_runtime_dim(self.settings),
         ]
         return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
 
@@ -7499,13 +7503,21 @@ class SQLiteRepository:
         embeddings — the same cheap aggregate query _vector_matrix uses to key
         its cache. Factored out so callers can `peek()` cache warmth (e.g. the
         large-notebook cold-matrix guard in _retrieve_relations_scored) without
-        duplicating the SQL or paying for the (potentially GB-scale) loader."""
+        duplicating the SQL or paying for the (potentially GB-scale) loader.
+
+        Includes the runtime truncation dim (T3 / 风险 R4): the cached matrix
+        lives in the runtime similarity space, so flipping EMBED_RUNTIME_DIM
+        without a restart must miss — serving an old-dim matrix would make
+        every query_sims silently return {} (dim-mismatch guard). Warm-peek
+        (_vector_matrix_warm) shares this version, so guard warmth judgments
+        stay in sync with the real cache by construction."""
+        from app.services.vector_index import resolve_runtime_dim
         ver = db.execute(
             f"SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
             f"FROM {table} WHERE notebook_id = ?",
             (notebook_id,),
         ).fetchone()
-        return (table, ver["c"], ver["ts"])
+        return (table, ver["c"], ver["ts"], resolve_runtime_dim(self.settings))
 
     def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
                        table: str, id_col: str):
@@ -7519,13 +7531,17 @@ class SQLiteRepository:
         from app.services.vector_index import build_matrix
 
         version = self._vector_matrix_version(db, notebook_id, table)
+        # 键↔loader 同源:截断维取 version 元组里那份(而非各自再读 settings),
+        # 缓存键声称的空间与实际加载的空间 by construction 一致(T3/R4)。
+        runtime_dim = version[-1]
 
         def _load():
             rows = db.execute(
                 f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
                 (notebook_id,),
             ).fetchall()
-            return build_matrix((r["vid"], r["vector"]) for r in rows)
+            return build_matrix(((r["vid"], r["vector"]) for r in rows),
+                                runtime_dim=runtime_dim)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
 
@@ -7709,10 +7725,14 @@ class SQLiteRepository:
                                      "FROM concept_clusters WHERE notebook_id=?", (nb,)).fetchone()
                 version_parts.append((nb, obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
                                       chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"]))
+        # runtime_dim 入键(T3/R4):emb_synonym 边由向量矩阵派生,切
+        # EMBED_RUNTIME_DIM 后旧空间算出的图不能再服役。
+        from app.services.vector_index import resolve_runtime_dim
         version = ("ppr_graph", tuple(version_parts),
                    self.settings.ppr_variant_edge_weight,
                    self.settings.ppr_emb_synonym_enabled, self.settings.ppr_emb_synonym_threshold,
-                   self.settings.ppr_emb_synonym_topk,)
+                   self.settings.ppr_emb_synonym_topk,
+                   resolve_runtime_dim(self.settings),)
 
         def _load():
             ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -7770,11 +7790,17 @@ class SQLiteRepository:
         seq read + 2 cluster aggregates — always run, never single-flighted (it's
         the signal used to decide whether the expensive cold path is needed at
         all, so it must never itself block on another thread's cold compute)."""
+        # runtime_dim 是 settings_tail 的一员(T3/R4):它经
+        # _compute_scale_version_cold 流入 _scale_index_version,进而与磁盘
+        # manifest.version 对照 —— 切 EMBED_RUNTIME_DIM 后旧维 scale 索引必须
+        # 判 stale(而非 ANN 查询恒空)。
+        from app.services.vector_index import resolve_runtime_dim
         settings_tail = (
             self.settings.ppr_variant_edge_weight,
             self.settings.ppr_emb_synonym_enabled,
             self.settings.ppr_emb_synonym_threshold,
             self.settings.ppr_emb_synonym_topk,
+            resolve_runtime_dim(self.settings),
         )
         with self._connect() as db:
             st = db.execute(
