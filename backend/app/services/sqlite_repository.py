@@ -672,6 +672,25 @@ class SQLiteRepository:
                   updated_at TEXT NOT NULL
                 );
 
+                -- 深度报告(report_engine):后台生成的多节技术报告落库。
+                -- outline/sections/gaps 为 JSON 列;content_md 为汇总后的完整 markdown。
+                CREATE TABLE IF NOT EXISTS reports (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  question TEXT NOT NULL,
+                  outline_json TEXT NOT NULL DEFAULT '[]',
+                  sections_json TEXT NOT NULL DEFAULT '[]',
+                  gaps_json TEXT NOT NULL DEFAULT '[]',
+                  content_md TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  progress TEXT NOT NULL DEFAULT '',
+                  error TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reports_nb_created ON reports(notebook_id, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS feedback (
                   id TEXT PRIMARY KEY,
                   answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
@@ -12009,6 +12028,66 @@ class SQLiteRepository:
             db.executemany("DELETE FROM answers WHERE conversation_id = ?", [(cid,) for cid in ids])
             db.executemany("DELETE FROM conversations WHERE id = ?", [(cid,) for cid in ids])
         return len(ids)
+
+    # --- 深度报告 ---
+    def create_report(self, notebook_id: str, question: str) -> str:
+        self.get_notebook(notebook_id)          # 不存在则 KeyError
+        rid = f"rep-{uuid4().hex[:10]}"
+        now = _now()
+        with self._write() as db:
+            db.execute(
+                "INSERT INTO reports(id, notebook_id, question, created_by, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (rid, notebook_id, question, self.current_user().id, now, now))
+        return rid
+
+    def update_report(self, notebook_id: str, report_id: str, *, status=None,
+                      progress=None, error=None, outline=None, sections=None,
+                      gaps=None, content_md=None) -> None:
+        sets, args = ["updated_at = ?"], [_now()]
+        for col, val, dump in (("status", status, False), ("progress", progress, False),
+                               ("error", error, False), ("content_md", content_md, False),
+                               ("outline_json", outline, True),
+                               ("sections_json", sections, True), ("gaps_json", gaps, True)):
+            if val is not None:
+                sets.append(f"{col} = ?")
+                args.append(json.dumps(val, ensure_ascii=False) if dump else val)
+        args.extend([report_id, notebook_id])
+        with self._write() as db:
+            db.execute(f"UPDATE reports SET {', '.join(sets)} WHERE id = ? AND notebook_id = ?", args)
+
+    def _report_row_to_dict(self, row, *, full: bool) -> dict:
+        d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
+             "status": row["status"], "progress": row["progress"], "error": row["error"],
+             "created_by": row["created_by"], "created_at": row["created_at"],
+             "updated_at": row["updated_at"],
+             "section_count": len(json.loads(row["outline_json"] or "[]"))}
+        if full:
+            d.update(outline=json.loads(row["outline_json"] or "[]"),
+                     sections=json.loads(row["sections_json"] or "[]"),
+                     gaps=json.loads(row["gaps_json"] or "[]"),
+                     content_md=row["content_md"])
+        return d
+
+    def get_report(self, notebook_id: str, report_id: str) -> dict:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM reports WHERE id = ? AND notebook_id = ?",
+                             (report_id, notebook_id)).fetchone()
+        if row is None:
+            raise KeyError(report_id)
+        return self._report_row_to_dict(row, full=True)
+
+    def list_reports(self, notebook_id: str) -> list:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM reports WHERE notebook_id = ? ORDER BY created_at DESC, id",
+                (notebook_id,)).fetchall()
+        return [self._report_row_to_dict(r, full=False) for r in rows]
+
+    def delete_report(self, notebook_id: str, report_id: str) -> None:
+        with self._write() as db:
+            db.execute("DELETE FROM reports WHERE id = ? AND notebook_id = ?",
+                       (report_id, notebook_id))
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         if payload.rating not in {"useful", "not_useful"}:
