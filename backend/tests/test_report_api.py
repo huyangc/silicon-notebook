@@ -1,4 +1,7 @@
-"""Task 7: 深度报告 API 端点(创建/列表/详情/取消/删除)+ 取消注册表。"""
+"""Task 7: 深度报告 API 端点(创建/列表/详情/取消/删除/导出)+ 取消注册表。"""
+import io
+import zipfile
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -75,3 +78,56 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
     assert r.json()["status"] == "cancelled"
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["status"] == "cancelled"
+
+
+def _mk_report(client, monkeypatch, nb_id, question, *, done=False, content_md=""):
+    """建一个报告;done=True 时用 repo.update_report 直接置 status/content_md。"""
+    import app.api.routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_report_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    rid = client.post(f"/api/notebooks/{nb_id}/reports",
+                      json={"question": question}).json()["report_id"]
+    if done:
+        from app.api.deps import repository
+        repository().update_report(nb_id, rid, status="done", content_md=content_md)
+    return rid
+
+
+def test_report_export_zip_only_done(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    done1 = _mk_report(client, monkeypatch, nb["id"], "第一问 为什么?",
+                       done=True, content_md="# R1\n正文一")
+    done2 = _mk_report(client, monkeypatch, nb["id"], "第二问",
+                       done=True, content_md="# R2\n正文二")
+    pending = _mk_report(client, monkeypatch, nb["id"], "未完成问")   # 仍 pending
+    resp = client.post(f"/api/notebooks/{nb['id']}/reports/export",
+                       json={"report_ids": [done1, done2, pending, "rep-不存在"]})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/zip")
+    assert "attachment" in resp.headers.get("content-disposition", "")
+    assert "reports.zip" in resp.headers.get("content-disposition", "")
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    names = zf.namelist()
+    assert len(names) == 2                       # 只 2 份 done,pending/不存在被跳过
+    assert all(n.endswith(".md") for n in names)
+    blob = "\n".join(zf.read(n).decode("utf-8") for n in names)
+    assert "# R1" in blob and "# R2" in blob
+
+
+def test_report_export_empty_ids_rejected(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    resp = client.post(f"/api/notebooks/{nb['id']}/reports/export",
+                       json={"report_ids": []})
+    assert resp.status_code == 422
+
+
+def test_report_export_skips_other_notebook_report(client, monkeypatch):
+    """跨 notebook 隔离:另一 notebook 的 done 报告 id 传入本 notebook 导出 → 被跳过。
+    仅传该外部 id 时无可导出内容 → 422。"""
+    nb_a = client.post("/api/notebooks", json={"name": "a"}).json()
+    nb_b = client.post("/api/notebooks", json={"name": "b"}).json()
+    foreign = _mk_report(client, monkeypatch, nb_b["id"], "别人的报告",
+                         done=True, content_md="# FOREIGN")
+    resp = client.post(f"/api/notebooks/{nb_a['id']}/reports/export",
+                       json={"report_ids": [foreign]})
+    assert resp.status_code == 422
