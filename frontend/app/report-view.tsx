@@ -12,7 +12,7 @@
  */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, Square, Trash2 } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -59,10 +59,18 @@ export type ReportDetailT = ReportSummaryT & {
 // 终态判定:pending/running 之外一律视为终态,未知状态不会无限轮询。
 const isReportActive = (status: string) => status === "pending" || status === "running";
 
-// 智能滑块(仿 Claude Effort「更快 ←→ 更聪明」):每节 reflect 步上限。
-// 档位越高每节深挖越充分但越慢;后端 create_report 会 clamp 到 [1,16]。
+// 研究深度:五档命名,index 0→4 一一对应 DEPTHS(每节 reflect 步上限)。
+// 各档都算深入,区别在充分程度;后端 create_report 会 clamp 到 [1,16]。
 const DEPTHS = [1, 2, 4, 8, 16];
-const DEPTH_LABELS = ["最快", "快", "均衡", "深入", "最深"];
+const DEPTH_LABELS = ["概览", "标准", "深入", "详尽", "穷尽"];
+// 每档一句中性说明(不用快/聪明措辞),popover 里给选中档显示。
+const DEPTH_HINTS = [
+  "最快出稿,覆盖主干要点",
+  "常用档,深度与篇幅平衡",
+  "逐节多轮检索,论证更完整",
+  "更广取证,细节与边角更全",
+  "最充分深挖,覆盖尽可能全面",
+];
 
 // 节内进度:phase → 图标类型。完成=对勾,失败=叹号,其余进行中=点动画。
 type SectionPhaseIcon = "done" | "failed" | "active";
@@ -235,7 +243,9 @@ export function ReportsPanel({
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
   const [question, setQuestion] = useState("");
-  const [depthIdx, setDepthIdx] = useState(1); // 默认「快」(depth=2)
+  const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
+  const [depthOpen, setDepthOpen] = useState(false);
+  const depthRef = useRef<HTMLDivElement | null>(null);
   const [creating, setCreating] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -300,6 +310,25 @@ export function ReportsPanel({
     const timer = window.setTimeout(() => setConfirmDelete(false), 4000);
     return () => window.clearTimeout(timer);
   }, [confirmDelete]);
+
+  // 研究深度 popover:点外部 / Esc 关闭(镜像 page.tsx 的菜单收起写法)。
+  useEffect(() => {
+    if (!depthOpen) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && depthRef.current?.contains(target)) return;
+      setDepthOpen(false);
+    }
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") setDepthOpen(false);
+    }
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [depthOpen]);
 
   async function submitCreate() {
     const q = question.trim();
@@ -469,37 +498,55 @@ export function ReportsPanel({
           disabled={creating}
           onChange={(event) => setQuestion(event.target.value)}
         />
-        <div className="report-depth">
-          <div className="report-depth-head">
-            <span className="report-depth-caption">研究深度</span>
-            <span className="report-depth-current">{DEPTH_LABELS[depthIdx]}</span>
-          </div>
-          <input
-            className="report-depth-slider"
-            type="range"
-            min={0}
-            max={DEPTHS.length - 1}
-            step={1}
-            value={depthIdx}
-            disabled={creating}
-            aria-label="研究深度"
-            onChange={(event) => setDepthIdx(Number(event.target.value))}
-          />
-          <div className="report-depth-ends">
-            <span>更快</span>
-            <span>更聪明</span>
-          </div>
-        </div>
         <div className="report-compose-actions">
           <span className="report-compose-hint">后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页</span>
-          <button
-            className="button"
-            type="button"
-            disabled={creating || !question.trim()}
-            onClick={() => void submitCreate()}
-          >
-            {creating ? "提交中…" : "生成深度报告"}
-          </button>
+          <div className="report-compose-controls">
+            <div className="report-depth" ref={depthRef}>
+              <button
+                type="button"
+                className={`report-depth-chip${depthOpen ? " open" : ""}`}
+                disabled={creating}
+                aria-haspopup="dialog"
+                aria-expanded={depthOpen}
+                onClick={() => setDepthOpen((open) => !open)}
+              >
+                <span className="report-depth-chip-label">深度</span>
+                <span className="report-depth-chip-value">{DEPTH_LABELS[depthIdx]}</span>
+              </button>
+              {depthOpen && (
+                <div className="report-depth-popover" role="dialog" aria-label="研究深度">
+                  <div className="report-depth-popover-head">
+                    <span className="report-depth-popover-title">研究深度</span>
+                    <span className="report-depth-popover-current">{DEPTH_LABELS[depthIdx]}</span>
+                  </div>
+                  <div className="report-depth-segments" role="radiogroup" aria-label="研究深度">
+                    {DEPTH_LABELS.map((label, index) => (
+                      <button
+                        key={label}
+                        type="button"
+                        role="radio"
+                        aria-checked={index === depthIdx}
+                        className={`report-depth-segment${index === depthIdx ? " active" : ""}`}
+                        onClick={() => setDepthIdx(index)}
+                      >
+                        <span className="report-depth-segment-dot" aria-hidden />
+                        <span className="report-depth-segment-label">{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="report-depth-popover-hint">{DEPTH_HINTS[depthIdx]}</p>
+                </div>
+              )}
+            </div>
+            <button
+              className="button"
+              type="button"
+              disabled={creating || !question.trim()}
+              onClick={() => void submitCreate()}
+            >
+              {creating ? "提交中…" : "生成深度报告"}
+            </button>
+          </div>
         </div>
       </div>
       {reports === null ? (

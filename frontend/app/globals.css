@@ -1286,76 +1286,145 @@ button.chat-session-card {
   cursor: not-allowed;
 }
 
-/* 智能滑块「更快 ←→ 更聪明」:5 档研究深度。 */
-.report-depth {
-  display: grid;
-  gap: 6px;
+/* 生成区底行右侧一排:[深度 chip] [生成深度报告],右对齐垂直居中。 */
+.report-compose-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
-.report-depth-head {
+/* 研究深度:次级 chip 按钮 + 上方弹出的调档 popover。 */
+.report-depth {
+  position: relative;
+}
+
+.report-depth-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid #d2d6df;
+  border-radius: 999px;
+  background: #fff;
+  color: #22272e;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.report-depth-chip:hover:not(:disabled),
+.report-depth-chip.open {
+  border-color: #9aa6b7;
+  background: #f7f9fc;
+}
+
+.report-depth-chip.open {
+  border-color: #1d4ed8;
+}
+
+.report-depth-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.report-depth-chip-label {
+  color: #6b7280;
+  font-weight: 650;
+}
+
+.report-depth-chip-value {
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.report-depth-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: 232px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e6ee;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+}
+
+.report-depth-popover-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
 
-.report-depth-caption {
+.report-depth-popover-title {
   color: #6b7280;
   font-size: 12px;
   font-weight: 700;
 }
 
-.report-depth-current {
+.report-depth-popover-current {
   color: #1d4ed8;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.report-depth-segments {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.report-depth-segment {
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  padding: 7px 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #f4f6fa;
+  color: #64748b;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.report-depth-segment:hover {
+  background: #eaeef6;
+  color: #374151;
+}
+
+.report-depth-segment.active {
+  border-color: #1d4ed8;
+  background: #eef2ff;
+  color: #1d4ed8;
   font-weight: 700;
 }
 
-.report-depth-slider {
-  width: 100%;
-  margin: 2px 0;
-  height: 4px;
+.report-depth-segment-dot {
+  width: 6px;
+  height: 6px;
   border-radius: 999px;
-  background: #e2e8f0;
-  outline: 0;
-  cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
+  background: #cbd5e1;
 }
 
-.report-depth-slider:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.report-depth-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
+.report-depth-segment.active .report-depth-segment-dot {
   background: #1d4ed8;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 3px rgba(29, 78, 216, 0.35);
-  cursor: pointer;
 }
 
-.report-depth-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  background: #1d4ed8;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 3px rgba(29, 78, 216, 0.35);
-  cursor: pointer;
+.report-depth-segment-label {
+  line-height: 1.2;
 }
 
-.report-depth-ends {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #94a3b8;
-  font-size: 11px;
+.report-depth-popover-hint {
+  margin: 0;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .report-list {
