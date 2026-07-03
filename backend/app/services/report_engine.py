@@ -1,5 +1,5 @@
 """深度报告引擎:大纲规划 → 每节完整 reasoning 深挖(节间并行) → 逐节撰写
-(证据三层 [k]/（推断）/【通识】) → 汇总(执行摘要/参考/知识缺口/分析计划)。
+(证据三层 [k]/（推断）/【通识】) → 汇总(执行摘要/参考文献/结尾局限)。
 
 设计对齐 docs/superpowers/specs/2026-07-03-deep-report-mode-design.md。
 形态镜像 ReasoningRetriever:持 (repo, settings, cancel_event),写库经 repo。
@@ -18,8 +18,6 @@ from typing import Dict, List, Optional
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 
-_GAP_PAIR_CAP = 40          # 跨节概念连通性检查的最大 pair 数(成本护栏)
-_TOP_CONCEPTS_PER_SECTION = 3
 _MARKER = re.compile(r"\[k(\d+)\]")   # 节内 [k_i] 引用标记(全局重编号用)
 
 # --- 取消注册表:report_id → threading.Event(活动后台 job 才在册) ---
@@ -120,11 +118,7 @@ class ReportEngine:
                 "markdown": str(data.get("markdown", "")).strip(),
                 "grounded": bool(data.get("grounded", False)),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
-                "attempted": list(getattr(result, "attempted", []) or []),
-                "top_concepts": [
-                    {"object_id": h.object_id,
-                     "name": str(h.payload.get("name", "")).strip() or h.object_id}
-                    for h in result.top_hits[:_TOP_CONCEPTS_PER_SECTION]]}
+                "attempted": list(getattr(result, "attempted", []) or [])}
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
@@ -180,7 +174,7 @@ class ReportEngine:
                 drafted = {"title": section["title"], "scope": section["scope"],
                            "markdown": "", "grounded": False, "failed": True,
                            "error": str(exc)[:300], "id_map": {},
-                           "attempted": [], "top_concepts": []}
+                           "attempted": []}
                 with lock:
                     status[i]["phase"] = "失败"
             persist(force=True)
@@ -215,7 +209,7 @@ class ReportEngine:
             self.repo.update_report(notebook_id, rid, status="failed",
                                     error=str(exc)[:500], progress="失败")
 
-    # --- Stage D:汇总——执行摘要 + 全局引用 + 知识缺口 + 分析计划 ---
+    # --- Stage D:汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
     def _assemble(self, notebook_id, rid, question, outline, sections):
         from app.services.prompts import report_summary_prompt
         # 执行摘要(容错:失败则空段,不拖垮报告)。
@@ -269,41 +263,16 @@ class ReportEngine:
 
             remapped[si] = _MARKER.sub(_sub, s.get("markdown") or "")
 
-        # --- 知识缺口(逻辑不变,concept 连通性仍用 top_concepts) ---
-        gaps: List[str] = []
-        # 缺口一:零命中/干涸子查询(each 节 attempted 里 new==0)。
-        for s in sections:
-            for a in s.get("attempted", []):
-                if a.get("new") == 0:
-                    gaps.append(f"「{s['title']}」节:子查询 “{a['query']}” 在库内未检得新证据")
-        # 缺口二:跨节高相关概念对在 KG 中无边(结构性缺口)。
-        pairs_checked = 0
-        concepts = [(s["title"], c) for s in sections for c in s.get("top_concepts", [])]
-        for i in range(len(concepts)):
-            for j in range(i + 1, len(concepts)):
-                if concepts[i][0] == concepts[j][0]:
-                    continue                     # 只查跨节
-                if pairs_checked >= _GAP_PAIR_CAP:
-                    break
-                pairs_checked += 1
-                a, b = concepts[i][1], concepts[j][1]
-                try:
-                    neigh = self.repo._retrieve_neighbors(notebook_id, a["object_id"],
-                                                          None, "both")
-                except Exception:
-                    continue
-                if not any(h.object_id == b["object_id"] for h in neigh):
-                    gaps.append(f"图谱缺口:「{a['name']}」与「{b['name']}」尚无关联边")
-        # 缺口三:整节无 [k] 支撑。
-        for s in sections:
-            if s.get("markdown") and not s.get("grounded"):
-                gaps.append(f"「{s['title']}」节无库内引用支撑(全部为推断/通识,建议补充语料)")
-        gaps = list(dict.fromkeys(gaps))[:30]
+        # --- 覆盖度信号(仅高信号:库内证据不足的章节;供未来「覆盖度」面板)。
+        # 报告体例要求:正文不堆砌诊断。故此处只留「哪些节缺库内支撑」这一条
+        # 可读性最高、开销为零的信号;结尾附一行「局限」。
+        # 已移除:①干涸子查询罗列(暴露英文子查询,内部机制)②跨节概念对连通性
+        # 检查(大库 _retrieve_neighbors 开销 + claim 文本被当概念名 → 大面积噪音)。
+        weak = [s["title"] for s in sections
+                if s.get("markdown") and not s.get("grounded")]
+        gaps = [f"「{t}」库内证据不足,内容偏推断/通识" for t in weak]
 
-        # --- 组装 content_md(用重编号后的节 markdown) ---
-        plan_lines = [
-            f"- {s['title']}: " + "; ".join(o.get("sub_queries", []))
-            for s, o in zip(sections, outline)]
+        # --- 组装 content_md:执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
         parts = [f"# 深度报告:{question}", ""]
         if summary:
             parts += ["## 执行摘要", "", summary, ""]
@@ -312,12 +281,12 @@ class ReportEngine:
                 parts += [f"## {s['title']}", "", f"（本节生成失败:{s.get('error','')}）", ""]
             elif remapped.get(si):
                 parts += [remapped[si], ""]
-        if gaps:
-            parts += ["## 知识缺口", ""] + [f"- {g}" for g in gaps] + [""]
         if references:
             parts += ["## 参考文献", ""] + [
                 f"- [{r['key']}] {r['label']}"
                 + (f" · {r['location_label']}" if r["location_label"] else "")
                 for r in references] + [""]
-        parts += ["## 分析计划", ""] + plan_lines
+        if weak:
+            parts += [f"> **局限**:{'、'.join(weak)} 库内证据有限,相关论述以推断/"
+                      "通识为主,建议补充对应语料后重新生成。", ""]
         return "\n".join(parts), gaps, references
