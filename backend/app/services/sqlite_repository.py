@@ -7418,13 +7418,22 @@ class SQLiteRepository:
             sink.append({"stage": stage, "model": model or "", "message": msg[:200]})
 
     def _embed_query(self, query: str) -> Optional[List[float]]:
+        """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
+        与语料侧 build_matrix 共用 truncate_vec 同一口径)。查询/语料两侧维度
+        不一致 = 静默零召回,是截断项目的头号风险 —— 勿在别处另行截断。"""
         if not self.settings.embedder_configured:
             return None
         try:
-            return self.embedder.embed_query(query[:2000])
+            vec = self.embedder.embed_query(query[:2000])
         except Exception as exc:
             self._note_model_error("embed", self.settings.embed_model, exc)
             return None
+        from app.services.vector_index import resolve_runtime_dim, truncate_vec
+        rd = resolve_runtime_dim(self.settings)
+        if rd and vec is not None and len(vec) > rd:
+            import numpy as np
+            vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
+        return vec
 
     def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
                          with_vectors: bool = True) -> List[dict]:

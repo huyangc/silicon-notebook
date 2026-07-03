@@ -129,3 +129,45 @@ def test_helper_equivalent_to_mrl_truncated_sims():
 
     eval_sims = truncated_sims(corpus, q, d)                # spike 工具口径
     assert np.allclose(prod_sims, eval_sims, atol=1e-5)
+
+
+# ── T2:查询侧截断 + 同空间端到端不变量 ──────────────────────────────────────
+
+@pytest.fixture
+def dual_dim_repo(tmp_path, monkeypatch):
+    """存储维 32 / 运行时维 16 的双维 repo(FakeEmbedder 按存储维出向量,
+    模拟端点原生输出)。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_RUNTIME_DIM", "16")
+    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
+                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "32"}.items():
+        monkeypatch.setenv(k, v)
+    from app.core.config import Settings, get_settings
+    get_settings.cache_clear()
+    from app.services.embedding import FakeEmbedder
+    from app.services.sqlite_repository import SQLiteRepository
+    r = SQLiteRepository(Settings())
+    r.embedder = FakeEmbedder(dim=32)
+    return r
+
+
+def test_embed_query_truncated_to_runtime_dim(dual_dim_repo):
+    vec = dual_dim_repo._embed_query("bandgap reference")
+    assert vec is not None and len(vec) == 16
+    assert np.linalg.norm(vec) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_query_and_corpus_same_space_end_to_end(dual_dim_repo):
+    """全计划核心回归:_embed_query 输出维 == build_matrix 输出列数
+    (查询/语料同空间;不满足 = query_sims 静默返 {} = 零召回)。"""
+    from app.services.vector_index import build_matrix, encode_vector, query_sims
+    emb = dual_dim_repo.embedder
+    texts = ["bandgap reference", "cascode amplifier", "PLL jitter"]
+    rows = [(f"c{i}", encode_vector(emb.embed_query(t))) for i, t in enumerate(texts)]
+    ids, mat = build_matrix(rows)                      # settings 路径 → 截断到 16
+    q = dual_dim_repo._embed_query(texts[0])
+    assert len(q) == mat.shape[1] == 16
+    sims = query_sims(q, ids, mat)
+    assert sims and sims["c0"] == pytest.approx(1.0, abs=1e-4)   # 自身命中,非零召回
