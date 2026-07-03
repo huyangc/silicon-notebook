@@ -21,7 +21,7 @@
 - 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`base` 是权威参考 KG（如模拟设计教材），`personal` 是用户自己的笔记。`federated_retrieve` 跨 `base ∪ 当前 personal` 收集候选、给每条命中打 tier 标签，排序时施加 base 权威权重；当 base 与 personal 冲突时答案以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。notebook 操作菜单（「分析」）提供「设为基准库 / 取消基准库」以把某 notebook 标为基准 KG 并撤销（经 `POST /api/notebooks/{id}/tier`）
 - **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有，用户只能看到自己的 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，默认 `admin`）；admin 持有原有 notebook 并是唯一可将 notebook 标为基准库的用户。基准库 notebook 对普通用户的列表隐藏，但问答时仍作为权威检索上下文使用。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
 - 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
-- 深度报告（后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。LLM 先规划大纲，每节独立跑一次完整 `reasoning` 深挖（节间并行，各自独立检索预算），按三层证据纪律撰写（`[k]` 库内引用 /（推断）库内推断 /【通识】库外通识，行内标注且提示未经验证），最后汇总加执行摘要、参考文献、自动检出的**知识缺口**段（干涸子查询 + 跨节无关联的概念对 + 无引用支撑的节）与分析计划。「更快 ↔ 更聪明」滑块（`depth`，每节 reflect 步预算，默认 2）用深度换时延；章节按 `KG_JOB_CONCURRENCY` 并行深挖，前端显示逐节实时进度（`section_status`）。以可取消的后台 job 运行并显示进度；结果落库、可导出 `.md`
+- 深度报告（后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。LLM 先规划大纲，每节独立跑一次完整 `reasoning` 深挖（节间并行，各自独立检索预算），按三层证据纪律撰写（`[k]` 库内引用 /（推断）库内推断 /【通识】库外通识，行内标注且提示未经验证），最后汇总加执行摘要、参考文献，以及（仅当某节缺库内支撑时）结尾一行「局限」说明。研究深度控件为五个命名档「概览/标准/深入/详尽/穷尽」（默认「标准」，= 每节 reflect 步预算，在生成按钮旁弹出选择）用充分程度换时延；章节按 `KG_JOB_CONCURRENCY` 并行深挖，前端显示逐节实时进度（`section_status`）。以可取消的后台 job 运行；每份报告可下 `.md`，或多选批量下 `reports.zip`
 - 边可信与治理：每条边的可信信号（evidence / 同源佐证 / 类型合法性）+ 高风险边优先的审核队列；被审核拒绝的边从图推理中排除
 - 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除。个人→基准节点晋升（propose → under_review → approve/reject），批准时去重入库，配套策展晋升队列
 - 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
@@ -244,7 +244,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 权威参考 KG，personal = 默认用户笔记）。
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
-- 深度报告：`POST /api/notebooks/{id}/reports` body `{question, depth?}`（`depth` 1–16，默认 2 = 每节 reflect 步预算，即「更快 ↔ 更聪明」滑块）→ `{report_id}`（启动后台 job；推理 LLM 未配置返回 409）、`GET /api/notebooks/{id}/reports`（列表）、`GET /api/notebooks/{id}/reports/{rid}`（轮询状态 + `content_md` + 实时 `section_status`）、`POST .../reports/{rid}/cancel`、`DELETE .../reports/{rid}`。章节按 `KG_JOB_CONCURRENCY` 并行深挖。
+- 深度报告：`POST /api/notebooks/{id}/reports` body `{question, depth?}`（`depth` 1–16，默认 2 = 每节 reflect 步预算，前端呈现为五个命名档 概览/标准/深入/详尽/穷尽）→ `{report_id}`（启动后台 job；推理 LLM 未配置返回 409）、`GET /api/notebooks/{id}/reports`（列表）、`GET /api/notebooks/{id}/reports/{rid}`（轮询状态 + `content_md` + 实时 `section_status`）、`POST .../reports/{rid}/cancel`、`DELETE .../reports/{rid}`、`POST .../reports/export` body `{report_ids}` → 所选已完成报告的 `reports.zip`。章节按 `KG_JOB_CONCURRENCY` 并行深挖。
 
 ## 配置
 
