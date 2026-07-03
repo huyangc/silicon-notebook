@@ -115,17 +115,32 @@ def _ro(db_path: str) -> sqlite3.Connection:
 
 
 def _iter_vec_blocks(conn, table: str, id_col: str, notebook_id: str,
-                     stored_dim: int, block_rows: int):
+                     stored_dim: int, block_rows: int,
+                     id_subset: "Optional[List[str]]" = None):
     """流式产出 (ids, matrix[float32, 未归一]) 块;坏行/维度不符行计数返回。
-    生成器最后一次 yield 后,skipped 数由调用方经列表捕获(这里用可变 dict)。"""
-    cur = conn.execute(
-        f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
-        (notebook_id,))
+    id_subset 非空 → 只按这批 id 取(大库抽样评测),分批 IN 免撞 SQLite
+    变量上限;否则全表游标扫。"""
+    def _row_batches():
+        if id_subset is None:
+            cur = conn.execute(
+                f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
+                (notebook_id,))
+            while True:
+                rows = cur.fetchmany(block_rows)
+                if not rows:
+                    return
+                yield rows
+        else:
+            for lo in range(0, len(id_subset), min(block_rows, 800)):
+                batch = id_subset[lo:lo + min(block_rows, 800)]
+                ph = ",".join("?" for _ in batch)
+                yield conn.execute(
+                    f"SELECT {id_col} AS vid, vector FROM {table} "
+                    f"WHERE notebook_id = ? AND {id_col} IN ({ph})",
+                    (notebook_id, *batch)).fetchall()
+
     skipped = 0
-    while True:
-        rows = cur.fetchmany(block_rows)
-        if not rows:
-            break
+    for rows in _row_batches():
         ids, vecs = [], []
         for r in rows:
             try:
@@ -188,26 +203,38 @@ def biggest_notebook(db_path: str) -> Optional[str]:
 
 def run_overlap_eval(db_path: str, notebook_id: str, table_key: str,
                      dims: Sequence[int], n_queries: int = 200, k: int = 50,
-                     block_rows: int = 20_000, seed: int = 42) -> dict:
+                     block_rows: int = 20_000, seed: int = 42,
+                     sample_rows: int = 0, progress: bool = False) -> dict:
     """邻居保持率评测:采样 n_queries 条向量当查询,流式对比原维 vs 各截断维的
-    top-K 排名重合率。返回 {rows, used, skipped, stored_dim, dims:{dim:metrics}}。"""
+    top-K 排名重合率。sample_rows>0 → 语料侧也只抽这么多行(大库提速;查询与
+    排名都在同一子集上算,原维 vs 截断维的相对对比依然成立,子集稀疏会让
+    邻居间距变大、重合率读数略偏乐观——判边界值时建议全量复核)。
+    返回 {rows, sampled, used, skipped, stored_dim, dims:{dim:metrics}}。"""
     table, id_col = TABLES[table_key]
     with _ro(db_path) as conn:
         total = conn.execute(
             f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
             (notebook_id,)).fetchone()["c"]
         if total == 0:
-            return {"rows": 0, "used": 0, "skipped": 0, "stored_dim": None, "dims": {}}
+            return {"rows": 0, "sampled": 0, "used": 0, "skipped": 0,
+                    "stored_dim": None, "dims": {}}
         stored_dim = _detect_dim(conn, table, id_col, notebook_id)
         if stored_dim is None:
-            return {"rows": total, "used": 0, "skipped": total, "stored_dim": None, "dims": {}}
+            return {"rows": total, "sampled": 0, "used": 0, "skipped": total,
+                    "stored_dim": None, "dims": {}}
         dims = [d for d in dims if d < stored_dim]
 
-        # 采样查询向量:先取全部 id(轻),种子随机挑,再按 id 取向量
+        # 先取全部 id(轻);语料抽样与查询抽样都从同一子集出
         all_ids = [r["vid"] for r in conn.execute(
             f"SELECT {id_col} AS vid FROM {table} WHERE notebook_id=?", (notebook_id,))]
         rng = np.random.default_rng(seed)
-        q_ids = list(rng.choice(all_ids, size=min(n_queries, len(all_ids)), replace=False))
+        id_subset = None
+        corpus_ids = all_ids
+        if sample_rows and sample_rows < len(all_ids):
+            corpus_ids = list(rng.choice(all_ids, size=sample_rows, replace=False))
+            id_subset = corpus_ids
+        q_ids = list(rng.choice(corpus_ids, size=min(n_queries, len(corpus_ids)),
+                                replace=False))
         q_vecs = []
         kept_q_ids = []
         for lo in range(0, len(q_ids), 500):
@@ -224,20 +251,25 @@ def run_overlap_eval(db_path: str, notebook_id: str, table_key: str,
                     kept_q_ids.append(r["vid"])
                     q_vecs.append(v)
         if not q_vecs:
-            return {"rows": total, "used": 0, "skipped": total, "stored_dim": stored_dim, "dims": {}}
+            return {"rows": total, "sampled": len(corpus_ids), "used": 0,
+                    "skipped": total, "stored_dim": stored_dim, "dims": {}}
         Q = np.vstack(q_vecs)
 
         # 流式累积:每个 (维度档∪基线) × 每个查询一个 TopK
         eval_dims = [stored_dim] + list(dims)
         acc = {d: [_TopK(k) for _ in kept_q_ids] for d in eval_dims}
         used = skipped = 0
+        target = len(corpus_ids)
         q_pos = {qid: qi for qi, qid in enumerate(kept_q_ids)}
         for ids, block, skip in _iter_vec_blocks(conn, table, id_col, notebook_id,
-                                                 stored_dim, block_rows):
+                                                 stored_dim, block_rows,
+                                                 id_subset=id_subset):
             skipped += skip
             if not ids:
                 continue
             used += len(ids)
+            if progress and used % 100_000 < len(ids):
+                print(f"    … {used}/{target} 行", flush=True)
             # 本块里出现的查询自身位置(排除自检索)
             self_hits = [(row, q_pos[vid]) for row, vid in enumerate(ids) if vid in q_pos]
             for d in eval_dims:
@@ -260,8 +292,8 @@ def run_overlap_eval(db_path: str, notebook_id: str, table_key: str,
             f"mean_overlap@{k}": float(np.mean(oK)),
             "n_queries": len(kept_q_ids),
         }
-    return {"rows": total, "used": used, "skipped": skipped,
-            "stored_dim": stored_dim, "dims": metrics}
+    return {"rows": total, "sampled": len(corpus_ids), "used": used,
+            "skipped": skipped, "stored_dim": stored_dim, "dims": metrics}
 
 
 # ── gold 模式 ────────────────────────────────────────────────────────────────
@@ -335,6 +367,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="overlap 模式评测哪些表(逗号分隔;行数统计恒覆盖全部四张)")
     ap.add_argument("--dims", default=",".join(str(d) for d in DEFAULT_DIMS))
     ap.add_argument("--queries", type=int, default=200, help="overlap 模式采样查询数")
+    ap.add_argument("--sample-rows", type=int, default=0,
+                    help="overlap 模式语料抽样行数(0=全量;大库如百万级 relation 建议 5万起,"
+                         "子集稀疏会让重合率略偏乐观,边界值请全量复核)")
     ap.add_argument("--k", type=int, default=50, help="overlap 模式 top-K")
     ap.add_argument("--gold", default="", help="recall_gold.yaml 路径 → 追加 gold 模式(需 embed 端点)")
     ap.add_argument("--block-rows", type=int, default=20_000)
@@ -361,13 +396,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         if key not in TABLES:
             print(f"  (未知表 {key},跳过)")
             continue
-        print(f"\n[overlap 模式:{key}](采样 {args.queries} 查询,top-{args.k})")
+        sr = f",语料抽样 {args.sample_rows}" if args.sample_rows else ""
+        print(f"\n[overlap 模式:{key}](采样 {args.queries} 查询,top-{args.k}{sr})")
         out = run_overlap_eval(db, nb, key, dims, n_queries=args.queries,
-                               k=args.k, block_rows=args.block_rows, seed=args.seed)
+                               k=args.k, block_rows=args.block_rows, seed=args.seed,
+                               sample_rows=args.sample_rows, progress=True)
         if not out["dims"]:
             print(f"  行 {out['rows']},可用 {out.get('used', 0)} —— 跳过(空表/无可解码向量/维度都不小于存储维)")
             continue
-        print(f"  行 {out['rows']},进评测 {out['used']},跳过 {out['skipped']},存储维 {out['stored_dim']}")
+        samp = f"(抽样 {out['sampled']})" if out["sampled"] < out["rows"] else ""
+        print(f"  行 {out['rows']}{samp},进评测 {out['used']},跳过 {out['skipped']},存储维 {out['stored_dim']}")
         for d, m in sorted(out["dims"].items(), reverse=True):
             print(f"  截断 {d:>5}: overlap@10 mean={m['mean_overlap@10']:.3f} "
                   f"min={m['min_overlap@10']:.3f}  overlap@{args.k} mean={m[f'mean_overlap@{args.k}']:.3f}")

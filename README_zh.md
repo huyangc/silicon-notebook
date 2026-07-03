@@ -503,6 +503,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-no
 # 从表内采样向量当查询,对比原维 vs 截断维的 top-K 排名重合率
 ( cd backend && python -m app.eval.mrl_truncation )                          # 自动挑最大的 notebook
 ( cd backend && python -m app.eval.mrl_truncation --notebook nb-xxxx --tables knowledge,chunk,relation --dims 2048,1024 )
+# 超大表(如百万级 relation):语料侧也抽样——排名在同一子集内对比,
+# 原维 vs 截断维的相对结论依然成立(稀疏子集读数略偏乐观;边界值请全量复核)
+( cd backend && python -m app.eval.mrl_truncation --tables relation --sample-rows 50000 )
 
 # gold 模式(需配置 EMBED 端点;每题按原生维 embed 一次):
 # 对提交在仓库里的 gold 集算各截断档的 recall@12 / MRR 相对衰减
