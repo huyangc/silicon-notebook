@@ -613,8 +613,8 @@ const rebuildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`
 const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
 
 // 深度报告(后台 job):类型见 report-view.tsx(与后端 ReportSummary/ReportDetail 对齐)。
-const createReport = (nb: string, question: string) =>
-  api<{ report_id: string }>(`/notebooks/${nb}/reports`, { method: "POST", body: JSON.stringify({ question }) });
+const createReport = (nb: string, question: string, depth: number) =>
+  api<{ report_id: string }>(`/notebooks/${nb}/reports`, { method: "POST", body: JSON.stringify({ question, depth }) });
 const listReports = (nb: string) => api<ReportSummaryT[]>(`/notebooks/${nb}/reports`);
 const getReport = (nb: string, rid: string) => api<ReportDetailT>(`/notebooks/${nb}/reports/${rid}`);
 const cancelReport = (nb: string, rid: string) =>
