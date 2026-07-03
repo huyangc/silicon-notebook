@@ -131,3 +131,52 @@ def test_concurrent_cold_stale_single_flight(repo, monkeypatch):
     for t in threads: t.join()
     assert calls["n"] == 1                          # 单飞:只加载一次
     assert all(r is results[0] for r in results)    # 都拿到同一实例
+
+
+def test_combined_graph_cache_hits_under_ingestion(repo, monkeypatch):
+    """flag 关:摄取(kg_mutation_seq 变)期间组合图缓存命中,不每查询 _load 重建。"""
+    nb = _indexed_nb_with_delta(repo)
+    base_indexes = [(nb.id, repo._scale_index(nb.id, allow_stale=True))]
+    loads = {"n": 0}
+    orig = repo._vector_cache.get
+
+    def counting_get(key, version, loader):
+        # 只计数 scale_combined 的加载,忽略 entchunk/elemchunk 等其他 cache 键
+        if key.endswith(":scale_combined"):
+            def wrapped():
+                loads["n"] += 1
+                return loader()
+        else:
+            wrapped = loader
+        return orig(key, version, wrapped)
+    monkeypatch.setattr(repo._vector_cache, "get", counting_get)
+
+    repo._scale_combined_graph(nb.id, base_indexes)
+    _insert_source_chunk(repo, nb.id, "sC", "cC", "carol", 3)  # bump kg_mutation_seq
+    repo._scale_combined_graph(nb.id, base_indexes)
+    assert loads["n"] == 1     # flag 关:active churn 不进 key → 第二次命中缓存
+
+
+def test_combined_graph_rebuilds_when_flag_on_and_delta_changes(repo, monkeypatch):
+    """flag 开:delta 变仍触发组合图重建(active_ver 保留在 key 里)。"""
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
+    nb = _indexed_nb_with_delta(repo)
+    base_indexes = [(nb.id, repo._scale_index(nb.id, allow_stale=True))]
+    loads = {"n": 0}
+    orig = repo._vector_cache.get
+
+    def counting_get(key, version, loader):
+        # 只计数 scale_combined 的加载,忽略 entchunk/elemchunk 等其他 cache 键
+        if key.endswith(":scale_combined"):
+            def wrapped():
+                loads["n"] += 1
+                return loader()
+        else:
+            wrapped = loader
+        return orig(key, version, wrapped)
+    monkeypatch.setattr(repo._vector_cache, "get", counting_get)
+
+    repo._scale_combined_graph(nb.id, base_indexes)
+    _insert_source_chunk(repo, nb.id, "sC", "cC", "carol", 3)
+    repo._scale_combined_graph(nb.id, base_indexes)
+    assert loads["n"] == 2     # flag 开:delta 变 → 版本键变 → 重建
