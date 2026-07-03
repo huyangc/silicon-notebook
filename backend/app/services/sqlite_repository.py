@@ -7991,6 +7991,18 @@ class SQLiteRepository:
             self._scale_ver_cache[notebook_id] = (seq, clu_key, settings_tail, list(version))
             return version
 
+    def _read_manifest_version(self, out_dir: str):
+        """廉价读 out_dir/manifest.json 的 version 字段(几 KB,sub-ms)。用于
+        allow_stale 检索路径校验「进程缓存里的 stale 实例是否仍是当前磁盘索引」——
+        磁盘索引只在 rebuild/fold 时换(新 version),与 kg_mutation_seq 无关。
+        文件缺失/损坏/无 version → None(fail-soft,调用方回退到重新 load)。"""
+        mpath = os.path.join(out_dir, "manifest.json")
+        try:
+            with open(mpath) as fh:
+                return json.load(fh).get("version")
+        except (OSError, ValueError):
+            return None
+
     def _scale_index(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex (manifest version == current DB version) or None.
         Process-cached: returns the cached instance when the version still matches.
