@@ -176,10 +176,13 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 6: Stage D 汇总——执行摘要 + 参考 + 知识缺口 + 分析计划
+# Task 6: Stage D 汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限
+# 报告体例:不堆砌「知识缺口」诊断、不外显「分析计划」子查询;仅结尾一行局限。
 # ---------------------------------------------------------------------------
 
-def test_assemble_builds_full_report_with_gaps(repo, monkeypatch):
+def test_assemble_builds_report_body_only(repo):
+    """content_md = 执行摘要 + 章节 + 参考文献 + 结尾局限行;无知识缺口/分析计划段,
+    无概念对连通性罗列。gaps 仅精简保留「库内证据不足的章节」信号(供未来覆盖度面板)。"""
     nb = _mk_nb(repo)
     eng = _mk_engine(repo, _OutlineLLM())
     outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]},
@@ -189,25 +192,41 @@ def test_assemble_builds_full_report_with_gaps(repo, monkeypatch):
          "id_map": {"k1": {"object_id": "c1", "object_type": "chunk", "name": "BGR",
                            "source_title": "Razavi", "location_label": "§11",
                            "tier": "base"}},
-         "attempted": [
-             {"query": "qa", "new": 3, "tries": 1},
-             {"query": "qa-dry", "new": 0, "tries": 2}],
-         "top_concepts": [{"object_id": "ko-1", "name": "Bandgap"}]},
+         "attempted": [{"query": "qa-dry", "new": 0, "tries": 2}]},
         {"title": "B", "scope": "sb", "markdown": "## B\n【通识】x", "grounded": False,
-         "id_map": {}, "attempted": [],
-         "top_concepts": [{"object_id": "ko-2", "name": "Packaging Stress"}]},
+         "id_map": {}, "attempted": []},
     ]
-    monkeypatch.setattr(eng.repo, "_retrieve_neighbors", lambda *a, **k: [])  # 两概念无边
     rid = repo.create_report(nb.id, "q")
     md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    # 报告主体
     assert "## 执行摘要" in md and "总结" in md
     assert "## A" in md and "## B" in md
-    assert "## 知识缺口" in md and "qa-dry" in md            # 零命中子查询
-    assert "Bandgap" in md and "Packaging Stress" in md      # 无边概念对
     assert "## 参考文献" in md and "Razavi" in md
     assert references[0]["label"] == "Razavi"
-    assert "## 分析计划" in md and "qa" in md
-    assert any("qa-dry" in g for g in gaps)
+    # 移除项:无诊断堆砌 / 无内部机制外显
+    assert "## 知识缺口" not in md and "## 分析计划" not in md
+    assert "qa-dry" not in md and "qa" not in md.split("## 参考文献")[0]  # 子查询不外显
+    assert "尚无关联边" not in md                                        # 概念对连通性已删
+    # 结尾一行局限:点名库内证据不足的章节(B,grounded=False)
+    assert "局限" in md and "B" in md.split("局限")[1][:40]
+    # gaps 字段精简:仅弱证据章节(供覆盖度面板),不含概念对/原始子查询
+    assert gaps == ["「B」库内证据不足,内容偏推断/通识"]
+
+
+def test_assemble_all_grounded_has_no_limitation_note(repo):
+    """全部章节有库内支撑时,报告无「局限」行、gaps 为空。"""
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    sections = [{"title": "A", "scope": "sa", "markdown": "## A\nbody [k1]",
+                 "grounded": True,
+                 "id_map": {"k1": {"object_id": "c1", "object_type": "chunk",
+                                   "name": "X", "source_title": "Src",
+                                   "location_label": "", "tier": "base"}},
+                 "attempted": []}]
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    assert "局限" not in md and gaps == []
 
 
 def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
