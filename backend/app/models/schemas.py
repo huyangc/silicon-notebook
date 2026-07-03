@@ -300,6 +300,10 @@ class AskResponse(BaseModel):
     reasoning_trace: Optional[List["TraceStep"]] = None
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False
+    # 大库(not copyable)且完全无 scale 索引(从未建过)时 True:检索能力受限,
+    # 驱动前端渲染「构建索引」提示。「建过但有 delta」不置此位(既有「N 源待索引」
+    # 徽章覆盖那种最终一致态)。
+    index_required: bool = False
     model_errors: List[ModelError] = Field(default_factory=list)
 
 
