@@ -180,3 +180,23 @@ def test_combined_graph_rebuilds_when_flag_on_and_delta_changes(repo, monkeypatc
     _insert_source_chunk(repo, nb.id, "sC", "cC", "carol", 3)
     repo._scale_combined_graph(nb.id, base_indexes)
     assert loads["n"] == 2     # flag 开:delta 变 → 版本键变 → 重建
+
+
+def test_active_kg_delta_skips_count_when_gated(repo, monkeypatch):
+    """indexed + flag 关:_active_kg_delta 返 ([],[],[]) 且不调 _index_delta 的完整 COUNT。"""
+    nb = _indexed_nb_with_delta(repo)
+    calls = {"index_delta": 0}
+    real = repo._index_delta
+    monkeypatch.setattr(repo, "_index_delta",
+                        lambda n: (calls.__setitem__("index_delta", calls["index_delta"] + 1), real(n))[1])
+    out = repo._active_kg_delta(nb.id)
+    assert out == ([], [], [])
+    assert calls["index_delta"] == 0   # 门控早退:不触碰 _index_delta
+
+
+def test_active_kg_delta_gathers_when_flag_on(repo, monkeypatch):
+    """flag 开:仍 gather delta(不早退),保持既有行为。"""
+    monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
+    nb = _indexed_nb_with_delta(repo)
+    node_ids, edges, chunk_ids = repo._active_kg_delta(nb.id)
+    assert "cB" in chunk_ids            # delta chunk 被 gather

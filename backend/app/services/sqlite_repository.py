@@ -9355,13 +9355,18 @@ class SQLiteRepository:
         double-count. Otherwise the whole notebook is gathered (unchanged).
         Returns (active_node_ids, active_edges, active_chunk_ids).
         """
-        delta = self._index_delta(notebook_id)
-        if delta["indexed"] and not self.settings.scale_search_include_delta:
+        # 廉价门控早退:indexed(磁盘有 manifest)且 flag 关时,图基底只含已索引部分,
+        # 直接返空——省掉 _index_delta 对 delta_sources 的分批 COUNT(生产 48,739 源、
+        # 55 批,结果本会被丢弃)。gate 结果与「先 _index_delta 再判 indexed」一致:
+        # _index_delta 的 indexed 恰是 manifest 是否存在。
+        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
+        if (os.path.exists(os.path.join(out_dir, "manifest.json"))
+                and not self.settings.scale_search_include_delta):
             # 同一原则第四处:已索引库的图基底只含已索引部分(核心 CSR 本身),水位后
             # delta 由 auto-fold 收进索引后自然可达。未索引的 active 小库(下方
-            # src=None 整库 gather)是 two-tier 联邦的 active 层,不是 delta,
-            # 不受此门控。
+            # src=None 整库 gather)是 two-tier 联邦的 active 层,不是 delta,不受门控。
             return [], [], []
+        delta = self._index_delta(notebook_id)
         src = delta["delta_sources"] if delta["indexed"] else None
         node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
             self._gather_kg_graph(notebook_id, source_ids=src)
