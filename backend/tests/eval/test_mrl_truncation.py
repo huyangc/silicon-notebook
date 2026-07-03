@@ -125,6 +125,39 @@ def test_overlap_eval_empty_table(tmp_path):
     assert out["rows"] == 0 and out["dims"] == {}
 
 
+def test_overlap_eval_sample_rows_bounds_corpus(tmp_path):
+    """--sample-rows:大库只抽子集做语料;无损前缀性质在子集上同样成立,
+    结果确定(同 seed 同子集)。"""
+    rng = np.random.default_rng(21)
+    rows = []
+    for i in range(200):
+        v = np.zeros(32, dtype=np.float32)
+        v[:16] = rng.normal(size=16)
+        rows.append((f"c{i}", "nb-1", encode_vector(v)))
+    db = _mk_db(tmp_path, rows)
+
+    out = run_overlap_eval(db, "nb-1", "chunk", dims=[16], n_queries=8,
+                           k=5, block_rows=17, seed=7, sample_rows=50)
+    assert out["rows"] == 200          # 全库行数照实报
+    assert out["sampled"] == 50        # 语料只抽 50
+    assert out["used"] == 50
+    assert out["dims"][16]["mean_overlap@10"] == pytest.approx(1.0)
+
+    out2 = run_overlap_eval(db, "nb-1", "chunk", dims=[16], n_queries=8,
+                            k=5, block_rows=17, seed=7, sample_rows=50)
+    assert out2["dims"] == out["dims"]  # 同 seed 可复现
+
+
+def test_overlap_eval_sample_rows_ge_total_is_full(tmp_path):
+    rng = np.random.default_rng(2)
+    rows = [(f"c{i}", "nb-1", encode_vector(rng.normal(size=32).astype(np.float32)))
+            for i in range(20)]
+    db = _mk_db(tmp_path, rows)
+    out = run_overlap_eval(db, "nb-1", "chunk", dims=[16], n_queries=5,
+                           k=5, block_rows=7, seed=1, sample_rows=500)
+    assert out["sampled"] == 20 and out["used"] == 20
+
+
 # ── e2e:gold 模式(注入 FakeEmbedder,零 API)────────────────────────────────
 
 def test_gold_eval_full_dim_perfect_when_vectors_match(tmp_path):

@@ -542,6 +542,10 @@ The `backfill-source-index` subcommand proactively populates `knowledge_object_s
 # samples stored vectors as queries and compares full-dim vs truncated top-K rankings
 ( cd backend && python -m app.eval.mrl_truncation )                          # auto-picks the biggest notebook
 ( cd backend && python -m app.eval.mrl_truncation --notebook nb-xxxx --tables knowledge,chunk,relation --dims 2048,1024 )
+# very large tables (e.g. millions of relation rows): subsample the corpus side too —
+# rankings are compared within the same subsample, so the full-vs-truncated relative
+# comparison stays valid (slightly optimistic on sparse subsets; re-run full for borderline calls)
+( cd backend && python -m app.eval.mrl_truncation --tables relation --sample-rows 50000 )
 
 # gold mode (needs a configured EMBED endpoint; embeds each question once at native dim):
 # recall@12 / MRR relative degradation per truncation tier against the committed gold set
