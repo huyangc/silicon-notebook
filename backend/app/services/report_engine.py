@@ -1,0 +1,158 @@
+"""深度报告引擎:大纲规划 → 每节完整 reasoning 深挖(节间并行) → 逐节撰写
+(证据三层 [k]/（推断）/【通识】) → 汇总(执行摘要/参考/知识缺口/分析计划)。
+
+设计对齐 docs/superpowers/specs/2026-07-03-deep-report-mode-design.md。
+形态镜像 ReasoningRetriever:持 (repo, settings, cancel_event),写库经 repo。
+线程要点:节间 ThreadPoolExecutor 并行,worker 不继承 ContextVar——每个 submit
+用 contextvars.copy_context().run 包裹,保住 per-user 模型解析。
+"""
+from __future__ import annotations
+import contextvars
+import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
+
+from app.core.llm import cap_kwargs
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+
+_GAP_PAIR_CAP = 40          # 跨节概念连通性检查的最大 pair 数(成本护栏)
+_TOP_CONCEPTS_PER_SECTION = 3
+
+
+class ReportEngine:
+    def __init__(self, repo, settings, cancel_event: CancelEvent = None):
+        self.repo = repo
+        self.settings = settings
+        self.cancel_event = cancel_event
+
+    # --- Stage A ---
+    def _plan_outline(self, notebook_id: str, question: str, history: str) -> List[dict]:
+        from app.services.prompts import report_outline_prompt, REPORT_OUTLINE_SCHEMA_HINT
+        client = self.repo.reasoning_llm_client
+        try:
+            raw = client.chat_json(
+                [{"role": "user", "content": report_outline_prompt(
+                    question, max_sections=self.settings.report_max_sections,
+                    history_block=history)}],
+                REPORT_OUTLINE_SCHEMA_HINT, cancel_event=self.cancel_event)
+            data = json.loads(raw)
+            sections = []
+            for s in (data.get("sections") or [])[: self.settings.report_max_sections]:
+                title = str(s.get("title", "")).strip()
+                subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
+                if title and subs:
+                    sections.append({"title": title,
+                                     "scope": str(s.get("scope", "")).strip(),
+                                     "sub_queries": subs[:4]})
+            if sections:
+                return sections
+        except AskCancelled:
+            raise
+        except Exception:
+            pass
+        # 回退骨架:expand_query 的子查询平铺为单节(保证总能出报告)。
+        from app.services.query_rewrite import expand_query
+        ex = expand_query(self.repo.rewrite_llm_client, question, history)
+        return [{"title": "分析", "scope": question,
+                 "sub_queries": [s.query for s in ex.sub_queries][:4] or [question]}]
+
+    # --- Stage B(单节):完整 reasoning 深挖 ---
+    def _deep_dive(self, notebook_id: str, section: dict, question: str):
+        from app.services.reasoning_retrieval import ReasoningRetriever
+        sec_question = (f"{question}\n[报告章节] {section['title']}: {section['scope']}\n"
+                        f"[本节检索方向] " + "; ".join(section["sub_queries"]))
+        return ReasoningRetriever(self.repo, self.settings, self.cancel_event).run(
+            notebook_id, sec_question, top_n=self.settings.report_section_top_n)
+
+    # --- Stage C(单节):撰写 ---
+    def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
+        from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
+        chunk_block, chunk_map = self.repo._chunk_answer_context(
+            result.chunks, budget_chars=self.settings.report_section_chunk_budget)
+        kg_block, kg_map = self.repo._answer_context(
+            notebook_id, result.top_hits, id_offset=len(chunk_map))
+        # 现场事实:_chunk_answer_context/_answer_context 空输入返回 "(none)" 哨兵
+        # (非空串),先归一再拼接,避免把哨兵当真实证据块。
+        chunk_block = "" if chunk_block == "(none)" else chunk_block
+        kg_block = "" if kg_block == "(none)" else kg_block
+        context_block = (f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
+                         if chunk_block else kg_block) or "(no evidence retrieved)"
+        client = self.repo.reasoning_llm_client
+        raw = client.chat_json(
+            [{"role": "user", "content": report_section_prompt(
+                section["title"], section["scope"], question, context_block,
+                allow_parametric=self.settings.report_allow_parametric)}],
+            REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
+            **cap_kwargs(client, "report_section_max_tokens"))
+        data = json.loads(raw)
+        id_map = {**chunk_map, **kg_map}
+        return {"title": section["title"], "scope": section["scope"],
+                "markdown": str(data.get("markdown", "")).strip(),
+                "grounded": bool(data.get("grounded", False)),
+                "id_map_sources": self._sources_of(id_map),
+                "attempted": list(getattr(result, "attempted", []) or []),
+                "top_concepts": [
+                    {"object_id": h.object_id,
+                     "name": str(h.payload.get("name", "")).strip() or h.object_id}
+                    for h in result.top_hits[:_TOP_CONCEPTS_PER_SECTION]]}
+
+    @staticmethod
+    def _sources_of(id_map: dict) -> List[str]:
+        seen, out = set(), []
+        for ctx in id_map.values():
+            title = str(ctx.get("source_title", "") or ctx.get("name", "")).strip()
+            if title and title not in seen:
+                seen.add(title)
+                out.append(title)
+        return out
+
+    # --- Stage B+C 并行编排 ---
+    def _run_sections(self, notebook_id: str, rid: str, outline: List[dict],
+                      question: str) -> List[dict]:
+        done_count = {"n": 0}
+
+        def _one(section: dict) -> dict:
+            raise_if_cancelled(self.cancel_event)
+            try:
+                result = self._deep_dive(notebook_id, section, question)
+                drafted = self._draft_section(notebook_id, section, question, result)
+            except AskCancelled:
+                raise
+            except Exception as exc:
+                drafted = {"title": section["title"], "scope": section["scope"],
+                           "markdown": "", "grounded": False, "failed": True,
+                           "error": str(exc)[:300], "id_map_sources": [],
+                           "attempted": [], "top_concepts": []}
+            done_count["n"] += 1
+            self.repo.update_report(notebook_id, rid,
+                                    progress=f"章节深挖 {done_count['n']}/{len(outline)}")
+            return drafted
+
+        workers = max(1, int(self.settings.report_section_concurrency))
+        with ThreadPoolExecutor(max_workers=min(workers, len(outline))) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, _one, s)
+                       for s in outline]
+            return [f.result() for f in futures]     # 保大纲序
+
+    # --- 入口 ---
+    def run(self, notebook_id: str, rid: str, question: str, history: str = "") -> None:
+        try:
+            self.repo.update_report(notebook_id, rid, status="running", progress="大纲规划中")
+            outline = self._plan_outline(notebook_id, question, history)
+            self.repo.update_report(notebook_id, rid, outline=outline,
+                                    progress=f"大纲就绪({len(outline)} 节),章节深挖 0/{len(outline)}")
+            sections = self._run_sections(notebook_id, rid, outline, question)
+            self.repo.update_report(notebook_id, rid, sections=sections, progress="汇总中")
+            content_md, gaps = self._assemble(notebook_id, rid, question, outline, sections)
+            self.repo.update_report(notebook_id, rid, content_md=content_md, gaps=gaps,
+                                    status="done", progress="完成")
+        except AskCancelled:
+            self.repo.update_report(notebook_id, rid, status="cancelled", progress="已取消")
+        except Exception as exc:
+            self.repo.update_report(notebook_id, rid, status="failed",
+                                    error=str(exc)[:500], progress="失败")
+
+    # --- Stage D(Task 6 实现;本任务先放最小占位,Task 6 内替换) ---
+    def _assemble(self, notebook_id, rid, question, outline, sections):
+        body = "\n\n".join(s["markdown"] for s in sections if s.get("markdown"))
+        return f"# 深度报告\n\n{body}", []
