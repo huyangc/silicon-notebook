@@ -37,6 +37,12 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    # 隔离 LLM 端点:清空真实 key/model,避免 OS 环境让 reasoning/rewrite 专属
+    # client 被构造出来打真实网络(不 configured 时回退到测试桩 llm_client)。
+    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL",
+               "REWRITE_LLM_API_KEY", "REWRITE_LLM_BASE_URL", "REWRITE_LLM_MODEL"):
+        monkeypatch.setenv(_k, "")
     from app.core.config import Settings
     from app.services.sqlite_repository import SQLiteRepository
     return SQLiteRepository(Settings(_env_file=None))
@@ -86,3 +92,85 @@ def test_report_prompts_contract():
     assert "【通识】" not in sp2
     su = report_summary_prompt("总问题", "## 节1\nmd")
     assert "executive summary" in su.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: report_engine——大纲 + 逐节并行深挖 + 撰写
+# ---------------------------------------------------------------------------
+
+def _mk_engine(repo, llm):
+    from app.services.report_engine import ReportEngine
+    repo.llm_client = llm
+    return ReportEngine(repo, repo.settings)
+
+
+class _OutlineLLM:
+    configured = True
+    def __init__(self, n_fail_sections=0):
+        self.section_calls = []
+        self._fail_left = n_fail_sections
+    def chat_json(self, messages, schema_hint, **kw):
+        content = messages[-1]["content"]
+        if "OUTLINE" in content:
+            return json.dumps({"sections": [
+                {"title": "A", "scope": "sa", "sub_queries": ["qa"]},
+                {"title": "B", "scope": "sb", "sub_queries": ["qb"]}]})
+        if "ONE section" in content:
+            self.section_calls.append(content)
+            if self._fail_left > 0:
+                self._fail_left -= 1
+                raise RuntimeError("boom")
+            return json.dumps({"markdown": "## X\nbody [k1]", "grounded": True})
+        if "EXECUTIVE SUMMARY" in content:
+            return json.dumps({"summary": "总结"})
+        return json.dumps({})
+
+
+def test_engine_outline_fallback_on_bad_json(repo):
+    nb = _mk_nb(repo)
+    class _Bad:
+        configured = True
+        def chat_json(self, *a, **k):
+            return "not json"
+    eng = _mk_engine(repo, _Bad())
+    outline = eng._plan_outline(nb.id, "q", "")
+    assert len(outline) >= 1 and outline[0]["sub_queries"]      # 回退骨架仍可跑
+
+
+def test_engine_runs_sections_in_parallel_and_tolerates_one_failure(repo, monkeypatch):
+    nb = _mk_nb(repo)
+    llm = _OutlineLLM(n_fail_sections=1)
+    eng = _mk_engine(repo, llm)
+    # stub 每节深挖:不跑真检索,返回空 ReasoningResult(编排测试与检索解耦)
+    from app.services.reasoning_retrieval import ReasoningResult
+    monkeypatch.setattr(eng, "_deep_dive",
+                        lambda nb_id, section, question: ReasoningResult())
+    rid = repo.create_report(nb.id, "q")
+    eng.run(nb.id, rid, "q", "")
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "done"
+    secs = detail["sections"]
+    assert len(secs) == 2
+    ok = [s for s in secs if not s.get("failed")]
+    bad = [s for s in secs if s.get("failed")]
+    assert len(ok) == 1 and len(bad) == 1          # 单节失败不拖垮整报告
+    assert detail["content_md"].startswith("#")     # 汇总仍生成
+
+
+def test_engine_cancel_marks_cancelled(repo, monkeypatch):
+    import threading
+    nb = _mk_nb(repo)
+    llm = _OutlineLLM()
+    cancel = threading.Event()
+    from app.services.report_engine import ReportEngine
+    repo.llm_client = llm
+    eng = ReportEngine(repo, repo.settings, cancel_event=cancel)
+    from app.services.reasoning_retrieval import ReasoningResult
+    def _dd(nb_id, section, question):
+        cancel.set()                                # 深挖中途被取消
+        from app.services.cancellation import raise_if_cancelled
+        raise_if_cancelled(cancel)
+    monkeypatch.setattr(eng, "_deep_dive", _dd)
+    rid = repo.create_report(nb.id, "q")
+    eng.run(nb.id, rid, "q", "")
+    assert repo.get_report(nb.id, rid)["status"] == "cancelled"
