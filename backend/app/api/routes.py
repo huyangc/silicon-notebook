@@ -866,7 +866,8 @@ def _report_llm_ready(repo) -> bool:
     return bool(getattr(repo.reasoning_llm_client, "configured", False))
 
 
-def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history: str) -> None:
+def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history: str,
+                       depth: int = 2) -> None:
     from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
     cancel = register_cancel(rid)
     ctx = contextvars.copy_context()          # per-user 模型经 ContextVar 传播
@@ -874,7 +875,7 @@ def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history:
     def worker():
         try:
             ReportEngine(repo, repo.settings, cancel_event=cancel).run(
-                notebook_id, rid, question, history)
+                notebook_id, rid, question, history, depth=depth)
         finally:
             unregister_cancel(rid)
 
@@ -890,11 +891,12 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
         raise HTTPException(status_code=422, detail="question required")
     if not _report_llm_ready(repo):
         raise HTTPException(status_code=409, detail="LLM not configured")
+    depth = max(1, min(16, int(payload.depth)))
     try:
-        rid = repo.create_report(notebook_id, payload.question.strip())
+        rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    _launch_report_job(repo, notebook_id, rid, payload.question.strip(), payload.history)
+    _launch_report_job(repo, notebook_id, rid, payload.question.strip(), payload.history, depth)
     return {"report_id": rid, "status": "pending"}
 
 

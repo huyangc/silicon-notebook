@@ -1149,6 +1149,15 @@ class SQLiteRepository:
                       ON kg_cluster_scratch(notebook_id, run_id);
                     """
                 )
+            # 深度报告:depth(智能滑块封顶 reflect 轮数)+ section_status_json
+            # (节内实时进度)。Additive;pre-existing reports 表 CREATE TABLE
+            # IF NOT EXISTS 不会补列,须守卫式 ALTER。默认 depth=2、进度空 '[]'。
+            rep_cols = {r["name"] for r in db.execute("PRAGMA table_info(reports)").fetchall()}
+            if rep_cols and "depth" not in rep_cols:
+                db.execute("ALTER TABLE reports ADD COLUMN depth INTEGER NOT NULL DEFAULT 2")
+            if rep_cols and "section_status_json" not in rep_cols:
+                db.execute(
+                    "ALTER TABLE reports ADD COLUMN section_status_json TEXT NOT NULL DEFAULT '[]'")
             # Seed the editable object-schema registry from the code defaults
             # (INSERT OR IGNORE keeps any curator edits / induced types intact).
             now = _now()
@@ -12167,15 +12176,15 @@ class SQLiteRepository:
         return len(ids)
 
     # --- 深度报告 ---
-    def create_report(self, notebook_id: str, question: str) -> str:
+    def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
         self.get_notebook(notebook_id)          # 不存在则 KeyError
         rid = f"rep-{uuid4().hex[:10]}"
         now = _now()
         with self._write() as db:
             db.execute(
-                "INSERT INTO reports(id, notebook_id, question, created_by, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?)",
-                (rid, notebook_id, question, self.current_user().id, now, now))
+                "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (rid, notebook_id, question, depth, self.current_user().id, now, now))
         return rid
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,

@@ -29,7 +29,7 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     import app.api.routes as routes_mod
     monkeypatch.setattr(routes_mod, "_launch_report_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
-    r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?"})
+    r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?", "depth": 8})
     assert r.status_code == 200
     rid = r.json()["report_id"]
     lst = client.get(f"/api/notebooks/{nb['id']}/reports").json()
@@ -37,6 +37,8 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["question"] == "为什么?" and "content_md" in detail
     assert "references" in detail and detail["references"] == []
+    assert detail["depth"] == 8
+    assert "section_status" in detail
     assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel").status_code == 200
     assert client.delete(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 200
     assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 404
