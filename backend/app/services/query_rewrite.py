@@ -54,7 +54,8 @@ def expand_query(client, question: str, history: str = "", *,
     if max_retries is not None: kw["max_retries"] = max_retries
     try:
         raw = client.chat_json(
-            [{"role": "user", "content": expand_query_prompt(question, history, want_types)}],
+            [{"role": "user", "content": expand_query_prompt(question, history, want_types,
+                                                             max_subqueries=max_subqueries)}],
             EXPAND_SCHEMA_HINT, cancel_event=cancel_event, **kw)
         data = json.loads(raw)
         if not isinstance(data, dict):

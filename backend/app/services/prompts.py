@@ -317,7 +317,8 @@ EXPAND_SCHEMA_HINT = ('{"query_en":"","high_level_keywords":[],"low_level_keywor
                       '"sub_queries":[{"query":"","types":[],"prefer":"balanced","reason":""}]}')
 
 
-def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False) -> str:
+def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False,
+                        max_subqueries: int = 4) -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else "")
@@ -335,11 +336,15 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "(used to retrieve RELATIONS).\n"
         "3. low_level_keywords: concrete entities / names / specifics (used to "
         "retrieve ENTITIES).\n"
-        "4. sub_queries: 1-4 focused, standalone ENGLISH search queries that together "
+        f"4. sub_queries: 1-{max_subqueries} focused, standalone ENGLISH search queries that together "
         "cover the question. For a COMPARISON, emit ONE sub-query per entity (e.g. "
         "'DeepSeek-V2 architecture and features', 'DeepSeek-V3 improvements'). For a "
         "BROAD/overview question, emit one per distinct dimension. For a simple "
-        "single-topic question, ONE sub-query is fine. Use canonical entity names.\n"
+        "single-topic question, ONE sub-query is fine. For a DEEP MECHANISM/DERIVATION "
+        "question that spans abstraction levels, emit one sub-query per level it "
+        "crosses (e.g. circuit principle / device physics / statistical or solid-state "
+        "physics / quantum-lattice origin / engineering constraints such as packaging "
+        "& materials). Use canonical entity names.\n"
         f"{types_line}"
         "Keep sub-queries non-redundant.\n\n"
         f"{history_section}"

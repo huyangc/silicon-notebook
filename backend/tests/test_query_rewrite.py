@@ -53,3 +53,25 @@ def test_expand_fallback_on_unconfigured_exception_empty():
                 _FakeLLM({"sub_queries": []}), _FakeLLM({"query_en": "x", "sub_queries": "nope"})):
         ex = expand_query(llm, "gpt4 对比")
         assert [s.query for s in ex.sub_queries] == ["gpt 4 对比"]   # 回退=normalize_terms(原问)
+
+
+def test_expand_query_prompt_injects_max_subqueries():
+    from app.services.prompts import expand_query_prompt
+    assert "1-6 focused" in expand_query_prompt("q", max_subqueries=6)
+    assert "1-4 focused" in expand_query_prompt("q")          # 默认向后兼容
+    assert "MECHANISM/DERIVATION" in expand_query_prompt("q")
+
+
+def test_expand_query_passes_cap_into_prompt():
+    """expand_query 把 max_subqueries 透传进 prompt(修 config 上限形同虚设)。"""
+    from app.services.query_rewrite import expand_query
+    captured = {}
+
+    class _Fake:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            captured["prompt"] = messages[-1]["content"]
+            return '{"query_en":"q","sub_queries":[{"query":"a"}]}'
+
+    expand_query(_Fake(), "q", max_subqueries=7)
+    assert "1-7 focused" in captured["prompt"]
