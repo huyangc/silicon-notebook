@@ -12053,6 +12053,19 @@ class SQLiteRepository:
             ))
         return cited
 
+    def _needs_index(self, notebook_id: str) -> bool:
+        """大库且磁盘完全无 scale 索引(从未建过)→ True。用于 AskResponse.index_required:
+        大库检索强制走索引,无索引时检索降级(FTS/skip/refuse),需提示用户手动建索引。
+        小库(copyable=True)允许暴力、不要求索引 → False。已建索引(含 stale/有 delta)→
+        False(那是恒定成本·最终一致态,由「N 源待索引」徽章覆盖,不重复提示)。
+        两处判定都廉价:copystats 版本 memo;_scale_index(allow_stale) 经磁盘身份缓存 O(1)。"""
+        try:
+            if self.notebook_copy_stats(notebook_id)["copyable"]:
+                return False
+            return self._scale_index(notebook_id, allow_stale=True) is None
+        except Exception:  # noqa: BLE001 — 判定失败不拖垮 ask,退化为不提示
+            return False
+
     def _save_answer(
         self,
         notebook_id: str,
@@ -12060,6 +12073,10 @@ class SQLiteRepository:
         response: AskResponse,
         conversation_id: Optional[str] = None,
     ) -> str:
+        # 所有 ask handler 的唯一收口:在持久化/返回前给 response 打大库无索引提示位。
+        # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
+        # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
+        response.index_required = self._needs_index(notebook_id)
         answer_id = f"ans-{uuid4().hex[:10]}"
         now = _now()
         payload = response.model_dump()
