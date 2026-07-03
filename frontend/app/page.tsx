@@ -51,6 +51,7 @@ import {
 } from "./model-settings.ts";
 import { AuthGate } from "./AuthGate";
 import { Pagination } from "./Pagination";
+import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -206,11 +207,12 @@ type Citation = {
   quoted_span: string;
 };
 
-type ChatMode = "ask" | "rules";
+type ChatMode = "ask" | "rules" | "reports";
 
 const CHAT_MODES: Array<[ChatMode, string]> = [
   ["ask", "问答"],
-  ["rules", "知识库"]
+  ["rules", "知识库"],
+  ["reports", "深度报告"]
 ];
 
 // Any object_type string returned by /knowledge-types.
@@ -609,6 +611,16 @@ const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/$
 const buildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/build`, { method: "POST" });
 const rebuildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
 const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
+
+// 深度报告(后台 job):类型见 report-view.tsx(与后端 ReportSummary/ReportDetail 对齐)。
+const createReport = (nb: string, question: string) =>
+  api<{ report_id: string }>(`/notebooks/${nb}/reports`, { method: "POST", body: JSON.stringify({ question }) });
+const listReports = (nb: string) => api<ReportSummaryT[]>(`/notebooks/${nb}/reports`);
+const getReport = (nb: string, rid: string) => api<ReportDetailT>(`/notebooks/${nb}/reports/${rid}`);
+const cancelReport = (nb: string, rid: string) =>
+  api<{ status: string }>(`/notebooks/${nb}/reports/${rid}/cancel`, { method: "POST" });
+const deleteReport = (nb: string, rid: string) =>
+  api<{ status: string }>(`/notebooks/${nb}/reports/${rid}`, { method: "DELETE" });
 
 type ScaleIndexState = "unindexed" | "suggested" | "queued" | "building" | "indexed" | "stale";
 type ScaleIndexStatus = { exists: boolean; stale: boolean; building: boolean; eligible: boolean;
@@ -3387,6 +3399,18 @@ export default function Home() {
                       setKnowledgeStatusFilter(s);
                       loadKnowledge(knowledgeKind, { status: s, page: 0 }).catch(reportError);
                     }}
+                  />
+                )}
+
+                {chatMode === "reports" && currentNotebookId && (
+                  <ReportsPanel
+                    notebookId={currentNotebookId}
+                    listReports={listReports}
+                    getReport={getReport}
+                    createReport={createReport}
+                    cancelReport={cancelReport}
+                    deleteReport={deleteReport}
+                    setToast={setToast}
                   />
                 )}
               </div>
