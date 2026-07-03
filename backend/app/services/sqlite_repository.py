@@ -681,6 +681,7 @@ class SQLiteRepository:
                   outline_json TEXT NOT NULL DEFAULT '[]',
                   sections_json TEXT NOT NULL DEFAULT '[]',
                   gaps_json TEXT NOT NULL DEFAULT '[]',
+                  references_json TEXT NOT NULL DEFAULT '[]',
                   content_md TEXT NOT NULL DEFAULT '',
                   status TEXT NOT NULL DEFAULT 'pending',
                   progress TEXT NOT NULL DEFAULT '',
@@ -12043,12 +12044,13 @@ class SQLiteRepository:
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
-                      gaps=None, content_md=None) -> None:
+                      gaps=None, references=None, content_md=None) -> None:
         sets, args = ["updated_at = ?"], [_now()]
         for col, val, dump in (("status", status, False), ("progress", progress, False),
                                ("error", error, False), ("content_md", content_md, False),
                                ("outline_json", outline, True),
-                               ("sections_json", sections, True), ("gaps_json", gaps, True)):
+                               ("sections_json", sections, True), ("gaps_json", gaps, True),
+                               ("references_json", references, True)):
             if val is not None:
                 sets.append(f"{col} = ?")
                 args.append(json.dumps(val, ensure_ascii=False) if dump else val)
@@ -12066,6 +12068,7 @@ class SQLiteRepository:
             d.update(outline=json.loads(row["outline_json"] or "[]"),
                      sections=json.loads(row["sections_json"] or "[]"),
                      gaps=json.loads(row["gaps_json"] or "[]"),
+                     references=json.loads(row["references_json"] or "[]"),
                      content_md=row["content_md"])
         return d
 

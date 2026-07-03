@@ -36,6 +36,7 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     assert lst[0]["id"] == rid and lst[0]["status"] == "pending"
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["question"] == "为什么?" and "content_md" in detail
+    assert "references" in detail and detail["references"] == []
     assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel").status_code == 200
     assert client.delete(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 200
     assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 404

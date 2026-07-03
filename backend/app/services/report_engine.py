@@ -9,6 +9,7 @@
 from __future__ import annotations
 import contextvars
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
@@ -18,6 +19,7 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 
 _GAP_PAIR_CAP = 40          # 跨节概念连通性检查的最大 pair 数(成本护栏)
 _TOP_CONCEPTS_PER_SECTION = 3
+_MARKER = re.compile(r"\[k(\d+)\]")   # 节内 [k_i] 引用标记(全局重编号用)
 
 # --- 取消注册表:report_id → threading.Event(活动后台 job 才在册) ---
 _ACTIVE_CANCELS: Dict[str, threading.Event] = {}
@@ -115,22 +117,12 @@ class ReportEngine:
         return {"title": section["title"], "scope": section["scope"],
                 "markdown": str(data.get("markdown", "")).strip(),
                 "grounded": bool(data.get("grounded", False)),
-                "id_map_sources": self._sources_of(id_map),
+                "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or []),
                 "top_concepts": [
                     {"object_id": h.object_id,
                      "name": str(h.payload.get("name", "")).strip() or h.object_id}
                     for h in result.top_hits[:_TOP_CONCEPTS_PER_SECTION]]}
-
-    @staticmethod
-    def _sources_of(id_map: dict) -> List[str]:
-        seen, out = set(), []
-        for ctx in id_map.values():
-            title = str(ctx.get("source_title", "") or ctx.get("name", "")).strip()
-            if title and title not in seen:
-                seen.add(title)
-                out.append(title)
-        return out
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id: str, rid: str, outline: List[dict],
@@ -147,7 +139,7 @@ class ReportEngine:
             except Exception as exc:
                 drafted = {"title": section["title"], "scope": section["scope"],
                            "markdown": "", "grounded": False, "failed": True,
-                           "error": str(exc)[:300], "id_map_sources": [],
+                           "error": str(exc)[:300], "id_map": {},
                            "attempted": [], "top_concepts": []}
             done_count["n"] += 1
             self.repo.update_report(notebook_id, rid,
@@ -168,17 +160,22 @@ class ReportEngine:
             self.repo.update_report(notebook_id, rid, outline=outline,
                                     progress=f"大纲就绪({len(outline)} 节),章节深挖 0/{len(outline)}")
             sections = self._run_sections(notebook_id, rid, outline, question)
-            self.repo.update_report(notebook_id, rid, sections=sections, progress="汇总中")
-            content_md, gaps = self._assemble(notebook_id, rid, question, outline, sections)
-            self.repo.update_report(notebook_id, rid, content_md=content_md, gaps=gaps,
-                                    status="done", progress="完成")
+            # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
+            self.repo.update_report(notebook_id, rid, progress="汇总中")
+            content_md, gaps, references = self._assemble(
+                notebook_id, rid, question, outline, sections)
+            for s in sections:
+                s.pop("id_map", None)          # 账目仅供 assemble,不入库
+            self.repo.update_report(notebook_id, rid, sections=sections,
+                                    content_md=content_md, gaps=gaps,
+                                    references=references, status="done", progress="完成")
         except AskCancelled:
             self.repo.update_report(notebook_id, rid, status="cancelled", progress="已取消")
         except Exception as exc:
             self.repo.update_report(notebook_id, rid, status="failed",
                                     error=str(exc)[:500], progress="失败")
 
-    # --- Stage D:汇总——执行摘要 + 参考 + 知识缺口 + 分析计划 ---
+    # --- Stage D:汇总——执行摘要 + 全局引用 + 知识缺口 + 分析计划 ---
     def _assemble(self, notebook_id, rid, question, outline, sections):
         from app.services.prompts import report_summary_prompt
         # 执行摘要(容错:失败则空段,不拖垮报告)。
@@ -195,6 +192,44 @@ class ReportEngine:
         except Exception:
             pass
 
+        # --- 全局引用重编号(按来源去重):节内 [k_i] → 全局 [k{N}] ---
+        references: List[dict] = []
+        ref_pos: Dict[str, int] = {}       # dedup key -> 全局 1-based
+
+        def _dk(ctx):                       # 去重键:source_id > source_title > object_id
+            return str(ctx.get("source_id") or ctx.get("source_title")
+                       or ctx.get("object_id") or "")
+
+        def _label(ctx):
+            return (str(ctx.get("source_title") or ctx.get("name")
+                        or ctx.get("object_id") or "").strip() or "(unnamed)")
+
+        remapped: Dict[int, str] = {}
+        for si, s in enumerate(sections):
+            id_map = s.get("id_map") or {}
+
+            def _sub(m, _id_map=id_map):
+                ctx = _id_map.get(f"k{m.group(1)}")
+                if not ctx:
+                    return ""               # 剥除幻觉/未知 marker
+                dk = _dk(ctx)
+                if dk not in ref_pos:
+                    ref_pos[dk] = len(references) + 1
+                    references.append({
+                        "key": f"k{ref_pos[dk]}",
+                        "object_id": str(ctx.get("object_id") or ""),
+                        "object_type": str(ctx.get("object_type") or ""),
+                        "label": _label(ctx),
+                        "name": str(ctx.get("name") or ""),
+                        "source_title": str(ctx.get("source_title") or ""),
+                        "location_label": str(ctx.get("location_label") or ""),
+                        "tier": str(ctx.get("tier") or "personal"),
+                    })
+                return f"[k{ref_pos[dk]}]"
+
+            remapped[si] = _MARKER.sub(_sub, s.get("markdown") or "")
+
+        # --- 知识缺口(逻辑不变,concept 连通性仍用 top_concepts) ---
         gaps: List[str] = []
         # 缺口一:零命中/干涸子查询(each 节 attempted 里 new==0)。
         for s in sections:
@@ -225,22 +260,24 @@ class ReportEngine:
                 gaps.append(f"「{s['title']}」节无库内引用支撑(全部为推断/通识,建议补充语料)")
         gaps = list(dict.fromkeys(gaps))[:30]
 
-        refs = list(dict.fromkeys(t for s in sections for t in s.get("id_map_sources", [])))
+        # --- 组装 content_md(用重编号后的节 markdown) ---
         plan_lines = [
             f"- {s['title']}: " + "; ".join(o.get("sub_queries", []))
             for s, o in zip(sections, outline)]
         parts = [f"# 深度报告:{question}", ""]
         if summary:
             parts += ["## 执行摘要", "", summary, ""]
-        for s in sections:
+        for si, s in enumerate(sections):
             if s.get("failed"):
                 parts += [f"## {s['title']}", "", f"（本节生成失败:{s.get('error','')}）", ""]
-            elif s.get("markdown"):
-                parts += [s["markdown"], ""]
+            elif remapped.get(si):
+                parts += [remapped[si], ""]
         if gaps:
             parts += ["## 知识缺口", ""] + [f"- {g}" for g in gaps] + [""]
-        if refs:
-            parts += ["## 参考文献(库内来源;[k] 编号为节内编号)", ""] + \
-                     [f"- {r}" for r in refs] + [""]
+        if references:
+            parts += ["## 参考文献", ""] + [
+                f"- [{r['key']}] {r['label']}"
+                + (f" · {r['location_label']}" if r["location_label"] else "")
+                for r in references] + [""]
         parts += ["## 分析计划", ""] + plan_lines
-        return "\n".join(parts), gaps
+        return "\n".join(parts), gaps, references
