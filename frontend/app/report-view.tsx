@@ -580,20 +580,23 @@ export function ReportsPanel({
                     <span className="report-depth-popover-title">研究深度</span>
                     <span className="report-depth-popover-current">{DEPTH_LABELS[depthIdx]}</span>
                   </div>
-                  <div className="report-depth-segments" role="radiogroup" aria-label="研究深度">
-                    {DEPTH_LABELS.map((label, index) => (
-                      <button
-                        key={label}
-                        type="button"
-                        role="radio"
-                        aria-checked={index === depthIdx}
-                        className={`report-depth-segment${index === depthIdx ? " active" : ""}`}
-                        onClick={() => setDepthIdx(index)}
-                      >
-                        <span className="report-depth-segment-dot" aria-hidden />
-                        <span className="report-depth-segment-label">{label}</span>
-                      </button>
-                    ))}
+                  <div className="report-depth-slider">
+                    <div className="report-depth-slider-track" aria-hidden>
+                      {DEPTH_LABELS.map((_, index) => (
+                        <span key={index} className="report-depth-slider-dot" />
+                      ))}
+                    </div>
+                    <input
+                      type="range"
+                      className="report-depth-slider-input"
+                      min={0}
+                      max={DEPTH_LABELS.length - 1}
+                      step={1}
+                      value={depthIdx}
+                      aria-label="研究深度"
+                      aria-valuetext={DEPTH_LABELS[depthIdx]}
+                      onChange={(event) => setDepthIdx(Number(event.target.value))}
+                    />
                   </div>
                   <p className="report-depth-popover-hint">{DEPTH_HINTS[depthIdx]}</p>
                 </div>
