@@ -66,3 +66,23 @@ def test_report_crud_roundtrip(repo):
     assert repo.list_reports(nb.id) == []
     with pytest.raises(KeyError):
         repo.get_report(nb.id, rid)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: 报告三 prompt(大纲/节撰写/执行摘要)
+# ---------------------------------------------------------------------------
+
+def test_report_prompts_contract():
+    from app.services.prompts import (
+        report_outline_prompt, report_section_prompt, report_summary_prompt,
+        REPORT_OUTLINE_SCHEMA_HINT, REPORT_SECTION_SCHEMA_HINT)
+    op = report_outline_prompt("q", max_sections=5, history_block="h")
+    assert "3-5" in op and "sub_queries" in op and "Prior conversation" in op
+    sp = report_section_prompt("失效机理", "应力如何改变 VBE", "总问题", "CTX",
+                               allow_parametric=True)
+    assert "【通识】" in sp and "[k" in sp and "layer by layer" not in sp  # 独立文本,非复用 answer_prompt
+    assert "ONLY this section" in sp
+    sp2 = report_section_prompt("t", "s", "q", "CTX", allow_parametric=False)
+    assert "【通识】" not in sp2
+    su = report_summary_prompt("总问题", "## 节1\nmd")
+    assert "executive summary" in su.lower()

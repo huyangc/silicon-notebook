@@ -352,3 +352,88 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         'Return JSON only: {"query_en":"","high_level_keywords":[],'
         '"low_level_keywords":[],"sub_queries":[{"query":""' + types_schema + "}]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 深度报告(report_engine)
+# ---------------------------------------------------------------------------
+
+REPORT_OUTLINE_SCHEMA_HINT = (
+    '{"sections":[{"title":"","scope":"","sub_queries":[""]}]}')
+
+
+def report_outline_prompt(question: str, max_sections: int = 6,
+                          history_block: str = "") -> str:
+    history_section = (
+        "Prior conversation (for context):\n" f"{history_block}\n\n"
+        if history_block else "")
+    return (
+        "You plan the OUTLINE of a deep technical report that answers an "
+        "engineer's question from a document corpus. Produce 3-" f"{max_sections} "
+        "sections. Rules:\n"
+        "- Sections follow the question's own structure; for a multi-layer "
+        "mechanism question, one section per abstraction layer (e.g. circuit "
+        "principle / device physics / statistical & solid-state physics / "
+        "quantum-lattice origin / engineering requirements such as packaging & "
+        "materials).\n"
+        "- Do NOT include executive-summary / references / knowledge-gap "
+        "sections — the system appends those automatically.\n"
+        "- Each section: title (in the question's language), scope (one line, "
+        "what the section must establish), sub_queries (2-4 focused ENGLISH "
+        "retrieval queries for that section's evidence).\n\n"
+        f"{history_section}"
+        f"Question: {question}\n\n"
+        'Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""]}]}'
+    )
+
+
+REPORT_SECTION_SCHEMA_HINT = '{"markdown":"","grounded":true}'
+
+
+def report_section_prompt(section_title: str, section_scope: str, question: str,
+                          context_block: str, allow_parametric: bool = True) -> str:
+    parametric_rule = (
+        "4. You MAY use domain general knowledge beyond the items when the "
+        "items do not cover a needed link — but EVERY such sentence must start "
+        "with the marker 【通识】, carry NO [k] marker, and numeric values must "
+        "be given as typical ranges, not point values.\n"
+        if allow_parametric else
+        "4. Do NOT introduce facts beyond the knowledge items; where evidence "
+        "is missing, state the gap explicitly.\n")
+    return (
+        "You write ONE section of a deep technical report for an engineer. "
+        "Write ONLY this section — no report title, no executive summary, no "
+        "other sections' content.\n"
+        f"Report question: {question}\n"
+        f"Section title: {section_title}\n"
+        f"Section scope: {section_scope}\n"
+        "Rules:\n"
+        "1. When a sentence uses a knowledge item, append its id marker like "
+        "[k1] at the end of that sentence. A [k] marker may ONLY be attached "
+        "to a sentence whose content comes DIRECTLY from that item.\n"
+        "2. When a sentence is your own inference bridging the items, prefix "
+        "it with （推断） and attach NO [k].\n"
+        "3. Keep the derivation chain complete within this section's scope; "
+        "keep formulas dimensionally consistent and prefer circuit-realizable "
+        "forms; single-source numeric values: attribute as that source's "
+        "stated value, ranges may be added as （推断）.\n"
+        f"{parametric_rule}"
+        "5. Answer in the question's language. Typeset ALL math as LaTeX "
+        "($...$ inline, $$...$$ display); keep [k] markers outside math.\n"
+        "6. Start the section body directly with a '## <section title>' "
+        "heading, then prose (tables allowed in GitHub markdown).\n"
+        "7. grounded=true only if at least one [k] appears in the section.\n\n"
+        f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
+        'Return JSON only: {"markdown":"","grounded":true|false}'
+    )
+
+
+def report_summary_prompt(question: str, sections_block: str) -> str:
+    return (
+        "Write the EXECUTIVE SUMMARY (one tight paragraph, 120-250 words, in "
+        "the question's language) of the report below: the direct answer "
+        "first, then the load-bearing findings and the key engineering "
+        "recommendations. No new facts, no citations markers, no headings.\n\n"
+        f"Question: {question}\n\nReport sections:\n{sections_block}\n\n"
+        'Return JSON only: {"summary":""}'
+    )
