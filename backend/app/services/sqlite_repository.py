@@ -328,6 +328,11 @@ class SQLiteRepository:
         # waiting on a per-nb lock (no lock-ordering cycle).
         self._scale_ver_lock = threading.Lock()
         self._scale_ver_locks: Dict[str, threading.Lock] = {}
+        # per-nb 单飞:allow_stale 检索路径 cold-load ScaleIndex 时,防 N 个并发查询
+        # 各自 load_scale_index + hnswlib.load_index(8GB)造成 N× 内存尖峰。锁次序同
+        # _scale_ver_lock:全局锁只护锁表结构,绝不在全局锁内跑 load。
+        self._scale_idx_load_lock = threading.Lock()
+        self._scale_idx_load_locks: Dict[str, threading.Lock] = {}
         # C7: same bounded-LRU rework as _scale_idx_cache above.
         self._viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
         self._vector_cache = VectorCache(max_entries=self.settings.vector_cache_max_entries)
