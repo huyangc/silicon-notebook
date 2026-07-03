@@ -82,7 +82,10 @@ cp .env.example .env
 - **PDF 高保真**(可选)—— 一个 MinerU 端点,见 [用 MinerU 解析 PDF](#用-mineru-解析-pdf);
   保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
 
-`.env.example` 是权威、逐项带注释的完整变量清单;[配置](#配置)按组列出常用项。
+`.env.example` 现在只列部署时通常需要设置的变量;[配置](#配置)按组列出常用项。其余
+100+ 个内部调参旋钮(分词/上下文预算、并发度、检索阈值、日志路径、reasoning 护栏、
+scale 调度细节等)都在 `backend/app/core/config.py` 里带合理默认值,确需微调时直接
+设对应环境变量即可覆盖。
 
 **远程访问——浏览器在另一台机器上**(不是服务器),所以**不能用 `localhost`/`127.0.0.1`**
 (那在每个访客自己机器上解析,连不到服务器)。
@@ -270,7 +273,6 @@ EMBED_API_KEY
 EMBED_DIM               # 须与模型输出维度一致（默认 1024）
 EMBED_TRUNCATE_CHARS    # 每段文本喂给 embedder 的最大字符数（默认 2000）
 EMBED_BATCH_SIZE        # 每次嵌入调用的元素数（默认 10）
-EMBED_PERSIST_CHUNK     # 每批落库行数（默认 200）
 EMBED_CONCURRENCY       # 并发嵌入线程数（默认 8；温和值，防 429）
 ```
 
@@ -332,7 +334,6 @@ RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义�
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
 KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
 QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
-GLOBAL_MAX_COMMUNITIES       # Global 问答(ask mode="global")考虑的社区报告上限（默认 20）
 RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
 RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
 KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
@@ -394,7 +395,8 @@ SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000�
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` 是每个环境变量的权威完整清单（含默认值与逐行注释）——上面分组只列常用项。其余可调项还包括：可选的推理专用 LLM（`REASONING_LLM_BASE_URL` / `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`）及其护栏（`REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`）、检索/接地调参（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`），以及运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+`.env.example` 现在只列部署时通常需要设置的变量——上面分组（以及作为每个变量权威完整
+清单的 `backend/app/core/config.py`）覆盖其余。其他有文档记录的调参项还包括：可选的推理专用 LLM（`REASONING_LLM_BASE_URL` / `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`）及其护栏（`REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`）、检索/接地调参（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`），以及运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
 
 没有配置 LLM 时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
 

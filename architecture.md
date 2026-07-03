@@ -183,7 +183,7 @@ OpenAI 兼容；`chat_json`（`response_format=json_object` + `strip_json_fences
 ### 3.6 配置开关（`.env` / `core/config.py`）
 
 - **模型服务**：`openai_compat_base_url/api_key/model/timeout=60/max_retries=2`（所有模型经 URL 端点接入，不启动本地服务）。
-- **嵌入**：`embed_provider`（""/dashscope）/`embed_model`/`embed_base_url`/`embed_api_key`/`embed_dim=1024`/`embed_truncate_chars=2000`/`embed_batch_size=10`/`embed_persist_chunk=200`/`embed_concurrency=50`。
+- **嵌入**：`embed_provider`（""/dashscope）/`embed_model`/`embed_base_url`/`embed_api_key`/`embed_dim=1024`/`embed_truncate_chars=2000`/`embed_batch_size=10`/`embed_concurrency=50`。
 - **KG 抽取**：`kg_extract_workers=16`（全局窗口并发上限）/`kg_job_concurrency=8`（文档级并发）/`kg_ask_reserve=64`（Ask 连接预留）/`kg_window_target_chars=0`（0=自适应）/`kg_window_min_chars=4000`/`kg_window_max_chars=8000`/`kg_window_overlap_chars=450`/`kg_window_warn_threshold=1200`。
 - **DB**：`db_busy_timeout_ms=30000`。
 - **检索**：`retrieval_top_n=12`。

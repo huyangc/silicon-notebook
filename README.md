@@ -85,8 +85,11 @@ retrieval, no LLM extraction or answers). To enable full functionality, set at m
 - **PDF fidelity** (optional) — a MinerU endpoint, see [PDF parsing with MinerU](#pdf-parsing-with-mineru);
   leave `MINERU_MODE=off` for the pypdf text fallback.
 
-`.env.example` is the authoritative, fully-commented list of every variable;
-[Configuration](#configuration) groups the common ones.
+`.env.example` now lists only the variables you're likely to need at deployment time;
+[Configuration](#configuration) groups the common ones. The 100+ internal tuning knobs
+(tokenization/context budgets, concurrency, retrieval thresholds, log paths, reasoning
+guardrails, scale scheduling, …) all have sensible defaults in `backend/app/core/config.py`
+— set the matching environment variable only if you need to override one.
 
 **Remote access — note the browser is on a *different* machine** than the server, so it
 cannot use `localhost`/`127.0.0.1` (those resolve to each visitor's own machine).
@@ -284,7 +287,6 @@ EMBED_API_KEY
 EMBED_DIM               # must match model output dimension (default 1024)
 EMBED_TRUNCATE_CHARS    # max chars fed to embedder per text (default 2000)
 EMBED_BATCH_SIZE        # elements per embedding call (default 10)
-EMBED_PERSIST_CHUNK     # rows written to DB per batch (default 200)
 EMBED_CONCURRENCY       # concurrent embedding threads (default 8; mild, avoids 429)
 ```
 
@@ -355,7 +357,6 @@ RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusio
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
 KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)
 QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
-GLOBAL_MAX_COMMUNITIES       # max community reports for Global QA, ask mode="global" (default 20)
 RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning seeds (default false, opt-in pending eval)
 RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
 KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)
@@ -420,9 +421,10 @@ SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (defau
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` is the authoritative, complete list of every variable with its default
-and an inline comment — the groups above highlight the common ones. Other documented
-knobs include the optional dedicated reasoning LLM (`REASONING_LLM_BASE_URL` /
+`.env.example` only ships the variables you're likely to need at deployment time — the
+groups above (and `backend/app/core/config.py`, the authoritative source of every
+variable with its default) cover the rest. Other documented knobs include the optional
+dedicated reasoning LLM (`REASONING_LLM_BASE_URL` /
 `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`) and its guardrails (`REASONING_MAX_STEPS`,
 `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, `REASONING_MAX_RETRIES`),
 retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
