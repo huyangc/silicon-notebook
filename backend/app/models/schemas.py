@@ -199,6 +199,10 @@ class ReportSummary(BaseModel):
     created_by: str = ""
 
 
+class ReportExportRequest(BaseModel):
+    report_ids: List[str] = Field(default_factory=list)
+
+
 class ReportDetail(ReportSummary):
     outline: List[dict] = Field(default_factory=list)
     sections: List[dict] = Field(default_factory=list)

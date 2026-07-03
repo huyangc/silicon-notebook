@@ -12330,6 +12330,49 @@ class SQLiteRepository:
             db.execute("DELETE FROM reports WHERE id = ? AND notebook_id = ?",
                        (report_id, notebook_id))
 
+    def export_reports(self, notebook_id: str, report_ids: list) -> list:
+        """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
+        notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
+        id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+
+        只读走 _connect()。report_ids 数量通常极小(用户勾选的几份报告),直接构造
+        占位符即可;但仍按 _in_batches 分批以防罕见的大批量超 SQLite 变量上限
+        (3.32+ 上限 32,766),批间用 dict 汇总后按原顺序回放。"""
+        def _safe(name: str) -> str:
+            s = re.sub(r'[/\\:*?"<>|\r\n]', "_", name or "").strip()
+            return s or ""
+
+        ids = [r for r in (report_ids or []) if r]
+        if not ids:
+            return []
+        found: dict = {}                         # rid -> (question, content_md)
+        with self._connect() as db:
+            for batch in self._in_batches(ids):
+                placeholders = ",".join("?" for _ in batch)
+                rows = db.execute(
+                    f"SELECT id, question, content_md FROM reports "
+                    f"WHERE notebook_id = ? AND status = 'done' "
+                    f"AND content_md IS NOT NULL AND content_md != '' "
+                    f"AND id IN ({placeholders})",
+                    (notebook_id, *batch)).fetchall()
+                for row in rows:
+                    found[row["id"]] = (row["question"], row["content_md"])
+        out: list = []
+        seen: dict = {}                          # 文件名去重(极端同名 → 加 -N 后缀)
+        for rid in ids:                          # 保持传入顺序
+            if rid not in found:
+                continue
+            question, content_md = found[rid]
+            stem = _safe(question)[:40] or rid
+            fname = f"{stem}-{rid}.md"
+            if fname in seen:
+                seen[fname] += 1
+                fname = f"{stem}-{rid}-{seen[fname]}.md"
+            else:
+                seen[fname] = 0
+            out.append((fname, content_md))
+        return out
+
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         if payload.rating not in {"useful", "not_useful"}:
             raise ValueError("rating must be useful or not_useful")

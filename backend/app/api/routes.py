@@ -1,8 +1,10 @@
 import asyncio
 import contextvars
+import io
 import json
 import queue
 import threading
+import zipfile
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -59,6 +61,7 @@ from app.models.schemas import (
     PromotionRejectRequest,
     ReportCreate,
     ReportDetail,
+    ReportExportRequest,
     ReportSummary,
     SourceDetail,
     SourceElement,
@@ -906,6 +909,25 @@ def list_reports(notebook_id: str) -> List[ReportSummary]:
     # repo 行含 notebook_id/updated_at 等多余键 → 按模型字段过滤(仓库无 extra=ignore 风格)
     return [ReportSummary(**{k: v for k, v in r.items() if k in ReportSummary.model_fields})
             for r in repository().list_reports(notebook_id)]
+
+
+@router.post("/notebooks/{notebook_id}/reports/export",
+             dependencies=[Depends(require_notebook_read)])
+def export_reports_endpoint(notebook_id: str, payload: ReportExportRequest) -> StreamingResponse:
+    # owner∪成员可下(require_notebook_read);只导出该 notebook 下 status='done' 且
+    # content_md 非空的报告,非 done/空/跨 notebook 的 id 静默跳过(repo 层已过滤)。
+    rows = repository().export_reports(notebook_id, payload.report_ids)
+    if not rows:                                 # 空 report_ids 或全部无效
+        raise HTTPException(status_code=422, detail="no exportable reports")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, md in rows:
+            z.writestr(name, md)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="reports.zip"'})
 
 
 @router.get("/notebooks/{notebook_id}/reports/{report_id}",
