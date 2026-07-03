@@ -84,6 +84,8 @@ class ReasoningResult:
     elements: List[RetrievedElement] = field(default_factory=list)
     trace: List[TraceStep] = field(default_factory=list)
     chunks: List[RetrievedChunk] = field(default_factory=list)
+    # 子查询执行账目({"query","new","tries"}),供报告管线做知识缺口分析。
+    attempted: List[dict] = field(default_factory=list)
 
 
 class ReasoningRetriever:
@@ -221,8 +223,10 @@ class ReasoningRetriever:
             lines.extend(render(x) for x in tail)
         return "\n".join(lines) if lines else "(no candidates yet)"
 
-    def run(self, notebook_id, question, history="", on_step=None):
+    def run(self, notebook_id, question, history="", on_step=None, top_n=None):
         raise_if_cancelled(self.cancel_event)
+        # top_n 覆盖 settings.retrieval_top_n(报告管线每节独立预算);None=沿用全局。
+        top_n = top_n or self.settings.retrieval_top_n
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
@@ -454,7 +458,7 @@ class ReasoningRetriever:
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
             top_hits, counts = self._quota_rerank(
-                notebook_id, collected, used_queries, self.settings.retrieval_top_n)
+                notebook_id, collected, used_queries, top_n)
             # 只暴露各子查询贡献数(不含兜底组), 便于观测。
             answer_detail["quota"] = counts[:len(used_queries)]
         else:
@@ -462,11 +466,13 @@ class ReasoningRetriever:
             scored_map = {h.object_id: h for h in self.repo._retrieve_scored(notebook_id, question)}
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
-            top_hits = top_hits[: self.settings.retrieval_top_n]
+            top_hits = top_hits[:top_n]
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         record(TraceStep(step_type="answer",
                          summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
                          detail=answer_detail))
-        return ReasoningResult(top_hits=top_hits, elements=elements,
-                               trace=trace, chunks=chunks)
+        return ReasoningResult(
+            top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
+            attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
+                       for a in attempted.values()])
