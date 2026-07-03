@@ -21,6 +21,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). `base` is the authoritative reference KG (e.g. an analog-design textbook); `personal` is the user's own notes. `federated_retrieve` gathers candidates across `base ∪ active personal`, tags each hit with its tier, applies a base-authority weight in ranking, and on a base↔personal contradiction the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor. The notebook actions menu ("分析") offers "设为基准库 / 取消基准库" to mark a notebook as the base KG and back (via `POST /api/notebooks/{id}/tier`)
 - **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; users see only their own notebooks. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, default `admin`); the admin owns pre-existing notebooks and is the only user who can mark a notebook as the base KG. Base notebooks are hidden from regular users' lists but are still used as authoritative retrieval context at ask time. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
 - Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
+- Deep report (background job): a notebook-level "深度报告" action turns one question into a multi-section technical report. An LLM plans an outline, each section runs a full `reasoning` deep-dive independently (sections run in parallel, each with its own retrieval budget), each is drafted with a three-tier evidence discipline (`[k]` in-corpus citation / `（推断）` in-corpus inference / `【通识】` general-knowledge, marked and flagged unverified), then a summary pass adds an executive summary, references, an auto-detected **knowledge-gap** section (dry sub-queries + unconnected cross-section concept pairs + unsupported sections), and the analysis plan. Runs as a cancellable background job with progress; results persist and export as `.md`
 - Edge trust & curation: per-edge trust signals (evidence / corroboration / type-validity) plus a curator review queue; reviewer-rejected edges are excluded from graph reasoning
 - Knowledge governance: browse by type via `/knowledge-types` + `/knowledge?type=...`, status lifecycle, duplicate detection & merge, conflict detection; `deprecated` objects excluded from retrieval and 1-hop expansion. Personal→base node promotion (propose → under review → approve/reject) with dedup-on-approve and a curator promotion queue
 - Unified KG: cross-document concept clustering (`concept_clusters`), pending-merges review
@@ -252,6 +253,7 @@ Key local beta APIs:
 - Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = authoritative reference KG, personal = default user notes).
 - Edge trust & curation: `GET /api/notebooks/{id}/edge-review-queue`, `POST /api/notebooks/{id}/relations/{rel_id}/review`
 - Governance / promotion: `POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`, `GET /api/promotion-queue`, `POST /api/promotion-queue/{candidate_id}/approve|reject`
+- Deep report: `POST /api/notebooks/{id}/reports` body `{question}` → `{report_id}` (starts a background job; 409 if the reasoning LLM is unconfigured), `GET /api/notebooks/{id}/reports` (list), `GET /api/notebooks/{id}/reports/{rid}` (poll status + `content_md`), `POST .../reports/{rid}/cancel`, `DELETE .../reports/{rid}`
 
 ## Configuration
 
@@ -363,6 +365,12 @@ RERANK_MAX_DOCS              # max docs per rerank request, auto-batched beyond 
 MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
 MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
 MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
+REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
+REPORT_SECTION_TOP_N         # deep-report: KG hits kept per section deep-dive (default 12)
+REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000)
+REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
+REPORT_SECTION_CONCURRENCY   # deep-report: sections deep-dived in parallel (default 3)
+REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 ```
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
