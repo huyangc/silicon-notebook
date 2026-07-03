@@ -34,7 +34,7 @@ INTEREST_KINDS = (
     "scale_ppr_bailout", "ppr_fallback_refused", "graph_walk_refused",
     "relation_scoring_skipped", "tier2_skipped", "chunk_bruteforce_skipped",
     "kg_bruteforce_refused", "element_scoring_skipped", "scale_index_build",
-    "model_error", "ask_stage", "pipeline",
+    "scale_ppr_stage", "model_error", "ask_stage", "pipeline",
 )
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
 BIG_NB_ROWS = 20_000
@@ -69,6 +69,38 @@ def _iter_jsonl(path):
                     continue
     except OSError:
         return
+
+
+def _env_path(root):
+    path = os.path.join(root, ".env")
+    if os.path.exists(path):
+        return path
+    alt = os.path.join(root, "backend", ".env")
+    return alt if os.path.exists(alt) else ""
+
+
+def _read_env(root):
+    path = _env_path(root)
+    seen = {}
+    if not path:
+        return seen
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            seen[k.strip()] = v.strip()
+    except OSError:
+        return seen
+    return seen
+
+
+def _env_bool(env, key, default):
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 class Sampler:
@@ -200,6 +232,7 @@ def report_events(local_dir, since):
     last_model_errors = []
     ask_stage = defaultdict(Sampler)
     pipe_stage = defaultdict(Sampler)
+    scale_ppr_stage = defaultdict(Sampler)
     last_build = None
     build_stages = {}
     for path in paths:
@@ -236,6 +269,10 @@ def report_events(local_dir, since):
                 ms = e.get("latency_ms")
                 if isinstance(ms, (int, float)) and e.get("status") == "done":
                     pipe_stage[e.get("stage", "?")].add(ms)
+            elif k == "scale_ppr_stage":
+                ms = e.get("latency_ms")
+                if isinstance(ms, (int, float)):
+                    scale_ppr_stage[e.get("stage", "?")].add(ms)
             elif k == "scale_index_build":
                 st, ms = e.get("stage", "?"), e.get("latency_ms", 0)
                 build_stages[st] = ms
@@ -272,6 +309,10 @@ def report_events(local_dir, since):
         print("\n[摄取管线各阶段延迟]")
         for st in sorted(pipe_stage, key=lambda s: -pipe_stage[s].max):
             print(f"  {pipe_stage[st].line()}  {st}")
+    if scale_ppr_stage:
+        print("\n[scale_ppr 各阶段延迟]")
+        for st in sorted(scale_ppr_stage, key=lambda s: -scale_ppr_stage[s].max):
+            print(f"  {scale_ppr_stage[st].line()}  {st}")
     if last_build:
         ts, stages = last_build
         print(f"\n[最近一次 scale 索引构建 {ts} 分段]")
@@ -442,7 +483,8 @@ def report_scale_profile(local_dir):
                 delta_chunks = max(0, chunks.get(nb, 0) - covered)
                 print(f"    ⚠ 索引水位后新增 {len(delta_src)} 个 source(约 {delta_chunks} chunk)"
                       f"未收进索引 → KG 对象侧 delta 每次查询无条件暴力(现查现建矩阵、无缓存);"
-                      f"chunk 侧默认只搜已索引部分。建议手动触发 fold/重建,别等低峰窗口")
+                      f"chunk 侧不做 delta 向量暴力,但 FTS 词法补召回仍可能命中全库 chunk。"
+                      f"建议手动触发 fold/重建,别等低峰窗口")
             else:
                 print("    索引水位新鲜(无 delta source) ✓")
         # 向量 text 残留快速采样(O(1);确切计数用 --deep)
@@ -453,6 +495,172 @@ def report_scale_profile(local_dir):
             flag = ("   ⚠ 最旧行仍是 text — 有未迁移 JSON 残留,全量矩阵加载=分钟~数十分钟级"
                     "(49w 行实测 ~36min),用 --deep 拿确切计数" if old == "text" else " ✓")
             print(f"    {t}: oldest={old} newest={new}{flag}")
+    finally:
+        conn.close()
+
+
+def report_reasoning_ppr_audit(local_dir, root):
+    """Explain the strict-reasoning hot path without running retrieval/PPR.
+
+    Reasoning mode prints "初检索得到 X 个候选节点" and then immediately runs a
+    deterministic PPR seed pass when GRAPH_PPR_ENABLED=true. A hang after that
+    trace line is therefore usually inside _ppr_retrieve/scale_ppr. This audit
+    reads only DB aggregates and scale-index manifests to show whether each
+    large notebook stays on the persisted index core, falls back to bounded FTS,
+    or has a shape that can still touch full active vectors.
+    """
+    section("strict reasoning / PPR 路径审计(只读,不跑 PPR)")
+    db = os.path.join(local_dir, "silicon_notebook.db")
+    if not os.path.exists(db):
+        print(f"(缺 {db})")
+        return
+    env = _read_env(root)
+    graph_ppr = _env_bool(env, "GRAPH_PPR_ENABLED", True)
+    include_delta = _env_bool(env, "SCALE_SEARCH_INCLUDE_DELTA", False)
+    chunk_ann_enabled = _env_bool(env, "CHUNK_ANN_ENABLED", True)
+    emb_syn = _env_bool(env, "PPR_EMB_SYNONYM_ENABLED", True)
+    print(f"开关: GRAPH_PPR_ENABLED={graph_ppr} "
+          f"SCALE_SEARCH_INCLUDE_DELTA={include_delta} "
+          f"CHUNK_ANN_ENABLED={chunk_ann_enabled} "
+          f"PPR_EMB_SYNONYM_ENABLED={emb_syn}")
+    if graph_ppr:
+        print("提示: reasoning 初检索 trace 之后会先跑一次 PPR seed pass;"
+              "若日志停在「初检索得到...」,重点看本段。")
+    else:
+        print("GRAPH_PPR_ENABLED=false: reasoning 不会进入 PPR seed pass。")
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        print(f"(DB 只读打开失败: {exc})")
+        return
+    try:
+        tiers = {r["id"]: r["tier"] for r in conn.execute(
+            "SELECT id, tier FROM notebooks").fetchall()}
+        base_nbs = [n for n, t in tiers.items() if t == "base"]
+
+        def group_count(sql):
+            try:
+                return {r["nb"]: r["c"] for r in conn.execute(sql).fetchall()}
+            except sqlite3.Error:
+                return {}
+
+        ko = group_count("SELECT notebook_id nb, COUNT(*) c FROM knowledge_objects GROUP BY 1")
+        chunks = group_count("SELECT notebook_id nb, COUNT(*) c FROM chunks GROUP BY 1")
+        rels = group_count("SELECT notebook_id nb, COUNT(*) c FROM knowledge_relations GROUP BY 1")
+        kemb = group_count("SELECT notebook_id nb, COUNT(*) c FROM knowledge_embeddings GROUP BY 1")
+        remb = group_count("SELECT notebook_id nb, COUNT(*) c FROM relation_embeddings GROUP BY 1")
+        cemb = group_count("SELECT notebook_id nb, COUNT(*) c FROM chunk_embeddings GROUP BY 1")
+
+        idx_root = os.path.join(local_dir, "storage", "kg_index")
+
+        def manifest(nb):
+            mpath = os.path.join(idx_root, nb, "manifest.json")
+            if not os.path.exists(mpath):
+                return None
+            try:
+                with open(mpath, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:  # noqa: BLE001
+                return {"_broken": True, "_path": mpath}
+
+        def pct(a, b):
+            return "n/a" if not b else f"{(100.0 * a / b):.1f}%"
+
+        def graph_size_gb(nb):
+            gpath = os.path.join(idx_root, nb, "graph.npz")
+            return os.path.getsize(gpath) / 1e9 if os.path.exists(gpath) else 0.0
+
+        ordered = sorted(tiers, key=lambda n: -(ko.get(n, 0) + chunks.get(n, 0)))
+        shown = 0
+        for nb in ordered:
+            total = ko.get(nb, 0) + chunks.get(nb, 0)
+            if total < BIG_NB_ROWS:
+                continue
+            shown += 1
+            mf = manifest(nb)
+            has_self_idx = bool(mf and not mf.get("_broken"))
+            print(f"\n  active={nb} tier={tiers.get(nb, 'personal')} "
+                  f"KO={ko.get(nb, 0)} chunks={chunks.get(nb, 0)} "
+                  f"relations={rels.get(nb, 0)}")
+
+            if not has_self_idx:
+                if mf and mf.get("_broken"):
+                    print(f"    ⚠ self scale index manifest 损坏: {mf.get('_path')}")
+                else:
+                    print("    ⚠ self 无 scale index: KG 初检索在大库下会拒绝暴力,"
+                          "改走 FTS 有界兜底; PPR 会依赖 base participant,"
+                          "否则拒绝 rustworkx 全图 fallback")
+            else:
+                print(f"    self index: n_nodes={mf.get('n_nodes')} "
+                      f"n_kg_nodes={mf.get('n_kg_nodes')} n_chunks={mf.get('n_chunks')} "
+                      f"n_ann={mf.get('n_ann')}({pct(int(mf.get('n_ann', 0)), kemb.get(nb, 0))} of knowledge_embeddings) "
+                      f"chunk_ann={mf.get('n_chunk_ann', 0)} relation_ann={mf.get('n_relation_ann', 0)} "
+                      f"graph.npz={graph_size_gb(nb):.2f}GB")
+                if int(mf.get("n_ann", 0)) < kemb.get(nb, 0):
+                    print("    注意: KG ANN 只覆盖 manifest.n_ann 这部分 embedding。"
+                          "SCALE_SEARCH_INCLUDE_DELTA=false 时,语义 KG 检索/PPR self core"
+                          "按设计不搜索未入 ANN 的对象。")
+                if chunk_ann_enabled and not mf.get("has_chunk_ann"):
+                    print("    ⚠ self index 缺 chunk_ann: PPR chunk seed 会走 FTS 有界降级,"
+                          "不会全量向量扫,但召回/延迟会受 FTS 影响")
+                elif chunk_ann_enabled and mf.get("has_chunk_ann"):
+                    print("    chunk seed: 语义候选走 chunk_ann;另有 FTS 词法补召回"
+                          "(有界,但可命中未进 chunk_ann 的 chunk)")
+                if not mf.get("has_relation_ann") and remb.get(nb, 0):
+                    print("    ⚠ self index 缺 relation_ann: relation 检索在大库冷矩阵时会跳过;"
+                          "若进程里关系矩阵已暖,仍可能检索全量 relation_embeddings")
+                if include_delta:
+                    delta_ko = max(0, ko.get(nb, 0) - int(mf.get("n_kg_nodes", 0)))
+                    delta_chunks = max(0, chunks.get(nb, 0) - int(mf.get("n_chunks", 0)))
+                    print(f"    ⚠ SCALE_SEARCH_INCLUDE_DELTA=true: 查询会尝试纳入索引水位后的"
+                          f" delta(约 KO={delta_ko}, chunks={delta_chunks}),这会破坏"
+                          "「只搜已索引部分」的性能假设")
+                else:
+                    print("    delta 策略: SCALE_SEARCH_INCLUDE_DELTA=false → "
+                          "KG/PPR self delta 不暴力补搜,等待 fold/重建进索引")
+
+            participants = []
+            for bid in base_nbs:
+                if bid == nb:
+                    continue
+                bmf = manifest(bid)
+                if bmf and not bmf.get("_broken"):
+                    participants.append((bid, bmf))
+            if has_self_idx:
+                participants.append((nb, mf))
+            if not participants:
+                print("    PPR participants=0 → scale_ppr no_participants;"
+                      "大库会直接 ppr_fallback_refused,不再 rustworkx 全图构建")
+                continue
+
+            p_nodes = sum(int(pm.get("n_nodes", 0)) for _pid, pm in participants)
+            p_graph_gb = sum(graph_size_gb(pid) for pid, _pm in participants)
+            p_desc = ", ".join(
+                f"{pid}{'(self)' if pid == nb else '(base)'}:{pm.get('n_nodes')} nodes"
+                for pid, pm in participants)
+            print(f"    PPR participants: {p_desc}")
+            print(f"    PPR indexed core estimate: nodes={p_nodes} graph.npz={p_graph_gb:.2f}GB; "
+                  "personalized_ppr 会在这个 CSR core 上做最多 100 次稀疏迭代"
+                  "(这是 indexed-only,但不是 top-k 子图)")
+
+            external = [pid for pid, _pm in participants if pid != nb]
+            if emb_syn and external and total >= BIG_NB_ROWS:
+                print("    ⚠ 潜在慢点: active 大库 + 外部 base participant + "
+                      "PPR_EMB_SYNONYM_ENABLED=true 时,_scale_xlayer_bridge_edges "
+                      "会为跨库 synonym bridge 加载 active 的全量 knowledge_embeddings。"
+                      "若卡在初检索 trace 之后且 CPU/内存飙升,优先核查这里。")
+            elif emb_syn and external:
+                print("    cross-layer bridge: 会加载 active embedding 域与外部 base ANN 对齐;"
+                      "active 若是小个人库通常可接受。")
+            if len(participants) > 1:
+                print("    cold-cache 组合图: 多 participant 会 reconstruct/splice CSR;"
+                      "首次查询慢、后续同版本应由 vector_cache 命中。")
+            if shown >= 12:
+                break
+        if shown == 0:
+            print("没有超过大库阈值的 notebook。")
     finally:
         conn.close()
 
@@ -504,16 +712,12 @@ def report_artifacts(local_dir, deep):
 
 def report_env(root):
     section(".env 关键开关(值含 KEY/TOKEN/PASSWORD/SECRET 的只报已配置)")
-    path = os.path.join(root, ".env")
-    if not os.path.exists(path):
-        # 双 .local 同款坑:老部署 .env 可能在 backend/ 下
-        alt = os.path.join(root, "backend", ".env")
-        if os.path.exists(alt):
-            path = alt
-            print(f"(根下无 .env,改用 {alt})")
-        else:
-            print("(无 .env)")
-            return
+    path = _env_path(root)
+    if not path:
+        print("(无 .env)")
+        return
+    if path == os.path.join(root, "backend", ".env"):
+        print(f"(根下无 .env,改用 {path})")
     interesting = (
         "RELATION_RETRIEVAL_ENABLED", "CHUNK_KG_OVERLAY_ENABLED", "CHUNK_ANN_ENABLED",
         "CHUNK_BRUTEFORCE_MAX_CHUNKS",
@@ -531,13 +735,9 @@ def report_env(root):
         "SCALE_IDX_CACHE_MAX", "EDGE_CENTRALITY_MAX_NODES", "HNSW_EF_CONSTRUCTION",
         "CHUNK_RECALL", "SILICON_NOTEBOOK_STORAGE_DIR", "DATABASE_URL",
     )
+    raw = _read_env(root)
     seen = {}
-    for line in open(path, encoding="utf-8", errors="replace"):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
+    for k, v in raw.items():
         if any(m in k.upper() for m in SECRET_MARKERS):
             seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
         elif k in interesting:
@@ -568,6 +768,7 @@ def main():
     report_events(local_dir, since)
     report_llm(local_dir, since)
     report_scale_profile(local_dir)
+    report_reasoning_ppr_audit(local_dir, root)
     report_artifacts(local_dir, args.deep)
     report_env(root)
     print("\n=== 完 — 把以上整段输出贴回即可 " + "=" * 40)

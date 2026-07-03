@@ -72,6 +72,20 @@ export function referenceByAnchorKey(references: AnswerReference[]): Record<stri
   );
 }
 
+export function referenceByCitationKey(references: AnswerReference[]): Record<string, AnswerReference> {
+  const entries: Array<[string, AnswerReference]> = [];
+  for (const reference of references) {
+    if (reference.anchor?.key) {
+      entries.push([reference.anchor.key, reference]);
+    }
+    const displayNumber = reference.displayLabel.match(/^\[(\d+)\]$/)?.[1];
+    if (displayNumber) {
+      entries.push([displayNumber, reference]);
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
 export function renderTextWithReferenceNumbers(text: string, references: AnswerReference[]): string {
   const byKey = referenceByAnchorKey(references);
   return text.replace(/\[(k\d+)\]/g, (token, key: string) => byKey[key]?.displayLabel ?? token);

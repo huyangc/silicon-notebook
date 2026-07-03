@@ -44,6 +44,25 @@ test("引用标记渲染为 cite: 链接(urlTransform 保留 cite: 协议)", () 
   assert.match(html, />\[1\]</);
 });
 
+test("数字复合引用渲染为多个 cite 链接", () => {
+  const refs = {
+    1: { id: "r1", displayLabel: "[1]" },
+    2: { id: "r2", displayLabel: "[2]" },
+    3: { id: "r3", displayLabel: "[3]" },
+  };
+  const html = render("结论来自多个来源 [1, 2, 3]。", refs);
+  assert.match(html, /href="cite:1"/);
+  assert.match(html, /href="cite:2"/);
+  assert.match(html, /href="cite:3"/);
+});
+
+test("数字复合引用中有未命中编号时保持原文", () => {
+  const refs = { 1: { id: "r1", displayLabel: "[1]" } };
+  const html = render("普通数组或缺失引用 [1, 99] 不应半转换。", refs);
+  assert.match(html, /\[1, 99\]/);
+  assert.doesNotMatch(html, /href="cite:1"/);
+});
+
 test("未命中的 key 原样保留为文本", () => {
   const html = render("见 [k9] 处", {});
   assert.match(html, /\[k9\]/);
