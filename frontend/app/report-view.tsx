@@ -34,11 +34,13 @@ export type ReportSummaryT = {
   section_count: number;
   created_at: string;
   created_by: string;
+  depth?: number;
 };
 
 export type ReportDetailT = ReportSummaryT & {
   outline: { title: string; scope: string; sub_queries: string[] }[];
   sections: { title: string; markdown: string; grounded: boolean; failed?: boolean }[];
+  section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
   content_md: string;
   references: {
@@ -56,6 +58,16 @@ export type ReportDetailT = ReportSummaryT & {
 
 // 终态判定:pending/running 之外一律视为终态,未知状态不会无限轮询。
 const isReportActive = (status: string) => status === "pending" || status === "running";
+
+// 智能滑块(仿 Claude Effort「更快 ←→ 更聪明」):每节 reflect 步上限。
+// 档位越高每节深挖越充分但越慢;后端 create_report 会 clamp 到 [1,16]。
+const DEPTHS = [1, 2, 4, 8, 16];
+const DEPTH_LABELS = ["最快", "快", "均衡", "深入", "最深"];
+
+// 节内进度:phase → 图标类型。完成=对勾,失败=叹号,其余进行中=点动画。
+type SectionPhaseIcon = "done" | "failed" | "active";
+const sectionPhaseIcon = (phase: string): SectionPhaseIcon =>
+  phase === "完成" ? "done" : phase === "失败" ? "failed" : "active";
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "排队中",
@@ -205,7 +217,7 @@ export interface ReportsPanelProps {
   notebookId: string;
   listReports: (nb: string) => Promise<ReportSummaryT[]>;
   getReport: (nb: string, rid: string) => Promise<ReportDetailT>;
-  createReport: (nb: string, question: string) => Promise<{ report_id: string }>;
+  createReport: (nb: string, question: string, depth: number) => Promise<{ report_id: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
   setToast: (message: string) => void;
@@ -223,6 +235,7 @@ export function ReportsPanel({
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
   const [question, setQuestion] = useState("");
+  const [depthIdx, setDepthIdx] = useState(1); // 默认「快」(depth=2)
   const [creating, setCreating] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -293,7 +306,7 @@ export function ReportsPanel({
     if (!q || creating) return;
     setCreating(true);
     try {
-      await createReport(notebookId, q);
+      await createReport(notebookId, q, DEPTHS[depthIdx]);
       setQuestion("");
       setToast("已开始生成深度报告（后台进行，约 5–15 分钟）");
       setReports(await listReports(notebookId));
@@ -401,7 +414,25 @@ export function ReportsPanel({
         {isReportActive(active.status) && (
           <div className="report-running-hint">
             <p>正在后台生成，此页每 6 秒自动刷新；也可以先去其他 tab，随时回来查看。</p>
-            {active.outline.length > 0 && (
+            {active.section_status && active.section_status.length > 0 ? (
+              <ul className="report-section-status">
+                {active.section_status.map((s, index) => {
+                  const icon = sectionPhaseIcon(s.phase);
+                  return (
+                    <li className="report-section-row" key={`${s.title}-${index}`}>
+                      <span className={`report-section-icon ${icon}`} aria-hidden>
+                        {icon === "done" ? "✓" : icon === "failed" ? "!" : null}
+                      </span>
+                      <span className="report-section-title" title={s.title}>{s.title}</span>
+                      <span className="report-section-phase">
+                        {s.phase}
+                        {s.phase === "深挖" && s.step > 0 && ` 第${s.step}步`}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : active.outline.length > 0 ? (
               <>
                 <span className="report-outline-caption">研究大纲（{active.outline.length} 节）</span>
                 <ol className="report-outline">
@@ -410,6 +441,8 @@ export function ReportsPanel({
                   ))}
                 </ol>
               </>
+            ) : (
+              active.progress && <p className="report-running-progress">{active.progress}</p>
             )}
           </div>
         )}
@@ -436,6 +469,27 @@ export function ReportsPanel({
           disabled={creating}
           onChange={(event) => setQuestion(event.target.value)}
         />
+        <div className="report-depth">
+          <div className="report-depth-head">
+            <span className="report-depth-caption">研究深度</span>
+            <span className="report-depth-current">{DEPTH_LABELS[depthIdx]}</span>
+          </div>
+          <input
+            className="report-depth-slider"
+            type="range"
+            min={0}
+            max={DEPTHS.length - 1}
+            step={1}
+            value={depthIdx}
+            disabled={creating}
+            aria-label="研究深度"
+            onChange={(event) => setDepthIdx(Number(event.target.value))}
+          />
+          <div className="report-depth-ends">
+            <span>更快</span>
+            <span>更聪明</span>
+          </div>
+        </div>
         <div className="report-compose-actions">
           <span className="report-compose-hint">后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页</span>
           <button
