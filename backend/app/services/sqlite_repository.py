@@ -7439,6 +7439,14 @@ class SQLiteRepository:
             vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
         return vec
 
+    def _runtime_dim(self) -> int:
+        """本 repo 生效的运行时截断维(读 self.settings,非全局 get_settings)。
+        build_matrix 内部裸调 resolve_runtime_dim() 读全局单例,生产两者同一对象,
+        但测试/多实例下 self.settings 才是真相 —— 建 ANN/矩阵的 build_matrix 调用
+        应显式传本值,使工件维度由本 repo 配置决定(见 T5 manifest 真相化)。"""
+        from app.services.vector_index import resolve_runtime_dim
+        return resolve_runtime_dim(self.settings)
+
     def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
                          with_vectors: bool = True) -> List[dict]:
         from app.services.vector_index import decode_vector
@@ -7975,7 +7983,8 @@ class SQLiteRepository:
         labels = getattr(idx, _labels_by_kind[kind], None)
         if not path or not labels:
             return None
-        dim = int(idx.manifest.get("dim", self.settings.embed_dim))
+        from app.services.vector_index import resolve_runtime_dim as _rrd
+        dim = int(idx.manifest.get("dim", _rrd(self.settings) or self.settings.embed_dim))
         try:
             h = hnswlib.Index(space="cosine", dim=dim)
             h.load_index(path, max_elements=len(labels))
@@ -8444,7 +8453,7 @@ class SQLiteRepository:
                 rows = db.execute(
                     "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id=?",
                     (notebook_id,)).fetchall()
-                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint)
+                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint, runtime_dim=self._runtime_dim())
 
         ann_ids_raw, ann_matrix_raw = _timed("kg_matrix", _kg_matrix)
         ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
@@ -8542,7 +8551,7 @@ class SQLiteRepository:
                 rows = db.execute(
                     "SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE notebook_id=?",
                     (notebook_id,)).fetchall()
-                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint)
+                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint, runtime_dim=self._runtime_dim())
 
         c_ids_raw, c_mat_raw = _timed("chunk_matrix", _chunk_matrix)
         chunk_ann_labels = list(c_ids_raw) if c_ids_raw else []
@@ -8567,7 +8576,7 @@ class SQLiteRepository:
                 rows = db.execute(
                     "SELECT relation_id AS vid, vector FROM relation_embeddings WHERE notebook_id=?",
                     (notebook_id,)).fetchall()
-                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint)
+                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint, runtime_dim=self._runtime_dim())
 
         rel_ids_raw, rel_mat_raw = _timed("relation_matrix", _relation_matrix)
         relation_ann_labels = list(rel_ids_raw) if rel_ids_raw else []
@@ -8591,9 +8600,15 @@ class SQLiteRepository:
             watermark_sources = sorted(
                 r["id"] for r in db.execute(
                     "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall())
+        # manifest dim = 工件实际维(截断后的 ann_vectors 列数),不信配置 —— 运行时
+        # 截断开启时三 ANN 均建在同一 runtime_dim 空间,manifest 记录真相以便 load/
+        # 查询侧的 dim 守卫据实比较(T5;空矩阵回退到运行时生效维)。
+        from app.services.vector_index import resolve_runtime_dim as _rrd
+        built_dim = (int(ann_vectors.shape[1]) if getattr(ann_vectors, "size", 0)
+                     else (_rrd(self.settings) or self.settings.embed_dim))
         manifest = {
             "version": self._scale_index_version(notebook_id),
-            "dim": self.settings.embed_dim,
+            "dim": built_dim,
             "n_nodes": len(node_ids),
             "n_kg_nodes": n_kg,
             "n_chunks": len(chunk_ids),
@@ -8652,6 +8667,10 @@ class SQLiteRepository:
             "latency_ms": total_ms,
         })
         _notify_stage("total", total_ms)
+        # full rebuild 原地覆盖磁盘工件,但热进程的 _scale_idx_cache 仍持旧实例
+        # (旧维/旧水位)——不失效则「重建后同进程看不见新索引」(fold 在 :8808
+        # 已 pop,build 此前漏了,已核实缺陷)。pop → 下次 _scale_index 冷 reload 新工件。
+        self._scale_idx_cache.pop(notebook_id, None)
         # Return a manifest dict enriched with persist+total (in-memory only;
         # the on-disk manifest.json written above intentionally only has the 7
         # pre-persist stages, since persist's own duration can't be known
@@ -8674,6 +8693,17 @@ class SQLiteRepository:
 
         idx = self._scale_index(notebook_id, allow_stale=True)
         if idx is None:
+            return self.build_scale_index(notebook_id)
+        # 运行时维守卫:旧索引建在 manifest.dim 空间,fold 的 delta 向量经 build_matrix
+        # 已截断到运行时维 —— 两者不符则 add_items 会 hnswlib 硬错(被 _run_scale_op
+        # 吞成一行日志,delta 积成山复现假死事故)。拒 fold + 发事件 + 升 full 重建。
+        from app.services.vector_index import resolve_runtime_dim as _rrd
+        _eff_dim = _rrd(self.settings) or self.settings.embed_dim
+        if int(idx.manifest.get("dim", _eff_dim)) != int(_eff_dim):
+            self.event_log.emit({
+                "kind": "scale_fold_refused", "notebook_id": notebook_id,
+                "reason": "dim_mismatch", "manifest_dim": int(idx.manifest.get("dim", 0)),
+                "runtime_dim": int(_eff_dim)})
             return self.build_scale_index(notebook_id)
         delta = self._index_delta(notebook_id)
         if not delta["delta_sources"]:
@@ -8714,7 +8744,9 @@ class SQLiteRepository:
             np.save(os.path.join(tmp_dir, "idf.npy"), np.asarray(idf, dtype=np.float32))
             np.save(os.path.join(tmp_dir, "chunk_index.npy"), np.asarray(chunk_index, dtype=np.int32))
 
-            dim = int(idx.manifest.get("dim", self.settings.embed_dim))
+            # dim 失配已在方法入口拒 fold(转 build);到此 manifest.dim == 生效维,
+            # fallback 用运行时生效维(旧 manifest 无 dim 键 + 运行时开的边角)。
+            dim = int(idx.manifest.get("dim", self._runtime_dim() or self.settings.embed_dim))
 
             def _delta_vecs(table, col, ids):
                 if not ids:
@@ -8729,7 +8761,7 @@ class SQLiteRepository:
                                     f"WHERE notebook_id=? AND {col} IN ({ph})",
                                     (notebook_id, *batch)).fetchall():
                                 yield r["vid"], r["vector"]
-                return build_matrix(_rows())
+                return build_matrix(_rows(), runtime_dim=self._runtime_dim())
 
             # ANN(KG 对象):增量 add delta 对象向量
             kg_vids, kg_mat = _delta_vecs("knowledge_embeddings", "object_id", list(kg_set))
@@ -8901,9 +8933,19 @@ class SQLiteRepository:
                 manifest = json.load(fh)
             version_stale = manifest.get("version") != self._scale_index_version(notebook_id)
             delta_over = delta["delta_chunks"] > self.settings.index_stale_delta_threshold
-            base["state"] = "stale" if (version_stale or delta_over) else "indexed"
+            # 运行时维切换后旧索引(manifest.dim ≠ 生效维)必须重建:ANN 建在旧空间,
+            # 截断后的查询向量与之维度不符 → knn_query 硬错被吞成 fail-open 降级。
+            # 判 stale 并带 reason,前端徽章据此提示重建(T6)。
+            from app.services.vector_index import resolve_runtime_dim as _rrd
+            eff_dim = _rrd(self.settings) or self.settings.embed_dim
+            dim_stale = int(manifest.get("dim", eff_dim)) != int(eff_dim)
+            base["state"] = "stale" if (version_stale or delta_over or dim_stale) else "indexed"
+            if dim_stale:
+                base["stale_reason"] = "dim_mismatch"
             base.update({
-                "stale": bool(version_stale or delta_over),
+                "stale": bool(version_stale or delta_over or dim_stale),
+                "manifest_dim": int(manifest.get("dim", 0)),
+                "runtime_dim": int(eff_dim),
                 "n_nodes": int(manifest.get("n_nodes", 0)),
                 "n_chunks": int(manifest.get("n_chunks", 0)),
                 "n_ann": int(manifest.get("n_ann", 0)),
@@ -8924,6 +8966,14 @@ class SQLiteRepository:
         if mode not in ("fold", "full"):
             mode = "fold" if self._scale_index(notebook_id, allow_stale=True) is not None else "full"
         if mode == "fold":
+            # 运行时维切换:旧索引 manifest.dim ≠ 生效维 → fold 会把截断后的 delta
+            # 向量 add 进旧空间(硬错/污染)→ 强制 full 在新空间整体重建。
+            idx = self._scale_index(notebook_id, allow_stale=True)
+            if idx is not None:
+                from app.services.vector_index import resolve_runtime_dim as _rrd
+                eff_dim = _rrd(self.settings) or self.settings.embed_dim
+                if int(idx.manifest.get("dim", eff_dim)) != int(eff_dim):
+                    return "full"
             try:
                 delta = self._index_delta(notebook_id)
                 if len(delta["delta_sources"]) > self.settings.scale_fold_max_delta_sources:
