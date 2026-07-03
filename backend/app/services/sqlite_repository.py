@@ -10498,13 +10498,17 @@ class SQLiteRepository:
         # 库曾因 .env 丢失静默走到这里,单问磨半小时「思考中」。降级为 FTS 词法
         # 候选 + 有界打分(候选内仍关键词+语义融合),发 chunk_bruteforce_skipped
         # 事件;真解=建 scale 索引(chunk ANN)。小库/关守卫(0)字节不变。
+        # 大库暴力守卫(统一「大库」定义 = not copyable,与其余 5 条检索路径一把尺子):
+        # 大库无论 chunk 多少都强制走索引/FTS 降级,绝不全表暴力。chunk 计数阈值
+        # chunk_bruteforce_max_chunks 作叠加下限保留(小库 chunk 极多也降级)。
+        large = not self.notebook_copy_stats(notebook_id)["copyable"]
         threshold = self.settings.chunk_bruteforce_max_chunks
-        if threshold > 0:
+        if large or threshold > 0:
             with self._connect() as db:
                 n_chunks = db.execute(
                     "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id = ?",
                     (notebook_id,)).fetchone()["c"]
-            if n_chunks > threshold:
+            if large or n_chunks > threshold:
                 return self._retrieve_chunks_fts_degraded(
                     notebook_id, query, query_vector, recall, n_chunks)
         # ↓ 现有暴力路径保持不变
