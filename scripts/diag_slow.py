@@ -33,8 +33,9 @@ SECRET_MARKERS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
 INTEREST_KINDS = (
     "scale_ppr_bailout", "ppr_fallback_refused", "graph_walk_refused",
     "relation_scoring_skipped", "tier2_skipped", "chunk_bruteforce_skipped",
-    "kg_bruteforce_refused", "element_scoring_skipped", "scale_index_build",
-    "scale_ppr_stage", "model_error", "ask_stage", "pipeline",
+    "kg_bruteforce_refused", "element_scoring_skipped", "dim_mismatch",
+    "scale_fold_refused", "scale_index_build", "scale_ppr_stage",
+    "model_error", "ask_stage", "pipeline",
 )
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
 BIG_NB_ROWS = 20_000
@@ -254,7 +255,8 @@ def report_events(local_dir, since):
             elif k in ("ppr_fallback_refused", "graph_walk_refused",
                        "relation_scoring_skipped", "tier2_skipped",
                        "chunk_bruteforce_skipped", "kg_bruteforce_refused",
-                       "element_scoring_skipped"):
+                       "element_scoring_skipped", "dim_mismatch",
+                       "scale_fold_refused"):
                 refuse_sites[f"{k}:{e.get('site', e.get('reason', ''))}"] += 1
             elif k == "model_error":
                 key = f"{e.get('stage','?')}/{e.get('model','?')}"
@@ -377,12 +379,14 @@ def _sample_typeof(conn, table):
     return out  # [oldest, newest]
 
 
-def report_scale_profile(local_dir):
+def report_scale_profile(local_dir, runtime_dim=0):
     """per-notebook 规模画像 + scale 索引健康诊断(本段是「严格推理慢」的主证据):
     - 无索引的大库 → KG 对象检索走全量暴力(json 解析 55w payload+全量分词+GB 级矩阵)
     - 索引在但 delta 大 → KG 对象侧 delta 每次查询无条件暴力(chunk 侧默认关,对象侧没开关)
-    - manifest dim 与库内向量维度失配 → ANN 静默失效,悄悄回退全量
+    - manifest dim 失配 → ANN 静默失效,悄悄回退全量(runtime_dim>0 时判据=manifest应==运行时维,
+      库内向量恒为存储维属正常)
     只读、每查询都是聚合/LIMIT 1,秒级。"""
+    _runtime_dim = runtime_dim
     section("per-notebook 规模画像 + scale 索引诊断")
     db = os.path.join(local_dir, "silicon_notebook.db")
     if not os.path.exists(db):
@@ -458,12 +462,19 @@ def report_scale_profile(local_dir):
             if not mf.get("has_chunk_ann"):
                 print("    ⚠ 索引无 chunk_ann → PPR 种子/chunk 检索对全部 chunk 逐条分词打分"
                       "(每次查询重付)")
-            # 维度失配探测:ANN 静默失效的头号来源(换 embed 模型后没重建索引)
+            # 维度失配探测:ANN 静默失效的头号来源(换 embed 模型后没重建索引)。
+            # 运行时截断(EMBED_RUNTIME_DIM)开启后,库内向量恒为存储维(如 4096)而
+            # manifest/查询恒为运行时维(如 1024)—— 此为**健康**,不是失配。判据改为
+            # 「manifest dim 应 == 运行时生效维」,而非 == 库内存储维。
             r = conn.execute(
                 "SELECT vector FROM knowledge_embeddings WHERE notebook_id=? LIMIT 1",
                 (nb,)).fetchone()
             live_dim = _vec_dim(r["vector"]) if r else None
-            if dim and live_dim and int(dim) != int(live_dim):
+            rt = _runtime_dim  # 运行时生效维(0=关,见 report_env 解析)
+            if rt and dim and int(dim) != int(rt):
+                print(f"    ⚠⚠ 维度失配: manifest dim={dim} vs 运行时维 EMBED_RUNTIME_DIM={rt} → "
+                      f"索引建在旧空间,ANN 每次静默跳过 — 需 mode=full 重建")
+            elif not rt and dim and live_dim and int(dim) != int(live_dim):
                 print(f"    ⚠⚠ 维度失配: manifest dim={dim} vs 库内向量 dim={live_dim} → "
                       f"ANN 每次静默跳过(无事件!),KG 对象检索悄悄回退全量暴力 — 需重建索引")
             # 水位 delta:对象侧 delta 暴力没有开关,每次查询都付
@@ -710,6 +721,22 @@ def report_artifacts(local_dir, deep):
         print(f"  (DB 只读打开失败: {exc})")
 
 
+def _read_env_int(root, key):
+    """从 root/.env(或 backend/.env)读一个整型开关;缺失/非法 → 0。"""
+    for cand in (os.path.join(root, ".env"), os.path.join(root, "backend", ".env")):
+        if not os.path.exists(cand):
+            continue
+        for line in open(cand, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                try:
+                    return int(line.split("=", 1)[1].strip())
+                except ValueError:
+                    return 0
+        return 0
+    return 0
+
+
 def report_env(root):
     section(".env 关键开关(值含 KEY/TOKEN/PASSWORD/SECRET 的只报已配置)")
     path = _env_path(root)
@@ -730,7 +757,7 @@ def report_env(root):
         "REASONING_MAX_STEPS", "REASONING_STALE_LIMIT", "REASONING_MAX_SUBQUERIES",
         "REASONING_TIMEOUT_SECONDS", "REASONING_QUOTA_ENABLED",
         "NOTEBOOK_COPY_MAX_BYTES", "NOTEBOOK_COPY_MAX_ROWS",
-        "KG_AUTO_EXTRACT", "EMBED_MODEL", "EMBED_DIM",
+        "KG_AUTO_EXTRACT", "EMBED_MODEL", "EMBED_DIM", "EMBED_RUNTIME_DIM",
         "OPENAI_COMPAT_MODEL", "REASONING_LLM_MODEL", "VECTOR_CACHE_MAX_ENTRIES",
         "SCALE_IDX_CACHE_MAX", "EDGE_CENTRALITY_MAX_NODES", "HNSW_EF_CONSTRUCTION",
         "CHUNK_RECALL", "SILICON_NOTEBOOK_STORAGE_DIR", "DATABASE_URL",
@@ -767,7 +794,7 @@ def main():
     report_requests(local_dir, since, args.slow_ms)
     report_events(local_dir, since)
     report_llm(local_dir, since)
-    report_scale_profile(local_dir)
+    report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"))
     report_reasoning_ppr_audit(local_dir, root)
     report_artifacts(local_dir, args.deep)
     report_env(root)

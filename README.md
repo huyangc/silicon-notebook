@@ -76,7 +76,12 @@ retrieval, no LLM extraction or answers). To enable full functionality, set at m
   `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL`; any OpenAI-compatible endpoint.
 - **Embeddings** (semantic retrieval; otherwise keyword-only) — `EMBED_PROVIDER=dashscope`
   plus `EMBED_MODEL` / `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM` (must equal the
-  model's output dimension).
+  model's output dimension). Optional `EMBED_RUNTIME_DIM` (default `0` = off) truncates
+  the similarity space to its first N dimensions + re-normalize (MRL) — cuts in-process
+  matrix / ANN memory ~`EMBED_DIM/N`× while keeping the native vectors on disk as the
+  source of truth. Switching it on/off requires rebuilding scale indexes; see
+  [docs/runtime-dim-truncation-runbook.md](docs/runtime-dim-truncation-runbook.md). Never
+  lower `EMBED_DIM` to shrink vectors — that discards every stored vector as wrong-dim.
 - **PDF fidelity** (optional) — a MinerU endpoint, see [PDF parsing with MinerU](#pdf-parsing-with-mineru);
   leave `MINERU_MODE=off` for the pypdf text fallback.
 
