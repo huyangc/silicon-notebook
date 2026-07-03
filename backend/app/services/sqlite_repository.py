@@ -8009,23 +8009,59 @@ class SQLiteRepository:
             return None
 
     def _scale_index(self, notebook_id: str, allow_stale: bool = False):
-        """Return a valid ScaleIndex (manifest version == current DB version) or None.
-        Process-cached: returns the cached instance when the version still matches.
-        allow_stale=True: 也返回磁盘上已存在但版本漂移的索引(调用方用 ⊕-delta 路径
-        兜新鲜度);stale 实例不写进进程缓存(缓存保持版本精确)。"""
+        """Return a valid ScaleIndex or None.
+
+        exact(allow_stale=False):manifest.version == 当前 DB 版本 cur 才算有效,
+        否则 None——viz/status 等要求与 DB 强一致的调用方语义不变。
+
+        allow_stale=True(检索热路径「取磁盘已索引部分」):按**磁盘索引身份**
+        (manifest.json 的 version)缓存复用。磁盘索引只在 rebuild/fold 时换,与
+        kg_mutation_seq(每写 bump)无关——所以摄取造成 cur 漂移时,不再每查询重建
+        stale 实例 + 重载 ~10GB ANN handle,而是复用同一进程缓存实例(handle memoize
+        存活)。cold-load 走 per-nb 单飞锁,防 N 个并发查询各载 8GB 造成内存尖峰。
+        stale-serve 与 scale_search_include_delta 无关地正确:ANN 核=磁盘已索引部分,
+        flag=ON 时 delta 新鲜度来自检索侧 ⊕delta 暴力块,不来自这个核。"""
         from app.services.kg import scale_index as si
         out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
         cur = self._scale_index_version(notebook_id)
         cached = self._scale_idx_cache.get(notebook_id)
         if cached is not None and cached.manifest.get("version") == cur:
             return cached
-        idx = si.load_scale_index(out_dir)
-        if idx is None:
+        if not allow_stale:
+            # version-exact:字节不变——load,manifest==cur 才 cache 并返回,否则 None。
+            idx = si.load_scale_index(out_dir)
+            if idx is None:
+                return None
+            if idx.manifest.get("version") == cur:
+                self._scale_idx_cache[notebook_id] = idx
+                return idx
             return None
-        if idx.manifest.get("version") == cur:
+        # allow_stale:按磁盘身份复用。cached 若仍是当前磁盘索引(其 version == 磁盘
+        # manifest version)→ 直接返回(handle 存活,零重载)。
+        disk_ver = self._read_manifest_version(out_dir)
+        if disk_ver is None:
+            return None   # 无索引
+        if cached is not None and cached.manifest.get("version") == disk_ver:
+            return cached
+        # cold:单飞加载。全局锁只护锁表,load 在 per-nb 锁内、不持全局锁。
+        with self._scale_idx_load_lock:
+            nb_lock = self._scale_idx_load_locks.get(notebook_id)
+            if nb_lock is None:
+                nb_lock = threading.Lock()
+                self._scale_idx_load_locks[notebook_id] = nb_lock
+        with nb_lock:
+            # double-check:等锁期间别的线程可能已加载好当前磁盘索引。
+            cached = self._scale_idx_cache.get(notebook_id)
+            disk_ver = self._read_manifest_version(out_dir)
+            if disk_ver is None:
+                return None
+            if cached is not None and cached.manifest.get("version") == disk_ver:
+                return cached
+            idx = si.load_scale_index(out_dir)
+            if idx is None:
+                return None
             self._scale_idx_cache[notebook_id] = idx
             return idx
-        return idx if allow_stale else None
 
     def _open_scale_ann(self, idx, kind: str):
         """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例(进程缓存,版本变→新实例→重开)。

@@ -43,3 +43,91 @@ def test_read_manifest_version(repo, tmp_path):
 def test_load_lock_table_present(repo):
     assert isinstance(repo._scale_idx_load_lock, threading.Lock().__class__)
     assert repo._scale_idx_load_locks == {}
+
+
+def _insert_source_chunk(repo, nb_id, sid, cid, text, day):
+    now = f"2026-07-{day:02d}T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                   (sid, nb_id, "t", "md", "ready", now, now))
+        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+                   (cid, nb_id, sid, text, "", "[]", now))
+        v = repo.embedder.embed_query(text)
+        db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                   (cid, nb_id, json.dumps(v), now))
+    # Raw SQL above bypasses the real chunk-ingest path, which unconditionally
+    # bumps kg_mutation_seq (sqlite_repository.py ~:3487) precisely so
+    # _scale_index_version drifts on any chunk write. Without this explicit
+    # bump, this helper's inserts are invisible to _scale_index_version's
+    # seq-memoized fast path and `cur` would never diverge from the watermark
+    # build's manifest version — defeating the whole point of "insert a delta
+    # source after build_scale_index".
+    repo._mark_unified_kg_dirty(nb_id)
+
+
+def _indexed_nb_with_delta(repo):
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    _insert_source_chunk(repo, nb.id, "sA", "cA", "alpha", 1)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)                 # watermark={sA}; manifest.version=V0
+    _insert_source_chunk(repo, nb.id, "sB", "cB", "bravo", 2)  # delta → cur != V0
+    return nb
+
+
+def test_stale_index_reused_across_queries(repo, monkeypatch):
+    """摄取造成 cur != manifest.version 时,多次 allow_stale 调用只 load 一次磁盘。"""
+    nb = _indexed_nb_with_delta(repo)
+    import app.services.kg.scale_index as si
+    calls = {"n": 0}
+    real = si.load_scale_index
+    monkeypatch.setattr(si, "load_scale_index", lambda d: (calls.__setitem__("n", calls["n"] + 1), real(d))[1])
+    a = repo._scale_index(nb.id, allow_stale=True)
+    b = repo._scale_index(nb.id, allow_stale=True)
+    c = repo._scale_index(nb.id, allow_stale=True)
+    assert a is not None and a is b is c          # 同一实例复用
+    assert calls["n"] == 1                         # 只从磁盘 load 一次
+
+
+def test_exact_caller_unchanged_on_delta(repo):
+    """version-exact 调用方(无 allow_stale)在有 delta 时仍返 None,行为不变。"""
+    nb = _indexed_nb_with_delta(repo)
+    assert repo._scale_index(nb.id) is None
+
+
+def test_stale_reload_after_disk_rebuild(repo):
+    """磁盘 manifest 版本变(rebuild/fold)后,下次 stale 调用返回新实例(自愈)。"""
+    nb = _indexed_nb_with_delta(repo)
+    a = repo._scale_index(nb.id, allow_stale=True)
+    repo.build_scale_index(nb.id)                  # 重建 → 新 manifest.version,收进 sB
+    b = repo._scale_index(nb.id, allow_stale=True)
+    assert b is not None and b is not a            # 新磁盘身份 → 新实例
+
+
+def test_no_manifest_returns_none(repo):
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="empty"))
+    assert repo._scale_index(nb.id, allow_stale=True) is None
+
+
+def test_concurrent_cold_stale_single_flight(repo, monkeypatch):
+    """并发 cold stale 调用只 load 一次(单飞)。"""
+    import app.services.kg.scale_index as si
+    nb = _indexed_nb_with_delta(repo)
+    repo._scale_idx_cache.pop(nb.id, None)         # 清缓存造 cold
+    calls = {"n": 0}
+    real = si.load_scale_index
+    import time
+
+    def slow_load(d):
+        calls["n"] += 1
+        time.sleep(0.05)
+        return real(d)
+    monkeypatch.setattr(si, "load_scale_index", slow_load)
+    import threading
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(repo._scale_index(nb.id, allow_stale=True))) for _ in range(6)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert calls["n"] == 1                          # 单飞:只加载一次
+    assert all(r is results[0] for r in results)    # 都拿到同一实例
