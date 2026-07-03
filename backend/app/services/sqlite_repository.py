@@ -9521,10 +9521,13 @@ class SQLiteRepository:
         base_ver = tuple(
             (bid, tuple(idx.manifest.get("version", [])))
             for bid, idx in base_indexes)
-        active_ver = tuple(self._scale_index_version(notebook_id))
-        # flag 只入这个组合图缓存的 version 元组(不进 _scale_index_version 的
-        # settings_tail——那会让所有存量索引 manifest 失配变 stale)。翻转开关即
-        # 自然使这个缓存失效,不需要显式 invalidate。
+        # flag 关(默认):组合图内容由 participants 磁盘 manifest 版本(已在 base_ver)
+        # 完全决定——_active_kg_delta 返空、splice 空操作。故不把 churn 的
+        # _scale_index_version 计入 key,使摄取期(kg_mutation_seq 每写 bump)缓存命中。
+        # flag 开:delta 被 splice 进组合图,内容随 active 变,必须含 active_ver。
+        # flag 本身也进 key,翻转开关自然失效,无需显式 invalidate。
+        active_ver = (tuple(self._scale_index_version(notebook_id))
+                      if self.settings.scale_search_include_delta else None)
         version = ("scale_combined", base_ver, active_ver,
                    bool(self.settings.scale_search_include_delta))
 
