@@ -14,11 +14,13 @@
 
 import { useEffect, useState } from "react";
 import { ArrowLeft, Download, Square, Trash2 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { remarkCitations } from "./answer-citations";
+import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 
 // ---------------------------------------------------------------------------
 // 类型(与 backend/app/models/schemas.py 的 ReportSummary/ReportDetail 对齐)
@@ -39,6 +41,16 @@ export type ReportDetailT = ReportSummaryT & {
   sections: { title: string; markdown: string; grounded: boolean; failed?: boolean }[];
   gaps: string[];
   content_md: string;
+  references: {
+    key: string;
+    label: string;
+    name?: string;
+    source_title?: string;
+    location_label?: string;
+    object_id?: string;
+    object_type?: string;
+    tier?: string;
+  }[];
   error: string;
 };
 
@@ -77,12 +89,67 @@ function downloadMd(r: ReportDetailT) {
 }
 
 // ---------------------------------------------------------------------------
-// ReportMarkdown:复用 answer-markdown.tsx 同款渲染栈,但不带 citations 插件。
-// 报告正文里的 [k1] 为节内证据编号,按纯文本呈现即可(参考文献节有说明)。
+// ReportMarkdown:复用 answer-markdown.tsx 的引用基建。
+// 正文里的 [k\d+] 现为全局按来源去重编号,后端保证每个内联 marker 都有对应
+// reference;由 references 构造 refsByKey → remarkCitations 把 [k] 转成可点击
+// cite-chip,点击高亮并滚动到「参考文献」段(h2 覆盖挂 id=report-references)。
 // ---------------------------------------------------------------------------
 
-export function ReportMarkdown({ markdown }: { markdown: string }) {
+export function ReportMarkdown({
+  markdown,
+  references = [],
+}: {
+  markdown: string;
+  references?: ReportDetailT["references"];
+}) {
+  const [selectedRefKey, setSelectedRefKey] = useState<string | null>(null);
+  const refObjs: AnswerReference[] = references.map((r, i) => ({
+    id: `report:${r.key}`,
+    displayLabel: `[${i + 1}]`,
+    anchor: {
+      key: r.key,
+      object_id: r.object_id || "",
+      object_type: r.object_type || "",
+      label: r.label,
+      name: r.name,
+      source_title: r.source_title,
+      location_label: r.location_label,
+      tier: r.tier,
+    },
+  }));
+  const refsByKey = referenceByAnchorKey(refObjs);
   const components = {
+    a({ href, children }: { href?: string; children?: React.ReactNode }) {
+      if (href?.startsWith("cite:")) {
+        const key = href.slice(5);
+        if (refsByKey[key]) {
+          return (
+            <button
+              type="button"
+              className={`cite-chip${selectedRefKey === key ? " active" : ""}`}
+              onClick={() => {
+                setSelectedRefKey(key);
+                document
+                  .getElementById("report-references")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+            >
+              {children}
+            </button>
+          );
+        }
+        return <span>{children}</span>;
+      }
+      return (
+        <a href={href} target="_blank" rel="noreferrer">
+          {children}
+        </a>
+      );
+    },
+    h2({ children }: { children?: React.ReactNode }) {
+      const text = Array.isArray(children) ? children.join("") : String(children ?? "");
+      return <h2 id={text.includes("参考文献") ? "report-references" : undefined}>{children}</h2>;
+    },
     // 代码块/表格沿用问答区现有样式 class,保持全站观感一致。
     pre({ children }: { children?: React.ReactNode }) {
       return <pre className="answer-code">{children}</pre>;
@@ -94,19 +161,19 @@ export function ReportMarkdown({ markdown }: { markdown: string }) {
         </div>
       );
     },
-    a({ href, children }: { href?: string; children?: React.ReactNode }) {
-      return (
-        <a href={href} target="_blank" rel="noreferrer">
-          {children}
-        </a>
-      );
-    },
   } as Parameters<typeof ReactMarkdown>[0]["components"];
   return (
-    <div className="report-markdown">
+    <div className="report-markdown answer-markdown">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[
+          remarkGfm,
+          remarkMath,
+          [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+        ]}
         rehypePlugins={[rehypeKatex]}
+        // 默认 urlTransform 会清掉 cite: 协议 → 徽章 href 丢失;放行 cite:,
+        // 其余仍走默认清洗(防 javascript: 等不安全协议)。
+        urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
         components={components}
       >
         {markdown}
@@ -347,7 +414,7 @@ export function ReportsPanel({
           </div>
         )}
         {active.content_md ? (
-          <ReportMarkdown markdown={active.content_md} />
+          <ReportMarkdown markdown={active.content_md} references={active.references} />
         ) : (
           !isReportActive(active.status) && active.status !== "failed" && (
             <p className="tool-hint">该报告没有正文内容（可能在完成前被取消）。</p>
