@@ -1,6 +1,6 @@
 # PostgreSQL + pgvector 迁移 spec:向量入库 / 全局写锁退役 / 多 worker(CSR PPR 旁挂保留)
 
-> 日期:2026-07-03 · 状态:设计草案,待需求方评审。纯文档,无代码改动。
+> 日期:2026-07-03 · 状态:设计草案 · **已评审** —— 必要性/可行性评审结论与 15 条修订清单见 [2026-07-03-pgvector-migration-review.md](2026-07-03-pgvector-migration-review.md)(要点:先止血补丁包+MRL 截断 spike;近期 R1 续命(截断 1024,天花板 ~6×);**R3 全迁降级为条件触发**——库规模 ≥2×/rebuild 常态化/确需 workers>1 任一信号出现即启动;修订清单并入正文前本 spec 不作为开工依据)。纯文档,无代码改动。
 > 关联:[docs/kg-perf-audit-16c64g.md](../../kg-perf-audit-16c64g.md)(动因)、[2026-07-01-index-lifecycle-redesign.md](2026-07-01-index-lifecycle-redesign.md)(索引生命周期,本 spec 沿用其状态机词汇)、[2026-06-29-base-kg-scale-retrieval-design.md](2026-06-29-base-kg-scale-retrieval-design.md)(CSR+PPR 基底)。
 > 规模标尺:单库 10⁶ 节点 / 百万级 chunk / 百万级关系;16C/64G 单机起步;多用户。
 > **2026-07-03 修订(真机实况)**:生产 `EMBED_DIM=4096`(Qwen3-Embedding-8B),非早稿假设的 1024;实测 kg 向量矩阵单项 ~8.3GB、DB 112GB。**4096 维超 pgvector HNSW 索引维度上限(vector ≤2000;halfvec ≤4000)—— 向量切换(P2)存在阻断级前置决策,见 §5.5「向量维度策略」。** 全文尺寸估算以此部署实测为准。
