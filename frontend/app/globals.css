@@ -1501,6 +1501,123 @@ button.chat-session-card {
   50% { opacity: 0.35; }
 }
 
+/* ---- 列表工具栏:批量下载入口 / 多选操作条 ---- */
+.report-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 32px;
+}
+
+.report-list-toolbar.select {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border: 1px solid #cdd8ee;
+  border-radius: 10px;
+  background: #eef3fd;
+}
+
+.report-list-select-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #d2d6df;
+  border-radius: 999px;
+  background: #fff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.report-list-select-toggle:hover:not(:disabled) {
+  border-color: #9aa6b7;
+  background: #f7f9fc;
+  color: #111827;
+}
+
+.report-list-select-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.report-select-count {
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.report-select-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 多选模式下 done 行左侧加一列 checkbox;高亮已选。 */
+.report-card.selectable {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  cursor: pointer;
+}
+
+.report-card.selected {
+  border-color: #7aa0ef;
+  background: #f4f8ff;
+}
+
+.report-card-check {
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.report-card-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: #1d4ed8;
+  cursor: pointer;
+}
+
+/* 行尾:状态徽章 + 单篇下载图标按钮,垂直居中一排。 */
+.report-card-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.report-card-download {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.report-card-download:hover:not(:disabled) {
+  border-color: #9aa6b7;
+  background: #f7f9fc;
+  color: #111827;
+}
+
+.report-card-download:active:not(:disabled) {
+  background: #eef2f8;
+}
+
+.report-card-download:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .report-detail-head {
   display: flex;
   align-items: center;

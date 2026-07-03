@@ -624,6 +624,38 @@ const cancelReport = (nb: string, rid: string) =>
   api<{ status: string }>(`/notebooks/${nb}/reports/${rid}/cancel`, { method: "POST" });
 const deleteReport = (nb: string, rid: string) =>
   api<{ status: string }>(`/notebooks/${nb}/reports/${rid}`, { method: "DELETE" });
+// 批量导出返回 zip 二进制(非 JSON),api<T> 会 .json() 解析故不适用;
+// 走原始 fetch,复用 API_BASE + authHeaders()(与 api()/readAskStream 同款认证),
+// ok 时取 blob 触发下载,非 ok 抛出后端错误详情(如 422)。
+async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void> {
+  const response = await fetch(`${API_BASE}/notebooks/${nb}/reports/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ report_ids: reportIds }),
+  });
+  if (response.status === 401 && getToken()) {
+    clearToken();
+    if (typeof window !== "undefined") window.location.reload();
+  }
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.clone().json();
+      detail = (body && (body.detail || body.message)) || "";
+    } catch {
+      detail = (await response.text().catch(() => "")) || "";
+    }
+    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
+    throw new Error(`${response.status} ${response.statusText}${suffix}`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "reports.zip";
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 type ScaleIndexState = "unindexed" | "suggested" | "queued" | "building" | "indexed" | "stale";
 type ScaleIndexStatus = { exists: boolean; stale: boolean; building: boolean; eligible: boolean;
@@ -3422,6 +3454,7 @@ export default function Home() {
                     createReport={createReport}
                     cancelReport={cancelReport}
                     deleteReport={deleteReport}
+                    downloadReportsZip={downloadReportsZip}
                     setToast={setToast}
                   />
                 )}
