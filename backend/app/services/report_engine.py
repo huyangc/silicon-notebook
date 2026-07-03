@@ -152,7 +152,69 @@ class ReportEngine:
             self.repo.update_report(notebook_id, rid, status="failed",
                                     error=str(exc)[:500], progress="失败")
 
-    # --- Stage D(Task 6 实现;本任务先放最小占位,Task 6 内替换) ---
+    # --- Stage D:汇总——执行摘要 + 参考 + 知识缺口 + 分析计划 ---
     def _assemble(self, notebook_id, rid, question, outline, sections):
-        body = "\n\n".join(s["markdown"] for s in sections if s.get("markdown"))
-        return f"# 深度报告\n\n{body}", []
+        from app.services.prompts import report_summary_prompt
+        # 执行摘要(容错:失败则空段,不拖垮报告)。
+        summary = ""
+        try:
+            sections_block = "\n\n".join(
+                s["markdown"][:2000] for s in sections if s.get("markdown"))
+            raw = self.repo.reasoning_llm_client.chat_json(
+                [{"role": "user", "content": report_summary_prompt(question, sections_block)}],
+                '{"summary":""}', cancel_event=self.cancel_event)
+            summary = str(json.loads(raw).get("summary", "")).strip()
+        except AskCancelled:
+            raise
+        except Exception:
+            pass
+
+        gaps: List[str] = []
+        # 缺口一:零命中/干涸子查询(each 节 attempted 里 new==0)。
+        for s in sections:
+            for a in s.get("attempted", []):
+                if a.get("new") == 0:
+                    gaps.append(f"「{s['title']}」节:子查询 “{a['query']}” 在库内未检得新证据")
+        # 缺口二:跨节高相关概念对在 KG 中无边(结构性缺口)。
+        pairs_checked = 0
+        concepts = [(s["title"], c) for s in sections for c in s.get("top_concepts", [])]
+        for i in range(len(concepts)):
+            for j in range(i + 1, len(concepts)):
+                if concepts[i][0] == concepts[j][0]:
+                    continue                     # 只查跨节
+                if pairs_checked >= _GAP_PAIR_CAP:
+                    break
+                pairs_checked += 1
+                a, b = concepts[i][1], concepts[j][1]
+                try:
+                    neigh = self.repo._retrieve_neighbors(notebook_id, a["object_id"],
+                                                          None, "both")
+                except Exception:
+                    continue
+                if not any(h.object_id == b["object_id"] for h in neigh):
+                    gaps.append(f"图谱缺口:「{a['name']}」与「{b['name']}」尚无关联边")
+        # 缺口三:整节无 [k] 支撑。
+        for s in sections:
+            if s.get("markdown") and not s.get("grounded"):
+                gaps.append(f"「{s['title']}」节无库内引用支撑(全部为推断/通识,建议补充语料)")
+        gaps = list(dict.fromkeys(gaps))[:30]
+
+        refs = list(dict.fromkeys(t for s in sections for t in s.get("id_map_sources", [])))
+        plan_lines = [
+            f"- {s['title']}: " + "; ".join(o.get("sub_queries", []))
+            for s, o in zip(sections, outline)]
+        parts = [f"# 深度报告:{question}", ""]
+        if summary:
+            parts += ["## 执行摘要", "", summary, ""]
+        for s in sections:
+            if s.get("failed"):
+                parts += [f"## {s['title']}", "", f"（本节生成失败:{s.get('error','')}）", ""]
+            elif s.get("markdown"):
+                parts += [s["markdown"], ""]
+        if gaps:
+            parts += ["## 知识缺口", ""] + [f"- {g}" for g in gaps] + [""]
+        if refs:
+            parts += ["## 参考文献(库内来源;[k] 编号为节内编号)", ""] + \
+                     [f"- {r}" for r in refs] + [""]
+        parts += ["## 分析计划", ""] + plan_lines
+        return "\n".join(parts), gaps
