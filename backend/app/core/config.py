@@ -167,10 +167,9 @@ class Settings(BaseSettings):
     # 信号(共享证据元素 + 概念名命中文本)在**同源内**为 degree-0 节点补边,治 ~22%
     # gleaning/首遍无边的孤立节点。注意 pydantic-settings v2 用 validation_alias 映射环境变量。
     kg_relink_enabled: bool = Field(True, validation_alias="KG_RELINK_ENABLED")
-    # embedding：每条截断长度、每条 API 批大小、落库分块大小。
+    # embedding：每条截断长度、每条 API 批大小。
     embed_truncate_chars: int = Field(2000, env="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, env="EMBED_BATCH_SIZE")
-    embed_persist_chunk: int = Field(200, env="EMBED_PERSIST_CHUNK")
     # 元素向量化并发度（并行发出的 batch 请求数；dashscope 单请求 batch≤10）。
     # 注意：批量并发上传多文档时，每文档各自以此并发嵌入，峰值会叠加，过高会打爆
     # embedding 服务 QPS（429 limit_requests）导致向量缺失；配合下面的 429 退避重试，
@@ -298,8 +297,6 @@ class Settings(BaseSettings):
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, env="REASONING_TIMEOUT_SECONDS")
     reasoning_max_retries: int = Field(1, env="REASONING_MAX_RETRIES")
-    # Global 问答:map-reduce 时纳入的社区报告上限(按 size 取前 N)。
-    global_max_communities: int = Field(20, env="GLOBAL_MAX_COMMUNITIES")
     # 问题感知证据精炼: 默认开启(隔离 eval: 正确性 1.57→1.73 且伪引用全层→0%;
     # 代价每 ask 多 1 次 LLM)。答题前对已装配证据按问题抽"相关要点"前置,聚焦答题。设 false 关。
     kg_query_refine_enabled: bool = Field(True, env="KG_QUERY_REFINE_ENABLED")
