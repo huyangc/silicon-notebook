@@ -374,7 +374,6 @@ REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
 REPORT_SECTION_TOP_N         # deep-report: KG hits kept per section deep-dive (default 12)
 REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000)
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
-REPORT_SECTION_CONCURRENCY   # deep-report: sections deep-dived in parallel (default 3)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 ```
 

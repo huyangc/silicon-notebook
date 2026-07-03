@@ -223,10 +223,12 @@ class ReasoningRetriever:
             lines.extend(render(x) for x in tail)
         return "\n".join(lines) if lines else "(no candidates yet)"
 
-    def run(self, notebook_id, question, history="", on_step=None, top_n=None):
+    def run(self, notebook_id, question, history="", on_step=None, top_n=None, max_steps=None):
         raise_if_cancelled(self.cancel_event)
         # top_n 覆盖 settings.retrieval_top_n(报告管线每节独立预算);None=沿用全局。
         top_n = top_n or self.settings.retrieval_top_n
+        # max_steps 覆盖 settings.reasoning_max_steps(报告滑块封顶 reflect 轮数);None=沿用全局。
+        max_steps = max_steps or self.settings.reasoning_max_steps
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
@@ -309,7 +311,7 @@ class ReasoningRetriever:
         stale = 1 if no_progress else 0
         elements_searches = 0
         ppr_searches = 0
-        while steps < self.settings.reasoning_max_steps:
+        while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
             steps += 1
             summary = self._summarize(collected, elements, chunks)

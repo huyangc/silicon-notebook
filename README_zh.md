@@ -351,7 +351,6 @@ REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6�
 REPORT_SECTION_TOP_N         # 深度报告：每节深挖保留的 KG 命中数（默认 12）
 REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000）
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
-REPORT_SECTION_CONCURRENCY   # 深度报告：并行深挖的章节数（默认 3）
 REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
 ```
 

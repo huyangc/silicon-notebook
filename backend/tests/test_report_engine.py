@@ -16,7 +16,6 @@ def test_report_settings_defaults():
     assert s.report_section_chunk_budget == 20000
     assert s.report_section_max_tokens == 8192
     assert s.report_allow_parametric is True
-    assert s.report_section_concurrency == 3
 
 
 def test_report_settings_env(monkeypatch):
