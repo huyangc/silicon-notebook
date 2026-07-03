@@ -9513,8 +9513,10 @@ class SQLiteRepository:
     def _scale_combined_graph(self, notebook_id: str, base_indexes):
         """Build (and version-cache) the query-INDEPENDENT combined base⊕active
         CSR graph used by scale_ppr. Version key = each base's manifest version +
-        the active notebook's _scale_index_version, so the cache invalidates when
-        any participant's KG/embeddings/settings change. Same _vector_cache /
+        (conditionally) the active notebook's _scale_index_version — see the
+        active_ver comment below for exactly when it is included — so the cache
+        invalidates whenever a participant's KG/embeddings/settings change in a
+        way that can affect the combined graph. Same _vector_cache /
         version-loader pattern as _ppr_graph.
 
         Returns dict: combined_ids, combined_A, combined_index,
@@ -9526,13 +9528,19 @@ class SQLiteRepository:
         base_ver = tuple(
             (bid, tuple(idx.manifest.get("version", [])))
             for bid, idx in base_indexes)
-        # flag 关(默认):组合图内容由 participants 磁盘 manifest 版本(已在 base_ver)
-        # 完全决定——_active_kg_delta 返空、splice 空操作。故不把 churn 的
-        # _scale_index_version 计入 key,使摄取期(kg_mutation_seq 每写 bump)缓存命中。
-        # flag 开:delta 被 splice 进组合图,内容随 active 变,必须含 active_ver。
-        # flag 本身也进 key,翻转开关自然失效,无需显式 invalidate。
-        active_ver = (tuple(self._scale_index_version(notebook_id))
-                      if self.settings.scale_search_include_delta else None)
+        active_indexed = os.path.exists(
+            os.path.join(self.settings.storage_dir, "kg_index", notebook_id, "manifest.json"))
+        # Drop the churning active_ver from the key ONLY when the active notebook is
+        # ITSELF indexed and delta is gated off: then _active_kg_delta early-returns
+        # empty (its gate = active manifest exists), so the combined graph is fully
+        # determined by participants' on-disk manifest versions (in base_ver), and the
+        # ingestion churn (kg_mutation_seq) is irrelevant. If the active notebook is
+        # UN-indexed (two-tier federation: un-indexed active over a base index),
+        # _active_kg_delta gathers the whole active KG into the graph, so its mutations
+        # MUST stay in the key — keep active_ver.
+        active_ver = (None
+                      if (active_indexed and not self.settings.scale_search_include_delta)
+                      else tuple(self._scale_index_version(notebook_id)))
         version = ("scale_combined", base_ver, active_ver,
                    bool(self.settings.scale_search_include_delta))
 

@@ -200,3 +200,47 @@ def test_active_kg_delta_gathers_when_flag_on(repo, monkeypatch):
     nb = _indexed_nb_with_delta(repo)
     node_ids, edges, chunk_ids = repo._active_kg_delta(nb.id)
     assert "cB" in chunk_ids            # delta chunk 被 gather
+
+
+def _build_indexed_base(repo, name="base"):
+    """tier='base' notebook WITH a built scale index (mirrors
+    test_scale_xlayer_bridge_delta.py's _build_indexed_base)."""
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name=name))
+    repo.mark_notebook_base(nb.id)
+    _insert_source_chunk(repo, nb.id, "sBase", "cBase", "base-alpha", 1)
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    return nb
+
+
+def test_combined_graph_key_keeps_active_ver_for_unindexed_active_over_base(repo, monkeypatch):
+    """联邦回归:active 自身未索引(无 manifest),但有独立的 tier='base' 索引参与者
+    时,flag 关也必须保留 active_ver——_active_kg_delta 对未索引的 active 不早退,
+    会把整个 active KG gather+splice 进组合图,故 active 的写入必须使缓存失效,
+    否则会静默服务陈旧组合图(见 finding)。"""
+    base = _build_indexed_base(repo)
+    from app.models.schemas import NotebookCreate
+    active = repo.create_notebook(NotebookCreate(name="active"))
+    # active 无 build_scale_index → 无 manifest.json → active_indexed=False
+    assert not os.path.exists(os.path.join(
+        repo.settings.storage_dir, "kg_index", active.id, "manifest.json"))
+
+    base_indexes = [(base.id, repo._scale_index(base.id, allow_stale=True))]
+    loads = {"n": 0}
+    orig = repo._vector_cache.get
+
+    def counting_get(key, version, loader):
+        if key.endswith(":scale_combined"):
+            def wrapped():
+                loads["n"] += 1
+                return loader()
+        else:
+            wrapped = loader
+        return orig(key, version, wrapped)
+    monkeypatch.setattr(repo._vector_cache, "get", counting_get)
+
+    repo._scale_combined_graph(active.id, base_indexes)
+    _insert_source_chunk(repo, active.id, "sC", "cC", "carol", 3)  # active KG 变更
+    repo._scale_combined_graph(active.id, base_indexes)
+    assert loads["n"] == 2      # active_ver 保留在 key 里 → 变更触发重建,不陈旧命中
