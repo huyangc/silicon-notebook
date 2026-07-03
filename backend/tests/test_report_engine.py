@@ -187,21 +187,80 @@ def test_assemble_builds_full_report_with_gaps(repo, monkeypatch):
                {"title": "B", "scope": "sb", "sub_queries": ["qb"]}]
     sections = [
         {"title": "A", "scope": "sa", "markdown": "## A\nbody [k1]", "grounded": True,
-         "id_map_sources": ["Razavi"], "attempted": [
+         "id_map": {"k1": {"object_id": "c1", "object_type": "chunk", "name": "BGR",
+                           "source_title": "Razavi", "location_label": "§11",
+                           "tier": "base"}},
+         "attempted": [
              {"query": "qa", "new": 3, "tries": 1},
              {"query": "qa-dry", "new": 0, "tries": 2}],
          "top_concepts": [{"object_id": "ko-1", "name": "Bandgap"}]},
         {"title": "B", "scope": "sb", "markdown": "## B\n【通识】x", "grounded": False,
-         "id_map_sources": [], "attempted": [],
+         "id_map": {}, "attempted": [],
          "top_concepts": [{"object_id": "ko-2", "name": "Packaging Stress"}]},
     ]
     monkeypatch.setattr(eng.repo, "_retrieve_neighbors", lambda *a, **k: [])  # 两概念无边
     rid = repo.create_report(nb.id, "q")
-    md, gaps = eng._assemble(nb.id, rid, "q", outline, sections)
+    md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
     assert "## 执行摘要" in md and "总结" in md
     assert "## A" in md and "## B" in md
     assert "## 知识缺口" in md and "qa-dry" in md            # 零命中子查询
     assert "Bandgap" in md and "Packaging Stress" in md      # 无边概念对
     assert "## 参考文献" in md and "Razavi" in md
+    assert references[0]["label"] == "Razavi"
     assert "## 分析计划" in md and "qa" in md
     assert any("qa-dry" in g for g in gaps)
+
+
+def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
+    """跨节 [k] 全局按来源去重重编号:同一来源在不同节共享同一全局 [k];未知
+    marker 被剥除;references 结构化有序;content_md 内联与参考文献段一致。"""
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]},
+               {"title": "B", "scope": "sb", "sub_queries": ["qb"]}]
+    # A 引用 Razavi(k1)+Gray(k2)且有个幻觉 k9;B 再次引用 Razavi(节内 k1)
+    razavi = {"object_id": "c1", "object_type": "chunk", "name": "BGR",
+              "source_title": "Razavi Analog CMOS", "location_label": "§11", "tier": "base"}
+    gray = {"object_id": "c2", "object_type": "chunk", "name": "PN",
+            "source_title": "Gray & Meyer", "location_label": "§1", "tier": "base"}
+    razavi_b = {"object_id": "c9", "object_type": "chunk", "name": "curv",
+                "source_title": "Razavi Analog CMOS", "location_label": "§11.4", "tier": "base"}
+    sections = [
+        {"title": "A", "scope": "sa", "grounded": True,
+         "markdown": "## A\nCTAT+PTAT 抵消 [k1]。指数式 [k2]。幻觉 [k9]。",
+         "id_map": {"k1": razavi, "k2": gray},
+         "attempted": [], "top_concepts": []},
+        {"title": "B", "scope": "sb", "grounded": True,
+         "markdown": "## B\n曲率补偿 [k1]。",
+         "id_map": {"k1": razavi_b},          # 同 Razavi 来源,节内也叫 k1
+         "attempted": [], "top_concepts": []},
+    ]
+    monkeypatch.setattr(eng.repo, "_retrieve_neighbors", lambda *a, **k: [])
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+
+    # 全局去重:Razavi=k1(A、B 共享)、Gray=k2 → 2 条 references
+    assert [r["key"] for r in references] == ["k1", "k2"]
+    assert references[0]["label"] == "Razavi Analog CMOS"
+    assert references[1]["label"] == "Gray & Meyer"
+    # A 段:k1/k2 保留、幻觉 k9 被剥除
+    assert "[k1]" in md and "[k2]" in md and "[k9]" not in md and "幻觉 。" in md
+    # B 段:节内 k1(Razavi)→ 全局仍 k1(与 A 的 Razavi 同号)。仅取 B 正文
+    # (到下一个 ## 标题止,避免命中「参考文献」段里罗列的 [k2]）。
+    b_seg = md.split("## B")[1].split("\n## ")[0]
+    assert "[k1]" in b_seg and "[k2]" not in b_seg
+    # 参考文献段列出 [k1]/[k2] + 标题
+    assert "## 参考文献" in md
+    assert "[k1]" in md.split("## 参考文献")[1] and "Razavi Analog CMOS" in md.split("## 参考文献")[1]
+
+
+def test_assemble_no_citations_omits_references(repo):
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "s", "sub_queries": ["q"]}]
+    sections = [{"title": "A", "scope": "s", "grounded": False,
+                 "markdown": "## A\n全是【通识】x。", "id_map": {},
+                 "attempted": [], "top_concepts": []}]
+    md, gaps, references = eng._assemble(nb.id, rid := repo.create_report(nb.id, "q"),
+                                         "q", outline, sections)
+    assert references == [] and "## 参考文献" not in md

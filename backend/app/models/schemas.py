@@ -202,6 +202,7 @@ class ReportDetail(ReportSummary):
     outline: List[dict] = Field(default_factory=list)
     sections: List[dict] = Field(default_factory=list)
     gaps: List[str] = Field(default_factory=list)
+    references: List[dict] = Field(default_factory=list)
     content_md: str = ""
     error: str = ""
 
