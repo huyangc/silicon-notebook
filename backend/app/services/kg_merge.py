@@ -402,6 +402,9 @@ def cluster_objects(
             reps[s] = np.mean(np.asarray(vs, dtype=np.float32), axis=0)
 
     members_count = {s: len(lst) for s, lst in members.items()}
+    # ann_threads 故意不传:此 cluster_seeds 调用属 legacy(cluster_objects/cluster_concepts
+    # 仅测试在用,rebuild_unified_kg 直接调 cluster_seeds 并已传 kg_cluster_ann_threads)。
+    # 若将来把生产重建改指到这里,记得把按核解析的线程数一并透传,否则会静默退回单核。
     sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                        conflict_fn=conflict_fn, id_prefix=id_prefix, hi=hi, lo=lo,
                        top_k=top_k, max_pending=max_pending)
