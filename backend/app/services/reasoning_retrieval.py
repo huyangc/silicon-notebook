@@ -97,23 +97,23 @@ class ReasoningRetriever:
     # --- KG 工具箱(薄封装 repo 原语) ---
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
-        return self.repo.federated_retrieve(notebook_id, query, types=types,
-                                            w_keyword=wk, w_semantic=ws)
+        return self.repo.retrieval.federated_retrieve(notebook_id, query, types=types,
+                                                      w_keyword=wk, w_semantic=ws)
 
     def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
-        return self.repo._retrieve_neighbors(notebook_id, object_id, edge_type, direction)
+        return self.repo.retrieval.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
 
     def get(self, notebook_id, object_id):
         try:
-            return self.repo.node_context(notebook_id, object_id)
+            return self.repo.retrieval.node_context(notebook_id, object_id)
         except KeyError:
             return {}
 
     def search_elements(self, notebook_id, query):
-        return self.repo._retrieve_elements(notebook_id, query)
+        return self.repo.retrieval.retrieve_elements(notebook_id, query)
 
     def ppr_retrieve(self, notebook_id, query):
-        return self.repo._ppr_retrieve(notebook_id, query)
+        return self.repo.retrieval.ppr_retrieve(notebook_id, query)
 
     # --- LLM 决策点 ---
     def plan(self, question, history=""):
@@ -465,7 +465,7 @@ class ReasoningRetriever:
             answer_detail["quota"] = counts[:len(used_queries)]
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            scored_map = {h.object_id: h for h in self.repo._retrieve_scored(notebook_id, question)}
+            scored_map = {h.object_id: h for h in self.repo.retrieval.retrieve_scored(notebook_id, question)}
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[:top_n]
