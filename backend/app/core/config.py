@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, List, Literal
@@ -159,6 +160,9 @@ class Settings(BaseSettings):
     kg_cluster_rep_ann_max: int = Field(2_000_000, validation_alias="KG_CLUSTER_REP_ANN_MAX")
     # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
     kg_job_concurrency: int = Field(8, env="KG_JOB_CONCURRENCY")
+    # 0 = auto:未显式设置时按核数解析为 min(cpu_count, 32)(见 _resolve_core_bound_defaults)。
+    # 这是唯一按本机核数缩放的 KG 旋钮——服务端绑定旋钮(EXTRACT/JOB/EMBED)刻意不跟核数走。
+    kg_cluster_ann_threads: int = Field(0, validation_alias="KG_CLUSTER_ANN_THREADS")
     # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。
     kg_ask_reserve: int = Field(64, env="KG_ASK_RESERVE")
     # 单文档窗口数超过此值 → 记 WARN（不截断、不丢弃，仍全量抽取）。
@@ -429,6 +433,14 @@ class Settings(BaseSettings):
                 f"EMBED_RUNTIME_DIM={self.embed_runtime_dim} > EMBED_DIM={self.embed_dim} —— "
                 f"运行时维不能超过存储/原生维。若想提高运行时维,先确认存量向量原生维;"
                 f"绝对不要反过来改小 EMBED_DIM(存量按 EMBED_DIM 过滤,改小=全库向量被当异维残留丢光)")
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_core_bound_defaults(self) -> "Settings":
+        """核绑定旋钮的按核数默认。仅在未显式设置(<=0 哨兵)时生效;显式值原样保留。
+        封顶 32:HNSW 图构建争用 + rep 矩阵内存带宽,超 ~32 线程收益递减。"""
+        if self.kg_cluster_ann_threads <= 0:
+            self.kg_cluster_ann_threads = min(os.cpu_count() or 1, 32)
         return self
 
     @model_validator(mode="after")
