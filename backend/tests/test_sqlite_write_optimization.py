@@ -57,7 +57,9 @@ def test_all_writes_go_through_write_lock():
     assert not WRITE.search("neighbour_ids.update(r['x'] for r in rows)")
     assert not WRITE.search("buf.insert(0, item)")
     assert not WRITE.search('name.replace("a", "b")')
-    ALLOW = {"_migrate", "_seed"}            # 起步单线程, 不并发, 豁免
+    # 起步单线程, 不并发, 豁免。_migration_N = 版本化 schema 迁移步骤(基线=_migration_1);
+    # _recover_interrupted_jobs = 启动崩溃兜底。均由 __init__ 在对外服务前调用。
+    ALLOW = {"_migrate", "_migration_1", "_recover_interrupted_jobs", "_seed"}
     cur = None
     in_block = False
     block_indent = 0

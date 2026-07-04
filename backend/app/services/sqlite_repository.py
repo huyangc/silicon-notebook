@@ -240,6 +240,11 @@ _UNCONFIGURED_LLM = _UnconfiguredLLMClient()
 _COPY_CHUNK = 1000
 
 
+# Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
+# 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
+SCHEMA_VERSION = 1
+
+
 class SQLiteRepository:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -351,6 +356,7 @@ class SQLiteRepository:
         self._viz_building: set = set()
         self._viz_building_lock = threading.Lock()
         self._migrate()
+        self._recover_interrupted_jobs()
         self._seed()
 
     def _system_llm_for(self, role: str):
@@ -447,7 +453,36 @@ class SQLiteRepository:
             with self._connect() as db:
                 yield db
 
-    def _migrate(self) -> None:
+    def _migrate(self) -> list[int]:
+        """Schema 版本闸：按 PRAGMA user_version 顺序应用尚未跑过的迁移步骤。
+
+        对已部署库安全（上线于版本机制之前的库 user_version 默认 0）：每个步骤
+        本身仍幂等（CREATE ... IF NOT EXISTS + 守卫式 ALTER），所以在已齐全的库
+        上重跑 == 每次启动本就在做的事，跑完盖上版本戳、此后走快路径直接跳过。
+        幂等性是安全网、版本戳是优化+可观测，即便迁移中途崩溃、重跑仍安全。
+        返回本次实际应用的版本号列表（未应用任何步骤时为空 []）。"""
+        with self._connect() as db:
+            current = int(db.execute("PRAGMA user_version").fetchone()[0])
+        if current >= SCHEMA_VERSION:
+            return []
+        applied: list[int] = []
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            getattr(self, f"_migration_{version}")()
+            with self._connect() as db:
+                db.execute(f"PRAGMA user_version = {version}")
+            applied.append(version)
+        return applied
+
+    @staticmethod
+    def _add_column_if_missing(db, table: str, column: str, coldef: str) -> None:
+        """幂等补列：仅当表存在且列缺失时才 ALTER。等价收编现有散落的
+        `cols = {...PRAGMA table_info...}; if cols and col not in cols: ALTER` 守卫，
+        消除写法不一与"忘写守卫"的整类 bug。表不存在时静默 no-op。"""
+        cols = {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if cols and column not in cols:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+
+    def _migration_1(self) -> None:
         # Pre-migration: if kg_cluster_scratch exists without run_id (schema from
         # before SP3), drop it so the executescript below can recreate it with the
         # new schema.  The table is purely transient (cleared before each use), so
@@ -975,20 +1010,10 @@ class SQLiteRepository:
                              tokenize='trigram');
                 """
             )
-            # Startup reconciliation: the backend is single-process and merge-review
-            # jobs run on a daemon thread, so a thread cannot outlive a process
-            # restart. Any row still 'running' at startup is therefore definitionally
-            # stale (left behind by a crash/restart) and would otherwise permanently
-            # block that notebook's single-flight guard. Idempotent — safe every boot.
-            db.execute(
-                "UPDATE merge_review_jobs SET status='failed', "
-                "error='中断:服务重启' WHERE status='running'")
             # Lightweight column migrations for pre-existing databases.
             # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard via PRAGMA so this
             # runs idempotently on every init.
-            answer_cols = {r["name"] for r in db.execute("PRAGMA table_info(answers)").fetchall()}
-            if "conversation_id" not in answer_cols:
-                db.execute("ALTER TABLE answers ADD COLUMN conversation_id TEXT")
+            self._add_column_if_missing(db, "answers", "conversation_id", "TEXT")
             # conversation_id is added via ALTER TABLE above (SQLite has no
             # "ADD COLUMN ... indexed" shorthand), so its index must live here
             # rather than in the CREATE TABLE block. _conversation_history /
@@ -1001,46 +1026,31 @@ class SQLiteRepository:
                 "CREATE INDEX IF NOT EXISTS idx_answers_conversation "
                 "ON answers(conversation_id)"
             )
-            ccols = {r["name"] for r in db.execute("PRAGMA table_info(conversations)").fetchall()}
-            if "created_by" not in ccols:
-                db.execute("ALTER TABLE conversations ADD COLUMN created_by TEXT DEFAULT ''")
+            self._add_column_if_missing(db, "conversations", "created_by", "TEXT DEFAULT ''")
             db.execute(
                 "UPDATE conversations SET created_by='user-local' "
                 "WHERE created_by IS NULL OR created_by=''"
             )
-            ko_cols = {r["name"] for r in db.execute("PRAGMA table_info(knowledge_objects)").fetchall()}
-            if "last_reviewed" not in ko_cols:
-                db.execute(
-                    "ALTER TABLE knowledge_objects ADD COLUMN last_reviewed TEXT NOT NULL DEFAULT ''"
-                )
-            if "source_id" not in ko_cols:
-                db.execute(
-                    "ALTER TABLE knowledge_objects ADD COLUMN source_id TEXT NOT NULL DEFAULT ''"
-                )
-            nb_cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)").fetchall()}
+            self._add_column_if_missing(db, "knowledge_objects", "last_reviewed", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "knowledge_objects", "source_id", "TEXT NOT NULL DEFAULT ''")
             for col in ("target_users", "expected_questions", "source_types", "taxonomy", "access_scope", "template"):
-                if col not in nb_cols:
-                    db.execute(f"ALTER TABLE notebooks ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+                self._add_column_if_missing(db, "notebooks", col, "TEXT NOT NULL DEFAULT ''")
             # purpose_auto=1 means the description is auto-derived from sources and
             # may be regenerated; set to 0 once the user edits it manually.
-            if "purpose_auto" not in nb_cols:
-                db.execute("ALTER TABLE notebooks ADD COLUMN purpose_auto INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(db, "notebooks", "purpose_auto", "INTEGER NOT NULL DEFAULT 0")
             # tier column: 'personal' (default) or 'base' (analog-textbook KG).
             # Existing notebooks default to 'personal'; the base KG is marked via
             # mark_notebook_base(). PRAGMA guard keeps this idempotent.
-            if "tier" not in nb_cols:
-                db.execute("ALTER TABLE notebooks ADD COLUMN tier TEXT NOT NULL DEFAULT 'personal'")
+            self._add_column_if_missing(db, "notebooks", "tier", "TEXT NOT NULL DEFAULT 'personal'")
             # Notebook sharing (Phase 1): is_shared toggles an opaque share_token
             # that lets others deep-copy the small library into their own space.
             # Unique index (partial, NULL 不参与) 保证 token 全局唯一。
-            if "is_shared" not in nb_cols:
-                db.execute("ALTER TABLE notebooks ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0")
-            if "share_token" not in nb_cols:
-                db.execute("ALTER TABLE notebooks ADD COLUMN share_token TEXT DEFAULT NULL")
-                db.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_share_token "
-                    "ON notebooks(share_token) WHERE share_token IS NOT NULL"
-                )
+            self._add_column_if_missing(db, "notebooks", "is_shared", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(db, "notebooks", "share_token", "TEXT DEFAULT NULL")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_share_token "
+                "ON notebooks(share_token) WHERE share_token IS NOT NULL"
+            )
             # Notebook sharing (Phase 2): 大库无法深拷贝 → 改为「只读共享」，他人凭
             # share_token 加入为只读成员(role='reader')。读权 = owner ∪ 成员;写权仍
             # owner-only(user_can_access_notebook 不动)。CASCADE 保证删库自动清成员。
@@ -1054,87 +1064,56 @@ class SQLiteRepository:
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_notebook_members_user ON notebook_members(user_id)")
             # Per-source document type drives schema/profile selection at extraction.
-            src_cols = {r["name"] for r in db.execute("PRAGMA table_info(sources)").fetchall()}
-            if "doc_type" not in src_cols:
-                db.execute("ALTER TABLE sources ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
-            if "source_url" not in src_cols:
-                db.execute("ALTER TABLE sources ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "sources", "doc_type", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "sources", "source_url", "TEXT NOT NULL DEFAULT ''")
             # LLM review metadata columns for concept_merge_candidates.
-            cm_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_merge_candidates)").fetchall()}
-            if "confidence" not in cm_cols:
-                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN confidence REAL NOT NULL DEFAULT 0")
-            if "rationale" not in cm_cols:
-                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''")
-            if "reviewed_by" not in cm_cols:
-                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT ''")
-            if "seed_a" not in cm_cols:
-                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN seed_a TEXT NOT NULL DEFAULT ''")
-            if "seed_b" not in cm_cols:
-                db.execute("ALTER TABLE concept_merge_candidates ADD COLUMN seed_b TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "concept_merge_candidates", "confidence", "REAL NOT NULL DEFAULT 0")
+            self._add_column_if_missing(db, "concept_merge_candidates", "rationale", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "concept_merge_candidates", "reviewed_by", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "concept_merge_candidates", "seed_a", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "concept_merge_candidates", "seed_b", "TEXT NOT NULL DEFAULT ''")
             # object_type column for concept_clusters (per-type isolation).
-            cc_cols = {r["name"] for r in db.execute("PRAGMA table_info(concept_clusters)").fetchall()}
-            if "object_type" not in cc_cols:
-                db.execute("ALTER TABLE concept_clusters ADD COLUMN object_type TEXT NOT NULL DEFAULT 'concept'")
-            if "canonical_description" not in cc_cols:
-                db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_description TEXT NOT NULL DEFAULT ''")
-            if "canonical_desc_sig" not in cc_cols:
-                db.execute("ALTER TABLE concept_clusters ADD COLUMN canonical_desc_sig TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "concept_clusters", "object_type", "TEXT NOT NULL DEFAULT 'concept'")
+            self._add_column_if_missing(db, "concept_clusters", "canonical_description", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "concept_clusters", "canonical_desc_sig", "TEXT NOT NULL DEFAULT ''")
             # cluster_input_version for unified_kg_state: content-hash of the
             # clustering inputs at the last rebuild, so rebuild_unified_kg can skip
             # the recompute when inputs are unchanged. Additive; pre-existing DBs
             # get '' (never-rebuilt) and thus never wrongly skip.
-            uks_cols = {r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)").fetchall()}
-            if "cluster_input_version" not in uks_cols:
-                db.execute("ALTER TABLE unified_kg_state ADD COLUMN cluster_input_version TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "unified_kg_state", "cluster_input_version", "TEXT NOT NULL DEFAULT ''")
             # kg_mutation_seq: monotonic counter bumped by _mark_unified_kg_dirty.
             # Additive; pre-existing DBs start at 0. Any prior stored
             # cluster_input_version was 'v1' (timestamp-based) and won't match the
             # new 'v2' scheme, so the first post-migration rebuild recomputes — safe.
-            if "kg_mutation_seq" not in uks_cols:
-                db.execute("ALTER TABLE unified_kg_state ADD COLUMN kg_mutation_seq INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(db, "unified_kg_state", "kg_mutation_seq", "INTEGER NOT NULL DEFAULT 0")
             # source_index_backfilled: 0/1 marker — once set, _clear_source_extraction_state
             # trusts knowledge_object_sources for this notebook and skips the legacy
             # full-evidence-scan fallback. Set by the backfill-on-first-use scan itself
             # (the scan callers were already paying becomes the LAST one) or by the
             # standalone `backfill-source-index` CLI. Additive; pre-existing DBs start
             # at 0 (never backfilled), so they correctly take the legacy-scan path once.
-            if "source_index_backfilled" not in uks_cols:
-                db.execute(
-                    "ALTER TABLE unified_kg_state ADD COLUMN source_index_backfilled "
-                    "INTEGER NOT NULL DEFAULT 0"
-                )
+            self._add_column_if_missing(
+                db, "unified_kg_state", "source_index_backfilled", "INTEGER NOT NULL DEFAULT 0"
+            )
             # Community report columns (title/summary/findings).
-            comm_cols = {r["name"] for r in db.execute("PRAGMA table_info(communities)").fetchall()}
             for col, default in (("title", "''"), ("summary", "''"), ("findings", "'[]'")):
-                if col not in comm_cols:
-                    db.execute(f"ALTER TABLE communities ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}")
+                self._add_column_if_missing(db, "communities", col, f"TEXT NOT NULL DEFAULT {default}")
             # Track E: edge review_status column (curation feedback loop).
-            kr_cols = {r["name"] for r in db.execute(
-                "PRAGMA table_info(knowledge_relations)").fetchall()}
-            if "review_status" not in kr_cols:
-                db.execute(
-                    "ALTER TABLE knowledge_relations "
-                    "ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'"
-                )
+            self._add_column_if_missing(
+                db, "knowledge_relations", "review_status", "TEXT NOT NULL DEFAULT 'pending'"
+            )
             # 用户系统：username + 密码列（守卫式 ALTER 幂等）。
-            user_cols = {r["name"] for r in db.execute("PRAGMA table_info(users)").fetchall()}
-            if "username" not in user_cols:
-                db.execute("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT ''")
-            if "password_hash" not in user_cols:
-                db.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
-            if "password_salt" not in user_cols:
-                db.execute("ALTER TABLE users ADD COLUMN password_salt TEXT NOT NULL DEFAULT ''")
-            if "password_iterations" not in user_cols:
-                db.execute("ALTER TABLE users ADD COLUMN password_iterations INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(db, "users", "username", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "users", "password_hash", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "users", "password_salt", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(db, "users", "password_iterations", "INTEGER NOT NULL DEFAULT 0")
             # 小写 username 唯一（空串不算冲突：用部分索引排除空串）。
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username "
                 "ON users(username) WHERE username != ''"
             )
             # 每用户模型服务配置(JSON;明文存,API 层只写不回显)。
-            prof_cols = {r["name"] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()}
-            if "model_settings" not in prof_cols:
-                db.execute("ALTER TABLE user_profiles ADD COLUMN model_settings TEXT NOT NULL DEFAULT '{}'")
+            self._add_column_if_missing(db, "user_profiles", "model_settings", "TEXT NOT NULL DEFAULT '{}'")
             # kg_cluster_scratch: run_id column added in SP3 to isolate concurrent
             # rebuilds. Pre-existing DBs have the table without this column.
             # The scratch table is purely transient (always cleared before use), so
@@ -1157,36 +1136,20 @@ class SQLiteRepository:
             # 深度报告:depth(智能滑块封顶 reflect 轮数)+ section_status_json
             # (节内实时进度)。Additive;pre-existing reports 表 CREATE TABLE
             # IF NOT EXISTS 不会补列,须守卫式 ALTER。默认 depth=2、进度空 '[]'。
-            rep_cols = {r["name"] for r in db.execute("PRAGMA table_info(reports)").fetchall()}
-            if rep_cols and "depth" not in rep_cols:
-                db.execute("ALTER TABLE reports ADD COLUMN depth INTEGER NOT NULL DEFAULT 2")
-            if rep_cols and "section_status_json" not in rep_cols:
-                db.execute(
-                    "ALTER TABLE reports ADD COLUMN section_status_json TEXT NOT NULL DEFAULT '[]'")
-            # Seed the editable object-schema registry from the code defaults
-            # (INSERT OR IGNORE keeps any curator edits / induced types intact).
-            now = _now()
-            for object_type, schema in OBJECT_SCHEMAS.items():
-                list_fields = [f for f in schema.fields if f in LIST_FIELDS]
-                db.execute(
-                    """
-                    INSERT OR IGNORE INTO object_schemas
-                    (object_type, plural, fields, primary_field, description, label,
-                     list_fields, source, status, rationale, notebook_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'builtin', 'active', '', '', ?, ?)
-                    """,
-                    (
-                        object_type,
-                        schema.plural,
-                        json.dumps(schema.fields, ensure_ascii=False),
-                        schema.primary,
-                        schema.description,
-                        OBJECT_TYPE_LABELS.get(object_type, object_type),
-                        json.dumps(list_fields, ensure_ascii=False),
-                        now,
-                        now,
-                    ),
-                )
+            self._add_column_if_missing(db, "reports", "depth", "INTEGER NOT NULL DEFAULT 2")
+            self._add_column_if_missing(
+                db, "reports", "section_status_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+
+    def _recover_interrupted_jobs(self) -> None:
+        """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
+        merge-review 跑在 daemon 线程上、无法跨进程重启存活，故启动时仍是 'running'
+        的行定义上就是上次崩溃/重启遗留的陈旧行，否则会永久卡死该 notebook 的单飞守卫。
+        幂等——safe every boot。"""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE merge_review_jobs SET status='failed', "
+                "error='中断:服务重启' WHERE status='running'")
 
     def _seed(self) -> None:
         now = _now()
@@ -1244,6 +1207,31 @@ class SQLiteRepository:
                     "INSERT OR IGNORE INTO concept_whitelist (term, note, created_at) VALUES (?, 'builtin', ?)",
                     (_wl_norm(term), now),
                 )
+            # 内建 object-schema 注册表种子（从 code 默认；INSERT OR IGNORE 保留策展人的
+            # 编辑/归纳类型）。与版本化 schema 迁移解耦，随 _seed 每启动补齐——code 新增
+            # 内建类型即落库，不必等 SCHEMA_VERSION 递增。
+            for object_type, schema in OBJECT_SCHEMAS.items():
+                list_fields = [f for f in schema.fields if f in LIST_FIELDS]
+                db.execute(
+                    """
+                    INSERT OR IGNORE INTO object_schemas
+                    (object_type, plural, fields, primary_field, description, label,
+                     list_fields, source, status, rationale, notebook_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'builtin', 'active', '', '', ?, ?)
+                    """,
+                    (
+                        object_type,
+                        schema.plural,
+                        json.dumps(schema.fields, ensure_ascii=False),
+                        schema.primary,
+                        schema.description,
+                        OBJECT_TYPE_LABELS.get(object_type, object_type),
+                        json.dumps(list_fields, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+
     def _count(self, db: sqlite3.Connection, table: str, column: str, value: str) -> int:
         row = db.execute(
             f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?",
