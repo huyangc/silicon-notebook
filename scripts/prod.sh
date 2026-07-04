@@ -58,6 +58,10 @@ else
   exit 1
 fi
 
+# 按核数自动调参:设 OMP/BLAS 线程(须早于 python 起)。AUTOTUNE=0 关闭。
+# shellcheck source=scripts/autotune.sh
+source "$ROOT_DIR/scripts/autotune.sh"
+
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
   exit 1
