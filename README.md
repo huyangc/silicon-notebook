@@ -307,6 +307,35 @@ KG_WINDOW_OVERLAP_CHARS     # overlap between adjacent windows (default 450)
 KG_WINDOW_WARN_THRESHOLD    # log WARNING when window count exceeds this (default 1200)
 ```
 
+**Core-aware autotune:** only knobs that are actually CPU-bound scale with the machine's
+core count automatically — everything else stays fixed regardless of hardware:
+
+```text
+KG_CLUSTER_ANN_THREADS   # hnswlib ANN index-build threads for concept clustering/merge.
+                         # 0 (default) = auto min(cpu_count, 32); the only retrieval/KG
+                         # knob that is core-derived.
+```
+
+`scripts/dev.sh` / `scripts/prod.sh` also source `scripts/autotune.sh`, which sets
+`OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` (and `NUMEXPR_NUM_THREADS`)
+to `min(cpu_count, 8)` when they are not already set in the environment, and the offline
+backfill CLI's process-pool worker default is `min(cpu_count, 32)`. Set `AUTOTUNE=0` to
+disable the shell-level tuning entirely. Any of these values can still be overridden with
+an explicit env var, which always wins over the auto-derived default. The resolved values
+are printed once at backend startup (an `autotune: kg_cluster_ann_threads=... backfill_default_workers=...`
+console line) so you can confirm what a given process actually picked up.
+
+By deliberate contrast, `KG_EXTRACT_WORKERS` / `KG_JOB_CONCURRENCY` / `EMBED_CONCURRENCY`
+are concurrency limits against a remote LLM/embedding endpoint, not the local machine —
+they are **not** scaled by core count, and adding cores will not change them. To raise
+throughput there, scale the model/embedding service instead.
+
+Running multiple backend workers (`--workers N`) is a manual opt-in, not something
+autotune enables for you — the default stays a single worker. Each additional worker
+duplicates in-memory state (a large KG/ANN index can be GB-scale), multiplying memory
+use roughly N×, and background KG jobs may land on any worker, which complicates status
+tracking. Only turn it on if you have understood and accounted for both costs.
+
 **Database:**
 
 ```text

@@ -289,6 +289,31 @@ KG_WINDOW_OVERLAP_CHARS     # 相邻窗口重叠字符数（默认 450）
 KG_WINDOW_WARN_THRESHOLD    # 窗口数超此值记 WARNING（默认 1200）
 ```
 
+**按核数自动调参：** 只有真正受 CPU 核数约束的旋钮才会按机器核数自动缩放，其余旋钮不论硬件如何都保持固定：
+
+```text
+KG_CLUSTER_ANN_THREADS   # 概念聚类/合并用的 hnswlib ANN 建索引线程数。
+                         # 0（默认）= 自动 min(cpu核数, 32)；检索/KG 相关旋钮里
+                         # 唯一按本机核数推导的一个。
+```
+
+`scripts/dev.sh` / `scripts/prod.sh` 会 source `scripts/autotune.sh`，在未显式设置时
+把 `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`（以及
+`NUMEXPR_NUM_THREADS`）设为 `min(cpu核数, 8)`；离线回填 CLI 的进程池 worker 默认值同样是
+`min(cpu核数, 32)`。设 `AUTOTUNE=0` 可整体关闭该 shell 层自动调参。以上任何值都可以用
+显式 env 覆盖——显式设置的值永远优先于自动推导的默认值。后端启动时会打印一行已解析的
+实际值（`autotune: kg_cluster_ann_threads=... backfill_default_workers=...` 控制台日志），
+方便确认某次运行到底生效的是什么。
+
+与此刻意相反，`KG_EXTRACT_WORKERS` / `KG_JOB_CONCURRENCY` / `EMBED_CONCURRENCY` 是针对
+远程 LLM/嵌入端点的并发上限，不是本机资源——它们**不**按核数缩放，加核也不会改变它们；
+要提升这块吞吐，应扩容模型/嵌入服务端，而不是调这几个值。
+
+启用多 worker（`--workers N`）是**手动 opt-in**，autotune 不会替你打开——默认仍是单
+worker。每多一个 worker 就多一份内存中的状态（大型 KG/ANN 索引可达 GB 级），内存占用
+大致按 N 倍增长，且后台 KG job 可能落在任意一个 worker 上，会让状态追踪复杂化。只有在
+清楚并接受这两个代价后再开启。
+
 **数据库：**
 
 ```text
