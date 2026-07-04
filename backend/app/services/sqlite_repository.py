@@ -6292,7 +6292,8 @@ class SQLiteRepository:
         _t_cluster = _time.perf_counter()
         sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                            conflict_fn=_discriminative_conflict, id_prefix="K-",
-                           rep_ann_max=self.settings.kg_cluster_rep_ann_max)
+                           rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                           ann_threads=self.settings.kg_cluster_ann_threads)
         # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
         from app.services.concept_merge_review import review_merge_candidates
         autoc = sd.get("auto_candidates", [])
@@ -6330,7 +6331,8 @@ class SQLiteRepository:
                 # reps/members already in RAM — re-cluster is cheap.
                 sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                                    conflict_fn=_discriminative_conflict, id_prefix="K-",
-                                   rep_ann_max=self.settings.kg_cluster_rep_ann_max)
+                                   rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                                   ann_threads=self.settings.kg_cluster_ann_threads)
             _stage(f"concept: merge-review {len(autoc)} candidates → "
                    f"{len(extra)} merged ({_time.perf_counter() - _t_mr:.1f}s)")
         _stage(f"concept: clustered {len(seeds)} seeds → "
@@ -6462,7 +6464,8 @@ class SQLiteRepository:
             # (same as legacy write_clusters([], object_type=t)).
             sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
                                  conflict_fn=None, id_prefix=prefix,
-                                 rep_ann_max=self.settings.kg_cluster_rep_ann_max)
+                                 rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                                 ann_threads=self.settings.kg_cluster_ann_threads)
             self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
                                              sd_t["canonical_names"], run_id=run_id)
             _stage(f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
