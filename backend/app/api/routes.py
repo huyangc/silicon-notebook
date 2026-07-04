@@ -78,6 +78,7 @@ from app.models.schemas import (
     UnifiedKgStatus,
     UserProfile,
 )
+from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.cancellation import AskCancelled
 from app.services.kg import scheduler as kg_scheduler
@@ -828,8 +829,8 @@ def build_kg(notebook_id: str) -> dict:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    threading.Thread(target=repo.build_notebook_kg, args=(notebook_id,),
-                     name=f"buildkg-{notebook_id}", daemon=True).start()
+    background_jobs.submit(repo.build_notebook_kg, notebook_id,
+                           name=f"buildkg-{notebook_id}")
     return {"status": "building", "notebook_id": notebook_id}
 
 
@@ -845,8 +846,8 @@ def rebuild_kg(notebook_id: str) -> dict:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    threading.Thread(target=repo.rebuild_notebook_kg, args=(notebook_id,),
-                     name=f"rebuildkg-{notebook_id}", daemon=True).start()
+    background_jobs.submit(repo.rebuild_notebook_kg, notebook_id,
+                           name=f"rebuildkg-{notebook_id}")
     return {"status": "rebuilding", "notebook_id": notebook_id}
 
 
@@ -873,7 +874,6 @@ def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history:
                        depth: int = 2) -> None:
     from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
     cancel = register_cancel(rid)
-    ctx = contextvars.copy_context()          # per-user 模型经 ContextVar 传播
 
     def worker():
         try:
@@ -882,8 +882,8 @@ def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history:
         finally:
             unregister_cancel(rid)
 
-    threading.Thread(target=lambda: ctx.run(worker),
-                     name=f"report-{rid}", daemon=True).start()
+    # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
+    background_jobs.submit(worker, name=f"report-{rid}")
 
 
 @router.post("/notebooks/{notebook_id}/reports",
@@ -1108,12 +1108,8 @@ def resolve_conflicts(notebook_id: str) -> dict:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    threading.Thread(
-        target=repo.resolve_notebook_conflicts,
-        args=(notebook_id,),
-        name=f"conflictresolve-{notebook_id}",
-        daemon=True,
-    ).start()
+    background_jobs.submit(repo.resolve_notebook_conflicts, notebook_id,
+                           name=f"conflictresolve-{notebook_id}")
     return {"status": "resolving", "notebook_id": notebook_id}
 
 
@@ -1193,9 +1189,8 @@ def review_all_unified_kg_merges(notebook_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Notebook not found")
     if repo.merge_review_job_status(notebook_id)["status"] == "running":
         return {"status": "running"}
-    ctx = contextvars.copy_context()
-    threading.Thread(target=lambda: ctx.run(repo.run_merge_review_job, notebook_id),
-                     name=f"mergereview-{notebook_id}", daemon=True).start()
+    background_jobs.submit(repo.run_merge_review_job, notebook_id,
+                           name=f"mergereview-{notebook_id}")
     return {"status": "started"}
 
 
