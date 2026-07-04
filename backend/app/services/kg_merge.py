@@ -177,7 +177,8 @@ _MIN_SHARD_CAP = 20_000
 
 def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
                     k: int = 5, lo: float = 0.82,
-                    max_reps: int | None = None) -> List[tuple]:
+                    max_reps: int | None = None,
+                    ann_threads: int = 1) -> List[tuple]:
     """hnswlib 余弦 top-k 近邻候选(sim≥lo), 去重无序对。O(N log N)。
     reps: seed -> 代表向量(未归一化亦可, cosine 空间内部归一)。
     默认单个全局 hnsw 索引(不分片), 消除跨片丢对。
@@ -200,7 +201,7 @@ def _ann_candidates(seeds: List[str], reps: Dict[str, "np.ndarray"],
         dim = int(Mshard.shape[1])
         index = hnswlib.Index(space="cosine", dim=dim)
         index.init_index(max_elements=sn, ef_construction=200, M=16, random_seed=42)
-        index.set_num_threads(1)
+        index.set_num_threads(max(1, ann_threads))
         index.add_items(Mshard, np.arange(sn))
         index.set_ef(max(64, k + 32))
         kk = min(k + 1, sn)
@@ -308,6 +309,7 @@ def cluster_seeds(
     top_k: int = 5,
     max_pending: int = 1000,
     rep_ann_max: int | None = None,
+    ann_threads: int = 1,
 ) -> dict:
     """seed 级聚类核心(随 #seeds 有界)。confirmed/rejected 为 seed 对(frozenset)。
     rep_ann_max: 传给 _ann_candidates 的分片上限(None=不分片)。
@@ -320,7 +322,8 @@ def cluster_seeds(
         if a in uf.p and b in uf.p:
             uf.union(a, b)
     rej = {frozenset(p) for p in rejected}
-    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo, max_reps=rep_ann_max)
+    raw = _ann_candidates(seeds, reps, k=top_k, lo=lo, max_reps=rep_ann_max,
+                          ann_threads=ann_threads)
     cand = []
     for a, b, sim in raw:
         if rej and frozenset((a, b)) in rej:
