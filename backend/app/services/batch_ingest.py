@@ -592,7 +592,7 @@ _VECTOR_TABLES = (
 
 _BACKFILL_BATCH_SIZE = 5000
 _BACKFILL_MAP_CHUNKSIZE = 256
-_BACKFILL_DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
+_BACKFILL_DEFAULT_WORKERS = min(32, os.cpu_count() or 1)
 
 
 def _parse_encode(pair: Tuple[str, str]) -> Tuple[str, bytes]:
@@ -869,8 +869,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=None,
                    help="all 阶段同时抽取的文档数(覆盖 KG_JOB_CONCURRENCY,其余摄取阶段为"
                         "文件级并发,默认 4);vectors-to-blob 阶段为 json.loads/编码并行进程数"
-                        f"(默认 min(8, CPU核数)={_BACKFILL_DEFAULT_WORKERS},<=1 走原串行路径,"
-                        "不启动进程池)")
+                        f"(默认 min(32, CPU核数)={_BACKFILL_DEFAULT_WORKERS},<=1 走原串行路径,"
+                        "不启动进程池;别到 64——单写 SQLite executemany + IPC 在 ~16-24 处封顶)")
     p.add_argument("--embed-conc", type=int, default=4,
                    help="embedding 并发(覆盖 EMBED_CONCURRENCY;all 阶段峰值≈workers×此值,"
                         "注意 429)。默认 4")
@@ -894,7 +894,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # --workers has a phase-dependent default (argparse default is None so we
     # can tell "omitted" from "explicitly 4"): doc-extraction concurrency for
     # ingest/all/kg defaults to 4; vectors-to-blob's parse/encode pool defaults
-    # to min(8, cpu_count()) and is resolved separately below.
+    # to min(32, cpu_count()) and is resolved separately below.
     if args.workers is None and args.phase != "vectors-to-blob":
         args.workers = 4
 
