@@ -10214,6 +10214,16 @@ class SQLiteRepository:
                 self._note_model_error("kg_obj_delta", self.settings.embed_model, exc)
         return sims
 
+    @property
+    def retrieval(self):
+        """检索原语的显式接口（W2.1）。消费者(reasoning/graph)应经此调用，
+        而非穿透本类的私有 `_retrieve_*` 方法。当前委托回本类现有实现。"""
+        rs = getattr(self, "_retrieval_service", None)
+        if rs is None:
+            from app.services.retrieval_service import RetrievalService
+            rs = self._retrieval_service = RetrievalService(self)
+        return rs
+
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,
