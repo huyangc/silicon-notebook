@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -243,6 +244,29 @@ _COPY_CHUNK = 1000
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
 SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ChunkRetrievalPlan:
+    """ask_chunk 编排层的检索决策一次性只读快照（W2.2）。
+
+    由 `_build_chunk_retrieval_plan` 一次读齐 self.settings + KG 存在探测 + rerank 配置
+    产出，供 ask_chunk 从「就地内联算 overlay_on / 三分支 / 就地读 self.settings.X」改为
+    「读 plan.X」——不改控制流形状，只把散落的**编排决策**收到一处、一次。
+
+    **只收编排层的「决策」**：strategy 由 overlay_on ∧ 子查询数算出；mmr/fuse knob。
+    刻意**不收**候选生成层的全局直读 flag（chunk_ann_enabled / chunk_bruteforce_max_chunks /
+    scale_search_include_delta / graph_ppr_enabled）——它们在所有上下文读同一个 settings 值、
+    非 per-query 决策，且 _retrieve_chunks 有多个非 ask_chunk 调用者（无此 plan），穿进去只会
+    造成同一 flag 两种读法长期并存，收益边际而风险落在有生产假死史的候选级联上。
+    也不收共享 flag（rrf / canonical_fold / relation_retrieval / top_n）——它们在共享
+    _retrieve_scored / graph 路径，收进来即改变 reasoning/graph 语义。
+    """
+    strategy: str            # "mix" | "multi" | "single"（复刻 overlay_on / 子查询数三分支）
+    overlay_on: bool         # chunk_kg_overlay_enabled ∧ rerank.configured ∧ (has_kg ∨ base_has_kg)
+    mmr_k: int               # chunk_mmr_k（single 分支 MMR）
+    mmr_lambda: float        # chunk_mmr_lambda（single 分支 MMR）
+    fuse_k: int              # == chunk_mmr_k（复刻 multi 分支 quota_fuse 复用同一 knob）
 
 
 class SQLiteRepository:
@@ -10781,6 +10805,29 @@ class SQLiteRepository:
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
 
+    def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
+        """一次读齐 chunk 检索路径的 flag/knob，产出不可变快照（W2.2）。见 ChunkRetrievalPlan。
+        strategy 复刻 ask_chunk 的 overlay_on 三元 AND 与 if/elif/else 顺序，逐真值等价；
+        fuse_k 复刻 multi 分支 quota_fuse 复用 chunk_mmr_k 的隐式契约。"""
+        s = self.settings
+        overlay_on = (s.chunk_kg_overlay_enabled
+                      and self.rerank_client.configured
+                      and (self._notebook_has_kg(notebook_id)
+                           or self._any_base_notebook_has_kg()))
+        if overlay_on:
+            strategy = "mix"
+        elif len(sub_queries) >= 2:
+            strategy = "multi"
+        else:
+            strategy = "single"
+        return ChunkRetrievalPlan(
+            strategy=strategy,
+            overlay_on=overlay_on,
+            mmr_k=s.chunk_mmr_k,
+            mmr_lambda=s.chunk_mmr_lambda,
+            fuse_k=s.chunk_mmr_k,
+        )
+
     def ask_chunk(
         self,
         notebook_id: str,
@@ -10833,14 +10880,15 @@ class SQLiteRepository:
             # ── 检索 + 选择 ──
             # mix(overlay 开 + rerank 配齐 + 有 KG):三路并池 → rerank 排序 → token 预算截。
             # 否则走现状 chunk-only(MMR / quota_fuse),与历史字节等价。
-            overlay_on = (self.settings.chunk_kg_overlay_enabled
-                          and self.rerank_client.configured
-                          and (self._notebook_has_kg(notebook_id)
-                               or self._any_base_notebook_has_kg()))
+            # W2.2:一次读齐 chunk-path flag/knob → 不可变 plan;overlay_on / strategy /
+            # 各 knob 下面统一读 plan(不再就地读 self.settings)。plan.overlay_on 与旧三元
+            # AND 逐字等价,答案/引用分支继续按 overlay_on 分派。
+            plan = self._build_chunk_retrieval_plan(notebook_id, sub_queries)
+            overlay_on = plan.overlay_on
             kg_block, kg_id_map, kg_hits = "", {}, []
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
-            if overlay_on:
+            if plan.strategy == "mix":
                 candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = self._mix_retrieve(
                     notebook_id, retrieval_query, hl, sub_queries)
                 raise_if_cancelled(cancel_event)
@@ -10857,17 +10905,17 @@ class SQLiteRepository:
                 ask_stage("mix_rerank", _t, recall=len(candidates),
                           selected=len(selected), kg_nodes=len(kg_id_map),
                           concept_walk=concept_walk_n)
-            elif len(sub_queries) >= 2:
+            elif plan.strategy == "multi":
                 collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
                 raise_if_cancelled(cancel_event)
-                selected, _counts = quota_fuse(collected, per_query, self.settings.chunk_mmr_k,
+                selected, _counts = quota_fuse(collected, per_query, plan.fuse_k,
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
                 scored, ids, mat = self._retrieve_chunks(notebook_id, sub_queries[0])
                 raise_if_cancelled(cancel_event)
                 selected = self._mmr_select_chunks(
-                    scored, ids, mat, self.settings.chunk_mmr_k, self.settings.chunk_mmr_lambda)
+                    scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
                 ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
             answer, llm_grounded, anchors = "", False, []
