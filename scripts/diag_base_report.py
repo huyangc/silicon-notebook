@@ -136,6 +136,39 @@ def main():
         print("       tier 分布:", dict(Counter(getattr(h, "tier", "?") for h in fed)))
     except Exception as e:
         print("  B) federated_retrieve 异常:", repr(e))
+
+    # --- 5. 用最近报告的真实子查询,复现每节检索:base 进没进上下文 ---
+    # 结论判读:
+    #   base(fed) 都=0  → 报告的子查询本就检不到 base(问题太锚定当前文件/措辞不匹配)
+    #   base(fed)>0 但 base(进上下文/top12)=0 → 最终重排/配额把 base 挤掉(检索侧 bug)
+    #   base 进上下文>0 但报告 0 引用 → 撰写 LLM 没引 base(相关性/prompt,非检索)
+    print("\n== 5. 复现最近报告每节子查询的 base 命中(检索侧是否带出 base)==")
+    try:
+        with repo._connect() as db:
+            rep2 = db.execute("SELECT outline_json FROM reports WHERE status='done' "
+                              "ORDER BY created_at DESC LIMIT 1").fetchone()
+        outline = json.loads(rep2["outline_json"] or "[]") if rep2 else []
+        if not outline:
+            print("  (报告无 outline_json,跳过)")
+        for sec in outline:
+            title = str(sec.get("title", ""))[:16]
+            for sq in (sec.get("sub_queries") or [])[:2]:
+                try:
+                    fed = repo.federated_retrieve(active_id, str(sq))
+                    base_fed = sum(1 for h in fed if getattr(h, "notebook_id", "") == base_id)
+                    top = sorted(fed, key=lambda h: getattr(h, "relevance", 0), reverse=True)[:12]
+                    base_top = sum(1 for h in top if getattr(h, "notebook_id", "") == base_id)
+                    _blk, idm = repo._answer_context(active_id, top)
+                    base_ctx = sum(1 for v in idm.values()
+                                   if str(v.get("tier", "")) == "base"
+                                   or v.get("object_id") in {h.object_id for h in top
+                                                             if getattr(h, "notebook_id", "") == base_id})
+                    print(f"  节[{title}] SQ={str(sq)[:42]!r}: fed总={len(fed)} base={base_fed} "
+                          f"| top12里base={base_top} | 进上下文base={base_ctx}")
+                except Exception as e:
+                    print(f"  节[{title}] SQ={str(sq)[:30]!r} 探针异常:", repr(e))
+    except Exception as e:
+        print("  §5 异常:", repr(e))
     print("=" * 60)
 
 
