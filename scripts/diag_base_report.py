@@ -169,6 +169,40 @@ def main():
                     print(f"  节[{title}] SQ={str(sq)[:30]!r} 探针异常:", repr(e))
     except Exception as e:
         print("  §5 异常:", repr(e))
+
+    # --- 6. PPR 是否把 base 原文 chunk 带进来(scale_ppr 跨层验证)---
+    # scale_ppr(active) 会把 base⊕active splice 成一张合并图跑 PPR,返回的 chunk
+    # 可含 base 原文。判读:
+    #   base原文 chunk > 0 → base 原文确实经 PPR 进了报告/reasoning(跨层生效)
+    #   scale_ppr 返回 0   → 走了 rustworkx 单库兜底(base 无索引/bail)→ PPR 不跨层
+    print(f"\n== 6. PPR 跨层:base 原文 chunk 是否进 PPR(active={active_id}, query={q!r})==")
+    try:
+        chunks = repo._ppr_retrieve(active_id, q)
+        ids = [c.chunk_id for c in chunks]
+        nb_of: dict = {}
+        if ids:
+            with repo._connect() as db:
+                for i in range(0, len(ids), 400):        # 分批防超 SQLite 变量上限
+                    part = ids[i:i + 400]
+                    ph = ",".join("?" for _ in part)
+                    for r in db.execute(f"SELECT id, notebook_id FROM chunks WHERE id IN ({ph})", part):
+                        nb_of[r["id"]] = r["notebook_id"]
+        base_ch = sum(1 for cid in ids if nb_of.get(cid) == base_id)
+        print(f"  _ppr_retrieve(active) 返回 {len(chunks)} chunk;其中 base 原文: {base_ch}"
+              "   ←←← >0 = base 原文确经 PPR(scale_ppr 跨层)进来")
+        print("   chunk 归属 notebook 分布:",
+              dict(Counter(nb_of.get(c.chunk_id, "?") for c in chunks)))
+        try:
+            ranked = repo.scale_ppr(active_id, q)
+            print(f"  scale_ppr(active) 直接返回 {len(ranked)} chunk 排名"
+                  "  (0=走了 rustworkx 单库兜底/base 无索引→PPR 不跨层)")
+        except Exception as e:
+            print("  scale_ppr 探针异常:", repr(e))
+        for c in chunks[:4]:
+            tag = "base" if nb_of.get(c.chunk_id) == base_id else "active"
+            print(f"     [{tag}] {str(c.source_title)[:28]} · {str(c.text)[:44]}")
+    except Exception as e:
+        print("  §6 异常:", repr(e))
     print("=" * 60)
 
 
