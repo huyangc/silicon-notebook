@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  formatDuration,
   getReasoningTraceSummary,
   getTraceStepDetail,
 } from "./reasoning-trace.ts";
@@ -19,7 +20,41 @@ test("summarizes the latest reasoning step for a collapsed trace row", () => {
     latestSummary: "合成: 采用 9 个KG候选 + 0 段原文",
     latestDetail: "9 个 KG / 0 段原文",
     stepCountLabel: "3 步",
+    totalLabel: "",
   });
+});
+
+test("sums per-step durations into a total label for the collapsed row", () => {
+  const steps = [
+    { step_type: "plan", summary: "规划", detail: {}, duration_ms: 1200 },
+    { step_type: "retrieve", summary: "检索", detail: { count: 8 }, duration_ms: 800 },
+    { step_type: "answer", summary: "合成", detail: { kg: 9 }, duration_ms: 10340 },
+  ];
+  // 1200 + 800 + 10340 = 12340ms -> 12.3s
+  assert.equal(getReasoningTraceSummary(steps, false).totalLabel, "12.3s");
+});
+
+test("omits the total label when no step carries a duration", () => {
+  const steps = [{ step_type: "plan", summary: "规划", detail: {} }];
+  assert.equal(getReasoningTraceSummary(steps, false).totalLabel, "");
+});
+
+test("formatDuration renders ms / seconds / minutes buckets", () => {
+  assert.equal(formatDuration(0), "0ms");
+  assert.equal(formatDuration(820), "820ms");
+  assert.equal(formatDuration(999), "999ms");
+  assert.equal(formatDuration(1000), "1.0s");
+  assert.equal(formatDuration(1200), "1.2s");
+  assert.equal(formatDuration(12340), "12.3s");
+  assert.equal(formatDuration(60000), "1m0s");
+  assert.equal(formatDuration(63000), "1m3s");
+  assert.equal(formatDuration(119600), "2m0s");
+});
+
+test("formatDuration guards against non-finite and negative inputs", () => {
+  assert.equal(formatDuration(-5), "0ms");
+  assert.equal(formatDuration(NaN), "0ms");
+  assert.equal(formatDuration(Infinity), "0ms");
 });
 
 test("uses concise detail labels for trace step payloads", () => {
@@ -36,5 +71,6 @@ test("summarizes an empty live trace as waiting for backend events", () => {
     latestSummary: "等待后端事件…",
     latestDetail: "",
     stepCountLabel: "0 步",
+    totalLabel: "",
   });
 });

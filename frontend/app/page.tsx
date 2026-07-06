@@ -13,7 +13,7 @@ import {
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
-import { getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
+import { formatDuration, getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
   groupOf, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
@@ -5293,20 +5293,35 @@ function ReasoningTracePanel({ steps, live = false }: { steps: ReasoningTraceSte
         <span className={`reasoning-trace-chip ${summary.latestLabel ? "" : "empty"}`}>{summary.latestLabel || "空"}</span>
         <strong>{summary.latestSummary}</strong>
         <small>{summary.latestDetail}</small>
-        <span className="reasoning-trace-count">{summary.stepCountLabel}</span>
+        <span className="reasoning-trace-count">
+          {summary.stepCountLabel}{summary.totalLabel ? ` · ${summary.totalLabel}` : ""}
+        </span>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
       </button>
       {expanded && (
         <ol className="reasoning-trace-list">
           {steps.length === 0 ? (
             <li className="reasoning-trace-empty">等待后端事件…</li>
-          ) : steps.map((step, index) => (
-            <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
-              <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
-              <strong>{step.summary}</strong>
-              {getTraceStepDetail(step) && <small>{getTraceStepDetail(step)}</small>}
-            </li>
-          ))}
+          ) : steps.map((step, index) => {
+            const detail = getTraceStepDetail(step);
+            const hasTime = typeof step.duration_ms === "number";
+            return (
+              <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
+                <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
+                <strong>{step.summary}</strong>
+                {(detail || hasTime) && (
+                  <div className="reasoning-trace-meta">
+                    {detail && <small>{detail}</small>}
+                    {hasTime && (
+                      <time className={`reasoning-trace-time ${(step.duration_ms ?? 0) >= 10000 ? "slow" : ""}`}>
+                        {formatDuration(step.duration_ms ?? 0)}
+                      </time>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

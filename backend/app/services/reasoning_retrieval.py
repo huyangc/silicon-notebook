@@ -7,6 +7,7 @@ ReasoningRetriever 持 repo 引用,运行时注入,避免与 sqlite_repository �
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -236,8 +237,16 @@ class ReasoningRetriever:
         seen_chunks: set = set()
         visited: set = set()
 
+        # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
+        # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
+        last_ts = time.perf_counter()
+
         def record(step: TraceStep) -> None:
+            nonlocal last_ts
             raise_if_cancelled(self.cancel_event)
+            now = time.perf_counter()
+            step.duration_ms = round((now - last_ts) * 1000)
+            last_ts = now
             trace.append(step)
             if on_step:
                 on_step(step)

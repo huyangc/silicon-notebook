@@ -17,7 +17,26 @@ export type ReasoningTraceSummary = {
   latestSummary: string;
   latestDetail: string;
   stepCountLabel: string;
+  totalLabel: string;
 };
+
+// 把毫秒渲染成人话:<1s 用 ms、<1min 用 x.xs、更久用 xmxs。
+// 非有限/负值一律归零,避免 NaN 泄漏到 UI。
+export function formatDuration(ms: number): string {
+  const v = Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0;
+  if (v < 1000) return `${v}ms`;
+  if (v < 60000) return `${(v / 1000).toFixed(1)}s`;
+  const totalSec = Math.round(v / 1000);
+  return `${Math.floor(totalSec / 60)}m${totalSec % 60}s`;
+}
+
+// 轨迹总耗时 = 各步 duration_ms 之和(缺失按 0)。
+function totalDurationMs(steps: ReasoningTraceStep[]): number {
+  return steps.reduce(
+    (sum, step) => sum + (typeof step.duration_ms === "number" ? step.duration_ms : 0),
+    0,
+  );
+}
 
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
   const detail = step.detail ?? {};
@@ -45,13 +64,16 @@ export function getReasoningTraceSummary(
       latestSummary: "等待后端事件…",
       latestDetail: "",
       stepCountLabel: "0 步",
+      totalLabel: "",
     };
   }
+  const totalMs = totalDurationMs(steps);
   return {
     title: live ? "Agent 推理中" : "Agent 推理轨迹",
     latestLabel: TRACE_STEP_LABELS[latest.step_type] ?? latest.step_type,
     latestSummary: latest.summary,
     latestDetail: getTraceStepDetail(latest),
     stepCountLabel: `${steps.length} 步`,
+    totalLabel: totalMs > 0 ? formatDuration(totalMs) : "",
   };
 }
