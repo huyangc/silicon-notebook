@@ -1653,6 +1653,77 @@ button.chat-session-card {
   cursor: not-allowed;
 }
 
+/* 列表行删除:同下载钮同尺寸的图标钮,hover 转红;两步确认时展开小确认条。 */
+.report-card-delete {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.report-card-delete:hover {
+  border-color: #f0a9a9;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.report-card-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid #f0c0c0;
+  border-radius: 999px;
+  background: #fef2f2;
+}
+
+.report-card-confirm-text {
+  font-size: 12px;
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.report-card-confirm-yes,
+.report-card-confirm-no {
+  border: none;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.report-card-confirm-yes {
+  background: #dc2626;
+  color: #fff;
+}
+
+.report-card-confirm-yes:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.report-card-confirm-yes:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.report-card-confirm-no {
+  background: #fff;
+  color: #64748b;
+  border: 1px solid #e2e6ee;
+}
+
+.report-card-confirm-no:hover {
+  color: #111827;
+  border-color: #cbd3e0;
+}
+
 .report-detail-head {
   display: flex;
   align-items: center;
