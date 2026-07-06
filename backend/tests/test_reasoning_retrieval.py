@@ -11,6 +11,9 @@ def test_trace_step_model_shape():
     assert d["step_type"] == "plan"
     assert d["summary"].startswith("规划")
     assert d["detail"] == {"n": 2}
+    assert d["duration_ms"] is None            # 默认无耗时,record() 时才回填
+    t.duration_ms = 1234
+    assert t.model_dump()["duration_ms"] == 1234
 
 
 def test_ask_request_mode_defaults_chunk():
@@ -386,6 +389,8 @@ def test_run_plan_then_answer(rrepo):
     assert res.top_hits  # 召回到候选
     kinds = [t.step_type for t in res.trace]
     assert kinds[0] == "plan" and "retrieve" in kinds and kinds[-1] == "answer"
+    # record() 给每步回填墙钟耗时 —— 全部为非负整数,直达前端展示
+    assert all(isinstance(t.duration_ms, int) and t.duration_ms >= 0 for t in res.trace)
 
 
 def test_run_expand_graph_records_trace(rrepo):

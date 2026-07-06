@@ -2109,6 +2109,26 @@ button.chat-session-card {
   white-space: nowrap;
 }
 
+/* 第三列:描述 + 每步耗时并排(右对齐),耗时用等宽数字,慢步(≥10s)加暖色强调 */
+.reasoning-trace-list li .reasoning-trace-meta {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.reasoning-trace-time {
+  color: #64748b;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.reasoning-trace-time.slow {
+  color: #b45309;
+}
+
 .reasoning-trace-list li.active span {
   border-color: #2f6f73;
   background: #e7f3f1;

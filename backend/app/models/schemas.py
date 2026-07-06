@@ -252,6 +252,7 @@ class TraceStep(BaseModel):
     step_type: str            # plan | retrieve | reflect | expand | fallback | answer | skip
     summary: str              # 人话摘要
     detail: Dict[str, Any] = Field(default_factory=dict)
+    duration_ms: Optional[int] = None  # 该步墙钟耗时(相邻两步 record 之差),供前端展示
 
 
 class AskRequest(BaseModel):
