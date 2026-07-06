@@ -117,21 +117,6 @@ def type_weight(object_type: str, process_intent: bool) -> float:
     return table.get(object_type, 0.5)
 
 
-# Tier authority weights: base KG (curated textbook) outranks personal notes
-# when scores are tied. Applied in ask()'s rank_key alongside type_weight —
-# NEVER inside _fuse — so relevance stays [0,1] and the tau thresholds are not
-# shifted. A personal hit with higher raw relevance still wins.
-_TIER_WEIGHT = {
-    "base": 1.20,
-    "personal": 1.00,
-}
-
-
-def tier_weight(tier: str) -> float:
-    """Authority multiplier for a notebook tier; default 1.0 for unknowns."""
-    return _TIER_WEIGHT.get(tier, 1.00)
-
-
 def est_tokens(text: str) -> int:
     """粗估 token(无 tiktoken):中英混排约 3.5 字符/token,向上取整。仅用于预算截断。"""
     return math.ceil(len(text or "") / 3.5)

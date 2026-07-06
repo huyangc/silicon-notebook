@@ -87,6 +87,12 @@ def test_report_prompts_contract():
                                allow_parametric=True)
     assert "【通识】" in sp and "[k" in sp and "layer by layer" not in sp  # 独立文本,非复用 answer_prompt
     assert "ONLY this section" in sp
+    # 两层库权威规则(镜像 answer_prompt 规则 5):base 权威 + 冲突以 base 为准 + 切题第一不强引。
+    spl = sp.lower()
+    assert "authoritative" in spl and "defer to the base" in spl, \
+        "report_section_prompt 缺 base 权威/冲突以 base 为准 规则"
+    assert "relevant" in spl and ("do not" in spl or "don't" in spl), \
+        "report_section_prompt 缺『base 与本节无关不要硬引(切题第一)』规则"
     sp2 = report_section_prompt("t", "s", "q", "CTX", allow_parametric=False)
     assert "【通识】" not in sp2
     su = report_summary_prompt("总问题", "## 节1\nmd")

@@ -422,7 +422,13 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "($...$ inline, $$...$$ display); keep [k] markers outside math.\n"
         "6. Start the section body directly with a '## <section title>' "
         "heading, then prose (tables allowed in GitHub markdown).\n"
-        "7. grounded=true only if at least one [k] appears in the section.\n\n"
+        "7. grounded=true only if at least one [k] appears in the section.\n"
+        "8. Items tagged [base] come from the authoritative reference knowledge "
+        "base; items tagged [personal] are the user's own notebook. If a personal "
+        "item contradicts a base item, defer to the base item's position and "
+        "briefly note the discrepancy. Relevance comes first: cite a [base] item "
+        "ONLY when it actually supports THIS section — if a base item is not "
+        "relevant to this section, do NOT force it in.\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return JSON only: {"markdown":"","grounded":true|false}'
     )
