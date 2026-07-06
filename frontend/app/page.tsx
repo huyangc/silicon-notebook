@@ -1192,6 +1192,7 @@ export default function Home() {
   const askAbortRef = useRef<AbortController | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
   const kgGraphRef = useRef<any>(null);
@@ -1366,6 +1367,38 @@ export default function Home() {
       window.removeEventListener("resize", closeAccountMenu);
     };
   }, [accountMenuOpen]);
+
+  // 会话历史面板:点面板外部(或按 Esc)关闭。切换按钮(会话/历史/当前会话)排除在外——
+  // 交给按钮自己的 onClick 切换,否则 pointerdown 先关、click 再开会「关了又开」。
+  useEffect(() => {
+    if (!sessionPanelOpen) return;
+
+    function closePanel() {
+      setSessionPanelOpen(false);
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (sessionPopoverRef.current?.contains(target)) return;
+      if (target instanceof Element &&
+          target.closest(".chat-session-toggle, .chat-current-session")) {
+        return;
+      }
+      closePanel();
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") closePanel();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [sessionPanelOpen]);
 
   // Keep a live ref of `sources` so the poll loop below reads the latest without
   // re-subscribing (its effect is keyed on the boolean `hasPending`, not the array).
@@ -3302,7 +3335,7 @@ export default function Home() {
                 </div>
               )}
               {chatMode === "ask" && sessionPanelOpen && (
-                <div className="chat-session-popover" role="dialog" aria-label="会话管理">
+                <div className="chat-session-popover" role="dialog" aria-label="会话管理" ref={sessionPopoverRef}>
                   <div className="chat-session-popover-top">
                     <div className="chat-session-popover-head">
                       <div>
