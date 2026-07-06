@@ -829,8 +829,8 @@ def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
 def test_plan_uses_expand_query(rrepo, monkeypatch):
     import app.services.query_rewrite as qr
     monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
-        query_en="x", sub_queries=[qr.SubQuerySpec("sub A", types=["concept"]),
-                                   qr.SubQuerySpec("sub B")]))
+        query="x", sub_queries=[qr.SubQuerySpec("sub A", types=["concept"]),
+                                qr.SubQuerySpec("sub B")]))
     from app.services.reasoning_retrieval import ReasoningRetriever
     r = ReasoningRetriever(rrepo, rrepo.settings)
     subs = r.plan("中文复合问题")

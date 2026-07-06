@@ -31,7 +31,7 @@ class SubQuerySpec:
 
 @dataclass
 class ExpandedQuery:
-    query_en: str
+    query: str
     sub_queries: List[SubQuerySpec]
     high_level_keywords: List[str] = field(default_factory=list)
     low_level_keywords: List[str] = field(default_factory=list)
@@ -40,12 +40,15 @@ class ExpandedQuery:
 def expand_query(client, question: str, history: str = "", *,
                  timeout: Optional[float] = None, max_retries: Optional[int] = None,
                  max_subqueries: int = 4, want_types: bool = False,
+                 corpus_langs: Optional[List[str]] = None,
                  cancel_event: CancelEvent = None) -> ExpandedQuery:
-    """一次 LLM 调用:问题(任意语言)→ 英文改写 + 1..max_subqueries 个具体英文子查询。
+    """一次 LLM 调用:问题(任意语言)→ 同语言规范改写 + 1..max_subqueries 个具体子查询
+    (保持问题本身的语言)。keywords 按 corpus_langs 双语化(供纯词法 FTS/KG 名匹配),
+    sub_queries 单语言(多语向量 embedder 一次即跨语,无需二次嵌入)。
     want_types=True 时每个子查询附 KG types/prefer(供 reasoning)。
     任何失败/未配置/空 → 回退 [normalize_terms(question)] 单子查询。始终 >=1。"""
     from app.services.prompts import expand_query_prompt, EXPAND_SCHEMA_HINT
-    fallback = ExpandedQuery(query_en=question,
+    fallback = ExpandedQuery(query=question,
                              sub_queries=[SubQuerySpec(query=normalize_terms(question))])
     if not getattr(client, "configured", False):
         return fallback
@@ -55,7 +58,8 @@ def expand_query(client, question: str, history: str = "", *,
     try:
         raw = client.chat_json(
             [{"role": "user", "content": expand_query_prompt(question, history, want_types,
-                                                             max_subqueries=max_subqueries)}],
+                                                             max_subqueries=max_subqueries,
+                                                             corpus_langs=corpus_langs)}],
             EXPAND_SCHEMA_HINT, cancel_event=cancel_event, **kw)
         data = json.loads(raw)
         if not isinstance(data, dict):
@@ -91,8 +95,8 @@ def expand_query(client, question: str, history: str = "", *,
             return []
         hl = _kw_list(data.get("high_level_keywords"))
         ll = _kw_list(data.get("low_level_keywords"))
-        query_en = str(data.get("query_en", "")).strip() or question
-        return ExpandedQuery(query_en=query_en, sub_queries=out,
+        query = str(data.get("query", "")).strip() or question
+        return ExpandedQuery(query=query, sub_queries=out,
                              high_level_keywords=hl, low_level_keywords=ll)
     except AskCancelled:
         raise

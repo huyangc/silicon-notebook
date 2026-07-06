@@ -6,6 +6,8 @@ without touching the repository/extraction code.
 
 from __future__ import annotations
 
+from typing import List, Optional
+
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
@@ -19,6 +21,10 @@ def concept_description_prompt(name: str, evidence_block: str) -> str:
         "source snippets below (which mention it across documents). Merge the "
         "snippets, resolve any contradictions into a single coherent description, "
         "stay factual to the snippets, third person, include the concept name. "
+        "Preserve entity/concept names, formula expressions and canonical labels "
+        "EXACTLY as they appear in the source, in their original language — do NOT "
+        "translate or transliterate them; write the description in the language of "
+        "the source snippets. "
         "Return JSON only with a 'description' field.\n\n"
         f"Concept: {name}\n\nSource snippets:\n{evidence_block}"
     )
@@ -26,10 +32,11 @@ def concept_description_prompt(name: str, evidence_block: str) -> str:
 
 def notebook_description_prompt(sources_block: str) -> str:
     return (
-        "Write a concise 1-2 sentence description (Chinese ok) of what this "
-        "knowhow notebook covers, based on the sources its curator has added. "
-        "Describe the subject matter and document types; do not invent scope "
-        "beyond the sources. Return valid JSON only with a 'description' field.\n\n"
+        "Write a concise 1-2 sentence description, in the dominant language of the "
+        "sources, of what this knowhow notebook covers, based on the sources its "
+        "curator has added. Describe the subject matter and document types; do not "
+        "invent scope beyond the sources. Return valid JSON only with a "
+        "'description' field.\n\n"
         f"Sources:\n{sources_block}"
     )
 
@@ -41,9 +48,10 @@ def notebook_meta_prompt(sources_block: str) -> str:
     return (
         "Based on the sources a curator added to this semiconductor knowhow "
         "notebook, propose a concise notebook NAME (<= 20 characters, no quotes) "
-        "and a 1-2 sentence DESCRIPTION (Chinese ok) of what it covers. Describe "
-        "the actual subject matter and document types; do not invent scope beyond "
-        "the sources. Return valid JSON only with 'name' and 'description'.\n\n"
+        "and a 1-2 sentence DESCRIPTION, both in the dominant language of the "
+        "sources, of what it covers. Describe the actual subject matter and "
+        "document types; do not invent scope beyond the sources. Return valid "
+        "JSON only with 'name' and 'description'.\n\n"
         f"Sources:\n{sources_block}"
     )
 
@@ -74,7 +82,10 @@ def gleaning_prompt(section_path: str, doc_type: str) -> str:
         "ONLY the NODES that were missed — use the SAME node types (Concept, "
         "Claim, Formula, Procedure) and the SAME JSON schema, each with its "
         'integer "ev" element label. Do NOT repeat nodes you already extracted. '
-        "If nothing was missed, return an empty nodes list. Return JSON only."
+        "If nothing was missed, return an empty nodes list. "
+        "Preserve entity/concept names, formula expressions and canonical labels "
+        "EXACTLY as they appear in the source text, in their original language — "
+        "do NOT translate or transliterate them. Return JSON only."
     )
 
 
@@ -97,7 +108,11 @@ def schema_induction_prompt(existing_types: list, sample_block: str) -> str:
         "payload keys; primary: the main text field; rationale: one line on why "
         "it is needed and not covered by existing types.\n"
         "- Do NOT repeat any existing type. Return valid JSON only; empty "
-        "new_types list if nothing new is warranted.\n\n"
+        "new_types list if nothing new is warranted.\n"
+        "- Keep object_type / field KEYS as snake_case ASCII identifiers; but write "
+        "the human-facing label / description / rationale in the language of the "
+        "source material, and preserve any entity/concept names from the source "
+        "in their original language — do NOT translate them.\n\n"
         f"Existing object types: {', '.join(existing_types)}\n\n"
         f"Document sample:\n{sample_block}"
     )
@@ -264,7 +279,10 @@ def community_report_prompt(members_block: str, relations_block: str) -> str:
         "design knowledge graph into a short report. Given the member items and "
         "their internal relationships, produce: a short title (the community's "
         "theme), a 2-4 sentence summary, and 3-6 key findings (each a concise "
-        "sentence). Stay factual to the members. Return JSON only with "
+        "sentence). Stay factual to the members. Preserve entity/concept names, "
+        "formula expressions and canonical labels EXACTLY as they appear, in their "
+        "original language — do NOT translate them; write the title/summary/findings "
+        "in the language of the source material. Return JSON only with "
         "'title','summary','findings'.\n\n"
         f"Members:\n{members_block}\n\nInternal relationships:\n{relations_block}"
     )
@@ -294,8 +312,9 @@ def global_reduce_prompt(question: str, points_block: str) -> str:
     return (
         "You answer the user question by synthesizing the key points below "
         "(gathered from community reports, sorted by importance). Be concrete and "
-        "structured. If the points do not cover the question, say so and set "
-        "grounded=false. Return JSON only with 'answer' and 'grounded'.\n\n"
+        "structured. Answer in the SAME language as the question. If the points do "
+        "not cover the question, say so and set grounded=false. Return JSON only "
+        "with 'answer' and 'grounded'.\n\n"
         f"Question: {question}\n\nKey points:\n{points_block}"
     )
 
@@ -307,18 +326,21 @@ def evidence_refine_prompt(question: str, evidence_block: str) -> str:
     return (
         "From the retrieved knowledge items below, extract ONLY the statements "
         "directly relevant to answering the question, as a concise list (verbatim "
-        "or lightly compressed, faithful to the items). Drop irrelevant items. If "
+        "or lightly compressed, faithful to the items). Drop irrelevant items. "
+        "Keep entity/concept names, formula expressions and canonical labels EXACTLY "
+        "as they appear, in their original language — do NOT translate them. If "
         "none are relevant, return an empty list. Return JSON only with 'relevant'.\n\n"
         f"Question: {question}\n\nRetrieved items:\n{evidence_block}"
     )
 
 
-EXPAND_SCHEMA_HINT = ('{"query_en":"","high_level_keywords":[],"low_level_keywords":[],'
+EXPAND_SCHEMA_HINT = ('{"query":"","high_level_keywords":[],"low_level_keywords":[],'
                       '"sub_queries":[{"query":"","types":[],"prefer":"balanced","reason":""}]}')
 
 
 def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False,
-                        max_subqueries: int = 4) -> str:
+                        max_subqueries: int = 4,
+                        corpus_langs: Optional[List[str]] = None) -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else "")
@@ -327,29 +349,42 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "procedure; omit/empty = all). prefer: keyword|semantic|balanced.\n"
         if want_types else "")
     types_schema = ',"types":[],"prefer":"balanced"' if want_types else ""
+    langs = [l for l in (corpus_langs or ["zh", "en"]) if l] or ["zh", "en"]
+    if len(langs) > 1:
+        kw_langs_rule = (
+            "provide terms in EACH of these corpus languages: "
+            f"{', '.join(langs)} — for a term with a well-known form in another "
+            "listed language (e.g. an English acronym for a Chinese concept, or "
+            "vice-versa), include BOTH forms — so lexical search matches documents "
+            "in any of them.")
+    else:
+        kw_langs_rule = (
+            f"provide terms in the corpus language ({langs[0]}); a single-language "
+            "corpus needs only single-language keywords.")
     return (
-        "You prepare an engineer's question for retrieval over an ENGLISH document "
+        "You prepare an engineer's question for retrieval over a document "
         "corpus. Produce:\n"
-        "1. query_en: the question rewritten in clear English (translate if needed; "
-        "spell entity/version names canonically, e.g. 'deepseekv2' -> 'DeepSeek-V2').\n"
+        "1. query: the question rewritten cleanly IN ITS OWN LANGUAGE (spell "
+        "entity/version names canonically, e.g. 'deepseekv2' -> 'DeepSeek-V2').\n"
         "2. high_level_keywords: themes / relationship types / abstract topics "
-        "(used to retrieve RELATIONS).\n"
+        f"(used to retrieve RELATIONS) — {kw_langs_rule}\n"
         "3. low_level_keywords: concrete entities / names / specifics (used to "
-        "retrieve ENTITIES).\n"
-        f"4. sub_queries: 1-{max_subqueries} focused, standalone ENGLISH search queries that together "
-        "cover the question. For a COMPARISON, emit ONE sub-query per entity (e.g. "
-        "'DeepSeek-V2 architecture and features', 'DeepSeek-V3 improvements'). For a "
-        "BROAD/overview question, emit one per distinct dimension. For a simple "
-        "single-topic question, ONE sub-query is fine. For a DEEP MECHANISM/DERIVATION "
-        "question that spans abstraction levels, emit one sub-query per level it "
-        "crosses (e.g. circuit principle / device physics / statistical or solid-state "
-        "physics / quantum-lattice origin / engineering constraints such as packaging "
-        "& materials). Use canonical entity names.\n"
+        f"retrieve ENTITIES) — {kw_langs_rule}\n"
+        f"4. sub_queries: 1-{max_subqueries} focused, standalone retrieval queries IN "
+        "THE QUESTION'S LANGUAGE that together cover the question. For a COMPARISON, "
+        "emit ONE sub-query per entity (e.g. 'DeepSeek-V2 architecture and features', "
+        "'DeepSeek-V3 improvements'). For a BROAD/overview question, emit one per "
+        "distinct dimension. For a simple single-topic question, ONE sub-query is "
+        "fine. For a DEEP MECHANISM/DERIVATION question that spans abstraction "
+        "levels, emit one sub-query per level it crosses (e.g. circuit principle / "
+        "device physics / statistical or solid-state physics / quantum-lattice "
+        "origin / engineering constraints such as packaging & materials). Use "
+        "canonical entity names.\n"
         f"{types_line}"
         "Keep sub-queries non-redundant.\n\n"
         f"{history_section}"
         f"Question: {question}\n\n"
-        'Return JSON only: {"query_en":"","high_level_keywords":[],'
+        'Return JSON only: {"query":"","high_level_keywords":[],'
         '"low_level_keywords":[],"sub_queries":[{"query":""' + types_schema + "}]}"
     )
 
