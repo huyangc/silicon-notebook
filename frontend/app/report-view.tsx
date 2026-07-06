@@ -253,6 +253,9 @@ export function ReportsPanel({
   const [confirmDelete, setConfirmDelete] = useState(false);
   // 列表单篇下载:记录正在下载的 rid,禁用该行按钮防重复点击。
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  // 列表内删除:两步确认——记录待确认删除的 rid + 正在删除的 rid。
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   // 多选批量下载:是否处于多选模式 + 已选 rid 集合 + zip 下载中标志。
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -418,6 +421,23 @@ export function ReportsPanel({
       surfaceError(error);
     } finally {
       setDownloadingId(null);
+    }
+  }
+
+  // 列表内删除:第一次点亮出确认,确认后才真删;删完刷新列表。
+  async function deleteFromList(rid: string) {
+    if (deletingId) return;
+    setDeletingId(rid);
+    try {
+      await deleteReport(notebookId, rid);
+      setToast("报告已删除");
+      setConfirmDeleteId(null);
+      if (active && active.id === rid) setActive(null);
+      setReports(await listReports(notebookId));
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -700,6 +720,47 @@ export function ReportsPanel({
                       >
                         <Download size={16} />
                       </button>
+                    )}
+                    {!selectMode && (
+                      confirmDeleteId === r.id ? (
+                        <span className="report-card-confirm" onClick={(e) => e.stopPropagation()}>
+                          <span className="report-card-confirm-text">删除?</span>
+                          <button
+                            type="button"
+                            className="report-card-confirm-yes"
+                            disabled={deletingId === r.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void deleteFromList(r.id);
+                            }}
+                          >
+                            {deletingId === r.id ? "删除中…" : "确认"}
+                          </button>
+                          <button
+                            type="button"
+                            className="report-card-confirm-no"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmDeleteId(null);
+                            }}
+                          >
+                            取消
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          className="report-card-delete"
+                          type="button"
+                          title="删除报告"
+                          aria-label="删除报告"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDeleteId(r.id);
+                          }}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )
                     )}
                   </div>
                 </article>
