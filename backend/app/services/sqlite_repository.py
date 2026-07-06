@@ -114,7 +114,6 @@ from app.services.retrieval import (
     score_knowledge,
     score_elements,
     type_weight,
-    tier_weight,
     ensure_procedure_quota,
     classify_evidence,
 )
@@ -10447,7 +10446,10 @@ class SQLiteRepository:
         _fuse, same dual-index best-of — so the [0,1]/tau and dual-index best-of
         invariants are preserved by construction. Hits are merged and sorted by
         score desc; no cross-notebook normalisation is applied (the same fused
-        relevance scale applies to both tiers).
+        relevance scale applies to both tiers). Two-tier authority is a
+        ZERO-MAGNITUDE ordering strategy: ranking is pure relevance (tier-blind),
+        and base only wins as a tie-break on an EXACT score tie — never via any
+        multiplier/quota/floor. A personal hit with higher relevance still wins.
         """
         notebook_ids: List[str] = [active_notebook_id]
         with self._connect() as db:
@@ -10473,7 +10475,9 @@ class SQLiteRepository:
                 h.tier = tier
             all_hits.extend(hits)
 
-        all_hits.sort(key=lambda it: it.score, reverse=True)
+        # Pure-relevance ordering (tier-blind); base wins ONLY on an exact score
+        # tie (True > False). Zero magnitude — no constant is added to any score.
+        all_hits.sort(key=lambda it: (it.score, getattr(it, "tier", "") == "base"), reverse=True)
         return all_hits
 
     def federated_retrieve_relations(self, active_notebook_id: str,

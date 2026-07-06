@@ -111,27 +111,67 @@ class TestTask2:
 
 
 class TestTask3:
-    def test_tier_weight_base_exceeds_personal(self):
-        from app.services.retrieval import tier_weight
-        assert tier_weight("base") > tier_weight("personal")
+    """两层库权威=零幅度次序策略:排序永远纯相关度、tier 无关;base 的『更权威』
+    只体现为『完全平局时 base 排前』。绝不用任何幅度乘数/配额/地板。"""
 
-    def test_tier_weight_values_are_positive(self):
-        from app.services.retrieval import tier_weight
-        assert tier_weight("base") > 0
-        assert tier_weight("personal") > 0
-        assert tier_weight("unknown") > 0
+    def test_tier_weight_is_removed(self):
+        """死代码 tier_weight 已删:模块不再暴露该属性,import 应 ImportError。"""
+        import app.services.retrieval as retrieval
+        assert not hasattr(retrieval, "tier_weight"), \
+            "tier_weight 幅度乘数应已删除(零幅度次序策略不使用任何权威乘数)"
+        assert not hasattr(retrieval, "_TIER_WEIGHT")
+        with pytest.raises(ImportError):
+            from app.services.retrieval import tier_weight  # noqa: F401
 
-    def test_base_hit_outranks_personal_with_same_raw_score(self, repo):
-        """A base hit with score=0.20 must rank above a personal hit with score=0.20."""
-        from app.services.retrieval import RetrievedKnowledge, tier_weight
-        from app.services.sqlite_repository import type_weight
+    def test_base_outranks_personal_only_on_exact_score_tie(self):
+        """score 完全相等时 base 排在 personal 前(纯次序键,无常数)。"""
+        from app.services.retrieval import RetrievedKnowledge
         base_hit = RetrievedKnowledge(
             object_id="b1", object_type="claim", payload={}, tier="base", score=0.20, relevance=0.20)
         personal_hit = RetrievedKnowledge(
             object_id="p1", object_type="claim", payload={}, tier="personal", score=0.20, relevance=0.20)
-        process_intent = False
-        rank = lambda h: h.score * type_weight(h.object_type, process_intent) * tier_weight(h.tier)
-        assert rank(base_hit) > rank(personal_hit)
+        # federated_retrieve 使用的排序键:score 第一、仅平局时 base(True>False)优先。
+        key = lambda it: (it.score, getattr(it, "tier", "") == "base")
+        ranked = sorted([personal_hit, base_hit], key=key, reverse=True)
+        assert ranked[0] is base_hit, "分数相等时 base 应排在 personal 前"
+
+    def test_higher_relevance_personal_still_wins_over_base(self):
+        """零幅度:base 不获得任何幅度加成;相关度更高的 personal 仍胜出(切题第一)。"""
+        from app.services.retrieval import RetrievedKnowledge
+        base_hit = RetrievedKnowledge(
+            object_id="b1", object_type="claim", payload={}, tier="base", score=0.20, relevance=0.20)
+        personal_hit = RetrievedKnowledge(
+            object_id="p1", object_type="claim", payload={}, tier="personal", score=0.30, relevance=0.30)
+        key = lambda it: (it.score, getattr(it, "tier", "") == "base")
+        ranked = sorted([base_hit, personal_hit], key=key, reverse=True)
+        assert ranked[0] is personal_hit, "相关度更高的 personal 命中必须排在 base 前(纯相关度第一)"
+
+    def test_federated_retrieve_ranks_base_first_on_score_tie(self, repo):
+        """真库路径:两 tier 命中 score 相等时,base 在结果里应排在 personal 之前。"""
+        from app.services.retrieval import RetrievedKnowledge
+        base_nb = repo.create_notebook(NotebookCreate(name="base"))
+        repo.mark_notebook_base(base_nb.id)
+        personal_nb = repo.create_notebook(NotebookCreate(name="personal"))
+
+        base_hit = RetrievedKnowledge(
+            object_id="b1", object_type="claim", payload={}, score=0.20, relevance=0.20)
+        personal_hit = RetrievedKnowledge(
+            object_id="p1", object_type="claim", payload={}, score=0.20, relevance=0.20)
+
+        def fake_retrieve_scored(nid, query, **kwargs):
+            if nid == base_nb.id:
+                return [RetrievedKnowledge(
+                    object_id="b1", object_type="claim", payload={}, score=0.20, relevance=0.20)]
+            if nid == personal_nb.id:
+                return [RetrievedKnowledge(
+                    object_id="p1", object_type="claim", payload={}, score=0.20, relevance=0.20)]
+            return []
+
+        repo._retrieve_scored = fake_retrieve_scored
+        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
+        tied = [h for h in hits if h.score == 0.20]
+        assert [h.tier for h in tied][:2] == ["base", "personal"], \
+            f"平局时应 base 先于 personal,实得 {[h.tier for h in tied]!r}"
 
     def test_keyword_base_hit_tau_position_unchanged(self, repo):
         """A pure-keyword base hit's .relevance (what tau reads) must stay [0,1].
