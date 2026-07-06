@@ -333,6 +333,10 @@ class SQLiteRepository:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
         self._user_model_cfg_cache: Dict[str, dict] = {}
+        # Bilingual-query hint: per-notebook detected corpus languages (subset of
+        # ["zh","en"]), sampled cheaply and memoized. Staleness is harmless — a
+        # wrong guess only over/under-generates FTS keywords, never breaks recall.
+        self._notebook_langs_cache: Dict[str, List[str]] = {}
         # C7: bounded LRU (was an unbounded plain dict — every notebook ever
         # touched stayed resident for the life of the process; each entry is
         # numpy arrays + a memoized hnsw handle, tens-of-MB to GB). Eviction
@@ -2335,6 +2339,9 @@ class SQLiteRepository:
                 db.executemany(
                     "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
                     [(r["id"], notebook_id, r["text"] or "") for r in rows])
+        # Chunk set was just (re)indexed — drop the corpus-language hint so it
+        # re-samples (copy_notebook / refresh-graph can bring new-language content).
+        self._notebook_langs_cache.pop(notebook_id, None)
         return len(rows)
 
     def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
@@ -2722,6 +2729,58 @@ class SQLiteRepository:
         """True iff this notebook has any knowledge_objects row."""
         with self._connect() as db:
             return self._has_kg(db, notebook_id)
+
+    # CJK unified-ideograph block: presence ⇒ Chinese content.
+    _CJK_RE = re.compile(r"[一-鿿]")
+    _LATIN_RE = re.compile(r"[A-Za-z]")
+
+    def _notebook_langs(self, notebook_id: str) -> List[str]:
+        """Cheap, cached probe of a notebook's corpus languages (subset of
+        ["zh","en"]) for bilingual query expansion — used so the query rewriter
+        mints keywords in each corpus language, and (via _keyword_chunk_candidates)
+        so those bilingual keywords carry the 2nd language into the CHUNK FTS as
+        well as the KG-name/relation FTS. Samples a bounded SPREAD (head ∪ tail by
+        rowid, up to ~60 texts) — not the first N — so 2nd-language content appended
+        after many first-language chunks is still caught. Detects CJK vs Latin
+        letters; returns ["en"] when empty/unknown, both when mixed. This is a
+        HINT: a wrong guess only over/under-generates FTS keywords, never breaks
+        retrieval. Cached per-notebook; the cache is invalidated at chunk-write
+        settle points (source add / re-chunk / FTS backfill) so a notebook that
+        gains new-language content re-reflects it."""
+        cached = self._notebook_langs_cache.get(notebook_id)
+        if cached is not None:
+            return cached
+        has_cjk = has_latin = False
+        with self._connect() as db:
+            # Head ∪ tail spread by rowid (bounded, no full-table sort — never
+            # ORDER BY RANDOM()): catches both the earliest and the most recently
+            # added chunks cheaply.
+            rows = db.execute(
+                "SELECT text FROM ("
+                "  SELECT rowid AS rid, text FROM chunks WHERE notebook_id=? "
+                "  ORDER BY rowid LIMIT 30) "
+                "UNION "
+                "SELECT text FROM ("
+                "  SELECT rowid AS rid, text FROM chunks WHERE notebook_id=? "
+                "  ORDER BY rowid DESC LIMIT 30)",
+                (notebook_id, notebook_id)).fetchall()
+        for r in rows:
+            t = r["text"] or ""
+            if not has_cjk and self._CJK_RE.search(t):
+                has_cjk = True
+            if not has_latin and self._LATIN_RE.search(t):
+                has_latin = True
+            if has_cjk and has_latin:
+                break
+        langs: List[str] = []
+        if has_cjk:
+            langs.append("zh")
+        if has_latin:
+            langs.append("en")
+        if not langs:
+            langs = ["en"]   # empty/unknown → safe single-language default
+        self._notebook_langs_cache[notebook_id] = langs
+        return langs
 
     def _should_extract_kg(self, notebook_id: str) -> bool:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
@@ -5798,6 +5857,11 @@ class SQLiteRepository:
         # changed), so the next write-path or read-path fallback call should
         # re-evaluate rather than trust a stale "checked" verdict.
         self._auto_index_checked.discard(notebook_id)
+        # Content just changed → the memoized corpus-language hint may be stale
+        # (a new source could add a 2nd language). Drop it; next _notebook_langs
+        # re-samples. This is the single mutation funnel, so it covers chunk adds,
+        # re-chunk, re-embed and KG edits — the cheapest correct invalidation site.
+        self._notebook_langs_cache.pop(notebook_id, None)
 
     def unified_kg_status(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)
@@ -10703,6 +10767,52 @@ class SQLiteRepository:
                 ids, mat = qids, qmat
         return collected, per_query, ids, mat
 
+    def _keyword_chunk_candidates(self, notebook_id: str, keywords: str,
+                                  recall: int = 0):
+        """Bilingual-keyword CHUNK lexical recall (the chunk-side of "FTS carries
+        the 2nd language"). ONE chunk_fts_search over the combined bilingual
+        keyword string, hydrated + keyword-scored into RetrievedChunk (semantic 0,
+        exactly like the existing ANN∪FTS union). Empty/blank keywords → []. NO
+        vector embed — purely lexical. Called ONCE per ask (not per sub-query);
+        the caller merges these into whatever candidate set its branch built
+        (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
+        never the question-language sub_queries — is still retrieved. fail-open:
+        FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → []."""
+        from app.services.retrieval import score_chunks
+        needle = (keywords or "").strip()
+        if not needle:
+            return []
+        recall = recall or self.settings.chunk_recall
+        try:
+            from app.services.kg.search import chunk_fts_search
+            with self._connect() as db:
+                hits = chunk_fts_search(db, notebook_id, needle, k=recall)
+            if not hits:
+                return []
+            chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
+            # keyword-only score (no query_vector/chunk_sims) — mirrors the ANN∪FTS
+            # union where lexical hits get keyword score and semantic 0.
+            return score_chunks(needle, chunks, None, None, limit=recall)
+        except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
+            self._note_model_error("chunk_keyword_union", self.settings.embed_model, exc)
+            return []
+
+    @staticmethod
+    def _union_chunk_candidates(base: list, extra: list) -> list:
+        """Append `extra` RetrievedChunks to `base`, deduped by chunk_id (keep the
+        existing entry on collision — base already scored it with semantic signal).
+        Order-preserving. Used to fold the bilingual-keyword lexical hits into a
+        list-shaped candidate set (mix / single-subquery branches)."""
+        if not extra:
+            return base
+        seen = {c.chunk_id for c in base}
+        out = list(base)
+        for c in extra:
+            if c.chunk_id not in seen:
+                seen.add(c.chunk_id)
+                out.append(c)
+        return out
+
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
         """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
         from app.services.mmr import mmr_rerank
@@ -10873,11 +10983,19 @@ class SQLiteRepository:
             if self.settings.query_rewrite_enabled:
                 ex = expand_query(self.rewrite_llm_client, retrieval_query, history,
                                   max_subqueries=self.settings.chunk_max_subqueries,
+                                  corpus_langs=self._notebook_langs(notebook_id),
                                   cancel_event=cancel_event)
                 sub_queries = [s.query for s in ex.sub_queries]
             else:
                 sub_queries = [retrieval_query]
             hl = " ".join(ex.high_level_keywords) if ex else ""
+            # Bilingual keyword string (high+low level, both corpus languages) for
+            # the CHUNK lexical union — this is how "FTS carries the 2nd language"
+            # reaches chunks (not just the KG-name/relation FTS). Computed ONCE;
+            # merged into whichever candidate branch runs below (dedup by chunk_id).
+            kw_str = " ".join(ex.high_level_keywords + ex.low_level_keywords) if ex else ""
+            kw_hits = (self._keyword_chunk_candidates(notebook_id, kw_str)
+                       if kw_str.strip() else [])
             ask_stage("expand_query", _t, n=len(sub_queries))
 
             # ── 检索 + 选择 ──
@@ -10894,6 +11012,8 @@ class SQLiteRepository:
             if plan.strategy == "mix":
                 candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = self._mix_retrieve(
                     notebook_id, retrieval_query, hl, sub_queries)
+                # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
+                candidates = self._union_chunk_candidates(candidates, kw_hits)
                 raise_if_cancelled(cancel_event)
                 order = self.rerank_client.rerank(
                     retrieval_query, [c.text for c in candidates],
@@ -10911,11 +11031,21 @@ class SQLiteRepository:
             elif plan.strategy == "multi":
                 collected, per_query, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
                 raise_if_cancelled(cancel_event)
+                # ∪ bilingual-keyword chunk hits: merge into collected (best relevance)
+                # and add as an extra per_query group so quota_fuse can surface them.
+                if kw_hits:
+                    for c in kw_hits:
+                        cur = collected.get(c.chunk_id)
+                        if cur is None or c.relevance > cur.relevance:
+                            collected[c.chunk_id] = c
+                    per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
                 selected, _counts = quota_fuse(collected, per_query, plan.fuse_k,
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
                 scored, ids, mat = self._retrieve_chunks(notebook_id, sub_queries[0])
+                # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
+                scored = self._union_chunk_candidates(scored, kw_hits)
                 raise_if_cancelled(cancel_event)
                 selected = self._mmr_select_chunks(
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
@@ -11116,8 +11246,10 @@ class SQLiteRepository:
             return base_seeds
         from app.services.query_rewrite import expand_query
         raise_if_cancelled(cancel_event)
-        exp = expand_query(self.rewrite_llm_client, question, cancel_event=cancel_event)
-        hl = " ".join(exp.high_level_keywords) or exp.query_en or question
+        exp = expand_query(self.rewrite_llm_client, question,
+                           corpus_langs=self._notebook_langs(notebook_id),
+                           cancel_event=cancel_event)
+        hl = " ".join(exp.high_level_keywords) or exp.query or question
         ll = " ".join(exp.low_level_keywords)
         extra: List[str] = []
         rel_hits = self.federated_retrieve_relations(notebook_id, hl)[

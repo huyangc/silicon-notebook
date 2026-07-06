@@ -8,7 +8,7 @@ class _FakeClient:
 
 
 def test_expand_query_parses_dual_keywords():
-    raw = ('{"query_en":"how does cascode boost output resistance",'
+    raw = ('{"query":"how does cascode boost output resistance",'
            '"high_level_keywords":["output resistance","gain boosting"],'
            '"low_level_keywords":["cascode","r_ds"],'
            '"sub_queries":[{"query":"cascode output resistance"}]}')
@@ -19,7 +19,7 @@ def test_expand_query_parses_dual_keywords():
 
 
 def test_expand_query_missing_keywords_defaults_empty():
-    raw = '{"query_en":"x","sub_queries":[{"query":"x"}]}'
+    raw = '{"query":"x","sub_queries":[{"query":"x"}]}'
     exp = expand_query(_FakeClient(raw), "x")
     assert exp.high_level_keywords == [] and exp.low_level_keywords == []
 

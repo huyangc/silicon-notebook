@@ -94,6 +94,11 @@ Give each node a "local_id" reused in edges. "name" carries the node's text
 multi-step Procedure emit ONE Procedure node with an ordered `steps` array, each
 {{"name":..,"ev":..}}. Skip narrative/filler.
 
+Preserve entity/concept names, formula expressions and canonical labels EXACTLY
+as they appear in the source text, in their ORIGINAL LANGUAGE — do NOT translate
+or transliterate them (a Chinese term stays Chinese, an English term stays
+English). Write any Claim proposition in the language of the source passage.
+
 Passage:
 \"\"\"{labeled_text}\"\"\"
 

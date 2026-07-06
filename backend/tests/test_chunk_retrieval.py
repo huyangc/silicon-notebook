@@ -251,8 +251,8 @@ def test_ask_chunk_comparison_balances_both_entities(repo, monkeypatch):
                                 "DeepSeek-V3 MTP training " * 20])
     import app.services.query_rewrite as qr
     monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
-        query_en="V3 vs V2", sub_queries=[qr.SubQuerySpec("DeepSeek-V3 improvements"),
-                                          qr.SubQuerySpec("DeepSeek-V2 features")]))
+        query="V3 vs V2", sub_queries=[qr.SubQuerySpec("DeepSeek-V3 improvements"),
+                                       qr.SubQuerySpec("DeepSeek-V2 features")]))
     repo.llm_client = _FakeLLM("V3 improves on V2 [k1][k2].")
     resp = repo.ask_chunk(nb.id, AskRequest(question="deepseekv3相比deepseekv2有什么改进"))
     srcs = " ".join((a.snippet or "") + (a.name or "") for a in resp.anchors).lower()
@@ -264,7 +264,7 @@ def test_ask_chunk_single_subquery_still_works(repo, monkeypatch):
     nb, _ = _seed_chunks(repo, ["alpha topic " * 30, "beta topic " * 30])
     import app.services.query_rewrite as qr
     monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
-        query_en="alpha", sub_queries=[qr.SubQuerySpec("alpha topic")]))
+        query="alpha", sub_queries=[qr.SubQuerySpec("alpha topic")]))
     resp = repo.ask_chunk(nb.id, AskRequest(question="alpha"))
     assert resp.citations   # 单子查询走 MMR,正常返回
 

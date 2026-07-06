@@ -133,7 +133,7 @@ def _stub_expand(monkeypatch, n):
 
     def _fake(client, question, history="", **kw):
         subs = [qr.SubQuerySpec(query=f"sub {i}") for i in range(1, n + 1)]
-        return qr.ExpandedQuery(query_en=question, sub_queries=subs)
+        return qr.ExpandedQuery(query=question, sub_queries=subs)
 
     monkeypatch.setattr(qr, "expand_query", _fake)
 
@@ -278,7 +278,7 @@ def test_ask_chunk_expand_query_uses_chunk_max_subqueries(repo, monkeypatch):
 
     def _spy_expand(client, question, history="", **kw):
         seen["max_subqueries"] = kw.get("max_subqueries")
-        return qr.ExpandedQuery(query_en=question, sub_queries=[qr.SubQuerySpec(query=question)])
+        return qr.ExpandedQuery(query=question, sub_queries=[qr.SubQuerySpec(query=question)])
 
     monkeypatch.setattr(qr, "expand_query", _spy_expand)
     repo.ask_chunk(nb.id, AskRequest(question="what is topic"))
@@ -291,7 +291,7 @@ def test_ask_chunk_expand_query_uses_chunk_max_subqueries(repo, monkeypatch):
 
     def _never(*a, **k):
         called["expand"] += 1
-        return qr.ExpandedQuery(query_en="x", sub_queries=[qr.SubQuerySpec(query="x")])
+        return qr.ExpandedQuery(query="x", sub_queries=[qr.SubQuerySpec(query="x")])
 
     monkeypatch.setattr(qr, "expand_query", _never)
 
