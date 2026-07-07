@@ -1320,3 +1320,14 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# --- 待确认中心 (Pending Actions Center) ---------------------------------
+
+
+@router.get("/me/pending-actions")
+def me_pending_actions(user: UserProfile = Depends(get_current_user)) -> dict:
+    """当前用户的待办快照：深度报告待确认 + 治理三队列 + 索引状态，供铃铛使用。
+    只读转调 repository().pending_actions；聚合逻辑与三源覆盖见该方法本身
+    （Task 1 已有专门单测），此处只做 HTTP 薄包装。"""
+    return repository().pending_actions(user.id)
