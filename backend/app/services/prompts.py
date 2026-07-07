@@ -232,9 +232,9 @@ def plan_prompt(question: str, history_block: str = "") -> str:
 
 REFLECT_SCHEMA_HINT = (
     '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
-    'search_elements|ppr_retrieve","expand":{"object_id":"","edge_type":null,'
+    'search_elements|ppr_retrieve|expand_community","expand":{"object_id":"","edge_type":null,'
     '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
-    '"prefer":"balanced","reason":""},"elements_query":"","ppr_query":"","reason":""}'
+    '"prefer":"balanced","reason":""},"community_focal":"","elements_query":"","ppr_query":"","reason":""}'
 )
 
 
@@ -258,6 +258,10 @@ def reflect_prompt(question: str, candidates_summary: str) -> str:
         "(set ppr_query). Prefer this for comparison / cross-paper questions where "
         "single-document evidence isn't enough, or when a multi-layer derivation "
         "needs supporting passages scattered across documents.\n"
+        "- expand_community: the question compares an entity with its peers / other "
+        "of-its-kind, and those peers are missing from candidates; pull the entity's "
+        "SEMANTIC COMMUNITY members across documents (set community_focal to the entity "
+        "name, e.g. 'DeepSeek-V4'). Use for 'X vs other Y' questions.\n"
         "Before choosing answer, check aspect by aspect that every part the "
         "question explicitly asks for (each layer / entity / requirement it "
         "names) is covered by the candidates; if an asked-for aspect has no "
