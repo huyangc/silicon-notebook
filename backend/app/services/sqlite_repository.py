@@ -1156,6 +1156,13 @@ class SQLiteRepository:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username "
                 "ON users(username) WHERE username != ''"
             )
+            # admin 用户总览:按 created_by 分组统计,补覆盖索引(幂等)。
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notebooks_created_by "
+                "ON notebooks(created_by)")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_created_by "
+                "ON conversations(created_by)")
             # 每用户模型服务配置(JSON;明文存,API 层只写不回显)。
             self._add_column_if_missing(db, "user_profiles", "model_settings", "TEXT NOT NULL DEFAULT '{}'")
             # kg_cluster_scratch: run_id column added in SP3 to isolate concurrent
@@ -1613,6 +1620,49 @@ class SQLiteRepository:
             profile = db.execute(
                 "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)).fetchone()
             return self._user_profile(user, profile)
+
+    def list_user_usage(self) -> List[Dict[str, Any]]:
+        """All users + per-user usage counts for the admin overview.
+        Read-only: a fixed set of GROUP BY aggregations joined in Python by
+        user id (no per-user N+1). Missing counts default to 0; last_active is
+        the newest conversation updated_at (None if the user has none).
+        username 仅用于显示;下钻日志仍用内部 id 当 owner。"""
+        with self._connect() as db:
+            users = db.execute(
+                "SELECT id, username, display_name, role, created_at "
+                "FROM users ORDER BY created_at, id").fetchall()
+            nb = {r["k"]: r["c"] for r in db.execute(
+                "SELECT created_by AS k, COUNT(*) AS c FROM notebooks "
+                "WHERE status != 'copying' GROUP BY created_by").fetchall()}
+            src = {r["k"]: r["c"] for r in db.execute(
+                "SELECT nb.created_by AS k, COUNT(*) AS c FROM sources s "
+                "JOIN notebooks nb ON nb.id = s.notebook_id "
+                "GROUP BY nb.created_by").fetchall()}
+            conv = {r["k"]: r["c"] for r in db.execute(
+                "SELECT created_by AS k, COUNT(*) AS c FROM conversations "
+                "GROUP BY created_by").fetchall()}
+            rep = {r["k"]: r["c"] for r in db.execute(
+                "SELECT nb.created_by AS k, COUNT(*) AS c FROM reports r "
+                "JOIN notebooks nb ON nb.id = r.notebook_id "
+                "GROUP BY nb.created_by").fetchall()}
+            active = {r["k"]: r["m"] for r in db.execute(
+                "SELECT created_by AS k, MAX(updated_at) AS m FROM conversations "
+                "GROUP BY created_by").fetchall()}
+        out: List[Dict[str, Any]] = []
+        for u in users:
+            uid = u["id"]
+            out.append({
+                "id": uid,
+                "username": u["username"] or u["display_name"] or uid,
+                "role": u["role"],
+                "created_at": u["created_at"],
+                "notebooks": nb.get(uid, 0),
+                "sources": src.get(uid, 0),
+                "conversations": conv.get(uid, 0),
+                "reports": rep.get(uid, 0),
+                "last_active": active.get(uid),
+            })
+        return out
 
     def create_session(self, user_id: str) -> str:
         import secrets
