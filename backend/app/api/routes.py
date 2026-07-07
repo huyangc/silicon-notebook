@@ -833,7 +833,7 @@ def build_kg(notebook_id: str) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     background_jobs.submit(repo.build_notebook_kg, notebook_id,
-                           name=f"buildkg-{notebook_id}")
+                           name=f"buildkg-{notebook_id}", notify_pending=True)
     return {"status": "building", "notebook_id": notebook_id}
 
 
@@ -850,7 +850,7 @@ def rebuild_kg(notebook_id: str) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     background_jobs.submit(repo.rebuild_notebook_kg, notebook_id,
-                           name=f"rebuildkg-{notebook_id}")
+                           name=f"rebuildkg-{notebook_id}", notify_pending=True)
     return {"status": "rebuilding", "notebook_id": notebook_id}
 
 
@@ -894,7 +894,7 @@ def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: s
             unregister_cancel(rid)
 
     # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
-    background_jobs.submit(worker, name=f"report-plan-{rid}")
+    background_jobs.submit(worker, name=f"report-plan-{rid}", notify_pending=True)
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
@@ -910,7 +910,7 @@ def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
         finally:
             unregister_cancel(rid)
 
-    background_jobs.submit(worker, name=f"report-gen-{rid}")
+    background_jobs.submit(worker, name=f"report-gen-{rid}", notify_pending=True)
 
 
 @router.post("/notebooks/{notebook_id}/reports",
@@ -1170,7 +1170,7 @@ def resolve_conflicts(notebook_id: str) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     background_jobs.submit(repo.resolve_notebook_conflicts, notebook_id,
-                           name=f"conflictresolve-{notebook_id}")
+                           name=f"conflictresolve-{notebook_id}", notify_pending=True)
     return {"status": "resolving", "notebook_id": notebook_id}
 
 
@@ -1251,7 +1251,7 @@ def review_all_unified_kg_merges(notebook_id: str) -> dict:
     if repo.merge_review_job_status(notebook_id)["status"] == "running":
         return {"status": "running"}
     background_jobs.submit(repo.run_merge_review_job, notebook_id,
-                           name=f"mergereview-{notebook_id}")
+                           name=f"mergereview-{notebook_id}", notify_pending=True)
     return {"status": "started"}
 
 

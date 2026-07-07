@@ -8901,6 +8901,7 @@ class SQLiteRepository:
                 if notebook_id in self._scale_building:
                     return {"status": "already_building"}
                 self._scale_building.add(notebook_id)
+        ok = False
         try:
             # 先把 delta 融进 concept_clusters(spec §4「incremental_fuse 簇」),
             # 否则 _gather_kg_graph(delta) 查不到 delta 对象的 cluster 成员 → 缺跨文档 hub 桥,
@@ -9028,11 +9029,17 @@ class SQLiteRepository:
                 os.rename(tmp_dir, out_dir)
                 shutil.rmtree(old_dir, ignore_errors=True)
                 self._scale_idx_cache.pop(notebook_id, None)  # 失效进程缓存 → 下次 reload
+            ok = True
             return manifest
         finally:
             if not _assume_locked:
                 with self._scale_building_lock:
                     self._scale_building.discard(notebook_id)
+                # _assume_locked=True 时(由 _run_scale_op 调用)通知已在那边的最外层
+                # 统一发一次;这里只在「独立调用 fold」(_assume_locked=False,如手动/
+                # idle 调度器直调 fold)时通知,避免经 _run_scale_op 调用时重复 emit。
+                if ok:
+                    self._notify_index_done(notebook_id)
 
     def _index_delta(self, notebook_id: str) -> dict:
         """按 manifest 水位算 delta:水位后新增的 source 及其 chunk 数。
@@ -9170,6 +9177,62 @@ class SQLiteRepository:
                 pass
         return mode
 
+    def _resolve_index_owner(self, notebook_id: str) -> "str | None":
+        """索引完成通知该发给谁:优先发起请求线程的 `_REQUEST_USER`(copy_context 已
+        传播,常规「刷新图谱」按钮走这条),回退查 `notebooks.created_by`(覆盖无请求
+        上下文的场景,如 idle 调度器/摄取后自动 fold),都无则 None(调用方应静默跳过
+        通知,而非报错)。"""
+        try:
+            u = _REQUEST_USER.get()
+            if u is not None:
+                return u.id
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)
+                ).fetchone()
+                return row["created_by"] if row else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _notebook_name(self, notebook_id: str) -> str:
+        """索引完成 toast 用的 notebook 展示名;查不到就空字符串(前端已按空名兜底)。"""
+        try:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT name FROM notebooks WHERE id = ?", (notebook_id,)
+                ).fetchone()
+                return row["name"] if row else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _notify_index_done(self, notebook_id: str) -> None:
+        """索引成功收尾的统一通知钩子(fold/build 共用):刷新该 owner 的待确认中心
+        snapshot(索引状态变化,如 building→indexed)+ 发一次瞬时 index_done 事件供
+        前端弹 toast。只在**成功**路径调用——调用方负责判断成功与否;通知本身失败
+        (无事件循环/DB 查询异常等)绝不能影响已经完成的索引写入,故整段 try/except
+        吞掉,仅记日志。延迟 import pending_bus 避免模块加载期循环依赖。"""
+        try:
+            from app.services.pending_bus import pending_bus
+            uid = self._resolve_index_owner(notebook_id)
+            if not uid:
+                return
+            name = self._notebook_name(notebook_id)
+            pending_bus.mark_dirty(uid)
+            pending_bus.emit(uid, {
+                "event": "index_done",
+                "notebook_id": notebook_id,
+                "notebook_name": name,
+            })
+        except Exception:  # noqa: BLE001 — 通知失败绝不影响已完成的索引 op
+            try:
+                self.event_log.logger.exception(
+                    "index_done notify failed for %s", notebook_id)
+            except Exception:
+                pass
+
     def _run_scale_op(self, notebook_id: str, mode: str) -> None:
         """后台执行(guarded):按 mode 跑 fold_scale_index_delta 或 build_scale_index。
         本方法持 _scale_building guard;fold 用 _assume_locked=True 调用,避免嵌套去重空跑
@@ -9181,12 +9244,14 @@ class SQLiteRepository:
             self._scale_building.add(notebook_id)
 
         def _run():
+            ok = False
             try:
                 op = self._resolve_scale_mode(notebook_id, mode)
                 if op == "fold":
                     self.fold_scale_index_delta(notebook_id, _assume_locked=True)
                 else:
                     self.build_scale_index(notebook_id)
+                ok = True
             except Exception:  # noqa: BLE001 — 后台任务,失败仅记录
                 try:
                     self.event_log.logger.exception("scale op failed for %s", notebook_id)
@@ -9195,6 +9260,12 @@ class SQLiteRepository:
             finally:
                 with self._scale_building_lock:
                     self._scale_building.discard(notebook_id)
+                # 本方法是 _assume_locked=True 调用 fold 时的最外层持锁者(镜像上面
+                # discard 的判定):无论走 fold 还是 full build,通知都从这里统一发一次,
+                # 避免 fold 自身在 _assume_locked=True 时重复 emit(见 fold 内 not
+                # _assume_locked 守卫)。仅成功(ok=True)才通知。
+                if ok:
+                    self._notify_index_done(notebook_id)
         threading.Thread(target=_run, name=f"scaleidx-{notebook_id}", daemon=True).start()
 
     def _process_idle_queue(self, force: bool = False) -> None:

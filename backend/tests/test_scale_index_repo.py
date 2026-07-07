@@ -1089,3 +1089,48 @@ def test_hnsw_ef_construction_default_and_env(monkeypatch):
     monkeypatch.setenv("HNSW_EF_CONSTRUCTION", "77")
     s2 = Settings()
     assert s2.hnsw_ef_construction == 77
+
+
+# ── Task 6: _resolve_index_owner (index_done 通知发给谁) ─────────────────────
+
+def test_resolve_index_owner_prefers_request_user(repo):
+    """`_REQUEST_USER` 设了值(发起线程 copy_context 已传播)→ 优先用它的 id,
+    即便 notebook 另有 created_by(常规「刷新图谱」按钮路径:请求用户未必是
+    notebook 的 created_by,如只读成员触发)。两个 id 都须是真实 users 行
+    (created_by 有 FK REFERENCES users(id)),故用 create_user 造第二个用户。"""
+    from app.services import sqlite_repository as sr
+
+    creator = repo.create_user("a00111111", "pw")
+    nb = repo.create_notebook(NotebookCreate(name="owner-test"))
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (creator.id, nb.id))
+
+    requester = repo.create_user("a00222222", "pw")
+    token = sr._REQUEST_USER.set(requester)
+    try:
+        assert repo._resolve_index_owner(nb.id) == requester.id
+        assert requester.id != creator.id  # 确认真走的是 _REQUEST_USER 分支而非巧合同值
+    finally:
+        sr._REQUEST_USER.reset(token)
+
+
+def test_resolve_index_owner_falls_back_to_created_by(repo):
+    """无 `_REQUEST_USER`(如 idle 调度器/自动 fold,没有发起请求上下文)→ 回退查
+    `notebooks.created_by`。"""
+    from app.services import sqlite_repository as sr
+
+    creator = repo.create_user("a00333333", "pw")
+    nb = repo.create_notebook(NotebookCreate(name="owner-test2"))
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET created_by=? WHERE id=?", (creator.id, nb.id))
+
+    assert sr._REQUEST_USER.get() is None  # fixture/test isolation: nothing left set
+    assert repo._resolve_index_owner(nb.id) == creator.id
+
+
+def test_resolve_index_owner_none_when_neither_available(repo):
+    """既无 `_REQUEST_USER` 又查不到 notebook(如已删除/id 不存在,覆盖自动 fold
+    的边角)→ None,调用方(_notify_index_done)应静默跳过通知而非报错。"""
+    from app.services import sqlite_repository as sr
+    assert sr._REQUEST_USER.get() is None
+    assert repo._resolve_index_owner("nonexistent-notebook-id") is None
