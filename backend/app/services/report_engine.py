@@ -118,6 +118,22 @@ class ReportEngine:
             pass
         return ("\n\n".join(parts))[:4000] if parts else "(语料侦察无结果)"
 
+    def _probe_sufficiency(self, notebook_id: str, sections: List[dict]) -> List[dict]:
+        """0-LLM 客观信号:每节各 sub_query 跑 federated_retrieve,统计命中并集(base 拆分)。"""
+        out = []
+        for s in sections:
+            seen, base = set(), set()
+            for q in (s.get("sub_queries") or []):
+                try:
+                    for h in self.repo.federated_retrieve(notebook_id, str(q)):
+                        seen.add(h.object_id)
+                        if getattr(h, "tier", "") == "base":
+                            base.add(h.object_id)
+                except Exception:
+                    continue
+            out.append({"title": s.get("title", ""), "hits": len(seen), "base_hits": len(base)})
+        return out
+
     # --- Stage B(单节):完整 reasoning 深挖 ---
     def _deep_dive(self, notebook_id, section, question, depth=None, on_step=None):
         from app.services.reasoning_retrieval import ReasoningRetriever
