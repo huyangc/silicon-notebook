@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 
-_MARKER = re.compile(r"\[k(\d+)\]")   # 节内 [k_i] 引用标记(全局重编号用)
+_MARKER = re.compile(r"\[(k\d+(?:\s*,\s*k\d+)*)\]")   # 节内 [k_i] 或 [k_i, k_j] 引用标记(全局重编号用)
 
 # --- 取消注册表:report_id → threading.Event(活动后台 job 才在册) ---
 _ACTIVE_CANCELS: Dict[str, threading.Event] = {}
@@ -380,23 +380,30 @@ class ReportEngine:
             id_map = s.get("id_map") or {}
 
             def _sub(m, _id_map=id_map):
-                ctx = _id_map.get(f"k{m.group(1)}")
-                if not ctx:
-                    return ""               # 剥除幻觉/未知 marker
-                dk = _dk(ctx)
-                if dk not in ref_pos:
-                    ref_pos[dk] = len(references) + 1
-                    references.append({
-                        "key": f"k{ref_pos[dk]}",
-                        "object_id": str(ctx.get("object_id") or ""),
-                        "object_type": str(ctx.get("object_type") or ""),
-                        "label": _label(ctx),
-                        "name": str(ctx.get("name") or ""),
-                        "source_title": str(ctx.get("source_title") or ""),
-                        "location_label": str(ctx.get("location_label") or ""),
-                        "tier": str(ctx.get("tier") or "personal"),
-                    })
-                return f"[k{ref_pos[dk]}]"
+                # 支持单 key [k1] 与逗号复合 [k1, k3](LLM 常不按 [k1][k3] 而吐逗号):
+                # 逐 key 重映射到全局、bracket 内去重;全未知则整段剥除(幻觉/未知 marker)。
+                out_keys: List[str] = []
+                for _raw in m.group(1).split(","):
+                    ctx = _id_map.get(_raw.strip())
+                    if not ctx:
+                        continue
+                    dk = _dk(ctx)
+                    if dk not in ref_pos:
+                        ref_pos[dk] = len(references) + 1
+                        references.append({
+                            "key": f"k{ref_pos[dk]}",
+                            "object_id": str(ctx.get("object_id") or ""),
+                            "object_type": str(ctx.get("object_type") or ""),
+                            "label": _label(ctx),
+                            "name": str(ctx.get("name") or ""),
+                            "source_title": str(ctx.get("source_title") or ""),
+                            "location_label": str(ctx.get("location_label") or ""),
+                            "tier": str(ctx.get("tier") or "personal"),
+                        })
+                    _gk = f"k{ref_pos[dk]}"
+                    if _gk not in out_keys:
+                        out_keys.append(_gk)
+                return ("[" + ", ".join(out_keys) + "]") if out_keys else ""
 
             remapped[si] = _MARKER.sub(_sub, s.get("markdown") or "")
 
