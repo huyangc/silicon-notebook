@@ -303,6 +303,7 @@ idx_commmem_nb_can
 idx_commmem_nb_comm
 idx_communities_nb_level
 idx_conflict_candidates_nb_status
+idx_conversations_created_by
 idx_element_embeddings_nb
 idx_extraction_runs_source_created
 idx_feedback_answer
@@ -323,6 +324,7 @@ idx_kos_notebook
 idx_kos_object
 idx_kos_source
 idx_notebook_members_user
+idx_notebooks_created_by
 idx_notebooks_share_token
 idx_promotion_nb
 idx_promotion_object
