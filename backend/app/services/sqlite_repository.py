@@ -12637,7 +12637,12 @@ class SQLiteRepository:
         不走 list_notebooks()(它含"分享给我只读"的库,会破坏用户间隔离)。
         index 项的状态分类完全委托给已有的 scale_index_status(nb).state,不重新
         实现索引状态机;building/queued 视为进行中、不计入 count(不是待用户确认的
-        动作),但仍作为 item 呈现供前端展示进度。"""
+        动作),但仍作为 item 呈现供前端展示进度。
+
+        「晋升候选」子项仅对 admin 呈现 —— 非 admin 也能创建晋升候选
+        (propose_promotion 只受 require_notebook_access 守卫),但深链目标
+        /promotion-queue 是 admin-only(403),故对非 admin 隐藏该项以免铃铛
+        指向一个必 403 的动作。"""
         items: list[dict] = []
         with self._connect() as db:
             my = db.execute(
@@ -12648,6 +12653,12 @@ class SQLiteRepository:
             nb_ids = list(name_of.keys())
 
             if nb_ids:
+                # 一次性判定 admin 身份(单条廉价查询,不按 notebook 重复判定)
+                role_row = db.execute(
+                    "SELECT role FROM users WHERE id = ?", (user_id,),
+                ).fetchone()
+                is_admin = bool(role_row) and role_row["role"] == "admin"
+
                 # ① 深度报告待确认(outline_ready = 大纲已生成、等用户编辑/确认后再 generate)
                 rows = db.execute(
                     "SELECT id, question, notebook_id, created_at FROM reports "
@@ -12669,8 +12680,11 @@ class SQLiteRepository:
                 gov_specs = [
                     ("merge", "concept_merge_candidates", "status = 'pending'"),
                     ("edge", "knowledge_relations", "review_status = 'pending'"),
-                    ("promotion", "promotion_candidates", "status IN ('proposed','under_review')"),
                 ]
+                if is_admin:
+                    gov_specs.append(
+                        ("promotion", "promotion_candidates", "status IN ('proposed','under_review')")
+                    )
                 for subtype, table, pred in gov_specs:
                     grp = db.execute(
                         f"SELECT notebook_id, COUNT(*) AS c FROM {table} "

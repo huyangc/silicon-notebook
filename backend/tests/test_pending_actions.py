@@ -128,3 +128,52 @@ def test_pending_actions_index_unindexed_not_surfaced(repo):
     _seed_user_nb(repo, "user-a")
     out = repo.pending_actions("user-a")
     assert out == {"count": 0, "items": []}
+
+
+def _seed_promotion_candidate(repo, nb_id, cand_id="promo-1"):
+    """在 promotion_candidates 插一条 status='proposed' 的行(propose_promotion
+    对非 admin 也放行,见 require_notebook_access 守卫;/promotion-queue 才是
+    admin-only,故此表本身不隐含 admin 身份)。"""
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO promotion_candidates "
+            "(id, notebook_id, object_id, object_type, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (cand_id, nb_id, "obj-1", "concept", "proposed",
+             "2026-07-07T01:00:00", "2026-07-07T01:00:00"),
+        )
+
+
+def test_pending_actions_promotion_hidden_for_non_admin(repo):
+    """非 admin 创建的晋升候选不应出现在其待办中心 —— /promotion-queue 深链是
+    admin-only(403),铃铛不该指向一个必 403 的动作(见本方法 docstring)。"""
+    nb = _seed_user_nb(repo, "user-a")  # _mk_user 建的 role 固定为 'user'
+    _seed_promotion_candidate(repo, nb)
+    out = repo.pending_actions("user-a")
+    gov = [it for it in out["items"] if it["type"] == "governance" and it["subtype"] == "promotion"]
+    assert gov == []
+    assert out["count"] == 0
+
+
+def test_pending_actions_promotion_visible_for_admin(repo):
+    """admin 创建的晋升候选应正常出现(admin 可访问 /promotion-queue)。"""
+    now = _now()
+    uid = "user-admin"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", (uid, f"{uid}@e.test", uid, "admin", now, now))
+    nb_id = f"nb-{uid}-NB"
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO notebooks (id, name, purpose, primary_domain, status, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (nb_id, "NB", "", "", "ready", uid, "2026-07-07T00:00:00", "2026-07-07T00:00:00"),
+        )
+    _seed_promotion_candidate(repo, nb_id)
+    out = repo.pending_actions(uid)
+    gov = [it for it in out["items"] if it["type"] == "governance" and it["subtype"] == "promotion"]
+    assert len(gov) == 1
+    assert gov[0]["count"] == 1
+    assert gov[0]["notebook_id"] == nb_id
+    assert out["count"] == 1
