@@ -1042,9 +1042,10 @@ def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile 
 @router.post("/notebooks/{notebook_id}/unified-kg/rebuild", dependencies=[Depends(require_notebook_access)])
 def rebuild_unified_kg(notebook_id: str) -> dict:
     try:
-        # Explicit user action (刷新图谱): force a full recompute so it also picks
-        # up any clustering-settings change the data-version gate can't observe.
-        clusters = repository().rebuild_unified_kg(notebook_id, force=True)
+        # 刷新图谱:走版本门控(force=False)——输入未变则跳过重聚类,只增量重建社区
+        # (纯图/无 LLM/秒级);有新内容才重聚。强制全量重聚(如改了聚类设置)用
+        # scripts/recluster_kg.py。这兑现「判断:只需重建社区就跳过其他动作」。
+        clusters = repository().rebuild_unified_kg(notebook_id, force=False)
         return {"clusters": clusters}
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
