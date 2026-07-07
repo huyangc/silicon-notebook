@@ -170,6 +170,15 @@ export function PendingBell(props: {
     });
     view.visibleDone.forEach((d) => onDismissDone(d.notebook_id));
   };
+  // 小节标题「×」:关闭该小节全部(治理/报告/索引 走签名 dismissed;已完成走 onDismissDone)。
+  const dismissGroup = (sigs: string[]) => {
+    if (sigs.length === 0) return;
+    setDismissed((prev) => {
+      const n = Array.from(new Set([...prev, ...sigs]));
+      saveSigs(dismKey, n);
+      return n;
+    });
+  };
 
   const groups: { key: string; label: string; items: PendingItem[] }[] = [
     { key: "report_outline", label: "深度报告待确认", items: view.visibleItems.filter((i) => i.type === "report_outline") },
@@ -206,7 +215,11 @@ export function PendingBell(props: {
           {!hasAny && <p className="pending-empty">暂无待确认</p>}
           {groups.map((g) => g.items.length > 0 && (
             <div className="pending-group" key={g.key}>
-              <div className="pending-group-title">{g.label}</div>
+              <div className="pending-group-title">
+                <span>{g.label}</span>
+                <span className="pending-group-x" title={`关闭全部「${g.label}」`}
+                      onClick={() => dismissGroup(g.items.map(itemSig))}>×</span>
+              </div>
               {g.items.map((it, idx) => (
                 <button className="pending-row" key={`${g.key}-${idx}`}
                         onClick={() => { setOpen(false); onOpenItem(it); }}>
@@ -222,7 +235,11 @@ export function PendingBell(props: {
           ))}
           {view.visibleDone.length > 0 && (
             <div className="pending-group pending-group-done">
-              <div className="pending-group-title">已完成</div>
+              <div className="pending-group-title">
+                <span>已完成</span>
+                <span className="pending-group-x" title="关闭全部「已完成」"
+                      onClick={() => view.visibleDone.forEach((d) => onDismissDone(d.notebook_id))}>×</span>
+              </div>
               {view.visibleDone.map((d) => (
                 <button className="pending-row pending-row-done" key={d.notebook_id}
                         onClick={() => { setOpen(false); onOpenDone(d); onDismissDone(d.notebook_id); }}>
