@@ -1,0 +1,11 @@
+.usage-page { max-width: 1000px; margin: 0 auto; padding: 24px; }
+.usage-page h1 { font-size: 20px; margin-bottom: 16px; }
+.usage-empty { color: var(--muted, #666); }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.usage-table th, .usage-table td {
+  text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border, #e5e7eb);
+  white-space: nowrap;
+}
+.usage-table th { color: var(--muted, #666); font-weight: 600; }
+.usage-table td a { color: var(--accent, #2563eb); text-decoration: none; }
+.usage-table td a:hover { text-decoration: underline; }
