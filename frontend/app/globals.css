@@ -5233,8 +5233,11 @@ button.chat-session-card {
   z-index: 40;
   width: min(320px, calc(100vw - 28px));
   max-height: 60vh;
-  overflow-y: auto;
+  /* 单列 minmax(0,1fr):不让长报告标题(nowrap)把隐式列撑到 max-content 而横向溢出;
+     overflow-x hidden 兜底 —— 修「面板出现横向滚动条」。 */
+  overflow: hidden auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   padding: 8px;
   border: 1px solid var(--line, #dbe2ee);
@@ -5262,9 +5265,9 @@ button.chat-session-card {
 }
 .pending-row {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   border: 0;
   border-radius: 10px;
@@ -5278,7 +5281,20 @@ button.chat-session-card {
 .pending-row:hover {
   background: var(--soft, #f2f4f7);
 }
+/* 文本内容纵向堆叠(notebook 名 + 标签),min-width:0 让长标签能省略号截断而不撑宽 */
+.pending-row-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
 .pending-row-nb {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted, #667085);
   font-size: 11px;
 }
@@ -5309,6 +5325,26 @@ button.chat-session-card {
 }
 .pending-row-x:hover {
   opacity: 1;
+}
+.pending-actions-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 2px 4px 6px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--soft, #eef2f6);
+}
+.pending-clear {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #667085);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 8px;
+}
+.pending-clear:hover {
+  background: var(--soft, #f2f4f7);
+  color: var(--ink, #111827);
 }
 .pending-toast {
   position: fixed;
