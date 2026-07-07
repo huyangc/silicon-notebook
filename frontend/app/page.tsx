@@ -52,6 +52,7 @@ import {
 import { AuthGate } from "./AuthGate";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
+import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -1005,6 +1006,8 @@ export default function Home() {
   const [relinkingKg, setRelinkingKg] = useState(false);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
+  const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
+  const pending = usePendingActions(Boolean(authChecked && getToken()));
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
     setBuildingKg(true);
@@ -1793,6 +1796,24 @@ export default function Home() {
     await loadSessions(notebookId);
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
     window.scrollTo(0, 0);
+  }
+
+  // --- Pending center: precise deep-link per item type --------------------
+  async function openPendingItem(item: PendingItem) {
+    await openNotebook(item.notebook_id);
+    if (item.type === "report_outline") {
+      switchChatMode("reports");
+      if (item.report_id) setPendingReportFocusId(item.report_id);
+    } else if (item.type === "governance") {
+      if (item.subtype === "edge") { await openEdgeReviewQueue(); }
+      else if (item.subtype === "promotion") { await openPromoQueue(); }
+      else { setKgViewOpen(true); }  // merge → KG 图谱视图内联「待确认合并」
+    } else if (item.type === "index") {
+      setKgViewOpen(true);  // 索引状态/重建入口在 KG 视图
+    }
+  }
+  function openDoneItem(d: { notebook_id: string }) {
+    openNotebook(d.notebook_id).then(() => setKgViewOpen(true));
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
@@ -2856,6 +2877,13 @@ export default function Home() {
         </div>
         <div className="topbar-right">
           <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
+          <PendingBell
+            snapshot={pending.snapshot}
+            doneItems={pending.doneItems}
+            onOpenItem={openPendingItem}
+            onOpenDone={openDoneItem}
+            onDismissDone={pending.dismissDone}
+          />
           <div className="user-menu" ref={accountMenuRef}>
             <button
               className="user-menu-trigger"
@@ -4594,6 +4622,8 @@ export default function Home() {
       )}
 
       {toast && <div className="toast">{toast}</div>}
+      <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
+        onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
       {modelPanelOpen && modelForms && (
         <section className="utility-modal" role="dialog" aria-modal="true"
