@@ -40,9 +40,9 @@ def test_rebuild_unified_kg_calls_rebuild_communities(repo, monkeypatch):
     called = {}
     orig = repo.rebuild_communities
 
-    def spy(notebook_id, level=0):
+    def spy(notebook_id, level=0, force=False):
         called["nb"] = notebook_id
-        return orig(notebook_id, level)
+        return orig(notebook_id, level, force=force)
 
     monkeypatch.setattr(repo, "rebuild_communities", spy)
     repo.rebuild_unified_kg(nb.id, force=True)
@@ -54,7 +54,7 @@ def test_rebuild_unified_kg_failopen_on_community_error(repo, monkeypatch):
     emit communities_rebuild_failed and the rebuild should still return."""
     nb = _seed(repo)
 
-    def boom(notebook_id, level=0):
+    def boom(notebook_id, level=0, force=False):
         raise RuntimeError("community boom")
 
     monkeypatch.setattr(repo, "rebuild_communities", boom)

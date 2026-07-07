@@ -1127,6 +1127,9 @@ class SQLiteRepository:
             # cluster_input_version was 'v1' (timestamp-based) and won't match the
             # new 'v2' scheme, so the first post-migration rebuild recomputes — safe.
             self._add_column_if_missing(db, "unified_kg_state", "kg_mutation_seq", "INTEGER NOT NULL DEFAULT 0")
+            # community_seq: kg_mutation_seq at which communities were last (re)built.
+            # 版本闸:社区随 KG 变动增量重建;-1 默认 → 首次必建(never matches seq>=0)。
+            self._add_column_if_missing(db, "unified_kg_state", "community_seq", "INTEGER NOT NULL DEFAULT -1")
             # source_index_backfilled: 0/1 marker — once set, _clear_source_extraction_state
             # trusts knowledge_object_sources for this notebook and skips the legacy
             # full-evidence-scan fallback. Set by the backfill-on-first-use scan itself
@@ -6354,6 +6357,14 @@ class SQLiteRepository:
                         progress(f"跳过:自上次 rebuild 起输入未变化({cached} clusters)", 0, 0)
                     except Exception:
                         pass
+                # 增量:聚类被跳过(输入未变),但社区可能未建/过期 → rebuild_communities
+                # 自带版本闸,只在需要时建(纯图、无 LLM、秒级)。这让「只需重建社区」的
+                # 场景在原有刷新流程里零额外成本达成;fail-open,不拖垮跳过路径。
+                try:
+                    self.rebuild_communities(notebook_id, level=0)
+                except Exception as exc:  # noqa: BLE001
+                    self.event_log.emit({"kind": "communities_rebuild_failed",
+                                         "notebook_id": notebook_id, "error": str(exc)[:200]})
                 return cached
         from uuid import uuid4 as _uuid4
         from app.services.kg_merge import (cluster_seeds, _norm, _discriminative_conflict,
@@ -6638,16 +6649,16 @@ class SQLiteRepository:
             self.maybe_auto_index(notebook_id)
         except Exception:
             self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
-        # 社区层:聚类稳定后重建(纯图、无 LLM、fail-open——绝不拖垮 KG 重建)。
-        # rebuild_communities 自身已带 enabled/大库守卫,这里只兜异常。
+        # 社区层:聚类刚重算 → force=True 强制重建社区(clustering 未必 bump
+        # kg_mutation_seq,版本闸可能误跳)。纯图、无 LLM、fail-open——绝不拖垮 KG 重建。
         try:
-            self.rebuild_communities(notebook_id, level=0)
+            self.rebuild_communities(notebook_id, level=0, force=True)
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "communities_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
         return cluster_count
 
-    def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
+    def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
         持久化到 communities + community_members(反向索引,存 canonical_name/centrality)。
         无 LLM、确定性(seed=42)。大库(scale-tier)无持久化 CSR → 拒 networkx(避免 OOM),
@@ -6659,6 +6670,20 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         if not self.settings.community_layer_enabled:
             return 0
+        # 版本闸(增量):社区已按当前 kg_mutation_seq 建过且非空 → 跳过(除非 force)。
+        # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
+        # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
+        with self._connect() as _db:
+            _st = _db.execute(
+                "SELECT kg_mutation_seq, community_seq FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,)).fetchone()
+            _cnt = _db.execute(
+                "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=? AND level=?",
+                (notebook_id, level)).fetchone()
+        _seq = int(_st["kg_mutation_seq"]) if _st else 0
+        if (not force and _st is not None and _st["community_seq"] == _seq
+                and _cnt and _cnt["c"] > 0):
+            return int(_cnt["c"])
         # 大库守卫:绝不在 scale-tier 无 CSR 时用 networkx 暴力建图(10^7 边必 OOM/挂)。
         # 镜像 _retrieve_scored 的"大库拒暴力"纪律;fail-open + 可观测,返回 0。
         if (not self.notebook_copy_stats(notebook_id)["copyable"]
@@ -6709,6 +6734,10 @@ class SQLiteRepository:
                     "VALUES (?,?,?,?,?,?)",
                     [(m, notebook_id, level, cid, names.get(m, m), float(g.degree(m))) for m in members])
                 kept += 1
+        # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
+        with self._write() as db:
+            db.execute("UPDATE unified_kg_state SET community_seq=? WHERE notebook_id=?",
+                       (_seq, notebook_id))
         self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
                              "level": level, "communities": kept, "nodes": g.number_of_nodes()})
         return kept

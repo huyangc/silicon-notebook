@@ -267,6 +267,7 @@ unified_kg_state.object_count|INTEGER|1|0|0
 unified_kg_state.relation_count|INTEGER|1|0|0
 unified_kg_state.cluster_count|INTEGER|1|0|0
 unified_kg_state.updated_at|TEXT|1|None|0
+unified_kg_state.community_seq|INTEGER|1|-1|0
 unified_kg_state.source_index_backfilled|INTEGER|1|0|0
 user_profiles.id|TEXT|0|None|1
 user_profiles.user_id|TEXT|1|None|0

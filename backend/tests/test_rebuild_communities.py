@@ -204,3 +204,31 @@ def test_large_with_index_uses_networkx(repo, monkeypatch):
     monkeypatch.setattr(repo, "notebook_copy_stats", lambda _nb: {"copyable": False})
     monkeypatch.setattr(repo, "_scale_index", lambda _nb, allow_stale=False: object())
     assert repo.rebuild_communities(nb.id, level=0) >= 1
+
+
+def test_incremental_gate_skips_when_kg_unchanged(repo):
+    """增量版本闸:kg_mutation_seq 未变 → 第二次跳过(no-op);seq 变或 force 才重建。
+    这让「刷新图谱」重复触发在 KG 未变时秒级、只在需要时重建社区。"""
+    nb = _seed_two_docs_shared_canonical(repo)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, kg_mutation_seq, community_seq, updated_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(notebook_id) DO UPDATE SET "
+            "kg_mutation_seq=excluded.kg_mutation_seq, community_seq=excluded.community_seq",
+            (nb.id, 5, -1, NOW))
+    events = []
+    repo.event_log.emit = lambda e: events.append(e)
+
+    def _built():
+        return sum(1 for e in events if e.get("kind") == "communities_rebuilt")
+
+    n1 = repo.rebuild_communities(nb.id, level=0)      # 首次(community_seq=-1≠5)→ 建
+    assert n1 >= 1 and _built() == 1
+    n2 = repo.rebuild_communities(nb.id, level=0)      # seq 仍 5 → 版本闸跳过
+    assert n2 == n1 and _built() == 1                  # 无新的 communities_rebuilt
+    with repo._write() as db:                          # 模拟 KG 变动
+        db.execute("UPDATE unified_kg_state SET kg_mutation_seq=6 WHERE notebook_id=?", (nb.id,))
+    repo.rebuild_communities(nb.id, level=0)           # seq 变 → 重建
+    assert _built() == 2
+    repo.rebuild_communities(nb.id, level=0, force=True)  # force 无视版本闸
+    assert _built() == 3
