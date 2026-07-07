@@ -310,13 +310,17 @@ class ReportEngine:
                        for i, s in enumerate(outline)]
             return [f.result() for f in futures]
 
-    # --- 入口 ---
-    def run(self, notebook_id: str, rid: str, question: str, history: str = "", depth: int = 2) -> None:
+    # --- 入口:Stage B/C/D(生成阶段)——读 outline_json → 深挖 → 汇总 → done ---
+    def generate(self, notebook_id, rid, question, depth: int = 2) -> None:
         try:
-            self.repo.update_report(notebook_id, rid, status="running", progress="大纲规划中")
-            outline = self._plan_outline(notebook_id, question, history)
-            self.repo.update_report(notebook_id, rid, outline=outline,
-                                    progress=f"大纲就绪({len(outline)} 节),章节深挖 0/{len(outline)}")
+            d = self.repo.get_report(notebook_id, rid)
+            outline = d.get("outline") or []
+            if not outline:
+                self.repo.update_report(notebook_id, rid, status="failed",
+                                        error="no outline to generate", progress="无大纲")
+                return
+            self.repo.update_report(notebook_id, rid, status="generating",
+                                    progress=f"章节 0/{len(outline)} 完成")
             sections = self._run_sections(notebook_id, rid, outline, question, depth)
             # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
             self.repo.update_report(notebook_id, rid, progress="汇总中")
@@ -332,6 +336,15 @@ class ReportEngine:
         except Exception as exc:
             self.repo.update_report(notebook_id, rid, status="failed",
                                     error=str(exc)[:500], progress="失败")
+
+    # --- 编排:规划(→outline_ready)+(auto_generate 时)生成,保留一键直出 ---
+    def run(self, notebook_id, rid, question, history="", depth: int = 2,
+            auto_generate: bool = False) -> None:
+        self.plan_outline(notebook_id, rid, question, history)
+        if not auto_generate:
+            return
+        if self.repo.get_report(notebook_id, rid).get("status") == "outline_ready":
+            self.generate(notebook_id, rid, question, depth)
 
     # --- Stage D:汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
     def _assemble(self, notebook_id, rid, question, outline, sections):

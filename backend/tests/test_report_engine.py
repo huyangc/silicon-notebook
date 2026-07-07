@@ -143,15 +143,20 @@ def test_engine_outline_fallback_on_bad_json(repo):
 
 
 def test_engine_runs_sections_in_parallel_and_tolerates_one_failure(repo, monkeypatch):
+    # 两阶段:run(auto_generate=True) 规划后直出。STORM 回退到 _plan_outline 的
+    # A/B 两节;stub 语料侦察/探针以与检索解耦(编排测试聚焦并行深挖与容错)。
+    from app.services.report_engine import ReportEngine
     nb = _mk_nb(repo)
     llm = _OutlineLLM(n_fail_sections=1)
     eng = _mk_engine(repo, llm)
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
+    monkeypatch.setattr(repo, "federated_retrieve", lambda a, q: [])
     # stub 每节深挖:不跑真检索,返回空 ReasoningResult(编排测试与检索解耦)
     from app.services.reasoning_retrieval import ReasoningResult
     monkeypatch.setattr(eng, "_deep_dive",
                         lambda nb_id, section, question, depth=None, on_step=None: ReasoningResult())
     rid = repo.create_report(nb.id, "q")
-    eng.run(nb.id, rid, "q", "")
+    eng.run(nb.id, rid, "q", "", auto_generate=True)
     detail = repo.get_report(nb.id, rid)
     assert detail["status"] == "done"
     secs = detail["sections"]
@@ -163,6 +168,7 @@ def test_engine_runs_sections_in_parallel_and_tolerates_one_failure(repo, monkey
 
 
 def test_engine_cancel_marks_cancelled(repo, monkeypatch):
+    # 两阶段:规划到 outline_ready 后 auto_generate 进生成,深挖中途取消 → cancelled。
     import threading
     nb = _mk_nb(repo)
     llm = _OutlineLLM()
@@ -170,6 +176,8 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
     repo.llm_client = llm
     eng = ReportEngine(repo, repo.settings, cancel_event=cancel)
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
+    monkeypatch.setattr(repo, "federated_retrieve", lambda a, q: [])
     from app.services.reasoning_retrieval import ReasoningResult
     def _dd(nb_id, section, question, depth=None, on_step=None):
         cancel.set()                                # 深挖中途被取消
@@ -177,7 +185,7 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
         raise_if_cancelled(cancel)
     monkeypatch.setattr(eng, "_deep_dive", _dd)
     rid = repo.create_report(nb.id, "q")
-    eng.run(nb.id, rid, "q", "")
+    eng.run(nb.id, rid, "q", "", auto_generate=True)
     assert repo.get_report(nb.id, rid)["status"] == "cancelled"
 
 
@@ -459,3 +467,36 @@ def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
     eng.plan_outline(nb.id, rid, "q")
     d=repo.get_report(nb.id, rid)
     assert d["status"]=="outline_ready" and len(d["outline"])>=1   # 回退骨架
+
+
+# ---------------------------------------------------------------------------
+# Task 5(两阶段): 引擎拆 generate 阶段(读 outline_json→深挖→汇总→done)+ run 编排
+# ---------------------------------------------------------------------------
+
+def test_generate_runs_sections_on_stored_outline(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    from app.services.reasoning_retrieval import ReasoningResult
+    nb=_mk_nb(repo)
+    rid=repo.create_report(nb.id,"q")
+    repo.update_report(nb.id, rid, outline=[{"title":"A","scope":"s","sub_queries":["q"]}],
+                       status="outline_ready")
+    eng=ReportEngine(repo, repo.settings)
+    monkeypatch.setattr(eng, "_deep_dive", lambda *a,**k: ReasoningResult())
+    class _S:
+        configured=True
+        def chat_json(self,*a,**k): return json.dumps({"summary":"总"})
+    repo.llm_client=_S()
+    eng.generate(nb.id, rid, "q", depth=2)
+    d=repo.get_report(nb.id, rid)
+    assert d["status"]=="done" and d["content_md"].startswith("#")
+
+def test_run_backcompat_plans_then_generates(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    eng=ReportEngine(repo, repo.settings)
+    calls=[]
+    monkeypatch.setattr(eng,"plan_outline", lambda *a,**k: calls.append("plan"))
+    monkeypatch.setattr(eng,"generate", lambda *a,**k: calls.append("gen"))
+    # outline_ready 由 stub plan_outline 不写,run 需自己判定;这里断言两阶段都被调用
+    monkeypatch.setattr(repo,"get_report", lambda n,r: {"status":"outline_ready","outline":[{"title":"A"}]})
+    eng.run("nb","rid","q", auto_generate=True)
+    assert calls==["plan","gen"]
