@@ -6638,6 +6638,13 @@ class SQLiteRepository:
             self.maybe_auto_index(notebook_id)
         except Exception:
             self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
+        # 社区层:聚类稳定后重建(纯图、无 LLM、fail-open——绝不拖垮 KG 重建)。
+        # rebuild_communities 自身已带 enabled/大库守卫,这里只兜异常。
+        try:
+            self.rebuild_communities(notebook_id, level=0)
+        except Exception as exc:  # noqa: BLE001
+            self.event_log.emit({"kind": "communities_rebuild_failed",
+                                 "notebook_id": notebook_id, "error": str(exc)[:200]})
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
