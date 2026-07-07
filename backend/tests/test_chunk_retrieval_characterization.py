@@ -511,6 +511,9 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     assert len(resp_mix.citations) == 1, (
         f"mix 分支只绑被引用的 chunk,期望 1 条 Citation,实得 {len(resp_mix.citations)}")
     assert resp_mix.citations[0].source_id == "src-x"
+    # nb1 是 personal 库、chunk 无 notebook_id(同库路径)→ tier 应回退 nb1 自己的 tier。
+    assert resp_mix.citations[0].tier == "personal", (
+        f"personal 库同库 chunk 引用 tier 应为 personal,实为 {resp_mix.citations[0].tier}")
 
     # ── 非 mix 分支:同一批 selected,overlay_on=False → 每 selected 一条 Citation(3 条),
     #    与答案引用无关。用真实单查询 MMR 路径不好精确控 selected 集,故直接 stub
@@ -532,3 +535,48 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
         f"非 mix 分支每 selected 一条 Citation,期望 3 条,实得 {len(resp_non.citations)}")
     assert {c.source_id for c in resp_non.citations} == {"src-x"}
     assert {c.location_label for c in resp_non.citations} == {"0", "1", "2"}
+    assert {c.tier for c in resp_non.citations} == {"personal"}, (
+        f"nb2 是 personal 库,非 mix 分支全部 3 条 citation tier 应为 personal,"
+        f"实为 {[c.tier for c in resp_non.citations]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11. Citation.tier 跨层:PPR 召回的 base 库 chunk 生成的 Citation 须标 tier="base"
+#     (真机 bug:reasoning/mix 引用了 base 库原文,前端徽章却只见 personal——根因
+#     是 Citation 此前完全不带 tier。这里锁 ask_chunk 的 mix 分支:_mix_retrieve
+#     第三路概念漫游(PPR)可掺 base 库 chunk,citation 必须如实反映其来源 tier。)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch):
+    """selected 里混一条打了 base 库 notebook_id 的 RetrievedChunk(模拟 _ppr_retrieve
+    的产出:真实 base chunk 与 active 库同池但 notebook_id 指向 base)——citation.tier
+    必须解析为 'base',同池的本库 chunk 仍是 'personal'。"""
+    from app.services.retrieval import RetrievedChunk
+
+    active_nb, _ = _seed_chunks(repo, ["moe routing expert " * 20])
+    base_nb, _ = _seed_chunks(repo, ["base layer reference " * 20])
+    repo.mark_notebook_base(base_nb.id)
+
+    own_chunk = RetrievedChunk(
+        chunk_id="ck-own-0", source_id="src-x", source_title="Doc",
+        section_path="0", text="own passage moe routing detail",
+        element_ids=["el-x-0000"], score=1.0, relevance=1.0)
+    ppr_chunk = RetrievedChunk(
+        chunk_id="ck-ppr-0", source_id="src-base", source_title="BaseDoc",
+        section_path="0", text="base layer passage moe routing detail",
+        element_ids=["el-base-0000"], score=0.9, relevance=0.9,
+        notebook_id=base_nb.id)                        # PPR 标了来源 notebook
+
+    _enable_overlay(repo, active_nb.id)
+    monkeypatch.setattr(repo, "_mix_retrieve",
+                        lambda nb_id, q, hl, subs: ([own_chunk, ppr_chunk], "", {}, [], 1))
+    monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)
+    repo.llm_client = _FakeLLM(markers=("k1", "k2"))    # 两条都被引用
+
+    resp = repo.ask_chunk(active_nb.id, AskRequest(question="moe routing"))
+
+    tier_by_chunk = {c.source_id: c.tier for c in resp.citations}
+    assert tier_by_chunk.get("src-x") == "personal", (
+        f"active 库自己的 chunk tier 应为 personal,实为 {tier_by_chunk.get('src-x')}")
+    assert tier_by_chunk.get("src-base") == "base", (
+        f"PPR 带来的 base 库 chunk citation.tier 应为 base,实为 {tier_by_chunk.get('src-base')}")

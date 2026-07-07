@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildAnswerReferences,
+  computeSourceTierCounts,
   parseMarkdownBlocks,
   referenceByCitationKey,
   renderTextWithReferenceNumbers,
@@ -80,6 +81,60 @@ test("parses code fences, display formulas, and markdown tables", () => {
 test("preserves anchor tier on built references", () => {
   const references = buildAnswerReferences("看 [k2]。", anchors, []);
   assert.equal(references[0].anchor?.tier, "base");
+});
+
+test("computeSourceTierCounts counts anchors and citations across mixed tiers", () => {
+  const mixedAnchors = [
+    { key: "k1", object_id: "ko-1", object_type: "concept", label: "A", tier: "base" },
+    { key: "k2", object_id: "ko-2", object_type: "concept", label: "B", tier: "personal" },
+  ];
+  const mixedCitations = [
+    { label: "C", source_id: "src-1", element_id: "e1", location_label: "p.1", quoted_span: "q1", tier: "base" },
+    { label: "D", source_id: "src-2", element_id: "e2", location_label: "p.2", quoted_span: "q2", tier: "personal" },
+  ];
+  assert.deepEqual(computeSourceTierCounts(mixedAnchors, mixedCitations), { personal: 2, base: 2 });
+});
+
+test("computeSourceTierCounts dedupes anchors by object_id and citations by source_id", () => {
+  const dupAnchors = [
+    { key: "k1", object_id: "ko-1", object_type: "concept", label: "A", tier: "base" },
+    { key: "k2", object_id: "ko-1", object_type: "concept", label: "A again", tier: "base" },
+  ];
+  const dupCitations = [
+    { label: "C", source_id: "src-1", element_id: "e1", location_label: "p.1", quoted_span: "q1", tier: "personal" },
+    { label: "C2", source_id: "src-1", element_id: "e9", location_label: "p.9", quoted_span: "q9", tier: "personal" },
+  ];
+  assert.deepEqual(computeSourceTierCounts(dupAnchors, dupCitations), { personal: 1, base: 1 });
+});
+
+test("computeSourceTierCounts treats missing/unknown tier as personal", () => {
+  const anchorsNoTier = [{ key: "k1", object_id: "ko-1", object_type: "concept", label: "A" }];
+  const citationsNoTier = [
+    { label: "C", source_id: "src-1", element_id: "e1", location_label: "p.1", quoted_span: "q1" },
+  ];
+  assert.deepEqual(computeSourceTierCounts(anchorsNoTier, citationsNoTier), { personal: 2, base: 0 });
+});
+
+test("computeSourceTierCounts returns all zeros for empty input", () => {
+  assert.deepEqual(computeSourceTierCounts([], []), { personal: 0, base: 0 });
+});
+
+test("computeSourceTierCounts handles all-personal sources", () => {
+  const allPersonal = [
+    { key: "k1", object_id: "ko-1", object_type: "concept", label: "A", tier: "personal" },
+    { key: "k2", object_id: "ko-2", object_type: "concept", label: "B", tier: "personal" },
+  ];
+  assert.deepEqual(computeSourceTierCounts(allPersonal, []), { personal: 2, base: 0 });
+});
+
+test("computeSourceTierCounts does not double count the same source appearing as both anchor and citation", () => {
+  // Anchors and citations key on different id spaces (object_id vs source_id), so this
+  // documents current behavior: they are independent source spaces, not cross-deduped.
+  const oneAnchor = [{ key: "k1", object_id: "ko-1", object_type: "chunk", label: "A", tier: "base" }];
+  const oneCitation = [
+    { label: "A", source_id: "src-1", element_id: "e1", location_label: "p.1", quoted_span: "q1", tier: "base" },
+  ];
+  assert.deepEqual(computeSourceTierCounts(oneAnchor, oneCitation), { personal: 0, base: 2 });
 });
 
 test("maps display citation numbers to references for numeric model citations", () => {

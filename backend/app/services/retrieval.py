@@ -608,6 +608,13 @@ class RetrievedChunk:
     element_ids: List[str] = field(default_factory=list)
     score: float = 0.0
     relevance: float = 0.0
+    # Origin notebook, only set by cross-tier retrieval paths (currently
+    # _ppr_retrieve, which can surface chunks from a base notebook while
+    # querying an active/personal one — mirrors RetrievedKnowledge.notebook_id).
+    # "" (default) means "the notebook this ask() call is scoped to" — every
+    # single-notebook chunk path (_retrieve_chunks, _kg_source_chunks, etc.)
+    # leaves this unset and callers fall back to the ask's own notebook_id.
+    notebook_id: str = ""
 
     @property
     def object_id(self) -> str:

@@ -10219,14 +10219,20 @@ class SQLiteRepository:
             ph = ",".join("?" for _ in score_map)
             rows = db.execute(
                 f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-                f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+                f"c.notebook_id AS chunk_notebook_id, s.title AS source_title "
+                f"FROM chunks c JOIN sources s ON s.id=c.source_id "
                 f"WHERE c.id IN ({ph})", list(score_map)).fetchall()
         from app.services.retrieval import RetrievedChunk
+        # combined_chunk_ids (scale_ppr) spans base ⊕ active — a chunk here can
+        # belong to a base notebook even though this call is scoped to
+        # `notebook_id`. Tag each with its real origin so citation-building can
+        # resolve tier correctly (see Citation.tier).
         out = [RetrievedChunk(
             chunk_id=r["id"], source_id=r["source_id"], source_title=r["source_title"],
             section_path=r["section_path"], text=r["text"],
             element_ids=json.loads(r["element_ids"] or "[]"),
-            relevance=score_map[r["id"]]) for r in rows]
+            relevance=score_map[r["id"]],
+            notebook_id=r["chunk_notebook_id"]) for r in rows]
         out.sort(key=lambda c: c.relevance, reverse=True)
         return out
 
@@ -10327,6 +10333,25 @@ class SQLiteRepository:
             last_reviewed=obj.get("last_reviewed", ""),
         )
 
+    def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
+        """Batch-resolve {notebook_id: tier} in one query (mirrors
+        federated_retrieve's tier_map pass). Used by citation-building sites
+        that fan across several notebooks (e.g. PPR chunks that can span
+        base ⊕ active) so tier lookup is O(distinct notebooks), not O(citations).
+        Missing/unknown ids default to "personal" (safe: matches Citation.tier's
+        own default, never silently mislabels a source as authoritative base)."""
+        ids = {nid for nid in notebook_ids if nid}
+        if not ids:
+            return {}
+        tier_map: Dict[str, str] = {}
+        with self._connect() as db:
+            for batch in self._in_batches(ids):
+                ph = ",".join("?" for _ in batch)
+                for row in db.execute(
+                        f"SELECT id, tier FROM notebooks WHERE id IN ({ph})", batch):
+                    tier_map[row["id"]] = row["tier"] or "personal"
+        return tier_map
+
     def _citations_from(
         self,
         items: List[RetrievedKnowledge],
@@ -10335,10 +10360,11 @@ class SQLiteRepository:
     ) -> List[Citation]:
         citations: List[Citation] = []
         for item in items:
+            tier = getattr(item, "tier", "personal") or "personal"
             for evidence in item.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue
-                citations.append(_citation(label, evidence))
+                citations.append(_citation(label, evidence, tier))
         return citations
 
     # SQLite default SQLITE_MAX_VARIABLE_NUMBER-safe chunk size for `IN (...)`
@@ -11403,8 +11429,16 @@ class SQLiteRepository:
 
             # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
             # 非 mix:每个精选 chunk 一条(字节等价于历史)。
+            # tier:selected 通常单库(personal),但概念漫游(PPR,第三路 merge 进
+            # _mix_retrieve 的 candidates)可掺 base 库 chunk——那些 c.notebook_id
+            # 非空;其余(单库路径)留空,回退本次 ask 的 notebook_id。一次批量
+            # 查询解出 {notebook_id: tier},citations 数量再多也只查一次。
             citations: List[Citation] = []
             raise_if_cancelled(cancel_event)
+            chunk_tier_map = self._tier_map_for(
+                {c.notebook_id or notebook_id for c in selected})
+            def _chunk_tier(c) -> str:
+                return chunk_tier_map.get(c.notebook_id or notebook_id, "personal")
             if overlay_on:
                 by_id = {c.chunk_id: c for c in selected}
                 for a in anchors:
@@ -11414,14 +11448,16 @@ class SQLiteRepository:
                         citations.append(Citation(
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
-                            location_label=c.section_path, quoted_span=c.text[:200]))
+                            location_label=c.section_path, quoted_span=c.text[:200],
+                            tier=_chunk_tier(c)))
             else:
                 for c in selected:
                     eid = c.element_ids[0] if c.element_ids else ""
                     citations.append(Citation(
                         label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                         source_id=c.source_id, element_id=eid,
-                        location_label=c.section_path, quoted_span=c.text[:200]))
+                        location_label=c.section_path, quoted_span=c.text[:200],
+                        tier=_chunk_tier(c)))
 
             # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
             combined_hits = list(selected) + list(kg_hits)
@@ -12271,6 +12307,10 @@ class SQLiteRepository:
                             answer, llm_grounded, anchors = "", False, []
                     citations: List[Citation] = []
                     by_id = {c.chunk_id: c for c in ppr_chunks}
+                    # ppr_chunks = 合成 community_chunks(无 notebook_id,回退本 nb)
+                    # + _ppr_retrieve 结果(可掺 base 库 chunk,notebook_id 已标)。
+                    ppr_tier_map = self._tier_map_for(
+                        {c.notebook_id or notebook_id for c in ppr_chunks})
                     for a in anchors:
                         if a.object_type == "chunk" and a.object_id in by_id:
                             c = by_id[a.object_id]
@@ -12278,7 +12318,8 @@ class SQLiteRepository:
                             citations.append(Citation(
                                 label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                                 source_id=c.source_id, element_id=eid,
-                                location_label=c.section_path, quoted_span=c.text[:200]))
+                                location_label=c.section_path, quoted_span=c.text[:200],
+                                tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal")))
                     evidence_level, top_relevance = classify_evidence(
                         ppr_chunks, anchors, llm_grounded,
                         self.settings.evidence_tau_low, self.settings.evidence_tau_high)
@@ -12420,6 +12461,11 @@ class SQLiteRepository:
                         answer, llm_grounded, anchors = "", False, []
                 citations: List[Citation] = []
                 by_id = {c.chunk_id: c for c in src_chunks}
+                # src_chunks 来自 _kg_source_chunks(notebook_id, ...):subgraph 节点虽可能
+                # 跨 base(_federated_rx_graph),但 element→chunk 反查经 _elem_chunk_map(
+                # notebook_id) 单库范围,base 节点的 element 天生查不到 chunk——凡是这里
+                # 真返回的 chunk 必属 notebook_id 自己,故只需查这一个 notebook 的 tier。
+                src_chunk_tier = self._tier_map_for({notebook_id}).get(notebook_id, "personal")
                 for a in anchors:
                     if a.object_type == "chunk" and a.object_id in by_id:
                         c = by_id[a.object_id]
@@ -12427,7 +12473,8 @@ class SQLiteRepository:
                         citations.append(Citation(
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
-                            location_label=c.section_path, quoted_span=c.text[:200]))
+                            location_label=c.section_path, quoted_span=c.text[:200],
+                            tier=src_chunk_tier))
                 evidence_level, top_relevance = classify_evidence(
                     src_chunks, anchors, llm_grounded,
                     self.settings.evidence_tau_low, self.settings.evidence_tau_high)
@@ -13329,13 +13376,14 @@ def _session_expiry(days: int = 30) -> str:
     return (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
-def _citation(label: str, evidence: Evidence) -> Citation:
+def _citation(label: str, evidence: Evidence, tier: str = "personal") -> Citation:
     return Citation(
         label=label,
         source_id=evidence.source_id,
         element_id=evidence.element_id,
         location_label=evidence.location_label,
         quoted_span=evidence.quoted_span,
+        tier=tier,
     )
 
 
