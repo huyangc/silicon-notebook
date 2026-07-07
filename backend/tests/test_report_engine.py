@@ -375,3 +375,16 @@ def test_build_corpus_map_grounds_on_corpus(repo, monkeypatch):
     assert "Gray & Meyer" in m and "§11.2" in m         # chunk 来源·路径
     assert "不该进 map" not in m                # 不含 chunk 正文
     assert len(m) <= 4000
+
+
+# ---------------------------------------------------------------------------
+# Task 2(STORM): 多视角预写作大纲 prompt(接地 + 张力 + MECE)
+# ---------------------------------------------------------------------------
+
+def test_storm_outline_prompt_contract():
+    from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
+    p = report_storm_outline_prompt("Q问题", "CORPUSMAP内容", max_sections=5, history_block="H历史")
+    for kw in ("expert perspectives", "raise", "cluster", "tension", "MECE",
+               "vocabulary", "CORPUSMAP内容", "Q问题", "H历史", "3-5"):
+        assert kw in p
+    assert "perspectives" in REPORT_STORM_SCHEMA_HINT and "tensions" in REPORT_STORM_SCHEMA_HINT

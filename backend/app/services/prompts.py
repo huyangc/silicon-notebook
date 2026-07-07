@@ -478,3 +478,46 @@ def report_summary_prompt(question: str, sections_block: str) -> str:
         f"Question: {question}\n\nReport sections:\n{sections_block}\n\n"
         'Return JSON only: {"summary":""}'
     )
+
+
+REPORT_STORM_SCHEMA_HINT = (
+    '{"sections":[{"title":"","scope":"","sub_queries":[""],'
+    '"perspectives":[""],"tensions":[""]}]}')
+
+
+def report_storm_outline_prompt(question: str, corpus_map: str,
+                                max_sections: int = 6, history_block: str = "") -> str:
+    history_section = (f"Prior conversation:\n{history_block}\n\n" if history_block else "")
+    return (
+        "You plan the OUTLINE of a deep, insightful technical report — NOT a shallow "
+        "summary. Derive it by PRE-WRITING, not by writing it directly:\n"
+        "1. Adopt 3-4 expert perspectives (lenses): first dynamically generate 2-3 "
+        "PERSPECTIVES tailored to THIS question & corpus; then add 1-2 from the "
+        "general set (domain expert / hands-on practitioner / risk-skeptic). "
+        "Perspectives must serve answering the user's question — do not add lenses "
+        "for mere variety.\n"
+        "2. From each perspective, RAISE (raise) 2-3 deep questions about the user's "
+        "question (e.g. the skeptic asks about failure modes / risks / missing "
+        "evidence).\n"
+        "3. Dedup and cluster (CLUSTER) these questions by theme into report "
+        "sections.\n"
+        "4. PRESERVE the TENSION (tension): where perspectives disagree, keep the "
+        "conflict explicit as an insight — never flatten into one-sided "
+        "praise/summary.\n"
+        "5. Sections must be MECE (mutually exclusive, no overlap; collectively cover "
+        "the question).\n"
+        "6. Ground in the corpus map below: sub_queries MUST reuse the actual "
+        "vocabulary / entity names that appear in the map (verbatim spelling).\n"
+        "7. Keep a section the question explicitly asks for EVEN IF the map lacks it "
+        "(the map is a sample; the writing stage can bridge gaps as 【通识】).\n"
+        f"Produce 3-{max_sections} sections. Do NOT include executive-summary / "
+        "references / knowledge-gap sections (auto-appended). Each section: title "
+        "(question's language), scope (one line), sub_queries (2-4 focused ENGLISH "
+        "retrieval queries), perspectives (which lenses it came from), tensions "
+        "(one line each; which other section/lens it conflicts with, or []).\n\n"
+        f"{history_section}"
+        f"Question: {question}\n\n"
+        f"Corpus map (what the library actually contains):\n{corpus_map}\n\n"
+        'Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""],'
+        '"perspectives":[""],"tensions":[""]}]}'
+    )
