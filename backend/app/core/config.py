@@ -95,6 +95,13 @@ class Settings(BaseSettings):
         True, validation_alias="REPORT_ALLOW_PARAMETRIC")
     # 节间并行度复用 kg_job_concurrency(节深挖无耦合;尊重全局限流退避)。
 
+    # --- 跨文档社区层(communities;GraphRAG 式社区检测 + 兄弟扩展) ---
+    # 纯图/无 LLM 的离线资产;community_layer_enabled 关闭时既不建也不用。
+    community_layer_enabled: bool = Field(True, validation_alias="COMMUNITY_LAYER_ENABLED")
+    community_min_size: int = Field(3, validation_alias="COMMUNITY_MIN_SIZE")
+    community_peers_topk: int = Field(8, validation_alias="COMMUNITY_PEERS_TOPK")
+    community_rerank_candidates: int = Field(200, validation_alias="COMMUNITY_RERANK_CANDIDATES")
+
     # 推理搜索 (mode=reasoning) 专用 LLM 端点（可选）。三项全部非空时推理路径改用此
     # 模型，与全局 OPENAI_COMPAT_* 解耦；任一为空 → 整体回退全局。超时/重试沿用
     # reasoning_timeout_seconds / reasoning_max_retries，此处不另设。
