@@ -45,6 +45,12 @@ communities.title|TEXT|1|''|0
 communities.summary|TEXT|1|''|0
 communities.findings|TEXT|1|'[]'|0
 communities.created_at|TEXT|1|None|0
+community_members.canonical_id|TEXT|1|None|0
+community_members.notebook_id|TEXT|1|None|0
+community_members.level|INTEGER|1|0|0
+community_members.community_id|TEXT|1|None|0
+community_members.canonical_name|TEXT|1|''|0
+community_members.centrality|REAL|1|0|0
 concept_clusters.id|TEXT|0|None|1
 concept_clusters.notebook_id|TEXT|1|None|0
 concept_clusters.canonical_id|TEXT|1|None|0
@@ -292,6 +298,8 @@ idx_chunks_source
 idx_clusters_member
 idx_clusters_nb
 idx_clusters_nb_created
+idx_commmem_nb_can
+idx_commmem_nb_comm
 idx_communities_nb_level
 idx_conflict_candidates_nb_status
 idx_element_embeddings_nb

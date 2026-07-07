@@ -36,6 +36,9 @@ def _rel(s, t):
 
 def _seed(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
+    # community_min_size default is now 3 (drops noise/singletons); this suite's
+    # A-B group is size 2 by design, so lower the threshold to exercise it.
+    repo.settings.community_min_size = 2
     repo.store_kg(nb.id, None, [_claim("A", "cascode raises output resistance"),
                                 _claim("B", "cascode limits output swing"),
                                 _claim("C", "current mirror copies current")],
