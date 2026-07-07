@@ -8,6 +8,9 @@ import { ChannelTabs } from "./components/ChannelTabs";
 import { StatsBar } from "./components/StatsBar";
 import { LogList } from "./components/LogList";
 import { LogDetail } from "./components/LogDetail";
+import { fetchMe, type AuthUser } from "../../auth.ts";
+import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
+import { usernameForOwner } from "./owner";
 
 const PAGE = 200;
 const POLL_MS = 5000;
@@ -33,13 +36,52 @@ export default function LogsPage() {
   const [q, setQ] = useState("");
   const [qInput, setQInput] = useState("");
 
-  const filterParams = useMemo(() => ({ kind, status, model, q }), [kind, status, model, q]);
+  const [me, setMe] = useState<AuthUser | null>(null);
+  const [adminUsers, setAdminUsers] = useState<AdminUserUsage[]>([]);
+  const [owner, setOwner] = useState("");
+
+  const filterParams = useMemo(
+    () => ({ kind, status, model, q, owner }),
+    [kind, status, model, q, owner],
+  );
+
+  // read ?owner= from the URL once on mount (admin drill-down entry point)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const o = params.get("owner");
+    if (o) setOwner(o);
+  }, []);
+
+  // current user + (admin-only) user list for the drill-down dropdown
+  useEffect(() => {
+    fetchMe()
+      .then((u) => {
+        setMe(u);
+        if (u.role === "admin") {
+          fetchAdminUsers()
+            .then(setAdminUsers)
+            .catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const selectOwner = useCallback((next: string) => {
+    setOwner(next);
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (next) params.set("owner", next);
+    else params.delete("owner");
+    const qs = params.toString();
+    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+  }, []);
 
   useEffect(() => {
-    fetchChannels()
+    fetchChannels(owner)
       .then((r) => setChannels(r.channels))
       .catch((e) => setError(String(e)));
-  }, []);
+  }, [owner]);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -131,6 +173,26 @@ export default function LogsPage() {
 
   return (
     <div className="logview">
+      <div className="logview-owner">
+        <span>
+          当前查看:<strong>{usernameForOwner(adminUsers, owner, me?.username ?? "")}</strong>
+        </span>
+        {me?.role === "admin" ? (
+          <select
+            className="logview-owner-select"
+            value={owner}
+            onChange={(e) => selectOwner(e.target.value)}
+          >
+            <option value="">我自己{me.username ? `(${me.username})` : ""}</option>
+            {adminUsers.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.username}
+              </option>
+            ))}
+          </select>
+        ) : null}
+      </div>
+
       <div className="logview-top">
         <ChannelTabs channels={channels} active={channel} onSelect={() => undefined} />
         <StatsBar stats={stats} />

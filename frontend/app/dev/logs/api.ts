@@ -1,9 +1,10 @@
 import type { ChannelsResponse, FullRecord, ListResponse } from "./types";
+import { authHeaders } from "../../auth.ts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) {
     let detail = "";
     try {
@@ -17,8 +18,9 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
-export function fetchChannels(): Promise<ChannelsResponse> {
-  return get<ChannelsResponse>(`/debug/logs`);
+export function fetchChannels(owner?: string): Promise<ChannelsResponse> {
+  const suffix = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+  return get<ChannelsResponse>(`/debug/logs${suffix}`);
 }
 
 export type RecordQuery = {
@@ -29,6 +31,7 @@ export type RecordQuery = {
   status?: string;
   model?: string;
   q?: string;
+  owner?: string;
 };
 
 export function fetchRecords(channel: string, params: RecordQuery): Promise<ListResponse> {
