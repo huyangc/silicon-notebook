@@ -413,3 +413,49 @@ def test_sufficiency_prompt_contract():
     p = report_sufficiency_prompt("Q", "PROBEBLOCK")
     assert "sufficiency" in p and "PROBEBLOCK" in p and "Q" in p
     assert "gap_note" in REPORT_SUFFICIENCY_SCHEMA_HINT and "action" in REPORT_SUFFICIENCY_SCHEMA_HINT
+
+
+# ---------------------------------------------------------------------------
+# Task 4(STORM): plan_outline 编排(map→STORM→探针→Judge→富大纲→outline_ready)
+# ---------------------------------------------------------------------------
+
+def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    nb = _mk_nb(repo)
+    class _LLM:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            c = messages[-1]["content"]
+            if "PRE-WRITING" in c or "expert PERSPECTIVES" in c:
+                return json.dumps({"sections":[{"title":"机理","scope":"s","sub_queries":["bandgap"],
+                                                "perspectives":["领域专家"],"tensions":[]}]})
+            if "ENOUGH evidence" in c:
+                return json.dumps({"verdicts":[{"title":"机理","sufficiency":"薄弱",
+                                                "gap_note":"缺实测","action":"supplement"}]})
+            return "{}"
+    repo.llm_client = _LLM()          # reasoning/rewrite 都回退到它(测试桩)
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q: "MAP")
+    monkeypatch.setattr(repo, "federated_retrieve", lambda a,q: [])
+    eng = ReportEngine(repo, repo.settings)
+    rid = repo.create_report(nb.id, "why bandgap 1.2V")
+    eng.plan_outline(nb.id, rid, "why bandgap 1.2V")
+    d = repo.get_report(nb.id, rid)
+    assert d["status"] == "outline_ready"
+    sec = d["outline"][0]
+    assert sec["title"]=="机理" and sec["perspectives"]==["领域专家"]
+    assert sec["sufficiency"]=="薄弱" and sec["action"]=="supplement"
+
+def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    nb = _mk_nb(repo)
+    class _Bad:
+        configured=True
+        def chat_json(self, *a, **k): return "not json"
+    repo.llm_client=_Bad()
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q:"MAP")
+    monkeypatch.setattr(repo, "federated_retrieve", lambda a,q: [])
+    eng=ReportEngine(repo, repo.settings)
+    rid=repo.create_report(nb.id,"q")
+    eng.plan_outline(nb.id, rid, "q")
+    d=repo.get_report(nb.id, rid)
+    assert d["status"]=="outline_ready" and len(d["outline"])>=1   # 回退骨架

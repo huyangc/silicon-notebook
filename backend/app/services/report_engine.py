@@ -134,6 +134,79 @@ class ReportEngine:
             out.append({"title": s.get("title", ""), "hits": len(seen), "base_hits": len(base)})
         return out
 
+    # --- Stage A 编排:map → STORM → 探针 → Judge → 富大纲 → outline_ready ---
+    def plan_outline(self, notebook_id, rid, question, history="") -> None:
+        try:
+            self.repo.update_report(notebook_id, rid, status="planning", progress="侦察语料中")
+            corpus_map = self._build_corpus_map(notebook_id, question)
+            raise_if_cancelled(self.cancel_event)
+            self.repo.update_report(notebook_id, rid, progress="多视角规划大纲中")
+            sections = self._storm_outline(notebook_id, question, history, corpus_map)
+            # 充分性:探针(0 LLM)+ Judge(flash)
+            probe = self._probe_sufficiency(notebook_id, sections)
+            sections = self._judge_sufficiency(question, sections, probe)
+            self.repo.update_report(notebook_id, rid, outline=sections,
+                                    status="outline_ready",
+                                    progress=f"大纲就绪({len(sections)} 节),待确认")
+        except AskCancelled:
+            self.repo.update_report(notebook_id, rid, status="cancelled", progress="已取消")
+        except Exception as exc:
+            self.repo.update_report(notebook_id, rid, status="failed",
+                                    error=str(exc)[:500], progress="规划失败")
+
+    def _storm_outline(self, notebook_id, question, history, corpus_map) -> List[dict]:
+        from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
+        try:
+            raw = self.repo.reasoning_llm_client.chat_json(
+                [{"role": "user", "content": report_storm_outline_prompt(
+                    question, corpus_map, max_sections=self.settings.report_max_sections,
+                    history_block=history)}],
+                REPORT_STORM_SCHEMA_HINT, cancel_event=self.cancel_event)
+            data = json.loads(raw)
+            out = []
+            for s in (data.get("sections") or [])[: self.settings.report_max_sections]:
+                title = str(s.get("title", "")).strip()
+                subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
+                if title and subs:
+                    out.append({
+                        "title": title, "scope": str(s.get("scope", "")).strip(),
+                        "sub_queries": subs[:4],
+                        "perspectives": [str(p).strip() for p in (s.get("perspectives") or []) if str(p).strip()],
+                        "tensions": [str(t).strip() for t in (s.get("tensions") or []) if str(t).strip()]})
+            if out:
+                return out
+        except AskCancelled:
+            raise
+        except Exception:
+            pass
+        return self._plan_outline(notebook_id, question, history)   # 回退现行骨架
+
+    def _judge_sufficiency(self, question, sections, probe) -> List[dict]:
+        from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
+        by_title = {p["title"]: p for p in probe}
+        # 缺省:按探针命中给保守判定(Judge 失败也有充分性信号)
+        for s in sections:
+            h = by_title.get(s["title"], {"hits": 0, "base_hits": 0})
+            s.setdefault("sufficiency", "充足" if h["hits"] >= 3 else "薄弱" if h["hits"] else "缺失")
+            s.setdefault("gap_note", "")
+            s.setdefault("action", "keep" if h["hits"] >= 3 else "supplement" if h["hits"] else "external")
+        try:
+            block = "\n".join(f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']}" for p in probe)
+            raw = self.repo.rewrite_llm_client.chat_json(
+                [{"role": "user", "content": report_sufficiency_prompt(question, block)}],
+                REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
+            for v in (json.loads(raw).get("verdicts") or []):
+                for s in sections:
+                    if s["title"] == str(v.get("title", "")).strip():
+                        if v.get("sufficiency"): s["sufficiency"] = str(v["sufficiency"])
+                        if v.get("gap_note") is not None: s["gap_note"] = str(v.get("gap_note", ""))
+                        if v.get("action"): s["action"] = str(v["action"])
+        except AskCancelled:
+            raise
+        except Exception:
+            pass
+        return sections
+
     # --- Stage B(单节):完整 reasoning 深挖 ---
     def _deep_dive(self, notebook_id, section, question, depth=None, on_step=None):
         from app.services.reasoning_retrieval import ReasoningRetriever
