@@ -344,3 +344,34 @@ def test_run_sections_writes_section_status(repo, monkeypatch):
     detail = repo.get_report(nb.id, rid)
     assert len(detail["section_status"]) == 2
     assert all(x["phase"] == "完成" for x in detail["section_status"])
+
+
+# ---------------------------------------------------------------------------
+# Task 1(STORM): Corpus map 0-LLM 语料侦察(来源 + KG + chunk 路径)
+# ---------------------------------------------------------------------------
+
+def test_build_corpus_map_grounds_on_corpus(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    from app.services.retrieval import RetrievedKnowledge, RetrievedChunk
+    nb = _mk_nb(repo)
+    eng = ReportEngine(repo, repo.settings)
+    # 来源
+    with repo._write() as db:
+        db.execute("INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,created_at,updated_at)"
+                   " VALUES('s1',?, 'Razavi Analog CMOS','file','uploaded','parsed',?,?)",
+                   (nb.id, "2026", "2026"))
+    def _fed(active, q):
+        h = RetrievedKnowledge(object_id="ko1", object_type="concept", payload={"name": "Bandgap Reference"})
+        h.tier = "base"; h.notebook_id = "nb-base"
+        return [h]
+    def _ppr(nbid, q):
+        return [RetrievedChunk(chunk_id="c1", source_id="s2", source_title="Gray & Meyer",
+                               section_path="§11.2", text="……很长的正文不该进 map……")]
+    monkeypatch.setattr(repo, "federated_retrieve", _fed)
+    monkeypatch.setattr(repo, "_ppr_retrieve", _ppr)
+    m = eng._build_corpus_map(nb.id, "why is bandgap 1.2V")
+    assert "Razavi Analog CMOS" in m            # 来源标题
+    assert "Bandgap Reference" in m and "[base]" in m   # KG + tier
+    assert "Gray & Meyer" in m and "§11.2" in m         # chunk 来源·路径
+    assert "不该进 map" not in m                # 不含 chunk 正文
+    assert len(m) <= 4000
