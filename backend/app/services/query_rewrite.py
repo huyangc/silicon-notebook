@@ -35,6 +35,7 @@ class ExpandedQuery:
     sub_queries: List[SubQuerySpec]
     high_level_keywords: List[str] = field(default_factory=list)
     low_level_keywords: List[str] = field(default_factory=list)
+    comparison: Optional[dict] = None   # {"focal": 实体名} 若 LLM 判定为对比题,否则 None
 
 
 def expand_query(client, question: str, history: str = "", *,
@@ -96,8 +97,13 @@ def expand_query(client, question: str, history: str = "", *,
         hl = _kw_list(data.get("high_level_keywords"))
         ll = _kw_list(data.get("low_level_keywords"))
         query = str(data.get("query", "")).strip() or question
+        comp = data.get("comparison")
+        comparison = None
+        if isinstance(comp, dict) and str(comp.get("focal", "")).strip():
+            comparison = {"focal": str(comp["focal"]).strip()}
         return ExpandedQuery(query=query, sub_queries=out,
-                             high_level_keywords=hl, low_level_keywords=ll)
+                             high_level_keywords=hl, low_level_keywords=ll,
+                             comparison=comparison)
     except AskCancelled:
         raise
     except Exception:
