@@ -339,7 +339,8 @@ def evidence_refine_prompt(question: str, evidence_block: str) -> str:
 
 
 EXPAND_SCHEMA_HINT = ('{"query":"","high_level_keywords":[],"low_level_keywords":[],'
-                      '"sub_queries":[{"query":"","types":[],"prefer":"balanced","reason":""}]}')
+                      '"sub_queries":[{"query":"","types":[],"prefer":"balanced","reason":""}],'
+                      '"comparison":{"focal":""}}')
 
 
 def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False,
@@ -385,11 +386,15 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "origin / engineering constraints such as packaging & materials). Use "
         "canonical entity names.\n"
         f"{types_line}"
-        "Keep sub-queries non-redundant.\n\n"
+        "Keep sub-queries non-redundant.\n"
+        "If the question compares an entity with others of its kind (e.g. 'X vs "
+        "other LLMs'), set comparison.focal to that entity's canonical name; omit "
+        "comparison otherwise.\n\n"
         f"{history_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"query":"","high_level_keywords":[],'
-        '"low_level_keywords":[],"sub_queries":[{"query":""' + types_schema + "}]}"
+        '"low_level_keywords":[],"sub_queries":[{"query":""' + types_schema + '}],'
+        '"comparison":{"focal":""}}'
     )
 
 

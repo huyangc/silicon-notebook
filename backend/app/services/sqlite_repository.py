@@ -11117,6 +11117,18 @@ class SQLiteRepository:
                 sub_queries = [s.query for s in ex.sub_queries]
             else:
                 sub_queries = [retrieval_query]
+            # 对比题:焦点社区兄弟追加为子查询(chunk 无 agent 循环,借 expand 的
+            # comparison 字段触发)。无 base/无社区 → community_peers fail-open 返回 []。
+            if ex and ex.comparison and self.settings.community_layer_enabled:
+                from app.services.communities import community_peers, first_base_notebook_id
+                base_nb = first_base_notebook_id(self, notebook_id)
+                if base_nb:
+                    for pname in community_peers(
+                            self, base_nb, ex.comparison["focal"], retrieval_query,
+                            top_k=self.settings.community_peers_topk,
+                            candidates=self.settings.community_rerank_candidates):
+                        if pname not in sub_queries:
+                            sub_queries.append(pname)
             hl = " ".join(ex.high_level_keywords) if ex else ""
             # Bilingual keyword string (high+low level, both corpus languages) for
             # the CHUNK lexical union — this is how "FTS carries the 2nd language"
