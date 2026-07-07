@@ -12558,6 +12558,91 @@ class SQLiteRepository:
             out.append((fname, content_md))
         return out
 
+    def pending_actions(self, user_id: str) -> dict:
+        """聚合当前用户「我创建的」notebook 的三类待办(深度报告待确认/治理队列/
+        索引状态),供「待确认中心」铃铛使用。REST 与后续流式端点共用同一计算核心。
+
+        只读、无 LLM/embed 调用。严格按 notebooks.created_by = user_id 过滤 ——
+        不走 list_notebooks()(它含"分享给我只读"的库,会破坏用户间隔离)。
+        index 项的状态分类完全委托给已有的 scale_index_status(nb).state,不重新
+        实现索引状态机;building/queued 视为进行中、不计入 count(不是待用户确认的
+        动作),但仍作为 item 呈现供前端展示进度。"""
+        items: list[dict] = []
+        with self._connect() as db:
+            my = db.execute(
+                "SELECT id, name FROM notebooks WHERE created_by = ? AND status != 'copying'",
+                (user_id,),
+            ).fetchall()
+            name_of = {r["id"]: r["name"] for r in my}
+            nb_ids = list(name_of.keys())
+
+            if nb_ids:
+                # ① 深度报告待确认(outline_ready = 大纲已生成、等用户编辑/确认后再 generate)
+                rows = db.execute(
+                    "SELECT id, question, notebook_id, created_at FROM reports "
+                    "WHERE status = 'outline_ready' AND created_by = ? ORDER BY updated_at DESC",
+                    (user_id,),
+                ).fetchall()
+                for r in rows:
+                    items.append({
+                        "type": "report_outline",
+                        "notebook_id": r["notebook_id"],
+                        "notebook_name": name_of.get(r["notebook_id"], ""),
+                        "report_id": r["id"],
+                        "title": (r["question"] or "")[:60],
+                        "created_at": r["created_at"],
+                    })
+
+                # ② 治理三队列(count>0 才出项):概念合并候选/边审查/晋升候选
+                placeholders = ",".join("?" for _ in nb_ids)
+                gov_specs = [
+                    ("merge", "concept_merge_candidates", "status = 'pending'"),
+                    ("edge", "knowledge_relations", "review_status = 'pending'"),
+                    ("promotion", "promotion_candidates", "status IN ('proposed','under_review')"),
+                ]
+                for subtype, table, pred in gov_specs:
+                    grp = db.execute(
+                        f"SELECT notebook_id, COUNT(*) AS c FROM {table} "
+                        f"WHERE notebook_id IN ({placeholders}) AND {pred} GROUP BY notebook_id",
+                        nb_ids,
+                    ).fetchall()
+                    for g in grp:
+                        if g["c"] > 0:
+                            items.append({
+                                "type": "governance",
+                                "subtype": subtype,
+                                "notebook_id": g["notebook_id"],
+                                "notebook_name": name_of.get(g["notebook_id"], ""),
+                                "count": g["c"],
+                            })
+
+        # ③ 索引状态(scale_index_status 自管连接,故在上面的 with 块外调用)
+        for nb_id in nb_ids:
+            try:
+                st = self.scale_index_status(nb_id)
+            except Exception:  # noqa: BLE001 — 单库状态异常不拖垮整个中心
+                continue
+            state = st.get("state")
+            if state in ("stale", "suggested", "building", "queued"):
+                item = {
+                    "type": "index",
+                    "state": "building" if state == "queued" else state,
+                    "notebook_id": nb_id,
+                    "notebook_name": name_of.get(nb_id, ""),
+                }
+                total = st.get("total_chunks") or 0
+                delta = st.get("delta_chunks") or 0
+                if state in ("building", "queued") and total:
+                    item["progress"] = round(100.0 * max(0, total - delta) / total)
+                items.append(item)
+
+        actionable = sum(
+            1 for it in items
+            if it["type"] in ("report_outline", "governance")
+            or (it["type"] == "index" and it["state"] in ("stale", "suggested"))
+        )
+        return {"count": actionable, "items": items}
+
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         if payload.rating not in {"useful", "not_useful"}:
             raise ValueError("rating must be useful or not_useful")
