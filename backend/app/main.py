@@ -8,10 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, repository
 from app.api.routes import router
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.services.pending_bus import pending_bus
 
 logger = logging.getLogger("silicon_notebook.startup")
 
@@ -136,6 +137,12 @@ def create_app() -> FastAPI:
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
     app.include_router(debug_logs_router, prefix="/api")
+
+    # 待确认中心事件总线：注入 recompute，供后台 job（mark_dirty）与流式端点
+    # 复用同一份快照计算口径（app.api.routes 里初始 snapshot 直接调
+    # repository().pending_actions，不走这个私有 _recompute）。
+    pending_bus.set_recompute(lambda uid: repository().pending_actions(uid))
+
     return app
 
 
