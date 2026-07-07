@@ -18,6 +18,7 @@ from app.api.deps import (
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
 from app.models.schemas import (
+    AdminUserUsage,
     AskRequest,
     AskResponse,
     ConceptWhitelistAdd,
@@ -1322,6 +1323,14 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/admin/users", response_model=List[AdminUserUsage])
+def list_admin_users(user: UserProfile = Depends(get_current_user)) -> List[AdminUserUsage]:
+    """管理员用户使用总览:所有用户 + 用量统计。仅 admin。"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看用户总览")
+    return [AdminUserUsage(**row) for row in repository().list_user_usage()]
 
 
 # --- 待确认中心 (Pending Actions Center) ---------------------------------
