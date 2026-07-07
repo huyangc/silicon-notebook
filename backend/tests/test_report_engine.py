@@ -227,6 +227,52 @@ def test_assemble_builds_report_body_only(repo):
     assert gaps == ["「B」库内证据不足,内容偏推断/通识"]
 
 
+def test_assemble_multikey_citation_renumbered(repo):
+    """LLM 常吐逗号复合引用 [k1, k3](而非 prompt 要求的 [k1][k3]):_assemble 须逐 key
+    全局重编号、登记两条 reference,正文输出仍是逗号复合 [k1, k2](全局编号)。"""
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    sections = [
+        {"title": "A", "scope": "sa",
+         "markdown": "## A\n超越开源并与闭源持平 [k1, k3]。", "grounded": True,
+         "id_map": {
+             "k1": {"object_id": "c1", "object_type": "chunk", "name": "N1",
+                    "source_title": "SrcA", "location_label": "§1", "tier": "base"},
+             "k3": {"object_id": "c3", "object_type": "chunk", "name": "N3",
+                    "source_title": "SrcB", "location_label": "§3", "tier": "personal"},
+         },
+         "attempted": []},
+    ]
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    body = md.split("## 参考文献")[0]
+    assert len(references) == 2                       # 两来源都登记
+    assert "[k1, k2]" in body                         # 复合引用逐 key 重编号(逗号形式保留)
+    assert "k3" not in body                           # 节内局部 key 不残留
+    assert "SrcA" in md and "SrcB" in md
+
+
+def test_assemble_multikey_drops_unknown_keys(repo):
+    """复合引用里混入未知/幻觉 key → 只保留已知的;全未知则整段剥除。"""
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    sections = [
+        {"title": "A", "scope": "sa",
+         "markdown": "## A\n部分已知 [k1, k9]。全幻觉 [k8, k9]。", "grounded": True,
+         "id_map": {"k1": {"object_id": "c1", "object_type": "chunk", "name": "N1",
+                           "source_title": "SrcA", "location_label": "§1", "tier": "base"}},
+         "attempted": []},
+    ]
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    body = md.split("## 参考文献")[0]
+    assert "[k1]" in body                             # [k1, k9] → 只留已知 k1
+    assert "k9" not in body and "k8" not in body      # 未知全剥除
+    assert "全幻觉 。" in body or "全幻觉  。" in body   # [k8, k9] 整段剥除(留空)
+
+
 def test_assemble_all_grounded_has_no_limitation_note(repo):
     """全部章节有库内支撑时,报告无「局限」行、gaps 为空。"""
     nb = _mk_nb(repo)

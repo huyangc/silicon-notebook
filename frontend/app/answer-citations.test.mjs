@@ -56,6 +56,25 @@ test("数字复合引用渲染为多个 cite 链接", () => {
   assert.match(html, /href="cite:3"/);
 });
 
+test("k 前缀复合引用 [k6, k10] 渲染为多个 cite 链接(报告 LLM 常吐逗号形式)", () => {
+  const refs = {
+    k6: { id: "r6", displayLabel: "[6]" },
+    k10: { id: "r10", displayLabel: "[10]" },
+  };
+  const html = render("超越先前开源模型并与闭源持平 [k6, k10]。", refs);
+  assert.match(html, /href="cite:k6"/);
+  assert.match(html, /href="cite:k10"/);
+  assert.match(html, />\[6\]</);
+  assert.match(html, />\[10\]</);
+});
+
+test("k 前缀复合引用有未命中时保持原文", () => {
+  const refs = { k6: { id: "r6", displayLabel: "[6]" } };
+  const html = render("混入幻觉 [k6, k99] 不应半转换。", refs);
+  assert.match(html, /\[k6, k99\]/);
+  assert.doesNotMatch(html, /href="cite:k6"/);
+});
+
 test("数字复合引用中有未命中编号时保持原文", () => {
   const refs = { 1: { id: "r1", displayLabel: "[1]" } };
   const html = render("普通数组或缺失引用 [1, 99] 不应半转换。", refs);

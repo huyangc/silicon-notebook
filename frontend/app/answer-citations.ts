@@ -24,7 +24,8 @@ export function remarkCitations(refsByKey: Record<string, AnswerReference>) {
   return (tree: Root) => {
     visit(tree, "text", (node: Text, index, parent) => {
       if (!parent || index === undefined) return;
-      const pattern = /\[(k\d+|(?:\d+\s*,\s*)*\d+)\]/g;
+      // 复合引用统一:一到多个 k?\d+ 以逗号分隔。[k1] / [1] / [k6, k10] / [1, 2] 皆匹配。
+      const pattern = /\[((?:k?\d+\s*,\s*)*k?\d+)\]/g;
       const text = node.value;
       if (!pattern.test(text)) return;
 
@@ -37,9 +38,8 @@ export function remarkCitations(refsByKey: Record<string, AnswerReference>) {
 
       while ((match = pattern.exec(text)) !== null) {
         const token = match[1];
-        const keys = token.startsWith("k")
-          ? [token]
-          : token.split(",").map((part) => part.trim()).filter(Boolean);
+        // 逗号分隔的复合引用(k 前缀或纯数字皆可)统一按逗号拆;单 key 拆出单元素。
+        const keys = token.split(",").map((part) => part.trim()).filter(Boolean);
         const refs = keys.map((key) => refsByKey[key]);
 
         // 前面的纯文本
