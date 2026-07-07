@@ -312,6 +312,8 @@ class ReasoningRetriever:
 
         # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
         used_queries = list(dict.fromkeys(s.query for s in subqueries))
+        # 同一 run 内已 expand_community 过的焦点(防反复触发)。
+        community_focals_done: set = set()
 
         steps = 0
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
@@ -455,6 +457,44 @@ class ReasoningRetriever:
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
                                      detail={"query": pq, "found": len(new), "phase": "action"}))
+            elif decision.next_action == "expand_community":
+                # 横向对比:焦点 → base 库所在社区 → 兄弟实体,逐个发子查询。
+                # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
+                from app.services.communities import community_peers, first_base_notebook_id
+                focal_name = decision.community_focal or (
+                    max(collected.values(), key=lambda h: h.score).payload.get("name", "")
+                    if collected else "")
+                fkey = _norm_query(focal_name)
+                if not focal_name or fkey in community_focals_done:
+                    record(TraceStep(step_type="skip",
+                                     summary="跳过 expand_community(无焦点或已扩展)",
+                                     detail={"reason": "no_focal_or_done", "focal": focal_name}))
+                else:
+                    community_focals_done.add(fkey)
+                    base_nb = first_base_notebook_id(self.repo, notebook_id)
+                    peers = community_peers(
+                        self.repo, base_nb, focal_name, question,
+                        top_k=self.settings.community_peers_topk,
+                        candidates=self.settings.community_rerank_candidates) if base_nb else []
+                    added, names = 0, []
+                    for pname in peers:
+                        raise_if_cancelled(self.cancel_event)
+                        key = _norm_query(pname)
+                        if key in attempted:
+                            continue
+                        got = 0
+                        for h in self.search(notebook_id, pname)[:_PER_QUERY_LIMIT]:
+                            if h.object_id not in collected:
+                                collected[h.object_id] = h
+                                added += 1
+                                got += 1
+                        attempted[key] = _QueryAttempt(query=pname, new=got, tries=1)
+                        if pname not in used_queries:
+                            used_queries.append(pname)
+                        names.append(pname)
+                    record(TraceStep(step_type="expand_community",
+                                     summary=f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}",
+                                     detail={"focal": focal_name, "peers": names, "new": added}))
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。

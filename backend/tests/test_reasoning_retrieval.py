@@ -1021,3 +1021,43 @@ def test_run_max_steps_override_caps_reflect_loop(rrepo):
     rrepo.llm_client = _LoopLLM()
     ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
     assert calls["reflect"] <= 2      # 被 max_steps=2 封顶(而非 settings 的 50)
+
+
+def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
+    """expand_community 动作:对焦点社区兄弟发子查询、记 expand_community trace。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    import app.services.communities as C
+    nb = _seed_two_nodes(rrepo)
+    monkeypatch.setattr(C, "community_peers", lambda *a, **k: ["RTL综合", "布线"])
+    monkeypatch.setattr(C, "first_base_notebook_id", lambda *a, **k: nb.id)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+             "reason": "需要同类"},
+            {"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "DeepSeek-V4 相比其他", "")
+    assert any(t.step_type == "expand_community" for t in res.trace)
+    attempted_q = [a["query"] for a in res.attempted]
+    assert "RTL综合" in attempted_q and "布线" in attempted_q
+
+
+def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
+    """无 base 库 → 不 fan-out,优雅继续(fail-open)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    import app.services.communities as C
+    nb = _seed_two_nodes(rrepo)
+    called = {"peers": 0}
+    def _peers(*a, **k):
+        called["peers"] += 1
+        return []
+    monkeypatch.setattr(C, "community_peers", _peers)
+    monkeypatch.setattr(C, "first_base_notebook_id", lambda *a, **k: None)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "X"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "X"},
+            {"next_action": "answer", "sufficient": True}])
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
+    assert called["peers"] == 0                     # base 为 None → 根本不调 community_peers
+    assert any(t.step_type == "expand_community" for t in res.trace)
