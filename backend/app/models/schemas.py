@@ -148,6 +148,9 @@ class NotebookSummary(BaseModel):
     # 系统中是否存在已建 KG 的 tier='base' 笔记本。即便本 notebook 无图,有 base 也可
     # 进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或 base_kg_available)。
     base_kg_available: bool = False
+    # 全局唯一基准库的名字(tier='base',无则空)。全局参考信息,所有用户只读可见 ——
+    # 前端「分析」弹窗顶部展示「当前基准库:X」,非管理员也能看到是哪个(但改不了)。
+    base_notebook_name: str = ""
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
     # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);

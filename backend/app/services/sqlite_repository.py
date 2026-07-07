@@ -1342,6 +1342,26 @@ class SQLiteRepository:
         with self._connect() as conn:
             return bool(conn.execute(sql).fetchone()[0])
 
+    def _base_notebook_info(self, db: "sqlite3.Connection | None" = None) -> "tuple[str, bool]":
+        """(基准库名, 是否有 KG) —— 一次查询同时供 NotebookSummary 的 base_notebook_name
+        与 base_kg_available,避免每条 summary 各查一次(net-zero 于原 base_kg_available)。
+        基准库全局唯一(mark_notebook_base 会降级其它 tier='base'),取最早创建者;has_kg
+        沿用 _any_base_notebook_has_kg 相同的 EXISTS 语义,保证 base_kg_available 值不变。
+        无基准库 → ("", False)。"""
+        sql = ("SELECT nb.name, "
+               "EXISTS(SELECT 1 FROM knowledge_objects ko "
+               "JOIN notebooks b ON b.id = ko.notebook_id WHERE b.tier = 'base') "
+               "FROM notebooks nb WHERE nb.tier = 'base' "
+               "ORDER BY nb.created_at ASC LIMIT 1")
+        if db is not None:
+            row = db.execute(sql).fetchone()
+        else:
+            with self._connect() as conn:
+                row = conn.execute(sql).fetchone()
+        if not row:
+            return ("", False)
+        return (row[0] or "", bool(row[1]))
+
     @staticmethod
     def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
         """PURE: parse an evidence JSON TEXT column value into the set of distinct
@@ -13051,6 +13071,7 @@ class SQLiteRepository:
             except (json.JSONDecodeError, TypeError):
                 return []
 
+        base_name, base_has_kg = self._base_notebook_info(db)
         return NotebookSummary(
             id=row["id"],
             name=row["name"],
@@ -13066,7 +13087,8 @@ class SQLiteRepository:
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
             kg_ready=self._has_kg(db, row["id"]),
-            base_kg_available=self._any_base_notebook_has_kg(db),
+            base_kg_available=base_has_kg,
+            base_notebook_name=base_name,
             kg_pending_sources=self._count_pending_kg_sources(db, row["id"]),
         )
 
