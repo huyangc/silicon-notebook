@@ -3524,6 +3524,8 @@ export default function Home() {
                     deleteReport={deleteReport}
                     downloadReportsZip={downloadReportsZip}
                     setToast={setToast}
+                    focusReportId={pendingReportFocusId}
+                    onFocusConsumed={() => setPendingReportFocusId(null)}
                   />
                 )}
               </div>

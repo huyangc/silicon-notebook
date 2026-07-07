@@ -462,6 +462,9 @@ export interface ReportsPanelProps {
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
   downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
   setToast: (message: string) => void;
+  /** 「待确认中心」深链:指定报告 id 后自动拉详情并打开大纲编辑器,消费后由父组件清空。 */
+  focusReportId?: string | null;
+  onFocusConsumed?: () => void;
 }
 
 export function ReportsPanel({
@@ -475,6 +478,8 @@ export function ReportsPanel({
   deleteReport,
   downloadReportsZip,
   setToast,
+  focusReportId,
+  onFocusConsumed,
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
@@ -514,6 +519,24 @@ export function ReportsPanel({
     // surfaceError 仅包装 setToast,不入依赖。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notebookId, listReports]);
+
+  // 「待确认中心」深链:focusReportId 就绪且列表已拉取后,拉该报告详情并打开大纲编辑器;
+  // 无论成败都要消费掉 focusReportId,避免重复触发。
+  useEffect(() => {
+    if (!focusReportId || reports === null) return;
+    (async () => {
+      try {
+        const detail = await getReport(notebookId, focusReportId);
+        setActive(detail);
+      } catch (error) {
+        surfaceError(error);
+      } finally {
+        onFocusConsumed?.();
+      }
+    })();
+    // surfaceError 仅包装 setToast,不入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReportId, reports, notebookId, getReport, onFocusConsumed]);
 
   // 列表轮询:列表视图下存在非终态报告时每 6s 刷新;终态即停,卸载清理。
   const hasLiveReports = (reports ?? []).some((r) => isReportActive(r.status));
