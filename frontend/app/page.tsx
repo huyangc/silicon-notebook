@@ -27,6 +27,10 @@ import {
 } from "./promotion-queue";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
+  describeScaleIndex, scaleIndexOpConfirm, SCALE_OP_MODE,
+  type ScaleIndexOp, type ScaleIndexStatus,
+} from "./scale-index";
+import {
   shareNotebook,
   unshareNotebook,
   previewShared,
@@ -663,13 +667,8 @@ async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void
   URL.revokeObjectURL(url);
 }
 
-type ScaleIndexState = "unindexed" | "suggested" | "queued" | "building" | "indexed" | "stale";
-type ScaleIndexStatus = { exists: boolean; stale: boolean; building: boolean; eligible: boolean;
-  state?: ScaleIndexState;
-  delta_chunks?: number; unindexed_sources?: number; delta_searchable?: boolean;
-  n_nodes: number; n_chunks: number; n_ann: number; n_chunk_ann: number; has_chunk_ann: boolean };
-const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now") =>
-  api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when }) });
+const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now", mode: "auto" | "fold" | "full" = "auto") =>
+  api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when, mode }) });
 const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/${nb}/scale-index/status`);
 
 function formatRelativeTime(iso: string): string {
@@ -1124,26 +1123,29 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [vizBuilding, kgViewOpen, currentNotebookId, kgLimit]);
   // Kick off a scale-index rebuild; the effect above then polls until it's ready.
-  const startScaleIndexRebuild = async (nb: string, when: "now" | "idle" = "now") => {
+  const startScaleIndexRebuild = async (nb: string, when: "now" | "idle" = "now", mode: "auto" | "fold" | "full" = "auto") => {
     setBuildingScaleIndex(true);
     try {
-      await rebuildScaleIndex(nb, when);
+      await rebuildScaleIndex(nb, when, mode);
       if (when === "idle") {
         setToast("已排队，将在服务器空闲时（低峰）重建；完成后自动更新");
         // Reflect the queued state right away; the poll effect keeps it fresh.
         fetchScaleIndexStatus(nb).then((s) => setScaleIndexStatus(s)).catch(() => {});
       } else {
-        setToast("已开始重建检索索引（后台进行，可能数分钟）；完成后自动更新");
+        setToast(mode === "fold"
+          ? "已开始更新检索索引（增量收录新增来源，后台进行）；完成后自动更新"
+          : "已开始构建检索索引（后台进行，可能数分钟）；完成后自动更新");
       }
     } catch (e) { reportError(e); setBuildingScaleIndex(false); }
   };
-  // 点「检索索引」徽章:未建/建议/过期 → 先确认再立即后台构建/重建(与 tier 解耦,大库亦可建)。
-  const confirmBuildScaleIndex = () => {
+  // 「检索索引」三个精确动作 —— 各自弹确认(描述具体精确)后立即后台执行:
+  //   build  未构建/建议 → 从零构建(full)    update 已过期 → 增量收录新增源(fold)
+  //   rebuild 已建成     → 删除现有索引从头全量重建(full)。与 tier 解耦,大库亦可建。
+  const runScaleIndexOp = (op: ScaleIndexOp) => {
     const s = scaleIndexStatus;
-    if (!currentNotebookId || buildingScaleIndex || !s || !s.eligible || s.state === "queued") return;
-    const verb = s.exists ? "重建" : "构建";
-    if (window.confirm(`${verb}检索索引？\n\n为本库建立向量检索索引（CSR 图 + KG/chunk ANN，加速语义检索与严格推理），后台进行，大库可能数分钟。`)) {
-      startScaleIndexRebuild(currentNotebookId, "now");
+    if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
+    if (window.confirm(scaleIndexOpConfirm(op, s))) {
+      startScaleIndexRebuild(currentNotebookId, "now", SCALE_OP_MODE[op]);
     }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
@@ -2306,6 +2308,8 @@ export default function Home() {
     if (!currentNotebookId) return;
     const response = await api<NotebookAnalytics>(`/notebooks/${currentNotebookId}/analytics`);
     setAnalytics(response);
+    // 看板打开时刷新检索索引状态,保证「检索索引」板块显示当前态(而非上次切库的快照)。
+    fetchScaleIndexStatus(currentNotebookId).then((s) => setScaleIndexStatus(s)).catch(() => {});
   }
 
   async function loadSchemas() {
@@ -3202,35 +3206,29 @@ export default function Home() {
                     )
                 )}
                 {scaleIndexStatus && (scaleIndexStatus.eligible || scaleIndexStatus.exists) && (() => {
-                  // 检索索引与 tier 解耦：任意达标库（含大个人库）均显示，可点构建/重建。
-                  // 六态 label/颜色与 KG 视图徽章（kg-rail-section 内）保持一致。
+                  // 检索索引与 tier 解耦：任意达标库（含大个人库）均显示。徽章紧凑,只做主
+                  // 动作(构建/更新);全量重建入口在看板卡片。状态语义统一走 describeScaleIndex。
                   const s = scaleIndexStatus;
-                  const st = s.state ?? (s.building ? "building" : s.exists ? (s.stale ? "stale" : "indexed") : "unindexed");
-                  const clickable = s.eligible && !s.building && st !== "queued";
-                  const label = st === "building" ? "检索索引：构建中…"
-                    : st === "queued" ? "检索索引：已排队（空闲时建）"
-                    : st === "indexed" ? `检索索引：已同步 · ${s.n_nodes} 节点`
-                    : st === "stale" ? "检索索引：已过期"
-                    : st === "suggested" ? "检索索引：建议构建"
-                    : "检索索引：未构建";
-                  const color = (st === "building" || st === "queued" || st === "stale" || st === "suggested")
-                    ? "var(--color-warn, #b97a00)"
-                    : st === "indexed" ? "var(--color-ok, #1a7f5a)" : undefined;
+                  const v = describeScaleIndex(s);
+                  const clickable = v.primaryOp !== null;
+                  const color = v.tone === "warn" ? "var(--color-warn, #b97a00)"
+                    : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
+                  const label = `检索索引：${v.stateLabel}${v.state === "indexed" ? ` · ${s.n_nodes} 节点` : ""}`;
                   return (
                     <p
                       className="tool-hint"
                       role={clickable ? "button" : undefined}
                       tabIndex={clickable ? 0 : undefined}
                       title={clickable
-                        ? (s.exists ? "点击重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                        ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : "点击构建检索索引（会先确认）")
                         : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
-                      onClick={clickable ? confirmBuildScaleIndex : undefined}
-                      onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmBuildScaleIndex(); } }) : undefined}
+                      onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
+                      onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
                       style={{ margin: "2px 2px 8px", cursor: clickable ? "pointer" : "default", color }}
                     >
                       {label}
                       {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                        <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「重建索引」或等待自动增量收进后可见">
+                        <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「更新索引」或等待自动增量收进后可见">
                           {` · ${s.unindexed_sources} 源待索引`}
                         </span>
                       )}
@@ -4121,6 +4119,45 @@ export default function Home() {
               <div className="tag-row">
                 {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
               </div>
+              <p className="section-title">检索索引</p>
+              {scaleIndexStatus ? (() => {
+                const s = scaleIndexStatus;
+                const v = describeScaleIndex(s);
+                const desc = v.tone === "muted" ? "库较小，走暴力检索即可，无需索引"
+                  : v.state === "building" ? "后台进行，完成后自动更新"
+                  : v.state === "queued" ? "已排队，将在服务器空闲时构建；完成后自动更新"
+                  : v.state === "stale" ? "新增内容未纳入索引，暂不参与检索与推理"
+                  : v.state === "indexed" ? "已建成且为最新"
+                  : "从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与严格推理";
+                return (
+                  <div className={`index-card index-tone-${v.tone}`}>
+                    <span className="index-ic" aria-hidden="true"><Database size={19} /></span>
+                    <div className="index-main">
+                      <div className="index-state">
+                        {v.stateLabel}
+                        {v.state === "stale" && (s.unindexed_sources ?? 0) > 0 ? ` · ${s.unindexed_sources} 源待索引` : ""}
+                      </div>
+                      <div className="index-sub">{desc}</div>
+                      {v.state === "indexed" && (
+                        <div className="mini-tags">
+                          <span className="tag">{s.n_nodes} 节点</span>
+                          <span className="tag">{s.n_chunks} chunks</span>
+                          {s.has_chunk_ann && <span className="tag">chunk ANN ✓</span>}
+                        </div>
+                      )}
+                    </div>
+                    {(v.primaryOp || v.canRebuild) && (
+                      <div className="index-ctas">
+                        {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
+                        {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
+                        {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })() : (
+                <p className="tool-hint">加载检索索引状态…</p>
+              )}
             </div>
           </div>
         </section>
@@ -4282,32 +4319,26 @@ export default function Home() {
                     )}
                     {scaleIndexStatus && (() => {
                       const s = scaleIndexStatus;
-                      const st = s.state ?? (s.building ? "building" : s.exists ? (s.stale ? "stale" : "indexed") : "unindexed");
-                      const clickable = s.eligible && !s.building && st !== "queued";
-                      const label = st === "building" ? "检索索引：构建中…"
-                        : st === "queued" ? "检索索引：已排队（空闲时建）"
-                        : st === "indexed" ? `检索索引：已同步 · ${s.n_nodes} 节点`
-                        : st === "stale" ? "检索索引：已过期"
-                        : st === "suggested" ? "检索索引：建议构建"
-                        : "检索索引：未构建";
-                      const color = (st === "building" || st === "queued" || st === "stale" || st === "suggested")
-                        ? "var(--color-warn, #b97a00)"
-                        : st === "indexed" ? "var(--color-ok, #1a7f5a)" : undefined;
+                      const v = describeScaleIndex(s);
+                      const clickable = v.primaryOp !== null;
+                      const color = v.tone === "warn" ? "var(--color-warn, #b97a00)"
+                        : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
+                      const label = `检索索引：${v.stateLabel}${v.state === "indexed" ? ` · ${s.n_nodes} 节点` : ""}`;
                       return (
                         <span
                           className="tag"
                           role={clickable ? "button" : undefined}
                           tabIndex={clickable ? 0 : undefined}
                           title={clickable
-                            ? (s.exists ? "点击重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                            ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : "点击构建检索索引（会先确认）")
                             : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
-                          onClick={clickable ? confirmBuildScaleIndex : undefined}
-                          onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmBuildScaleIndex(); } }) : undefined}
+                          onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
+                          onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
                           style={{ cursor: clickable ? "pointer" : "default", color }}
                         >
                           {label}
                           {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                            <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「重建索引」或等待自动增量收进后可见">
+                            <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「更新索引」或等待自动增量收进后可见">
                               {` · ${s.unindexed_sources} 源待索引`}
                             </span>
                           )}
