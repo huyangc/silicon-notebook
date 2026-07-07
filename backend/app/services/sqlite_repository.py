@@ -242,7 +242,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1196,32 @@ class SQLiteRepository:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conversations_created_by "
                 "ON conversations(created_by)")
+
+    def _migration_3(self) -> None:
+        """已部署库补建 community_members 反向索引表(canonical→社区)。
+
+        该表原本在 _migration_1 的 baseline executescript 里(全新库随之建),但 community
+        层把它作为后加表塞进 _migration_1 却未 bump SCHEMA_VERSION —— 已达 user_version<=2
+        的旧库因 `_migrate` 的 `if current >= SCHEMA_VERSION: return []` 版本闸短路、不重跑
+        _migration_1,导致缺表:community_peers()/expand_community 与深度报告的社区/横向对比
+        节查该表 `no such table: community_members` 崩(communities 表因更早就在 baseline
+        里而存在,故只缺反向索引这一张)。幂等 CREATE IF NOT EXISTS,已有该表的库 no-op。
+        DDL 与 _migration_1 中的定义逐字一致。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS community_members (
+                  canonical_id TEXT NOT NULL,
+                  notebook_id TEXT NOT NULL,
+                  level INTEGER NOT NULL DEFAULT 0,
+                  community_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  centrality REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_commmem_nb_can ON community_members(notebook_id, canonical_id);
+                CREATE INDEX IF NOT EXISTS idx_commmem_nb_comm ON community_members(notebook_id, community_id);
+                """
+            )
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
