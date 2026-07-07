@@ -5157,6 +5157,7 @@ button.chat-session-card {
   color: #344054;
   font-size: 13px;
   font-weight: 650;
+  text-decoration: none;
   cursor: pointer;
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }

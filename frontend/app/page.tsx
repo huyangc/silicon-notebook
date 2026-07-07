@@ -57,6 +57,7 @@ import { AuthGate } from "./AuthGate";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
+import { canSeeAdminUsage } from "./admin/usage/format.ts";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -2910,6 +2911,12 @@ export default function Home() {
                     <small>{accountRole}</small>
                   </div>
                 </div>
+                {canSeeAdminUsage(currentUser.role) && (
+                  <a className="user-logout" role="menuitem" href="/admin/usage" title="用户使用总览">
+                    <BarChart3 size={16} />
+                    <span>用户总览</span>
+                  </a>
+                )}
                 <button className="user-logout" type="button" role="menuitem" onClick={() => handleLogout().catch(reportError)}>
                   <LogOut size={16} />
                   <span>退出登录</span>
