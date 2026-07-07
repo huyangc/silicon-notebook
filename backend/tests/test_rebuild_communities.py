@@ -106,15 +106,15 @@ def test_canonical_bridges_documents(repo):
     assert len({r["community_id"] for r in rows}) == 1
 
 
-def test_naive_relation_graph_splits_documents(repo, monkeypatch):
-    """Contrast: on the RAW-object graph (cluster_map neutralized so every object
-    is its own singleton canonical) the two docs are DISJOINT (8 distinct object
-    ids, edges only within each doc) → their members never share a community. This
-    is the exact regression the canonical mapping fixes."""
+def test_naive_relation_graph_splits_documents(repo):
+    """Contrast: with NO canonical clustering (concept_clusters 清空 → SQL-join 的
+    COALESCE 回退到裸 object_id) the two docs are DISJOINT (8 distinct object ids,
+    edges only within each doc) → their members never share a community. This is the
+    exact regression the canonical mapping fixes."""
     nb = _seed_two_docs_shared_canonical(repo)
-    # Neutralize cluster_map → identity (member id maps to itself): reproduces the
-    # old逐篇封闭 behavior on the very same seed.
-    monkeypatch.setattr(repo, "cluster_map", lambda _nb: {})
+    # 清空 concept_clusters → SQL-join 两端 COALESCE 回退裸 object_id,复现逐篇封闭。
+    with repo._write() as db:
+        db.execute("DELETE FROM concept_clusters WHERE notebook_id=?", (nb.id,))
     repo.rebuild_communities(nb.id, level=0)
     with repo._connect() as db:
         rows = db.execute(
@@ -185,9 +185,11 @@ def test_rerun_replaces_rows(repo):
     assert first == second and first > 0
 
 
-def test_large_no_index_refuses(repo, monkeypatch):
-    """scale-tier (copyable=False) with no persistent CSR must REFUSE networkx,
-    emit community_build_refused, and return 0 — never OOM/hang."""
+def test_large_no_index_refuses_without_igraph(repo, monkeypatch):
+    """networkx 回退(igraph 不可用)且 scale-tier 无 CSR → 拒(避免 dict-of-dicts OOM),
+    emit community_build_refused、返回 0。"""
+    import sys
+    monkeypatch.setitem(sys.modules, "igraph", None)   # `import igraph` → ImportError → _ig=None
     nb = _seed_two_docs_shared_canonical(repo)
     monkeypatch.setattr(repo, "notebook_copy_stats", lambda _nb: {"copyable": False})
     monkeypatch.setattr(repo, "_scale_index", lambda _nb, allow_stale=False: None)
@@ -197,12 +199,22 @@ def test_large_no_index_refuses(repo, monkeypatch):
     assert any(e.get("kind") == "community_build_refused" for e in events)
 
 
-def test_large_with_index_uses_networkx(repo, monkeypatch):
-    """scale-tier but CSR present → guard passes, networkx path runs (Task 3
-    covers base/small; Task 11 will swap in igraph for true scale)."""
+def test_large_no_index_builds_with_igraph(repo, monkeypatch):
+    """igraph 可用时,scale-tier 无 CSR 不再拒——整数边表 + C 核安全 → 直接建成。"""
     nb = _seed_two_docs_shared_canonical(repo)
     monkeypatch.setattr(repo, "notebook_copy_stats", lambda _nb: {"copyable": False})
-    monkeypatch.setattr(repo, "_scale_index", lambda _nb, allow_stale=False: object())
+    monkeypatch.setattr(repo, "_scale_index", lambda _nb, allow_stale=False: None)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
+    assert repo.rebuild_communities(nb.id, level=0) >= 1
+    assert not any(e.get("kind") == "community_build_refused" for e in events)
+
+
+def test_networkx_fallback_still_builds(repo, monkeypatch):
+    """无 igraph 时小库仍走 networkx 回退建成(与 igraph 路径结果结构一致)。"""
+    import sys
+    monkeypatch.setitem(sys.modules, "igraph", None)
+    nb = _seed_two_docs_shared_canonical(repo)
     assert repo.rebuild_communities(nb.id, level=0) >= 1
 
 

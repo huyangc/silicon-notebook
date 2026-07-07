@@ -6661,8 +6661,9 @@ class SQLiteRepository:
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
         持久化到 communities + community_members(反向索引,存 canonical_name/centrality)。
-        无 LLM、确定性(seed=42)。大库(scale-tier)无持久化 CSR → 拒 networkx(避免 OOM),
-        emit community_build_refused 返回 0。返回入库社区数。
+        无 LLM、确定性(seed=42)。后端:igraph(装了即用,整数边表+C 核,10^6–10^7 边
+        内存/耗时有界)优先,缺失回退 networkx;仅 networkx 回退且大库(scale-tier)无 CSR
+        时拒(emit community_build_refused 返回 0,避免 OOM)。返回入库社区数。
 
         为何喂 canonical 图:裸 knowledge_relations 逐篇封闭(每篇的同名实体是不同
         object_id)→ 社区不跨文档。经 cluster_map 把两端映射到 canonical_id 后,不同
@@ -6684,35 +6685,80 @@ class SQLiteRepository:
         if (not force and _st is not None and _st["community_seq"] == _seq
                 and _cnt and _cnt["c"] > 0):
             return int(_cnt["c"])
-        # 大库守卫:绝不在 scale-tier 无 CSR 时用 networkx 暴力建图(10^7 边必 OOM/挂)。
-        # 镜像 _retrieve_scored 的"大库拒暴力"纪律;fail-open + 可观测,返回 0。
-        if (not self.notebook_copy_stats(notebook_id)["copyable"]
+        # 社区检测后端:igraph(整数边表 + C 核,10^6–10^7 边内存/耗时有界)优先;
+        # 缺失(未装)才回退 networkx(纯 Python dict-of-dicts,大库会 OOM)。
+        try:
+            import igraph as _ig
+        except Exception:
+            _ig = None
+        # 大库守卫:仅在 networkx 回退(无 igraph)时才拒 scale-tier 无 CSR(避免 OOM)。
+        # igraph 路径整数边表 + C 核,10^7 边安全,无需 CSR、不拒。
+        if (_ig is None
+                and not self.notebook_copy_stats(notebook_id)["copyable"]
                 and self._scale_index(notebook_id, allow_stale=True) is None):
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
             return 0
-        import networkx as nx
-        from networkx.algorithms.community import louvain_communities
-        cmap = self.cluster_map(notebook_id)  # member_object_id -> canonical_id
+        # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
+        # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
+        # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
+        can2idx: "Dict[str, int]" = {}
+        ew: "Dict[tuple, int]" = {}
         with self._connect() as db:
-            rels = db.execute(
-                "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id=?",
-                (notebook_id,)).fetchall()
             names = {r["canonical_id"]: r["canonical_name"] for r in db.execute(
                 "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters WHERE notebook_id=?",
                 (notebook_id,))}
-        g = nx.Graph()
-        for r in rels:
-            s = cmap.get(r["source_object_id"], r["source_object_id"])
-            t = cmap.get(r["target_object_id"], r["target_object_id"])
-            if not s or not t or s == t:
-                continue
-            if g.has_edge(s, t):
-                g[s][t]["weight"] += 1
+            for r in db.execute(
+                    "SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
+                    "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+                    "FROM knowledge_relations kr "
+                    "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+                    "AND cs.member_object_id=kr.source_object_id "
+                    "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+                    "AND ct.member_object_id=kr.target_object_id "
+                    "WHERE kr.notebook_id=?", (notebook_id,)):
+                s, t = r["s"], r["t"]
+                if not s or not t or s == t:
+                    continue
+                si = can2idx.setdefault(s, len(can2idx))
+                ti = can2idx.setdefault(t, len(can2idx))
+                key = (si, ti) if si < ti else (ti, si)
+                ew[key] = ew.get(key, 0) + 1
+        idx2can = [""] * len(can2idx)
+        for _c, _i in can2idx.items():
+            idx2can[_i] = _c
+        n_nodes = len(can2idx)
+        # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
+        comms: "List[List[str]]" = []
+        deg: "Dict[str, float]" = {}
+        if n_nodes:
+            edge_list = list(ew.keys())
+            if _ig is not None:
+                import random as _random
+                _random.seed(42)
+                try:
+                    _ig.set_random_number_generator(_random)   # 确定性(seed=42)
+                except Exception:
+                    pass
+                G = _ig.Graph(n=n_nodes, edges=edge_list)
+                G.es["weight"] = list(ew.values())
+                membership = G.community_multilevel(weights="weight").membership
+                degs = G.degree()
+                buckets: "Dict[int, List[str]]" = {}
+                for _i, _m in enumerate(membership):
+                    buckets.setdefault(_m, []).append(idx2can[_i])
+                    deg[idx2can[_i]] = float(degs[_i])
+                comms = list(buckets.values())
             else:
-                g.add_edge(s, t, weight=1)
-        comms = (louvain_communities(g, weight="weight", seed=42)
-                 if g.number_of_nodes() else [])
+                import networkx as nx
+                from networkx.algorithms.community import louvain_communities
+                g = nx.Graph()
+                for (_a, _b), _w in ew.items():
+                    g.add_edge(_a, _b, weight=_w)
+                comms = [[idx2can[_i] for _i in c]
+                         for c in louvain_communities(g, weight="weight", seed=42)]
+                for _i, _d in g.degree():
+                    deg[idx2can[_i]] = float(_d)
         now = _now()
         min_size = self.settings.community_min_size
         kept = 0
@@ -6732,14 +6778,14 @@ class SQLiteRepository:
                     "INSERT INTO community_members "
                     "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
                     "VALUES (?,?,?,?,?,?)",
-                    [(m, notebook_id, level, cid, names.get(m, m), float(g.degree(m))) for m in members])
+                    [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0)) for m in members])
                 kept += 1
         # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
         with self._write() as db:
             db.execute("UPDATE unified_kg_state SET community_seq=? WHERE notebook_id=?",
                        (_seq, notebook_id))
         self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
-                             "level": level, "communities": kept, "nodes": g.number_of_nodes()})
+                             "level": level, "communities": kept, "nodes": n_nodes})
         return kept
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
