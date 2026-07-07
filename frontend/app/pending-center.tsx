@@ -39,7 +39,7 @@ export function usePendingActions(enabled: boolean) {
     // REST 兜底:先拉一次秒开
     (async () => {
       try {
-        const r = await fetch(`${API_BASE}/api/me/pending-actions`, { headers: authHeaders() });
+        const r = await fetch(`${API_BASE}/me/pending-actions`, { headers: authHeaders() });
         if (r.ok) setSnapshot(await r.json());
       } catch { /* 交给流 */ }
     })();
@@ -49,7 +49,7 @@ export function usePendingActions(enabled: boolean) {
       const ac = new AbortController();
       abortRef.current = ac;
       try {
-        const resp = await fetch(`${API_BASE}/api/me/pending-actions/stream`, {
+        const resp = await fetch(`${API_BASE}/me/pending-actions/stream`, {
           headers: authHeaders(), signal: ac.signal,
         });
         if (!resp.ok || !resp.body) throw new Error(`stream ${resp.status}`);
