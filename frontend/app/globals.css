@@ -3463,6 +3463,51 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+/* 看板「检索索引」状态卡:图标 + 状态 + 说明/计数 + 右侧动作(构建/更新/全量重建) */
+.index-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 13px 14px;
+  background: #fff;
+}
+.index-card .index-ic {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+}
+.index-tone-warn .index-ic { background: #fbf1df; color: #b97a00; }
+.index-tone-ok .index-ic { background: #e6f3ec; color: #1a7f5a; }
+.index-tone-muted .index-ic { background: #eef1f5; color: #9aa4b2; }
+.index-card .index-main { flex: 1 1 auto; min-width: 0; display: grid; gap: 3px; }
+.index-card .index-state { font-size: 14px; font-weight: 700; color: #22272e; }
+.index-tone-warn .index-state { color: #976500; }
+.index-tone-ok .index-state { color: #177a54; }
+.index-tone-muted .index-state { color: #8a94a6; }
+.index-card .index-sub { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.index-card .mini-tags { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.index-card .mini-tags .tag { font-size: 11px; padding: 3px 8px; }
+.index-ctas { display: flex; gap: 8px; flex: 0 0 auto; }
+.index-cta {
+  border: 1px solid #d2d6df;
+  background: #fff;
+  border-radius: 999px;
+  padding: 7px 15px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #22272e;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.index-cta:hover { background: #f6f8fb; }
+.index-cta.primary { background: #0b0b0c; color: #fff; border-color: #0b0b0c; }
+.index-cta.primary:hover { background: #26262a; }
+
 .answer-model-error {
   display: block;
   background: #fff7ed;
