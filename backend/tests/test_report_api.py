@@ -30,7 +30,7 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     assert r.status_code == 409
     # stub 引擎线程:不真跑(单测不起真深挖)
     import app.api.routes as routes_mod
-    monkeypatch.setattr(routes_mod, "_launch_report_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?", "depth": 8})
     assert r.status_code == 200
@@ -49,7 +49,7 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
 
 def test_report_create_rejects_blank_question_and_missing_nb(client, monkeypatch):
     import app.api.routes as routes_mod
-    monkeypatch.setattr(routes_mod, "_launch_report_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     nb = client.post("/api/notebooks", json={"name": "t"}).json()
     r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "   "})
@@ -63,7 +63,7 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
     from app.services.report_engine import (
         register_cancel, cancel_report, unregister_cancel)
     import app.api.routes as routes_mod
-    monkeypatch.setattr(routes_mod, "_launch_report_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     nb = client.post("/api/notebooks", json={"name": "t"}).json()
     rid = client.post(f"/api/notebooks/{nb['id']}/reports",
@@ -83,7 +83,7 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
 def _mk_report(client, monkeypatch, nb_id, question, *, done=False, content_md=""):
     """建一个报告;done=True 时用 repo.update_report 直接置 status/content_md。"""
     import app.api.routes as routes_mod
-    monkeypatch.setattr(routes_mod, "_launch_report_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     rid = client.post(f"/api/notebooks/{nb_id}/reports",
                       json={"question": question}).json()["report_id"]
@@ -131,3 +131,40 @@ def test_report_export_skips_other_notebook_report(client, monkeypatch):
     resp = client.post(f"/api/notebooks/{nb_a['id']}/reports/export",
                        json={"report_ids": [foreign]})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Task 6(两阶段): POST /reports 起规划 job → outline_ready → PATCH 大纲 → generate
+# ---------------------------------------------------------------------------
+
+def test_two_phase_report_lifecycle(client, monkeypatch):
+    import app.api.routes as R
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    launched = {}
+    monkeypatch.setattr(R, "_launch_plan_job", lambda repo,nb,rid,q,h,ag: launched.setdefault("plan", (rid, ag)))
+    monkeypatch.setattr(R, "_launch_generate_job", lambda repo,nb,rid,q,d: launched.setdefault("gen", rid))
+    nb = client.post("/api/notebooks", json={"name":"t","purpose":"p","primary_domain":"d"}).json()
+    r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question":"why?"})
+    rid = r.json()["report_id"]; assert launched["plan"][0]==rid and launched["plan"][1] is False
+    # 模拟 planning 完成:写 outline_ready + outline
+    from app.api.deps import repository
+    repository().update_report(nb["id"], rid, status="outline_ready",
+                               outline=[{"title":"A","scope":"s","sub_queries":["q"]}])
+    d = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert d["status"]=="outline_ready" and d["outline"][0]["title"]=="A"
+    # 编辑大纲
+    assert client.patch(f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+                        json={"sections":[{"title":"A2","scope":"s","sub_queries":["q2"]}]}).status_code==200
+    assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()["outline"][0]["title"]=="A2"
+    # 触发生成
+    assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/generate", json={}).status_code==200
+    assert launched["gen"]==rid
+
+def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
+    import app.api.routes as R
+    monkeypatch.setattr(R,"_report_llm_ready",lambda repo:True)
+    monkeypatch.setattr(R,"_launch_plan_job",lambda *a,**k:None)
+    nb=client.post("/api/notebooks",json={"name":"t","purpose":"p","primary_domain":"d"}).json()
+    rid=client.post(f"/api/notebooks/{nb['id']}/reports",json={"question":"q"}).json()["report_id"]
+    # 仍 planning(无 outline)→ generate 应 409
+    assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/generate",json={}).status_code==409
