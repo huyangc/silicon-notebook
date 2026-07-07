@@ -3,6 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { API_BASE, authHeaders, getToken } from "./auth";
+import { itemSig, currentSigs, pruneSigs, pendingView } from "./pending-actions";
+
+// localStorage 读写(私密模式/SSR 容错):待办的「已读/关掉」状态按用户存本地。
+const loadSigs = (key: string): string[] => {
+  try { const v = window.localStorage.getItem(key); return v ? JSON.parse(v) : []; } catch { return []; }
+};
+const saveSigs = (key: string, v: string[]) => {
+  try { window.localStorage.setItem(key, JSON.stringify(v)); } catch { /* ignore */ }
+};
 
 export type PendingItem = {
   type: "report_outline" | "governance" | "index";
@@ -93,14 +102,49 @@ export function usePendingActions(enabled: boolean) {
 export function PendingBell(props: {
   snapshot: { count: number; items: PendingItem[] };
   doneItems: DoneToast[];
+  userId?: string;
   onOpenItem: (item: PendingItem) => void;
   onOpenDone: (d: DoneToast) => void;
   onDismissDone: (notebook_id: string) => void;
 }) {
-  const { snapshot, doneItems, onOpenItem, onOpenDone, onDismissDone } = props;
+  const { snapshot, doneItems, userId, onOpenItem, onOpenDone, onDismissDone } = props;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
-  const badge = snapshot.count + doneItems.length;
+
+  // 已读(seen)/关掉(dismissed)按用户存 localStorage。
+  const seenKey = `pending:seen:${userId || "anon"}`;
+  const dismKey = `pending:dismissed:${userId || "anon"}`;
+  const [seen, setSeen] = useState<string[]>([]);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+
+  // 用户切换(登录/登出)→ 重载各自的集合。
+  useEffect(() => { setSeen(loadSigs(seenKey)); setDismissed(loadSigs(dismKey)); }, [seenKey, dismKey]);
+
+  // 每次快照变化:把关掉集合剪到「仍存在」的签名(限大小 + 计数变化的项复活)。
+  useEffect(() => {
+    const cur = currentSigs(snapshot.items, doneItems);
+    setDismissed((prev) => {
+      const pruned = pruneSigs(prev, cur);
+      if (pruned.length === prev.length) return prev;
+      saveSigs(dismKey, pruned);
+      return pruned;
+    });
+  }, [snapshot.items, doneItems, dismKey]);
+
+  const view = pendingView(snapshot.items, doneItems, seen, dismissed);
+  const badge = view.unread;
+
+  // 打开面板(或打开时来了新项)→ 把当前可见项全部标为已读 → 徽标归零。seen 不在依赖里,
+  // 故 setSeen 不会自触发循环;dismissed/快照变化时若面板开着会重新标记。
+  useEffect(() => {
+    if (!open) return;
+    const sigs = currentSigs(view.visibleItems, view.visibleDone);
+    setSeen((prev) => {
+      if (prev.length === sigs.length && sigs.every((s) => prev.includes(s))) return prev;
+      saveSigs(seenKey, sigs);
+      return sigs;
+    });
+  }, [open, snapshot.items, doneItems, dismissed, seenKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) return;
@@ -109,10 +153,28 @@ export function PendingBell(props: {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  const dismissItem = (sig: string) => {
+    setDismissed((prev) => {
+      if (prev.includes(sig)) return prev;
+      const n = [...prev, sig];
+      saveSigs(dismKey, n);
+      return n;
+    });
+  };
+  const dismissAll = () => {
+    const sigs = view.visibleItems.map(itemSig);
+    setDismissed((prev) => {
+      const n = Array.from(new Set([...prev, ...sigs]));
+      saveSigs(dismKey, n);
+      return n;
+    });
+    view.visibleDone.forEach((d) => onDismissDone(d.notebook_id));
+  };
+
   const groups: { key: string; label: string; items: PendingItem[] }[] = [
-    { key: "report_outline", label: "深度报告待确认", items: snapshot.items.filter((i) => i.type === "report_outline") },
-    { key: "governance", label: "治理待办", items: snapshot.items.filter((i) => i.type === "governance") },
-    { key: "index", label: "索引状态", items: snapshot.items.filter((i) => i.type === "index") },
+    { key: "report_outline", label: "深度报告待确认", items: view.visibleItems.filter((i) => i.type === "report_outline") },
+    { key: "governance", label: "治理待办", items: view.visibleItems.filter((i) => i.type === "governance") },
+    { key: "index", label: "索引状态", items: view.visibleItems.filter((i) => i.type === "index") },
   ];
 
   const labelFor = (it: PendingItem): string => {
@@ -126,6 +188,8 @@ export function PendingBell(props: {
     return `${it.notebook_name} · ${s}`;
   };
 
+  const hasAny = view.visibleItems.length + view.visibleDone.length > 0;
+
   return (
     <div className="pending-center" ref={ref}>
       <button className="pending-bell" onClick={() => setOpen((o) => !o)} aria-label="待确认中心">
@@ -134,27 +198,36 @@ export function PendingBell(props: {
       </button>
       {open && (
         <div className="pending-popover">
-          {badge === 0 && <p className="pending-empty">暂无待确认</p>}
+          {hasAny && (
+            <div className="pending-actions-bar">
+              <button className="pending-clear" type="button" onClick={dismissAll}>全部清空</button>
+            </div>
+          )}
+          {!hasAny && <p className="pending-empty">暂无待确认</p>}
           {groups.map((g) => g.items.length > 0 && (
             <div className="pending-group" key={g.key}>
               <div className="pending-group-title">{g.label}</div>
               {g.items.map((it, idx) => (
                 <button className="pending-row" key={`${g.key}-${idx}`}
                         onClick={() => { setOpen(false); onOpenItem(it); }}>
-                  {it.type !== "report_outline" && <span className="pending-row-nb">{it.notebook_name}</span>}
-                  <span className="pending-row-label">{labelFor(it)}</span>
+                  <span className="pending-row-main">
+                    {it.type !== "report_outline" && <span className="pending-row-nb">{it.notebook_name}</span>}
+                    <span className="pending-row-label">{labelFor(it)}</span>
+                  </span>
+                  <span className="pending-row-x" title="关掉"
+                        onClick={(e) => { e.stopPropagation(); dismissItem(itemSig(it)); }}>×</span>
                 </button>
               ))}
             </div>
           ))}
-          {doneItems.length > 0 && (
+          {view.visibleDone.length > 0 && (
             <div className="pending-group pending-group-done">
               <div className="pending-group-title">已完成</div>
-              {doneItems.map((d) => (
+              {view.visibleDone.map((d) => (
                 <button className="pending-row pending-row-done" key={d.notebook_id}
                         onClick={() => { setOpen(false); onOpenDone(d); onDismissDone(d.notebook_id); }}>
-                  <span className="pending-row-label">{d.notebook_name} · 索引构建完成</span>
-                  <span className="pending-row-x" onClick={(e) => { e.stopPropagation(); onDismissDone(d.notebook_id); }}>×</span>
+                  <span className="pending-row-main"><span className="pending-row-label">{d.notebook_name} · 索引构建完成</span></span>
+                  <span className="pending-row-x" title="关掉" onClick={(e) => { e.stopPropagation(); onDismissDone(d.notebook_id); }}>×</span>
                 </button>
               ))}
             </div>

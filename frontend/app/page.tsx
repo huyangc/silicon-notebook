@@ -2886,6 +2886,7 @@ export default function Home() {
           <PendingBell
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
+            userId={currentUser?.id}
             onOpenItem={(it) => openPendingItem(it).catch(reportError)}
             onOpenDone={openDoneItem}
             onDismissDone={pending.dismissDone}
