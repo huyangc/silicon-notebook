@@ -242,7 +242,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -1222,6 +1222,19 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_commmem_nb_comm ON community_members(notebook_id, community_id);
                 """
             )
+
+    def _migration_4(self) -> None:
+        """已部署库补建 unified_kg_state.community_seq 版本闸列(社区上次重建时的
+        kg_mutation_seq;DEFAULT -1=从未建过)。
+
+        与 community_members 表(_migration_3)同源:community 层把 community_seq 列塞进
+        _migration_1 的守卫 ALTER 却未 bump SCHEMA_VERSION —— 已部署库版本闸短路不重跑
+        _migration_1 → 缺列 → rebuild_communities 查它 `no such column: community_seq`
+        → 社区建不了。_migration_3(PR#210)只补了表、漏了这列,故独立补一步。守卫 ALTER
+        幂等,已有该列的库 no-op。"""
+        with self._connect() as db:
+            self._add_column_if_missing(
+                db, "unified_kg_state", "community_seq", "INTEGER NOT NULL DEFAULT -1")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

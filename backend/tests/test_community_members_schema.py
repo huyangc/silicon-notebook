@@ -39,37 +39,49 @@ def test_community_members_indexes(repo):
     assert "idx_commmem_nb_comm" in idx
 
 
-def test_migration_3_backfills_on_deployed_db(repo):
-    """回归生产 bug:已部署库(user_version 已达标,当年跑 _migration_1 时 baseline
-    还没 community_members)重启后应由 _migration_3 补建该表。
+def test_migration_3_and_4_backfill_community_schema(repo):
+    """回归生产 bug:已部署库(user_version 已达标)重启后应由 _migration_3 补建
+    community_members 表、_migration_4 补建 unified_kg_state.community_seq 列。
 
-    community 层把 community_members 塞进 _migration_1 却未 bump SCHEMA_VERSION,
-    导致 `_migrate` 的 `if current >= SCHEMA_VERSION: return []` 版本闸对旧库短路、
-    不重跑 _migration_1 → 缺表 → community_peers()/expand_community 与报告社区节
-    `no such table: community_members` 崩。此测试模拟旧库并断言重启即补建。
-    (顺延为 _migration_3:master 的 _migration_2 已被 admin created_by 索引占用。)"""
+    community 层把这两样 schema 塞进 _migration_1 却未 bump SCHEMA_VERSION → `_migrate`
+    版本闸 `if current >= SCHEMA_VERSION: return []` 对旧库短路、不重跑 _migration_1 →
+    缺表 → community_peers()/expand_community 与报告社区节 `no such table` 崩;缺列 →
+    rebuild_communities 查 community_seq `no such column` → 社区建不了。此测试模拟旧库
+    并断言两步都补齐。(表=_migration_3/PR#210;列=_migration_4:_migration_3 只补了表、
+    漏了列,且 master 的 _migration_2 已被 admin created_by 索引占用,故一路顺延。)"""
     from app.services.sqlite_repository import SCHEMA_VERSION
 
-    # 模拟旧部署库:删掉 community_members + 版本戳回退到 2(已跑过 admin 的
-    # _migration_2 却仍缺 community_members —— 贴近真实部署)。communities 表故意
-    # 保留 —— 复现"communities 在但反向索引缺"。
+    # 模拟旧部署库:删掉 community_members 表 + community_seq 列 + 版本戳回退。
+    # communities 表故意保留 —— 复现"communities 在但反向索引/版本闸缺"。
     with repo._connect() as db:
         db.executescript(
             "DROP INDEX IF EXISTS idx_commmem_nb_can;"
             "DROP INDEX IF EXISTS idx_commmem_nb_comm;"
             "DROP TABLE IF EXISTS community_members;"
         )
+        has_uks = bool(db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='unified_kg_state'"
+        ).fetchone())
+        if has_uks:
+            db.execute("ALTER TABLE unified_kg_state DROP COLUMN community_seq")
         db.execute("PRAGMA user_version = 2")
-    with repo._connect() as db:  # 确认已成缺表状态
+    with repo._connect() as db:  # 确认已成缺表 + 缺列状态
         assert not db.execute("PRAGMA table_info(community_members)").fetchall()
+        if has_uks:
+            assert "community_seq" not in {
+                r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)")}
 
     applied = repo._migrate()  # 等价于后端重启时的迁移
 
-    assert 3 in applied, "应用了 _migration_3"
-    assert SCHEMA_VERSION == 3
+    assert 3 in applied and 4 in applied, "应用了 _migration_3(表)与 _migration_4(列)"
+    assert SCHEMA_VERSION == 4
     with repo._connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 3
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 4
         cols = {r["name"] for r in db.execute("PRAGMA table_info(community_members)")}
         idx = {r["name"] for r in db.execute("PRAGMA index_list(community_members)")}
+        uks_cols = ({r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)")}
+                    if has_uks else set())
     assert {"canonical_id", "notebook_id", "community_id", "centrality"} <= cols
     assert {"idx_commmem_nb_can", "idx_commmem_nb_comm"} <= idx
+    if has_uks:
+        assert "community_seq" in uks_cols
