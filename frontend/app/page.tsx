@@ -7,6 +7,7 @@ import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import {
   buildAnswerReferences,
+  computeSourceTierCounts,
   renderTextWithReferenceNumbers,
   splitInlineLatex,
   type AnswerReference,
@@ -213,6 +214,7 @@ type Citation = {
   element_id: string;
   location_label: string;
   quoted_span: string;
+  tier?: string;
 };
 
 type ChatMode = "ask" | "rules" | "reports";
@@ -5519,12 +5521,12 @@ function AnswerView({
             : { cls: "answer-ungrounded", label: "推断（未命中笔记本依据）" };
         return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
       })()}
-      {references.length > 0 && (() => {
-        let base = 0;
-        for (const r of references) if (r.anchor?.tier === "base") base += 1;
+      {(() => {
+        const { personal, base } = computeSourceTierCounts(answer.anchors, answer.citations);
+        if (personal + base === 0) return null;
         return (
           <span className="tag source-dist" title="本次引用的来源分布（个人层 / 基准库）">
-            来源 · 个人 {references.length - base}
+            来源 · 个人 {personal}
             {base > 0 && <> · <strong className="source-dist-base">基准库 {base}</strong></>}
           </span>
         );

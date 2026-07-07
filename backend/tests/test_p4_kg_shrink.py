@@ -201,3 +201,66 @@ def test_reasoning_search_federates_base(repo):
     hits = ReasoningRetriever(repo, repo.settings).search(empty.id, "Engram")
     names = {h.payload.get("name") for h in hits}
     assert "Engram" in names                   # base hit surfaced via federation
+
+
+# ---------------------------------------------------------------------------
+# Citation.tier: reasoning-mode citations must reflect the federated hit's
+# tier, not silently default to personal. 真机 bug:DeepSeek-V4 一次 reasoning
+# 问答 12 条 citations 里 8 条来自 base 库,前端徽章却只见 personal——根因是
+# _citations_from/_citation 完全不读 RetrievedKnowledge.tier(federated_retrieve
+# 早就打好了标)。这里直接跑 federated_retrieve → _citations_from(与
+# ask_reasoning 12118-12120 同一调用形状),不依赖 LLM 配置。
+# ---------------------------------------------------------------------------
+
+_BASE_EVIDENCE = [{"source_id": "src-base", "source_title": "BaseDoc",
+                   "element_id": "el-base-0001", "element_type": "paragraph",
+                   "location_label": "1", "quoted_span": "Engram is a memory trace",
+                   "confidence": 1.0}]
+_PERSONAL_EVIDENCE = [{"source_id": "src-own", "source_title": "OwnDoc",
+                       "element_id": "el-own-0001", "element_type": "paragraph",
+                       "location_label": "1", "quoted_span": "my own note on Engram",
+                       "confidence": 1.0}]
+
+
+def test_citations_from_reasoning_hits_carries_base_tier(repo):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "Engram"}, "evidence": _BASE_EVIDENCE}], [])
+    active = repo.create_notebook(NotebookCreate(name="active"))
+    repo.store_kg(active.id, None, [
+        {"local_id": "A1", "object_type": "concept",
+         "payload": {"name": "Engram encoding"}, "evidence": _PERSONAL_EVIDENCE}], [])
+
+    # Mirrors ask_reasoning's own call shape (sqlite_repository.py ~12118-12120):
+    # top_hits federated across base ⊕ active, then bound to Citation objects.
+    top_hits = repo.retrieval.federated_retrieve(active.id, "Engram")
+    cited_element_ids = {ev.element_id for item in top_hits for ev in item.evidence}
+    citations = repo._citations_from(top_hits, cited_element_ids, "KG evidence")
+
+    tier_by_source = {c.source_id: c.tier for c in citations}
+    assert tier_by_source.get("src-base") == "base", (
+        f"base 库命中的 citation.tier 应为 base,实为 {tier_by_source.get('src-base')} "
+        f"(全部 citations: {[(c.source_id, c.tier) for c in citations]})")
+    assert tier_by_source.get("src-own") == "personal", (
+        f"active 库自己命中的 citation.tier 应为 personal,实为 {tier_by_source.get('src-own')}")
+
+
+def test_tier_map_for_batches_and_defaults_unknown_to_personal(repo):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    personal = repo.create_notebook(NotebookCreate(name="personal"))
+
+    tier_map = repo._tier_map_for({base.id, personal.id, "nonexistent-nb-id"})
+
+    assert tier_map[base.id] == "base"
+    assert tier_map[personal.id] == "personal"
+    # Unknown ids are simply absent (caller's .get(..., "personal") supplies the
+    # safe default) — _tier_map_for itself only returns rows it actually found.
+    assert "nonexistent-nb-id" not in tier_map
+
+
+def test_tier_map_for_empty_input_returns_empty_dict_without_querying(repo):
+    assert repo._tier_map_for(set()) == {}
+    assert repo._tier_map_for([]) == {}

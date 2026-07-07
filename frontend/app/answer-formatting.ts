@@ -17,6 +17,7 @@ export type CitationLike = {
   element_id: string;
   location_label: string;
   quoted_span: string;
+  tier?: string;
 };
 
 export type AnswerReference = {
@@ -62,6 +63,41 @@ export function buildAnswerReferences(
     displayLabel: `[${index + 1}]`,
     citation,
   }));
+}
+
+// Source-tier distribution for this answer's badge. Counts ALL sources behind the
+// answer (anchors ∪ citations), not just whichever `buildAnswerReferences` happened
+// to prefer for [k]-numbering — anchors and citations can both be populated (e.g.
+// reasoning mode: [k]-marker hits become anchors, but `citations` independently
+// carries the full KG-evidence trail), and each is its own id space so dedup is
+// per-collection: citations by `source_id`, anchors by `object_id`. Unset/unknown
+// tier counts as "personal" (matches the backend's `Citation.tier` / `AnswerAnchor.tier`
+// default), so pre-fix payloads (or any tier this build doesn't recognize) degrade to
+// today's (undercounted-base) badge rather than crashing or over-counting base.
+export function computeSourceTierCounts(
+  anchors: AnswerAnchorLike[],
+  citations: CitationLike[],
+): { personal: number; base: number } {
+  let personal = 0;
+  let base = 0;
+
+  const seenObjectIds = new Set<string>();
+  for (const anchor of anchors) {
+    if (seenObjectIds.has(anchor.object_id)) continue;
+    seenObjectIds.add(anchor.object_id);
+    if (anchor.tier === "base") base += 1;
+    else personal += 1;
+  }
+
+  const seenSourceIds = new Set<string>();
+  for (const citation of citations) {
+    if (seenSourceIds.has(citation.source_id)) continue;
+    seenSourceIds.add(citation.source_id);
+    if (citation.tier === "base") base += 1;
+    else personal += 1;
+  }
+
+  return { personal, base };
 }
 
 export function referenceByAnchorKey(references: AnswerReference[]): Record<string, AnswerReference> {

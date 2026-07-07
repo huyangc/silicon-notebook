@@ -257,6 +257,10 @@ class Citation(BaseModel):
     element_id: str
     location_label: str
     quoted_span: str
+    # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
+    # user notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
+    # citations, not just anchors.
+    tier: str = "personal"
 
 
 class TraceStep(BaseModel):
