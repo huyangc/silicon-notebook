@@ -1,6 +1,6 @@
 import pytest
 from app.core.config import Settings
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.sqlite_repository import SQLiteRepository, SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -78,13 +78,15 @@ def test_migration_2_runs_on_already_v1_db(tmp_path, monkeypatch):
         db.execute("DROP INDEX IF EXISTS idx_notebooks_created_by")
         db.execute("DROP INDEX IF EXISTS idx_conversations_created_by")
         db.execute("PRAGMA user_version = 1")
-    # 重新打开同一库:_migrate 应发现 1 < 2、跑 _migration_2、重建两个索引并盖章 2
+    # 重新打开同一库:_migrate 应发现 1 < SCHEMA_VERSION、按序跑 _migration_2..N
+    # (_migration_2 会重建 created_by 两个索引)并盖章到最新 SCHEMA_VERSION。
+    # 断言用 SCHEMA_VERSION 而非硬编码,后续加迁移步(如 _migration_3/4)bump 版本时不再破本测试。
     r2 = SQLiteRepository(Settings())
     with r2._connect() as db:
         names = {row["name"] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
         ver = db.execute("PRAGMA user_version").fetchone()[0]
-    assert ver == 2
+    assert ver == SCHEMA_VERSION
     assert "idx_notebooks_created_by" in names
     assert "idx_conversations_created_by" in names
 
