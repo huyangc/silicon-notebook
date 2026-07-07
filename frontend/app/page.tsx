@@ -624,6 +624,11 @@ const cancelReport = (nb: string, rid: string) =>
   api<{ status: string }>(`/notebooks/${nb}/reports/${rid}/cancel`, { method: "POST" });
 const deleteReport = (nb: string, rid: string) =>
   api<{ status: string }>(`/notebooks/${nb}/reports/${rid}`, { method: "DELETE" });
+// 两阶段:PATCH 覆盖编辑后的大纲(仅 outline_ready 可改),POST 从 outline_ready 起生成 job。
+const updateReportOutline = (nb: string, rid: string, sections: unknown[]) =>
+  api<{ status: string; sections: number }>(`/notebooks/${nb}/reports/${rid}/outline`, { method: "PATCH", body: JSON.stringify({ sections }) });
+const generateReport = (nb: string, rid: string, depth?: number) =>
+  api<{ status: string }>(`/notebooks/${nb}/reports/${rid}/generate`, { method: "POST", body: JSON.stringify(depth != null ? { depth } : {}) });
 // 批量导出返回 zip 二进制(非 JSON),api<T> 会 .json() 解析故不适用;
 // 走原始 fetch,复用 API_BASE + authHeaders()(与 api()/readAskStream 同款认证),
 // ok 时取 blob 触发下载,非 ok 抛出后端错误详情(如 422)。
@@ -3485,6 +3490,8 @@ export default function Home() {
                     listReports={listReports}
                     getReport={getReport}
                     createReport={createReport}
+                    updateReportOutline={updateReportOutline}
+                    generateReport={generateReport}
                     cancelReport={cancelReport}
                     deleteReport={deleteReport}
                     downloadReportsZip={downloadReportsZip}

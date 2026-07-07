@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, CheckSquare, Download, Square, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, CheckSquare, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -29,7 +29,8 @@ import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting"
 export type ReportSummaryT = {
   id: string;
   question: string;
-  status: string; // pending | running | done | failed | cancelled
+  // planning | outline_ready | generating(两阶段新增)| pending | running | done | failed | cancelled
+  status: string;
   progress: string;
   section_count: number;
   created_at: string;
@@ -37,8 +38,21 @@ export type ReportSummaryT = {
   depth?: number;
 };
 
+// 大纲富对象:STORM 预写作产物 + 充分性 Judge 判定;title/scope 用户可在编辑器改。
+export type ReportSufficiency = "充足" | "薄弱" | "缺失";
+export type ReportOutlineSectionT = {
+  title: string;
+  scope: string;
+  sub_queries: string[];
+  perspectives?: string[]; // 哪些视角挖出该节
+  tensions?: string[]; // 与其他节/视角的张力(v1 纯文字)
+  sufficiency?: ReportSufficiency; // 语料充分性:充足/薄弱/缺失
+  gap_note?: string; // 缺口一句话说明
+  action?: string; // keep | supplement | external
+};
+
 export type ReportDetailT = ReportSummaryT & {
-  outline: { title: string; scope: string; sub_queries: string[] }[];
+  outline: ReportOutlineSectionT[];
   sections: { title: string; markdown: string; grounded: boolean; failed?: boolean }[];
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
@@ -56,8 +70,10 @@ export type ReportDetailT = ReportSummaryT & {
   error: string;
 };
 
-// 终态判定:pending/running 之外一律视为终态,未知状态不会无限轮询。
-const isReportActive = (status: string) => status === "pending" || status === "running";
+// 非终态判定:轮询用。两阶段里 planning/generating 是活跃阶段,与 pending/running 同样需要轮询;
+// outline_ready 是稳定的「等用户确认」态,不轮询(用户编辑大纲期间不该被刷新覆盖)。
+const isReportActive = (status: string) =>
+  status === "pending" || status === "running" || status === "planning" || status === "generating";
 
 // 研究深度:五档命名,index 0→4 一一对应 DEPTHS(每节 reflect 步上限)。
 // 各档都算深入,区别在充分程度;后端 create_report 会 clamp 到 [1,16]。
@@ -79,7 +95,10 @@ const sectionPhaseIcon = (phase: string): SectionPhaseIcon =>
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "排队中",
+  planning: "规划中",
+  outline_ready: "待确认",
   running: "生成中",
+  generating: "生成中",
   done: "完成",
   failed: "失败",
   cancelled: "已取消",
@@ -218,6 +237,217 @@ function ReportStatusBadge({ status, progress }: { status: string; progress: str
 }
 
 // ---------------------------------------------------------------------------
+// 大纲编辑器(status==='outline_ready'):STORM 富大纲 → 用户可编辑 → 确认后生成。
+// 每节一张卡片:title/scope 受控输入、上移/下移/删节、顶部新增;徽章行展示
+// perspectives / sufficiency / gap_note / tensions(v1 纯文字,不做连线)。
+// ---------------------------------------------------------------------------
+
+const SUFFICIENCY_META: Record<ReportSufficiency, { label: string; cls: string }> = {
+  充足: { label: "证据充足", cls: "ok" },
+  薄弱: { label: "证据薄弱", cls: "weak" },
+  缺失: { label: "证据缺失", cls: "missing" },
+};
+
+// 后端富字段(perspectives/tensions/sufficiency/gap_note/action)编辑期原样透传,
+// 只让 title/scope 可改、可增删排序;生成时连同富字段一起 PATCH 回后端。
+type EditSection = ReportOutlineSectionT & { _key: string };
+let _outlineKeySeq = 0;
+const freshOutlineKey = () => `sec-${Date.now().toString(36)}-${(_outlineKeySeq++).toString(36)}`;
+const toEditSections = (outline: ReportOutlineSectionT[]): EditSection[] =>
+  outline.map((s) => ({ ...s, _key: freshOutlineKey() }));
+
+function OutlineEditor({
+  report,
+  notebookId,
+  updateReportOutline,
+  generateReport,
+  onGenerating,
+  setToast,
+}: {
+  report: ReportDetailT;
+  notebookId: string;
+  updateReportOutline: (nb: string, rid: string, sections: unknown[]) => Promise<{ status: string; sections: number }>;
+  generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
+  onGenerating: (detail: ReportDetailT) => void;
+  setToast: (message: string) => void;
+}) {
+  // 本地可编辑副本;仅当报告 id 变化时重新播种(避免打字被父层 state 覆盖)。
+  const [sections, setSections] = useState<EditSection[]>(() => toEditSections(report.outline));
+  const seededId = useRef(report.id);
+  useEffect(() => {
+    if (seededId.current !== report.id) {
+      seededId.current = report.id;
+      setSections(toEditSections(report.outline));
+    }
+  }, [report.id, report.outline]);
+
+  const [busy, setBusy] = useState(false);
+
+  const patchSection = (key: string, patch: Partial<EditSection>) =>
+    setSections((prev) => prev.map((s) => (s._key === key ? { ...s, ...patch } : s)));
+  const removeSection = (key: string) =>
+    setSections((prev) => prev.filter((s) => s._key !== key));
+  const moveSection = (index: number, dir: -1 | 1) =>
+    setSections((prev) => {
+      const next = index + dir;
+      if (next < 0 || next >= prev.length) return prev;
+      const copy = prev.slice();
+      [copy[index], copy[next]] = [copy[next], copy[index]];
+      return copy;
+    });
+  const addSection = () =>
+    setSections((prev) => [
+      ...prev,
+      { _key: freshOutlineKey(), title: "", scope: "", sub_queries: [] },
+    ]);
+
+  // 有效节 = 标题非空;后端要求 ≥1 有效节且每节带 sub_queries。新增的空节会带上占位
+  // sub_query(用标题),保证 PATCH 校验通过并让生成阶段有检索种子。
+  const validCount = sections.filter((s) => s.title.trim()).length;
+
+  async function confirmGenerate() {
+    if (busy) return;
+    const cleaned = sections
+      .filter((s) => s.title.trim())
+      .map(({ _key, ...s }) => {
+        void _key;
+        const subs = (s.sub_queries || []).map((q) => q.trim()).filter(Boolean);
+        return { ...s, title: s.title.trim(), scope: (s.scope || "").trim(),
+                 sub_queries: subs.length > 0 ? subs : [s.title.trim()] };
+      });
+    if (cleaned.length === 0) {
+      setToast("请至少保留一个有标题的章节");
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateReportOutline(notebookId, report.id, cleaned);
+      await generateReport(notebookId, report.id);
+      setToast("已确认大纲，开始生成完整报告");
+      // 乐观切到生成态,让父层立刻进 section_status 进度视图并恢复轮询。
+      onGenerating({ ...report, status: "generating", progress: "章节 0/" + cleaned.length + " 完成" });
+    } catch (error) {
+      setToast(`生成失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="report-outline-editor">
+      <div className="report-outline-editor-head">
+        <div>
+          <h3>确认研究大纲</h3>
+          <p>已按多视角预写作规划出 {sections.length} 个章节。可修改标题/范围、增删或调序,满意后生成完整报告。</p>
+        </div>
+        <button className="report-action" type="button" onClick={addSection} disabled={busy}>
+          <Plus size={14} /> 新增章节
+        </button>
+      </div>
+
+      {sections.length === 0 ? (
+        <div className="report-outline-empty">大纲为空,点「新增章节」添加,或返回列表重新规划。</div>
+      ) : (
+        <ol className="report-outline-cards">
+          {sections.map((s, index) => {
+            const suf = s.sufficiency ? SUFFICIENCY_META[s.sufficiency] : null;
+            return (
+              <li className="report-outline-card" key={s._key}>
+                <div className="report-outline-card-top">
+                  <span className="report-outline-card-index">{index + 1}</span>
+                  <input
+                    className="report-outline-card-title"
+                    type="text"
+                    value={s.title}
+                    placeholder="章节标题"
+                    disabled={busy}
+                    onChange={(e) => patchSection(s._key, { title: e.target.value })}
+                  />
+                  <div className="report-outline-card-ops">
+                    <button
+                      type="button"
+                      className="report-outline-op"
+                      title="上移"
+                      aria-label="上移"
+                      disabled={busy || index === 0}
+                      onClick={() => moveSection(index, -1)}
+                    >
+                      <ArrowUp size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="report-outline-op"
+                      title="下移"
+                      aria-label="下移"
+                      disabled={busy || index === sections.length - 1}
+                      onClick={() => moveSection(index, 1)}
+                    >
+                      <ArrowDown size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="report-outline-op danger"
+                      title="删除本节"
+                      aria-label="删除本节"
+                      disabled={busy}
+                      onClick={() => removeSection(s._key)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </div>
+                <input
+                  className="report-outline-card-scope"
+                  type="text"
+                  value={s.scope || ""}
+                  placeholder="本节范围(一句话)"
+                  disabled={busy}
+                  onChange={(e) => patchSection(s._key, { scope: e.target.value })}
+                />
+                {(suf || (s.perspectives && s.perspectives.length > 0)) && (
+                  <div className="report-outline-badges">
+                    {suf && (
+                      <span className={`report-suf ${suf.cls}`}>
+                        {suf.label}
+                        {s.gap_note ? ` · ${s.gap_note}` : ""}
+                      </span>
+                    )}
+                    {(s.perspectives || []).map((p, i) => (
+                      <span className="report-perspective" key={`${s._key}-p-${i}`}>{p}</span>
+                    ))}
+                  </div>
+                )}
+                {s.tensions && s.tensions.length > 0 && (
+                  <ul className="report-tensions">
+                    {s.tensions.map((t, i) => (
+                      <li key={`${s._key}-t-${i}`}>⚡ {t}</li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      <div className="report-outline-editor-foot">
+        <span className="report-outline-editor-count">
+          {validCount > 0 ? `${validCount} 个有效章节` : "至少保留一个有标题的章节"}
+        </span>
+        <button
+          className="button"
+          type="button"
+          disabled={busy || validCount === 0}
+          onClick={() => void confirmGenerate()}
+        >
+          <Sparkles size={15} /> {busy ? "提交中…" : "生成完整报告"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ReportsPanel
 // ---------------------------------------------------------------------------
 
@@ -226,6 +456,8 @@ export interface ReportsPanelProps {
   listReports: (nb: string) => Promise<ReportSummaryT[]>;
   getReport: (nb: string, rid: string) => Promise<ReportDetailT>;
   createReport: (nb: string, question: string, depth: number) => Promise<{ report_id: string }>;
+  updateReportOutline: (nb: string, rid: string, sections: unknown[]) => Promise<{ status: string; sections: number }>;
+  generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
   downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
@@ -237,6 +469,8 @@ export function ReportsPanel({
   listReports,
   getReport,
   createReport,
+  updateReportOutline,
+  generateReport,
   cancelReport,
   deleteReport,
   downloadReportsZip,
@@ -350,7 +584,7 @@ export function ReportsPanel({
     try {
       await createReport(notebookId, q, DEPTHS[depthIdx]);
       setQuestion("");
-      setToast("已开始生成深度报告（后台进行，约 5–15 分钟）");
+      setToast("正在规划研究大纲（约几十秒），完成后可确认再生成全文");
       setReports(await listReports(notebookId));
     } catch (error) {
       surfaceError(error);
@@ -490,7 +724,7 @@ export function ReportsPanel({
                 disabled={actionBusy}
                 onClick={() => void requestCancel()}
               >
-                <Square size={12} /> 取消生成
+                <Square size={12} /> {active.status === "planning" ? "取消规划" : "取消生成"}
               </button>
             )}
             {active.content_md && (
@@ -521,7 +755,26 @@ export function ReportsPanel({
         {active.status === "failed" && active.error && (
           <div className="report-error">生成失败：{active.error}</div>
         )}
-        {isReportActive(active.status) && (
+        {active.status === "planning" && (
+          <div className="report-running-hint report-planning-hint">
+            <span className="report-status-dot" aria-hidden />
+            <p>正在侦察语料并多视角规划大纲（通常几十秒）…{active.progress ? ` ${active.progress}` : ""}</p>
+          </div>
+        )}
+        {active.status === "outline_ready" && (
+          <OutlineEditor
+            report={active}
+            notebookId={notebookId}
+            updateReportOutline={updateReportOutline}
+            generateReport={generateReport}
+            onGenerating={(detail) => {
+              setActive((cur) => (cur && cur.id === detail.id ? detail : cur));
+              listReports(notebookId).then(setReports).catch(() => {});
+            }}
+            setToast={setToast}
+          />
+        )}
+        {isReportActive(active.status) && active.status !== "planning" && (
           <div className="report-running-hint">
             <p>正在后台生成，此页每 6 秒自动刷新；也可以先去其他 tab，随时回来查看。</p>
             {active.section_status && active.section_status.length > 0 ? (
