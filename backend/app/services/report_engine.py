@@ -83,6 +83,41 @@ class ReportEngine:
         return [{"title": "分析", "scope": question,
                  "sub_queries": [s.query for s in ex.sub_queries][:4] or [question]}]
 
+    # --- Stage A(STORM):Corpus map 0-LLM 语料侦察 ---
+    _SCOUT_KG_N = 12
+    _SCOUT_CHUNK_N = 8
+
+    def _build_corpus_map(self, notebook_id: str, question: str) -> str:
+        """0-LLM 语料侦察:来源标题 + federated KG 命中 + PPR chunk 来源·路径。
+        给 STORM 规划接地(治盲规划)。任一子步失败静默降级为空段。"""
+        parts: List[str] = []
+        try:
+            with self.repo._connect() as db:
+                rows = db.execute(
+                    "SELECT title FROM sources WHERE notebook_id=? ORDER BY created_at LIMIT 20",
+                    (notebook_id,)).fetchall()
+            titles = [str(r["title"]).strip() for r in rows if str(r["title"]).strip()]
+            if titles:
+                parts.append("本 notebook 来源文件:\n" + "\n".join(f"- {t}" for t in titles))
+        except Exception:
+            pass
+        try:
+            kg = self.repo.federated_retrieve(notebook_id, question)[: self._SCOUT_KG_N]
+            if kg:
+                parts.append("检索到的知识条目(name[type][tier]):\n" + "\n".join(
+                    f"- {str(h.payload.get('name','')).strip()}"
+                    f"[{h.object_type}][{getattr(h,'tier','personal')}]" for h in kg))
+        except Exception:
+            pass
+        try:
+            chunks = self.repo._ppr_retrieve(notebook_id, question)[: self._SCOUT_CHUNK_N]
+            if chunks:
+                parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
+                    f"- {c.source_title} · {c.section_path}" for c in chunks))
+        except Exception:
+            pass
+        return ("\n\n".join(parts))[:4000] if parts else "(语料侦察无结果)"
+
     # --- Stage B(单节):完整 reasoning 深挖 ---
     def _deep_dive(self, notebook_id, section, question, depth=None, on_step=None):
         from app.services.reasoning_retrieval import ReasoningRetriever
