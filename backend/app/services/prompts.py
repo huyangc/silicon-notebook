@@ -521,3 +521,24 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         'Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""],'
         '"perspectives":[""],"tensions":[""]}]}'
     )
+
+
+REPORT_SUFFICIENCY_SCHEMA_HINT = (
+    '{"verdicts":[{"title":"","sufficiency":"充足|薄弱|缺失",'
+    '"gap_note":"","action":"keep|supplement|external"}]}')
+
+
+def report_sufficiency_prompt(question: str, probe_block: str) -> str:
+    return (
+        "You judge whether the notebook library has ENOUGH evidence for each planned "
+        "report section. You are given each section's title and its OBJECTIVE retrieval "
+        "hit counts (hits = distinct knowledge items its sub-queries matched; base_hits "
+        "= from the authoritative base library). Trust the counts as the ground truth "
+        "of coverage; your job is to interpret them into a verdict + a one-line gap note "
+        "+ a suggested action. Rough guide: many hits → 充足(keep); few/only-tangential "
+        "→ 薄弱(supplement, note what's missing); ~0 hits → 缺失(external, the library "
+        "cannot support it). Do not invent coverage the counts don't show.\n\n"
+        f"Report question: {question}\n\n"
+        f"Sections with hit counts:\n{probe_block}\n\n"
+        'Return JSON only: {"verdicts":[{"title":"","sufficiency":"","gap_note":"","action":""}]}'
+    )

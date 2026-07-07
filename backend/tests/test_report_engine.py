@@ -388,3 +388,28 @@ def test_storm_outline_prompt_contract():
                "vocabulary", "CORPUSMAP内容", "Q问题", "H历史", "3-5"):
         assert kw in p
     assert "perspectives" in REPORT_STORM_SCHEMA_HINT and "tensions" in REPORT_STORM_SCHEMA_HINT
+
+
+# ---------------------------------------------------------------------------
+# Task 3(STORM): 充分性探针(0-LLM 命中数)+ Judge prompt
+# ---------------------------------------------------------------------------
+
+def test_probe_sufficiency_counts_hits(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    from app.services.retrieval import RetrievedKnowledge
+    eng = ReportEngine(repo, repo.settings)
+    def _fed(active, q):
+        h = RetrievedKnowledge(object_id="k-"+q, object_type="concept", payload={})
+        h.notebook_id = "nb-base" if "base" in q else "nb-x"; h.tier="base" if "base" in q else "personal"
+        return [h]
+    monkeypatch.setattr(repo, "federated_retrieve", _fed)
+    out = eng._probe_sufficiency("nb", [{"title":"A","sub_queries":["base-x","y"]},
+                                        {"title":"B","sub_queries":[]}])
+    assert out[0]["title"]=="A" and out[0]["hits"]==2 and out[0]["base_hits"]==1
+    assert out[1]["hits"]==0
+
+def test_sufficiency_prompt_contract():
+    from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
+    p = report_sufficiency_prompt("Q", "PROBEBLOCK")
+    assert "sufficiency" in p and "PROBEBLOCK" in p and "Q" in p
+    assert "gap_note" in REPORT_SUFFICIENCY_SCHEMA_HINT and "action" in REPORT_SUFFICIENCY_SCHEMA_HINT
