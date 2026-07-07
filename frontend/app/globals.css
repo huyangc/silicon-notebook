@@ -5117,3 +5117,148 @@ button.chat-session-card {
 .pagination-info { font-size: 12px; color: var(--muted, #667085); margin-right: auto; }
 .pagination-page { font-size: 13px; color: #20242a; }
 .pagination-jump { width: 68px; box-sizing: border-box; border: 1px solid #d9dfeb; border-radius: 8px; padding: 5px 8px; font-size: 13px; }
+
+/* 待确认中心:铃铛 + 徽章 + 下拉分组 + toast */
+.pending-center {
+  position: relative;
+  flex: 0 0 auto;
+}
+.pending-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line, #e1e6ee);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #475467;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.pending-bell:hover {
+  border-color: #c8d0df;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+.pending-bell:focus-visible {
+  outline: 2px solid rgba(31, 94, 255, 0.28);
+  outline-offset: 2px;
+}
+.pending-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1.5px solid #ffffff;
+  border-radius: 999px;
+  background: var(--red, #ba2d2d);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+.pending-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  z-index: 40;
+  width: min(320px, calc(100vw - 28px));
+  max-height: 60vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--line, #dbe2ee);
+  border-radius: 16px;
+  background: var(--panel, #ffffff);
+  box-shadow: var(--shadow, 0 20px 50px rgba(15, 23, 42, 0.18));
+}
+.pending-empty {
+  margin: 0;
+  padding: 24px 8px;
+  color: var(--muted, #667085);
+  font-size: 13px;
+  text-align: center;
+}
+.pending-group + .pending-group {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--soft, #eef2f6);
+}
+.pending-group-title {
+  padding: 6px 8px 2px;
+  color: var(--muted, #667085);
+  font-size: 11px;
+  font-weight: 650;
+}
+.pending-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  padding: 7px 8px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.pending-row:hover {
+  background: var(--soft, #f2f4f7);
+}
+.pending-row-nb {
+  color: var(--muted, #667085);
+  font-size: 11px;
+}
+.pending-row-label {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink, #111827);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-group-done .pending-row-done {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pending-group-done .pending-row-done .pending-row-label {
+  color: var(--muted, #667085);
+}
+.pending-row-x {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  color: var(--muted, #667085);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.pending-row-x:hover {
+  opacity: 1;
+}
+.pending-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 90;
+  max-width: 320px;
+  border: 1px solid var(--line, #dbe2ee);
+  border-left: 3px solid var(--green, #177a55);
+  border-radius: 12px;
+  background: var(--panel, #ffffff);
+  box-shadow: var(--shadow, 0 20px 50px rgba(15, 23, 42, 0.18));
+  padding: 12px 14px;
+  color: var(--ink, #17202a);
+  font-size: 13px;
+  cursor: pointer;
+}
