@@ -4966,6 +4966,18 @@ button.chat-session-card {
   background: var(--soft);
   color: var(--muted);
 }
+.source-dist {
+  color: var(--muted);
+}
+.source-dist-base {
+  color: var(--blue);
+  font-weight: 600;
+}
+.report-source-dist {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
 .auth-gate { min-height: 100vh; display: grid; place-items: center; background: var(--bg, #0b0d12); }
 .auth-card { width: 320px; padding: 28px; border-radius: 14px; background: #161a22; color: #e7ecf3;
   box-shadow: 0 10px 40px rgba(0,0,0,.4); display: flex; flex-direction: column; gap: 12px; }
