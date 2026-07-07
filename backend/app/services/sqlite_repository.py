@@ -1028,6 +1028,20 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_communities_nb_level ON communities(notebook_id, level);
                 DROP INDEX IF EXISTS idx_communities_nb;
 
+                -- 社区反向索引:canonical_id → 所在社区(O(1) 定位焦点社区,避免扫
+                -- communities.member_ids JSON)。存 canonical_name/centrality 供
+                -- community_peers 直接重排,不再回查 concept_clusters。
+                CREATE TABLE IF NOT EXISTS community_members (
+                  canonical_id TEXT NOT NULL,
+                  notebook_id TEXT NOT NULL,
+                  level INTEGER NOT NULL DEFAULT 0,
+                  community_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  centrality REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_commmem_nb_can ON community_members(notebook_id, canonical_id);
+                CREATE INDEX IF NOT EXISTS idx_commmem_nb_comm ON community_members(notebook_id, community_id);
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS kg_objects_fts
                   USING fts5(object_id UNINDEXED, notebook_id UNINDEXED, name,
                              tokenize='trigram');
