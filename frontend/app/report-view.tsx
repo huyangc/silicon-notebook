@@ -832,6 +832,16 @@ export function ReportsPanel({
             )}
           </div>
         )}
+        {active.content_md && active.references && active.references.length > 0 && (() => {
+          let base = 0;
+          for (const r of active.references) if (r.tier === "base") base += 1;
+          return (
+            <div className="report-source-dist" title="本报告引用的来源分布（个人层 / 基准库）">
+              来源 · 个人 {active.references.length - base}
+              {base > 0 && <> · <strong className="source-dist-base">基准库 {base}</strong></>}
+            </div>
+          );
+        })()}
         {active.content_md ? (
           <ReportMarkdown markdown={active.content_md} references={active.references} />
         ) : (

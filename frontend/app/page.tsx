@@ -5479,6 +5479,16 @@ function AnswerView({
             : { cls: "answer-ungrounded", label: "推断（未命中笔记本依据）" };
         return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
       })()}
+      {references.length > 0 && (() => {
+        let base = 0;
+        for (const r of references) if (r.anchor?.tier === "base") base += 1;
+        return (
+          <span className="tag source-dist" title="本次引用的来源分布（个人层 / 基准库）">
+            来源 · 个人 {references.length - base}
+            {base > 0 && <> · <strong className="source-dist-base">基准库 {base}</strong></>}
+          </span>
+        );
+      })()}
       <AnswerMarkdown
         answer={answerText}
         anchors={answer.anchors}
