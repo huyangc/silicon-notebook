@@ -471,11 +471,19 @@ class ReasoningRetriever:
                                      detail={"reason": "no_focal_or_done", "focal": focal_name}))
                 else:
                     community_focals_done.add(fkey)
-                    base_nb = first_base_notebook_id(self.repo, notebook_id)
-                    peers = community_peers(
-                        self.repo, base_nb, focal_name, question,
-                        top_k=self.settings.community_peers_topk,
-                        candidates=self.settings.community_rerank_candidates) if base_nb else []
+                    try:
+                        base_nb = first_base_notebook_id(self.repo, notebook_id)
+                        peers = community_peers(
+                            self.repo, base_nb, focal_name, question,
+                            top_k=self.settings.community_peers_topk,
+                            candidates=self.settings.community_rerank_candidates) if base_nb else []
+                    except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
+                        # community 层任何故障(缺表 community_members / 数据异常)都不该
+                        # 拖垮 reasoning 或深度报告的社区/横向对比节 —— 跳过社区扩展、继续。
+                        record(TraceStep(step_type="skip",
+                                         summary="跳过 expand_community(社区层不可用)",
+                                         detail={"reason": "community_error", "error": str(exc)[:120]}))
+                        peers = []
                     added, names = 0, []
                     for pname in peers:
                         raise_if_cancelled(self.cancel_event)
