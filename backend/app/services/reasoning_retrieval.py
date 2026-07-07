@@ -69,11 +69,13 @@ class SubQuery:
 @dataclass
 class ReflectDecision:
     sufficient: bool = False
-    next_action: str = "answer"   # answer|expand_graph|add_subquery|search_elements
+    # answer|expand_graph|add_subquery|search_elements|ppr_retrieve|expand_community
+    next_action: str = "answer"
     expand_object_id: str = ""
     expand_edge_type: Optional[str] = None
     expand_direction: str = "both"
     new_sub_query: Optional[SubQuery] = None
+    community_focal: str = ""
     elements_query: str = ""
     ppr_query: str = ""
     reason: str = ""
@@ -148,7 +150,7 @@ class ReasoningRetriever:
                 return answer_decision
             action = str(data.get("next_action", "answer"))
             if action not in ("answer", "expand_graph", "add_subquery",
-                               "search_elements", "ppr_retrieve"):
+                               "search_elements", "ppr_retrieve", "expand_community"):
                 action = "answer"
             d = ReflectDecision(
                 sufficient=bool(data.get("sufficient", False)),
@@ -168,6 +170,7 @@ class ReasoningRetriever:
                 d.new_sub_query = SubQuery(query=str(nsq["query"]).strip(),
                                            types=types, prefer=prefer,
                                            reason=str(nsq.get("reason", "")))
+            d.community_focal = str(data.get("community_focal", "")).strip()
             d.elements_query = str(data.get("elements_query", "")).strip()
             d.ppr_query = str(data.get("ppr_query", "")).strip()
             return d
