@@ -1,0 +1,58 @@
+import asyncio
+from app.services.pending_bus import PendingBus
+
+
+def test_emit_buffers_when_no_connection():
+    bus = PendingBus()
+    bus.set_recompute(lambda uid: {"count": 0, "items": []})
+    # 从没有连接过 → loop 未绑定 → event 入缓冲
+    bus.emit("u1", {"event": "index_done", "notebook_id": "nb1"})
+    assert bus._buffered_count("u1") == 1
+
+
+def test_ttl_prunes_old_events():
+    clock = {"t": 1000.0}
+    bus = PendingBus(now=lambda: clock["t"], ttl=100.0)
+    bus.emit("u1", {"event": "index_done", "notebook_id": "nb1"})
+    clock["t"] = 1050.0
+    bus.emit("u1", {"event": "index_done", "notebook_id": "nb2"})
+    clock["t"] = 1130.0  # nb1(age 130s)已超 TTL;nb2(age 80s)未超
+    bus.emit("u1", {"event": "index_done", "notebook_id": "nb3"})
+    assert bus._buffered_count("u1") == 2  # nb2, nb3 存活;nb1 被 prune
+
+
+def test_fanout_and_flush_via_loop():
+    async def scenario():
+        bus = PendingBus()
+        bus.set_recompute(lambda uid: {"count": 1, "items": [{"type": "x"}]})
+        bus.bind_loop()  # 在 async 上下文绑定当前 loop
+
+        # 无连接时 emit → 缓冲(bind_loop 后 emit 经 call_soon_threadsafe 投递,
+        # 需让出一次 loop 才会真正写入 _buffer,呼应生产环境里重连必经的网络往返)
+        bus.emit("u1", {"event": "index_done", "notebook_id": "nbA"})
+        await asyncio.sleep(0)
+
+        # 建立连接 → flush 缓冲补发 + 能收到后续 fan-out
+        q = bus.register("u1")
+        try:
+            drained = bus.flush_buffer("u1")
+            assert [d["notebook_id"] for d in drained] == ["nbA"]
+            assert bus._buffered_count("u1") == 0
+
+            # mark_dirty(有连接) → snapshot 进队列
+            bus.mark_dirty("u1")
+            await asyncio.sleep(0.01)
+            msg = q.get_nowait()
+            assert msg["kind"] == "snapshot"
+            assert msg["data"]["count"] == 1
+
+            # emit(有连接) → event 进队列(不缓冲)
+            bus.emit("u1", {"event": "index_done", "notebook_id": "nbB"})
+            await asyncio.sleep(0.01)
+            msg2 = q.get_nowait()
+            assert msg2["kind"] == "event"
+            assert msg2["notebook_id"] == "nbB"
+        finally:
+            bus.unregister("u1", q)
+
+    asyncio.run(scenario())
