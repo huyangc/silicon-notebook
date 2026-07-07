@@ -43,6 +43,24 @@ class TestTask1:
         assert repo.get_notebook(b.id).tier == "base"
         assert repo.get_notebook(a.id).tier == "personal"
 
+    def test_base_notebook_name_visible_from_any_summary(self, repo):
+        """base_notebook_name 暴露全局唯一基准库的名字,任意 notebook 的 summary 都能读到
+        (供非管理员在分析弹窗只读查看是哪个);无基准库为空;base_kg_available 语义不变。"""
+        base = repo.create_notebook(NotebookCreate(name="模拟IC教材"))
+        other = repo.create_notebook(NotebookCreate(name="my notes"))
+        # 尚无 base → 空
+        assert repo.get_notebook(other.id).base_notebook_name == ""
+        # 标记 base 后,从「别的」notebook 的 summary 也能看到基准库名(非仅 base 自身)
+        repo.mark_notebook_base(base.id)
+        assert repo.get_notebook(other.id).base_notebook_name == "模拟IC教材"
+        assert repo.get_notebook(base.id).base_notebook_name == "模拟IC教材"
+        # 空库无 KG → base_kg_available 仍为 False(合并进同一查询后未回归)
+        assert repo.get_notebook(other.id).base_kg_available is False
+        # 换 base(全局唯一)→ 名字随之更新
+        base2 = repo.create_notebook(NotebookCreate(name="内部规范集"))
+        repo.mark_notebook_base(base2.id)
+        assert repo.get_notebook(other.id).base_notebook_name == "内部规范集"
+
     def test_tier_is_idempotent_on_existing_db(self, tmp_path, monkeypatch):
         """Running _migrate() twice on a DB that already has the tier column
         must not raise (PRAGMA guard prevents duplicate ALTER TABLE)."""

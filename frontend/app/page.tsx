@@ -94,6 +94,7 @@ type NotebookSummary = {
   tier?: string;
   kg_ready?: boolean;
   base_kg_available?: boolean;
+  base_notebook_name?: string; // 全局唯一基准库名(所有用户只读可见,分析弹窗顶部展示)
   kg_pending_sources?: number;
   access?: "owner" | "reader"; // "reader" = 只读共享而来(Phase 2)
   shared_from?: string;        // reader 时 = 原 owner 用户名
@@ -3076,16 +3077,16 @@ export default function Home() {
                 {!isReader && (
                   <button className="workspace-nav-button" onClick={() => {
                     const tier = tierActionState(currentNotebook, notebooks);
-                    // 有基准库时把它的名字带进弹窗:别处是 base → replace(otherBaseName);当前就是 base → unset(自己的名字)
-                    const currentBaseName = tier.action === "replace" ? tier.otherBaseName
-                      : tier.action === "unset" ? currentNotebook?.name
-                      : undefined;
+                    // 基准库名走后端全局字段 base_notebook_name(所有用户只读可见,不依赖它出现在
+                    // 自己的库列表里)。弹窗顶部只读展示「当前基准库」,非管理员也能看到是哪个、但改不了。
+                    const baseName = currentNotebook?.base_notebook_name || "";
                     setInfoModal({
                     title: "分析",
                     message: "对当前 notebook 的知识图谱与基准库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
+                    sections: baseName ? [["当前基准库", [baseName]] as [string, string[]]] : undefined,
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
-                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", note: currentBaseName ? `当前基准库：${currentBaseName}` : undefined, action: () => handleTierAction().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
                       ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [
                         {
                           label: buildingScaleIndex ? "检索索引重建中…" : "立即重建检索索引",
