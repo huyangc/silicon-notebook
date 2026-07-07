@@ -2417,6 +2417,12 @@ button.chat-session-card {
   display: inline-grid;
   place-items: center;
   min-width: 44px;
+  /* 防御:徽章列固定 48px,未映射的长 step_type(如 expand_community)裁到列内,
+     绝不溢出压到摘要列上(镜像其它列的省略号纪律)。 */
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 4px;
+  white-space: nowrap;
   height: 22px;
   border: 1px solid #d9dfeb;
   border-radius: 999px;

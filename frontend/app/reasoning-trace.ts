@@ -6,6 +6,8 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   retrieve: "检索",
   reflect: "反思",
   expand: "扩展",
+  ppr: "漫游",
+  expand_community: "对比",
   fallback: "原文",
   answer: "合成",
   skip: "跳过",
