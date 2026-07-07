@@ -6641,19 +6641,38 @@ class SQLiteRepository:
         return cluster_count
 
     def rebuild_communities(self, notebook_id: str, level: int = 0) -> int:
-        """Detect communities over the notebook's KG (objects linked by relations)
-        via networkx Louvain; persist them (delete + reinsert). No LLM. Returns the
-        community count. Deterministic (fixed seed)."""
+        """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
+        持久化到 communities + community_members(反向索引,存 canonical_name/centrality)。
+        无 LLM、确定性(seed=42)。大库(scale-tier)无持久化 CSR → 拒 networkx(避免 OOM),
+        emit community_build_refused 返回 0。返回入库社区数。
+
+        为何喂 canonical 图:裸 knowledge_relations 逐篇封闭(每篇的同名实体是不同
+        object_id)→ 社区不跨文档。经 cluster_map 把两端映射到 canonical_id 后,不同
+        文档里同一 canonical 天然合并,社区才跨文档(对比/广度题需要的"兄弟"结构)。"""
         self.get_notebook(notebook_id)
+        if not self.settings.community_layer_enabled:
+            return 0
+        # 大库守卫:绝不在 scale-tier 无 CSR 时用 networkx 暴力建图(10^7 边必 OOM/挂)。
+        # 镜像 _retrieve_scored 的"大库拒暴力"纪律;fail-open + 可观测,返回 0。
+        if (not self.notebook_copy_stats(notebook_id)["copyable"]
+                and self._scale_index(notebook_id, allow_stale=True) is None):
+            self.event_log.emit({"kind": "community_build_refused",
+                                 "notebook_id": notebook_id, "reason": "no_scale_index"})
+            return 0
         import networkx as nx
         from networkx.algorithms.community import louvain_communities
+        cmap = self.cluster_map(notebook_id)  # member_object_id -> canonical_id
         with self._connect() as db:
             rels = db.execute(
                 "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id=?",
                 (notebook_id,)).fetchall()
+            names = {r["canonical_id"]: r["canonical_name"] for r in db.execute(
+                "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters WHERE notebook_id=?",
+                (notebook_id,))}
         g = nx.Graph()
         for r in rels:
-            s, t = r["source_object_id"], r["target_object_id"]
+            s = cmap.get(r["source_object_id"], r["source_object_id"])
+            t = cmap.get(r["target_object_id"], r["target_object_id"])
             if not s or not t or s == t:
                 continue
             if g.has_edge(s, t):
@@ -6663,15 +6682,29 @@ class SQLiteRepository:
         comms = (louvain_communities(g, weight="weight", seed=42)
                  if g.number_of_nodes() else [])
         now = _now()
+        min_size = self.settings.community_min_size
+        kept = 0
         with self._write() as db:
             db.execute("DELETE FROM communities WHERE notebook_id=? AND level=?", (notebook_id, level))
+            db.execute("DELETE FROM community_members WHERE notebook_id=? AND level=?", (notebook_id, level))
             for comm in comms:
+                if len(comm) < min_size:
+                    continue
+                cid = f"cm-{uuid4().hex[:10]}"
                 members = sorted(comm)
                 db.execute(
                     "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
                     "VALUES (?,?,?,?,?,?)",
-                    (f"cm-{uuid4().hex[:10]}", notebook_id, level, json.dumps(members), len(members), now))
-        return len(comms)
+                    (cid, notebook_id, level, json.dumps(members), len(members), now))
+                db.executemany(
+                    "INSERT INTO community_members "
+                    "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
+                    "VALUES (?,?,?,?,?,?)",
+                    [(m, notebook_id, level, cid, names.get(m, m), float(g.degree(m))) for m in members])
+                kept += 1
+        self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
+                             "level": level, "communities": kept, "nodes": g.number_of_nodes()})
+        return kept
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
         """Member-id lists of each detected community (for summaries / global search)."""

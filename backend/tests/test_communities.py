@@ -27,7 +27,10 @@ def _rel(s, t):
 
 def test_rebuild_communities_detects_two_groups(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    # group1: A-B-C triangle; group2: D-E; no cross edges -> 2 communities
+    # group1: A-B-C triangle; group2: D-E; no cross edges -> 2 communities.
+    # community_min_size default is now 3 (drops noise/singletons); this test
+    # exercises the grouping (incl. the size-2 group) so set it to 2 explicitly.
+    repo.settings.community_min_size = 2
     repo.store_kg(nb.id, None,
         [_claim("A", "a"), _claim("B", "b"), _claim("C", "c"),
          _claim("D", "d"), _claim("E", "e")],
@@ -47,6 +50,7 @@ def test_rebuild_communities_empty_graph(repo):
 
 def test_rebuild_communities_is_idempotent(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.settings.community_min_size = 2            # size-2 {A,B} must survive here
     repo.store_kg(nb.id, None, [_claim("A", "a"), _claim("B", "b")], [_rel("A", "B")])
     repo.rebuild_communities(nb.id)
     repo.rebuild_communities(nb.id)                 # rerun must not duplicate
