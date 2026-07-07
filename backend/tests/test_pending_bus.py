@@ -56,3 +56,27 @@ def test_fanout_and_flush_via_loop():
             bus.unregister("u1", q)
 
     asyncio.run(scenario())
+
+
+def test_submit_notify_pending_marks_dirty(monkeypatch):
+    import app.services.background_jobs as bj
+    called = []
+    monkeypatch.setattr(bj.pending_bus, "mark_dirty", lambda uid: called.append(uid))
+    # 让 job 线程内解析到某 uid
+    monkeypatch.setattr(bj, "_resolve_job_user", lambda: "user-a")
+    done = __import__("threading").Event()
+    t = bj.submit(lambda: done.set(), name="t", notify_pending=True)
+    done.wait(2.0)
+    t.join(2.0)
+    assert called == ["user-a"]
+
+
+def test_submit_without_notify_does_not_mark(monkeypatch):
+    import app.services.background_jobs as bj
+    called = []
+    monkeypatch.setattr(bj.pending_bus, "mark_dirty", lambda uid: called.append(uid))
+    done = __import__("threading").Event()
+    t = bj.submit(lambda: done.set(), name="t")  # notify_pending 默认 False
+    done.wait(2.0)
+    t.join(2.0)
+    assert called == []

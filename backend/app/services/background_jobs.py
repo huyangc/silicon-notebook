@@ -20,13 +20,29 @@ import logging
 import threading
 from typing import Callable
 
+from app.services.pending_bus import pending_bus
+
 _log = logging.getLogger("silicon_notebook.jobs")
 
 
-def submit(fn: Callable, *args, name: str | None = None, **kwargs) -> threading.Thread:
+def _resolve_job_user() -> str | None:
+    """在 job 线程(copy_context 已传播)里解析发起用户 id。"""
+    try:
+        from app.services.sqlite_repository import _REQUEST_USER
+        u = _REQUEST_USER.get()
+        return u.id if u is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def submit(fn: Callable, *args, name: str | None = None,
+           notify_pending: bool = False, **kwargs) -> threading.Thread:
     """在传播了调用线程上下文的 daemon 线程里跑 `fn(*args, **kwargs)`，返回该线程。
 
     快照必须在调用线程（通常是请求处理线程）里捕获，故 copy_context() 在此同步调用。
+
+    `notify_pending=True` 时，job 完成（无论成功/失败）后刷新发起用户的「待确认中心」
+    snapshot；通知失败绝不影响/冒泡出 job 本身。
     """
     ctx = contextvars.copy_context()
     label = name or getattr(fn, "__name__", "job")
@@ -36,6 +52,14 @@ def submit(fn: Callable, *args, name: str | None = None, **kwargs) -> threading.
             fn(*args, **kwargs)
         except Exception:  # noqa: BLE001 — 后台线程顶层兜底，绝不静默死
             _log.exception("background job failed: %s", label)
+        finally:
+            if notify_pending:
+                uid = _resolve_job_user()
+                if uid:
+                    try:
+                        pending_bus.mark_dirty(uid)
+                    except Exception:  # noqa: BLE001 — 通知失败绝不影响 job
+                        _log.exception("pending mark_dirty failed: %s", label)
 
     thread = threading.Thread(target=lambda: ctx.run(_run), name=name, daemon=True)
     thread.start()
