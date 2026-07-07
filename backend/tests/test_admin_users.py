@@ -87,3 +87,54 @@ def test_migration_2_runs_on_already_v1_db(tmp_path, monkeypatch):
     assert ver == 2
     assert "idx_notebooks_created_by" in names
     assert "idx_conversations_created_by" in names
+
+
+# ===== API Tests for GET /api/admin/users =====
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    from app.api import deps
+    deps.repository.cache_clear()
+    from app.main import create_app
+    return TestClient(create_app())
+
+
+def _auth(client, username):
+    client.post("/api/auth/register", json={"username": username, "password": "pw"})
+    token = client.post(
+        "/api/auth/login", json={"username": username, "password": "pw"}).json()["token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _auth_admin(client):
+    token = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_admin_users_forbidden_for_regular_user(client):
+    b = _auth(client, "z00123456")
+    assert client.get("/api/admin/users", headers=b).status_code == 403
+
+
+def test_admin_users_lists_username_and_counts(client):
+    admin = _auth_admin(client)
+    a = _auth(client, "z00123456")
+    client.post("/api/notebooks", json={"name": "A1"}, headers=a)
+    client.post("/api/notebooks", json={"name": "A2"}, headers=a)
+    resp = client.get("/api/admin/users", headers=admin)
+    assert resp.status_code == 200
+    rows = {r["username"]: r for r in resp.json()}
+    assert "admin" in rows and "z00123456" in rows
+    assert rows["z00123456"]["notebooks"] == 2
+    assert rows["z00123456"]["role"] == "user"
+    # 展示用户名,但内部 id 仍是 user-<hex>(未统一)
+    assert rows["z00123456"]["id"].startswith("user-")

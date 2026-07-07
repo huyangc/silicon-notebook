@@ -674,3 +674,15 @@ class ModelTestResult(BaseModel):
     ok: bool
     latency_ms: int = 0
     error: str = ""
+
+
+class AdminUserUsage(BaseModel):
+    id: str
+    username: str
+    role: str
+    created_at: str
+    notebooks: int
+    sources: int
+    conversations: int
+    reports: int
+    last_active: Optional[str] = None
