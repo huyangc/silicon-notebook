@@ -1523,6 +1523,18 @@ button.chat-session-card {
   color: #6b7280;
 }
 
+/* 两阶段新增态:规划中/生成中同「进行中」蓝;待确认用琥珀强调等待用户。 */
+.report-status.planning,
+.report-status.generating {
+  background: #e8f0fe;
+  color: #1d4ed8;
+}
+
+.report-status.outline_ready {
+  background: #fef3e2;
+  color: #b45309;
+}
+
 .report-status-dot {
   width: 7px;
   height: 7px;
@@ -1964,6 +1976,251 @@ button.chat-session-card {
 .report-markdown hr {
   border: 0;
   border-top: 1px solid #e6eaf1;
+}
+
+/* ---- 规划中(status==='planning'):秒级 loading,复用 running-hint 外框 ---- */
+.report-planning-hint {
+  grid-auto-flow: column;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.report-planning-hint .report-status-dot {
+  width: 9px;
+  height: 9px;
+  color: #1d4ed8;
+}
+
+/* ---- 大纲编辑器(status==='outline_ready') ---- */
+.report-outline-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.report-outline-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.report-outline-editor-head h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 720;
+  color: #1f2430;
+}
+
+.report-outline-editor-head p {
+  margin: 0;
+  max-width: 560px;
+  color: #5b6371;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.report-outline-cards {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+
+.report-outline-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dbe1ec;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fff;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.report-outline-card:hover {
+  border-color: #b9c4da;
+  box-shadow: 0 1px 4px rgba(31, 41, 55, 0.06);
+}
+
+.report-outline-card-top {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.report-outline-card-index {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #eef2f9;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.report-outline-card-title {
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2430;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.report-outline-card-scope {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #e2e6ee;
+  border-radius: 8px;
+  background: #fafbfd;
+  color: #3b424e;
+  font-size: 13px;
+}
+
+.report-outline-card-title:focus,
+.report-outline-card-scope:focus {
+  outline: none;
+  border-color: #7aa0ef;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(122, 160, 239, 0.18);
+}
+
+.report-outline-card-ops {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.report-outline-op {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #dde2ea;
+  border-radius: 8px;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.report-outline-op:hover:not(:disabled) {
+  border-color: #9aa6b7;
+  background: #f7f9fc;
+  color: #1f2430;
+}
+
+.report-outline-op.danger:hover:not(:disabled) {
+  border-color: #f0a9a9;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.report-outline-op:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 徽章行:充分性 + 视角标签,自动换行 */
+.report-outline-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-suf {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.report-suf.ok {
+  background: #e7f5ec;
+  color: #15803d;
+}
+
+.report-suf.weak {
+  background: #fdf1e0;
+  color: #b45309;
+}
+
+.report-suf.missing {
+  background: #fdecec;
+  color: #b91c1c;
+}
+
+.report-perspective {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border: 1px solid #d8e0f0;
+  border-radius: 999px;
+  background: #f2f6fd;
+  color: #3457a8;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.report-tensions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+}
+
+.report-tensions li {
+  color: #8a5a1a;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.report-outline-empty {
+  border: 1px dashed #c9d4e6;
+  border-radius: 12px;
+  padding: 18px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.report-outline-editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.report-outline-editor-count {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.report-outline-editor-foot .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .chat-body {
