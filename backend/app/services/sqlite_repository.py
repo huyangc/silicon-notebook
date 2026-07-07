@@ -242,7 +242,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -1156,13 +1156,6 @@ class SQLiteRepository:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username "
                 "ON users(username) WHERE username != ''"
             )
-            # admin 用户总览:按 created_by 分组统计,补覆盖索引(幂等)。
-            db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_notebooks_created_by "
-                "ON notebooks(created_by)")
-            db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_conversations_created_by "
-                "ON conversations(created_by)")
             # 每用户模型服务配置(JSON;明文存,API 层只写不回显)。
             self._add_column_if_missing(db, "user_profiles", "model_settings", "TEXT NOT NULL DEFAULT '{}'")
             # kg_cluster_scratch: run_id column added in SP3 to isolate concurrent
@@ -1191,6 +1184,18 @@ class SQLiteRepository:
             self._add_column_if_missing(
                 db, "reports", "section_status_json", "TEXT NOT NULL DEFAULT '[]'"
             )
+
+    def _migration_2(self) -> None:
+        """admin 用户总览:按 created_by 分组统计的覆盖索引(幂等)。
+        独立迁移步——_migration_1 已在既有库封版(user_version=1),新增索引必须
+        走新的版本步才能到达那些已迁移的库(否则 _migrate 快路径直接跳过)。"""
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notebooks_created_by "
+                "ON notebooks(created_by)")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_created_by "
+                "ON conversations(created_by)")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

@@ -59,3 +59,31 @@ def test_list_user_usage_counts(repo):
     assert b["notebooks"] == 0 and b["sources"] == 0
     assert b["conversations"] == 0 and b["reports"] == 0
     assert b["last_active"] is None
+
+
+def test_created_by_indexes_present_after_migration(repo):
+    with repo._connect() as db:
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    assert "idx_notebooks_created_by" in names
+    assert "idx_conversations_created_by" in names
+
+
+def test_migration_2_runs_on_already_v1_db(tmp_path, monkeypatch):
+    # 模拟被旧 _migration_1 迁移过、停在 user_version=1 且无 created_by 索引的既有库
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    r1 = SQLiteRepository(Settings())
+    with r1._write() as db:
+        db.execute("DROP INDEX IF EXISTS idx_notebooks_created_by")
+        db.execute("DROP INDEX IF EXISTS idx_conversations_created_by")
+        db.execute("PRAGMA user_version = 1")
+    # 重新打开同一库:_migrate 应发现 1 < 2、跑 _migration_2、重建两个索引并盖章 2
+    r2 = SQLiteRepository(Settings())
+    with r2._connect() as db:
+        names = {row["name"] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        ver = db.execute("PRAGMA user_version").fetchone()[0]
+    assert ver == 2
+    assert "idx_notebooks_created_by" in names
+    assert "idx_conversations_created_by" in names
