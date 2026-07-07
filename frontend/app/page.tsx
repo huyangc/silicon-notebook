@@ -1813,7 +1813,7 @@ export default function Home() {
     }
   }
   function openDoneItem(d: { notebook_id: string }) {
-    openNotebook(d.notebook_id).then(() => setKgViewOpen(true));
+    openNotebook(d.notebook_id).then(() => setKgViewOpen(true)).catch(reportError);
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
@@ -2880,7 +2880,7 @@ export default function Home() {
           <PendingBell
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
-            onOpenItem={openPendingItem}
+            onOpenItem={(it) => openPendingItem(it).catch(reportError)}
             onOpenDone={openDoneItem}
             onDismissDone={pending.dismissDone}
           />
