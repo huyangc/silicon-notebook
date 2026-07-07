@@ -187,6 +187,15 @@ class ReportCreate(BaseModel):
     question: str
     history: str = ""
     depth: int = 2
+    auto_generate: bool = False
+
+
+class ReportOutlineUpdate(BaseModel):
+    sections: List[dict] = Field(default_factory=list)
+
+
+class ReportGenerateRequest(BaseModel):
+    depth: int | None = None
 
 
 class ReportSummary(BaseModel):

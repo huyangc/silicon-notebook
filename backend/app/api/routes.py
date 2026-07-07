@@ -62,6 +62,8 @@ from app.models.schemas import (
     ReportCreate,
     ReportDetail,
     ReportExportRequest,
+    ReportGenerateRequest,
+    ReportOutlineUpdate,
     ReportSummary,
     SourceDetail,
     SourceElement,
@@ -870,20 +872,44 @@ def _report_llm_ready(repo) -> bool:
     return bool(getattr(repo.reasoning_llm_client, "configured", False))
 
 
-def _launch_report_job(repo, notebook_id: str, rid: str, question: str, history: str,
-                       depth: int = 2) -> None:
+def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
+                     auto_generate: bool = False) -> None:
+    """阶段1(规划)后台 job:跑 plan_outline → outline_ready;auto_generate 时
+    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。"""
     from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
     cancel = register_cancel(rid)
 
     def worker():
         try:
+            depth = 2
+            try:
+                depth = int(repo.get_report(notebook_id, rid).get("depth", 2))
+            except Exception:
+                pass
             ReportEngine(repo, repo.settings, cancel_event=cancel).run(
-                notebook_id, rid, question, history, depth=depth)
+                notebook_id, rid, question, history, depth=depth,
+                auto_generate=auto_generate)
         finally:
             unregister_cancel(rid)
 
     # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
-    background_jobs.submit(worker, name=f"report-{rid}")
+    background_jobs.submit(worker, name=f"report-plan-{rid}")
+
+
+def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
+                         depth: int = 2) -> None:
+    """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
+    from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
+    cancel = register_cancel(rid)
+
+    def worker():
+        try:
+            ReportEngine(repo, repo.settings, cancel_event=cancel).generate(
+                notebook_id, rid, question, depth=depth)
+        finally:
+            unregister_cancel(rid)
+
+    background_jobs.submit(worker, name=f"report-gen-{rid}")
 
 
 @router.post("/notebooks/{notebook_id}/reports",
@@ -899,7 +925,8 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
         rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    _launch_report_job(repo, notebook_id, rid, payload.question.strip(), payload.history, depth)
+    _launch_plan_job(repo, notebook_id, rid, payload.question.strip(), payload.history,
+                     payload.auto_generate)
     return {"report_id": rid, "status": "pending"}
 
 
@@ -938,6 +965,39 @@ def get_report(notebook_id: str, report_id: str) -> ReportDetail:
     except KeyError:
         raise HTTPException(status_code=404, detail="Report not found")
     return ReportDetail(**{k: v for k, v in r.items() if k in ReportDetail.model_fields})
+
+
+@router.patch("/notebooks/{notebook_id}/reports/{report_id}/outline",
+              dependencies=[Depends(require_notebook_write)])
+def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutlineUpdate) -> dict:
+    repo = repository()
+    try:
+        cur = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if cur.get("status") != "outline_ready":
+        raise HTTPException(status_code=409, detail="outline editable only when outline_ready")
+    secs = [s for s in payload.sections
+            if str(s.get("title", "")).strip() and (s.get("sub_queries") or [])]
+    if not secs:
+        raise HTTPException(status_code=422, detail="at least one valid section required")
+    repo.update_report(notebook_id, report_id, outline=secs)
+    return {"status": "ok", "sections": len(secs)}
+
+
+@router.post("/notebooks/{notebook_id}/reports/{report_id}/generate",
+             dependencies=[Depends(require_notebook_write)])
+def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateRequest) -> dict:
+    repo = repository()
+    try:
+        cur = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if cur.get("status") != "outline_ready":
+        raise HTTPException(status_code=409, detail="generate only from outline_ready")
+    depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
+    _launch_generate_job(repo, notebook_id, report_id, cur["question"], depth)
+    return {"status": "generating"}
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/cancel",
