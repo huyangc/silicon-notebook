@@ -11,6 +11,7 @@ openpyxl>=3.1.0
 markdown-it-py>=3.0.0
 numpy>=2.0.0
 networkx>=3.0
+python-igraph>=0.11    # 社区检测 scale 路径(整数边表+C 核,10^6-10^7 边;缺失则回退 networkx)
 rustworkx>=0.15.0
 pyyaml>=6.0
 pytest>=8.0
