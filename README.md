@@ -625,6 +625,28 @@ Options: `--owner` (notebook owner username, case-insensitive; defaults to the a
 
 Prereqs: configure EMBED and `KG_LLM` (KG extraction falls back to the global `OPENAI_COMPAT_*`) in `.env`. With EMBED unconfigured the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors (chunk/KG vectors are then skipped), never silently; KG extraction errors if no LLM is reachable. Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
 
+### Retrieval replay diff (`scripts/replay_retrieval.py`)
+
+The acceptance tool for proving "retrieval quality is unchanged" across a performance-optimization change: run a fixed question set through the reasoning retrieval primitives (`federated_retrieve` + `ppr_retrieve`), **without calling any answer LLM**, and record the hit id/score sequences as JSON. Two runs' outputs can then be diffed question-by-question.
+
+```bash
+# record a run (needs a configured EMBED endpoint for real query vectors; reads retrieval primitives only, no LLM required)
+python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
+
+# --full: also runs the complete reasoning-orchestration layer once (plan/reflect are replaced with a
+# fixed-sub-query + immediate-answer stub instead of the LLM, verifying the deterministic parts of the
+# orchestration layer are equivalent); sub-queries come from plan.json
+python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt \
+    --full --plan-file plan.json --out before.json
+
+# record again after the change, then diff the two runs
+python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out after.json
+python scripts/replay_retrieval.py --compare before.json after.json                     # --mode exact (default): id + score sequence must match position-for-position
+python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # only compares top-k id set overlap + order (tolerates score drift from e.g. float32 conversion)
+```
+
+`questions.txt` has one question per line; `plan.json` = `{"<question>": ["sub-query 1", "sub-query 2", ...]}`. **Must be run from the main checkout root** (`.env` is loaded relative to the current working directory, same as `batch_ingest.py`). The `--compare` exit code *is* the verdict: `0` when everything passes, `1` if any question mismatches — safe to wire directly into CI or a script gate. `--owner` reuses the same owner-resolution as `batch_ingest.py` (case-insensitive username, defaults to the admin user). With EMBED unconfigured, the CLI **errors out immediately** (exit code `2`) rather than silently producing a misleading "zero recall" comparison from zero vectors.
+
 ## Current Limitations
 
 - Retrieval uses SQLite keyword (CJK bi-gram) + float32 matrix semantic search with per-notebook cache. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach). BM25/FTS5 and pgvector are deferred for larger scale.

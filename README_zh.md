@@ -579,6 +579,27 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
+### 检索回放对照(`scripts/replay_retrieval.py`)
+
+性能优化改动前后,证明"检索效果不变"的验收工具:拿一份固定问题集跑 reasoning 检索原语(`federated_retrieve` + `ppr_retrieve`),**不调用任何答案 LLM**,把命中的 id/分数序列存成 JSON;两次运行的输出可逐问题 diff。
+
+```bash
+# 记录一次(需 EMBED 端点已配置,用真实查询向量;仅读检索原语,不需要 LLM)
+python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
+
+# --full:额外跑一遍完整 reasoning 编排层(plan/reflect 用固定子查询 + 立即 answer 的 stub 代替 LLM,
+# 验证编排层改动的确定性部分等价),子查询从 plan.json 里取
+python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt \
+    --full --plan-file plan.json --out before.json
+
+# 改动后重新记录一次,再对照两份输出
+python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out after.json
+python scripts/replay_retrieval.py --compare before.json after.json                  # --mode exact(默认):id + 分数序列须逐位相同
+python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # 只比较前 k 个 id 的集合重叠率与序(允许分数因 float32 化等改动而漂移)
+```
+
+`questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--compare` 的退出码即验收结果:全 PASS 退出 `0`,任意一处不一致退出 `1`,可直接接入 CI/脚本判定。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = admin 用户)。EMBED 未配置时**直接报错退出**(退出码 `2`),绝不用零向量静默跑出误导性的"零召回"对照结果。
+
 ## 当前限制
 
 - 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
