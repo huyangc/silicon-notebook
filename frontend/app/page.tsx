@@ -61,6 +61,7 @@ import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
+import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -209,6 +210,7 @@ type ConversationDetail = {
   updated_at: string;
   turn_count: number;
   turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
+  active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
 };
 
 type Citation = {
@@ -737,6 +739,8 @@ const reviewAllMergesApi = (nb: string) =>
   api<{ status: string }>(`/notebooks/${nb}/unified-kg/merges/review-all`, { method: "POST" });
 const fetchMergeReviewJob = (nb: string) =>
   api<MergeReviewJob>(`/notebooks/${nb}/unified-kg/merges/review-job`);
+const fetchAskJob = (nb: string, jobId: string) =>
+  api<AskJobDetail>(`/notebooks/${nb}/ask/jobs/${jobId}`);
 
 function mergePairKey(candidate: PendingMerge): string {
   return [candidate.canonical_a, candidate.canonical_b].sort().join("\u0000");
@@ -1241,6 +1245,47 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const askJobIdRef = useRef<string | null>(null);
+  // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
+  // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
+  const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
+  const reconnectConvIdRef = useRef<string | null>(null);
+  // 重连轮询:重开一个仍在跑的会话时,每 1.5s 拉 ask_job 详情,增量追加轨迹;
+  // 跑完则重载会话显示最终答案,取消/中断则提示并收起在途 turn。
+  useEffect(() => {
+    if (!reconnectJob || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    const jobId = reconnectJob.jobId;
+    let cancelled = false;
+    let seen = reconnectJob.seen;
+    const poll = window.setInterval(async () => {
+      try {
+        const d = await fetchAskJob(nb, jobId);
+        if (cancelled) return;
+        const fresh = newTraceSteps(d.trace ?? [], seen);
+        if (fresh.length) { seen += fresh.length; setPendingTrace((prev) => [...prev, ...fresh]); }
+        if (jobPollDone(d.status)) {
+          window.clearInterval(poll);
+          setReconnectJob(null);
+          setAsking(false);
+          setPendingQuestion(""); setPendingMode(DEFAULT_ASK_MODE); setPendingTrace([]);
+          askJobIdRef.current = null;
+          if (d.status === "done") {
+            await openSession(reconnectConvIdRef.current ?? "");   // 见注: 重载拿最终答案
+          } else if (d.status === "cancelled") {
+            setToast("该问答已被取消");
+          } else {
+            setToast(d.status === "interrupted" ? "该问答因服务重启中断" : `该问答失败：${d.error || "未知错误"}`);
+          }
+        }
+      } catch { /* transient; keep polling */ }
+    }, 1500);
+    const cap = window.setTimeout(() => {
+      if (!cancelled) { window.clearInterval(poll); setReconnectJob(null); setAsking(false);
+        setPendingQuestion(""); setPendingTrace([]); askJobIdRef.current = null;
+        setToast("该问答仍在后台进行，请稍后重开查看"); }
+    }, 20 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+  }, [reconnectJob, currentNotebookId]);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -2197,6 +2242,19 @@ export default function Home() {
     setChatMode("ask");
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
+    const active = detail.active_job;
+    if (active) {
+      // 把在途 turn 渲染成「生成中」并接回实时轨迹(仿正在 ask 的 UI)。
+      setPendingQuestion(active.question);
+      setPendingMode(modeFromTurn({ response: { mode: active.mode } }));
+      setPendingTrace(active.trace ?? []);
+      setAsking(true);
+      askJobIdRef.current = active.job_id;                  // 「停止」可作用于重连的 job
+      reconnectConvIdRef.current = id;
+      setReconnectJob({ jobId: active.job_id, seen: (active.trace ?? []).length });
+    } else {
+      setReconnectJob(null);
+    }
   }
 
   function startNewSession() {
