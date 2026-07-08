@@ -198,7 +198,7 @@ def paginate(
 
 def valid_date_param(date: str) -> bool:
     """验证日期参数是否合法。接受 'legacy' 或 YYYY-MM-DD 格式。"""
-    return date == "legacy" or bool(_DATE_RE.match(date or ""))
+    return date == "legacy" or bool(_DATE_RE.fullmatch(date or ""))
 
 
 def available_days(dir: Path, channel: str) -> List[str]:
