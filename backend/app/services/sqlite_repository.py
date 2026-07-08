@@ -389,6 +389,10 @@ class SQLiteRepository:
         # guarded set of notebook_ids currently being folded by _spawn_viz_build.
         self._viz_building: set = set()
         self._viz_building_lock = threading.Lock()
+        # KG build/rebuild 的进行中标志（进程内；重启后天然为空=未构建，无需 reconcile）。
+        # get_notebook 回填 NotebookSummary.kg_building，前端刷新后据此把「构建中」接回。
+        self._kg_building: set = set()
+        self._kg_building_lock = threading.Lock()
         self._migrate()
         self._recover_interrupted_jobs()
         self._seed()
@@ -1896,7 +1900,9 @@ class SQLiteRepository:
                 (notebook_id,)).fetchone()
             if row is None:
                 raise KeyError(notebook_id)
-            return self._notebook_from_row(db, row)
+            summary = self._notebook_from_row(db, row)
+        summary.kg_building = notebook_id in self._kg_building
+        return summary
 
     def share_notebook(self, notebook_id: str) -> dict:
         """开启分享(幂等):已分享则复用现有 token。返回 token + copyable + size。"""
@@ -2974,74 +2980,80 @@ class SQLiteRepository:
         单 source 失败隔离,不连累其余、不回退其终态,错误入 event log。
         progress(i, n, source_id, ok):可选回调,每抽完一源调一次(批量 CLI 显示进度用)。"""
         self.get_notebook(notebook_id)  # KeyError if missing
-        if not getattr(self.llm_client, "configured", False):
-            raise RuntimeError("LLM not configured; cannot build KG")
-        with self._connect() as db:
-            src_ids = [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)).fetchall()]
-            # source_id is NOT NULL DEFAULT '' — use != '' to find sources that truly have KG
-            kgful = {r["source_id"] for r in db.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)).fetchall()}
-        targets = [sid for sid in src_ids if sid not in kgful]
-        done, failed = [], []
-
-        def _extract_one(sid: str) -> bool:
-            try:
-                self._set_source_status(sid, "extracting")
-                self._run_extraction(sid)
-                self._set_source_status(sid, "extracted")
-                return True
-            except Exception:  # noqa: BLE001 — 隔离单 source 失败
-                self.event_log.logger.exception("build_notebook_kg failed for %s", sid)
-                return False
-
-        # 跨源并发:提交到全局 KG job 池(cap=KG_JOB_CONCURRENCY);窗口仍走全局 window
-        # 池(cap=KG_EXTRACT_WORKERS)、总量封顶不打爆 LLM,两池分离防死锁。
-        import concurrent.futures as _cf
-        from app.services.kg import scheduler as _kg_scheduler
-        futs = {_kg_scheduler.submit_job(_extract_one, sid): sid for sid in targets}
-        for _i, fut in enumerate(_cf.as_completed(futs), 1):
-            sid = futs[fut]
-            ok = bool(fut.result())   # _extract_one 内部已吞异常,只返回布尔
-            (done if ok else failed).append(sid)
-            if progress is not None:
-                try:
-                    progress(_i, len(targets), sid, ok)
-                except Exception:  # noqa: BLE001 — 进度回调绝不破坏构建
-                    pass
-        done.sort()
-        failed.sort()
+        with self._kg_building_lock:
+            self._kg_building.add(notebook_id)
         try:
-            self._mark_unified_kg_dirty(notebook_id)
-        except Exception:
-            self.event_log.logger.exception("unified-KG dirty mark failed for %s", notebook_id)
-        # Conflict resolution pass — runs after ALL sources are extracted.
-        # Fail-safe: any exception is logged but never breaks the build.
-        if self.settings.kg_conflict_resolution_enabled:
+            if not getattr(self.llm_client, "configured", False):
+                raise RuntimeError("LLM not configured; cannot build KG")
+            with self._connect() as db:
+                src_ids = [r["id"] for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)).fetchall()]
+                # source_id is NOT NULL DEFAULT '' — use != '' to find sources that truly have KG
+                kgful = {r["source_id"] for r in db.execute(
+                    "SELECT DISTINCT source_id FROM knowledge_objects "
+                    "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)).fetchall()}
+            targets = [sid for sid in src_ids if sid not in kgful]
+            done, failed = [], []
+
+            def _extract_one(sid: str) -> bool:
+                try:
+                    self._set_source_status(sid, "extracting")
+                    self._run_extraction(sid)
+                    self._set_source_status(sid, "extracted")
+                    return True
+                except Exception:  # noqa: BLE001 — 隔离单 source 失败
+                    self.event_log.logger.exception("build_notebook_kg failed for %s", sid)
+                    return False
+
+            # 跨源并发:提交到全局 KG job 池(cap=KG_JOB_CONCURRENCY);窗口仍走全局 window
+            # 池(cap=KG_EXTRACT_WORKERS)、总量封顶不打爆 LLM,两池分离防死锁。
+            import concurrent.futures as _cf
+            from app.services.kg import scheduler as _kg_scheduler
+            futs = {_kg_scheduler.submit_job(_extract_one, sid): sid for sid in targets}
+            for _i, fut in enumerate(_cf.as_completed(futs), 1):
+                sid = futs[fut]
+                ok = bool(fut.result())   # _extract_one 内部已吞异常,只返回布尔
+                (done if ok else failed).append(sid)
+                if progress is not None:
+                    try:
+                        progress(_i, len(targets), sid, ok)
+                    except Exception:  # noqa: BLE001 — 进度回调绝不破坏构建
+                        pass
+            done.sort()
+            failed.sort()
             try:
-                self.resolve_notebook_conflicts(notebook_id)
-            except Exception:  # noqa: BLE001
-                self.event_log.logger.exception(
-                    "build_notebook_kg: conflict resolution failed for %s", notebook_id
-                )
-        result = {"built": done, "failed": failed, "skipped": sorted(kgful)}
-        # Backfill relink — reconnect any degree-0 nodes left in this notebook's
-        # KG (legacy graphs, or nodes the inline path couldn't link within their
-        # own source). Fail-safe: never breaks the build.
-        if getattr(self.settings, "kg_relink_enabled", True):
-            try:
-                result["relink"] = self.relink_notebook_kg(notebook_id)
-            except Exception:  # noqa: BLE001
-                self.event_log.logger.exception(
-                    "build_notebook_kg: relink failed for %s", notebook_id
-                )
-        # Content-add settle point: enqueue an idle incremental fold if this
-        # notebook already has a scale index, so the newly-extracted sources
-        # become semantically searchable (fold only, never a fresh build).
-        # Fail-safe: helper never raises.
-        self._maybe_enqueue_scale_fold(notebook_id)
-        return result
+                self._mark_unified_kg_dirty(notebook_id)
+            except Exception:
+                self.event_log.logger.exception("unified-KG dirty mark failed for %s", notebook_id)
+            # Conflict resolution pass — runs after ALL sources are extracted.
+            # Fail-safe: any exception is logged but never breaks the build.
+            if self.settings.kg_conflict_resolution_enabled:
+                try:
+                    self.resolve_notebook_conflicts(notebook_id)
+                except Exception:  # noqa: BLE001
+                    self.event_log.logger.exception(
+                        "build_notebook_kg: conflict resolution failed for %s", notebook_id
+                    )
+            result = {"built": done, "failed": failed, "skipped": sorted(kgful)}
+            # Backfill relink — reconnect any degree-0 nodes left in this notebook's
+            # KG (legacy graphs, or nodes the inline path couldn't link within their
+            # own source). Fail-safe: never breaks the build.
+            if getattr(self.settings, "kg_relink_enabled", True):
+                try:
+                    result["relink"] = self.relink_notebook_kg(notebook_id)
+                except Exception:  # noqa: BLE001
+                    self.event_log.logger.exception(
+                        "build_notebook_kg: relink failed for %s", notebook_id
+                    )
+            # Content-add settle point: enqueue an idle incremental fold if this
+            # notebook already has a scale index, so the newly-extracted sources
+            # become semantically searchable (fold only, never a fresh build).
+            # Fail-safe: helper never raises.
+            self._maybe_enqueue_scale_fold(notebook_id)
+            return result
+        finally:
+            with self._kg_building_lock:
+                self._kg_building.discard(notebook_id)
 
     def rebuild_notebook_kg(self, notebook_id: str) -> dict:
         """Full re-extract: wipe all KG artefacts, then build from scratch.

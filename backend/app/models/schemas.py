@@ -145,6 +145,9 @@ class NotebookSummary(BaseModel):
     # 该 notebook 是否已构建知识图谱（有任意 knowledge_objects）。
     # 驱动前端严格推理(reasoning/graph)的可用门控。
     kg_ready: bool = False
+    # 该 notebook 此刻是否正在构建/重抽 KG（进程内内存标志，get_notebook 实时回填）。
+    # 前端刷新/切库后据此把「构建中…」进度接回（后台 daemon 线程本就在跑）。
+    kg_building: bool = False
     # 系统中是否存在已建 KG 的 tier='base' 笔记本。即便本 notebook 无图,有 base 也可
     # 进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或 base_kg_available)。
     base_kg_available: bool = False
