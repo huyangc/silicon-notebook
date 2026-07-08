@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS concept_comentions (
 
 ### 2. 构建 `rebuild_mention_bridge(notebook_id, force=False)`（seq 闸 + fail-open，挂 rebuild 尾部与跳过分支）
 
-- **别名表**：跨 ≥2 源的 concept 簇 → {canonical_name 全名, 去括号头名, 括号缩写(2-8 位字母数字)}，Latin 别名 len≥4、CJK 别名 len≥3（trigram FTS 最短查询长度=3；2 字中文名多为高频泛词，放弃可接受）；来源即 P0 的 `_strip_paren_acronym` 语义。缩写 len<3 者（如 "V2"）不入 FTS 词表。
+- **别名表**：跨 ≥2 源的 concept 簇 → {canonical_name 全名, 去括号头名, 括号缩写(3-8 位字母数字,绕过 Latin 长度门——GQA/MQA 类 3 位缩写是最有价值别名)}，Latin 别名 len≥4、CJK 别名 len≥3（trigram FTS 最短查询长度=3；2 字中文名多为高频泛词，放弃可接受）；来源即 P0 的 `_strip_paren_acronym` 语义。缩写 len<3 者（如 "V2"）不入 FTS 词表。
 - **匹配**：rebuild 作用域的**临时 contentless trigram FTS**（对齐仓库 kg_objects_fts 的 trigram 选型；避免 Python 大词表 regex 在部署规模的性能墙，也不引新依赖）建于 claim 名文本；每别名一条 phrase MATCH → 候选 claim；**Latin 别名对候选文本再做 `\b` 词边界后校验**（防 trigram 子串误命中如 rope⊂europe），CJK 别名子串即命中。FTS 表用完即 DROP。
 - **DF 上限门**：命中 claim 数 > `mention_alias_df_cap`（默认 2%×claims）的别名整体丢弃（泛词如 "model"），并计数入事件（不静默）。
 - **写出**：mention_edges（claim→concept canonical）；同一 claim 命中的 canonical 组合两两计入 concept_comentions（a<b）。单写事务 DELETE+批量 INSERT+seq 写回。
