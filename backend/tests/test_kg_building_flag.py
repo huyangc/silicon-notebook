@@ -53,3 +53,19 @@ def test_kg_building_cleared_on_failure(repo):
         repo.build_notebook_kg(nb.id)
     assert nb.id not in repo._kg_building          # 异常路径 finally 仍清位
     assert repo.get_notebook(nb.id).kg_building is False
+
+
+def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
+    """rebuild=delete+build：标志必须覆盖 delete 阶段（否则大库 delete>6s 时前端轮询过早停）。"""
+    nb = repo.create_notebook(NotebookCreate(name="t"))
+    repo.llm_client = types.SimpleNamespace(configured=True)  # build 不 RuntimeError；无 sources → 快
+    seen = {}
+    orig_delete = repo.delete_notebook_kg
+    def spy_delete(nid):
+        seen["during_delete"] = nid in repo._kg_building
+        return orig_delete(nid)
+    monkeypatch.setattr(repo, "delete_notebook_kg", spy_delete)
+    repo.rebuild_notebook_kg(nb.id)
+    assert seen["during_delete"] is True          # delete 阶段标志已置位
+    assert nb.id not in repo._kg_building           # rebuild 结束后清位
+    assert repo.get_notebook(nb.id).kg_building is False

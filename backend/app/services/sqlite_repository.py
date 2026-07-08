@@ -3061,9 +3061,26 @@ class SQLiteRepository:
         Equivalent to delete_notebook_kg + build_notebook_kg but in a single
         call so background threads don't need to chain the two methods.
         After delete every source has no KG, so build re-extracts all of them;
-        build's tail relink pass runs automatically."""
-        self.delete_notebook_kg(notebook_id)
-        return self.build_notebook_kg(notebook_id)
+        build's tail relink pass runs automatically.
+        Missing-notebook KeyError is raised by delete_notebook_kg's own
+        get_notebook guard (unchanged) — no separate pre-check here, so this
+        wrapper adds zero new behavior on the invalid-id path."""
+        # _kg_building must cover the delete phase too — large notebooks
+        # (590k+ objects) can spend >6s in delete_notebook_kg alone, and the
+        # frontend polls every 6s. Without this wrapper, a poll landing during
+        # delete reads kg_building=False (build_notebook_kg hasn't set it yet)
+        # and the UI reports "build complete" while the job is still running.
+        # Nesting is safe: set.add is idempotent, so build_notebook_kg's own
+        # add is a no-op; its finally-discard fires when build ends (the last
+        # step of rebuild), and this outer finally-discard is then a no-op too.
+        with self._kg_building_lock:
+            self._kg_building.add(notebook_id)
+        try:
+            self.delete_notebook_kg(notebook_id)
+            return self.build_notebook_kg(notebook_id)
+        finally:
+            with self._kg_building_lock:
+                self._kg_building.discard(notebook_id)
 
     def _parse_url_via_local(
         self, source_id: str, url: str, file_name: str
@@ -13351,6 +13368,8 @@ class SQLiteRepository:
         }
 
     def _notebook_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> NotebookSummary:
+        # 注意:kg_building 仅经 get_notebook 回填为真值;list_notebooks 等走
+        # _notebook_from_row 的路径恒为 False（当前无消费方读列表里的该字段）。
         counts = {
             "sources": self._count(db, "sources", "notebook_id", row["id"]),
             **self._knowledge_type_counts(db, row["id"]),
