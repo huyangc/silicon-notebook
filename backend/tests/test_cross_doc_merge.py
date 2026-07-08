@@ -78,6 +78,66 @@ def test_answer_context_dedups_merged_claims(repo):
     assert len(id_map) == 1   # the two merged claims collapse to one context line
 
 
+def _mark_base(repo, nb_id):
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb_id,))
+
+
+def _mk_src(repo, nb_id, sid):
+    # 插一行最小 sources 满足 knowledge_relations.source_id 的 FK(_connect 常开
+    # PRAGMA foreign_keys=ON;brief 直接传 's1' 作 source_id + 带关系会 FK 失败,
+    # 补建真实源行 —— 与 test_canonical_relations.py 同一适配,已在报告说明)。
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id, notebook_id, title, source_type, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'markdown', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            (sid, nb_id, sid))
+
+
+def test_answer_context_folds_across_tiers(repo):
+    # base 与 personal 各有同名 concept:命中两条 → 折叠成一行
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    per = repo.create_notebook(NotebookCreate(name="per"))
+    _mark_base(repo, base.id)
+    for nb, lid in ((base, "B"), (per, "P")):
+        repo.store_kg(nb.id, "s1", [{"local_id": lid, "object_type": "concept",
+            "payload": {"name": "cascode", "section_path": "1"}, "evidence": []}], [])
+        repo.rebuild_unified_kg(nb.id)
+    ids = {}
+    for nb in (base, per):
+        with repo._connect() as db:
+            ids[nb.id] = db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchone()["id"]
+    hits = [RetrievedKnowledge(object_id=ids[base.id], object_type="concept",
+                               payload={"name": "cascode"}, evidence=[], notebook_id=base.id),
+            RetrievedKnowledge(object_id=ids[per.id], object_type="concept",
+                               payload={"name": "cascode"}, evidence=[], notebook_id=per.id)]
+    block, id_map = repo._answer_context(per.id, hits)
+    assert len(id_map) == 1     # 跨 tier 同名折叠(旧行为:2 行)
+
+
+def test_answer_context_shows_base_relations(repo):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    _mark_base(repo, base.id)
+    _mk_src(repo, base.id, "s1")
+    repo.store_kg(base.id, "s1", [
+        {"local_id": "X", "object_type": "concept",
+         "payload": {"name": "cascode", "section_path": "1"}, "evidence": []},
+        {"local_id": "Y", "object_type": "concept",
+         "payload": {"name": "gain", "section_path": "1"}, "evidence": []},
+    ], [{"source_local_id": "X", "target_local_id": "Y", "edge_type": "supports", "evidence": []}])
+    repo.rebuild_unified_kg(base.id)
+    per = repo.create_notebook(NotebookCreate(name="per"))
+    with repo._connect() as db:
+        rows = db.execute("SELECT id, json_extract(payload,'$.name') nm FROM knowledge_objects "
+                          "WHERE notebook_id=?", (base.id,)).fetchall()
+    hits = [RetrievedKnowledge(object_id=r["id"], object_type="concept",
+                               payload={"name": r["nm"]}, evidence=[], notebook_id=base.id)
+            for r in rows]
+    block, id_map = repo._answer_context(per.id, hits)   # active=per, 命中全在 base
+    assert "relations:" in block and "supports" in block   # 旧行为:base 边不可见
+
+
 def test_unified_graph_object_level_no_dangling_after_merge(repo):
     # regression: non-concept merge must not create dangling edges at level=object
     # (the level the frontend requests). Non-concept nodes stay raw; concept->claim
