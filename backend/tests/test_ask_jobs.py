@@ -1,6 +1,8 @@
 """WS2a: ask_jobs 生命周期 + 显式取消 + 空会话清理 + 重启兜底。"""
+import json
 import threading
 import pytest
+from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -98,3 +100,48 @@ def _fake_answer(conv_id):
     from app.models.schemas import AskResponse
     return AskResponse(answer_id="", conversation_id=conv_id, conclusion="", answer="a",
                        grounded=True, anchors=[], related_knowledge=[], citations=[], llm_mode="x")
+
+
+# ---- 路由级测试:POST /notebooks/{id}/ask/jobs/{job_id}/cancel ----
+# 风格参照 test_ask_modes_api.py 的 _client() —— TestClient + repository().cache_clear()。
+
+def _api_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "")
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    from app.core.config import get_settings
+    from app.api import routes
+    from app.main import create_app
+    get_settings.cache_clear()
+    routes.repository.cache_clear()
+    return TestClient(create_app())
+
+
+def test_cancel_endpoint_unknown_job_id_returns_404(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    r = client.post(f"/api/notebooks/{nb}/ask/jobs/askjob-doesnotexist/cancel")
+    assert r.status_code == 404
+
+
+def test_cancel_endpoint_existing_job_returns_200_with_status(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    # chunk 模式走 /ask/stream 同步跑完;首个 NDJSON 事件是 started(带 job_id),
+    # 供前端「停止」按钮打 cancel 端点(与 test_ask_modes_api.py 的
+    # test_chunk_mode_streams_start_then_final 同一手法拿到真实 job_id)。
+    stream = client.post(f"/api/notebooks/{nb}/ask/stream",
+                         json={"question": "q", "mode": "chunk"})
+    assert stream.status_code == 200
+    events = [json.loads(l) for l in stream.text.splitlines() if l.strip()]
+    job_id = events[0]["job_id"]
+    assert events[0]["event"] == "started" and job_id
+
+    r = client.post(f"/api/notebooks/{nb}/ask/jobs/{job_id}/cancel")
+    assert r.status_code == 200
+    body = r.json()
+    assert "status" in body

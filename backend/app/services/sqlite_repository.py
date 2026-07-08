@@ -12958,12 +12958,11 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         question = payload.question.strip()
         now = _now()
+        job_id = f"askjob-{uuid4().hex[:10]}"
         with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question)
-        payload.conversation_id = conversation_id
-        job_id = f"askjob-{uuid4().hex[:10]}"
-        with self._write() as db:
+            payload.conversation_id = conversation_id
             db.execute(
                 "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
                 "status,trace_json,answer_id,error,created_at,updated_at) "
