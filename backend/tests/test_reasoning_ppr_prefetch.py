@@ -118,3 +118,36 @@ def test_prefetch_pool_shutdown_when_plan_raises():
     assert created_pools, "预期至少创建了 PPR 预取线程池"
     ppr_pool = created_pools[0]
     assert ppr_pool._shutdown is True
+
+
+def test_prefetch_pool_shutdown_when_ppr_future_raises():
+    """异常安全:plan/初检索都正常走到 seed pass,但后台 ppr_retrieve 本身抛错时,
+    ppr_future.result() 在 seed pass 处重抛——异常必须原样传出 run(),且线程池
+    仍必须被关闭一次(治 finally 被误删/误挪导致的线程泄漏)。"""
+    import app.services.reasoning_retrieval as mod
+
+    created_pools = []
+    real_pool_cls = mod.ThreadPoolExecutor
+
+    class _TrackingPool(real_pool_cls):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            created_pools.append(self)
+
+    repo, r = _mk()
+
+    def _boom(nb, q):
+        raise RuntimeError("ppr failed")
+    repo.retrieval.ppr_retrieve = _boom
+
+    mod.ThreadPoolExecutor = _TrackingPool
+    try:
+        with pytest.raises(RuntimeError, match="ppr failed"):
+            r.run("nb1", "问题")
+    finally:
+        mod.ThreadPoolExecutor = real_pool_cls
+
+    # max_workers=1 的 ppr 预取池必然先于子查询并发池创建 —— 取第一个。
+    assert created_pools, "预期至少创建了 PPR 预取线程池"
+    ppr_pool = created_pools[0]
+    assert ppr_pool._shutdown is True
