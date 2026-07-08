@@ -249,7 +249,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -1075,6 +1075,23 @@ class SQLiteRepository:
                              tokenize='trigram');
                 """
             )
+            # canonical 关系层(P1):关系端点折叠到 canonical 空间后的聚合,随
+            # rebuild_unified_kg 全量重写(seq 闸)。派生数据,可随时重建。
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS canonical_relations (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    canonical_src TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    canonical_tgt TEXT NOT NULL,
+                    support_count INTEGER NOT NULL DEFAULT 1,
+                    source_count INTEGER NOT NULL DEFAULT 1,
+                    sample_relation_ids TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (notebook_id, canonical_src, edge_type, canonical_tgt)
+                )
+                """
+            )
             # Lightweight column migrations for pre-existing databases.
             # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard via PRAGMA so this
             # runs idempotently on every init.
@@ -1154,6 +1171,9 @@ class SQLiteRepository:
             # community_seq: kg_mutation_seq at which communities were last (re)built.
             # 版本闸:社区随 KG 变动增量重建;-1 默认 → 首次必建(never matches seq>=0)。
             self._add_column_if_missing(db, "unified_kg_state", "community_seq", "INTEGER NOT NULL DEFAULT -1")
+            # canonical_rel_seq: canonical_relations 上次重建时的 kg_mutation_seq。
+            # -1 默认 → 首次必建(同 community_seq 语义)。
+            self._add_column_if_missing(db, "unified_kg_state", "canonical_rel_seq", "INTEGER NOT NULL DEFAULT -1")
             # source_index_backfilled: 0/1 marker — once set, _clear_source_extraction_state
             # trusts knowledge_object_sources for this notebook and skips the legacy
             # full-evidence-scan fallback. Set by the backfill-on-first-use scan itself
@@ -1320,6 +1340,29 @@ class SQLiteRepository:
                 );
                 """
             )
+
+    def _migration_8(self) -> None:
+        """canonical 关系层(P1):canonical_relations 表 + unified_kg_state.canonical_rel_seq。
+
+        已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
+        _migration_3/_migration_4 同款两层写法(baseline 双写 + 独立迁移)。"""
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS canonical_relations (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    canonical_src TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    canonical_tgt TEXT NOT NULL,
+                    support_count INTEGER NOT NULL DEFAULT 1,
+                    source_count INTEGER NOT NULL DEFAULT 1,
+                    sample_relation_ids TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (notebook_id, canonical_src, edge_type, canonical_tgt)
+                )
+                """
+            )
+            self._add_column_if_missing(db, "unified_kg_state", "canonical_rel_seq", "INTEGER NOT NULL DEFAULT -1")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
