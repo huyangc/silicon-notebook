@@ -11,6 +11,7 @@ Note — transitive-reject limitation (v1):
 from __future__ import annotations
 import logging
 import re
+import unicodedata
 from collections import Counter
 from typing import Dict, Iterable, List, Set, FrozenSet
 
@@ -64,8 +65,14 @@ def _strip_paren_acronym(name: str) -> str:
 
 
 def _norm(name: str) -> str:
-    stripped = _strip_paren_acronym(name or "")
-    cleaned = re.sub(r"[^a-z0-9+/ ]+", " ", stripped.strip().lower())
+    # NFKC 先行:中文语料常见全角拉丁/数字/括号(（）ＡＢＣ１２３)折到 ASCII,
+    # 让 acronym 剥离与 _ALIASES 能看见;纯 ASCII 输入是恒等变换。
+    folded = unicodedata.normalize("NFKC", name or "")
+    stripped = _strip_paren_acronym(folded)
+    # Unicode \w 保留 CJK/希腊/带音标字母 —— 旧 [^a-z0-9+/ ] 把纯中文名清成空
+    # seed,全库此类实体确定性塌缩进同一个 "K-" 簇(实测中文库 54% concept)。
+    # 纯 ASCII 名输出与旧类逐字节相同(下划线两版都归并为空格)。
+    cleaned = re.sub(r"[^\w+/ ]+", " ", stripped.strip().lower())
     cleaned = re.sub(r"[\s\-_]+", " ", cleaned).strip()
     return _ALIASES.get(cleaned, cleaned)
 

@@ -407,3 +407,44 @@ def test_cluster_seeds_emits_pending_seeds():
     # 至少命中那条版本变体对
     assert any({sa, sb} == {"deepseek v2", "deepseek v2 series"}
                for sa, sb, *_ in res["pending_seeds"])
+
+
+# --- Unicode / CJK normalization (P0 fix) ------------------------------------
+
+def test_norm_preserves_cjk_names():
+    assert _norm("双重汇率制") == "双重汇率制"
+    assert _norm("铸币平价") == "铸币平价"
+    assert _norm("双重汇率制") != _norm("铸币平价")
+
+
+def test_norm_keeps_cjk_tokens_in_mixed_names():
+    # 年份+中文名绝不能塌缩到裸年份 seed（旧行为:"1903年国际汇兑委员会"->"1903"）
+    assert _norm("1903年国际汇兑委员会") != "1903"
+    assert _norm("1903年国际汇兑委员会") != _norm("1955年货币改革")
+
+
+def test_norm_nfkc_folds_fullwidth_ascii():
+    assert _norm("ＫＶ Ｃａｃｈｅ") == _norm("KV Cache")
+
+
+def test_norm_greek_letters_survive():
+    # Python's str.lower() applies Unicode's contextual "final sigma" rule:
+    # a word-final Σ (followed by whitespace/end-of-string) lowercases to the
+    # final form ς (U+03C2), not plain σ (U+03C3) — deterministic stdlib
+    # behavior, not something _norm special-cases. The letters survive
+    # (not wiped to "modulator"), which is what this test guards.
+    assert _norm("ΔΣ Modulator") == "δς modulator"
+
+
+def test_norm_symbol_only_name_is_empty():
+    # 纯符号名归一化为空——由 seed_or_unique 守卫兜底（Task 3）
+    assert _norm("→") == ""
+    assert _norm("★☆") == ""
+
+
+def test_norm_ascii_behavior_unchanged():
+    # ASCII 零扰动回归网:与旧 [^a-z0-9+/ ] 字符类逐字节一致
+    assert _norm("Miller Compensation") == "miller compensation"
+    assert _norm("Op-Amp") == "op amp"        # 连字符→空格; "op amp" 是 _ALIASES 不动点
+    assert _norm("I/O") == "i/o"              # + / 保留
+    assert _norm("A_B") == "a b"              # 下划线经第二个 sub 归并为空格
