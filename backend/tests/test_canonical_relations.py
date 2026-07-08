@@ -148,6 +148,15 @@ def test_neighbors_edges_carry_support(repo):
     assert any(e.get("source_count") == 2 for e in nbres["edges"])
 
 
+def test_neighbors_incoming_edge_carries_support(repo):
+    # 表里存 K-cascode --supports--> K-gain;kg_neighbors 把边统一画成
+    # 「查询节点→邻居」,查 TARGET 侧(K-gain)时展示方向与存储方向相反,
+    # 注解必须经对称回退仍命中(否则入边永远丢 support/source_count)。
+    nb = _mk_nb_with_relations(repo)
+    res = repo.kg_neighbors(nb.id, "K-gain")
+    assert any(e.get("source_count") == 2 for e in res["edges"])
+
+
 def test_empty_table_leaves_edges_bare(repo):
     nb = _mk_nb_with_relations(repo)
     with repo._write() as db:
