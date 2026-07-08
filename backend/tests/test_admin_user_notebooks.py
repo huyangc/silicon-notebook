@@ -38,3 +38,45 @@ def test_list_user_notebooks_counts_and_excludes_copying(repo):
     assert by_id["n1"]["conversations"] == 1
     assert by_id["n2"]["sources"] == 0
     assert repo.list_user_notebooks("nobody") == []
+
+
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    from app.api import deps
+    deps.repository.cache_clear()
+    from app.main import create_app
+    return TestClient(create_app())
+
+
+def _auth(client, username):
+    client.post("/api/auth/register", json={"username": username, "password": "pw"})
+    t = client.post("/api/auth/login", json={"username": username, "password": "pw"}).json()["token"]
+    return {"Authorization": f"Bearer {t}"}
+
+
+def _auth_admin(client):
+    t = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+    return {"Authorization": f"Bearer {t}"}
+
+
+def test_user_notebooks_forbidden_for_regular(client):
+    b = _auth(client, "z00123456")
+    assert client.get("/api/admin/users/whoever/notebooks", headers=b).status_code == 403
+
+
+def test_user_notebooks_lists_for_admin(client):
+    admin = _auth_admin(client)
+    a = _auth(client, "z00123456")
+    uid = client.get("/api/me", headers=a).json()["id"]
+    client.post("/api/notebooks", json={"name": "NB-One"}, headers=a)
+    resp = client.get(f"/api/admin/users/{uid}/notebooks", headers=admin)
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert any(r["name"] == "NB-One" and "sources" in r for r in rows)

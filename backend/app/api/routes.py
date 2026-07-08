@@ -18,6 +18,7 @@ from app.api.deps import (
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
 from app.models.schemas import (
+    AdminUserNotebook,
     AdminUserUsage,
     AskRequest,
     AskResponse,
@@ -1331,6 +1332,14 @@ def list_admin_users(user: UserProfile = Depends(get_current_user)) -> List[Admi
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户总览")
     return [AdminUserUsage(**row) for row in repository().list_user_usage()]
+
+
+@router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])
+def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_current_user)) -> List[AdminUserNotebook]:
+    """某用户名下笔记本详情。仅 admin。"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看用户笔记本")
+    return [AdminUserNotebook(**row) for row in repository().list_user_notebooks(user_id)]
 
 
 # --- 待确认中心 (Pending Actions Center) ---------------------------------
