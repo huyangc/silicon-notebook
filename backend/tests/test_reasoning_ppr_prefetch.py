@@ -10,6 +10,8 @@ from app.services.reasoning_retrieval import ReasoningRetriever, SubQuery, Refle
 
 class _StubSettings:
     retrieval_top_n = 12
+    reasoning_top_n_per_query = 3
+    reasoning_top_n_cap = 36
     reasoning_max_steps = 5
     reasoning_max_subqueries = 3
     reasoning_stale_limit = 3

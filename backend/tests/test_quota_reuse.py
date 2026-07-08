@@ -8,6 +8,10 @@ from app.services.retrieval import RetrievedKnowledge
 
 class _StubSettings:
     retrieval_top_n = 4
+    # cap=4 钉住旧总预算(自适应下 retrieval_top_n 只是 floor,复合题会被
+    # per_query×n 抬高;本测试的 reuse⇔rerun 等价性要在固定预算下对比)。
+    reasoning_top_n_per_query = 3
+    reasoning_top_n_cap = 4
     reasoning_max_steps = 5
     reasoning_max_subqueries = 3
     reasoning_stale_limit = 3

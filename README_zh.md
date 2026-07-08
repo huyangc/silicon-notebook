@@ -325,7 +325,9 @@ SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storag
 **检索：**
 
 ```text
-RETRIEVAL_TOP_N         # 1-hop 扩展前的 top-N 命中数（默认 12）
+RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
+REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社区兄弟）保底席位（默认 3）
+REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
 ```
 
 **可伸缩检索索引：** 规模大到不可拷贝的 notebook（与 notebook 拷贝/分享判定同一阈值——
@@ -373,7 +375,6 @@ MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
 MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
 MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
-REPORT_SECTION_TOP_N         # 深度报告：每节深挖保留的 KG 命中数（默认 12）
 REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000）
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
 REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）

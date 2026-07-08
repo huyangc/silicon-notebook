@@ -51,6 +51,18 @@ def _norm_query(q: str) -> str:
     return " ".join(str(q).split()).casefold()
 
 
+def effective_top_n(settings, explicit: "Optional[int]", n_queries: int) -> int:
+    """合成阶段的证据预算。显式传入(报告逐节独立预算)直通;否则自适应——
+    单位是「每个方面(子查询,含 expand_community 兄弟)几席」而非写死总数:
+    per_query × 方面数,floor=retrieval_top_n(简单题与旧默认 12 逐字一致),
+    cap 封顶(对比题 3 原始+8 兄弟=11 方面 → 33,配额轮转不再被总数 12 摊薄)。"""
+    if explicit:
+        return explicit
+    return min(max(settings.retrieval_top_n,
+                   settings.reasoning_top_n_per_query * max(n_queries, 1)),
+               settings.reasoning_top_n_cap)
+
+
 @dataclass
 class _QueryAttempt:
     """单条子查询的执行账目:原文、带来的新增证据数、尝试次数(含被跳过的重复)。"""
@@ -260,8 +272,8 @@ class ReasoningRetriever:
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None, max_steps=None):
         raise_if_cancelled(self.cancel_event)
-        # top_n 覆盖 settings.retrieval_top_n(报告管线每节独立预算);None=沿用全局。
-        top_n = top_n or self.settings.retrieval_top_n
+        # top_n:显式传入(报告管线每节独立预算)直通;None=合成时按最终方面数
+        # (used_queries,含 expand_community 兄弟)自适应解析 —— 见 effective_top_n。
         # max_steps 覆盖 settings.reasoning_max_steps(报告滑块封顶 reflect 轮数);None=沿用全局。
         max_steps = max_steps or self.settings.reasoning_max_steps
         trace: List[TraceStep] = []
@@ -574,7 +586,10 @@ class ReasoningRetriever:
                                  detail={"reason": "stale_circuit_breaker", "stale": stale}))
                 break
 
-        answer_detail = {"elements": len(elements)}
+        # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
+        # expand_community 兄弟),预算随"问题的方面数"走。
+        top_n = effective_top_n(self.settings, top_n, len(used_queries))
+        answer_detail = {"elements": len(elements), "top_n": top_n}
         raise_if_cancelled(self.cancel_event)
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。

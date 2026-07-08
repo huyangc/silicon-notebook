@@ -347,7 +347,9 @@ SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local
 **Retrieval:**
 
 ```text
-RETRIEVAL_TOP_N         # top-N hits before 1-hop expansion (default 12)
+RETRIEVAL_TOP_N         # reasoning/report synthesis evidence-budget floor (default 20)
+REASONING_TOP_N_PER_QUERY  # adaptive budget: seats reserved per aspect/sub-query (default 3)
+REASONING_TOP_N_CAP        # adaptive budget cap; comparison Qs scale by #aspects (default 36)
 ```
 
 **Scalable-retrieval index:** notebooks large enough to be non-copyable (the same size
@@ -400,7 +402,6 @@ MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
 MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
 MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
 REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
-REPORT_SECTION_TOP_N         # deep-report: KG hits kept per section deep-dive (default 12)
 REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000)
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
