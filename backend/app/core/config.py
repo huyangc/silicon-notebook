@@ -244,6 +244,8 @@ class Settings(BaseSettings):
     relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, env="GRAPH_PPR_ENABLED")
+    # P0-C:seed pass PPR 与 plan LLM 并行(纯调度,结果逐位等价);False=原串行
+    reasoning_ppr_prefetch: bool = Field(True, validation_alias="REASONING_PPR_PREFETCH")
     ppr_damping: float = Field(0.5, env="PPR_DAMPING")               # rx.pagerank alpha
     ppr_passage_node_weight: float = Field(0.05, env="PPR_PASSAGE_NODE_WEIGHT")
     ppr_top_chunks: int = Field(20, env="PPR_TOP_CHUNKS")            # 最终喂答案的 chunk 数
