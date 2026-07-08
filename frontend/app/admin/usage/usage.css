@@ -9,3 +9,37 @@
 .usage-table th { color: var(--muted, #666); font-weight: 600; }
 .usage-table td a { color: var(--accent, #2563eb); text-decoration: none; }
 .usage-table td a:hover { text-decoration: underline; }
+
+.usage-table tbody tr:hover { background: var(--hover, #f9fafb); }
+.usage-table tr.usage-row-expanded { background: var(--hover, #f3f4f6); }
+.usage-table tr.usage-row-expanded:hover { background: var(--hover, #f3f4f6); }
+
+.usage-expand-col { width: 28px; padding-right: 0; }
+.usage-expand-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: none; background: transparent;
+  color: var(--muted, #666); font-size: 12px; line-height: 1; cursor: pointer;
+  border-radius: 4px;
+}
+.usage-expand-btn:hover { background: var(--border, #e5e7eb); color: inherit; }
+
+.usage-subrow td {
+  padding: 0 12px 12px 40px;
+  background: var(--hover, #fafafa);
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  white-space: normal;
+}
+.usage-subtable-status { padding: 10px 4px; color: var(--muted, #666); font-size: 13px; }
+.usage-subtable-error { color: var(--danger, #dc2626); }
+
+.usage-subtable {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  background: var(--surface, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 6px;
+  overflow: hidden;
+}
+.usage-subtable th, .usage-subtable td {
+  text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border, #e5e7eb);
+  white-space: nowrap;
+}
+.usage-subtable th { color: var(--muted, #666); font-weight: 600; background: var(--hover, #f9fafb); }
+.usage-subtable tbody tr:last-child td { border-bottom: none; }
