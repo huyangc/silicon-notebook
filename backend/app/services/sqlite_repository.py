@@ -198,6 +198,13 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
 _ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
     "ask_model_errors", default=None)
 
+# per-ask 查询 embed 缓存(P1-A):同一 ask 内同文本只打一次 embed 端点。
+# federated 两 tier 同 query、seed pass 与 quota 收尾的原问题此前各自重复 embed
+# (10-20 次网络 RTT/ask)。default None=非 ask 路径逐字节不变;失败(None)不缓存,
+# 保留重试语义;copy_context 线程共享同一 dict,CPython 下最坏=同文本算两次,无害。
+_ASK_EMBED_CACHE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "ask_embed_cache", default=None)
+
 # 请求级「当前用户」槽（单例仓库不能用实例态；由 get_current_user 依赖设/复位）。
 # None = 不在已认证请求上下文（离线脚本/直接测 repository）→ current_user() 回退 admin。
 _REQUEST_USER: "contextvars.ContextVar[UserProfile | None]" = contextvars.ContextVar(
@@ -7857,9 +7864,18 @@ class SQLiteRepository:
     def _embed_query(self, query: str) -> Optional[List[float]]:
         """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
         与语料侧 build_matrix 共用 truncate_vec 同一口径)。查询/语料两侧维度
-        不一致 = 静默零召回,是截断项目的头号风险 —— 勿在别处另行截断。"""
+        不一致 = 静默零召回,是截断项目的头号风险 —— 勿在别处另行截断。
+        P1-A:ask 作用域内(_ASK_EMBED_CACHE 非 None)按 query[:2000] 复用同文本
+        的截断后向量,砍 federated 双 tier/seed/quota 对同一问题的重复 RTT;
+        失败不缓存(保留每次重试语义)。default None(非 ask 路径)行为不变。"""
         if not self.settings.embedder_configured:
             return None
+        cache = _ASK_EMBED_CACHE.get()
+        key = query[:2000]
+        if cache is not None:
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
         try:
             vec = self.embedder.embed_query(query[:2000])
         except Exception as exc:
@@ -7870,6 +7886,8 @@ class SQLiteRepository:
         if rd and vec is not None and len(vec) > rd:
             import numpy as np
             vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
+        if cache is not None and vec is not None:
+            cache[key] = vec
         return vec
 
     def _runtime_dim(self) -> int:
@@ -12259,6 +12277,9 @@ class SQLiteRepository:
 
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
+        # P1-A(本轮 scope):只挂 reasoning 模式。ask_graph/ask_chunk 同样受益,
+        # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
+        _emb_token = _ASK_EMBED_CACHE.set({})
         try:
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
@@ -12341,6 +12362,7 @@ class SQLiteRepository:
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
+            _ASK_EMBED_CACHE.reset(_emb_token)
         response.mode = "reasoning"
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
