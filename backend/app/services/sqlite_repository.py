@@ -6710,6 +6710,12 @@ class SQLiteRepository:
                         progress(f"跳过:自上次 rebuild 起输入未变化({cached} clusters)", 0, 0)
                     except Exception:
                         pass
+                # canonical 关系层(派生)同款增量:自带 seq 闸,KG 未变即秒级 no-op。
+                try:
+                    self.rebuild_canonical_relations(notebook_id)
+                except Exception as exc:  # noqa: BLE001
+                    self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
+                                         "notebook_id": notebook_id, "error": str(exc)[:200]})
                 # 增量:聚类被跳过(输入未变),但社区可能未建/过期 → rebuild_communities
                 # 自带版本闸,只在需要时建(纯图、无 LLM、秒级)。这让「只需重建社区」的
                 # 场景在原有刷新流程里零额外成本达成;fail-open,不拖垮跳过路径。
@@ -6988,6 +6994,12 @@ class SQLiteRepository:
             db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
                        (notebook_id, run_id))
         _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
+        # canonical 关系层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
+        try:
+            self.rebuild_canonical_relations(notebook_id, force=True)
+        except Exception as exc:  # noqa: BLE001
+            self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
+                                 "notebook_id": notebook_id, "error": str(exc)[:200]})
         # Proactively refresh the viz-only index so the next KG-view open doesn't
         # pay a lazy build (and to cover same-second in-place edits the version
         # tuple can miss). Fail-open: a viz build error must never break rebuild.
@@ -7010,6 +7022,69 @@ class SQLiteRepository:
             self.event_log.emit({"kind": "communities_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
         return cluster_count
+
+    def rebuild_canonical_relations(self, notebook_id: str, force: bool = False) -> int:
+        """把 knowledge_relations 端点经 concept_clusters 折叠到 canonical 空间,
+        按 (canonical_src, edge_type, canonical_tgt) 聚合 support_count(原始行数)/
+        source_count(非NULL source_id 去重,下限1)/sample_relation_ids(cap 5),全量
+        重写 canonical_relations。方向保留;rejected 边排除;折叠后自环丢弃。
+
+        seq 闸(同 rebuild_communities):canonical_rel_seq==kg_mutation_seq 且表非空
+        → 跳过(force 绕过);重写后把入口捕获的 seq 写回。返回写入行数(跳过时返回
+        现有行数)。派生数据,fail-open 由调用方负责。"""
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            st = db.execute(
+                "SELECT kg_mutation_seq, canonical_rel_seq FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,)).fetchone()
+            cnt = db.execute(
+                "SELECT COUNT(*) AS c FROM canonical_relations WHERE notebook_id=?",
+                (notebook_id,)).fetchone()["c"]
+        seq = int(st["kg_mutation_seq"]) if st else 0
+        if (not force and st is not None and st["canonical_rel_seq"] == seq and cnt > 0):
+            return int(cnt)
+        agg: Dict[tuple, dict] = {}
+        with self._connect() as db:
+            cur = db.execute(
+                "SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, "
+                "       COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
+                "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+                "FROM knowledge_relations kr "
+                "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+                "  AND cs.member_object_id=kr.source_object_id "
+                "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+                "  AND ct.member_object_id=kr.target_object_id "
+                "WHERE kr.notebook_id=? AND kr.review_status!='rejected'",
+                (notebook_id,))
+            for r in cur:
+                s, t = r["s"], r["t"]
+                if not s or not t or s == t:
+                    continue
+                key = (s, r["et"], t)
+                ent = agg.get(key)
+                if ent is None:
+                    ent = agg[key] = {"n": 0, "docs": set(), "samples": []}
+                ent["n"] += 1
+                if r["src_doc"]:
+                    ent["docs"].add(r["src_doc"])
+                if len(ent["samples"]) < 5:
+                    ent["samples"].append(r["rid"])
+        now = _now()
+        rows = [(notebook_id, s, et, t, ent["n"], max(1, len(ent["docs"])),
+                 json.dumps(ent["samples"]), now)
+                for (s, et, t), ent in agg.items()]
+        with self._write() as db:
+            db.execute("DELETE FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
+            for i in range(0, len(rows), 1000):
+                db.executemany(
+                    "INSERT INTO canonical_relations "
+                    "(notebook_id, canonical_src, edge_type, canonical_tgt, "
+                    " support_count, source_count, sample_relation_ids, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)", rows[i:i + 1000])
+            db.execute(
+                "UPDATE unified_kg_state SET canonical_rel_seq=? WHERE notebook_id=?",
+                (seq, notebook_id))
+        return len(rows)
 
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
