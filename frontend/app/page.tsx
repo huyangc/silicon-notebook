@@ -1245,6 +1245,8 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const askJobIdRef = useRef<string | null>(null);
+  // started 事件落地前(jobId 尚未知晓)点了「停止」:先记下意图,onStart 拿到 jobId 后立即补打 cancel。
+  const cancelRequestedRef = useRef(false);
   // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
   // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
@@ -1273,8 +1275,10 @@ export default function Home() {
             await openSession(reconnectConvIdRef.current ?? "");   // 见注: 重载拿最终答案
           } else if (d.status === "cancelled") {
             setToast("该问答已被取消");
+            await loadSessions(nb);   // 后端对取消的首轮会话做了空会话清理,刷新列表去掉幽灵项
           } else {
             setToast(d.status === "interrupted" ? "该问答因服务重启中断" : `该问答失败：${d.error || "未知错误"}`);
+            await loadSessions(nb);   // 同上:失败/中断的首轮会话也可能已被后端清理
           }
         }
       } catch { /* transient; keep polling */ }
@@ -2178,6 +2182,7 @@ export default function Home() {
     setPendingMode(askMode);
     setPendingTrace([]);
     setAsking(true);
+    cancelRequestedRef.current = false;   // 每次新 ask 复位「停止」意图
     const controller = new AbortController();
     askAbortRef.current = controller;
     try {
@@ -2187,7 +2192,14 @@ export default function Home() {
         payload,
         (step) => setPendingTrace((previous) => [...previous, step]),
         controller.signal,
-        (jobId) => { askJobIdRef.current = jobId; },
+        (jobId) => {
+          askJobIdRef.current = jobId;
+          if (cancelRequestedRef.current) {
+            // started 落地前已点过「停止」:jobId 当时还不存在,补打 cancel 端点真取消 worker。
+            cancelRequestedRef.current = false;
+            api(`/notebooks/${currentNotebookId}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+          }
+        },
       );
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
@@ -2201,6 +2213,7 @@ export default function Home() {
     } finally {
       if (askAbortRef.current === controller) askAbortRef.current = null;
       askJobIdRef.current = null;
+      cancelRequestedRef.current = false;
       setPendingQuestion("");
       setPendingMode(DEFAULT_ASK_MODE);
       setPendingTrace([]);
@@ -2216,6 +2229,9 @@ export default function Home() {
     // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
     if (jobId && nb) {
       api(`/notebooks/${nb}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+    } else {
+      // started 事件还没落地,jobId 未知:记下意图,onStart 拿到 jobId 后补打 cancel(见 runAsk)。
+      cancelRequestedRef.current = true;
     }
     askAbortRef.current?.abort();
   }
