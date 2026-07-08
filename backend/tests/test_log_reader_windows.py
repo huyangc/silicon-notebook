@@ -75,3 +75,22 @@ def test_plain_window_before_returns_older(tmp_path):
     cut = all_recs[2]["seq"]
     older, _, _ = lr._load_plain_window(p, since=None, before=cut, max_records=100, max_bytes=1 << 20)
     assert [r["i"] for r in older] == [0, 1]
+
+
+def test_plain_window_keeps_line_at_exact_byte_boundary(tmp_path):
+    p = tmp_path / "llm-2026-07-08.jsonl"
+    objs = [{"i": 0}, {"i": 1}, {"i": 2}]  # 等长行
+    _write_lines(p, objs)
+    line_len = len(json.dumps(objs[0]) + "\n")
+    recs, _, trunc = lr._load_plain_window(
+        p, since=None, before=None, max_records=100, max_bytes=line_len * 2)
+    assert [r["i"] for r in recs] == [1, 2]   # 行首对齐的完整行 i=1 不得被丢
+    assert trunc is True                       # i=0 确在字节窗口外
+
+
+def test_plain_window_since_caps_records(tmp_path):
+    p = tmp_path / "llm-2026-07-08.jsonl"
+    _write_lines(p, [{"i": i} for i in range(10)])
+    recs, _, trunc = lr._load_plain_window(p, since=0, before=None, max_records=3, max_bytes=1 << 20)
+    assert len(recs) == 3 and trunc is True    # since=0 → i=1..9 均更新,极小 max_records 触发截断
+    assert [r["i"] for r in recs] == [7, 8, 9] # 保最新
