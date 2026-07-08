@@ -37,6 +37,44 @@ def test_reasoning_settings_knobs():
     assert s.reasoning_max_subqueries == 5
 
 
+def test_adaptive_top_n_settings_defaults():
+    from app.core.config import Settings
+    s = Settings()
+    assert s.retrieval_top_n == 20            # base floor(旧 12 从未校准,提到 20)
+    assert s.reasoning_top_n_per_query == 3
+    assert s.reasoning_top_n_cap == 36
+
+
+def test_adaptive_top_n_env(monkeypatch):
+    monkeypatch.setenv("REASONING_TOP_N_PER_QUERY", "5")
+    monkeypatch.setenv("REASONING_TOP_N_CAP", "20")
+    from app.core.config import Settings
+    s = Settings()
+    assert s.reasoning_top_n_per_query == 5
+    assert s.reasoning_top_n_cap == 20
+
+
+def test_effective_top_n_scales_with_aspects():
+    """证据预算=clamp(每方面席位×方面数, floor=retrieval_top_n(20), cap(36))。
+    简单/少方面题=floor(20);对比题(如 3+8 兄弟=11 方面)→ 3×11=33,不再被总数挤薄;
+    显式传入(报告逐节独立预算)直通。"""
+    from app.services.reasoning_retrieval import effective_top_n
+
+    class _S:
+        retrieval_top_n = 20
+        reasoning_top_n_per_query = 3
+        reasoning_top_n_cap = 36
+
+    s = _S()
+    assert effective_top_n(s, None, 1) == 20    # 单方面:floor
+    assert effective_top_n(s, None, 6) == 20    # 3×6=18 < floor → 仍 20
+    assert effective_top_n(s, None, 7) == 21    # 3×7=21 > floor → 自适应接管
+    assert effective_top_n(s, None, 11) == 33   # 对比题:3×11,自动扩容
+    assert effective_top_n(s, None, 20) == 36   # 封顶 cap
+    assert effective_top_n(s, 12, 11) == 12     # 显式传入(报告逐节)直通,不受方面数影响
+    assert effective_top_n(s, None, 0) == 20    # 防御:0 方面按 1 算 → floor
+
+
 def test_reasoning_quota_enabled_default():
     from app.core.config import Settings
     assert Settings().reasoning_quota_enabled is True
@@ -779,6 +817,9 @@ def test_run_quota_path_keeps_both_groups(rrepo, monkeypatch):
     nb = _seed_two_nodes(rrepo)
     rrepo.settings.reasoning_quota_enabled = True
     rrepo.settings.retrieval_top_n = 2
+    # 自适应预算下,"紧预算"由 cap 表达(retrieval_top_n 只是 floor,2 方面会被
+    # per_query×2=6 抬高):cap=2 钉住总预算,保住本测试「配额救弱势组」的原意。
+    rrepo.settings.reasoning_top_n_cap = 2
     # 用纯字母 key 避免 expand_query 内 normalize_terms 插入空格后 dict 查找失效
     per_q = {
         "subV": [_rk("A", 0.5), _rk("B", 0.45)],

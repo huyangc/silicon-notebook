@@ -85,7 +85,8 @@ class Settings(BaseSettings):
 
     # --- 深度报告(report_engine) ---
     report_max_sections: int = Field(6, validation_alias="REPORT_MAX_SECTIONS")
-    report_section_top_n: int = Field(12, validation_alias="REPORT_SECTION_TOP_N")
+    # (report_section_top_n 已移除:逐节深挖与 ask 统一走 effective_top_n 自适应预算,
+    #  由 retrieval_top_n / REASONING_TOP_N_* 统一治理;不再有报告专属的 KG 预算旋钮。)
     report_section_chunk_budget: int = Field(
         20000, validation_alias="REPORT_SECTION_CHUNK_BUDGET")
     report_section_max_tokens: int = Field(
@@ -192,8 +193,9 @@ class Settings(BaseSettings):
     embed_rate_limit_base_delay: float = Field(2.0, env="EMBED_RATE_LIMIT_BASE_DELAY")
     # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
     db_busy_timeout_ms: int = Field(30000, env="DB_BUSY_TIMEOUT_MS")
-    # 检索：top-N 知识对象。
-    retrieval_top_n: int = Field(12, env="RETRIEVAL_TOP_N")
+    # 检索：top-N 知识对象。旧默认 12 是 6 月从 scored[:12] 魔数原样抬入、从未校准;
+    # 提到 20 给简单/单方面题更多深度余量(对比题在此 floor 之上再按方面数自适应扩容)。
+    retrieval_top_n: int = Field(20, env="RETRIEVAL_TOP_N")
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, env="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, env="RETRIEVAL_RRF_K")
@@ -305,6 +307,11 @@ class Settings(BaseSettings):
     # 复合问题最终排序: 开启后按子查询配额 round-robin 选 top-N(避免整串全局排序让
     # 信息量大的一方通吃); 关闭则回退全局重排。单子查询时自动等价全局。
     reasoning_quota_enabled: bool = Field(True, env="REASONING_QUOTA_ENABLED")
+    # 自适应证据预算(top_n=None 时):最终采用的 KG 候选数 = 每方面(子查询,含
+    # expand_community 兄弟)× per_query 席位,floor=retrieval_top_n(简单题与旧 12
+    # 逐字一致),cap 封顶(对比题 3+8 兄弟=11 方面 → 33,不再被总数 12 摊薄)。
+    reasoning_top_n_per_query: int = Field(3, validation_alias="REASONING_TOP_N_PER_QUERY")
+    reasoning_top_n_cap: int = Field(36, validation_alias="REASONING_TOP_N_CAP")
     reasoning_quota_reuse_enabled: bool = Field(True, validation_alias="REASONING_QUOTA_REUSE")  # P1-B:quota 收尾复用初检索留存的全量打分(一次 run 内图只读⇒与重跑逐位等价);False=原收尾重跑
     # 退化循环熔断: 连续 N 轮无有效进展(含反复请求已访问节点)即强制收尾作答,
     # 不空转到 reasoning_max_steps; search_elements 累计次数上限(防"每次有新增但永不满足")。

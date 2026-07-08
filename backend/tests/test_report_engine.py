@@ -12,7 +12,7 @@ def test_report_settings_defaults():
     from app.core.config import Settings
     s = Settings(_env_file=None)
     assert s.report_max_sections == 6
-    assert s.report_section_top_n == 12
+    assert not hasattr(s, "report_section_top_n")   # 已移除:逐节与 ask 统一走自适应预算
     assert s.report_section_chunk_budget == 20000
     assert s.report_section_max_tokens == 8192
     assert s.report_allow_parametric is True
@@ -384,6 +384,7 @@ def test_deep_dive_passes_depth_as_max_steps(repo, monkeypatch):
     monkeypatch.setattr("app.services.reasoning_retrieval.ReasoningRetriever", _R)
     eng._deep_dive("nb", {"title": "t", "scope": "s", "sub_queries": ["q"]}, "Q", depth=3, on_step=None)
     assert captured.get("max_steps") == 3
+    assert captured.get("top_n") is None   # 不传 top_n → 与 ask 同一套自适应证据预算
 
 
 def test_run_sections_writes_section_status(repo, monkeypatch):

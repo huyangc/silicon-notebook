@@ -212,9 +212,10 @@ class ReportEngine:
         from app.services.reasoning_retrieval import ReasoningRetriever
         sec_question = (f"{question}\n[报告章节] {section['title']}: {section['scope']}\n"
                         f"[本节检索方向] " + "; ".join(section["sub_queries"]))
+        # 与 ask 走同一套流程:不传 top_n → run 按本节方面数自适应证据预算
+        # (effective_top_n:floor=retrieval_top_n,横向对比节因兄弟子查询多而扩容)。
         return ReasoningRetriever(self.repo, self.settings, self.cancel_event).run(
-            notebook_id, sec_question, on_step=on_step,
-            top_n=self.settings.report_section_top_n, max_steps=depth)
+            notebook_id, sec_question, on_step=on_step, max_steps=depth)
 
     # --- Stage C(单节):撰写 ---
     def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
