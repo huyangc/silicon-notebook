@@ -8,6 +8,9 @@ def test_valid_date_param():
     assert not lr.valid_date_param("2026-7-8")
     assert not lr.valid_date_param("../etc")
     assert not lr.valid_date_param("")
+    # $ 换行绕过必须被拒（CVE 类缺陷修复）
+    assert not lr.valid_date_param("2026-07-08\n")
+    assert not lr.valid_date_param("2026-07-08\nx")
 
 
 def test_available_days_sorted_desc_with_legacy(tmp_path):
