@@ -16,3 +16,15 @@ test("ignores blank NDJSON lines", () => {
   assert.deepEqual(parsed.lines, ['{"event":"progress"}']);
   assert.equal(parsed.remainder, "");
 });
+
+test("takeNdjsonLines 拆多行 + 保留残段", () => {
+  const r = takeNdjsonLines('{"event":"started","job_id":"j1"}\n{"event":"progress"');
+  assert.deepEqual(r.lines, ['{"event":"started","job_id":"j1"}']);
+  assert.equal(r.remainder, '{"event":"progress"');
+});
+
+test("started/cancelled 事件可被 JSON.parse 出正确 tag", () => {
+  assert.equal(JSON.parse('{"event":"started","job_id":"j1"}').event, "started");
+  assert.equal(JSON.parse('{"event":"started","job_id":"j1"}').job_id, "j1");
+  assert.equal(JSON.parse('{"event":"cancelled"}').event, "cancelled");
+});

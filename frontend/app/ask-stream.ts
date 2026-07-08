@@ -8,8 +8,10 @@ export type ReasoningTraceStep = {
 };
 
 export type AskStreamEvent<TResponse> =
+  | { event: "started"; job_id: string }
   | { event: "progress"; step: ReasoningTraceStep }
   | { event: "final"; response: TResponse }
+  | { event: "cancelled" }
   | { event: "error"; error: string };
 
 export function takeNdjsonLines(buffer: string): { lines: string[]; remainder: string } {

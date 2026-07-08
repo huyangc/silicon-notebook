@@ -558,6 +558,7 @@ async function readAskStream<TResponse>(
   payload: unknown,
   onProgress: (step: ReasoningTraceStep) => void | Promise<void>,
   signal?: AbortSignal,
+  onStart?: (jobId: string) => void,
 ): Promise<TResponse> {
   const started = performance.now();
   const response = await fetch(`${API_BASE}${path}`, {
@@ -603,11 +604,15 @@ async function readAskStream<TResponse>(
 
   const consumeLine = async (line: string) => {
     const event = JSON.parse(line) as AskStreamEvent<TResponse>;
-    if (event.event === "progress") {
+    if (event.event === "started") {
+      onStart?.(event.job_id);
+    } else if (event.event === "progress") {
       await onProgress(event.step);
       await yieldToPaint();
     } else if (event.event === "final") {
       finalResponse = event.response;
+    } else if (event.event === "cancelled") {
+      throw new DOMException("已中断回答", "AbortError");  // 走 runAsk 的 isAbortError 干净分支
     } else if (event.event === "error") {
       throw new Error(event.error);
     }
@@ -1232,6 +1237,7 @@ export default function Home() {
   const sourcesRef = useRef<SourceSummary[]>([]);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
+  const askJobIdRef = useRef<string | null>(null);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -2131,6 +2137,7 @@ export default function Home() {
         payload,
         (step) => setPendingTrace((previous) => [...previous, step]),
         controller.signal,
+        (jobId) => { askJobIdRef.current = jobId; },
       );
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
@@ -2143,6 +2150,7 @@ export default function Home() {
       reportError(error);
     } finally {
       if (askAbortRef.current === controller) askAbortRef.current = null;
+      askJobIdRef.current = null;
       setPendingQuestion("");
       setPendingMode(DEFAULT_ASK_MODE);
       setPendingTrace([]);
@@ -2152,6 +2160,13 @@ export default function Home() {
   }
 
   function abortAsk() {
+    const jobId = askJobIdRef.current;
+    const nb = currentNotebookId;
+    // 显式取消 = 打 cancel 端点(真取消后端 worker),再 abort 本地流(立即停读)。
+    // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
+    if (jobId && nb) {
+      api(`/notebooks/${nb}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+    }
     askAbortRef.current?.abort();
   }
 
