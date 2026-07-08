@@ -123,3 +123,26 @@ def test_load_day_window_dispatches(tmp_path):
         fh.write(json.dumps({"i": 9}) + "\n")
     r2, _, _ = lr.load_day_window(gzp, True, since=None, before=None)
     assert [r["i"] for r in r2] == [9]
+
+
+def test_gz_window_before_anchors_window_not_file_tail(tmp_path):
+    p = tmp_path / "llm-2026-07-01.jsonl.gz"
+    with _gz.open(p, "wt", encoding="utf-8") as fh:
+        for i in range(200):
+            fh.write(json.dumps({"i": i}) + "\n")
+    recs, _, trunc = lr._load_gz_window(p, since=None, before=150, max_records=100)
+    assert [r["i"] for r in recs] == list(range(50, 150))  # 窗口锚定在 before,非文件尾
+    assert trunc is True
+
+
+def test_gz_window_truncated_ignores_malformed_lines(tmp_path):
+    p = tmp_path / "llm-2026-07-02.jsonl.gz"
+    with _gz.open(p, "wt", encoding="utf-8") as fh:
+        for i in range(5):
+            fh.write(json.dumps({"i": i}) + "\n")
+        for _ in range(200):
+            fh.write("{not json\n")   # malformed
+    recs, malformed, trunc = lr._load_gz_window(p, since=None, before=None, max_records=100)
+    assert [r["i"] for r in recs] == [0, 1, 2, 3, 4]
+    assert malformed == 200
+    assert trunc is False              # 有效行仅 5 条,未截断(不被 malformed 污染)
