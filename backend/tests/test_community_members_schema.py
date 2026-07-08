@@ -74,9 +74,10 @@ def test_migration_3_and_4_backfill_community_schema(repo):
     applied = repo._migrate()  # 等价于后端重启时的迁移
 
     assert 3 in applied and 4 in applied, "应用了 _migration_3(表)与 _migration_4(列)"
-    assert SCHEMA_VERSION == 4
+    # 版本闸从旧库 user_version=2 迁到当前 SCHEMA_VERSION(非硬编码字面量——每次新增
+    # _migration_N 该常量都会 +1,断言与之绑定才不会随后续 schema 变更假红)。
     with repo._connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 4
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
         cols = {r["name"] for r in db.execute("PRAGMA table_info(community_members)")}
         idx = {r["name"] for r in db.execute("PRAGMA index_list(community_members)")}
         uks_cols = ({r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)")}
