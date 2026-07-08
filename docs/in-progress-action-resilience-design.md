@@ -182,7 +182,7 @@ WS2b = 一个 PR。轨迹持久化 + `GET …/ask/jobs/{jobId}` + 会话详情 J
 | `POST …/ask/stream` | WS2a | 断连不取消；首行发 `started`+job_id |
 | `POST …/ask/jobs/{jobId}/cancel` | WS2a | 显式取消（新） |
 | `GET …/ask/jobs/{jobId}` | WS2b | 状态 + 回放轨迹 + 终态答案（新） |
-| `GET …/unified-kg/status` | WS1 | 增 `build_status`/`building` 字段 |
+| `GET …/notebooks/{id}` | WS1 | 增 `kg_building` 字段（`get_notebook` 从进程内 `_kg_building` set 回填；无新端点） |
 | `GET …/conversations/{id}` | WS2b | 详情含在途 turn（JOIN ask_jobs） |
 
 ## 8. 数据模型变更
@@ -192,7 +192,7 @@ WS2b = 一个 PR。轨迹持久化 + `GET …/ask/jobs/{jobId}` + 会话详情 J
 
 ## 9. 错误处理与边界
 
-- **后端重启**：`kg_build_jobs` / `ask_jobs` 残留 running → `interrupted`/"中断:服务重启"；前端如实显示 + 重试。
+- **后端重启**：WS1 无表——`_kg_building` 内存 set 天然清空=未构建（诚实态，无需 KG 专属 reconcile；经 `background_jobs.submit` 提交的那次 job 另由现有 `_recover_interrupted_jobs` 标记）。WS2a 的 `ask_jobs` 残留 running → `interrupted`/"中断:服务重启"；前端如实显示 + 重试。
 - **会话被删**：`ON DELETE CASCADE` 清 `ask_jobs`；worker 落库遇会话不存在需 fail-open 不崩。
 - **显式取消竞态**：worker 已 done 后再取消 → no-op。
 - **多标签/多次重开**：重连走只读 poll，天然安全。
@@ -206,10 +206,10 @@ WS2b = 一个 PR。轨迹持久化 + `GET …/ask/jobs/{jobId}` + 会话详情 J
 - 新增：显式 cancel → 答案不存、`status='cancelled'`、空首轮会话被清理。
 - `ask_jobs` 生命周期：running→done / running→cancelled / 重启 reconcile running→interrupted。
 - 重连：`GET …/ask/jobs/{id}` 回放已持久化轨迹；轮询至 final。
-- WS1：`kg_build_jobs` 置位/清位/reconcile；`unified_kg_status` 含 build_status。
+- WS1：`_kg_building` set 在 `build_notebook_kg` **与** `rebuild_notebook_kg` 全程置位/清位（覆盖重抽的 delete 阶段，防大库 delete>6s 时前端轮询过早停）；`get_notebook.kg_building` 回填。
 
 **前端**（纯逻辑 `.ts` + `.test.mjs`，`node --test`，见 [[frontend-backend-co-design]] 前后端同步）：
-- WS1 一个纯函数 `resumeFromStatus(status)` → 是否重新起轮询 + 初始进度。
+- WS1 纯模块 `in-progress-resume.ts` 的四个谓词（`shouldResumeReviewAll`/`shouldResumeScaleIndex`/`shouldResumeKgBuild` + `kgBuildFinished`）→ 是否接回轮询 + KG 轮询停止条件（改看 `kg_building` 而非 `kg_ready`）。
 - WS2b 一个纯函数：给定 `ConversationDetail`（含在途 turn）→ 产出「哪些 turn 需重连、从第几步续」的 resume 描述子。
 - DOM 耦合部分保持薄。
 
