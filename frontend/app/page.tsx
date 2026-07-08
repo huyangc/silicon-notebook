@@ -411,6 +411,17 @@ function sourceTopicCandidates(notebook: NotebookSummary | null, sources: Source
     "lines", "authoritative", "gold", "coordinates", "live", "yaml", "atom",
     "atoms", "span", "file", "mineru", "parsed", "text", "element", "elements",
     "under", "each", "may", "drift",
+    // 常见英文虚词/填充词:避免标题里高频的 and/the/with… 被当成 topic(如
+    // 「围绕 And 提问」)。正则只取 ≥3 字符词,故 of/in/to/is 等 2 字词天然排除。
+    "and", "the", "for", "with", "from", "this", "that", "these", "those",
+    "into", "onto", "over", "than", "per", "via", "but", "nor", "yet",
+    "they", "them", "their", "there", "our", "your", "its", "his", "her",
+    "who", "whom", "whose", "which", "what", "some", "any", "all", "both",
+    "other", "another", "are", "was", "were", "been", "being", "has", "have",
+    "had", "can", "could", "will", "would", "shall", "should", "might", "must",
+    "not", "how", "why", "when", "where", "also", "more", "most", "very",
+    "just", "such", "then", "thus", "here", "about", "above", "below", "after",
+    "before", "between", "within", "without", "through", "upon", "off",
   ]);
   const counts = new Map<string, { label: string; count: number }>();
   const add = (text: string, weight: number) => {
