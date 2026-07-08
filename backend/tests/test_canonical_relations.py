@@ -162,6 +162,17 @@ def test_empty_table_leaves_edges_bare(repo):
     with repo._write() as db:
         db.execute("DELETE FROM canonical_relations WHERE notebook_id=?", (nb.id,))
         db.execute("UPDATE unified_kg_state SET canonical_rel_seq=-1 WHERE notebook_id=?", (nb.id,))
-    repo._unified_cache.clear()
     g = repo.unified_graph(nb.id, level="object")
     assert all("support_count" not in e for e in g["edges"])
+
+
+def test_annotation_does_not_stick_to_unified_cache(repo):
+    # _annotate_edge_support 必须拷贝而非就地改边 dict——full-graph 路径下这些
+    # dict 与 _unified_cache 共享引用,就地写字段会把注解粘进缓存(违反缓存
+    # 应保持不含注解的设计,导致后续读到滞后的旧计数)。
+    nb = _mk_nb_with_relations(repo)
+    g1 = repo.unified_graph(nb.id, level="object")
+    assert any(e.get("source_count") for e in g1["edges"])
+    cached = repo._unified_cache.get((nb.id, "object"))
+    assert cached is not None
+    assert all("support_count" not in e for e in cached["edges"])

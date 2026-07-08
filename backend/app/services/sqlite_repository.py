@@ -6270,6 +6270,7 @@ class SQLiteRepository:
         if not sup:
             return edges
         cmap = self.cluster_map(notebook_id)
+        out: List[dict] = []
         for e in edges:
             key = (cmap.get(e["source_object_id"], e["source_object_id"]),
                    e["edge_type"],
@@ -6281,8 +6282,12 @@ class SQLiteRepository:
                 # 展示朝向都能拿到支持度;正向命中优先,A→B 与 B→A 同时存在时不串。
                 hit = sup.get((key[2], key[1], key[0]))
             if hit:
-                e["support_count"], e["source_count"] = hit[0], hit[1]
-        return edges
+                # 拷贝而非就地改:全量路径的边 dict 与 _unified_cache 共享引用,
+                # 就地写字段会把注解粘进缓存(缓存须保持不含注解,避免粘住旧计数)。
+                out.append({**e, "support_count": hit[0], "source_count": hit[1]})
+            else:
+                out.append(e)
+        return out
 
     def unified_graph(self, notebook_id: str, level: str = "concept",
                       limit: Optional[int] = None) -> dict:
