@@ -4830,6 +4830,17 @@ button.chat-session-card {
   font-size: 11px;
 }
 
+.kg-relation-mid {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kg-relation-mid .tag {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
 .kg-text-card,
 .kg-evidence-card {
   min-width: 0;

@@ -317,7 +317,7 @@ type KnowledgeEdge = { from_id: string; to_id: string; relation: string; label: 
 type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
 
 type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
-type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string };
+type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string; support_count?: number; source_count?: number };
 type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[]; total_nodes?: number; total_edges?: number; truncated?: boolean; viz_building?: boolean };
 type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number; element_text?: string };
 type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
@@ -330,7 +330,7 @@ type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: numbe
 type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
 type MergeReviewJob = { status: string; total: number; done: number; error: string };
 type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
-type FgLink = { source: string | FgNode; target: string | FgNode; label: string };
+type FgLink = { source: string | FgNode; target: string | FgNode; label: string; sourceCount?: number };
 type KgSearchHit = { object_id: string; name: string; object_type: string; score: number; match: string };
 type KgSearchResp = { query: string; hits: KgSearchHit[] };
 type KgNeighborsResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
@@ -898,7 +898,8 @@ function drawKgLinkLabel(link: FgLink, ctx: CanvasRenderingContext2D, globalScal
   if (!source || !target || source.x == null || source.y == null || target.x == null || target.y == null) return;
   const x = (source.x + target.x) / 2;
   const y = (source.y + target.y) / 2;
-  const label = truncateKgLabel(RELATION_LABELS[link.label] ?? link.label, 18);
+  let label = truncateKgLabel(RELATION_LABELS[link.label] ?? link.label, 18);
+  if ((link.sourceCount ?? 1) >= 2) label += ` ×${link.sourceCount}`;
   const fontSize = Math.min(12, Math.max(8, 10 / globalScale));
 
   ctx.save();
@@ -1645,7 +1646,7 @@ export default function Home() {
       const keep = new Set(nodes.map((n) => n.id));
       const links: FgLink[] = uGraphMerged.edges
         .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
-        .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type }));
+        .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type, sourceCount: e.source_count }));
       return { nodes, links, searchHitCount: nodes.length };
     }
 
@@ -1664,7 +1665,7 @@ export default function Home() {
     const keep = new Set(nodes.map((n) => n.id));
     const links: FgLink[] = uGraphMerged.edges
       .filter((e) => keep.has(e.source_object_id) && keep.has(e.target_object_id))
-      .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type }));
+      .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type, sourceCount: e.source_count }));
     return { nodes, links, searchHitCount: 0 };
   }, [uGraphMerged, kgSearch, kgSearchHits, kgSelectedTypes]);
 
@@ -4553,8 +4554,11 @@ export default function Home() {
                   linkDirectionalArrowLength={7}
                   linkDirectionalArrowRelPos={1}
                   linkColor={() => "rgba(91, 105, 130, 0.42)"}
-                  linkWidth={1.35}
-                  linkLabel={(link: any) => RELATION_LABELS[link.label] ?? link.label}
+                  linkWidth={(link: any) => 1.35 + Math.min(((link.sourceCount ?? 1) - 1), 4) * 0.5}
+                  linkLabel={(link: any) => {
+                    const base = RELATION_LABELS[link.label] ?? link.label;
+                    return (link.sourceCount ?? 1) >= 2 ? `${base} · ${link.sourceCount} 源支持` : base;
+                  }}
                   linkCanvasObjectMode={() => "after"}
                   linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgLinkLabel(link, ctx, globalScale, kgDenseView)}
                   nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgNode(node, ctx, globalScale, selectedKgNodeId, kgDenseView)}
@@ -4617,7 +4621,14 @@ export default function Home() {
                         {selectedKgEdges.slice(0, 24).map((edge, index) => (
                           <div className="kg-relation-row" key={`${edge.source_object_id}-${edge.target_object_id}-${index}`}>
                             <span className="kg-relation-node"><KgTypeMark type={edge.sourceType} /><span>{truncateKgLabel(edge.sourceName, 28)}</span></span>
-                            <strong>{RELATION_LABELS[edge.edge_type] ?? edge.edge_type}</strong>
+                            {edge.source_count && edge.source_count >= 2 ? (
+                              <span className="kg-relation-mid">
+                                <strong>{RELATION_LABELS[edge.edge_type] ?? edge.edge_type}</strong>
+                                <span className="tag">×{edge.source_count}源</span>
+                              </span>
+                            ) : (
+                              <strong>{RELATION_LABELS[edge.edge_type] ?? edge.edge_type}</strong>
+                            )}
                             <span className="kg-relation-node"><KgTypeMark type={edge.targetType} /><span>{truncateKgLabel(edge.targetName, 28)}</span></span>
                           </div>
                         ))}
