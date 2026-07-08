@@ -645,7 +645,9 @@ python scripts/replay_retrieval.py --compare before.json after.json             
 python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # only compares top-k id set overlap + order (tolerates score drift from e.g. float32 conversion)
 ```
 
-`questions.txt` has one question per line; `plan.json` = `{"<question>": ["sub-query 1", "sub-query 2", ...]}`. **Must be run from the main checkout root** (`.env` is loaded relative to the current working directory, same as `batch_ingest.py`). The `--compare` exit code *is* the verdict: `0` when everything passes, `1` if any question mismatches — safe to wire directly into CI or a script gate. `--owner` reuses the same owner-resolution as `batch_ingest.py` (case-insensitive username, defaults to the admin user). With EMBED unconfigured, the CLI **errors out immediately** (exit code `2`) rather than silently producing a misleading "zero recall" comparison from zero vectors.
+`questions.txt` has one question per line; `plan.json` = `{"<question>": ["sub-query 1", "sub-query 2", ...]}`. **Must be run from the main checkout root** (`.env` is loaded relative to the current working directory, same as `batch_ingest.py`). `--owner` reuses the same owner-resolution as `batch_ingest.py` (case-insensitive username, defaults to `"admin"`).
+
+Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (EMBED unconfigured, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
 
 ## Current Limitations
 

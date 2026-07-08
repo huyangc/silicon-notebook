@@ -598,7 +598,9 @@ python scripts/replay_retrieval.py --compare before.json after.json             
 python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # 只比较前 k 个 id 的集合重叠率与序(允许分数因 float32 化等改动而漂移)
 ```
 
-`questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--compare` 的退出码即验收结果:全 PASS 退出 `0`,任意一处不一致退出 `1`,可直接接入 CI/脚本判定。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = admin 用户)。EMBED 未配置时**直接报错退出**(退出码 `2`),绝不用零向量静默跑出误导性的"零召回"对照结果。
+`questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = `"admin"`)。
+
+退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败(EMBED 未配置、notebook 不存在、或属主用户不存在)——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
 
 ## 当前限制
 

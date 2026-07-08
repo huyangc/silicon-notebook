@@ -52,7 +52,14 @@ def record_run(notebook_id: str, questions: list, full: bool, plan_map: dict,
         print(f"ERROR: notebook 不存在: {notebook_id}", file=sys.stderr)
         sys.exit(2)
 
-    profile = _resolve_owner_profile(repo, owner)
+    try:
+        profile = _resolve_owner_profile(repo, owner)
+    except SystemExit as e:
+        # _resolve_owner_profile(与 batch_ingest.py 共用,不改其行为)找不到属主时
+        # 自己 sys.exit(默认退出码 1)——与 --compare "两次运行不一致"的退出码 1 撞车。
+        # 这里捕获改判为本脚本统一的「前置条件失败」退出码 2,不碰共享函数本身。
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
     token = set_request_user(profile)
     try:
         out: dict = {}
@@ -149,7 +156,7 @@ def main() -> None:
     ap.add_argument("--out")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--plan-file")
-    ap.add_argument("--owner", default=None,
+    ap.add_argument("--owner", default="admin",
                     help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
     ap.add_argument("--mode", choices=("exact", "topk"), default="exact")
