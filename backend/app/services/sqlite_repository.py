@@ -249,7 +249,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -1092,6 +1092,31 @@ class SQLiteRepository:
                 )
                 """
             )
+            # 共提桥接层(P2):claim 文本确定性提取的「claim→跨源概念」mention 边,
+            # 以及同一 claim 命中的 canonical 组合两两计入的共提对。随
+            # rebuild_unified_kg 全量重写(mention_seq 闸)。派生数据,可随时重建。
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mention_edges (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    claim_object_id TEXT NOT NULL,
+                    concept_canonical_id TEXT NOT NULL,
+                    matched_alias TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (notebook_id, claim_object_id, concept_canonical_id)
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS concept_comentions (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    canonical_a TEXT NOT NULL,
+                    canonical_b TEXT NOT NULL,
+                    bridge_claims INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (notebook_id, canonical_a, canonical_b)
+                )
+                """
+            )
             # Lightweight column migrations for pre-existing databases.
             # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard via PRAGMA so this
             # runs idempotently on every init.
@@ -1174,6 +1199,9 @@ class SQLiteRepository:
             # canonical_rel_seq: canonical_relations 上次重建时的 kg_mutation_seq。
             # -1 默认 → 首次必建(同 community_seq 语义)。
             self._add_column_if_missing(db, "unified_kg_state", "canonical_rel_seq", "INTEGER NOT NULL DEFAULT -1")
+            # mention_seq: mention_edges/concept_comentions 上次重建时的 kg_mutation_seq。
+            # -1 默认 → 首次必建(同 canonical_rel_seq 语义)。
+            self._add_column_if_missing(db, "unified_kg_state", "mention_seq", "INTEGER NOT NULL DEFAULT -1")
             # source_index_backfilled: 0/1 marker — once set, _clear_source_extraction_state
             # trusts knowledge_object_sources for this notebook and skips the legacy
             # full-evidence-scan fallback. Set by the backfill-on-first-use scan itself
@@ -1363,6 +1391,36 @@ class SQLiteRepository:
                 """
             )
             self._add_column_if_missing(db, "unified_kg_state", "canonical_rel_seq", "INTEGER NOT NULL DEFAULT -1")
+
+    def _migration_9(self) -> None:
+        """共提桥接层(P2):mention_edges/concept_comentions 表 + unified_kg_state.mention_seq。
+
+        已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
+        _migration_3/_migration_4/_migration_8 同款两层写法(baseline 双写 + 独立迁移)。"""
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mention_edges (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    claim_object_id TEXT NOT NULL,
+                    concept_canonical_id TEXT NOT NULL,
+                    matched_alias TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (notebook_id, claim_object_id, concept_canonical_id)
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS concept_comentions (
+                    notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    canonical_a TEXT NOT NULL,
+                    canonical_b TEXT NOT NULL,
+                    bridge_claims INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (notebook_id, canonical_a, canonical_b)
+                )
+                """
+            )
+            self._add_column_if_missing(db, "unified_kg_state", "mention_seq", "INTEGER NOT NULL DEFAULT -1")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
