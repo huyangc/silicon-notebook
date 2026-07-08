@@ -307,36 +307,36 @@ def _load_plain_window(path, *, since, before, max_records, max_bytes):
 
 
 def _load_gz_window(path, *, since, before, max_records):
-    """gz 不可变、不被轮询：流式解压逐行，deque(maxlen) 只保最新 max_records 行，
-    seq=行索引（不可变故稳定）。truncated=行数超过 maxlen。"""
+    """gz 不可变、不被轮询：流式解压逐行，seq=行索引（不可变故稳定）。since/before 在
+    入 deque 前过滤，使窗口锚定在游标上（与明文分支一致）；deque(maxlen) 只保最新
+    max_records 条，内存有界。truncated=通过过滤的有效行数超过 max_records（丢了更旧的）。"""
     if not path.exists():
         return [], 0, False
     buf = deque(maxlen=max_records)
     malformed = 0
-    seen = 0
+    kept = 0  # 通过 since/before 过滤的有效记录数，用于判定是否真的截断（不含 malformed）
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         for idx, raw in enumerate(fh):
             line = raw.strip()
             if not line:
                 continue
-            seen += 1
             try:
                 obj = json.loads(line)
             except Exception:
                 malformed += 1
                 continue
-            if isinstance(obj, dict):
-                obj["seq"] = idx
-                buf.append(obj)
-            else:
+            if not isinstance(obj, dict):
                 malformed += 1
-    recs = list(buf)
-    if since is not None:
-        recs = [r for r in recs if r["seq"] > since]
-    if before is not None:
-        recs = [r for r in recs if r["seq"] < before]
-    truncated = seen > max_records
-    return recs, malformed, truncated
+                continue
+            if since is not None and idx <= since:
+                continue
+            if before is not None and idx >= before:
+                continue
+            obj["seq"] = idx
+            kept += 1
+            buf.append(obj)
+    truncated = kept > max_records
+    return list(buf), malformed, truncated
 
 
 def load_day_window(path, is_gzip, *, since=None, before=None,
