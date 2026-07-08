@@ -6275,6 +6275,11 @@ class SQLiteRepository:
                    e["edge_type"],
                    cmap.get(e["target_object_id"], e["target_object_id"]))
             hit = sup.get(key)
+            if hit is None:
+                # kg_neighbors 把边统一画成「查询节点→邻居」(既有展示行为),
+                # 入边的真实方向在表里是反的——对称回退让同一条底层关系无论
+                # 展示朝向都能拿到支持度;正向命中优先,A→B 与 B→A 同时存在时不串。
+                hit = sup.get((key[2], key[1], key[0]))
             if hit:
                 e["support_count"], e["source_count"] = hit[0], hit[1]
         return edges
