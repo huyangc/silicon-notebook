@@ -74,7 +74,7 @@ def test_bounded_node_edge_shape_matches_legacy(repo):
         assert set(n.keys()) == {"id", "object_type", "payload"}
         assert "name" in n["payload"]
     for e in bounded["edges"]:
-        assert set(e.keys()) == {"source_object_id", "target_object_id", "edge_type"}
+        assert {"source_object_id", "target_object_id", "edge_type"} <= set(e.keys())  # + optional support_count/source_count
     # names hydrated, not empty for the hub
     hub = next(n for n in bounded["nodes"] if n["payload"].get("name") == "MOSFET")
     assert hub["object_type"] == "concept"
@@ -90,7 +90,7 @@ def test_kg_neighbors_matches_topology(repo):
     assert "MOSFET" in names
     assert {"gain", "bias"} <= names  # both leaves are neighbors
     for e in out["edges"]:
-        assert set(e.keys()) == {"source_object_id", "target_object_id", "edge_type"}
+        assert {"source_object_id", "target_object_id", "edge_type"} <= set(e.keys())  # + optional support_count/source_count
 
 
 import time

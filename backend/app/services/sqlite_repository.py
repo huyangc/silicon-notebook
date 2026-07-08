@@ -6239,6 +6239,46 @@ class SQLiteRepository:
             "viz_building": viz_building,
         }
 
+    def _edge_support_map(self, notebook_id: str) -> Dict[tuple, tuple]:
+        """{(canonical_src, edge_type, canonical_tgt): (support_count, source_count)}。
+        版本 = canonical_rel_seq(O(1) 行读),表重建后自动失效。"""
+        with self._connect() as db:
+            st = db.execute(
+                "SELECT canonical_rel_seq FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,)).fetchone()
+        seq = int(st["canonical_rel_seq"]) if st else -1
+
+        def _load():
+            out: Dict[tuple, tuple] = {}
+            with self._connect() as db:
+                for r in db.execute(
+                        "SELECT canonical_src, edge_type, canonical_tgt, support_count, source_count "
+                        "FROM canonical_relations WHERE notebook_id=?", (notebook_id,)):
+                    out[(r["canonical_src"], r["edge_type"], r["canonical_tgt"])] = (
+                        int(r["support_count"]), int(r["source_count"]))
+            return out
+
+        return self._vector_cache.get(f"{notebook_id}:edge_support", ("edge_support", seq), _load)
+
+    def _annotate_edge_support(self, notebook_id: str, edges: List[dict]) -> List[dict]:
+        """给 unified/neighbors 形状的边({source_object_id,target_object_id,edge_type})
+        附 support_count/source_count。查表键先过 cluster_map 折叠:unified 图只折叠
+        concept 端点,claim/formula/procedure 保原始 id,而 canonical_relations 按全
+        类型折叠;concept 端点已是 canonical id、不在 cluster_map 键中,get(s,s) 恒等
+        通过。未命中不加字段(表空/滞后 → 前端优雅缺省)。"""
+        sup = self._edge_support_map(notebook_id)
+        if not sup:
+            return edges
+        cmap = self.cluster_map(notebook_id)
+        for e in edges:
+            key = (cmap.get(e["source_object_id"], e["source_object_id"]),
+                   e["edge_type"],
+                   cmap.get(e["target_object_id"], e["target_object_id"]))
+            hit = sup.get(key)
+            if hit:
+                e["support_count"], e["source_count"] = hit[0], hit[1]
+        return edges
+
     def unified_graph(self, notebook_id: str, level: str = "concept",
                       limit: Optional[int] = None) -> dict:
         """Graph data for the KG view. When `limit` is set and the full graph has
@@ -6267,7 +6307,7 @@ class SQLiteRepository:
             effective_limit = limit if limit is not None else self.settings.viz_default_limit
             idx = self._viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
-                return self._unified_graph_bounded(idx, effective_limit)
+                return self._unified_graph_bounded(notebook_id, idx, effective_limit)
             # No index available yet: either a background build was just
             # spawned inside _viz_index, or (rare race) it isn't tracked as
             # building anymore. Either way, large notebooks never fall
@@ -6284,7 +6324,7 @@ class SQLiteRepository:
         if limit is not None and level != "concept":
             idx = self._viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
-                return self._unified_graph_bounded(idx, limit)
+                return self._unified_graph_bounded(notebook_id, idx, limit)
             if idx is None and notebook_id in self._viz_building:
                 # A background build was spawned inside _viz_index instead of
                 # blocking this request on a minutes-long full-graph fold.
@@ -6298,7 +6338,7 @@ class SQLiteRepository:
         sliced = limit_graph_by_degree(full, limit) if limit is not None else full
         return {
             "nodes": sliced["nodes"],
-            "edges": sliced["edges"],
+            "edges": self._annotate_edge_support(notebook_id, sliced["edges"]),
             "total_nodes": total_nodes,
             "total_edges": total_edges,
             "truncated": len(sliced["nodes"]) < total_nodes,
@@ -6338,7 +6378,7 @@ class SQLiteRepository:
         return {"id": fid, "object_type": type_by_id.get(fid, ""),
                 "payload": {"name": name_by_id.get(fid, "")}}
 
-    def _unified_graph_bounded(self, idx, limit: int) -> dict:
+    def _unified_graph_bounded(self, notebook_id: str, idx, limit: int) -> dict:
         """Degree-top-N core from the persisted folded viz graph — EQUIVALENT to
         limit_graph_by_degree(_unified_graph_full(nb,'object'), limit): same node-id
         set (incl. degree-tie order), same kept edges, same totals/shape.
@@ -6366,6 +6406,7 @@ class SQLiteRepository:
         nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in ids if fid in keep]
         kept_edges = [{"source_object_id": s, "target_object_id": t, "edge_type": et}
                       for s, t, et in edges_all if s in keep and t in keep]
+        kept_edges = self._annotate_edge_support(notebook_id, kept_edges)
         return {
             "nodes": nodes,
             "edges": kept_edges,
@@ -6400,6 +6441,7 @@ class SQLiteRepository:
                 s, t = e["source"], e["target"]
                 et = et_map.get((s, t)) or et_map.get((t, s)) or "related"
                 edges.append({"source_object_id": s, "target_object_id": t, "edge_type": et})
+            edges = self._annotate_edge_support(notebook_id, edges)
             return {"nodes": nodes, "edges": edges}
         return self._kg_neighbors_db(notebook_id, object_id, cap)
 
@@ -6453,6 +6495,7 @@ class SQLiteRepository:
         meta = self._object_meta(notebook_id, all_ids, cmap)
         nodes = [{"id": oid, "object_type": meta.get(oid, ("", ""))[0],
                   "payload": {"name": meta.get(oid, ("", ""))[1]}} for oid in all_ids]
+        edges = self._annotate_edge_support(notebook_id, edges)
         return {"nodes": nodes, "edges": edges}
 
     def _object_meta(self, notebook_id: str, folded_ids, cmap):

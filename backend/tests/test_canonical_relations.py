@@ -131,3 +131,28 @@ def test_seq_gate_skips_then_force_recomputes(repo):
     assert seq0 >= 0                           # rebuild 后闸已写
     assert repo.rebuild_canonical_relations(nb.id) >= 0   # 未变 → 跳过不炸
     assert repo.rebuild_canonical_relations(nb.id, force=True) == 1
+
+
+def test_unified_graph_edges_carry_support(repo):
+    nb = _mk_nb_with_relations(repo)
+    g = repo.unified_graph(nb.id, level="object")
+    sup = [e for e in g["edges"] if e.get("source_count")]
+    assert sup and sup[0]["support_count"] == 2 and sup[0]["source_count"] == 2
+
+
+def test_neighbors_edges_carry_support(repo):
+    nb = _mk_nb_with_relations(repo)
+    g = repo.unified_graph(nb.id, level="object")
+    nid = next(n["id"] for n in g["nodes"])
+    nbres = repo.kg_neighbors(nb.id, nid)
+    assert any(e.get("source_count") == 2 for e in nbres["edges"])
+
+
+def test_empty_table_leaves_edges_bare(repo):
+    nb = _mk_nb_with_relations(repo)
+    with repo._write() as db:
+        db.execute("DELETE FROM canonical_relations WHERE notebook_id=?", (nb.id,))
+        db.execute("UPDATE unified_kg_state SET canonical_rel_seq=-1 WHERE notebook_id=?", (nb.id,))
+    repo._unified_cache.clear()
+    g = repo.unified_graph(nb.id, level="object")
+    assert all("support_count" not in e for e in g["edges"])
