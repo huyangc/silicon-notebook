@@ -40,8 +40,10 @@ all mutations are DELETE+INSERT. Site-by-site:
 So every concept_clusters writer now either self-invalidates or is reached by its
 caller's explicit invalidation — verified by a passing full-suite run (baseline vs.
 after: see report). The "same-second rename" test below exercises the DELETE+INSERT
-re-write hazard directly (COUNT/MAX(created_at) do NOT move within the same second —
-_scale_index_version's clu_key would be pinned) to prove the explicit invalidation is
+re-write hazard directly via a RAW SQL rewrite that bypasses every bump helper
+(COUNT/MAX(created_at) do NOT move within the same second, and P0-A's
+cluster_mutation_seq is untouched by a raw SQL write too — both would leave
+_scale_index_version's version tuple pinned) to prove the explicit invalidation is
 what saves us, not the version tuple.
 """
 import json
@@ -81,6 +83,13 @@ def _oracle_cluster_map(repo, notebook_id):
 
 def _seed_cluster_row(repo, nb_id, *, cc_id, canonical_id, member_id, canonical_name,
                        object_type="concept", created_at=None):
+    """Raw-SQL row insert (test-only fixture, no prod caller uses this shape
+    directly). P0-A: bump cluster_mutation_seq the way every real
+    concept_clusters writer does (write_clusters/append_clusters/...) — mirrors
+    test_scale_index_version_probe.py's _add_chunk/_add_embedding, which bump
+    kg_mutation_seq explicitly after their own raw INSERTs for the same reason:
+    a raw INSERT that bypassed the choke point would, correctly, be invisible
+    to the seq-keyed fast path (that is not a production code path either)."""
     now = created_at or _now()
     with repo._write() as db:
         db.execute(
@@ -88,6 +97,7 @@ def _seed_cluster_row(repo, nb_id, *, cc_id, canonical_id, member_id, canonical_
             "canonical_name,object_type,canonical_description,created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (cc_id, nb_id, canonical_id, member_id, canonical_name, object_type, "", now))
+        repo._bump_cluster_mutation_seq(db, nb_id)
 
 
 def _loader_spy(repo, monkeypatch):
@@ -219,8 +229,11 @@ def test_cluster_map_refreshes_after_rebuild(repo):
 
 def test_cluster_map_invalidates_on_kg_mutation_version_bump(repo):
     """Adding a cluster row via a fresh timestamp (normal, non-same-second case)
-    must be picked up even without an explicit _invalidate_unified_cache call,
-    because _scale_index_version re-reads the cluster COUNT/MAX every call."""
+    must be picked up even without an explicit _invalidate_unified_cache call.
+    P0-A: this now flows through cluster_mutation_seq (bumped by
+    _seed_cluster_row, mirroring every real concept_clusters writer) rather
+    than a live concept_clusters COUNT/MAX re-read — same observable outcome,
+    O(1) signal instead of a table aggregate."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_cluster_row(repo, nb.id, cc_id="cc-1", canonical_id="K-a", member_id="o1",
                        canonical_name="A", created_at="2026-07-02T00:00:00")
@@ -237,11 +250,14 @@ def test_cluster_map_invalidates_on_kg_mutation_version_bump(repo):
 def test_cluster_map_invalidates_on_same_second_rename_via_explicit_invalidation(repo):
     """Real in-place-edit entry point: write_clusters (used by rebuild's streamed
     writer _write_cluster_map_streamed too) DELETEs and re-INSERTs a member's row
-    under a renamed canonical_name/canonical_id in the SAME second. COUNT stays 1
-    and MAX(created_at) is pinned to the same literal timestamp, so
-    _scale_index_version's clu_key does NOT change — the version tuple alone would
-    serve a stale cached map. Only the explicit _invalidate_unified_cache call
-    (which incremental_fuse_source / rebuild_unified_kg already make) saves us."""
+    under a renamed canonical_name/canonical_id in the SAME second. This test
+    exercises the rewrite as a RAW SQL block (not through write_clusters) so it
+    bypasses cluster_mutation_seq's bump too, matching the pre-P0-A hazard this
+    test locks in: COUNT stays 1 and MAX(created_at) is pinned to the same
+    literal timestamp, so _scale_index_version's version tuple does NOT change —
+    it alone would serve a stale cached map. Only the explicit
+    _invalidate_unified_cache call (which incremental_fuse_source /
+    rebuild_unified_kg already make) saves us."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     same_ts = "2026-07-02T00:00:00"
     _seed_cluster_row(repo, nb.id, cc_id="cc-1", canonical_id="K-old-name", member_id="o1",

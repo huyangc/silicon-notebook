@@ -1,4 +1,11 @@
 """P1-8: O(1) memoized _scale_index_version fast path.
+P0-A update: cluster_mutation_seq (bumped by every concept_clusters write —
+write_clusters/append_clusters/incremental_fuse_source's orphan sweep/rebuild's
+streamed writer) replaced the old "always re-read concept_clusters COUNT/MAX"
+behavior, so the memo key is now (kg_mutation_seq, cluster_mutation_seq,
+settings_tail) and BOTH are O(1) single-row reads — no table aggregates run on
+a memo hit at all (see test_unchanged_seq_skips_noncluster_aggregates below and
+test_scale_version_probe.py for the focused P0-A tests).
 
 Two guarantees under test:
 
@@ -6,12 +13,14 @@ Two guarantees under test:
    version key must CHANGE after every class of KG write (object add, relation
    add, chunk add, embedding write, cluster rebuild, object status flip via
    merge, edge review flip). This is the invariant the memoized fast path must
-   NOT break — if kg_mutation_seq fails to advance on some write, the cache
-   would serve a stale version and the scale index would go stale silently.
+   NOT break — if kg_mutation_seq/cluster_mutation_seq fails to advance on some
+   write, the cache would serve a stale version and the scale index would go
+   stale silently.
 
-2. PERFORMANCE: when kg_mutation_seq is unchanged between two calls, the second
-   call must NOT re-run the 5 COUNT/MAX aggregates (it returns the memoized
-   list). We assert this by spying on db.execute and counting aggregate queries.
+2. PERFORMANCE: when (kg_mutation_seq, cluster_mutation_seq) is unchanged
+   between two calls, the second call must NOT re-run any of the 5 COUNT/MAX
+   aggregates (it returns the memoized list). We assert this by spying on
+   db.execute and counting aggregate queries.
 """
 import json
 import pytest
@@ -214,16 +223,24 @@ def test_cluster_rebuild_detected_despite_preserved_seq(repo):
 # ---------------------------------------------------------------------------
 
 def test_unchanged_seq_skips_noncluster_aggregates(repo, monkeypatch):
+    """P0-A updates this test's cluster expectation: clusters used to be
+    re-read every call (elided count 1, asserted pre-P0-A) because seq alone
+    couldn't see a rebuild's rewrite. Now cluster_mutation_seq (bumped in the
+    SAME commit as every concept_clusters write) carries that signal at O(1),
+    so an unchanged (seq, cseq) pair means the memo hit is a TRUE hit — the
+    cluster COUNT/MAX aggregate is elided too (0 times), not just the four
+    non-cluster tables' aggregates. See test_scale_version_probe.py's
+    test_version_memo_hit_skips_cluster_aggregates for the focused P0-A test."""
     nb = repo.create_notebook(NotebookCreate(name="b"))
     _add_concept(repo, nb.id, "a", "MOSFET")
 
     # Warm the cache (first call computes + memoizes).
     v_first = repo._scale_index_version(nb.id)
 
-    # Spy: count aggregate queries per table on the next call. With seq unchanged
-    # the fast path must skip the FOUR non-cluster tables' aggregates entirely,
-    # and read clusters exactly once (rebuild can move clusters without bumping
-    # seq, so they are never elided).
+    # Spy: count aggregate queries per table on the next call. With (seq, cseq)
+    # unchanged the fast path must skip ALL FIVE tables' aggregates entirely —
+    # clusters included, now that cluster_mutation_seq (not a cluster COUNT/MAX
+    # re-read) is the change signal for concept_clusters writes.
     orig_connect = repo._connect
     noncluster = {"n": 0}
     cluster = {"n": 0}
@@ -277,9 +294,9 @@ def test_unchanged_seq_skips_noncluster_aggregates(repo, monkeypatch):
         "with unchanged kg_mutation_seq the second call must NOT run the four "
         f"non-cluster COUNT/MAX aggregates; ran {noncluster['n']}"
     )
-    assert cluster["n"] == 1, (
-        "clusters must be re-read every call (never elided by seq); "
-        f"cluster aggregate ran {cluster['n']} times"
+    assert cluster["n"] == 0, (
+        "P0-A: with unchanged cluster_mutation_seq the second call must NOT "
+        f"re-read the concept_clusters COUNT/MAX either; ran {cluster['n']} times"
     )
 
 

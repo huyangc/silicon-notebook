@@ -261,6 +261,7 @@ sources.doc_type|TEXT|1|''|0
 unified_kg_state.notebook_id|TEXT|0|None|1
 unified_kg_state.dirty|INTEGER|1|0|0
 unified_kg_state.kg_mutation_seq|INTEGER|1|0|0
+unified_kg_state.cluster_mutation_seq|INTEGER|1|0|0
 unified_kg_state.cluster_input_version|TEXT|1|''|0
 unified_kg_state.last_rebuild_at|TEXT|1|''|0
 unified_kg_state.object_count|INTEGER|1|0|0

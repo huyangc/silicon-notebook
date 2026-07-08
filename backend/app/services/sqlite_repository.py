@@ -242,7 +242,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -895,6 +895,15 @@ class SQLiteRepository:
                   -- deterministic + O(1), with NO clock-granularity hole (a timestamp
                   -- MAX at 1s resolution misses same-second in-place edits).
                   kg_mutation_seq INTEGER NOT NULL DEFAULT 0,
+                  -- P0-A: monotonic counter bumped ONLY by concept_clusters writes
+                  -- (_bump_cluster_mutation_seq, called from the 4 cluster-write
+                  -- sites). Independent from kg_mutation_seq because rebuild
+                  -- DELIBERATELY keeps kg_mutation_seq stable across a rebuild
+                  -- (idempotency, see _cluster_input_version) while still rewriting
+                  -- concept_clusters — this column is _scale_index_version's O(1)
+                  -- change signal for that rewrite, replacing a per-call
+                  -- COUNT/MAX(created_at) scan of concept_clusters.
+                  cluster_mutation_seq INTEGER NOT NULL DEFAULT 0,
                   -- O(1) content-hash of the clustering INPUTS at the last rebuild
                   -- (see _cluster_input_version). rebuild_unified_kg skips the whole
                   -- recompute when this still matches; empty '' means never rebuilt.
@@ -1235,6 +1244,15 @@ class SQLiteRepository:
         with self._connect() as db:
             self._add_column_if_missing(
                 db, "unified_kg_state", "community_seq", "INTEGER NOT NULL DEFAULT -1")
+
+    def _migration_5(self) -> None:
+        """cluster_mutation_seq: concept_clusters 写路径的单调计数器(P0-A 探针
+        O(1) 化)。DEFAULT 0 = "从未 bump":首次探针 memo 必 miss→冷路径重算,
+        旧库升级后行为无缝。"""
+        with self._connect() as db:
+            self._add_column_if_missing(
+                db, "unified_kg_state", "cluster_mutation_seq",
+                "INTEGER NOT NULL DEFAULT 0")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
@@ -4753,6 +4771,11 @@ class SQLiteRepository:
                     (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
                      r["member_object_id"], r["canonical_name"], object_type,
                      r.get("canonical_description", ""), now))
+            # P0-A: bump the cluster-write change signal in the SAME commit as the
+            # DELETE+INSERT above — _scale_index_version's memo relies on this
+            # being atomic with the content change (no window where clusters moved
+            # but cseq didn't).
+            self._bump_cluster_mutation_seq(db, notebook_id)
         # P1-2: this DELETE+INSERT can land on the SAME second as a prior write to
         # this notebook (COUNT/MAX(created_at) unchanged for that (notebook_id,
         # object_type) slice, or even notebook-wide if this is the only cluster
@@ -4777,6 +4800,10 @@ class SQLiteRepository:
                     (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"],
                      r["canonical_name"], object_type, "", now))
                 added += 1
+            # P0-A: only bump when a row actually landed (a no-op call — every
+            # member already present — must not manufacture a fake change signal).
+            if added:
+                self._bump_cluster_mutation_seq(db, notebook_id)
         # P1-2: self-invalidate rather than rely on every caller remembering to.
         # incremental_fuse_source (the only production caller) already invalidates
         # at its own end too — invalidation is idempotent, so this is pure defense
@@ -4797,10 +4824,16 @@ class SQLiteRepository:
         # ko- 以新 id 重建,旧簇成员行悬空。消费方(build_ppr_graph/unified_graph)虽已过滤,
         # 仍清以防表无界增长 + unified_kg_status 的 canonical 计数虚高。id 是 PK,子查询走索引。
         with self._write() as db:
-            db.execute(
+            cur = db.execute(
                 "DELETE FROM concept_clusters WHERE notebook_id=? AND member_object_id NOT IN "
                 "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
                 (notebook_id, notebook_id))
+            # P0-A: only bump if this orphan-sweep actually deleted rows — the
+            # later append_clusters calls in this method self-bump on their own
+            # additions, so this guards just the DELETE branch (no double-count,
+            # no fake signal on a no-op sweep).
+            if cur.rowcount > 0:
+                self._bump_cluster_mutation_seq(db, notebook_id)
         from app.services.kg_merge import place_new_concepts, _norm
         # P1-2: one shared cluster_map load for the whole fuse call (Tier1/Tier2
         # concept pass below + the non-concept claim/formula/procedure pass at the
@@ -5993,6 +6026,22 @@ class SQLiteRepository:
         # re-chunk, re-embed and KG edits — the cheapest correct invalidation site.
         self._notebook_langs_cache.pop(notebook_id, None)
 
+    def _bump_cluster_mutation_seq(self, db, notebook_id: str) -> None:
+        """concept_clusters 写路径的单调计数器 bump。与 _mark_unified_kg_dirty 不同,
+        本 helper 在调用方已持有的写事务 db 内执行(写簇+bump 同 commit,原子——
+        不存在"簇写了、seq 没 bump"的窗口)。kg_mutation_seq 不在此处动:rebuild
+        刻意保持它稳定(幂等,见 _cluster_input_version),clusters 的变化信号独立成列。"""
+        db.execute(
+            """
+            INSERT INTO unified_kg_state (notebook_id, dirty, cluster_mutation_seq, updated_at)
+            VALUES (?, 0, 1, ?)
+            ON CONFLICT(notebook_id) DO UPDATE SET
+              cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,
+              updated_at=excluded.updated_at
+            """,
+            (notebook_id, _now()),
+        )
+
     def unified_kg_status(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)
         with self._connect() as db:
@@ -6428,6 +6477,13 @@ class SQLiteRepository:
                         "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at) "
                         "VALUES (?,?,?,?,?,?,?,?,?)", buf)
                     buf.clear()
+                # P0-A: same commit as the DELETE+INSERT above (wdb, not rdb) —
+                # every rebuild pass through this streamed writer rewrites
+                # concept_clusters for `object_type`, so it must bump every time
+                # (unconditional, unlike append_clusters' added>0 guard: a
+                # rebuild that clusters down to zero rows for this type is still
+                # a real content change from whatever was there before).
+                self._bump_cluster_mutation_seq(wdb, notebook_id)
 
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
@@ -7943,28 +7999,36 @@ class SQLiteRepository:
         version = self._vector_matrix_version(db, notebook_id, table)
         return self._vector_cache.peek(f"{notebook_id}:matrix:{table}", version)
 
-    def _keyword_token_sets(self, db, notebook_id: str, objects: list) -> dict:
+    def _keyword_token_sets(self, db, notebook_id: str, objects: list,
+                            bounded: bool = False) -> dict:
         """Cached {object_id: frozenset(haystack_tokens)} for keyword scoring.
 
         Version-keyed on (COUNT, MAX(updated_at)) of knowledge_objects so any
         payload or evidence edit invalidates the cache. Evidence text is included
-        so the token set is byte-equivalent to what score_knowledge builds live."""
-        from app.services.retrieval import _tokens, _payload_text
-        ver = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
-            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,)).fetchone()
-        version = ("kwtok", ver["c"], ver["ts"])
+        so the token set is byte-equivalent to what score_knowledge builds live.
 
-        def _load():
+        bounded=True(ANN 门控的有界候选路径):跳过版本 COUNT 与进程缓存,直接对
+        本批 objects 现场构建(与 _load 同构建逻辑,逐字节等价——为 ≤recall 个候选
+        付一次百万行 COUNT 是倒挂;该缓存对每查询候选集不同的 ANN 路径也从未命中过)。"""
+        from app.services.retrieval import _tokens, _payload_text
+
+        def _build(objs):
             out = {}
-            for o in objects:
+            for o in objs:
                 ev_text = " ".join(
                     e.quoted_span for e in o.get("evidence", [])
                 )
                 out[o["id"]] = frozenset(_tokens(f"{_payload_text(o['payload'])} {ev_text}"))
             return out
 
-        return self._vector_cache.get(f"{notebook_id}:kwtok", version, _load)
+        if bounded:
+            return _build(objects)
+
+        ver = db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,)).fetchone()
+        version = ("kwtok", ver["c"], ver["ts"])
+        return self._vector_cache.get(f"{notebook_id}:kwtok", version, lambda: _build(objects))
 
     def _federated_rx_graph(self, active_notebook_id: str):
         """Return a federated PyDiGraph merging base notebook(s) + active notebook.
@@ -8177,10 +8241,22 @@ class SQLiteRepository:
     # ── scale index (offline build) ──────────────────────────────────────────
 
     def _probe_scale_version_signal(self, notebook_id: str):
-        """Cheap probe: (seq, cluster_key, settings_tail) for `notebook_id`. O(1)
-        seq read + 2 cluster aggregates — always run, never single-flighted (it's
-        the signal used to decide whether the expensive cold path is needed at
-        all, so it must never itself block on another thread's cold compute)."""
+        """Cheap probe: (seq, cseq, settings_tail) for `notebook_id`. O(1) — a
+        single unified_kg_state row read, no table aggregates — always run,
+        never single-flighted (it's the signal used to decide whether the
+        expensive cold path is needed at all, so it must never itself block on
+        another thread's cold compute).
+
+        P0-A: clusters used to be re-read here every call via a concept_clusters
+        COUNT/MAX(created_at) (millions of rows at scale) because rebuild
+        deliberately keeps kg_mutation_seq stable across a rebuild (idempotency)
+        while still rewriting concept_clusters — seq alone couldn't see that
+        rewrite. Now cluster_mutation_seq (bumped in the SAME commit as every
+        concept_clusters write — write_clusters / append_clusters /
+        incremental_fuse_source's orphan sweep / the rebuild streamed writer)
+        carries that signal at O(1), so this probe never touches concept_clusters
+        at all; the real COUNT/MAX only run in _compute_scale_version_cold on a
+        memo miss."""
         # runtime_dim 是 settings_tail 的一员(T3/R4):它经
         # _compute_scale_version_cold 流入 _scale_index_version,进而与磁盘
         # manifest.version 对照 —— 切 EMBED_RUNTIME_DIM 后旧维 scale 索引必须
@@ -8195,22 +8271,21 @@ class SQLiteRepository:
         )
         with self._connect() as db:
             st = db.execute(
-                "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+                "SELECT kg_mutation_seq, cluster_mutation_seq FROM unified_kg_state "
+                "WHERE notebook_id=?",
                 (notebook_id,),
             ).fetchone()
             seq = int(st["kg_mutation_seq"]) if st else 0
-            # Clusters are ALWAYS re-read (rebuild moves them without bumping seq).
-            clu_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
-        clu_key = (int(clu_ver["c"]), clu_ver["ts"])
-        return seq, clu_key, settings_tail
+            cseq = int(st["cluster_mutation_seq"]) if st else 0
+        return seq, cseq, settings_tail
 
-    def _compute_scale_version_cold(self, notebook_id: str, seq: int, clu_key: tuple,
+    def _compute_scale_version_cold(self, notebook_id: str, seq: int,
                                      settings_tail: tuple) -> list:
-        """The expensive four-table cold path (eight aggregate columns) — only
-        ever called from inside _scale_index_version's per-nb single-flight
-        lock, never directly."""
+        """冷路径:五表聚合(clusters 聚合从热路径移到这里——P0-A 后热路径只读
+        unified_kg_state 单行,COUNT/MAX 只在 memo miss 时算)。version list 的
+        内容与格式与 P0-A 前逐位一致(clusters 仍在第 8、9 位),磁盘
+        manifest.version 兼容性不受影响。只从 _scale_index_version 的 per-nb
+        单飞锁内部调用,不直接对外暴露。"""
         with self._connect() as db:
             obj_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
@@ -8221,6 +8296,9 @@ class SQLiteRepository:
             chunk_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
+            clu_ver = db.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
+                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
             emb_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
@@ -8229,7 +8307,7 @@ class SQLiteRepository:
             int(obj_ver["c"]), obj_ver["ts"],
             int(rel_ver["c"]), rel_ver["ts"],
             int(chunk_ver["c"]), chunk_ver["ts"],
-            clu_key[0], clu_key[1],
+            int(clu_ver["c"]), clu_ver["ts"],
             int(emb_ver["c"]), emb_ver["ts"],
             *settings_tail,
         ]
@@ -8241,42 +8319,54 @@ class SQLiteRepository:
         for objects, relations, chunks, concept_clusters — all for this single notebook.
 
         P1-8 fast path (format-preserving memoization). This is called several
-        times per query (retrieval / PPR / status) and each call ran 5 COUNT/MAX
-        aggregates (10 aggregate columns). The version key FORMAT is unchanged, so
-        on-disk manifest.version keeps matching — no index invalidation.
+        times per query (retrieval / PPR / status) and each call used to run 5
+        COUNT/MAX aggregates (10 aggregate columns). The version key FORMAT is
+        unchanged, so on-disk manifest.version keeps matching — no index
+        invalidation.
 
-        Change signal = the O(1) monotonic kg_mutation_seq (bumped by
-        _mark_unified_kg_dirty — the single choke point for objects / relations /
-        chunks / embeddings; the merge-knowledge and edge-review in-place edits
-        were wired in to close their gaps) PLUS a direct read of the two
-        concept_clusters aggregates (COUNT + MAX(created_at)).
+        P0-A change signal = TWO O(1) monotonic counters, both single-row reads
+        of unified_kg_state, zero table aggregates on the hot path:
+          - kg_mutation_seq (bumped by _mark_unified_kg_dirty — the single choke
+            point for objects / relations / chunks / embeddings; the
+            merge-knowledge and edge-review in-place edits were wired in to
+            close their gaps).
+          - cluster_mutation_seq (bumped by _bump_cluster_mutation_seq — the
+            single choke point for concept_clusters writes: write_clusters /
+            append_clusters / incremental_fuse_source's orphan sweep / the
+            rebuild streamed writer _write_cluster_map_streamed).
 
-        Why clusters can't ride on seq: rebuild_unified_kg DELIBERATELY preserves
-        kg_mutation_seq across a rebuild (its end-write omits the seq column, so
-        _cluster_input_version is stable and re-running rebuild is idempotent — see
-        that method's docstring). But rebuild REWRITES concept_clusters, which this
-        version key must reflect (the scale index is downstream of clusters). So we
-        never elide the cluster aggregates: seq elides only the four non-cluster
-        tables' eight aggregate columns, and clusters are checked every call. Net
-        fast path = 1 O(1) seq read + 2 cluster aggregates instead of 10.
+        Why clusters needed their OWN counter instead of riding kg_mutation_seq:
+        rebuild_unified_kg DELIBERATELY preserves kg_mutation_seq across a
+        rebuild (its end-write omits the seq column, so _cluster_input_version
+        is stable and re-running rebuild is idempotent — see that method's
+        docstring). But rebuild REWRITES concept_clusters, which this version key
+        must reflect (the scale index is downstream of clusters). Before P0-A
+        this was covered by re-reading the real COUNT/MAX(created_at) every
+        single call (2 aggregate columns, but over a concept_clusters table that
+        can be millions of rows at scale); now cluster_mutation_seq carries that
+        signal at O(1) instead, and the real COUNT/MAX only run in
+        _compute_scale_version_cold on a memo miss. Net fast path = 1 single-row
+        unified_kg_state SELECT (both seq columns) instead of 1 seq read + 2
+        cluster aggregates.
 
-        Single-flight cold path: on a memo miss (cold cache or seq/cluster/
-        settings changed) this used to run the four non-cluster COUNT/MAX
-        aggregates directly, so N concurrent callers for the same notebook each
-        ran their own full table scan in parallel — measured 96-147s overlapping
-        on a 490k-object deployment when the KG page fires 3-5 concurrent
-        requests, and PR#157 makes every chunk write bump kg_mutation_seq (so
-        every upload re-triggers this for every concurrent viewer). Now a cold
-        miss takes a per-notebook lock (VectorCache's lock-table pattern,
-        simplified: no refcount eviction — the key space is #notebooks, not
-        per-request keys) and double-checks the memo inside the lock, so N
-        concurrent cold callers for the SAME notebook compute the four
-        aggregates exactly once; the rest observe the winner's result. Loader
-        exceptions propagate to every caller that raced into the cold path (the
-        Python exception itself isn't shared across threads — each waiter that
-        loses the double-check re-runs _compute_scale_version_cold itself after
-        acquiring the lock, so a failure is retried per-caller, never
-        cross-contaminates the memo, and a fixed-up retry succeeds).
+        Single-flight cold path: on a memo miss (cold cache or seq/cseq/settings
+        changed) this runs the FIVE-table COUNT/MAX aggregates (ten aggregate
+        columns, including the cluster pair moved here from the old hot path)
+        directly, so N concurrent callers for the same notebook each ran their
+        own full table scan in parallel — measured 96-147s overlapping on a
+        490k-object deployment when the KG page fires 3-5 concurrent requests,
+        and PR#157 makes every chunk write bump kg_mutation_seq (so every upload
+        re-triggers this for every concurrent viewer). Now a cold miss takes a
+        per-notebook lock (VectorCache's lock-table pattern, simplified: no
+        refcount eviction — the key space is #notebooks, not per-request keys)
+        and double-checks the memo inside the lock, so N concurrent cold callers
+        for the SAME notebook compute the five aggregates exactly once; the rest
+        observe the winner's result. Loader exceptions propagate to every caller
+        that raced into the cold path (the Python exception itself isn't shared
+        across threads — each waiter that loses the double-check re-runs
+        _compute_scale_version_cold itself after acquiring the lock, so a
+        failure is retried per-caller, never cross-contaminates the memo, and a
+        fixed-up retry succeeds).
 
         Lock ordering: _scale_ver_lock only guards structural access to the
         _scale_ver_locks table (get-or-create the per-nb Lock; entries are never
@@ -8295,12 +8385,12 @@ class SQLiteRepository:
         touched outside the lock table); this is defensive — no current
         production path actually nests like this.
         """
-        seq, clu_key, settings_tail = self._probe_scale_version_signal(notebook_id)
+        seq, cseq, settings_tail = self._probe_scale_version_signal(notebook_id)
         cached = self._scale_ver_cache.get(notebook_id)
         if (cached is not None and cached[0] == seq
-                and cached[1] == clu_key and cached[2] == settings_tail):
-            # seq + cluster aggregates + settings unchanged → skip the four
-            # non-cluster tables' eight aggregate columns entirely (no lock).
+                and cached[1] == cseq and cached[2] == settings_tail):
+            # seq + cseq + settings unchanged → skip the five-table ten
+            # aggregate-column cold path entirely (no lock, no table scans).
             return list(cached[3])
 
         # Cold path: get-or-create this notebook's lock (global lock held only
@@ -8313,19 +8403,19 @@ class SQLiteRepository:
 
         with nb_lock:
             # Double-check: another thread may have finished computing while we
-            # waited for the lock. Re-probe (seq/clusters may also have moved).
-            seq, clu_key, settings_tail = self._probe_scale_version_signal(notebook_id)
+            # waited for the lock. Re-probe (seq/cseq may also have moved).
+            seq, cseq, settings_tail = self._probe_scale_version_signal(notebook_id)
             cached = self._scale_ver_cache.get(notebook_id)
             if (cached is not None and cached[0] == seq
-                    and cached[1] == clu_key and cached[2] == settings_tail):
+                    and cached[1] == cseq and cached[2] == settings_tail):
                 return list(cached[3])
             # Exceptions from here propagate uncaught (nothing cached on
             # failure); the lock releases via `with`, so a retry by this or
             # another thread re-attempts the computation cleanly.
-            version = self._compute_scale_version_cold(notebook_id, seq, clu_key, settings_tail)
-            # Memoize keyed on (seq, cluster aggregates, settings). Store a copy
-            # so a caller mutating the returned list can't corrupt the cache.
-            self._scale_ver_cache[notebook_id] = (seq, clu_key, settings_tail, list(version))
+            version = self._compute_scale_version_cold(notebook_id, seq, settings_tail)
+            # Memoize keyed on (seq, cseq, settings). Store a copy so a caller
+            # mutating the returned list can't corrupt the cache.
+            self._scale_ver_cache[notebook_id] = (seq, cseq, settings_tail, list(version))
             return version
 
     def _read_manifest_version(self, out_dir: str):
@@ -10716,7 +10806,12 @@ class SQLiteRepository:
             kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
                        for t in type_list}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
-            token_sets = self._keyword_token_sets(db, notebook_id, all_kg_objs)
+            # P0-A: cand_sims is not None ⟺ we're on the bounded ANN/FTS candidate
+            # path (≤chunk_recall objects) — skip the knowledge_objects COUNT probe
+            # and the process-wide cache (which the candidate-set-varies-per-query
+            # path never hit anyway) and build the token sets directly for this batch.
+            token_sets = self._keyword_token_sets(
+                db, notebook_id, all_kg_objs, bounded=cand_sims is not None)
             # candidate object ids for this retrieval call
             candidate_ids = {o["id"] for o in all_kg_objs}
             # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
