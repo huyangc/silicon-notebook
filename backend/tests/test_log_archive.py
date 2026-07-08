@@ -52,3 +52,51 @@ def test_archive_stale_days_skips_today_and_legacy(tmp_path, monkeypatch):
     assert (tmp_path / f"llm-{today}.jsonl").exists()          # 今天不压
     assert not (tmp_path / f"llm-{today}.jsonl.gz").exists()
     assert (tmp_path / "llm.jsonl").exists()                    # legacy 不碰
+
+
+def _logger(tmp_path, monkeypatch, channel="llm", per_user=False):
+    class S:
+        event_log_enabled = True
+        event_log_dir = str(tmp_path)
+        llm_log_max_chars = 4000
+    return el.EventLogger(S(), channel=channel, per_user=per_user)
+
+
+def test_emit_writes_dated_file(tmp_path, monkeypatch):
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    lg = _logger(tmp_path, monkeypatch)
+    lg.emit({"id": "x1", "kind": "chat"})
+    dated = tmp_path / f"llm-{today}.jsonl"
+    assert dated.exists()
+    assert not (tmp_path / "llm.jsonl").exists()  # 不再写无日期文件
+    rec = json.loads(dated.read_text(encoding="utf-8").strip())
+    assert rec["id"] == "x1" and "ts" in rec
+
+
+def test_rollover_enqueues_prev_day_gzip(tmp_path, monkeypatch):
+    # 清空跨天账目，避免测试间串扰
+    el._last_write_day.clear()
+    lg = _logger(tmp_path, monkeypatch)
+    # 用一个可控 now 逐步推进日期
+    seq = iter(["2026-03-01", "2026-03-01", "2026-03-02"])
+    real = el.datetime
+
+    class FakeDT:
+        @staticmethod
+        def now():
+            # ts 用真实 now 即可；这里只需 strftime 的日期可控
+            class _N:
+                def __init__(self, day): self._day = day
+                def isoformat(self): return f"{self._day}T00:00:00"
+                def strftime(self, fmt): return self._day
+            return _N(next(seq))
+    monkeypatch.setattr(el, "datetime", FakeDT)
+    lg.emit({"id": "a"})   # 03-01 首写：prev=None → 不压
+    lg.emit({"id": "b"})   # 03-01 再写：同天 → 不压
+    lg.emit({"id": "c"})   # 03-02：跨天 → 压 03-01
+    el._archive_pool.shutdown(wait=True)
+    import concurrent.futures as _f
+    el._archive_pool = _f.ThreadPoolExecutor(max_workers=1, thread_name_prefix="log-archive")
+    assert (tmp_path / "llm-2026-03-01.jsonl.gz").exists()   # 昨天被压
+    assert (tmp_path / "llm-2026-03-02.jsonl").exists()      # 今天明文在

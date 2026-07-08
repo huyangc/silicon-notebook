@@ -1,9 +1,12 @@
 import json
+from datetime import datetime
 
 from app.core.config import Settings
 from app.core.event_logging import (
     EventLogger, set_log_owner, reset_log_owner, get_log_owner, owner_dir,
 )
+
+_TODAY = datetime.now().strftime("%Y-%m-%d")
 
 
 def _read(path):
@@ -27,15 +30,15 @@ def test_per_user_writes_to_owner_subdir(tmp_path):
         log.emit({"kind": "k", "status": "ok"})
     finally:
         reset_log_owner(tok)
-    assert (tmp_path / "user-3a8f9c2b1d" / "events.jsonl").exists()
+    assert (tmp_path / "user-3a8f9c2b1d" / f"events-{_TODAY}.jsonl").exists()
     assert not (tmp_path / "events.jsonl").exists()
-    assert _read(tmp_path / "user-3a8f9c2b1d" / "events.jsonl")[0]["kind"] == "k"
+    assert _read(tmp_path / "user-3a8f9c2b1d" / f"events-{_TODAY}.jsonl")[0]["kind"] == "k"
 
 
 def test_per_user_no_owner_falls_back_to_user_local(tmp_path):
     log = EventLogger(Settings(event_log_dir=str(tmp_path)), channel="events", per_user=True)
     log.emit({"kind": "k", "status": "ok"})  # ContextVar 未设
-    assert (tmp_path / "user-local" / "events.jsonl").exists()
+    assert (tmp_path / "user-local" / f"events-{_TODAY}.jsonl").exists()
 
 
 def test_per_user_illegal_owner_falls_back_to_system(tmp_path):
@@ -45,7 +48,7 @@ def test_per_user_illegal_owner_falls_back_to_system(tmp_path):
         log.emit({"kind": "k", "status": "ok"})
     finally:
         reset_log_owner(tok)
-    assert (tmp_path / "_system" / "events.jsonl").exists()
+    assert (tmp_path / "_system" / f"events-{_TODAY}.jsonl").exists()
 
 
 def test_non_per_user_writes_global(tmp_path):
@@ -55,7 +58,7 @@ def test_non_per_user_writes_global(tmp_path):
         log.emit({"kind": "k", "status": "ok"})
     finally:
         reset_log_owner(tok)
-    assert (tmp_path / "events.jsonl").exists()        # 全局,忽略 owner
+    assert (tmp_path / f"events-{_TODAY}.jsonl").exists()        # 全局,忽略 owner
     assert not (tmp_path / "user-3a8f9c2b1d").exists()
 
 
@@ -89,7 +92,7 @@ def test_llm_logger_per_user(tmp_path):
         logger.log({"kind": "chat", "model": "m", "status": "ok", "latency_ms": 1})
     finally:
         reset_log_owner(tok)
-    assert (tmp_path / "logs" / "user-3a8f9c2b1d" / "llm.jsonl").exists()
+    assert (tmp_path / "logs" / "user-3a8f9c2b1d" / f"llm-{_TODAY}.jsonl").exists()
     assert not (tmp_path / "logs" / "llm.jsonl").exists()
 
 
@@ -108,7 +111,7 @@ def test_repo_event_log_is_per_user(tmp_path):
         repo.event_log.emit({"kind": "k", "status": "ok"})
     finally:
         reset_request_user(tok)
-    assert (tmp_path / "logs" / user.id / "events.jsonl").exists()
+    assert (tmp_path / "logs" / user.id / f"events-{_TODAY}.jsonl").exists()
 
 
 def test_expand_channel_paths(tmp_path):

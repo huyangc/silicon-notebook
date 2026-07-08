@@ -100,6 +100,12 @@ def _gzip_day_file(plain: Path) -> None:
         pass
 
 
+# 跨天补压账目：(目录, channel) → 最近一次写入所属的 day 字符串。本进程内某序列
+# 首次见到新 day 时，把「上一 day」的明文提交压缩；O(1) 摊还，emit 热路径零额外 IO。
+_last_write_day: "Dict[Tuple[str, str], str]" = {}
+_last_write_lock = threading.Lock()
+
+
 def archive_stale_days(settings) -> None:
     """启动扫一遍：glob 全局与 per-user 一层子目录下的带日期明文，date<today 且无 .gz
     者提交压缩。老无日期单文件（legacy）不匹配 _DATED_RE，天然不碰。best-effort。"""
@@ -150,32 +156,41 @@ class EventLogger:
             return text[: self.max_chars] + f"...[+{len(text) - self.max_chars} chars]"
         return text
 
-    def _target_path(self) -> Path:
+    def _dir(self) -> Path:
         if not self.per_user:
-            return self.path
+            return self.log_dir
         try:
             sub = owner_dir(get_log_owner())
-        except Exception:  # pragma: no cover - owner 解析绝不破坏写入
+        except Exception:  # pragma: no cover
             sub = "_system"
-        return self.log_dir / sub / self.filename
+        return self.log_dir / sub
+
+    def _target_path_for_day(self, day: str) -> Path:
+        return self._dir() / f"{self.channel}-{day}.jsonl"
 
     def emit(self, event: Dict[str, Any], *, console: str = "") -> None:
         """Append `event` as a JSON line and emit a brief console line.
 
         `console` overrides the auto console summary. Wrapped so a logging
-        failure never propagates to the caller.
+        failure never propagates to the caller. Writes to a per-day file
+        (`<channel>-YYYY-MM-DD.jsonl`); when this call crosses a day boundary
+        for this (dir, channel), the previous day's plain file is enqueued
+        for background gzip.
         """
         if not self.enabled:
             return
-        event.setdefault("ts", datetime.now().isoformat())
+        now = datetime.now()
+        event.setdefault("ts", now.isoformat())
         event.setdefault("channel", self.channel)
-        target = self._target_path()
+        day = now.strftime("%Y-%m-%d")
+        target = self._target_path_for_day(day)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, ensure_ascii=False) + "\n")
         except Exception:  # pragma: no cover - logging must not break flow
             self.logger.warning("failed to write %s log line", self.channel, exc_info=False)
+        self._maybe_archive_prev_day(target.parent, day)
 
         status = event.get("status")
         line = console or self._auto_console(event)
@@ -185,6 +200,22 @@ class EventLogger:
             self.logger.warning("SLOW %s", line)
         else:
             self.logger.warning("%s", line)
+
+    def _maybe_archive_prev_day(self, dir_: Path, day: str) -> None:
+        """本进程内某 (目录, channel) 序列首次见到新 day 时，把上一 day 的明文提交
+        压缩。prev is None（本进程首写）不压——无从判断是否翻天；启动时的
+        archive_stale_days 已经扫过历史遗留。O(1) 摊还，绝不阻塞 emit。"""
+        try:
+            key = (str(dir_), self.channel)
+            with _last_write_lock:
+                prev = _last_write_day.get(key)
+                should = prev is not None and prev != day
+                if prev != day:
+                    _last_write_day[key] = day
+            if should:
+                _archive_pool.submit(_gzip_day_file, dir_ / f"{self.channel}-{prev}.jsonl")
+        except Exception:  # pragma: no cover - 归档入队绝不破坏 emit
+            pass
 
     @staticmethod
     def _auto_console(event: Dict[str, Any]) -> str:
