@@ -44,8 +44,11 @@ def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
     assert r.status_code == 200
     events = [json.loads(l) for l in r.text.splitlines() if l.strip()]
     kinds = [e["event"] for e in events]
-    assert kinds[0] == "progress" and events[0]["step"]["step_type"] == "start"
-    assert events[0]["step"]["detail"]["mode"] == "chunk"
+    # WS2a: 首事件现为 started(带 job_id,供前端「停止」调 cancel 端点),
+    # 随后才是 progress/start。
+    assert kinds[0] == "started" and events[0]["job_id"]
+    assert kinds[1] == "progress" and events[1]["step"]["step_type"] == "start"
+    assert events[1]["step"]["detail"]["mode"] == "chunk"
     assert kinds[-1] == "final"
     assert "reasoning_trace" not in events[-1]["response"] or \
         not events[-1]["response"]["reasoning_trace"]

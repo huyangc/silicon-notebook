@@ -46,10 +46,12 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     ]
     kinds = [event["event"] for event in events]
 
+    # WS2a: 首事件为 started(带 job_id),随后才是 progress/start。
+    assert kinds[0] == "started" and events[0]["job_id"]
     assert "progress" in kinds
     assert kinds[-1] == "final"
     assert kinds.index("progress") < kinds.index("final")
-    assert events[0]["step"]["step_type"] == "start"
+    assert events[1]["step"]["step_type"] == "start"
     assert any(event.get("step", {}).get("step_type") == "plan" for event in events)
     assert events[-1]["response"]["conversation_id"]
     assert events[-1]["response"]["reasoning_trace"]

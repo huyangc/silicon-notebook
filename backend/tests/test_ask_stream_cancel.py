@@ -1,6 +1,5 @@
 import asyncio
 import threading
-import time
 from types import SimpleNamespace
 
 from app.api.routes import _stream_ask_events
@@ -11,51 +10,39 @@ from app.services.cancellation import AskCancelled
 
 
 class _DisconnectingRequest:
-    def __init__(self):
-        self.calls = 0
-
     async def is_disconnected(self):
-        self.calls += 1
         return True
 
 
-def test_ask_stream_disconnect_cancels_backend_handler():
-    entered = threading.Event()
-    worker_exited = threading.Event()
-    received_cancel_event = []
+def test_disconnect_does_not_cancel_worker_runs_to_completion():
+    """WS2a: 客户端断连不再 set cancel_event;worker 照跑到完、finish_ask_job(done)。"""
+    entered = threading.Event(); completed = threading.Event(); saw_cancel = []
 
     class Repo:
-        def ask_chunk(self, notebook_id, payload, cancel_event=None):
-            received_cancel_event.append(cancel_event)
+        def begin_ask_job(self, nb, payload, mode, ev):
+            saw_cancel.append(ev); return "askjob-1", "conv-1"
+        def finish_ask_job(self, job_id, status, *, answer_id="", error=""):
+            if status == "done": completed.set()
+        def ask_chunk(self, nb, payload, cancel_event=None):
             entered.set()
-            while cancel_event is not None and not cancel_event.is_set():
-                time.sleep(0.005)
-            worker_exited.set()
-            raise AskCancelled()
+            from app.models.schemas import AskResponse
+            return AskResponse(answer_id="ans-1", conversation_id="conv-1", conclusion="",
+                               answer="a", grounded=True, anchors=[], related_knowledge=[],
+                               citations=[], llm_mode="x")
 
-    async def drive_stream():
-        stream = _stream_ask_events(
-            Repo(),
-            "nb-test",
-            AskRequest(question="q", mode="chunk"),
-            SimpleNamespace(id="chunk", handler="ask_chunk", streaming=False),
-            _DisconnectingRequest(),
-        )
+    async def drive():
+        stream = _stream_ask_events(Repo(), "nb", AskRequest(question="q", mode="chunk"),
+            SimpleNamespace(id="chunk", handler="ask_chunk", streaming=False), _DisconnectingRequest())
+        # 首事件应是 started(带 job_id);随后断连使 stream 提前结束
         first = await stream.__anext__()
-        assert '"event": "progress"' in first
-        assert entered.wait(1)
+        assert '"event": "started"' in first and '"job_id"' in first
         try:
-            await stream.__anext__()
+            while True: await stream.__anext__()
         except StopAsyncIteration:
             pass
-        else:
-            raise AssertionError("stream should stop instead of yielding final/error")
-
-    asyncio.run(drive_stream())
-
-    assert received_cancel_event and received_cancel_event[0] is not None
-    assert received_cancel_event[0].is_set()
-    assert worker_exited.wait(1)
+    asyncio.run(drive())
+    assert entered.wait(1) and completed.wait(1)     # worker 跑到完
+    assert saw_cancel and not saw_cancel[0].is_set() # cancel_event 未被断连 set
 
 
 def test_cancelable_llm_stream_closes_on_cancel(tmp_path):
