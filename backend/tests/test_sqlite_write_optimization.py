@@ -59,10 +59,10 @@ def test_all_writes_go_through_write_lock():
     assert not WRITE.search('name.replace("a", "b")')
     # 起步单线程, 不并发, 豁免。_migration_N = 版本化 schema 迁移步骤(基线=_migration_1);
     # _recover_interrupted_jobs = 启动崩溃兜底。均由 __init__ 在对外服务前调用。
-    # _migration_6(ask_jobs)/_migration_7(ask_trace_steps) 的 CREATE TABLE DDL 里
-    # "ON DELETE CASCADE" 外键子句触发 DELETE 关键字误报(非真实 DML 写),故与
-    # _migration_1 同列入豁免——同属版本化迁移步骤范畴。
-    ALLOW = {"_migrate", "_migration_1", "_migration_6", "_migration_7",
+    # _migration_6(ask_jobs)/_migration_7(ask_trace_steps)/_migration_8(canonical_relations)
+    # 的 CREATE TABLE DDL 里 "ON DELETE CASCADE" 外键子句触发 DELETE 关键字误报(非真实
+    # DML 写),故与 _migration_1 同列入豁免——同属版本化迁移步骤范畴。
+    ALLOW = {"_migrate", "_migration_1", "_migration_6", "_migration_7", "_migration_8",
              "_recover_interrupted_jobs", "_seed"}
     cur = None
     in_block = False
