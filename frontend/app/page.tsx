@@ -5687,7 +5687,7 @@ function AnswerView({
         return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
       })()}
       {(() => {
-        const { personal, base } = computeSourceTierCounts(answer.anchors, answer.citations);
+        const { personal, base } = computeSourceTierCounts(references);
         if (personal + base === 0) return null;
         return (
           <span className="tag source-dist" title="本次引用的来源分布（个人层 / 基准库）">
