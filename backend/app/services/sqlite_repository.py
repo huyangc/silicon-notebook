@@ -6109,12 +6109,19 @@ class SQLiteRepository:
         # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
         # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
         from app.services.vector_index import resolve_runtime_dim
+        # 算法版本(纯代码分量):归一化/哨兵/护栏等 seed·聚类语义的代码改动不动任何
+        # 数据派生分量(seq/COUNT/dim 全不变),但会改变聚类结果。折进版本串后,已部署
+        # 库改代码 → 下次「刷新图谱」(force=False)因版本失配真重算一次,不再被闸静默
+        # 跳过。bump 约定见 kg_merge.CLUSTER_ALGO_VERSION。函数内 import:测试可 patch
+        # kg_merge 模块属性,调用时按 patch 后的值读取。
+        from app.services.kg_merge import CLUSTER_ALGO_VERSION
         parts = [
             "v2", notebook_id,
             int(seq),
             int(obj_c), int(emb_c), int(dec_c),
             int(self.settings.embed_dim),
             resolve_runtime_dim(self.settings),
+            int(CLUSTER_ALGO_VERSION),
         ]
         return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
 
@@ -6622,8 +6629,14 @@ class SQLiteRepository:
         (_cluster_input_version) is stored at each rebuild. When force=False and
         that version still matches AND clusters already exist, the whole recompute
         is skipped and the cached cluster count returned — nothing is deleted or
-        rewritten. force=True (explicit 刷新图谱 / recluster) always recomputes and
-        also picks up clustering-SETTINGS changes the data-version can't see.
+        rewritten. The 刷新图谱 button goes through this force=False path (see
+        api/routes.py); the version now folds in kg_merge.CLUSTER_ALGO_VERSION, so a
+        code-only change to seed/clustering SEMANTICS bumps the version and the next
+        automatic rebuild truly recomputes rather than being silently skipped.
+        force=True is used only by the explicit recluster CLI paths
+        (scripts/recluster_kg.py, batch_ingest rebuild_only): it bypasses the gate
+        and additionally picks up clustering-SETTINGS changes (thresholds,
+        rep_ann_max) the data-version can't see.
 
         Memory-bounded (streamed): object→seed mappings live in the
         kg_cluster_scratch table; only seed-level aggregates (reps, counts,

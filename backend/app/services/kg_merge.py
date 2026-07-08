@@ -77,10 +77,21 @@ def _norm(name: str) -> str:
     return _ALIASES.get(cleaned, cleaned)
 
 
+# 聚类算法版本:纳入 _cluster_input_version 的组成部分。凡是改变 seed/聚类语义的
+# 代码修改(归一化规则、哨兵策略、护栏)都必须 bump —— 数据版本看不见纯代码变更,
+# 不 bump 则已部署库的「刷新图谱」会被版本闸静默跳过、修复永不生效。
+# v2: Unicode-safe _norm(NFKC+\w) + seed_or_unique 空seed哨兵(2026-07-08)。
+CLUSTER_ALGO_VERSION = 2
+
+
 def seed_or_unique(seed: str, object_id: str) -> str:
     """空/退化 seed(符号-only 名)绝不共簇:回退为按对象唯一的哨兵 seed。
     "~" 会被 _norm 清洗掉,真实名字的 seed 不可能以 "~" 开头 → 无碰撞。
-    宁可不并,不可全并(旧行为:全部空 seed 共享 canonical "K-")。"""
+    宁可不并,不可全并(旧行为:全部空 seed 共享 canonical "K-")。
+
+    无碰撞保证仅对 `_norm`-族归一化器成立(它们清洗掉 "~");`_norm_formula`
+    保留所有非空白字符,其 seed 理论上可含 "~"(碰撞需某公式全文恰为
+    "~"+另一对象的完整 id,实际不可达)。"""
     return seed if seed else f"~{object_id}"
 
 

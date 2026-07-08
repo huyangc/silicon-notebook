@@ -331,3 +331,50 @@ def test_rebuild_preserves_mutation_seq(repo):
             (nb.id,)).fetchone()
     assert row["dirty"] == 0                            # rebuild cleared dirty
     assert int(row["kg_mutation_seq"]) == seq_before    # seq preserved (not reset/bumped)
+
+
+# --- 9. algorithm-version component: code-only semantics change invalidates ----
+# A change to clustering SEMANTICS that lives purely in code (Unicode-safe _norm,
+# the empty-seed sentinel, guardrails) leaves every DATA-derived component of the
+# version identical — kg_mutation_seq, the three COUNTs and embed_dim are all
+# unchanged. Without an algorithm-version component, a deployed library clicking
+# 刷新图谱 (force=False) would be silently skipped and keep its pre-fix
+# mega-clusters. kg_merge.CLUSTER_ALGO_VERSION is folded into
+# _cluster_input_version so any bump of the constant moves the version. We model a
+# code-only semantics change by patching the constant where the version READS it
+# (module attribute), matching how _cluster_input_version imports it at call time.
+
+def test_version_changes_when_algo_version_bumped(repo, monkeypatch):
+    """Bumping kg_merge.CLUSTER_ALGO_VERSION changes the version string even
+    though every data-derived component is byte-for-byte identical."""
+    import app.services.kg_merge as kg_merge
+
+    nb = _make_kg(repo)
+    v0 = repo._cluster_input_version(nb.id)
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION",
+                        kg_merge.CLUSTER_ALGO_VERSION + 1)
+    v1 = repo._cluster_input_version(nb.id)
+    assert v0 != v1
+
+
+def test_algo_version_bump_forces_recompute(repo, monkeypatch):
+    """End-to-end: after a rebuild bakes the version in, an unchanged automatic
+    rebuild skips (baseline); bumping the algo version constant must then make the
+    force=False gate recompute — else deployed libraries keep pre-fix clusters."""
+    import app.services.kg_merge as kg_merge
+
+    nb = _make_kg(repo)
+    repo.rebuild_unified_kg(nb.id)                       # bake inputs into stored version
+
+    calls = _spy_stream(repo, monkeypatch)
+
+    # Baseline: unchanged inputs -> automatic (force=False) path skips recompute.
+    repo.rebuild_unified_kg(nb.id)
+    assert calls["n"] == 0
+
+    # A code-only clustering-semantics change, modeled as a constant bump where
+    # _cluster_input_version reads it. The gate must now refuse to skip.
+    monkeypatch.setattr(kg_merge, "CLUSTER_ALGO_VERSION",
+                        kg_merge.CLUSTER_ALGO_VERSION + 1)
+    repo.rebuild_unified_kg(nb.id)                       # force=False, but algo bumped
+    assert calls["n"] >= 1                               # real recompute ran (not skipped)
