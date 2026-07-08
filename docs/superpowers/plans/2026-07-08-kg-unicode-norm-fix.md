@@ -434,6 +434,6 @@ gh pr create --base master --title "fix(kg): Unicode 实体归一化——修中
 PR body 要点（必含）：
 1. 根因与实测：`_norm` 清空非 `[a-z0-9]` → 中文库 54%（207/386）concept 现已塌缩在同一个 `K-` 簇（真实库只读实测）；同文档中文概念永不合并；混合名剥离出年份 seed（`1903年国际汇兑委员会`→`1903`）。
 2. 修复：两个 `_norm` NFKC+Unicode `\w`（纯 ASCII 逐字节不变，测试固化）+ `seed_or_unique` 空 seed 守卫四处接线。
-3. 生效方式：**已部署库需点「刷新图谱」（force rebuild）**；增量融合对新源立即生效。英文库 rebuild 结果不漂移（真实库模拟：seed 变化数 N=个位数，附数字）。
+3. 生效方式：`kg_merge.CLUSTER_ALGO_VERSION`（本次 bump 到 2）已并入 `_cluster_input_version` 版本闸——纯代码语义改动数据版本看不见，故折进算法版本分量。部署后**下一次「刷新图谱」（`force=False`，或任何 rebuild 路径）因算法版本失配自动真重算一次**（大库为一次性成本），之后恢复 O(1) 跳过；无需手工 force。CLI `scripts/recluster_kg.py`（`force=True`）仍可显式强制。增量融合对新源立即生效。英文库 rebuild 结果不漂移（真实库模拟：seed 变化数 N=个位数，附数字）。
 4. 已决合并对（confirmed/rejected）按旧 seed 存储，非 ASCII 相关的极少数会失配转休眠——量化数字（预期 ~0）。
 5. 不改 schema、无新增 LLM/embed 调用。
