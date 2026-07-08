@@ -220,7 +220,8 @@ class ReportEngine:
     def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
         chunk_block, chunk_map = self.repo._chunk_answer_context(
-            result.chunks, budget_chars=self.settings.report_section_chunk_budget)
+            result.chunks, budget_chars=self.settings.report_section_chunk_budget,
+            notebook_id=notebook_id)
         kg_block, kg_map = self.repo._answer_context(
             notebook_id, result.top_hits, id_offset=len(chunk_map))
         # 现场事实:_chunk_answer_context/_answer_context 空输入返回 "(none)" 哨兵

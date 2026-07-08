@@ -11175,11 +11175,18 @@ class SQLiteRepository:
         by_id = {c.chunk_id: c for c in scored}
         return [by_id[cid] for cid in chosen]
 
-    def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None) -> tuple:
+    def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None,
+                               notebook_id: str = "") -> tuple:
         """产出长上下文综合用的 id 标注块 + id_map。chunk.text 已含 [section] 前缀
         (P1 build_chunks),故每行直接 `k_i: <text>`。id_map 形状与 KG 版一致,
-        使 _parse_answer_anchors 原样复用(object_id=chunk_id, object_type=chunk)。"""
+        使 _parse_answer_anchors 原样复用(object_id=chunk_id, object_type=chunk)。
+        tier:与 _answer_context(KG 版)同一模式——按每 chunk 自己的 notebook_id 解析
+        (PPR/概念漫游可掺 base 库 chunk,c.notebook_id 已标;单库路径留空回退调用方
+        传入的 notebook_id)。批量一次查询(O(distinct notebook) 非 O(chunk)),
+        循环内只查表。"""
         budget = self.settings.chunk_answer_budget_chars if budget_chars is None else budget_chars
+        tier_map = self._tier_map_for(
+            {getattr(c, "notebook_id", "") or notebook_id for c in chunks})
         lines, id_map = [], {}
         used = 0
         for i, c in enumerate(chunks, 1):
@@ -11189,11 +11196,13 @@ class SQLiteRepository:
             line = f"{key}: {c.text}"
             lines.append(line)
             used += len(line)
+            c_nb = getattr(c, "notebook_id", "") or notebook_id
             id_map[key] = {
                 "object_id": c.chunk_id, "object_type": "chunk",
                 "name": c.section_path or c.source_title, "definition": None,
                 "snippet": c.text[:300], "source_title": c.source_title,
-                "location_label": c.section_path, "tier": "personal",
+                "location_label": c.section_path,
+                "tier": tier_map.get(c_nb, "personal"),
             }
         return ("\n".join(lines) if lines else "(none)"), id_map
 
@@ -11203,12 +11212,15 @@ class SQLiteRepository:
         chunks,
         history="",
         cancel_event: CancelEvent = None,
+        notebook_id: str = "",
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
-        (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。"""
+        (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
+        notebook_id:转发给 _chunk_answer_context 解 anchor.tier(见其 docstring);
+        chunk 自带 notebook_id(跨库召回)优先,这只是单库 chunk 的回退值。"""
         from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
         raise_if_cancelled(cancel_event)
-        context_block, id_map = self._chunk_answer_context(chunks)
+        context_block, id_map = self._chunk_answer_context(chunks, notebook_id=notebook_id)
         raw = self.llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -11232,16 +11244,20 @@ class SQLiteRepository:
         kg_id_map,
         history="",
         cancel_event: CancelEvent = None,
+        notebook_id: str = "",
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
-        返回 (answer, llm_grounded, anchors)。"""
+        返回 (answer, llm_grounded, anchors)。notebook_id:转发给 _chunk_answer_context
+        解 anchor.tier(见其 docstring);chunk 自带 notebook_id(跨库召回)优先,
+        这只是单库 chunk 的回退值。"""
         # chunk 段编号 k1..kN,KG 段从 _MIX_KG_KEY_BASE 起;若 chunk 数逼近 base 会在
         # 合并 id_map 时撞 KG key(静默覆盖)。按 base-1 硬截(token 预算下通常远不及此)。
         chunks = chunks[: self._MIX_KG_KEY_BASE - 1]
         from app.services.prompts import answer_prompt, ANSWER_SCHEMA_HINT
         raise_if_cancelled(cancel_event)
-        chunk_block, chunk_id_map = self._chunk_answer_context(chunks, budget_chars=10**9)
+        chunk_block, chunk_id_map = self._chunk_answer_context(
+            chunks, budget_chars=10**9, notebook_id=notebook_id)
         if kg_block and kg_block != "(none)":
             context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
         else:
@@ -11415,10 +11431,11 @@ class SQLiteRepository:
                     if overlay_on:
                         answer, llm_grounded, anchors = self._answer_mix(
                             question, selected, kg_block, kg_id_map, history,
-                            cancel_event=cancel_event)
+                            cancel_event=cancel_event, notebook_id=notebook_id)
                     else:
                         answer, llm_grounded, anchors = self._answer_chunks(
-                            question, selected, history, cancel_event=cancel_event)
+                            question, selected, history, cancel_event=cancel_event,
+                            notebook_id=notebook_id)
                 except AskCancelled:
                     raise
                 except Exception as exc:
@@ -12029,7 +12046,8 @@ class SQLiteRepository:
             # k1001+,合并 id_map,两段都可 [k] 引用。无需 _answer_mix 的 base-1 截断:chunk
             # 数 ≤ ppr_top_chunks×(1 seed + _MAX_PPR_RETRIEVES) ≪ _MIX_KG_KEY_BASE(1000)。
             ordered = sorted(chunks, key=lambda c: (-c.relevance, c.chunk_id))
-            chunk_block, chunk_id_map = self._chunk_answer_context(ordered)
+            chunk_block, chunk_id_map = self._chunk_answer_context(
+                ordered, notebook_id=notebook_id)
             kg_block, kg_id_map = self._answer_context(
                 notebook_id, top_hits, id_offset=self._MIX_KG_KEY_BASE)
             if kg_block and kg_block != "(none)":
@@ -12299,7 +12317,8 @@ class SQLiteRepository:
                     if getattr(self.llm_client, "configured", False):
                         try:
                             answer, llm_grounded, anchors = self._answer_chunks(
-                                question, ppr_chunks, history, cancel_event=cancel_event)
+                                question, ppr_chunks, history, cancel_event=cancel_event,
+                                notebook_id=notebook_id)
                         except AskCancelled:
                             raise
                         except Exception as exc:
@@ -12453,7 +12472,7 @@ class SQLiteRepository:
                     try:
                         answer, llm_grounded, anchors = self._answer_mix(
                             question, src_chunks, mix_kg_block, mix_id_map, history,
-                            cancel_event=cancel_event)
+                            cancel_event=cancel_event, notebook_id=notebook_id)
                     except AskCancelled:
                         raise
                     except Exception as exc:
