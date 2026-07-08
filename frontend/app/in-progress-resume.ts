@@ -22,7 +22,8 @@ export function shouldResumeKgBuild(nb: NotebookKgBuildLike | null | undefined):
 }
 
 /** KG 轮询的停止条件：改看 kg_building（而非 kg_ready）——
- *  重抽已建库时 kg_ready 恒为真，用它会一上来就误判「完成」。 */
-export function kgBuildFinished(nb: NotebookKgBuildLike): boolean {
-  return !nb.kg_building;
+ *  重抽已建库时 kg_ready 恒为真，用它会一上来就误判「完成」。
+ *  空值（null/undefined）视为「未在构建」→ true。 */
+export function kgBuildFinished(nb: NotebookKgBuildLike | null | undefined): boolean {
+  return !nb || !nb.kg_building;
 }

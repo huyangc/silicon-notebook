@@ -32,4 +32,6 @@ test("kgBuildFinished: 看 kg_building 而非 kg_ready（重抽已建库时 kg_r
   assert.equal(kgBuildFinished({ kg_building: false }), true);
   assert.equal(kgBuildFinished({ kg_ready: true, kg_building: true }), false);  // 关键：不误停
   assert.equal(kgBuildFinished({}), true);
+  assert.equal(kgBuildFinished(null), true);
+  assert.equal(kgBuildFinished(undefined), true);
 });
