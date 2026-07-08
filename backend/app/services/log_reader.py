@@ -273,19 +273,28 @@ def _load_plain_window(path, *, since, before, max_records, max_bytes):
         return [], 0, False
     size = path.stat().st_size
     if since is not None:
-        # 轮询：seek 到 since 向后读到 EOF，只回 seq>since（since 那行是已见的最后一行）
         with path.open("rb") as fh:
             fh.seek(since)
             blob = fh.read()
         recs, malformed = _parse_blob(blob, since, drop_partial_first=False)
         recs = [r for r in recs if r["seq"] > since]
-        return recs, malformed, False
+        truncated = False
+        if len(recs) > max_records:            # since 分支也收口:仅回最新 max_records + 回传截断
+            recs = recs[-max_records:]
+            truncated = True
+        return recs, malformed, truncated
     end = before if before is not None else size
     start = max(0, end - max_bytes)
     with path.open("rb") as fh:
-        fh.seek(start)
-        blob = fh.read(end - start)
-    recs, malformed = _parse_blob(blob, start, drop_partial_first=(start > 0))
+        if start > 0:
+            fh.seek(start - 1)
+            at_boundary = fh.read(1) == b"\n"   # start 紧跟 \n 之后 = 行首对齐,首段是完整行不该丢
+            blob = fh.read(end - start)
+        else:
+            at_boundary = True
+            fh.seek(start)
+            blob = fh.read(end - start)
+    recs, malformed = _parse_blob(blob, start, drop_partial_first=(start > 0 and not at_boundary))
     if before is not None:
         recs = [r for r in recs if r["seq"] < before]
     truncated = start > 0
