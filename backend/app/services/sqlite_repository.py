@@ -13008,6 +13008,44 @@ class SQLiteRepository:
                 "mode": row["mode"], "status": row["status"], "answer_id": row["answer_id"],
                 "error": row["error"]}
 
+    def append_ask_trace(self, job_id: str, step: dict) -> None:
+        """把一个 trace step 追加进 ask_jobs.trace_json(JSON 数组)。仅单 worker 写、
+        读侧只读,无写写竞态。**fail-open**:轨迹持久化失败绝不拖垮 ask。"""
+        try:
+            with self._write() as db:
+                row = db.execute("SELECT trace_json FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+                if row is None:
+                    return
+                try:
+                    steps = json.loads(row["trace_json"] or "[]")
+                    if not isinstance(steps, list):
+                        steps = []
+                except (TypeError, ValueError):
+                    steps = []
+                steps.append(step)
+                db.execute("UPDATE ask_jobs SET trace_json=?, updated_at=? WHERE id=?",
+                           (json.dumps(steps, ensure_ascii=False), _now(), job_id))
+        except Exception:  # noqa: BLE001
+            self.event_log.logger.exception("append_ask_trace failed for %s", job_id)
+
+    def ask_job_detail(self, job_id: str) -> dict:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
+                "trace_json,answer_id,error FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        try:
+            trace = json.loads(row["trace_json"] or "[]")
+            if not isinstance(trace, list):
+                trace = []
+        except (TypeError, ValueError):
+            trace = []
+        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
+                "conversation_id": row["conversation_id"], "created_by": row["created_by"],
+                "mode": row["mode"], "question": row["question"], "status": row["status"],
+                "trace": trace, "answer_id": row["answer_id"], "error": row["error"]}
+
     def _cleanup_empty_conversation(self, conversation_id: str) -> None:
         """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
         with self._write() as db:
@@ -13055,6 +13093,10 @@ class SQLiteRepository:
                 "WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
                 (conversation_id,),
             ).fetchall()
+            job = db.execute(
+                "SELECT id, question, mode, trace_json FROM ask_jobs "
+                "WHERE conversation_id=? AND status='running' "
+                "ORDER BY created_at DESC LIMIT 1", (conversation_id,)).fetchone()
         turns = []
         for row in rows:
             try:
@@ -13070,6 +13112,17 @@ class SQLiteRepository:
                 )
             )
         used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
+        active_job = None
+        if job is not None:
+            from app.models.schemas import ActiveAskJob
+            try:
+                jt = json.loads(job["trace_json"] or "[]")
+                if not isinstance(jt, list):
+                    jt = []
+            except (TypeError, ValueError):
+                jt = []
+            active_job = ActiveAskJob(job_id=job["id"], question=job["question"] or "",
+                                      mode=job["mode"] or "", trace=jt)
         return ConversationDetail(
             id=conv["id"],
             notebook_id=conv["notebook_id"],
@@ -13078,6 +13131,7 @@ class SQLiteRepository:
             turn_count=len(turns),
             used_reasoning=used_reasoning,
             turns=turns,
+            active_job=active_job,
         )
 
     def list_conversations(self, notebook_id: str) -> "List[ConversationSummary]":
