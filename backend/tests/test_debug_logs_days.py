@@ -49,3 +49,21 @@ def test_date_param_reads_that_day_and_rejects_bad(client, tmp_path):
     assert len(ok.json()["records"]) == 1 and "truncated" in ok.json()
     bad = client.get("/api/debug/logs/llm?date=../etc", headers=admin)
     assert bad.status_code in (400, 404, 422)
+
+
+def test_get_record_unknown_channel_404(client):
+    admin = _auth_admin(client)
+    r = client.get("/api/debug/logs/nope/some-id", headers=admin)
+    assert r.status_code == 404 and "unknown channel" in r.json()["detail"]
+
+
+def test_get_record_by_seq_direct_read(client, tmp_path):
+    admin = _auth_admin(client)
+    owner = client.get("/api/me", headers=admin).json()["id"]
+    _seed_day(tmp_path, owner, "llm", "2026-07-07",
+              [{"id": "a", "kind": "chat"}, {"id": "b", "kind": "embed"}])
+    listed = client.get("/api/debug/logs/llm?date=2026-07-07", headers=admin).json()
+    rec_b = next(r for r in listed["records"] if r["id"] == "b")
+    detail = client.get(
+        f"/api/debug/logs/llm/b?date=2026-07-07&seq={rec_b['seq']}", headers=admin)
+    assert detail.status_code == 200 and detail.json()["id"] == "b"

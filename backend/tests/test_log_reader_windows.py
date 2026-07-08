@@ -146,3 +146,13 @@ def test_gz_window_truncated_ignores_malformed_lines(tmp_path):
     assert [r["i"] for r in recs] == [0, 1, 2, 3, 4]
     assert malformed == 200
     assert trunc is False              # 有效行仅 5 条,未截断(不被 malformed 污染)
+
+
+def test_read_record_at_by_offset(tmp_path):
+    p = tmp_path / "llm-2026-07-08.jsonl"
+    _write_lines(p, [{"i": 0}, {"i": 1}, {"i": 2}])
+    all_recs, _, _ = lr._load_plain_window(p, since=None, before=None, max_records=100, max_bytes=1 << 20)
+    off = all_recs[1]["seq"]                      # 第二行字节偏移
+    rec = lr.read_record_at(p, off)
+    assert rec is not None and rec["i"] == 1 and rec["seq"] == off
+    assert lr.read_record_at(p, 10_000) is None   # 越界 → None

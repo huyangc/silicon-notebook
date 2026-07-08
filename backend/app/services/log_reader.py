@@ -345,3 +345,19 @@ def load_day_window(path, is_gzip, *, since=None, before=None,
         return _load_gz_window(path, since=since, before=before, max_records=max_records)
     return _load_plain_window(path, since=since, before=before,
                               max_records=max_records, max_bytes=max_bytes)
+
+
+def read_record_at(path, offset):
+    """明文日志按字节偏移直读一行(get_record 的 O(1) 详情路径,不受尾窗 32MB 限制)。
+    offset 由列表返回的 seq(字节偏移)提供,必落在行首。越界/解析失败→None(调用方兜底)。"""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            line = fh.readline()
+        obj = json.loads(line)
+        if isinstance(obj, dict):
+            obj["seq"] = offset
+            return obj
+    except Exception:
+        return None
+    return None
