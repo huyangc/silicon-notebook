@@ -1,0 +1,28 @@
+.page-header {
+  height: 48px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--line, #d8dee6);
+  background: var(--panel, #ffffff);
+  color: var(--ink, #17202a);
+}
+
+.page-header-back {
+  color: var(--blue, #1f5eff);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.page-header-back:hover {
+  text-decoration: underline;
+}
+
+.page-header-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted, #657080);
+}

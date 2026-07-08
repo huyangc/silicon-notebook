@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useState } from "react";
 import { fetchMe } from "../../auth.ts";
+import { PageHeader } from "../../components/PageHeader.tsx";
 import { fetchAdminUsers, type AdminUserUsage } from "./api.ts";
 import { formatLastActive, logsDrillHref } from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
@@ -61,7 +62,7 @@ export default function AdminUsagePage() {
 
   return (
     <main className="usage-page">
-      <h1>用户使用总览</h1>
+      <PageHeader title="用户使用总览" />
       <table className="usage-table">
         <thead>
           <tr>

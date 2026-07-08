@@ -10,6 +10,7 @@ import { LogList } from "./components/LogList";
 import { LogDetail } from "./components/LogDetail";
 import { fetchMe, type AuthUser } from "../../auth.ts";
 import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
+import { PageHeader } from "../../components/PageHeader.tsx";
 import { usernameForOwner } from "./owner";
 import { dayLabel, TODAY_VALUE } from "./date.ts";
 
@@ -201,6 +202,7 @@ export default function LogsPage() {
 
   return (
     <div className="logview">
+      <PageHeader title="日志查看" />
       <div className="logview-owner">
         <span>
           当前查看:<strong>{usernameForOwner(adminUsers, owner, me?.username ?? "")}</strong>
