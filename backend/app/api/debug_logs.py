@@ -11,6 +11,7 @@ Channels are validated against `log_reader.CHANNELS`; `owner` is validated by
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -51,14 +52,12 @@ def _resolve_owner(channel: str, user: UserProfile, requested: Optional[str]) ->
     return requested
 
 
-def _channel_path(settings: Settings, channel: str, owner: Optional[str]) -> Path:
-    filename = log_reader.CHANNELS.get(channel)
-    if filename is None:
-        raise HTTPException(status_code=404, detail=f"unknown channel: {channel}")
+def _channel_dir(settings: Settings, owner: Optional[str]) -> Path:
+    """返回该 channel/owner 对应的日志目录（按天分文件的文件都落在这里）。"""
     log_dir = Path(settings.event_log_dir)
     if not log_dir.is_absolute():
         log_dir = _ROOT_DIR / log_dir
-    return log_dir / filename if owner is None else log_dir / owner / filename
+    return log_dir if owner is None else log_dir / owner
 
 
 @router.get("")
@@ -73,12 +72,26 @@ def list_channels(
             target = _resolve_owner(name, user, owner)
         except HTTPException:
             continue  # 无权的 channel（如非 admin 的 requests）不列出
-        path = _channel_path(settings, name, target)
-        records, _ = log_reader.load_records(path)
-        out.append(
-            {"name": name, "file": filename, "exists": path.exists(), "count": len(records)}
-        )
+        path_dir = _channel_dir(settings, target)
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_file = path_dir / f"{name}-{today}.jsonl"
+        out.append({"name": name, "file": filename,
+                    "exists": today_file.exists(),
+                    "bytes": today_file.stat().st_size if today_file.exists() else 0})
     return {"channels": out}
+
+
+@router.get("/{channel}/days")
+def list_days(
+    channel: str,
+    user: UserProfile = Depends(get_current_user),
+    settings: Settings = Depends(require_enabled),
+    owner: Optional[str] = Query(None),
+):
+    if channel not in log_reader.CHANNELS:
+        raise HTTPException(status_code=404, detail=f"unknown channel: {channel}")
+    target = _resolve_owner(channel, user, owner)
+    return {"channel": channel, "days": log_reader.available_days(_channel_dir(settings, target), channel)}
 
 
 @router.get("/{channel}")
@@ -87,6 +100,7 @@ def list_records(
     user: UserProfile = Depends(get_current_user),
     settings: Settings = Depends(require_enabled),
     owner: Optional[str] = Query(None),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD；缺省=今天"),
     limit: int = Query(200, ge=1, le=2000),
     before: Optional[int] = Query(None, description="Return records with seq < before (older page)"),
     since: Optional[int] = Query(None, description="Return records with seq > since (newer; for polling)"),
@@ -95,10 +109,16 @@ def list_records(
     model: Optional[str] = None,
     q: Optional[str] = None,
 ):
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    if not log_reader.valid_date_param(date):
+        raise HTTPException(status_code=400, detail=f"bad date: {date}")
     target = _resolve_owner(channel, user, owner)
-    path = _channel_path(settings, channel, target)
-    file_exists = path.exists()
-    records, malformed = log_reader.load_records(path)
+    if channel not in log_reader.CHANNELS:
+        raise HTTPException(status_code=404, detail=f"unknown channel: {channel}")
+    path, is_gzip = log_reader.resolve_day_path(_channel_dir(settings, target), channel, date)
+    records, malformed, truncated = log_reader.load_day_window(
+        path, is_gzip, since=since, before=before)
     filtered = log_reader.filter_records(records, kind=kind, status=status, model=model, q=q)
     stats = log_reader.compute_stats(records, filtered, malformed)
     filtered_desc = sorted(filtered, key=lambda r: r.get("seq", -1), reverse=True)
@@ -106,10 +126,12 @@ def list_records(
     newest_seq = filtered_desc[0]["seq"] if filtered_desc else None
     return {
         "channel": channel,
-        "file_exists": file_exists,
+        "date": date,
+        "file_exists": path.exists(),
         "records": [log_reader.to_summary(r) for r in page],
         "stats": stats,
-        "has_more": has_more,
+        "has_more": has_more or truncated,
+        "truncated": truncated,
         "newest_seq": newest_seq,
     }
 
@@ -121,10 +143,16 @@ def get_record(
     user: UserProfile = Depends(get_current_user),
     settings: Settings = Depends(require_enabled),
     owner: Optional[str] = Query(None),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD；缺省=今天"),
+    seq: Optional[int] = Query(None, description="明文文件内的字节偏移；跳过按 id 查找"),
 ):
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    if not log_reader.valid_date_param(date):
+        raise HTTPException(status_code=400, detail=f"bad date: {date}")
     target = _resolve_owner(channel, user, owner)
-    path = _channel_path(settings, channel, target)
-    records, _ = log_reader.load_records(path)
+    path, is_gzip = log_reader.resolve_day_path(_channel_dir(settings, target), channel, date)
+    records, _, _ = log_reader.load_day_window(path, is_gzip, since=None, before=None)
     matches = [r for r in records if r.get("id") == record_id]
     if not matches:
         raise HTTPException(status_code=404, detail=f"record not found: {record_id}")
