@@ -109,11 +109,15 @@ class ReasoningRetriever:
         # P1-B: 留存本次查询的全量打分(轻量 (relevance,score) map,含未进 collected
         # 的候选)。收尾 _quota_rerank 直接复用——一次 run 内图只读、打分确定,
         # 留存≡收尾重跑。仅 quota 开启时留存(省无谓内存)。
-        # 注意:仅在 types 为空/None 时留存——_quota_rerank 重跑用 self.search(nb, q)
-        # (无 types,全类打分);带 types 的调用(如 add_subquery 分支)与之不同参,
-        # 留存会与重跑结果不一致,故不留存、交由 _quota_rerank 回退重跑该查询。
-        if self.settings.reasoning_quota_enabled and getattr(
-                self.settings, "reasoning_quota_reuse_enabled", True) and not types:
+        # 注意:仅在 types 为空/None 且 prefer=="balanced" 时留存——_quota_rerank 重跑用
+        # self.search(nb, q)(无 types、prefer 用默认值 "balanced" → w_keyword/w_semantic
+        # 用模块默认权重);带 types 的调用(如 add_subquery 分支)或带非 balanced prefer
+        # 的调用(子查询自带 "keyword"/"semantic" 偏好, w_keyword/w_semantic 随之改变、
+        # relevance/score 也随之不同)都与重跑不同参,留存会与重跑结果不一致,故都不留存、
+        # 交由 _quota_rerank 回退重跑该查询(与重跑同权重,逐位等价)。
+        if (self.settings.reasoning_quota_enabled and getattr(
+                self.settings, "reasoning_quota_reuse_enabled", True)
+                and not types and prefer == "balanced"):
             self._per_query_scored[_norm_query(query)] = {
                 h.object_id: (h.relevance, h.score) for h in hits}
         return hits
