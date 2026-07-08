@@ -4,6 +4,18 @@ answers.question|TEXT|1|''|0
 answers.payload|TEXT|1|'{}'|0
 answers.created_at|TEXT|1|None|0
 answers.conversation_id|TEXT|0|None|0
+ask_jobs.id|TEXT|0|None|1
+ask_jobs.notebook_id|TEXT|1|None|0
+ask_jobs.conversation_id|TEXT|1|''|0
+ask_jobs.created_by|TEXT|1|''|0
+ask_jobs.mode|TEXT|1|''|0
+ask_jobs.question|TEXT|1|''|0
+ask_jobs.status|TEXT|1|'running'|0
+ask_jobs.trace_json|TEXT|1|''|0
+ask_jobs.answer_id|TEXT|1|''|0
+ask_jobs.error|TEXT|1|''|0
+ask_jobs.created_at|TEXT|1|''|0
+ask_jobs.updated_at|TEXT|1|''|0
 auth_sessions.token|TEXT|0|None|1
 auth_sessions.user_id|TEXT|1|None|0
 auth_sessions.created_at|TEXT|1|None|0
@@ -291,6 +303,8 @@ users.password_iterations|INTEGER|1|0|0
 --INDEXES--
 idx_answers_conversation
 idx_answers_nb
+idx_ask_jobs_conv
+idx_ask_jobs_nb_status
 idx_auth_sessions_user
 idx_candidates_nb_status
 idx_chunk_embeddings_nb

@@ -249,7 +249,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -393,6 +393,10 @@ class SQLiteRepository:
         # get_notebook 回填 NotebookSummary.kg_building，前端刷新后据此把「构建中」接回。
         self._kg_building: set = set()
         self._kg_building_lock = threading.Lock()
+        # WS2a: 在途 ask 的 {job_id: cancel_event} 进程内注册表——cancel 端点据此
+        # set 对应 worker 的 cancel_event（唯一真取消入口；断连不再取消）。
+        self._ask_cancel_events: dict = {}
+        self._ask_cancel_lock = threading.Lock()
         self._migrate()
         self._recover_interrupted_jobs()
         self._seed()
@@ -1265,14 +1269,42 @@ class SQLiteRepository:
                 db, "unified_kg_state", "cluster_mutation_seq",
                 "INTEGER NOT NULL DEFAULT 0")
 
+    def _migration_6(self) -> None:
+        """WS2a: ask 脱离连接执行的 ask_jobs 表(每个在途 ask 一行,支撑显式取消/
+        重启兜底/WS2b 轨迹持久化)。全新库经 _migrate 跑到此步得表,已部署库单独补建。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS ask_jobs (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  conversation_id TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  mode TEXT NOT NULL DEFAULT '',
+                  question TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'running',
+                  trace_json TEXT NOT NULL DEFAULT '',
+                  answer_id TEXT NOT NULL DEFAULT '',
+                  error TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_ask_jobs_conv ON ask_jobs(conversation_id);
+                CREATE INDEX IF NOT EXISTS idx_ask_jobs_nb_status ON ask_jobs(notebook_id, status);
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
-        merge-review 跑在 daemon 线程上、无法跨进程重启存活，故启动时仍是 'running'
+        merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
         的行定义上就是上次崩溃/重启遗留的陈旧行，否则会永久卡死该 notebook 的单飞守卫。
         幂等——safe every boot。"""
         with self._connect() as db:
             db.execute(
                 "UPDATE merge_review_jobs SET status='failed', "
+                "error='中断:服务重启' WHERE status='running'")
+            db.execute(
+                "UPDATE ask_jobs SET status='interrupted', "
                 "error='中断:服务重启' WHERE status='running'")
 
     def _seed(self) -> None:
@@ -12918,6 +12950,72 @@ class SQLiteRepository:
             (new_id, notebook_id, question[:60], self.current_user().id, now, now),
         )
         return new_id
+
+    def begin_ask_job(self, notebook_id: str, payload, mode: str, cancel_event) -> tuple[str, str]:
+        """建/接续会话 + 插入 running 的 ask_jobs 行 + 注册 cancel_event。
+        就地把解析出的 conversation_id 写回 payload,使随后的 handler(_ensure_conversation)
+        接续同一会话、不另建。返回 (job_id, conversation_id)。"""
+        self.get_notebook(notebook_id)
+        question = payload.question.strip()
+        now = _now()
+        with self._write() as db:
+            conversation_id = self._ensure_conversation(
+                db, notebook_id, payload.conversation_id, question)
+        payload.conversation_id = conversation_id
+        job_id = f"askjob-{uuid4().hex[:10]}"
+        with self._write() as db:
+            db.execute(
+                "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
+                "status,trace_json,answer_id,error,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?, 'running','','','',?,?)",
+                (job_id, notebook_id, conversation_id, self.current_user().id, mode,
+                 question[:200], now, now))
+        with self._ask_cancel_lock:
+            self._ask_cancel_events[job_id] = cancel_event
+        return job_id, conversation_id
+
+    def finish_ask_job(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:
+        """终态化 ask_job + 注销 cancel_event；cancelled/failed 时清理空会话(0 答案)。"""
+        with self._write() as db:
+            row = db.execute("SELECT conversation_id FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+            db.execute(
+                "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? WHERE id=?",
+                (status, answer_id, error, _now(), job_id))
+        with self._ask_cancel_lock:
+            self._ask_cancel_events.pop(job_id, None)
+        if status in ("cancelled", "failed") and row is not None and row["conversation_id"]:
+            self._cleanup_empty_conversation(row["conversation_id"])
+
+    def cancel_ask_job(self, job_id: str, user_id: str) -> dict:
+        """显式取消(属主校验)。set 在途 worker 的 cancel_event;非属主/不存在 → KeyError。"""
+        st = self.ask_job_status(job_id)   # KeyError if missing
+        if st["created_by"] != user_id:
+            raise KeyError(job_id)
+        with self._ask_cancel_lock:
+            ev = self._ask_cancel_events.get(job_id)
+        if ev is not None:
+            ev.set()
+        return {"status": "cancelling" if ev is not None else st["status"], "job_id": job_id}
+
+    def ask_job_status(self, job_id: str) -> dict:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id,notebook_id,conversation_id,created_by,mode,status,answer_id,error "
+                "FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
+                "conversation_id": row["conversation_id"], "created_by": row["created_by"],
+                "mode": row["mode"], "status": row["status"], "answer_id": row["answer_id"],
+                "error": row["error"]}
+
+    def _cleanup_empty_conversation(self, conversation_id: str) -> None:
+        """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
+        with self._write() as db:
+            db.execute(
+                "DELETE FROM conversations WHERE id=? AND NOT EXISTS "
+                "(SELECT 1 FROM answers WHERE conversation_id=?)",
+                (conversation_id, conversation_id))
 
     def _conversation_history(self, db, conversation_id: str, limit: int = 5) -> str:
         """Build the prior-turns history block (oldest->newest, last `limit`
