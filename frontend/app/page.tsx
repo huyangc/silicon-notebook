@@ -615,6 +615,9 @@ async function readAskStream<TResponse>(
       throw new DOMException("已中断回答", "AbortError");  // 走 runAsk 的 isAbortError 干净分支
     } else if (event.event === "error") {
       throw new Error(event.error);
+    } else {
+      const _exhaustive: never = event;   // union 新增 tag 未处理时 tsc 报错
+      throw new Error(`unknown ask stream event: ${JSON.stringify(_exhaustive)}`);
     }
   };
 
