@@ -584,6 +584,45 @@ def test_tier2_ann_early_stop_below_threshold_bounds_knn_calls(repo, monkeypatch
     assert pairs == {tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))}
 
 
+def test_tier2_ann_symbol_only_new_concept_never_bare_K(repo):
+    """空 seed 守卫的第 5 个消费点(P0):_tier2_bridge_candidates_ann 是
+    kg_merge.detect_bridge_candidates 的 ANN 双胞胎。符号-only 名的新 concept
+    (_norm→"")必须以按对象唯一的哨兵 canonical(K-~oid)桥接,绝不退化成裸
+    "K-" —— 否则该退化 canonical 会被写进 concept_merge_candidates,既与它自己
+    真实簇(place_new_concepts 已守卫成 K-~oid)错位,又让所有符号名新概念互相污染。"""
+    from app.models.schemas import NotebookCreate as _NC
+    from app.services.kg_merge import _norm, seed_or_unique
+    nb = repo.create_notebook(_NC(name="kb"))
+    now = "2026-07-02T00:00:00"
+    dim = 16
+    # 一个已存量的真实 concept,符号名新概念的向量紧挨着它(必过 lo=0.82)。
+    exist_vec = _mk_vec(dim, 0, 0.99, 1, 0.02)
+    _seed_concept(repo, nb.id, "ko-exist", "Coinage Parity", "src-A", exist_vec, now)
+    _build_small_base(repo, nb.id, [("ko-exist", "Coinage Parity", exist_vec)], now)
+    repo.build_scale_index(nb.id)
+
+    # 新 concept 名归一化为空 —— 修复前 my_cid 退化为裸 "K-"。
+    _seed_concept(repo, nb.id, "ko-sym", "→", "src-B", _unit(dim, 0), now)
+    repo._mark_unified_kg_dirty(nb.id)
+
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    assert idx is not None and idx.ann_labels
+    ann = repo._open_scale_ann(idx, "kg")
+    assert ann is not None
+    cmap = repo.cluster_map(nb.id)
+    new_objs = [{"object_id": "ko-sym", "name": "→"}]
+    cands = repo._tier2_bridge_candidates_ann(nb.id, idx, ann, new_objs, cmap)
+
+    # 向量桥接照常发生(两者很近)……
+    assert cands, "expected a bridge candidate — vectors are near"
+    # ……但落在按对象唯一的哨兵 canonical 上,绝无裸 "K-"。
+    sentinel = "K-" + seed_or_unique(_norm("→"), "ko-sym")   # == "K-~ko-sym"
+    for c in cands:
+        assert "K-" not in (c["canonical_a"], c["canonical_b"])
+        assert sentinel in (c["canonical_a"], c["canonical_b"])
+        assert "K-" + _norm("Coinage Parity") in (c["canonical_a"], c["canonical_b"])
+
+
 def test_tier2_ann_skips_deprecated_concepts(repo, monkeypatch):
     """旧路径 existing_items 过滤 status!='deprecated';ANN 分支的命中必须做同样校验:
     指向 deprecated concept 的 hit 不产生候选(且不挤占 eligible 槽位)。"""

@@ -5180,8 +5180,11 @@ class SQLiteRepository:
                 status_alive[i] = i in alive
 
         for oid, qvec in new_vecs.items():
-            from app.services.kg_merge import _norm
-            my_cid = "K-" + _norm(name_by_obj.get(oid, ""))
+            from app.services.kg_merge import _norm, seed_or_unique
+            # 与 kg_merge.detect_bridge_candidates 一致的空 seed 守卫:符号-only 名
+            # (_norm→"")绝不塌缩成裸 "K-"——否则该退化 canonical 会被写进
+            # concept_merge_candidates,与真实簇(K-~oid)错位且互相污染。
+            my_cid = "K-" + seed_or_unique(_norm(name_by_obj.get(oid, "")), oid)
             q = np.asarray(qvec, dtype=np.float32)
             k = min(max(topk * pad_factor, topk + 1), n_labels)
             eligible: list = []  # [(node_id, canonical_id, sim)] — alive concepts, not self
@@ -6445,7 +6448,8 @@ class SQLiteRepository:
         cluster_seeds receives {} vectors anyway — avoids a large ANN over
         non-concept seeds."""
         import numpy as np
-        from app.services.kg_merge import build_acronym_alias_map, _seed_with_alias, _norm
+        from app.services.kg_merge import (build_acronym_alias_map, _seed_with_alias,
+                                           _norm, seed_or_unique)
 
         embed_dim = self.settings.embed_dim
         # Scratch is scoped to (notebook_id, run_id); clear only this run's rows
@@ -6490,7 +6494,9 @@ class SQLiteRepository:
                     # Pass the full payload-bearing object so seed_fn can use it
                     # (e.g. seed_procedure appends a steps signature from payload).
                     # Mirrors the legacy cluster_objects(tobjs={name,payload}, ...).
-                    seed = _seed_with_alias({"name": name, "payload": pay}, seed_fn, alias_map)
+                    seed = seed_or_unique(
+                        _seed_with_alias({"name": name, "payload": pay}, seed_fn, alias_map),
+                        r["id"])
                     members_count[seed] = members_count.get(seed, 0) + 1
                     seed_first_name.setdefault(seed, name)
                     buf.append((notebook_id, run_id, r["id"], seed))
