@@ -8,8 +8,10 @@ reading the given file. Best-effort: malformed lines are skipped and counted.
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -302,3 +304,44 @@ def _load_plain_window(path, *, since, before, max_records, max_bytes):
         recs = recs[-max_records:]
         truncated = True
     return recs, malformed, truncated
+
+
+def _load_gz_window(path, *, since, before, max_records):
+    """gz 不可变、不被轮询：流式解压逐行，deque(maxlen) 只保最新 max_records 行，
+    seq=行索引（不可变故稳定）。truncated=行数超过 maxlen。"""
+    if not path.exists():
+        return [], 0, False
+    buf = deque(maxlen=max_records)
+    malformed = 0
+    seen = 0
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        for idx, raw in enumerate(fh):
+            line = raw.strip()
+            if not line:
+                continue
+            seen += 1
+            try:
+                obj = json.loads(line)
+            except Exception:
+                malformed += 1
+                continue
+            if isinstance(obj, dict):
+                obj["seq"] = idx
+                buf.append(obj)
+            else:
+                malformed += 1
+    recs = list(buf)
+    if since is not None:
+        recs = [r for r in recs if r["seq"] > since]
+    if before is not None:
+        recs = [r for r in recs if r["seq"] < before]
+    truncated = seen > max_records
+    return recs, malformed, truncated
+
+
+def load_day_window(path, is_gzip, *, since=None, before=None,
+                    max_records=MAX_RECORDS_PER_WINDOW, max_bytes=MAX_TAIL_BYTES):
+    if is_gzip:
+        return _load_gz_window(path, since=since, before=before, max_records=max_records)
+    return _load_plain_window(path, since=since, before=before,
+                              max_records=max_records, max_bytes=max_bytes)
