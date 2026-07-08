@@ -146,12 +146,20 @@ def get_record(
     date: Optional[str] = Query(None, description="YYYY-MM-DD；缺省=今天"),
     seq: Optional[int] = Query(None, description="明文文件内的字节偏移；跳过按 id 查找"),
 ):
+    if channel not in log_reader.CHANNELS:
+        raise HTTPException(status_code=404, detail=f"unknown channel: {channel}")
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
     if not log_reader.valid_date_param(date):
         raise HTTPException(status_code=400, detail=f"bad date: {date}")
     target = _resolve_owner(channel, user, owner)
     path, is_gzip = log_reader.resolve_day_path(_channel_dir(settings, target), channel, date)
+    # 明文文件:seq=字节偏移 → 直接 seek 单行 O(1),不受尾窗 32MB 限制(修早期记录误 404 + 免每次重载)
+    if seq is not None and not is_gzip and path.exists():
+        rec = log_reader.read_record_at(path, seq)
+        if rec is not None and rec.get("id") == record_id:
+            return rec
+    # 兜底(gz / 无 seq / seek 未命中):当天窗口内按 id 找(有界)
     records, _, _ = log_reader.load_day_window(path, is_gzip, since=None, before=None)
     matches = [r for r in records if r.get("id") == record_id]
     if not matches:
