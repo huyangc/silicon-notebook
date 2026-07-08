@@ -12311,6 +12311,15 @@ class SQLiteRepository:
                     merged.append(src[i])
         return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
 
+    def _participant_notebook_ids(self, notebook_id: str) -> List[str]:
+        """联邦参与库:active 在首位 + 全部 base tier(与 _ppr_graph/federated_retrieve
+        的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                (notebook_id,)).fetchall()
+        return [notebook_id] + [r["id"] for r in rows]
+
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0) -> tuple:
         """Build the id-tagged enriched context block + id_map for the answer
@@ -12325,7 +12334,14 @@ class SQLiteRepository:
         min_items = self.settings.answer_context_min_items
         lines, id_map = [], {}
         seen_clusters: set = set()
-        cmap = self.cluster_map(notebook_id)
+        # Federation fold: merge every participant notebook's cluster_map so a base
+        # hit and an active hit sharing a canonical id (e.g. "K-cascode") collapse
+        # to one line. Concept canonical ids are name-derived (deterministic across
+        # notebooks), so cross-tier same-name concepts fold correctly.
+        cmap: Dict[str, str] = {}
+        participants = self._participant_notebook_ids(notebook_id)
+        for nb in participants:
+            cmap.update(self.cluster_map(nb))
         used = 0
         i = 0
         for hit in top_hits:
@@ -12377,24 +12393,44 @@ class SQLiteRepository:
         if len(oid_to_key) >= 2:
             ids = list(oid_to_key)
             ph = ",".join("?" for _ in ids)
-            with self._connect() as db:
-                rels = db.execute(
-                    f"SELECT source_object_id, target_object_id, edge_type "
-                    f"FROM knowledge_relations WHERE notebook_id=? "
-                    f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
-                    [notebook_id, *ids, *ids],
-                ).fetchall()
-            rel_lines = []
+            rel_rows: List[tuple] = []   # (s_key, edge_type, t_key, src_nb, s_oid, t_oid)
             seen_rel = set()
-            for r in rels:
-                s = oid_to_key.get(r["source_object_id"])
-                t = oid_to_key.get(r["target_object_id"])
-                if s and t and s != t and (s, r["edge_type"], t) not in seen_rel:
-                    seen_rel.add((s, r["edge_type"], t))
-                    rel_lines.append(f"{s} -[{r['edge_type']}]-> {t}")
-            if rel_lines:
-                # Cap so a dense subgraph can't blow the answer context past budget.
-                lines.append("relations: " + "; ".join(rel_lines[:30]))
+            # Federation: an active-notebook hit and a base hit can both be in
+            # context, so the edge linking them may live in EITHER notebook. One
+            # IN query per participant (participants <= active + bases).
+            with self._connect() as db:
+                for nb in participants:
+                    for r in db.execute(
+                            f"SELECT source_object_id, target_object_id, edge_type "
+                            f"FROM knowledge_relations WHERE notebook_id=? "
+                            f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+                            [nb, *ids, *ids]).fetchall():
+                        s = oid_to_key.get(r["source_object_id"])
+                        t = oid_to_key.get(r["target_object_id"])
+                        if s and t and s != t and (s, r["edge_type"], t) not in seen_rel:
+                            seen_rel.add((s, r["edge_type"], t))
+                            rel_rows.append((s, r["edge_type"], t, nb,
+                                             r["source_object_id"], r["target_object_id"]))
+            if rel_rows:
+                # Rank by canonical source_count (breadth of support) so the most
+                # corroborated edges survive the cap. _edge_support_map / cluster_map
+                # are version-cached → these lookups are zero extra SQL over <=30 rows.
+                def _support(row):
+                    s_key, et, t_key, nb, s_oid, t_oid = row
+                    sup = self._edge_support_map(nb)
+                    cm = self.cluster_map(nb)
+                    hit = sup.get((cm.get(s_oid, s_oid), et, cm.get(t_oid, t_oid)))
+                    return hit[1] if hit else 1
+                rel_rows.sort(key=_support, reverse=True)
+                rel_lines = []
+                # Cap so a dense subgraph can't blow the answer context past budget
+                # (applied AFTER sorting by support, so the strongest edges win).
+                for row in rel_rows[:30]:
+                    s_key, et, t_key = row[0], row[1], row[2]
+                    n_src = _support(row)
+                    suffix = f" (×{n_src}源)" if n_src >= 2 else ""
+                    rel_lines.append(f"{s_key} -[{et}]-> {t_key}{suffix}")
+                lines.append("relations: " + "; ".join(rel_lines))
         return ("\n".join(lines) if lines else "(none)"), id_map
 
     def _rewrite_followup_query(
