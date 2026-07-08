@@ -599,9 +599,11 @@ async def _stream_ask_events(
 ):
     events: queue.Queue[dict[str, Any] | None] = queue.Queue()
     cancel_event = threading.Event()
+    # 建/接续会话 + 建 ask_jobs 行 + 注册 cancel_event;job_id 先发给客户端(供「停止」调用)。
+    job_id, _conv_id = repo.begin_ask_job(notebook_id, payload, spec.id, cancel_event)
+    events.put({"event": "started", "job_id": job_id})
     events.put({"event": "progress", "step": {
-        "step_type": "start", "summary": "启动检索",
-        "detail": {"mode": spec.id}}})
+        "step_type": "start", "summary": "启动检索", "detail": {"mode": spec.id}}})
 
     def on_trace(step) -> None:
         if not cancel_event.is_set():
@@ -611,44 +613,39 @@ async def _stream_ask_events(
         try:
             handler = getattr(repo, spec.handler)
             response = handler(
-                notebook_id,
-                payload,
-                on_trace=on_trace,
-                cancel_event=cancel_event,
+                notebook_id, payload, on_trace=on_trace, cancel_event=cancel_event,
             ) if spec.streaming else handler(
-                notebook_id,
-                payload,
-                cancel_event=cancel_event,
+                notebook_id, payload, cancel_event=cancel_event,
             )
-            if not cancel_event.is_set():
-                events.put({"event": "final", "response": response.model_dump()})
+            repo.finish_ask_job(job_id, "done", answer_id=response.answer_id)
+            events.put({"event": "final", "response": response.model_dump()})
         except AskCancelled:
-            pass
+            repo.finish_ask_job(job_id, "cancelled")
+            events.put({"event": "cancelled"})
         except Exception as exc:  # noqa: BLE001
-            if not cancel_event.is_set():
-                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+            repo.finish_ask_job(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
         finally:
             events.put(None)
 
     ctx = contextvars.copy_context()
     threading.Thread(target=lambda: ctx.run(worker), daemon=True).start()
-    try:
-        while True:
-            try:
-                event = events.get_nowait()
-            except queue.Empty:
-                if await request.is_disconnected():
-                    cancel_event.set()
-                    break
-                try:
-                    event = await asyncio.to_thread(events.get, True, 0.1)
-                except queue.Empty:
-                    continue
-            if event is None:
+    # 关键改动:客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
+    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。也不再有
+    # finally: cancel_event.set()。
+    while True:
+        try:
+            event = events.get_nowait()
+        except queue.Empty:
+            if await request.is_disconnected():
                 break
-            yield _ndjson_line(event)
-    finally:
-        cancel_event.set()
+            try:
+                event = await asyncio.to_thread(events.get, True, 0.1)
+            except queue.Empty:
+                continue
+        if event is None:
+            break
+        yield _ndjson_line(event)
 
 
 @router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
@@ -667,6 +664,16 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         _stream_ask_events(repo, notebook_id, payload, spec, request),
         media_type="application/x-ndjson",
     )
+
+
+@router.post("/notebooks/{notebook_id}/ask/jobs/{job_id}/cancel",
+             dependencies=[Depends(require_notebook_read)])
+def cancel_ask_job(notebook_id: str, job_id: str) -> dict:
+    repo = repository()
+    try:
+        return repo.cancel_ask_job(job_id, repo.current_user().id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ask job not found")
 
 
 @router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary], dependencies=[Depends(require_notebook_read)])
