@@ -39,8 +39,58 @@ def test_append_ask_trace_accumulates(repo):
     assert d["status"] == "running" and d["question"] == "Q?"
 
 
+def test_append_ask_trace_writes_to_subtable_not_trace_json_column(repo):
+    """perf fast-follow: append_ask_trace 现追加进 ask_trace_steps 子表(O(1) 单行
+    INSERT),不再对 ask_jobs.trace_json 做「读整个 JSON 数组→append→写回」的
+    O(N^2) read-modify-write。该列继续保留(兼容旧行)但停止写入——留空。"""
+    _, job_id, _ = _begin(repo)
+    repo.append_ask_trace(job_id, {"step_type": "plan", "summary": "s1", "detail": {}})
+    repo.append_ask_trace(job_id, {"step_type": "retrieve", "summary": "s2", "detail": {}})
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT seq, step_json FROM ask_trace_steps WHERE job_id=? ORDER BY seq ASC",
+            (job_id,),
+        ).fetchall()
+        trace_json_col = db.execute(
+            "SELECT trace_json FROM ask_jobs WHERE id=?", (job_id,)
+        ).fetchone()["trace_json"]
+    assert [r["seq"] for r in rows] == [0, 1]
+    assert [json.loads(r["step_json"])["step_type"] for r in rows] == ["plan", "retrieve"]
+    # 新写不再落 trace_json 列——保持默认空字符串
+    assert trace_json_col == ""
+
+
 def test_append_ask_trace_fail_open_on_unknown_job(repo):
     repo.append_ask_trace("askjob-missing", {"step_type": "x", "summary": "", "detail": {}})  # 不抛
+
+
+def test_append_ask_trace_concurrent_writers_no_duplicate_seq(repo):
+    """并发向同一 job 追加轨迹(如 reflect 循环的多个子步骤并发写入)不应产生
+    重复/跳号的 seq——取号(MAX(seq)+1)与插入须在同一个 _write() 事务里原子完成。
+    仓库单写者假设下本无写写竞态,但该断言验证实现没有退化成「先读号、放开锁、
+    再插入」的非原子两段式(那样并发下会取到同一个 next_seq、UNION PK 冲突或
+    悄悄覆盖)。"""
+    _, job_id, _ = _begin(repo)
+    N = 30
+    errors = []
+
+    def worker(i):
+        try:
+            repo.append_ask_trace(job_id, {"step_type": f"t{i}", "summary": "", "detail": {}})
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert not errors, errors
+    with repo._connect() as db:
+        seqs = [r["seq"] for r in db.execute(
+            "SELECT seq FROM ask_trace_steps WHERE job_id=? ORDER BY seq ASC", (job_id,)
+        ).fetchall()]
+    assert seqs == list(range(N))          # 连续无重复无跳号
+    assert len(set(seqs)) == N              # 每个 seq 恰好一行(PK 不冲突)
 
 
 def test_ask_job_detail_missing_raises(repo):

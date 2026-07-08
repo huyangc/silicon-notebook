@@ -249,7 +249,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -1283,6 +1283,9 @@ class SQLiteRepository:
                   mode TEXT NOT NULL DEFAULT '',
                   question TEXT NOT NULL DEFAULT '',
                   status TEXT NOT NULL DEFAULT 'running',
+                  -- 已由 _migration_7 的 ask_trace_steps 子表取代(perf fast-follow：
+                  -- 消 O(N^2) 全量重写 + 全局写锁长持有)。保留此列仅为兼容旧行/
+                  -- 避免重建表；append_ask_trace 起停止写入，读侧也不再读它。
                   trace_json TEXT NOT NULL DEFAULT '',
                   answer_id TEXT NOT NULL DEFAULT '',
                   error TEXT NOT NULL DEFAULT '',
@@ -1291,6 +1294,30 @@ class SQLiteRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ask_jobs_conv ON ask_jobs(conversation_id);
                 CREATE INDEX IF NOT EXISTS idx_ask_jobs_nb_status ON ask_jobs(notebook_id, status);
+                """
+            )
+
+    def _migration_7(self) -> None:
+        """perf fast-follow(折入 PR#220「进行中动作刷新韧性」):ask 轨迹持久化从
+        ask_jobs.trace_json 单列「读整个 JSON 数组→append→写回」改成 append-only
+        子表 ask_trace_steps(每 trace step 一行)。旧写法是 O(N^2) 累积序列化 +
+        每次都占用全站唯一的 _write() 全局写锁；子表把它变成 O(1) 单行 INSERT，
+        锁持有时间恒定、不再随轨迹变长而增长。
+
+        PK (job_id, seq) 本身即索引，覆盖 `WHERE job_id=? ORDER BY seq` 读取路径与
+        FK 级联删除的 `WHERE job_id=?` 匹配，故不必再补一张同列索引。
+        ON DELETE CASCADE 依赖 `_connect()` 常开的 `PRAGMA foreign_keys = ON`
+        （与仓库其它子表一致），job 所在 ask_jobs 行被删时子表行随之清空。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS ask_trace_steps (
+                  job_id TEXT NOT NULL REFERENCES ask_jobs(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  step_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL DEFAULT '',
+                  PRIMARY KEY (job_id, seq)
+                );
                 """
             )
 
@@ -13009,38 +13036,60 @@ class SQLiteRepository:
                 "error": row["error"]}
 
     def append_ask_trace(self, job_id: str, step: dict) -> None:
-        """把一个 trace step 追加进 ask_jobs.trace_json(JSON 数组)。仅单 worker 写、
-        读侧只读,无写写竞态。**fail-open**:轨迹持久化失败绝不拖垮 ask。"""
+        """把一个 trace step 追加进 ask_trace_steps 子表(append-only,O(1) 单行
+        INSERT)。seq 用 `SELECT COALESCE(MAX(seq),-1)+1 WHERE job_id=?` 在同一个
+        _write() 事务里取号+插入,避免与自己的下一次 append 竞态(虽单 worker 写
+        单个 job、无写写竞态,取号+插同事务仍是稳妥做法)。
+
+        perf fast-follow:取代旧版对 ask_jobs.trace_json 单列的「读整个 JSON 数组→
+        append→写回」——那是 O(N^2) 累积序列化,且每次都要占用全站唯一的 _write()
+        全局写锁,轨迹越长锁持有时间越长。子表把锁持有时间摊平成常数。
+
+        仍 **fail-open**:轨迹持久化失败绝不拖垮 ask。"""
         try:
             with self._write() as db:
-                row = db.execute("SELECT trace_json FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-                if row is None:
+                exists = db.execute("SELECT 1 FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+                if exists is None:
                     return
-                try:
-                    steps = json.loads(row["trace_json"] or "[]")
-                    if not isinstance(steps, list):
-                        steps = []
-                except (TypeError, ValueError):
-                    steps = []
-                steps.append(step)
-                db.execute("UPDATE ask_jobs SET trace_json=?, updated_at=? WHERE id=?",
-                           (json.dumps(steps, ensure_ascii=False), _now(), job_id))
+                next_seq = db.execute(
+                    "SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM ask_trace_steps WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()["n"]
+                db.execute(
+                    "INSERT INTO ask_trace_steps (job_id, seq, step_json, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (job_id, next_seq, json.dumps(step, ensure_ascii=False), _now()),
+                )
         except Exception:  # noqa: BLE001
             self.event_log.logger.exception("append_ask_trace failed for %s", job_id)
+
+    @staticmethod
+    def _read_ask_trace(db, job_id: str) -> list:
+        """从 ask_trace_steps 子表按 seq 顺序读回一个 job 的完整轨迹,拼成 list。
+        单行解析失败(损坏的 step_json)容错跳过而非整体失败——与旧版
+        trace_json 列「解析失败即空列表」的粗粒度容错相比更细,但不改变
+        「解析失败不抛」这条既有契约。取代直读 ask_jobs.trace_json 列
+        (该列已停止写入,只为兼容旧行保留,见 append_ask_trace)。"""
+        rows = db.execute(
+            "SELECT step_json FROM ask_trace_steps WHERE job_id=? ORDER BY seq ASC",
+            (job_id,),
+        ).fetchall()
+        trace = []
+        for r in rows:
+            try:
+                trace.append(json.loads(r["step_json"]))
+            except (TypeError, ValueError):
+                continue
+        return trace
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self._connect() as db:
             row = db.execute(
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "trace_json,answer_id,error FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            raise KeyError(job_id)
-        try:
-            trace = json.loads(row["trace_json"] or "[]")
-            if not isinstance(trace, list):
-                trace = []
-        except (TypeError, ValueError):
-            trace = []
+                "answer_id,error FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            trace = self._read_ask_trace(db, job_id)
         return {"job_id": row["id"], "notebook_id": row["notebook_id"],
                 "conversation_id": row["conversation_id"], "created_by": row["created_by"],
                 "mode": row["mode"], "question": row["question"], "status": row["status"],
@@ -13094,9 +13143,10 @@ class SQLiteRepository:
                 (conversation_id,),
             ).fetchall()
             job = db.execute(
-                "SELECT id, question, mode, trace_json FROM ask_jobs "
+                "SELECT id, question, mode FROM ask_jobs "
                 "WHERE conversation_id=? AND status='running' "
                 "ORDER BY created_at DESC LIMIT 1", (conversation_id,)).fetchone()
+            job_trace = self._read_ask_trace(db, job["id"]) if job is not None else []
         turns = []
         for row in rows:
             try:
@@ -13115,14 +13165,8 @@ class SQLiteRepository:
         active_job = None
         if job is not None:
             from app.models.schemas import ActiveAskJob
-            try:
-                jt = json.loads(job["trace_json"] or "[]")
-                if not isinstance(jt, list):
-                    jt = []
-            except (TypeError, ValueError):
-                jt = []
             active_job = ActiveAskJob(job_id=job["id"], question=job["question"] or "",
-                                      mode=job["mode"] or "", trace=jt)
+                                      mode=job["mode"] or "", trace=job_trace)
         return ConversationDetail(
             id=conv["id"],
             notebook_id=conv["notebook_id"],
