@@ -25,6 +25,10 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _PLAIN_DATE_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl$")
 _GZ_DATE_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl\.gz$")
 
+# 按天分文件读取窗口的上限（防止单次窗口读取吃满内存/耗时过长）。
+MAX_RECORDS_PER_WINDOW = 50_000
+MAX_TAIL_BYTES = 32 * 1024 * 1024
+
 
 def load_records(path: Path) -> Tuple[List[Dict[str, Any]], int]:
     """Return (records, malformed_count). Each record gets `seq` = 0-based line
@@ -231,3 +235,61 @@ def resolve_day_path(dir: Path, channel: str, date: str) -> Tuple[Path, bool]:
     if gz.exists():
         return gz, True
     return plain, False
+
+
+def _parse_blob(blob: bytes, base_off: int, *, drop_partial_first: bool) -> Tuple[List[dict], int]:
+    """把一段字节按 \n 切行，每行 seq=其在文件内的字节偏移(base_off + 段内起点)。
+    drop_partial_first：若 base_off>0，首段可能是被截断的半行，丢弃。返回 (records, malformed)。"""
+    records: List[dict] = []
+    malformed = 0
+    off = base_off
+    segments = blob.split(b"\n")
+    last = len(segments) - 1
+    for i, seg in enumerate(segments):
+        seg_off = off
+        off += len(seg) + 1  # 该段后有一个 \n（末段无，多算 1 但不再使用）
+        if drop_partial_first and i == 0:
+            continue
+        if i == last and seg == b"":
+            continue  # 末尾 \n 之后的空段
+        s = seg.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(seg)
+        except Exception:
+            malformed += 1
+            continue
+        if isinstance(obj, dict):
+            obj["seq"] = seg_off
+            records.append(obj)
+        else:
+            malformed += 1
+    return records, malformed
+
+
+def _load_plain_window(path, *, since, before, max_records, max_bytes):
+    if not path.exists():
+        return [], 0, False
+    size = path.stat().st_size
+    if since is not None:
+        # 轮询：seek 到 since 向后读到 EOF，只回 seq>since（since 那行是已见的最后一行）
+        with path.open("rb") as fh:
+            fh.seek(since)
+            blob = fh.read()
+        recs, malformed = _parse_blob(blob, since, drop_partial_first=False)
+        recs = [r for r in recs if r["seq"] > since]
+        return recs, malformed, False
+    end = before if before is not None else size
+    start = max(0, end - max_bytes)
+    with path.open("rb") as fh:
+        fh.seek(start)
+        blob = fh.read(end - start)
+    recs, malformed = _parse_blob(blob, start, drop_partial_first=(start > 0))
+    if before is not None:
+        recs = [r for r in recs if r["seq"] < before]
+    truncated = start > 0
+    if len(recs) > max_records:
+        recs = recs[-max_records:]
+        truncated = True
+    return recs, malformed, truncated
