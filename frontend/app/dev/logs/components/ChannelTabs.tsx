@@ -3,6 +3,12 @@ import type { ChannelInfo } from "../types";
 
 const ORDER = ["llm", "events", "requests"];
 
+function formatBytes(bytes?: number): string {
+  if (bytes === undefined || bytes === null) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
 export function ChannelTabs({
   channels,
   active,
@@ -25,7 +31,7 @@ export function ChannelTabs({
             title={disabled ? "v1 仅支持 LLM 通道" : ""}
             onClick={() => !disabled && onSelect(ch.name)}
           >
-            {ch.name.toUpperCase()} <span className="tab-count">{ch.count}</span>
+            {ch.name.toUpperCase()} <span className="tab-count">{formatBytes(ch.bytes)}</span>
           </button>
         );
       })}

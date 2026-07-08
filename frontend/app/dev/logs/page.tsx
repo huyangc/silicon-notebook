@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import "./logs.css";
 import type { ChannelInfo, FullRecord, Stats, Summary } from "./types";
-import { fetchChannels, fetchRecord, fetchRecords } from "./api";
+import { fetchChannels, fetchDays, fetchRecord, fetchRecords } from "./api";
 import { ChannelTabs } from "./components/ChannelTabs";
 import { StatsBar } from "./components/StatsBar";
 import { LogList } from "./components/LogList";
@@ -11,6 +11,7 @@ import { LogDetail } from "./components/LogDetail";
 import { fetchMe, type AuthUser } from "../../auth.ts";
 import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
 import { usernameForOwner } from "./owner";
+import { dayLabel, TODAY_VALUE } from "./date.ts";
 
 const PAGE = 200;
 const POLL_MS = 5000;
@@ -21,6 +22,7 @@ export default function LogsPage() {
   const [records, setRecords] = useState<Summary[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const [newestSeq, setNewestSeq] = useState<number | null>(null);
   const [pending, setPending] = useState<Summary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -39,18 +41,22 @@ export default function LogsPage() {
   const [me, setMe] = useState<AuthUser | null>(null);
   const [adminUsers, setAdminUsers] = useState<AdminUserUsage[]>([]);
   const [owner, setOwner] = useState("");
+  const [date, setDate] = useState(TODAY_VALUE);
+  const [days, setDays] = useState<string[]>([]);
 
   const filterParams = useMemo(
-    () => ({ kind, status, model, q, owner }),
-    [kind, status, model, q, owner],
+    () => ({ kind, status, model, q, owner, date }),
+    [kind, status, model, q, owner, date],
   );
 
-  // read ?owner= from the URL once on mount (admin drill-down entry point)
+  // read ?owner= and ?date= from the URL once on mount (admin drill-down / deep-link entry points)
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     const o = params.get("owner");
     if (o) setOwner(o);
+    const d = params.get("date");
+    if (d) setDate(d);
   }, []);
 
   // current user + (admin-only) user list for the drill-down dropdown
@@ -77,10 +83,27 @@ export default function LogsPage() {
     window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
   }, []);
 
+  const selectDate = useCallback((next: string) => {
+    setDate(next);
+    if (next !== TODAY_VALUE) setAutoRefresh(false); // 仅当天可实时；切到历史天时关闭自动刷新，避免勾选态和禁用态不一致
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (next) params.set("date", next);
+    else params.delete("date");
+    const qs = params.toString();
+    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+  }, []);
+
   useEffect(() => {
     fetchChannels(owner)
       .then((r) => setChannels(r.channels))
       .catch((e) => setError(String(e)));
+  }, [owner]);
+
+  useEffect(() => {
+    fetchDays(channel, owner)
+      .then((r) => setDays(r.days))
+      .catch(() => undefined);
   }, [owner]);
 
   const reload = useCallback(async () => {
@@ -91,6 +114,7 @@ export default function LogsPage() {
       setRecords(r.records);
       setStats(r.stats);
       setHasMore(r.has_more);
+      setTruncated(r.truncated);
       setNewestSeq(r.newest_seq);
       setPending([]);
     } catch (e) {
@@ -111,8 +135,9 @@ export default function LogsPage() {
   }, [qInput]);
 
   // auto-refresh polling: pull records newer than newestSeq into `pending`
+  // (only meaningful for "today" — a fixed historical day has no new records to poll for)
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!autoRefresh || date !== TODAY_VALUE) return;
     const t = setInterval(async () => {
       if (newestSeq == null) return;
       try {
@@ -156,18 +181,21 @@ export default function LogsPage() {
     }
   }, [records, filterParams]);
 
-  const select = useCallback(async (rec: Summary) => {
-    setSelectedId(rec.id);
-    setDetail(null);
-    setDetailLoading(true);
-    try {
-      setDetail(await fetchRecord(channel, rec.id));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setDetailLoading(false);
-    }
-  }, []);
+  const select = useCallback(
+    async (rec: Summary) => {
+      setSelectedId(rec.id);
+      setDetail(null);
+      setDetailLoading(true);
+      try {
+        setDetail(await fetchRecord(channel, rec.id, date || undefined, rec.seq));
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [date],
+  );
 
   const facets = stats?.facets;
 
@@ -191,6 +219,18 @@ export default function LogsPage() {
             ))}
           </select>
         ) : null}
+        <select
+          className="logview-date-select"
+          value={date}
+          onChange={(e) => selectDate(e.target.value)}
+        >
+          <option value={TODAY_VALUE}>{dayLabel(TODAY_VALUE)}</option>
+          {days.map((d) => (
+            <option key={d} value={d}>
+              {dayLabel(d)}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="logview-top">
@@ -232,12 +272,26 @@ export default function LogsPage() {
         <button className="copy-btn" onClick={() => void reload()}>
           <RefreshCw size={13} /> 刷新
         </button>
-        <label className="auto-toggle">
-          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> 自动刷新
+        <label
+          className="auto-toggle"
+          title={date !== TODAY_VALUE ? "仅当天可实时" : ""}
+        >
+          <input
+            type="checkbox"
+            checked={autoRefresh}
+            disabled={date !== TODAY_VALUE}
+            onChange={(e) => setAutoRefresh(e.target.checked)}
+          />{" "}
+          自动刷新{date !== TODAY_VALUE ? "(仅当天可实时)" : ""}
         </label>
       </div>
 
       {error ? <div className="errorbar">{error}</div> : null}
+      {truncated ? (
+        <div className="logview-trunc">
+          已截断,仅显示最近 {records.length} 条,请选择具体某天或缩小范围
+        </div>
+      ) : null}
 
       <div className="logview-body">
         <LogList

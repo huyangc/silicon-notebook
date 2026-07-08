@@ -32,6 +32,7 @@ export type RecordQuery = {
   model?: string;
   q?: string;
   owner?: string;
+  date?: string;
 };
 
 export function fetchRecords(channel: string, params: RecordQuery): Promise<ListResponse> {
@@ -43,6 +44,20 @@ export function fetchRecords(channel: string, params: RecordQuery): Promise<List
   return get<ListResponse>(`/debug/logs/${channel}${suffix}`);
 }
 
-export function fetchRecord(channel: string, id: string): Promise<FullRecord> {
-  return get<FullRecord>(`/debug/logs/${channel}/${encodeURIComponent(id)}`);
+export function fetchDays(channel: string, owner?: string): Promise<{ channel: string; days: string[] }> {
+  const suffix = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+  return get(`/debug/logs/${channel}/days${suffix}`);
+}
+
+export function fetchRecord(
+  channel: string,
+  id: string,
+  date?: string,
+  seq?: number,
+): Promise<FullRecord> {
+  const qs = new URLSearchParams();
+  if (date) qs.set("date", date);
+  if (seq !== undefined && seq !== null) qs.set("seq", String(seq));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return get<FullRecord>(`/debug/logs/${channel}/${encodeURIComponent(id)}${suffix}`);
 }
