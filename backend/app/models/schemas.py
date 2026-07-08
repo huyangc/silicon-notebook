@@ -693,3 +693,14 @@ class AdminUserUsage(BaseModel):
     conversations: int
     reports: int
     last_active: Optional[str] = None
+
+
+class AdminUserNotebook(BaseModel):
+    id: str
+    name: str
+    status: str
+    sources: int
+    conversations: int
+    reports: int
+    created_at: str
+    updated_at: str
