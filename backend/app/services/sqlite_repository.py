@@ -1728,6 +1728,32 @@ class SQLiteRepository:
             })
         return out
 
+    def list_user_notebooks(self, user_id: str) -> List[Dict[str, Any]]:
+        """某用户名下笔记本 + 每本 sources/conversations/reports 计数。只读、固定条数
+        GROUP BY，Python 按 notebook_id 合并，无 per-notebook N+1。排除 status='copying'。"""
+        with self._connect() as db:
+            nbs = db.execute(
+                "SELECT id, name, status, created_at, updated_at FROM notebooks "
+                "WHERE created_by = ? AND status != 'copying' ORDER BY created_at DESC",
+                (user_id,)).fetchall()
+            ids = [r["id"] for r in nbs]
+            src, conv, rep = {}, {}, {}
+            if ids:
+                ph = ",".join("?" * len(ids))
+                src = {r["k"]: r["c"] for r in db.execute(
+                    f"SELECT notebook_id AS k, COUNT(*) AS c FROM sources "
+                    f"WHERE notebook_id IN ({ph}) GROUP BY notebook_id", ids).fetchall()}
+                conv = {r["k"]: r["c"] for r in db.execute(
+                    f"SELECT notebook_id AS k, COUNT(*) AS c FROM conversations "
+                    f"WHERE notebook_id IN ({ph}) GROUP BY notebook_id", ids).fetchall()}
+                rep = {r["k"]: r["c"] for r in db.execute(
+                    f"SELECT notebook_id AS k, COUNT(*) AS c FROM reports "
+                    f"WHERE notebook_id IN ({ph}) GROUP BY notebook_id", ids).fetchall()}
+        return [{"id": r["id"], "name": r["name"], "status": r["status"],
+                 "created_at": r["created_at"], "updated_at": r["updated_at"],
+                 "sources": src.get(r["id"], 0), "conversations": conv.get(r["id"], 0),
+                 "reports": rep.get(r["id"], 0)} for r in nbs]
+
     def create_session(self, user_id: str) -> str:
         import secrets
         token = secrets.token_urlsafe(32)
