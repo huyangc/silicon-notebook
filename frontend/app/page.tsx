@@ -60,6 +60,7 @@ import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
+import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -95,6 +96,7 @@ type NotebookSummary = {
   access_scope?: string;
   tier?: string;
   kg_ready?: boolean;
+  kg_building?: boolean;
   base_kg_available?: boolean;
   base_notebook_name?: string; // 全局唯一基准库名(所有用户只读可见,分析弹窗顶部展示)
   kg_pending_sources?: number;
@@ -1071,7 +1073,7 @@ export default function Home() {
       try {
         const refreshed = await api<NotebookSummary>(`/notebooks/${nb}`);
         if (cancelled) return;
-        if (refreshed.kg_ready) {
+        if (kgBuildFinished(refreshed)) {
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
           setBuildingKg(false);
           setToast("知识图谱构建完成 ✓ 可用严格推理");
@@ -1090,7 +1092,11 @@ export default function Home() {
     const nb = currentNotebookId;
     if (!nb) { setScaleIndexStatus(null); return; }
     let cancelled = false;
-    fetchScaleIndexStatus(nb).then((s) => { if (!cancelled) setScaleIndexStatus(s); }).catch(() => {});
+    fetchScaleIndexStatus(nb).then((s) => {
+      if (cancelled) return;
+      setScaleIndexStatus(s);
+      if (shouldResumeScaleIndex(s)) setBuildingScaleIndex(true);  // 刷新后接回构建中
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, [currentNotebookId]);
   // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
@@ -1167,9 +1173,19 @@ export default function Home() {
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
   const [reviewAllRunning, setReviewAllRunning] = useState(false);
-  // Reset on notebook switch so the newly-selected notebook's "全部预审" button doesn't
-  // briefly show the previous notebook's done/total or stay disabled from a stale job.
-  useEffect(() => { setReviewAllJob(null); setReviewAllRunning(false); }, [currentNotebookId]);
+  // 切库/刷新：先查后端预审 job 真相，仍 running 就把进度接回（后端 job 不因前端刷新而停），
+  // 否则才清空。避免「后台在跑、前端却显示未运行」。
+  useEffect(() => {
+    const nb = currentNotebookId;
+    if (!nb) { setReviewAllJob(null); setReviewAllRunning(false); return; }
+    let cancelled = false;
+    fetchMergeReviewJob(nb).then((job) => {
+      if (cancelled) return;
+      if (shouldResumeReviewAll(job)) { setReviewAllJob(job); setReviewAllRunning(true); }
+      else { setReviewAllJob(null); setReviewAllRunning(false); }
+    }).catch(() => { if (!cancelled) { setReviewAllJob(null); setReviewAllRunning(false); } });
+    return () => { cancelled = true; };
+  }, [currentNotebookId]);
   // Mirror the buildingKg poll: while an "全部预审" job runs, poll status every 6s until it
   // leaves "running", with a 20min safety cap. Keying on currentNotebookId (captured as `nb`)
   // means switching notebooks or unmounting cancels this poll instead of clobbering the
@@ -1795,7 +1811,7 @@ export default function Home() {
     setSourcesTotal(sourcesPage.total_count);
     setSourcesPage(0);
     setSourceQuery("");
-    setBuildingKg(false);
+    setBuildingKg(shouldResumeKgBuild(notebook));
     setTurns([]);
     setConversationId(null);
     setAsking(false);
