@@ -3574,6 +3574,18 @@ button.chat-session-card {
   color: #111827;
 }
 
+/* 引用浮层:点引用徽章后在点击处弹出的悬浮容器(定位由 JS 内联 top/left 决定)。
+   内含 .cite-detail-card;这里只管悬浮外观 + 限高滚动 + 层级。 */
+.cite-popover {
+  z-index: 60;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(52vh, 440px);
+  overflow: hidden auto;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.22);
+}
+
 .cite-detail-card {
   display: grid;
   gap: 8px;

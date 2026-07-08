@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
@@ -13,6 +13,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import { placeCitationPopover } from "./citation-popover";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { formatDuration, getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
 import {
@@ -5391,6 +5392,56 @@ function SelectedReferenceDetail({
   );
 }
 
+// 点击引用徽章 → 在徽章处弹出的浮层(替代原来底部固定卡 + 滚动定位,长答案不再来回跳)。
+// fixed 定位锚定被点徽章;点外部 / Esc / 滚动即关闭。
+function CitationPopover({
+  reference,
+  anchorRect,
+  onClose,
+  onOpenKnowledgeGraph,
+}: {
+  reference: AnswerReference;
+  anchorRect: DOMRect;
+  onClose: () => void;
+  onOpenKnowledgeGraph: (objectId?: string) => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number }>(
+    () => ({ top: anchorRect.bottom + 6, left: anchorRect.left })
+  );
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos(placeCitationPopover(
+      { top: anchorRect.top, bottom: anchorRect.bottom, left: anchorRect.left },
+      { width: r.width, height: r.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    ));
+  }, [anchorRect]);
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onScroll = () => onClose();
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [onClose]);
+  return (
+    <div ref={ref} className="cite-popover" role="dialog"
+         style={{ position: "fixed", top: pos.top, left: pos.left }}>
+      <SelectedReferenceDetail reference={reference} onOpenKnowledgeGraph={onOpenKnowledgeGraph} />
+    </div>
+  );
+}
+
 function ReasoningTracePanel({ steps, live = false }: { steps: ReasoningTraceStep[]; live?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const summary = getReasoningTraceSummary(steps, live);
@@ -5458,23 +5509,16 @@ function AnswerView({
   onBuildScaleIndex: (nb: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
-  const selectedReferenceRef = useRef<HTMLDivElement | null>(null);
+  // 点击引用 → 在点击处弹浮层(reference + 被点徽章的 rect);点外部关闭。替代原底部固定卡 + 滚动。
+  const [citePopover, setCitePopover] = useState<{ reference: AnswerReference; rect: DOMRect } | null>(null);
   const answerText = answer.answer || answer.conclusion || "";
   const references = useMemo(
     () => buildAnswerReferences(answerText, answer.anchors, answer.citations),
     [answerText, answer.anchors, answer.citations]
   );
-  const selectedReference = references.find((reference) => reference.id === selectedReferenceId);
   useEffect(() => {
-    setSelectedReferenceId(null);
+    setCitePopover(null);
   }, [answer.answer_id]);
-  useEffect(() => {
-    if (!selectedReferenceId) return;
-    window.setTimeout(() => {
-      selectedReferenceRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }, 0);
-  }, [selectedReferenceId]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);
@@ -5535,16 +5579,19 @@ function AnswerView({
         answer={answerText}
         anchors={answer.anchors}
         citations={answer.citations}
-        selectedReferenceId={selectedReferenceId}
-        onReferenceClick={(reference) => setSelectedReferenceId((current) => current === reference.id ? null : reference.id)}
+        selectedReferenceId={citePopover?.reference.id ?? null}
+        onReferenceClick={(reference, event) => setCitePopover({ reference, rect: event.currentTarget.getBoundingClientRect() })}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />
       )}
-      {selectedReference && (
-        <div ref={selectedReferenceRef}>
-          <SelectedReferenceDetail reference={selectedReference} onOpenKnowledgeGraph={onOpenKnowledgeGraph} />
-        </div>
+      {citePopover && (
+        <CitationPopover
+          reference={citePopover.reference}
+          anchorRect={citePopover.rect}
+          onClose={() => setCitePopover(null)}
+          onOpenKnowledgeGraph={onOpenKnowledgeGraph}
+        />
       )}
       <div className="answer-feedback">
         <button
