@@ -77,6 +77,13 @@ def _norm(name: str) -> str:
     return _ALIASES.get(cleaned, cleaned)
 
 
+def seed_or_unique(seed: str, object_id: str) -> str:
+    """空/退化 seed(符号-only 名)绝不共簇:回退为按对象唯一的哨兵 seed。
+    "~" 会被 _norm 清洗掉,真实名字的 seed 不可能以 "~" 开头 → 无碰撞。
+    宁可不并,不可全并(旧行为:全部空 seed 共享 canonical "K-")。"""
+    return seed if seed else f"~{object_id}"
+
+
 def build_acronym_alias_map(names: Iterable[str]) -> Dict[str, str]:
     """For every "Full (ACR)" name where ACR is the initialism of Full, map the
     acronym's seed to the expansion's seed: ``{_norm(ACR): _norm(Full)}``. Lets
@@ -389,7 +396,8 @@ def cluster_objects(
     # redirect when the object's seed is a pure _norm(name) (i.e. concepts) so a
     # richer seed (e.g. procedure name#steps-signature) is never clobbered.
     alias_map = build_acronym_alias_map([c.get("name", "") for c in objects])
-    seed_of = {c["object_id"]: _seed_with_alias(c, seed_fn, alias_map) for c in objects}
+    seed_of = {c["object_id"]: seed_or_unique(_seed_with_alias(c, seed_fn, alias_map),
+                                              c["object_id"]) for c in objects}
     seeds = sorted(set(seed_of.values()))
 
     seed_first_name: Dict[str, str] = {}
@@ -470,7 +478,7 @@ def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_ve
         q = np.asarray(v, dtype="float32"); q /= (np.linalg.norm(q) + 1e-9)
         sims = EX @ q
         idx = np.argsort(-sims)[:top_k]
-        my_cid = "K-" + _norm(it.get("name", ""))
+        my_cid = "K-" + seed_or_unique(_norm(it.get("name", "")), it["object_id"])
         for j in idx:
             s = float(sims[j])
             if s < lo:
@@ -501,7 +509,8 @@ def place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
     rows = []
     for o in new_objects:
         name = o.get("name", "")
-        cid = f"{id_prefix}{_seed_with_alias(o, seed_fn, alias_map)}"
+        seed = seed_or_unique(_seed_with_alias(o, seed_fn, alias_map), o["object_id"])
+        cid = f"{id_prefix}{seed}"
         canon_name = existing_canon_names.get(cid, name) if cid in existing_cids else name
         rows.append({"canonical_id": cid, "member_object_id": o["object_id"],
                      "canonical_name": canon_name})
