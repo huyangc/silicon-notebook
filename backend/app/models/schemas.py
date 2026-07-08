@@ -351,8 +351,16 @@ class ConversationTurn(BaseModel):
     created_at: str = ""
 
 
+class ActiveAskJob(BaseModel):
+    job_id: str
+    question: str = ""
+    mode: str = ""
+    trace: List[dict] = Field(default_factory=list)
+
+
 class ConversationDetail(ConversationSummary):
     turns: List[ConversationTurn] = Field(default_factory=list)
+    active_job: Optional["ActiveAskJob"] = None
 
 
 class SearchHit(BaseModel):

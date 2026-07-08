@@ -607,7 +607,9 @@ async def _stream_ask_events(
 
     def on_trace(step) -> None:
         if not cancel_event.is_set():
-            events.put({"event": "progress", "step": step.model_dump()})
+            payload_step = step.model_dump()
+            repo.append_ask_trace(job_id, payload_step)   # WS2b: 持久化供重开会话回放
+            events.put({"event": "progress", "step": payload_step})
 
     def worker() -> None:
         try:
@@ -674,6 +676,19 @@ def cancel_ask_job(notebook_id: str, job_id: str) -> dict:
         return repo.cancel_ask_job(job_id, repo.current_user().id)
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
+
+
+@router.get("/notebooks/{notebook_id}/ask/jobs/{job_id}",
+            dependencies=[Depends(require_notebook_read)])
+def get_ask_job(notebook_id: str, job_id: str) -> dict:
+    repo = repository()
+    try:
+        detail = repo.ask_job_detail(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ask job not found")
+    if detail["created_by"] != repo.current_user().id:
+        raise HTTPException(status_code=404, detail="ask job not found")
+    return detail
 
 
 @router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary], dependencies=[Depends(require_notebook_read)])
