@@ -14,16 +14,18 @@ export type Stats = {
   facets: Facets;
 };
 
-export type ChannelInfo = { name: string; file: string; exists: boolean; count: number };
+export type ChannelInfo = { name: string; file: string; exists: boolean; count?: number; bytes?: number };
 export type ChannelsResponse = { channels: ChannelInfo[] };
 
 import type { Summary } from "./format";
 export type ListResponse = {
   channel: string;
+  date: string;
   file_exists: boolean;
   records: Summary[];
   stats: Stats;
   has_more: boolean;
+  truncated: boolean;
   newest_seq: number | null;
 };
 
