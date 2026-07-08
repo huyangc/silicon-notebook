@@ -1870,6 +1870,7 @@ export default function Home() {
     setConversationId(null);
     setAsking(false);
     setPendingQuestion("");
+    setReconnectJob(null);
     setFeedbackSent({});
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
@@ -1926,6 +1927,7 @@ export default function Home() {
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
+    setReconnectJob(null);
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     window.scrollTo(0, 0);
   }

@@ -112,3 +112,17 @@ test("session manager groups cleanup controls above the scrollable session list"
   assert.match(css, /\.chat-session-popover\s*{[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\);/s);
   assert.match(css, /\.chat-session-popover-top\s*{[^}]*display:\s*grid;[^}]*gap:\s*10px;/s);
 });
+
+test("switching or leaving a notebook clears any pending ask-job reconnect to avoid cross-notebook state bleed", () => {
+  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string) {");
+  const openNotebookEnd = page.indexOf("\n  }\n", openNotebookStart);
+  assert.ok(openNotebookStart > -1);
+  const openNotebookBody = page.slice(openNotebookStart, openNotebookEnd);
+  assert.ok(openNotebookBody.includes("setReconnectJob(null);"));
+
+  const showCollectionStart = page.indexOf("function showCollection() {");
+  const showCollectionEnd = page.indexOf("\n  }\n", showCollectionStart);
+  assert.ok(showCollectionStart > -1);
+  const showCollectionBody = page.slice(showCollectionStart, showCollectionEnd);
+  assert.ok(showCollectionBody.includes("setReconnectJob(null);"));
+});
