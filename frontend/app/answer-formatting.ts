@@ -65,39 +65,24 @@ export function buildAnswerReferences(
   }));
 }
 
-// Source-tier distribution for this answer's badge. Counts ALL sources behind the
-// answer (anchors ∪ citations), not just whichever `buildAnswerReferences` happened
-// to prefer for [k]-numbering — anchors and citations can both be populated (e.g.
-// reasoning mode: [k]-marker hits become anchors, but `citations` independently
-// carries the full KG-evidence trail), and each is its own id space so dedup is
-// per-collection: citations by `source_id`, anchors by `object_id`. Unset/unknown
-// tier counts as "personal" (matches the backend's `Citation.tier` / `AnswerAnchor.tier`
-// default), so pre-fix payloads (or any tier this build doesn't recognize) degrade to
-// today's (undercounted-base) badge rather than crashing or over-counting base.
+// Source-tier distribution for this answer's badge. Partitions the SAME references the
+// user actually sees (the `[k]` list from `buildAnswerReferences`) by tier, so
+// `personal + base` ALWAYS equals the reference count — it can never exceed what's shown.
+// (The previous impl summed `anchors ∪ citations` — two overlapping views of the same
+// chunks keyed on different id spaces, object_id vs source_id — so a source present in
+// both got counted twice, inflating base and producing totals above the visible count,
+// e.g. "个人 15 · 基准库 7 = 22" for a 15-reference answer.) Unset/unknown tier counts as
+// "personal" (matches the backend's `Citation.tier` / `AnswerAnchor.tier` default),
+// mirroring the report-mode badge whose `personal = total − base` can never over-count.
 export function computeSourceTierCounts(
-  anchors: AnswerAnchorLike[],
-  citations: CitationLike[],
+  references: AnswerReference[],
 ): { personal: number; base: number } {
-  let personal = 0;
   let base = 0;
-
-  const seenObjectIds = new Set<string>();
-  for (const anchor of anchors) {
-    if (seenObjectIds.has(anchor.object_id)) continue;
-    seenObjectIds.add(anchor.object_id);
-    if (anchor.tier === "base") base += 1;
-    else personal += 1;
+  for (const reference of references) {
+    const tier = reference.anchor?.tier ?? reference.citation?.tier;
+    if (tier === "base") base += 1;
   }
-
-  const seenSourceIds = new Set<string>();
-  for (const citation of citations) {
-    if (seenSourceIds.has(citation.source_id)) continue;
-    seenSourceIds.add(citation.source_id);
-    if (citation.tier === "base") base += 1;
-    else personal += 1;
-  }
-
-  return { personal, base };
+  return { personal: references.length - base, base };
 }
 
 export function referenceByAnchorKey(references: AnswerReference[]): Record<string, AnswerReference> {
