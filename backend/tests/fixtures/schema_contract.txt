@@ -16,6 +16,10 @@ ask_jobs.answer_id|TEXT|1|''|0
 ask_jobs.error|TEXT|1|''|0
 ask_jobs.created_at|TEXT|1|''|0
 ask_jobs.updated_at|TEXT|1|''|0
+ask_trace_steps.job_id|TEXT|1|None|1
+ask_trace_steps.seq|INTEGER|1|None|2
+ask_trace_steps.step_json|TEXT|1|None|0
+ask_trace_steps.created_at|TEXT|1|''|0
 auth_sessions.token|TEXT|0|None|1
 auth_sessions.user_id|TEXT|1|None|0
 auth_sessions.created_at|TEXT|1|None|0
