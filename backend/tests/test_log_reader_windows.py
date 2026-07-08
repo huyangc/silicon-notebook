@@ -94,3 +94,32 @@ def test_plain_window_since_caps_records(tmp_path):
     recs, _, trunc = lr._load_plain_window(p, since=0, before=None, max_records=3, max_bytes=1 << 20)
     assert len(recs) == 3 and trunc is True    # since=0 → i=1..9 均更新,极小 max_records 触发截断
     assert [r["i"] for r in recs] == [7, 8, 9] # 保最新
+
+
+import gzip as _gz
+
+
+def test_gz_window_line_index_seq_and_truncate(tmp_path):
+    p = tmp_path / "llm-2026-07-01.jsonl.gz"
+    with _gz.open(p, "wt", encoding="utf-8") as fh:
+        for i in range(10):
+            fh.write(json.dumps({"i": i}) + "\n")
+    recs, malformed, trunc = lr._load_gz_window(p, since=None, before=None, max_records=100)
+    assert [r["i"] for r in recs] == list(range(10))
+    assert [r["seq"] for r in recs] == list(range(10))      # 行索引
+    assert trunc is False
+    # maxlen 截断保最新
+    recs2, _, trunc2 = lr._load_gz_window(p, since=None, before=None, max_records=3)
+    assert [r["i"] for r in recs2] == [7, 8, 9] and trunc2 is True
+
+
+def test_load_day_window_dispatches(tmp_path):
+    plain = tmp_path / "llm-2026-07-08.jsonl"
+    _write_lines(plain, [{"i": 0}, {"i": 1}])
+    r1, _, _ = lr.load_day_window(plain, False, since=None, before=None)
+    assert [r["i"] for r in r1] == [0, 1]
+    gzp = tmp_path / "llm-2026-07-01.jsonl.gz"
+    with _gz.open(gzp, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"i": 9}) + "\n")
+    r2, _, _ = lr.load_day_window(gzp, True, since=None, before=None)
+    assert [r["i"] for r in r2] == [9]
