@@ -303,6 +303,7 @@ class Settings(BaseSettings):
     # 复合问题最终排序: 开启后按子查询配额 round-robin 选 top-N(避免整串全局排序让
     # 信息量大的一方通吃); 关闭则回退全局重排。单子查询时自动等价全局。
     reasoning_quota_enabled: bool = Field(True, env="REASONING_QUOTA_ENABLED")
+    reasoning_quota_reuse_enabled: bool = Field(True, validation_alias="REASONING_QUOTA_REUSE")  # P1-B:quota 收尾复用初检索留存的全量打分(一次 run 内图只读⇒与重跑逐位等价);False=原收尾重跑
     # 退化循环熔断: 连续 N 轮无有效进展(含反复请求已访问节点)即强制收尾作答,
     # 不空转到 reasoning_max_steps; search_elements 累计次数上限(防"每次有新增但永不满足")。
     reasoning_stale_limit: int = Field(3, env="REASONING_STALE_LIMIT")

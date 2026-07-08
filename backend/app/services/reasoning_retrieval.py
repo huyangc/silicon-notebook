@@ -97,12 +97,26 @@ class ReasoningRetriever:
         self.repo = repo
         self.settings = settings
         self.cancel_event = cancel_event
+        # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
+        # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
+        self._per_query_scored: Dict[str, Dict[str, tuple]] = {}
 
     # --- KG 工具箱(薄封装 repo 原语) ---
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
-        return self.repo.retrieval.federated_retrieve(notebook_id, query, types=types,
+        hits = self.repo.retrieval.federated_retrieve(notebook_id, query, types=types,
                                                       w_keyword=wk, w_semantic=ws)
+        # P1-B: 留存本次查询的全量打分(轻量 (relevance,score) map,含未进 collected
+        # 的候选)。收尾 _quota_rerank 直接复用——一次 run 内图只读、打分确定,
+        # 留存≡收尾重跑。仅 quota 开启时留存(省无谓内存)。
+        # 注意:仅在 types 为空/None 时留存——_quota_rerank 重跑用 self.search(nb, q)
+        # (无 types,全类打分);带 types 的调用(如 add_subquery 分支)与之不同参,
+        # 留存会与重跑结果不一致,故不留存、交由 _quota_rerank 回退重跑该查询。
+        if self.settings.reasoning_quota_enabled and getattr(
+                self.settings, "reasoning_quota_reuse_enabled", True) and not types:
+            self._per_query_scored[_norm_query(query)] = {
+                h.object_id: (h.relevance, h.score) for h in hits}
+        return hits
 
     def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
         return self.repo.retrieval.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
@@ -183,12 +197,24 @@ class ReasoningRetriever:
     # --- 编排 ---
     def _quota_rerank(self, notebook_id, collected, used_queries, top_n):
         """复合问题: 按子查询配额 round-robin 选 top_n。
-        步骤 1: 每个子查询全库重打分(容错: 抛错则该组空)。
+        步骤 1: 每个子查询的全库打分——P1-B 优先复用 run 中留存的 map(一次 run 内
+        图只读⇒与重跑逐位等价,见 search() 留存点);无留存(带 types 的子查询/
+        flag 关)则原样重跑该查询(fail-open,容错: 抛错则该组空)。
         步骤 2-4: 分组+轮转委托给通用 quota_fuse。
         返回 (top_hits, counts): counts[i]=第 i 个子查询贡献数, counts[-1]=兜底组。"""
+        from dataclasses import replace
         from app.services.retrieval import quota_fuse
+        reuse = self.settings.reasoning_quota_enabled and getattr(
+            self.settings, "reasoning_quota_reuse_enabled", True)
         per_q = []
         for q in used_queries:
+            stored = self._per_query_scored.get(_norm_query(q)) if reuse else None
+            if stored is not None:
+                # quota_fuse 只查 collected 里的 oid,交集重建即可(payload/evidence
+                # 不随查询变,replace 版与重跑版字段级相同)。
+                per_q.append({oid: replace(collected[oid], relevance=rel, score=sc)
+                              for oid, (rel, sc) in stored.items() if oid in collected})
+                continue
             try:
                 per_q.append({h.object_id: h for h in self.search(notebook_id, q)})
             except Exception:
