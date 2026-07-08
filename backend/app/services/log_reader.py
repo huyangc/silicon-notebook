@@ -9,6 +9,7 @@ reading the given file. Best-effort: malformed lines are skipped and counted.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +19,11 @@ CHANNELS: Dict[str, str] = {
     "events": "events.jsonl",
     "requests": "requests.jsonl",
 }
+
+# 正则表达式：日期参数验证与提取
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_PLAIN_DATE_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl$")
+_GZ_DATE_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl\.gz$")
 
 
 def load_records(path: Path) -> Tuple[List[Dict[str, Any]], int]:
@@ -188,3 +194,40 @@ def paginate(
         out = [r for r in out if r.get("seq", -1) < before]
     has_more = len(out) > limit
     return out[:limit], has_more
+
+
+def valid_date_param(date: str) -> bool:
+    """验证日期参数是否合法。接受 'legacy' 或 YYYY-MM-DD 格式。"""
+    return date == "legacy" or bool(_DATE_RE.match(date or ""))
+
+
+def available_days(dir: Path, channel: str) -> List[str]:
+    """枚举目录中按天分文件的日志文件。返回日期列表（降序），末尾追加 'legacy'（若存在）。"""
+    days = set()
+    if dir.exists():
+        for p in dir.glob(f"{channel}-*.jsonl"):
+            m = _PLAIN_DATE_RE.search(p.name)
+            if m:
+                days.add(m.group(1))
+        for p in dir.glob(f"{channel}-*.jsonl.gz"):
+            m = _GZ_DATE_RE.search(p.name)
+            if m:
+                days.add(m.group(1))
+    out = sorted(days, reverse=True)
+    if (dir / f"{channel}.jsonl").exists():
+        out.append("legacy")
+    return out
+
+
+def resolve_day_path(dir: Path, channel: str, date: str) -> Tuple[Path, bool]:
+    """根据日期解析日志文件路径。优先级：plain > gz > legacy。
+    返回 (path, is_gzipped)；文件不存在时返回默认路径（非 gz）。"""
+    if date == "legacy":
+        return dir / f"{channel}.jsonl", False
+    plain = dir / f"{channel}-{date}.jsonl"
+    if plain.exists():
+        return plain, False
+    gz = dir / f"{channel}-{date}.jsonl.gz"
+    if gz.exists():
+        return gz, True
+    return plain, False
