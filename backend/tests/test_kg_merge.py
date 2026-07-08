@@ -448,3 +448,44 @@ def test_norm_ascii_behavior_unchanged():
     assert _norm("Op-Amp") == "op amp"        # 连字符→空格; "op amp" 是 _ALIASES 不动点
     assert _norm("I/O") == "i/o"              # + / 保留
     assert _norm("A_B") == "a b"              # 下划线经第二个 sub 归并为空格
+
+
+# --- empty-seed guard: degenerate names must never co-cluster -----------------
+
+def test_seed_or_unique():
+    from app.services.kg_merge import seed_or_unique
+    assert seed_or_unique("cascode", "o1") == "cascode"
+    assert seed_or_unique("", "o1") == "~o1"
+    assert seed_or_unique("", "o1") != seed_or_unique("", "o2")
+
+
+def test_symbol_only_concepts_get_unique_clusters():
+    got = cluster_concepts([_concept("o1", "→"), _concept("o2", "★")], {}, set(), set())
+    cm = got["cluster_map"]
+    assert cm["o1"] != cm["o2"]
+    assert "K-" not in (cm["o1"], cm["o2"])   # 旧行为:两者都塌缩进 "K-"
+
+
+def test_same_symbol_name_still_isolated():
+    # 无真实名 seed 时宁可不并:两个都叫 "→" 的对象也各自独立成簇
+    got = cluster_concepts([_concept("o1", "→"), _concept("o2", "→")], {}, set(), set())
+    assert got["cluster_map"]["o1"] != got["cluster_map"]["o2"]
+
+
+def test_place_new_concepts_empty_seed_unique():
+    from app.services.kg_merge import place_new_concepts, _norm
+    rows = place_new_concepts(
+        [{"object_id": "n1", "name": "→"}, {"object_id": "n2", "name": "☆"}],
+        {}, {}, seed_fn=lambda o: _norm(o.get("name", "")))
+    cids = {r["canonical_id"] for r in rows}
+    assert len(cids) == 2 and "K-" not in cids
+
+
+def test_detect_bridge_empty_name_never_emits_bare_K():
+    from app.services.kg_merge import detect_bridge_candidates
+    out = detect_bridge_candidates(
+        [{"object_id": "n1", "name": "→"}], {"n1": [1.0, 0.0]},
+        [{"object_id": "e1", "name": "cascode"}], {"e1": [1.0, 0.0]},
+        {"e1": "K-cascode"}, set())
+    assert len(out) == 1                        # 向量桥接仍然发生
+    assert all("K-" not in (c["canonical_a"], c["canonical_b"]) for c in out)
