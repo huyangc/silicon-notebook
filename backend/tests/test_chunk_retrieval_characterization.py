@@ -541,16 +541,20 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 11. Citation.tier 跨层:PPR 召回的 base 库 chunk 生成的 Citation 须标 tier="base"
-#     (真机 bug:reasoning/mix 引用了 base 库原文,前端徽章却只见 personal——根因
-#     是 Citation 此前完全不带 tier。这里锁 ask_chunk 的 mix 分支:_mix_retrieve
-#     第三路概念漫游(PPR)可掺 base 库 chunk,citation 必须如实反映其来源 tier。)
+# 11. Citation.tier / AnswerAnchor.tier 跨层:PPR 召回的 base 库 chunk 生成的
+#     Citation 与 anchor 都须标 tier="base"(真机 bug 分两波:①reasoning/mix 引用
+#     了 base 库原文,前端徽章却只见 personal——根因是 Citation 此前完全不带 tier
+#     [PR#216 已修]。②同一根因换了个面孔:_chunk_answer_context 构造 id_map 时
+#     硬编码 tier="personal",不管 chunk.notebook_id 实际指向哪个库——citation 修
+#     好了,但「来源分布」徽章读的是 anchor.tier,anchors 仍全部误标 personal。
+#     这里锁 ask_chunk 的 mix 分支:_mix_retrieve 第三路概念漫游(PPR)可掺 base 库
+#     chunk,citation 与 anchor 都必须如实反映其来源 tier。)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch):
     """selected 里混一条打了 base 库 notebook_id 的 RetrievedChunk(模拟 _ppr_retrieve
     的产出:真实 base chunk 与 active 库同池但 notebook_id 指向 base)——citation.tier
-    必须解析为 'base',同池的本库 chunk 仍是 'personal'。"""
+    与 anchor.tier 都必须解析为 'base',同池的本库 chunk 仍是 'personal'。"""
     from app.services.retrieval import RetrievedChunk
 
     active_nb, _ = _seed_chunks(repo, ["moe routing expert " * 20])
@@ -580,3 +584,49 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
         f"active 库自己的 chunk tier 应为 personal,实为 {tier_by_chunk.get('src-x')}")
     assert tier_by_chunk.get("src-base") == "base", (
         f"PPR 带来的 base 库 chunk citation.tier 应为 base,实为 {tier_by_chunk.get('src-base')}")
+
+    # anchor.tier(「来源分布」徽章的真实数据源)必须与 citation.tier 一致,
+    # 而非硬编码 personal——两个 anchor 分别对应 own_chunk(k1)/ppr_chunk(k2)。
+    tier_by_anchor = {a.object_id: a.tier for a in resp.anchors}
+    assert tier_by_anchor.get("ck-own-0") == "personal", (
+        f"active 库自己的 chunk anchor.tier 应为 personal,实为 {tier_by_anchor.get('ck-own-0')}")
+    assert tier_by_anchor.get("ck-ppr-0") == "base", (
+        f"PPR 带来的 base 库 chunk anchor.tier 应为 base,实为 {tier_by_anchor.get('ck-ppr-0')}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 12. _chunk_answer_context 本身:tier 按每 chunk 的 notebook_id 批量解析,
+#     而非硬编码 "personal"(11 的端到端场景经 ask_chunk 全链路验证同一根因;
+#     这里在最小粒度直接锁 id_map 输出,减少未来重构误伤该行为的成本)。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_chunk_answer_context_resolves_tier_per_chunk_notebook_id(repo):
+    """三个 chunk:一个 notebook_id 指向 base 库、一个指向另一个 personal 库、
+    一个留空(回退调用方传入的 notebook_id)——id_map 里每条的 tier 都必须对应
+    其真实来源库,不能被硬编码坍缩成清一色 'personal'。"""
+    from app.services.retrieval import RetrievedChunk
+
+    own_nb, _ = _seed_chunks(repo, ["own doc passage"])
+    base_nb, _ = _seed_chunks(repo, ["base doc passage"])
+    repo.mark_notebook_base(base_nb.id)
+
+    chunks = [
+        RetrievedChunk(chunk_id="ck-empty", source_id="s", source_title="D",
+                        section_path="1", text="empty-notebook-id chunk", relevance=0.5),
+        RetrievedChunk(chunk_id="ck-base", source_id="s", source_title="D",
+                        section_path="1", text="base-tier chunk", relevance=0.5,
+                        notebook_id=base_nb.id),
+        RetrievedChunk(chunk_id="ck-own", source_id="s", source_title="D",
+                        section_path="1", text="own-tier chunk", relevance=0.5,
+                        notebook_id=own_nb.id),
+    ]
+
+    _, id_map = repo._chunk_answer_context(chunks, notebook_id=own_nb.id)
+
+    tier_by_chunk = {v["object_id"]: v["tier"] for v in id_map.values()}
+    assert tier_by_chunk["ck-empty"] == "personal", (
+        f"notebook_id 留空应回退调用方 own_nb(personal),实为 {tier_by_chunk['ck-empty']}")
+    assert tier_by_chunk["ck-base"] == "base", (
+        f"notebook_id 指向 base 库的 chunk tier 应为 base,实为 {tier_by_chunk['ck-base']}")
+    assert tier_by_chunk["ck-own"] == "personal", (
+        f"notebook_id 指向另一个 personal 库的 chunk tier 应为 personal,实为 {tier_by_chunk['ck-own']}")
