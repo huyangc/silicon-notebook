@@ -247,6 +247,8 @@ class Settings(BaseSettings):
     # P0-C:seed pass PPR 与 plan LLM 并行(纯调度,结果逐位等价);False=原串行
     reasoning_ppr_prefetch: bool = Field(True, validation_alias="REASONING_PPR_PREFETCH")
     ppr_damping: float = Field(0.5, env="PPR_DAMPING")               # rx.pagerank alpha
+    ppr_tol: float = Field(1e-6, validation_alias="PPR_TOL")          # PPR 幂迭代收敛阈(L1);float32 下 <1e-6 会低于噪声地板被 clamp
+    ppr_float32: bool = Field(True, validation_alias="PPR_FLOAT32")   # scale PPR 的 combined 转移阵/迭代用 float32(带宽减半≈2x;top-k 实践一致,分数长尾有 1e-6 级波动)
     ppr_passage_node_weight: float = Field(0.05, env="PPR_PASSAGE_NODE_WEIGHT")
     ppr_top_chunks: int = Field(20, env="PPR_TOP_CHUNKS")            # 最终喂答案的 chunk 数
     ppr_kg_seed_top_n: int = Field(20, env="PPR_KG_SEED_TOP_N")      # reset 向量里的 KG 种子数

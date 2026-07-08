@@ -10053,7 +10053,8 @@ class SQLiteRepository:
                       if (active_indexed and not self.settings.scale_search_include_delta)
                       else tuple(self._scale_index_version(notebook_id)))
         version = ("scale_combined", base_ver, active_ver,
-                   bool(self.settings.scale_search_include_delta))
+                   bool(self.settings.scale_search_include_delta),
+                   "f32" if self.settings.ppr_float32 else "f64")
 
         def _load():
             # 2. Combined graph: start from the first base index, splice remaining
@@ -10104,6 +10105,11 @@ class SQLiteRepository:
             combined_idf = np.array(
                 [combined_idf_map.get(nid, 1.0) for nid in combined_ids],
                 dtype=np.float64)
+
+            # P0-B: PPR 迭代全程 float32(SpMV 带宽减半≈2x;top-k 稳定,长尾分数
+            # 波动已获用户接受)。flag 已掺进上面的 version key,翻转即失效缓存。
+            if self.settings.ppr_float32:
+                combined_A = combined_A.astype(np.float32)
 
             return {
                 "combined_ids": combined_ids,
@@ -10164,8 +10170,9 @@ class SQLiteRepository:
         combined_chunk_ids = graph["combined_chunk_ids"]
         combined_idf = graph["combined_idf"]
 
-        # 3. Reset vector.
-        reset = np.zeros(len(combined_ids), dtype=np.float64)
+        # 3. Reset vector. dtype 以 combined_A 为准(而非 settings.ppr_float32 本身)——
+        #    缓存里的图可能是翻转前构建的旧 dtype,对齐它才不会在 dot() 里被隐式提升。
+        reset = np.zeros(len(combined_ids), dtype=combined_A.dtype)
         qvec = self._embed_query(question)
 
         # Bailout observability (Fix 2): 逐种子源计数,仅在 reset 全零(zero_reset)
@@ -10258,7 +10265,7 @@ class SQLiteRepository:
         t_ppr0 = time.perf_counter()
         _ppr_stats: dict = {}
         x = si.personalized_ppr(combined_A, reset, damping=self.settings.ppr_damping,
-                                stats=_ppr_stats)
+                                tol=self.settings.ppr_tol, stats=_ppr_stats)
         if x.sum() <= 0:
             self.event_log.emit({
                 "kind": "scale_ppr_bailout",

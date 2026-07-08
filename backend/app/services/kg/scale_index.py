@@ -119,7 +119,8 @@ def personalized_ppr(
 
     transition: 列随机转移阵 A（A[j,i] = 边 i->j 的归一化权重，按 i 的出度归一）。
     reset:      personalization 向量（非负；内部归一为和=1 作为 teleport 分布）。
-    返回稳态分布 x（和=1）；全零 reset → 全零向量（调用方据此回退 dense）。
+    返回稳态分布 x（和=1，dtype 跟随 transition：float32 输入 → float32 输出，
+    float64 输入 → float64 输出）；全零 reset → 全零向量（调用方据此回退 dense）。
     stats: 可选出参 dict,写入 {"iters": 实际迭代轮数}(纯观测,不影响数值)。
     """
     s = float(reset.sum())
@@ -127,21 +128,26 @@ def personalized_ppr(
         if stats is not None:
             stats["iters"] = 0
         return np.zeros(transition.shape[0], dtype=np.float64)
-    p = (reset.astype(np.float64) / s)
+    # dtype 跟随转移阵(float32 时迭代全程 float32,SpMV 带宽减半);residual 求和
+    # 用 float64 累积消掉求和噪声。float32 的 L1 残差噪声地板≈eps×Σ|x|≈1e-7,
+    # tol 低于它会永远达不到→空转满 max_iter 反而更慢,防御 clamp 到 1e-6。
+    dt = transition.dtype if transition.dtype in (np.float32, np.float64) else np.float64
+    eff_tol = max(float(tol), 1e-6) if dt == np.float32 else float(tol)
+    p = reset.astype(dt) / s
     x = p.copy()
     d = float(damping)
     iters = 0
     for _ in range(max_iter):
         iters += 1
         x_new = (1.0 - d) * p + d * transition.dot(x)
-        x_new += (1.0 - x_new.sum()) * p
-        if np.abs(x_new - x).sum() < tol:
+        x_new += (1.0 - float(x_new.sum())) * p
+        if float(np.abs(x_new - x).sum(dtype=np.float64)) < eff_tol:
             x = x_new
             break
         x = x_new
     if stats is not None:
         stats["iters"] = iters
-    total = x.sum()
+    total = float(x.sum())
     return x / total if total > 0 else x
 
 
