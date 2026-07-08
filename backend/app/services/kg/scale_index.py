@@ -113,26 +113,34 @@ def personalized_ppr(
     damping: float = 0.5,
     tol: float = 1e-8,
     max_iter: int = 100,
+    stats: dict = None,
 ) -> "np.ndarray":
     """个性化 PageRank 幂迭代。
 
     transition: 列随机转移阵 A（A[j,i] = 边 i->j 的归一化权重，按 i 的出度归一）。
     reset:      personalization 向量（非负；内部归一为和=1 作为 teleport 分布）。
     返回稳态分布 x（和=1）；全零 reset → 全零向量（调用方据此回退 dense）。
+    stats: 可选出参 dict,写入 {"iters": 实际迭代轮数}(纯观测,不影响数值)。
     """
     s = float(reset.sum())
     if s <= 0:
+        if stats is not None:
+            stats["iters"] = 0
         return np.zeros(transition.shape[0], dtype=np.float64)
     p = (reset.astype(np.float64) / s)
     x = p.copy()
     d = float(damping)
+    iters = 0
     for _ in range(max_iter):
+        iters += 1
         x_new = (1.0 - d) * p + d * transition.dot(x)
         x_new += (1.0 - x_new.sum()) * p
         if np.abs(x_new - x).sum() < tol:
             x = x_new
             break
         x = x_new
+    if stats is not None:
+        stats["iters"] = iters
     total = x.sum()
     return x / total if total > 0 else x
 

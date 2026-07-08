@@ -10147,7 +10147,10 @@ class SQLiteRepository:
                 "ann_sources_skipped": ann_sources_skipped,
             })
             return []
-        x = si.personalized_ppr(combined_A, reset, damping=self.settings.ppr_damping)
+        t_ppr0 = time.perf_counter()
+        _ppr_stats: dict = {}
+        x = si.personalized_ppr(combined_A, reset, damping=self.settings.ppr_damping,
+                                stats=_ppr_stats)
         if x.sum() <= 0:
             self.event_log.emit({
                 "kind": "scale_ppr_bailout",
@@ -10176,6 +10179,13 @@ class SQLiteRepository:
         span = hi - lo
         norm = [(cid, (s - lo) / span if span > 0 else 0.0) for cid, s in raw]
         norm.sort(key=lambda kv: kv[1], reverse=True)
+        self.event_log.emit({
+            "kind": "scale_ppr_done", "notebook_id": notebook_id,
+            "iters": _ppr_stats.get("iters", -1),
+            "ppr_ms": round((time.perf_counter() - t_ppr0) * 1000),
+            "nodes": len(combined_ids), "seeds": ann_seeds + active_seeds + chunk_seeds,
+            "chunks_ranked": len(norm),
+        })
         return norm
 
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
@@ -10662,8 +10672,11 @@ class SQLiteRepository:
         returning RetrievedKnowledge sorted by fused relevance desc. Shared by
         the reasoning retriever's tools; `w_keyword`/`w_semantic` carry the
         per-sub-query `prefer` bias."""
+        # ask_stage 埋点(纯观测):阶段墙钟拆解,生产诊断 20-30s 级检索用。
+        t0 = time.perf_counter()
         type_list = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
         query_vector = self._embed_query(query)
+        t_embed = time.perf_counter()
         # indexed 时用 ANN 核 ⊕ delta 取有界候选;无索引→cand_sims=None→全量(现状)。
         cand_sims = None
         if query_vector is not None:
@@ -10696,6 +10709,7 @@ class SQLiteRepository:
             if not lex:
                 return []
             cand_sims = {h["object_id"]: 0.0 for h in lex}
+        t_ann = time.perf_counter()
         from app.services.vector_index import query_sims, build_matrix
         with self._connect() as db:
             id_filter = set(cand_sims.keys()) if cand_sims is not None else None
@@ -10748,6 +10762,7 @@ class SQLiteRepository:
                 kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
                 element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
                 knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+        t_hydrate = time.perf_counter()
         penalty = self.settings.kg_isolated_rank_penalty
         if self.settings.retrieval_rrf_enabled:
             scored = self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
@@ -10766,9 +10781,22 @@ class SQLiteRepository:
                     w_isolated_penalty=penalty,
                 ))
             scored.sort(key=lambda it: it.score, reverse=True)
+        t_score = time.perf_counter()
         if self.settings.kg_canonical_fold_enabled:
             from app.services.retrieval import fold_by_canonical
             scored = fold_by_canonical(scored, self.cluster_map(notebook_id))
+        self.event_log.emit({
+            "kind": "ask_stage", "site": "_retrieve_scored",
+            "notebook_id": notebook_id,
+            "embed_ms": round((t_embed - t0) * 1000),
+            "ann_ms": round((t_ann - t_embed) * 1000),
+            "hydrate_ms": round((t_hydrate - t_ann) * 1000),
+            "score_ms": round((t_score - t_hydrate) * 1000),
+            "fold_ms": round((time.perf_counter() - t_score) * 1000),
+            "total_ms": round((time.perf_counter() - t0) * 1000),
+            "candidates": len(all_kg_objs),
+            "ann_gated": cand_sims is not None,
+        })
         return scored
 
     def federated_retrieve(
