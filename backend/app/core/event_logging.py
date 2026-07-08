@@ -12,12 +12,17 @@ a logging failure can never break the request / pipeline it is observing.
 from __future__ import annotations
 
 import contextvars
+import gzip
 import json
 import logging
+import os
 import re
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 from uuid import uuid4
 
 from app.core.config import Settings
@@ -69,6 +74,48 @@ def _anchor(p: "str | Path") -> Path:
     """相对路径锚定到仓库根（与 EventLogger 解析 log_dir 的规则一致）。"""
     p = Path(p)
     return p if p.is_absolute() else _ROOT_DIR / p
+
+
+# 日志归档：把「非今天」的天文件 gzip。单线程池串行执行，best-effort，绝不阻塞写入。
+_archive_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="log-archive")
+_DATED_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl$")
+
+
+def _gzip_day_file(plain: Path) -> None:
+    """把某天明文 jsonl 压成同名 .gz，再删明文。先写 .gz.tmp 再原子 rename，故读取器
+    「先明文缺则 .gz」在任一时刻至少一份可读、绝不读到半个 gz。异常吞掉（下次启动补）。"""
+    try:
+        plain = Path(plain)
+        if not plain.exists():
+            return
+        gz = plain.parent / (plain.name + ".gz")
+        if gz.exists():
+            return
+        tmp = plain.parent / (plain.name + ".gz.tmp")
+        with plain.open("rb") as fin, gzip.open(tmp, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+        os.replace(tmp, gz)
+        plain.unlink()
+    except Exception:  # pragma: no cover - 归档失败不致命
+        pass
+
+
+def archive_stale_days(settings) -> None:
+    """启动扫一遍：glob 全局与 per-user 一层子目录下的带日期明文，date<today 且无 .gz
+    者提交压缩。老无日期单文件（legacy）不匹配 _DATED_RE，天然不碰。best-effort。"""
+    try:
+        log_dir = Path(getattr(settings, "event_log_dir", ".local/logs"))
+        if not log_dir.is_absolute():
+            log_dir = _ROOT_DIR / log_dir
+        if not log_dir.exists():
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        for p in list(log_dir.glob("*.jsonl")) + list(log_dir.glob("*/*.jsonl")):
+            m = _DATED_RE.search(p.name)
+            if m and m.group(1) < today:
+                _archive_pool.submit(_gzip_day_file, p)
+    except Exception:  # pragma: no cover
+        pass
 
 
 def llm_log_dir_aligned(llm_log_path: "str | Path", event_log_dir: "str | Path") -> bool:

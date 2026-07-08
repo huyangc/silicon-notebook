@@ -43,6 +43,13 @@ def create_app() -> FastAPI:
     _env_file_preflight()
     settings = get_settings()
 
+    # 日志归档：启动时后台扫一遍「非今天」的天文件并 gzip，best-effort、不阻塞启动。
+    from app.core.event_logging import archive_stale_days, _archive_pool
+    try:
+        _archive_pool.submit(archive_stale_days, settings)
+    except Exception:  # pragma: no cover - 归档接线绝不阻断启动
+        logger.warning("log archive sweep 提交失败（不影响启动）", exc_info=False)
+
     # 启动路径日志：一眼可查 DB/storage/日志目录实际解析到哪里（uvicorn 控制台
     # 可见），根治「CLI 建索引 vs 服务启动」CWD 不一致导致数据分裂却无从察觉
     # 的问题。storage_dir/database_url 经 config.py 的 model_validator 锚定到
