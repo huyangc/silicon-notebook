@@ -260,9 +260,12 @@ class ReasoningRetriever:
         # 位置 join,故 seen_chunks 合并时序/trace 顺序与串行版逐位一致;
         # future.result() 重抛异常=与串行抛出同语义。
         # submit 与下方 seed pass 共用同一 graph_ppr_enabled 条件:只要没有异常
-        # 提前跳出,两者必然成对执行;plan/初检索抛异常(含 AskCancelled)时 seed
-        # pass 不会执行到——靠下面 try/except BaseException 兜底关闭线程池,
-        # 保证任何路径都不会出现"submit 了却无人 join 且池未关闭"的线程泄漏。
+        # 提前跳出,两者必然成对执行。下面单一 try/finally 包住从 submit 之后到
+        # seed pass join 为止的整段(plan、初检索、seed pass 三处都在内)——无论
+        # 正常返回、plan/初检索抛异常(含 AskCancelled)、还是 ppr_future.result()
+        # 本身抛异常,finally 都无条件关闭线程池且原异常原样向外传播;不需要
+        # except 分支兜底,一次 try/finally 覆盖所有路径,不会出现"submit 了却
+        # 无人 join 且池未关闭"的线程泄漏,也不会出现两处 shutdown 各触发一次。
         ppr_future = None
         ppr_pool = None
         if self.settings.graph_ppr_enabled and getattr(
@@ -320,12 +323,8 @@ class ReasoningRetriever:
             # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
             if self.settings.graph_ppr_enabled:
                 raise_if_cancelled(self.cancel_event)
-                try:
-                    ppr_all = (ppr_future.result() if ppr_future is not None
-                               else self.ppr_retrieve(notebook_id, question))
-                finally:
-                    if ppr_pool is not None:
-                        ppr_pool.shutdown(wait=False)
+                ppr_all = (ppr_future.result() if ppr_future is not None
+                           else self.ppr_retrieve(notebook_id, question))
                 seeded = [c for c in ppr_all if c.chunk_id not in seen_chunks]
                 for c in seeded:
                     seen_chunks.add(c.chunk_id)
@@ -333,12 +332,12 @@ class ReasoningRetriever:
                 record(TraceStep(step_type="ppr",
                                  summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
                                  detail={"found": len(seeded), "phase": "seed"}))
-        except BaseException:
-            # plan/初检索阶段抛异常(含 AskCancelled)→ seed pass 不会执行到,
-            # 上面的 finally 不会被触发——这里补关闭,防线程池泄漏。
+        finally:
+            # 无论正常走完、plan/初检索抛异常(含 AskCancelled)、还是上面
+            # ppr_future.result() 本身抛异常,这里都无条件关闭线程池且只关一次;
+            # 异常(如有)由 try 块原样向外传播,finally 不吞、不重抛。
             if ppr_pool is not None:
                 ppr_pool.shutdown(wait=False)
-            raise
 
         # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
         used_queries = list(dict.fromkeys(s.query for s in subqueries))
