@@ -1,11 +1,16 @@
 """Merge Concept nodes by normalized name/alias across fragments; rewire edges."""
 from __future__ import annotations
 import re
+import unicodedata
 from typing import List, Tuple
 from app.services.kg.models import Edge, Node
 
 def _norm(name: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", name.lower())).strip()
+    # NFKC + Unicode \w:CJK/希腊/带音标名参与同文档窗口间合并(旧类清成空名,
+    # 中文概念每窗口留一份重复节点)。删除语义保持:非字母数字直接删除(不是替换
+    # 空格),下划线显式删除 —— 纯 ASCII 输出与旧 [^a-z0-9 ] 类逐字节相同。
+    folded = unicodedata.normalize("NFKC", name or "").lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^\w ]|_", "", folded)).strip()
 
 def canonicalize(nodes: List[Node], edges: List[Edge], doc_id: str) -> Tuple[List[Node], List[Edge]]:
     canon: dict = {}          # normalized name -> canonical Concept node

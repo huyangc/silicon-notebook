@@ -34,3 +34,21 @@ def test_merges_concepts_by_normalized_name_and_rewires_edges():
     assert len(concepts) == 1                      # A & B merged
     assert len(concepts[0].mentions) == 2          # both spans recorded
     assert g_edges[0].target_id == concepts[0].id  # edge rewired to canonical id
+
+
+def test_cjk_concepts_merge_within_doc():
+    out, _ = canonicalize([_c("W0-0", "铸币平价"), _c("W1-0", "铸币平价")], [], doc_id="d")
+    concepts = [n for n in out if n.type == "Concept"]
+    assert len(concepts) == 1
+    assert len(concepts[0].mentions) == 2
+
+
+def test_cjk_distinct_concepts_not_merged():
+    out, _ = canonicalize([_c("W0-0", "双重汇率制"), _c("W1-0", "组织策略")], [], doc_id="d")
+    assert len([n for n in out if n.type == "Concept"]) == 2
+
+
+def test_symbol_only_concepts_never_merge():
+    # 空归一名走 else 分支原样保留(既有守卫),修复后必须维持
+    out, _ = canonicalize([_c("W0-0", "→"), _c("W1-0", "→")], [], doc_id="d")
+    assert len([n for n in out if n.type == "Concept"]) == 2
