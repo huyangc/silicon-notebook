@@ -6,6 +6,7 @@ ReasoningRetriever 持 repo 引用,运行时注入,避免与 sqlite_repository �
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -254,61 +255,90 @@ class ReasoningRetriever:
             if on_step:
                 on_step(step)
 
-        subqueries = self.plan(question, history)
-        raise_if_cancelled(self.cancel_event)
-        record(TraceStep(
-            step_type="plan", summary=f"规划了 {len(subqueries)} 个子查询",
-            detail={"sub_queries": [{"query": s.query, "types": s.types,
-                                     "prefer": s.prefer, "reason": s.reason}
-                                    for s in subqueries]}))
+        # P0-C: seed pass PPR 只依赖原问题与只读图状态,与 plan 的 LLM 时间完全
+        # 重叠(copy_context 保住 per-user 模型解析的 ContextVar)。在原 seed pass
+        # 位置 join,故 seen_chunks 合并时序/trace 顺序与串行版逐位一致;
+        # future.result() 重抛异常=与串行抛出同语义。
+        # submit 与下方 seed pass 共用同一 graph_ppr_enabled 条件:只要没有异常
+        # 提前跳出,两者必然成对执行;plan/初检索抛异常(含 AskCancelled)时 seed
+        # pass 不会执行到——靠下面 try/except BaseException 兜底关闭线程池,
+        # 保证任何路径都不会出现"submit 了却无人 join 且池未关闭"的线程泄漏。
+        ppr_future = None
+        ppr_pool = None
+        if self.settings.graph_ppr_enabled and getattr(
+                self.settings, "reasoning_ppr_prefetch", True):
+            ppr_pool = ThreadPoolExecutor(max_workers=1)
+            ppr_future = ppr_pool.submit(
+                contextvars.copy_context().run,
+                self.ppr_retrieve, notebook_id, question)
 
-        # 初检索:N 个子查询并发执行 search(只读检索,线程安全),按 subqueries
-        # 原顺序收集结果再依次 setdefault —— 故去重/确定性与串行版完全等价
-        # (每个 object_id 保留按"子查询顺序 + 查询内顺序"的第一个版本)。
-        # 单个子查询失败被吞掉(记空结果),不拖垮整个 run。
-        def _run_search(sq: SubQuery) -> List[RetrievedKnowledge]:
+        try:
+            subqueries = self.plan(question, history)
             raise_if_cancelled(self.cancel_event)
-            try:
-                hits = self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]
+            record(TraceStep(
+                step_type="plan", summary=f"规划了 {len(subqueries)} 个子查询",
+                detail={"sub_queries": [{"query": s.query, "types": s.types,
+                                         "prefer": s.prefer, "reason": s.reason}
+                                        for s in subqueries]}))
+
+            # 初检索:N 个子查询并发执行 search(只读检索,线程安全),按 subqueries
+            # 原顺序收集结果再依次 setdefault —— 故去重/确定性与串行版完全等价
+            # (每个 object_id 保留按"子查询顺序 + 查询内顺序"的第一个版本)。
+            # 单个子查询失败被吞掉(记空结果),不拖垮整个 run。
+            def _run_search(sq: SubQuery) -> List[RetrievedKnowledge]:
                 raise_if_cancelled(self.cancel_event)
-                return hits
-            except AskCancelled:
-                raise
-            except Exception:
-                return []
-
-        # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
-        # 每轮回喂 reflect(模型能看到试过什么、哪条是干的),add_subquery 对
-        # 重复键硬跳过 —— 治「反复补充同一条子查询」的两层根源。
-        attempted: Dict[str, _QueryAttempt] = {}
-        if subqueries:
-            with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
-                # map 保序:第 i 个结果对应第 i 个子查询,与提交顺序一致。
-                for sq, hits in zip(subqueries, ex.map(_run_search, subqueries)):
+                try:
+                    hits = self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]
                     raise_if_cancelled(self.cancel_event)
-                    rec = attempted.setdefault(_norm_query(sq.query),
-                                               _QueryAttempt(query=sq.query))
-                    rec.tries += 1
-                    for h in hits:
-                        if h.object_id not in collected:
-                            collected[h.object_id] = h
-                            rec.new += 1
-        record(TraceStep(step_type="retrieve",
-                         summary=f"初检索得到 {len(collected)} 个候选节点",
-                         detail={"count": len(collected)}))
+                    return hits
+                except AskCancelled:
+                    raise
+                except Exception:
+                    return []
 
-        # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
-        # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
-        if self.settings.graph_ppr_enabled:
-            raise_if_cancelled(self.cancel_event)
-            seeded = [c for c in self.ppr_retrieve(notebook_id, question)
-                      if c.chunk_id not in seen_chunks]
-            for c in seeded:
-                seen_chunks.add(c.chunk_id)
-            chunks.extend(seeded)
-            record(TraceStep(step_type="ppr",
-                             summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
-                             detail={"found": len(seeded), "phase": "seed"}))
+            # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
+            # 每轮回喂 reflect(模型能看到试过什么、哪条是干的),add_subquery 对
+            # 重复键硬跳过 —— 治「反复补充同一条子查询」的两层根源。
+            attempted: Dict[str, _QueryAttempt] = {}
+            if subqueries:
+                with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
+                    # map 保序:第 i 个结果对应第 i 个子查询,与提交顺序一致。
+                    for sq, hits in zip(subqueries, ex.map(_run_search, subqueries)):
+                        raise_if_cancelled(self.cancel_event)
+                        rec = attempted.setdefault(_norm_query(sq.query),
+                                                   _QueryAttempt(query=sq.query))
+                        rec.tries += 1
+                        for h in hits:
+                            if h.object_id not in collected:
+                                collected[h.object_id] = h
+                                rec.new += 1
+            record(TraceStep(step_type="retrieve",
+                             summary=f"初检索得到 {len(collected)} 个候选节点",
+                             detail={"count": len(collected)}))
+
+            # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
+            # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
+            if self.settings.graph_ppr_enabled:
+                raise_if_cancelled(self.cancel_event)
+                try:
+                    ppr_all = (ppr_future.result() if ppr_future is not None
+                               else self.ppr_retrieve(notebook_id, question))
+                finally:
+                    if ppr_pool is not None:
+                        ppr_pool.shutdown(wait=False)
+                seeded = [c for c in ppr_all if c.chunk_id not in seen_chunks]
+                for c in seeded:
+                    seen_chunks.add(c.chunk_id)
+                chunks.extend(seeded)
+                record(TraceStep(step_type="ppr",
+                                 summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
+                                 detail={"found": len(seeded), "phase": "seed"}))
+        except BaseException:
+            # plan/初检索阶段抛异常(含 AskCancelled)→ seed pass 不会执行到,
+            # 上面的 finally 不会被触发——这里补关闭,防线程池泄漏。
+            if ppr_pool is not None:
+                ppr_pool.shutdown(wait=False)
+            raise
 
         # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
         used_queries = list(dict.fromkeys(s.query for s in subqueries))
