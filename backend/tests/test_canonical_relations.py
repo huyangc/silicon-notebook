@@ -47,7 +47,9 @@ def test_deployed_v7_db_gets_backfilled(tmp_path, monkeypatch):
 
 
 def test_schema_version_bumped():
-    assert SCHEMA_VERSION == 8
+    # >= 而非 ==:后续迁移(如 _migration_9)会继续推高 SCHEMA_VERSION,这里只断言
+    # canonical_relations 那一步(_migration_8)已落地,不锁死为全局当前版本号。
+    assert SCHEMA_VERSION >= 8
 
 
 def _mk_src(repo, nb_id, sid):

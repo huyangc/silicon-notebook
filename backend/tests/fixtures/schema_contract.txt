@@ -84,6 +84,10 @@ concept_clusters.object_type|TEXT|1|'concept'|0
 concept_clusters.canonical_description|TEXT|1|''|0
 concept_clusters.canonical_desc_sig|TEXT|1|''|0
 concept_clusters.created_at|TEXT|1|None|0
+concept_comentions.notebook_id|TEXT|1|None|1
+concept_comentions.canonical_a|TEXT|1|None|2
+concept_comentions.canonical_b|TEXT|1|None|3
+concept_comentions.bridge_claims|INTEGER|1|1|0
 concept_merge_candidates.id|TEXT|0|None|1
 concept_merge_candidates.notebook_id|TEXT|1|None|0
 concept_merge_candidates.canonical_a|TEXT|1|None|0
@@ -187,6 +191,10 @@ knowledge_relations.edge_type|TEXT|1|None|0
 knowledge_relations.evidence|TEXT|1|'[]'|0
 knowledge_relations.created_at|TEXT|1|None|0
 knowledge_relations.review_status|TEXT|1|'pending'|0
+mention_edges.notebook_id|TEXT|1|None|1
+mention_edges.claim_object_id|TEXT|1|None|2
+mention_edges.concept_canonical_id|TEXT|1|None|3
+mention_edges.matched_alias|TEXT|1|''|0
 merge_review_jobs.notebook_id|TEXT|0|None|1
 merge_review_jobs.status|TEXT|1|'idle'|0
 merge_review_jobs.total|INTEGER|1|0|0
@@ -294,6 +302,7 @@ unified_kg_state.cluster_count|INTEGER|1|0|0
 unified_kg_state.updated_at|TEXT|1|None|0
 unified_kg_state.community_seq|INTEGER|1|-1|0
 unified_kg_state.canonical_rel_seq|INTEGER|1|-1|0
+unified_kg_state.mention_seq|INTEGER|1|-1|0
 unified_kg_state.source_index_backfilled|INTEGER|1|0|0
 user_profiles.id|TEXT|0|None|1
 user_profiles.user_id|TEXT|1|None|0
