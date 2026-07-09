@@ -53,3 +53,43 @@ def test_index_status_kg_pending_matches_summary(repo):
     summary = repo.get_notebook(nb.id)
     assert out["kg"]["pending_sources"] == summary.kg_pending_sources
     assert out["kg"]["pending_sources"] >= 1
+
+
+def test_cancel_dequeues_queued(repo):
+    nb = repo.create_notebook(NotebookCreate(name="q"))
+    # 手动放入空闲队列(镜像 trigger_scale_index_rebuild(when=idle) 的效果)
+    with repo._scale_building_lock:
+        repo._scale_idle_queue[nb.id] = "auto"
+    assert repo.scale_index_status(nb.id)["state"] == "queued"
+    out = repo.cancel_scale_index(nb.id)
+    assert out["cancelled"] is True
+    assert nb.id not in repo._scale_idle_queue
+    assert repo.scale_index_status(nb.id)["state"] != "queued"
+
+
+def test_cancel_building_refuses(repo):
+    nb = repo.create_notebook(NotebookCreate(name="b"))
+    with repo._scale_building_lock:
+        repo._scale_building.add(nb.id)
+    try:
+        out = repo.cancel_scale_index(nb.id)
+        assert out["cancelled"] is False
+        assert out["reason"] == "building_not_interruptible"
+    finally:
+        with repo._scale_building_lock:
+            repo._scale_building.discard(nb.id)
+
+
+def test_cancel_noop_idempotent(repo):
+    nb = repo.create_notebook(NotebookCreate(name="x"))
+    out = repo.cancel_scale_index(nb.id)   # 无队列项、未在建
+    assert out["cancelled"] is False
+
+
+def test_dequeue_returns_bool(repo):
+    nb = repo.create_notebook(NotebookCreate(name="d"))
+    assert repo._dequeue_scale_idle(nb.id) is False   # 不存在
+    with repo._scale_building_lock:
+        repo._scale_idle_queue[nb.id] = "auto"
+    assert repo._dequeue_scale_idle(nb.id) is True     # 移除
+    assert repo._dequeue_scale_idle(nb.id) is False    # 再移除幂等
