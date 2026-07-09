@@ -317,7 +317,7 @@ def test_seq_gate_and_flag(repo):
 
 实现要求（评审会核对）：
 - FTS MATCH 的别名要转义双引号；MATCH 短语用 `'"' + alias.replace('"','""') + '"'`。
-- 别名与 claim 文本统一 `lower()`；CJK 直接 `alias in text`（boundary_hit 已封装）。
+- 别名与 claim 文本统一 **NFKC 折叠 + `lower()`**（`unicodedata.normalize("NFKC", t).lower()`——与 mention_scan.build_alias_table 的别名折叠对齐，全角/半角互通）；命中校验一律走 `boundary_hit`（alnum-lookaround 统一边界，Task 2 修复后语义）。FTS 建表插入的文本也用折叠后的版本。
 - claim 集合 = `object_type='claim' AND status!='deprecated'`，文本 = payload.name，len<10 跳过。
 - comention 计数按 claim 去重（同一 claim 对一对只计 1）。
 - 接线两处（与 `rebuild_canonical_relations` 调用并排、同款 try/except，事件 `mention_bridge_rebuild_failed`；尾部 force=True）。

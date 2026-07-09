@@ -46,7 +46,9 @@ def test_deployed_v8_db_gets_backfilled(tmp_path, monkeypatch):
 
 
 def test_schema_version_is_9():
-    assert SCHEMA_VERSION == 9
+    # >= 而非 ==:后续迁移(如 _migration_10)会继续推高 SCHEMA_VERSION,这里只断言
+    # mention_bridge 那一步(_migration_9)已落地,不锁死为全局当前版本号。
+    assert SCHEMA_VERSION >= 9
 
 
 def _mk_src(repo, nb_id, sid):

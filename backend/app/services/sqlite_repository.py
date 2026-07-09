@@ -12060,9 +12060,10 @@ class SQLiteRepository:
                 sub_queries = [retrieval_query]
             # 对比题:焦点兄弟追加为子查询(chunk 无 agent 循环,借 expand 的 comparison
             # 字段触发)。共提优先、社区回退(resolve_comparison_peers)。无 base → 跳过。
-            # 外层 gate 保持 community_layer_enabled 不变(保守:共提源在此仍受该开关约束,
-            # 不单独放开——见 Task 4 报告)。
-            if ex and ex.comparison and self.settings.community_layer_enabled:
+            # 共提兄弟不应被社区层开关单独关死——P2 实测社区层对兄弟无效,操作员关
+            # community_layer 时 mention 桥仍需生效(与 reasoning 分支行为对齐)。
+            if ex and ex.comparison and (self.settings.community_layer_enabled
+                                          or self.settings.mention_bridge_enabled):
                 from app.services.communities import resolve_comparison_peers, first_base_notebook_id
                 base_nb = first_base_notebook_id(self, notebook_id)
                 if base_nb:
