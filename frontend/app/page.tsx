@@ -1159,7 +1159,9 @@ export default function Home() {
         const s = await fetchScaleIndexStatus(nb);
         if (cancelled) return;
         setScaleIndexStatus(s);
-        if (!s.building) {
+        // 终态判定复用 shouldResumeScaleIndex:building 或 state==="queued" 都还没完工，
+        // 否则「已排队」在这里会被 !s.building 误判成完成、提前弹「构建完成」toast 并停止轮询。
+        if (!shouldResumeScaleIndex(s)) {
           setBuildingScaleIndex(false);
           setToast(s.stale ? "索引重建结束（仍有更新未纳入）" : "检索索引重建完成 ✓");
         }
@@ -1198,7 +1200,9 @@ export default function Home() {
             .then((refreshed) => { if (!cancelled) setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur)); })
             .catch(() => {});
         }
-        if (buildingScaleIndex && !s.scale_index.building) {
+        // 同上:终态需 building 与 state==="queued" 都排除，否则「已排队」的自动 fold
+        // 会在这里被误判成完工，提前弹「构建完成」toast 并停止轮询。
+        if (buildingScaleIndex && !shouldResumeScaleIndex(s.scale_index)) {
           setBuildingScaleIndex(false);
           setToast(s.scale_index.stale ? "索引重建结束（仍有更新未纳入）" : "检索索引重建完成 ✓");
         }

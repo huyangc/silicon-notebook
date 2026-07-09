@@ -1116,9 +1116,11 @@ def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/index-status", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/index-status", dependencies=[Depends(require_notebook_read)])
 def index_status(notebook_id: str) -> dict:
-    """三系统构建状态聚合(kg/unified_kg/scale_index)。"""
+    """三系统构建状态聚合(kg/unified_kg/scale_index)。纯读:与 /analytics、
+    /unified-kg/status 一致用 read 守卫——只读成员也要能看面板里的状态位,
+    写操作(build/rebuild/cancel)各自仍是 require_notebook_access 且前端按 !isReader 隐藏按钮。"""
     try:
         return repository().index_status(notebook_id)
     except KeyError:
