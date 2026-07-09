@@ -12927,20 +12927,35 @@ class SQLiteRepository:
             citations = self._citations_from(top_hits, cited_element_ids, "KG evidence")
 
             answer, llm_grounded, anchors = "", False, []
+            synth_failed = False
             raise_if_cancelled(cancel_event)
             if self.reasoning_llm_client.configured and (top_hits or elements or chunks):
-                try:
-                    answer, llm_grounded, anchors = self._answer_reasoning(
-                        notebook_id, question, top_hits, elements, history,
-                        cancel_event=cancel_event, chunks=chunks)
-                except AskCancelled:
-                    raise
-                except Exception as exc:
+                _amodel = self.settings.reasoning_llm_model or self.settings.openai_compat_model
+                # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,
+                # 被 _stream_chat_content 丢弃)上 → content 空 → chat_json 返回 "{}" → 空
+                # answer(不抛异常、status=ok)。非确定失败,重试一次多半拿到真答案;两次皆空
+                # /抛错才降级。("{}" 不入 LLM 缓存,故重试是真·重掷而非复读旧结果。)
+                for _attempt in range(2):
+                    try:
+                        answer, llm_grounded, anchors = self._answer_reasoning(
+                            notebook_id, question, top_hits, elements, history,
+                            cancel_event=cancel_event, chunks=chunks)
+                    except AskCancelled:
+                        raise
+                    except Exception as exc:
+                        self._note_model_error("answer", _amodel, exc)
+                        answer, llm_grounded, anchors = "", False, []
+                    if answer:
+                        break
+                if not answer:
+                    synth_failed = True
+                    # 空 content 路径 status=ok、不抛异常 → 原先零 model_error、运维不可见;
+                    # 显式补一条,让"检索到却答不出"可追踪(前端横幅 + events.jsonl)。
                     self._note_model_error(
-                        "answer",
-                        self.settings.reasoning_llm_model or self.settings.openai_compat_model,
-                        exc)
-                    answer, llm_grounded, anchors = "", False, []
+                        "answer", _amodel,
+                        RuntimeError("answer synthesis produced empty content after retry "
+                                     "(reasoning model likely spent output budget on "
+                                     "discarded chain-of-thought)"))
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
@@ -12953,11 +12968,18 @@ class SQLiteRepository:
             if answer:
                 conclusion = _MARKER_RE.sub("", answer).strip()
                 llm_mode = "grounded" if grounded else "ungrounded"
+            elif synth_failed:
+                # 诚实降级:检索成功但答案合成未产出内容 —— 绝不冒充成 "Found N objects"
+                # (那读起来像"成功但偷懒")。如实说明并保留下方证据(related_knowledge/citations)。
+                llm_mode = "synthesis_failed"
+                conclusion = (
+                    f"已检索到 {len(top_hits)} 条相关证据,但本次答案合成未产出内容"
+                    "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。"
+                    if top_hits else
+                    "本次答案合成未产出内容,请重试该问题。")
             else:
                 llm_mode = "deterministic"
                 conclusion = (
-                    f"Found {len(top_hits)} relevant KG object(s) for this question."
-                    if top_hits else
                     "The notebook does not yet contain approved knowledge that matches "
                     "this question. Upload and review sources to build coverage.")
 
