@@ -10065,6 +10065,32 @@ class SQLiteRepository:
                      "n_chunk_ann": 0, "has_chunk_ann": False})
         return base
 
+    def index_status(self, notebook_id: str) -> dict:
+        """三系统构建状态聚合(纯只读,不触发任何 build)——供前端「索引与构建」面板
+        一次拉齐,替代 4 条独立轮询。kg=抽取,unified_kg=概念合并,scale_index=检索索引。
+        scale_index 原样复用 scale_index_status();unified_kg 取 dirty/building/last_rebuild_at
+        子集(building 取 viz_building——unified_kg_status 内部经 _viz_index_probe 只读探测,
+        从不 build)。kg 三字段直接复用 get_notebook() 算出的 NotebookSummary.kg_ready /
+        kg_building / kg_pending_sources —— 与 NotebookSummary 是同一段代码(_notebook_from_row
+        的 _has_kg/_count_pending_kg_sources + get_notebook 里的 _kg_building 回填,行 14086/
+        14089/2064),而非另抄一份 SQL,structurally 杜绝口径与概要卡片漂移。"""
+        nb = self.get_notebook(notebook_id)  # KeyError → 404
+        scale = self.scale_index_status(notebook_id)
+        uk = self.unified_kg_status(notebook_id)
+        return {
+            "kg": {
+                "ready": bool(nb.kg_ready),
+                "building": bool(nb.kg_building),
+                "pending_sources": int(nb.kg_pending_sources),
+            },
+            "unified_kg": {
+                "dirty": bool(uk.get("dirty", False)),
+                "building": bool(uk.get("viz_building", False)),
+                "last_rebuild_at": uk.get("last_rebuild_at", ""),
+            },
+            "scale_index": scale,
+        }
+
     def _resolve_scale_mode(self, notebook_id: str, mode: str) -> str:
         """把 mode 解析为具体操作:fold|full。
         auto = 有(含 stale)索引 → fold,否则 → full。

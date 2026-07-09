@@ -1107,6 +1107,15 @@ def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
+@router.get("/notebooks/{notebook_id}/index-status", dependencies=[Depends(require_notebook_access)])
+def index_status(notebook_id: str) -> dict:
+    """三系统构建状态聚合(kg/unified_kg/scale_index)。"""
+    try:
+        return repository().index_status(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
 @router.get("/notebooks/{notebook_id}/unified-kg", dependencies=[Depends(require_notebook_read)])
 def get_unified_kg(
     notebook_id: str,
