@@ -26,6 +26,13 @@ from app.services.sqlite_repository import SQLiteRepository, _now
 
 
 def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Settings:
+    # llm_log_path 的目录必须与 event_log_dir 对齐(见 event_logging.llm_log_dir_aligned):
+    # 否则 SQLiteRepository 构造时会打印「LLM_LOG_PATH 的目录与 EVENT_LOG_DIR 不一致」告警。
+    # 默认 llm_log_path=.local/logs/llm.jsonl 指向仓库根,而这里 event_log_dir 指向本 check
+    # 的临时目录,两者天然不一致——故把 llm_log_path 也钉进同一临时目录消除告警。
+    # (这几个字段用 Field(default, env=...) 声明、按字段名绑定,Settings(llm_log_path=...)
+    #  kwarg 生效;只有 validation_alias 声明的字段才须用别名名传参、否则被静默忽略。)
+    _log_dir = event_log_dir or (root / "logs")
     return Settings(
         database_url=f"sqlite:///{root / 'silicon_notebook.db'}",
         storage_dir=str(root / "storage"),
@@ -34,7 +41,8 @@ def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Setti
         openai_compat_api_key="",
         openai_compat_model="",
         embed_provider="",
-        event_log_dir=str(event_log_dir or (root / "logs")),
+        event_log_dir=str(_log_dir),
+        llm_log_path=str(_log_dir / "llm.jsonl"),
         # P4: 摄取默认不抽 KG;冒烟脚本要端到端验证 KG 抽取/存储/检索全管线,
         # 故显式开启自动抽取(offline 下产出 'no-llm' extraction run,正是各断言所期)。
         kg_auto_extract=True,
@@ -815,22 +823,37 @@ def check_llm_interaction_logging() -> None:
                 "response": {"content": "{}"},
             }
         )
-        # per-user 模式(PR#93):llm 日志写在 dirname(llm_log_path)/<owner>/llm.jsonl;
-        # owner 未设(离线/无请求上下文)→ user-local。读 logger 实际写入的 per-user 路径。
-        written = log_path.parent / owner_dir(get_log_owner()) / log_path.name
+        # per-user 模式(PR#93):llm 日志写在 dirname(llm_log_path)/<owner>/ 下,
+        # owner 未设(离线/无请求上下文)→ user-local。
+        # 注意:EventLogger 现在按天分文件 <channel>-YYYY-MM-DD.jsonl(配套 gzip 归档),
+        # 已不再是单个 llm.jsonl——logger.filename/.path 只是历史兼容属性,emit() 实际写的是
+        # 当天的 llm-<date>.jsonl。故这里按天文件名(channel 恒为 "llm")glob 读实际落盘那份,
+        # 别再假设旧的 llm.jsonl 命名(那正是本 check 之前 FileNotFoundError 的根因)。
+        owner_log_dir = log_path.parent / owner_dir(get_log_owner())
+        dated = sorted(owner_log_dir.glob("llm-*.jsonl"))
+        assert dated, f"per-user llm 日志未落盘于 {owner_log_dir}"
+        written = dated[-1]
         line = written.read_text(encoding="utf-8").strip().splitlines()[-1]
         parsed = json.loads(line)
         for field in ("ts", "id", "kind", "model", "status", "latency_ms"):
             assert field in parsed, field
 
-        bad = LLMInteractionLogger(Settings(llm_log_path=str(log_path)))
-        bad.path = log_path / "nope.jsonl"
+        # 韧性:emit 走 _target_path_for_day(不读 .path),故旧的 `bad.path=.../nope.jsonl`
+        # 覆盖已失效、测不到吞错。改用「日志目录的父路径是文件」真正触发写失败:emit 必须
+        # 吞掉 IO 错、绝不上抛。
+        clash = Path(temp_dir) / "clash"
+        clash.write_text("x", encoding="utf-8")
+        bad = LLMInteractionLogger(Settings(llm_log_path=str(clash / "llm.jsonl")))
         bad.log({"kind": "embed", "model": "m", "status": "ok", "latency_ms": 1, "dims": 3})
 
-        off_path = Path(temp_dir) / "off.jsonl"
-        off = LLMInteractionLogger(Settings(llm_log_path=str(off_path), llm_log_enabled=False))
+        # 禁用:enabled=False → 完全不写(per-user 模式连目录都不建),故目录不应存在。
+        # (旧断言 `not off.jsonl.exists()` 恒真——enabled 时也只会写 off-<date>.jsonl、
+        #  从不写 off.jsonl,测不到禁用;改断言实际写入目录不存在。)
+        off_dir = Path(temp_dir) / "off-logs"
+        off = LLMInteractionLogger(
+            Settings(llm_log_path=str(off_dir / "llm.jsonl"), llm_log_enabled=False))
         off.log({"kind": "chat", "model": "m", "status": "ok", "latency_ms": 1})
-        assert not off_path.exists()
+        assert not off_dir.exists()
     print("[smoke] llm interaction logging ok")
 
 
@@ -841,18 +864,26 @@ def check_event_logging() -> None:
     with tempfile.TemporaryDirectory(prefix="silicon-notebook-eventlog-") as temp_dir:
         logger = EventLogger(Settings(event_log_dir=temp_dir), channel="events")
         logger.emit({"kind": "pipeline", "stage": "parse", "status": "done", "latency_ms": 5})
-        line = (Path(temp_dir) / "events.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1]
+        # EventLogger 按天分文件 events-YYYY-MM-DD.jsonl(配套 gzip 归档),已不再是单个
+        # events.jsonl;glob 读实际落盘那份。
+        dated = sorted(Path(temp_dir).glob("events-*.jsonl"))
+        assert dated, f"events 日志未落盘于 {temp_dir}"
+        line = dated[-1].read_text(encoding="utf-8").strip().splitlines()[-1]
         parsed = json.loads(line)
         assert parsed["channel"] == "events" and "ts" in parsed, parsed
         assert parsed["stage"] == "parse"
 
-        bad = EventLogger(Settings(event_log_dir=temp_dir), channel="events")
-        bad.path = Path(temp_dir) / "events.jsonl" / "nope.jsonl"
+        # 韧性:log_dir 指向一个文件时建目录/写入必失败,但 emit 必须吞掉、绝不上抛。
+        # (旧的 `bad.path=.../nope.jsonl` 覆盖已失效——emit 不读 .path。)
+        clash = Path(temp_dir) / "clash-ev"
+        clash.write_text("x", encoding="utf-8")
+        bad = EventLogger(Settings(event_log_dir=str(clash)), channel="events")
         bad.emit({"kind": "status", "status": "ok"})
 
+        # 禁用:enabled=False → 无 off-<date>.jsonl 落盘(旧的 not off.jsonl.exists() 恒真)。
         off = EventLogger(Settings(event_log_dir=temp_dir, event_log_enabled=False), channel="off")
         off.emit({"kind": "x", "status": "ok"})
-        assert not (Path(temp_dir) / "off.jsonl").exists()
+        assert not list(Path(temp_dir).glob("off*.jsonl"))
     print("[smoke] event logging ok")
 
 
@@ -879,12 +910,16 @@ def check_pipeline_event_logging() -> None:
         run = _latest_extraction_run(repo, uploaded[0].id)
         assert run["run_type"] == "kg" and run["error_message"] == "no-llm"
 
-        # per-user 模式(PR#93):仓库 event_log 写在 event_log_dir/<owner>/events.jsonl;
-        # 离线无请求上下文 → owner=user-local。读实际写入的 per-user 路径。
-        events_path = log_dir / owner_dir(get_log_owner()) / "events.jsonl"
+        # per-user 模式(PR#93):仓库 event_log 写在 event_log_dir/<owner>/ 下;离线无请求
+        # 上下文 → owner=user-local。EventLogger 按天分文件 events-YYYY-MM-DD.jsonl,glob 读取
+        # 实际落盘的那些(单次运行通常一份;跨天则合并读)。
+        owner_ev_dir = log_dir / owner_dir(get_log_owner())
+        events_files = sorted(owner_ev_dir.glob("events-*.jsonl"))
+        assert events_files, f"pipeline events 未落盘于 {owner_ev_dir}"
         events = [
             json.loads(line)
-            for line in events_path.read_text(encoding="utf-8").splitlines()
+            for path in events_files
+            for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
         pipeline = [event for event in events if event.get("kind") == "pipeline"]
