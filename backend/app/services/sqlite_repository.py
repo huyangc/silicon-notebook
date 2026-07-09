@@ -7213,7 +7213,8 @@ class SQLiteRepository:
         """从 claim 文本确定性提取「claim→跨源概念」mention 边与概念共提对(零 LLM)。
 
         流程:跨 >=2 源的 concept 簇 → 别名表(mention_scan.build_alias_table)→
-        rebuild 作用域临时 trigram FTS(claim 折叠名)→ 每别名 phrase MATCH 召回
+        连接私有 TEMP trigram FTS(claim 折叠名;纯内存零 WAL,不占全局写锁)→
+        每别名 phrase MATCH 召回
         候选 → 统一 alnum-lookaround 边界(boundary_hit)后校验 → DF 双门(命中
         claim 数超 max(floor, cap×claims)的泛词整体丢弃 + 事件计数)→ 聚合
         claim→{canonical} 全量重写 mention_edges + 两两组合(a<b)concept_comentions。
@@ -7287,40 +7288,42 @@ class SQLiteRepository:
             df_gate = max(self.settings.mention_alias_df_floor,
                           self.settings.mention_alias_df_cap * n_claims)
             rowid_map = {i: claims[i - 1] for i in range(1, n_claims + 1)}
-            # 3) rebuild 作用域临时 trigram FTS。整个生命周期(建表→填充→查询→DROP)
-            #    在同一写事务内串行完成,避免与其它 notebook 并发 rebuild 争用这张共享
-            #    临时表;这是独立于主写事务(DELETE×2+INSERT+seq)的另一写事务,满足
-            #    "FTS 建表/查询在主事务外"。trigram=子串语义,故每候选仍须过 boundary_hit。
-            with self._write() as db:
-                try:
-                    db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS mention_scan_fts "
-                               "USING fts5(text, tokenize='trigram')")
-                    db.execute("DELETE FROM mention_scan_fts")
-                    db.executemany(
-                        "INSERT INTO mention_scan_fts(rowid, text) VALUES (?,?)",
-                        [(i, folded) for i, (_cid, folded) in enumerate(claims, 1)])
-                    # 4) 每别名 phrase MATCH 召回 → boundary_hit 校验 → DF 双门。
-                    for alias in sorted(alias_to_canons):
-                        if len(alias) < 3:     # trigram 最短查询=3;别名门已保证,双保险
-                            continue
-                        canons = alias_to_canons[alias]
-                        match_expr = '"' + alias.replace('"', '""') + '"'
-                        hits = []
-                        for row in db.execute(
-                                "SELECT rowid FROM mention_scan_fts WHERE mention_scan_fts MATCH ?",
-                                (match_expr,)):
-                            claim_id, folded = rowid_map[row["rowid"]]
-                            if boundary_hit(alias, folded):
-                                hits.append(claim_id)
-                        if len(hits) > df_gate:    # 泛词:整体丢弃 + 计数
-                            dropped += 1
-                            continue
-                        for claim_id in hits:
-                            d = claim_hits.setdefault(claim_id, {})
-                            for c in canons:
-                                d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
-                finally:
-                    db.execute("DROP TABLE IF EXISTS mention_scan_fts")
+            # 3) 连接私有 TEMP trigram FTS(建+填+查同一 _connect 连接):temp schema
+            #    按连接隔离——并发 rebuild 同名不相撞,无需串行化;temp_store=MEMORY
+            #    (见 _connect)→ 全程纯内存,零 WAL 写入、不占 _write_lock(效率约束:
+            #    部署规模 ~40万 claims 的插入+扫描绝不能挡住 ingest/其它 rebuild)。
+            #    连接关闭即整表蒸发(无需 DELETE/DROP;finally close 兼释放内存)。
+            #    trigram=子串语义,故每候选仍须过 boundary_hit 后校验。
+            scan_db = self._connect()
+            try:
+                scan_db.execute("CREATE VIRTUAL TABLE temp.mention_scan_fts "
+                                "USING fts5(text, tokenize='trigram')")
+                scan_db.executemany(
+                    "INSERT INTO temp.mention_scan_fts(rowid, text) VALUES (?,?)",
+                    [(i, folded) for i, (_cid, folded) in enumerate(claims, 1)])
+                # 4) 每别名 phrase MATCH 召回 → boundary_hit 校验 → DF 双门。
+                for alias in sorted(alias_to_canons):
+                    if len(alias) < 3:     # trigram 最短查询=3;别名门已保证,双保险
+                        continue
+                    canons = alias_to_canons[alias]
+                    match_expr = '"' + alias.replace('"', '""') + '"'
+                    hits = []
+                    for row in scan_db.execute(
+                            "SELECT rowid FROM temp.mention_scan_fts "
+                            "WHERE mention_scan_fts MATCH ?",
+                            (match_expr,)):
+                        claim_id, folded = rowid_map[row["rowid"]]
+                        if boundary_hit(alias, folded):
+                            hits.append(claim_id)
+                    if len(hits) > df_gate:    # 泛词:整体丢弃 + 计数
+                        dropped += 1
+                        continue
+                    for claim_id in hits:
+                        d = claim_hits.setdefault(claim_id, {})
+                        for c in canons:
+                            d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
+            finally:
+                scan_db.close()
         if dropped > 0:
             self.event_log.emit({"kind": "mention_alias_df_dropped",
                                  "notebook_id": notebook_id, "dropped": dropped})

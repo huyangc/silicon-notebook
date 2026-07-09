@@ -96,6 +96,9 @@ def test_rebuild_extracts_mention_edges_and_comentions(repo):
     assert cm[0]["bridge_claims"] == 2   # 两条对比claim
     a, b = sorted((gqa, mqa))
     assert (cm[0]["canonical_a"], cm[0]["canonical_b"]) == (a, b)
+    # 扫描 FTS 是连接私有 TEMP 表(纯内存,零 WAL):绝不能落进持久 schema。
+    with repo._connect() as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='mention_scan_fts'").fetchone() is None
 
 
 def test_df_cap_drops_generic_alias(repo):
