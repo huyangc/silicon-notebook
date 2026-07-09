@@ -603,6 +603,7 @@ class ScaleIndexStatus(BaseModel):
     total_chunks: int = 0
     unindexed_sources: int = 0
     delta_searchable: bool = False
+    last_built_at: str = ""
 
 
 class RebuildScaleIndexRequest(BaseModel):
