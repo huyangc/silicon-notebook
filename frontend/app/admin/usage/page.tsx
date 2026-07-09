@@ -90,6 +90,7 @@ export default function AdminUsagePage() {
           {state.rows.map((u) => {
             const isOpen = expanded === u.id;
             const entry = nbCache[u.id];
+            const isOnline = onlineIds.has(u.id);
             return (
               <Fragment key={u.id}>
                 <tr className={isOpen ? "usage-row-expanded" : undefined}>
@@ -106,9 +107,10 @@ export default function AdminUsagePage() {
                   </td>
                   <td>
                     <span
-                      className={`usage-dot ${onlineIds.has(u.id) ? "usage-dot-online" : "usage-dot-offline"}`}
-                      aria-label={onlineIds.has(u.id) ? "在线" : "离线"}
-                      title={onlineIds.has(u.id) ? "在线" : "离线"}
+                      className={`usage-dot ${isOnline ? "usage-dot-online" : "usage-dot-offline"}`}
+                      role="img"
+                      aria-label={isOnline ? "在线" : "离线"}
+                      title={isOnline ? "在线" : "离线"}
                     />
                     {u.username}
                   </td>

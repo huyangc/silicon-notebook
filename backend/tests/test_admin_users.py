@@ -168,6 +168,7 @@ def test_admin_online_endpoint_lists_connected(client):
     try:
         data = client.get("/api/admin/online", headers=admin).json()
         assert uid in data["online_ids"]
+        assert data["online_ids"] == sorted(data["online_ids"])  # 端点保证已排序
     finally:
         pending_bus.unregister(uid, q)
 
