@@ -1254,6 +1254,18 @@ export default function Home() {
     const nb = currentNotebookId;
     confirmIndexAction(scaleIndexOpConfirm(op, s), () => startScaleIndexRebuild(nb, "now", SCALE_OP_MODE[op]));
   };
+  // 「空闲时建」—— 与上面三个精确动作同一确认机制,仅 when 改为 idle(排队等服务器空闲/
+  // 低峰再建,mode 沿用 "auto" 交给后端按当时状态判断 fold/full)。原 admin 动作列表里的
+  // 「空闲时重建检索索引」收敛到这里,是面板对该能力的唯一入口。
+  const runScaleIndexIdle = () => {
+    const s = scaleIndexStatus;
+    if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
+    const nb = currentNotebookId;
+    confirmIndexAction(
+      "空闲时构建检索索引？\n\n排队等待服务器空闲（低峰窗口）时自动构建/更新索引，避开高峰；完成后自动更新。",
+      () => startScaleIndexRebuild(nb, "idle")
+    );
+  };
   // 取消检索索引:排队中→出队成功,刷新聚合状态;构建中(不可协作打断)→按后端 reason 提示。
   const handleCancelScaleIndex = async () => {
     if (!currentNotebookId || cancelingScaleIndex) return;
@@ -3309,18 +3321,8 @@ export default function Home() {
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
                       ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
-                      ...((currentUser?.role === "admin" && currentNotebook?.tier === "base") ? [
-                        {
-                          label: buildingScaleIndex ? "检索索引重建中…" : "立即重建检索索引",
-                          desc: "重建大库的向量检索索引（CSR 图 + ANN）；立即在后台进行，完成后自动更新",
-                          action: () => { if (currentNotebookId && !buildingScaleIndex) startScaleIndexRebuild(currentNotebookId, "now"); },
-                        },
-                        {
-                          label: "空闲时重建检索索引",
-                          desc: "排队等待服务器空闲（低峰窗口）时自动重建，避开高峰",
-                          action: () => { if (currentNotebookId) startScaleIndexRebuild(currentNotebookId, "idle"); },
-                        },
-                      ] : []),
+                      // 检索索引的立即/空闲时重建已收敛进「看板 → 索引与构建」面板(检索索引行,
+                      // 与 tier 解耦、大库亦可建)，此处不再重复列出，避免同一动作多处入口各自确认。
                       { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
                     ]
                     });
@@ -3696,7 +3698,8 @@ export default function Home() {
                             onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
                             onOpenKnowledgeGraph={(objectId) => openKgView(objectId)}
                             notebookId={currentNotebookId}
-                            onBuildScaleIndex={(nb) => { startScaleIndexRebuild(nb, "now").catch(reportError); }}
+                            onBuildScaleIndex={() => runScaleIndexOp("build")}
+                            buildingScaleIndex={buildingScaleIndex}
                           />
                         </div>
                       </div>
@@ -4475,6 +4478,7 @@ export default function Home() {
                               {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
                               {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
                               {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                              {v.tone !== "muted" && <button type="button" className="index-cta" onClick={runScaleIndexIdle}>空闲时建</button>}
                             </>
                           )}
                         </div>
@@ -5818,7 +5822,8 @@ function AnswerView({
   onFeedback,
   onOpenKnowledgeGraph,
   notebookId,
-  onBuildScaleIndex
+  onBuildScaleIndex,
+  buildingScaleIndex
 }: {
   answer: AskResponse;
   feedbackSent: string;
@@ -5826,6 +5831,7 @@ function AnswerView({
   onOpenKnowledgeGraph: (objectId?: string) => void;
   notebookId: string | null;
   onBuildScaleIndex: (nb: string) => void;
+  buildingScaleIndex: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   // 点击引用 → 在点击处弹浮层(reference + 被点徽章的 rect);点外部关闭。替代原底部固定卡 + 滚动。
@@ -5868,9 +5874,10 @@ function AnswerView({
             type="button"
             className="mode-engine"
             style={{ marginLeft: 6 }}
+            disabled={buildingScaleIndex}
             onClick={() => { if (notebookId) onBuildScaleIndex(notebookId); }}
           >
-            构建索引
+            {buildingScaleIndex ? "构建中…" : "构建索引"}
           </button>
         </div>
       )}
