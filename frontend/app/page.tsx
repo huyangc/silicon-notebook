@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -697,6 +697,10 @@ async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void
 
 const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now", mode: "auto" | "fold" | "full" = "auto") =>
   api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when, mode }) });
+// 取消检索索引构建:排队中→出队(cancelled:true);构建中→不可协作打断(cancelled:false,
+// reason:"building_not_interruptible",前端应提示「正在构建,完成后自动更新」)。
+const cancelScaleIndex = (nb: string) =>
+  api<{ cancelled: boolean; state: string; reason: string }>(`/notebooks/${nb}/scale-index/cancel`, { method: "POST" });
 const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/${nb}/scale-index/status`);
 
 // 三系统构建状态聚合(kg=抽取/unified_kg=概念合并/scale_index=检索索引)——镜像后端
@@ -708,6 +712,14 @@ type IndexStatus = {
   scale_index: ScaleIndexStatus;
 };
 const fetchIndexStatus = (nb: string) => api<IndexStatus>(`/notebooks/${nb}/index-status`);
+
+// 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
+// (完整重抽/重新合并/构建-更新-全量重建)执行前一律经此弹窗,文案模板一致
+// (动作名 + 后果 + 「后台进行,完成后自动更新」)。非破坏性动作(首次构建/补连孤立
+// 节点)不经过此函数,直接执行——与既有设计一致(见 relinkFromKgView 注释)。
+function confirmIndexAction(message: string): boolean {
+  return window.confirm(message);
+}
 
 function formatRelativeTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -1046,6 +1058,10 @@ export default function Home() {
   const [relinkingKg, setRelinkingKg] = useState(false);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
+  const [cancelingScaleIndex, setCancelingScaleIndex] = useState(false);
+  // 「索引与构建」面板(看板弹窗)的三系统聚合状态——openAnalytics 打开时经 fetchIndexStatus
+  // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
@@ -1056,24 +1072,13 @@ export default function Home() {
       .catch((e) => { reportError(e); setBuildingKg(false); });
   };
   // Trigger full re-extract: clears existing KG and rebuilds from all sources.
+  // 破坏性(清空重抽)——统一确认(与概念合并/检索索引三系统一致的确认机制+文案模板)。
   const startKgRebuild = (nb: string) => {
-    setInfoModal({
-      title: "完整重抽知识图谱",
-      message: "将清空现有知识图谱并重新抽取全部来源，确定？",
-      actions: [
-        { label: "取消", action: () => {} },
-        {
-          label: "确定重抽",
-          danger: true,
-          action: () => {
-            setBuildingKg(true);
-            rebuildKg(nb)
-              .then(() => setToast("已开始完整重抽（后台进行，可能需要数分钟）；完成后会自动更新"))
-              .catch((e) => { reportError(e); setBuildingKg(false); });
-          },
-        },
-      ],
-    });
+    if (!confirmIndexAction("完整重抽知识图谱？\n\n将清空现有知识图谱并重新抽取全部来源。后台进行，完成后自动更新。")) return;
+    setBuildingKg(true);
+    rebuildKg(nb)
+      .then(() => setToast("已开始完整重抽（后台进行，可能需要数分钟）；完成后会自动更新"))
+      .catch((e) => { reportError(e); setBuildingKg(false); });
   };
   // 侧栏收起状态持久化(localStorage;隐私模式等读写失败静默降级)
   useEffect(() => {
@@ -1144,6 +1149,25 @@ export default function Home() {
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [buildingScaleIndex, currentNotebookId]);
+  // 「索引与构建」看板弹窗打开期间,若三系统任一在忙(本地忙碌位,或聚合端点报告的
+  // kg/概念合并后台在建),轮询聚合端点(6s)保持面板内三行状态新鲜；modal 关闭或全部
+  // 空闲时自动停止,不额外占用轮询。
+  useEffect(() => {
+    if (!analytics || !currentNotebookId) return;
+    const busy = buildingKg || kgRefreshBusy || buildingScaleIndex
+      || Boolean(indexStatus?.kg.building) || Boolean(indexStatus?.unified_kg.building);
+    if (!busy) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(() => {
+      fetchIndexStatus(nb).then((s) => {
+        if (cancelled) return;
+        setIndexStatus(s);
+        setScaleIndexStatus(s.scale_index);
+      }).catch(() => {});
+    }, 6000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
   // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
   // building for a large notebook, poll every 6s until it flips false, then swap in the
   // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
@@ -1189,9 +1213,28 @@ export default function Home() {
   const runScaleIndexOp = (op: ScaleIndexOp) => {
     const s = scaleIndexStatus;
     if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
-    if (window.confirm(scaleIndexOpConfirm(op, s))) {
+    if (confirmIndexAction(scaleIndexOpConfirm(op, s))) {
       startScaleIndexRebuild(currentNotebookId, "now", SCALE_OP_MODE[op]);
     }
+  };
+  // 取消检索索引:排队中→出队成功,刷新聚合状态;构建中(不可协作打断)→按后端 reason 提示。
+  const handleCancelScaleIndex = async () => {
+    if (!currentNotebookId || cancelingScaleIndex) return;
+    const nb = currentNotebookId;
+    setCancelingScaleIndex(true);
+    try {
+      const r = await cancelScaleIndex(nb);
+      if (r.reason === "building_not_interruptible") {
+        setToast("正在构建，完成后自动更新");
+      } else if (r.cancelled) {
+        setToast("已取消排队中的检索索引构建");
+      }
+      const s = await fetchIndexStatus(nb);
+      setIndexStatus(s);
+      setScaleIndexStatus(s.scale_index);
+      if (!shouldResumeScaleIndex(s.scale_index)) setBuildingScaleIndex(false);
+    } catch (e) { reportError(e); }
+    finally { setCancelingScaleIndex(false); }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
@@ -2443,10 +2486,18 @@ export default function Home() {
 
   async function openAnalytics() {
     if (!currentNotebookId) return;
-    const response = await api<NotebookAnalytics>(`/notebooks/${currentNotebookId}/analytics`);
+    const nb = currentNotebookId;
+    const response = await api<NotebookAnalytics>(`/notebooks/${nb}/analytics`);
     setAnalytics(response);
-    // 看板打开时刷新检索索引状态,保证「检索索引」板块显示当前态(而非上次切库的快照)。
-    fetchScaleIndexStatus(currentNotebookId).then((s) => setScaleIndexStatus(s)).catch(() => {});
+    // 看板打开时经聚合端点一次拉齐三系统(kg/概念合并/检索索引)当前态(而非上次切库的
+    // 快照),取代原先仅单独拉检索索引状态;顺带回填 scaleIndexStatus(供既有
+    // runScaleIndexOp 等复用)与忙碌位(供既有轮询接回跨会话发起的构建)。
+    fetchIndexStatus(nb).then((s) => {
+      setIndexStatus(s);
+      setScaleIndexStatus(s.scale_index);
+      if (s.kg.building) setBuildingKg(true);
+      if (shouldResumeScaleIndex(s.scale_index)) setBuildingScaleIndex(true);
+    }).catch(() => {});
   }
 
   async function loadSchemas() {
@@ -2587,10 +2638,10 @@ export default function Home() {
     finally { setKgRefreshBusy(false); }
   }
 
-  // 点「待重建」/「图谱索引」徽章的入口:先确认再重建,不直接操作。
+  // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   function confirmRefreshUnifiedKg() {
     if (kgRefreshBusy || buildingKg) return;
-    if (window.confirm("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新抽取来源，可能耗时若干秒）。")) {
+    if (confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新抽取来源）。后台进行，完成后自动更新。")) {
       refreshUnifiedKg();
     }
   }
@@ -4236,7 +4287,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>知识分析看板</h2>
-                <p>回答质量、审核进度、知识覆盖与来源状态的本机统计。</p>
+                <p>回答质量、审核进度、知识覆盖、来源状态与索引构建状态的本机统计。</p>
               </div>
               <button className="icon-button" onClick={() => setAnalytics(null)} title="Close">×</button>
             </div>
@@ -4263,44 +4314,138 @@ export default function Home() {
               <div className="tag-row">
                 {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
               </div>
-              <p className="section-title">检索索引</p>
-              {scaleIndexStatus ? (() => {
-                const s = scaleIndexStatus;
-                const v = describeScaleIndex(s);
-                const desc = v.tone === "muted" ? "库较小，走暴力检索即可，无需索引"
-                  : v.state === "building" ? "后台进行，完成后自动更新"
-                  : v.state === "queued" ? "已排队，将在服务器空闲时构建；完成后自动更新"
-                  : v.state === "stale" ? "新增内容未纳入索引，暂不参与检索与推理"
-                  : v.state === "indexed" ? "已建成且为最新"
-                  : "从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与严格推理";
-                return (
-                  <div className={`index-card index-tone-${v.tone}`}>
-                    <span className="index-ic" aria-hidden="true"><Database size={19} /></span>
-                    <div className="index-main">
-                      <div className="index-state">
-                        {v.stateLabel}
-                        {v.state === "stale" && (s.unindexed_sources ?? 0) > 0 ? ` · ${s.unindexed_sources} 源待索引` : ""}
-                      </div>
-                      <div className="index-sub">{desc}</div>
-                      {v.state === "indexed" && (
-                        <div className="mini-tags">
-                          <span className="tag">{s.n_nodes} 节点</span>
-                          <span className="tag">{s.n_chunks} chunks</span>
-                          {s.has_chunk_ann && <span className="tag">chunk ANN ✓</span>}
+              <p className="section-title">索引与构建</p>
+              {indexStatus ? (
+                <div className="stack">
+                  {/* 知识图谱行:状态取 indexStatus.kg,动作复用既有 startKgBuild/startKgRebuild/relinkFromKgView。 */}
+                  {(() => {
+                    const kg = indexStatus.kg;
+                    const busy = kg.building || buildingKg;
+                    const stateLabel = busy ? "抽取中…" : !kg.ready ? "未建" : kg.pending_sources > 0 ? `${kg.pending_sources} 篇待抽` : "就绪";
+                    const tone: "ok" | "warn" = !busy && kg.ready && kg.pending_sources === 0 ? "ok" : "warn";
+                    const color = tone === "ok" ? "var(--color-ok, #1a7f5a)" : "var(--color-warn, #b97a00)";
+                    const sub = !kg.ready
+                      ? "从来源抽取知识对象与关系；严格推理（推理 / 图谱）需要先构建"
+                      : kg.pending_sources > 0
+                        ? "有新增来源尚未入图，可增量抽取并合并进现有图谱"
+                        : "已构建，可用严格推理（推理 / 图谱）";
+                    return (
+                      <div className={`index-card index-tone-${tone}`}>
+                        <span className="index-ic" aria-hidden="true"><Network size={19} /></span>
+                        <div className="index-main">
+                          <div className="tag-row" style={{ alignItems: "center" }}>
+                            <span className="index-state">知识图谱</span>
+                            <span className="tag" style={{ color }}>{stateLabel}</span>
+                          </div>
+                          <div className="index-sub">{sub}</div>
                         </div>
-                      )}
-                    </div>
-                    {(v.primaryOp || v.canRebuild) && (
-                      <div className="index-ctas">
-                        {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
-                        {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
-                        {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                        {!busy && (
+                          <div className="index-ctas">
+                            {(!kg.ready || kg.pending_sources > 0) && (
+                              <button
+                                type="button"
+                                className="index-cta primary"
+                                onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                              >
+                                {kg.ready ? `补抽 ${kg.pending_sources} 篇` : "构建"}
+                              </button>
+                            )}
+                            {kg.ready && kg.pending_sources === 0 && (
+                              <>
+                                <button
+                                  type="button"
+                                  className="index-cta"
+                                  onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
+                                >
+                                  完整重抽
+                                </button>
+                                <button type="button" className="index-cta" onClick={relinkFromKgView}>补连孤立节点</button>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                );
-              })() : (
-                <p className="tool-hint">加载检索索引状态…</p>
+                    );
+                  })()}
+                  {/* 概念合并行:状态取 indexStatus.unified_kg,唯一动作 = 既有 refreshUnifiedKg(经统一确认)。 */}
+                  {(() => {
+                    const uk = indexStatus.unified_kg;
+                    const busy = uk.building || kgRefreshBusy;
+                    const stateLabel = busy ? "重建中…" : uk.dirty ? "待重建" : "最新";
+                    const tone: "ok" | "warn" = busy || uk.dirty ? "warn" : "ok";
+                    const color = tone === "ok" ? "var(--color-ok, #1a7f5a)" : "var(--color-warn, #b97a00)";
+                    const tsSuffix = uk.last_rebuild_at ? ` · 上次 ${formatRelativeTime(uk.last_rebuild_at)}` : "";
+                    return (
+                      <div className={`index-card index-tone-${tone}`}>
+                        <span className="index-ic" aria-hidden="true"><GitMerge size={19} /></span>
+                        <div className="index-main">
+                          <div className="tag-row" style={{ alignItems: "center" }}>
+                            <span className="index-state">概念合并</span>
+                            <span className="tag" style={{ color }}>{stateLabel}{tsSuffix}</span>
+                          </div>
+                          <div className="index-sub">跨文档概念聚类；重算并刷新图谱索引（不重新抽取来源）</div>
+                        </div>
+                        {!busy && (
+                          <div className="index-ctas">
+                            <button type="button" className={`index-cta${uk.dirty ? " primary" : ""}`} onClick={confirmRefreshUnifiedKg}>重新合并</button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  {/* 检索索引行:状态取 indexStatus.scale_index,忙碌(排队/构建中)时唯一动作变为「取消」。 */}
+                  {(() => {
+                    const s = indexStatus.scale_index;
+                    const v = describeScaleIndex(s);
+                    const busy = v.state === "building" || v.state === "queued";
+                    const tsSuffix = s.last_built_at ? ` · 上次 ${formatRelativeTime(s.last_built_at)}` : "";
+                    const color = v.tone === "warn" ? "var(--color-warn, #b97a00)" : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
+                    const desc = v.tone === "muted" ? "库较小，走暴力检索即可，无需索引"
+                      : v.state === "building" ? "后台进行，完成后自动更新"
+                      : v.state === "queued" ? "已排队，将在服务器空闲时构建；完成后自动更新"
+                      : v.state === "stale" ? "新增内容未纳入索引，暂不参与检索与推理"
+                      : v.state === "indexed" ? "已建成且为最新"
+                      : "从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与严格推理";
+                    return (
+                      <div className={`index-card index-tone-${v.tone}`}>
+                        <span className="index-ic" aria-hidden="true"><Database size={19} /></span>
+                        <div className="index-main">
+                          <div className="tag-row" style={{ alignItems: "center" }}>
+                            <span className="index-state">检索索引</span>
+                            <span className="tag" style={{ color }}>
+                              {v.stateLabel}
+                              {v.state === "stale" && (s.unindexed_sources ?? 0) > 0 ? ` · ${s.unindexed_sources} 源待索引` : ""}
+                              {tsSuffix}
+                            </span>
+                          </div>
+                          <div className="index-sub">{desc}</div>
+                          {v.state === "indexed" && (
+                            <div className="mini-tags">
+                              <span className="tag">{s.n_nodes} 节点</span>
+                              <span className="tag">{s.n_chunks} chunks</span>
+                              {s.has_chunk_ann && <span className="tag">chunk ANN ✓</span>}
+                            </div>
+                          )}
+                        </div>
+                        <div className="index-ctas">
+                          {busy ? (
+                            <button type="button" className="index-cta" disabled={cancelingScaleIndex} onClick={handleCancelScaleIndex}>
+                              {cancelingScaleIndex ? "取消中…" : "取消"}
+                            </button>
+                          ) : (
+                            <>
+                              {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
+                              {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
+                              {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <p className="tool-hint">加载索引与构建状态…</p>
               )}
             </div>
           </div>
@@ -4393,8 +4538,8 @@ export default function Home() {
                     type="button"
                     className="sort-button"
                     disabled={kgRefreshBusy || buildingKg}
-                    title="对现有节点重新聚类 / 跨文档合并并刷新（不重新抽取来源）"
-                    onClick={refreshUnifiedKg}
+                    title="对现有节点重新聚类 / 跨文档合并并刷新（不重新抽取来源，会先确认）"
+                    onClick={confirmRefreshUnifiedKg}
                   >
                     {kgRefreshBusy ? "合并中…" : "重新合并"}
                   </button>
@@ -4444,17 +4589,11 @@ export default function Home() {
                 )}
                 {unifiedKgStatus && (
                   <div className="tag-row" style={{ marginTop: 4 }}>
+                    {/* 纯状态展示,非交互——唯一动作入口是上方「重新合并」按钮(去重复,见其 title)。 */}
                     <span
                       className="tag"
-                      role="button"
-                      tabIndex={0}
-                      title="点击重新合并（会先确认）：重算跨文档聚类并刷新图谱索引"
-                      onClick={confirmRefreshUnifiedKg}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); confirmRefreshUnifiedKg(); } }}
-                      style={{
-                        cursor: (kgRefreshBusy || buildingKg) ? "default" : "pointer",
-                        color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined,
-                      }}
+                      title="概念合并状态；点击上方「重新合并」按钮可手动刷新"
+                      style={{ color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined }}
                     >
                       {kgRefreshBusy ? "重建中…" : unifiedKgStatus.dirty ? "待重建" : "已同步"}
                     </span>
