@@ -20,6 +20,13 @@ test("scaleIndex: building=true → 接回；false/缺省/空 → 否", () => {
   assert.equal(shouldResumeScaleIndex(null), false);
 });
 
+test("scaleIndex: state===\"queued\" 即使 building=false 也应接回（已排队不刷新 bug）", () => {
+  assert.equal(shouldResumeScaleIndex({ building: false, state: "queued" }), true);
+  assert.equal(shouldResumeScaleIndex({ state: "queued" }), true);
+  assert.equal(shouldResumeScaleIndex({ building: false, state: "indexed" }), false);
+  assert.equal(shouldResumeScaleIndex({ building: false, state: "stale" }), false);
+});
+
 test("kgBuild: kg_building=true → 接回；false/缺省/空 → 否", () => {
   assert.equal(shouldResumeKgBuild({ kg_building: true }), true);
   assert.equal(shouldResumeKgBuild({ kg_building: false }), false);

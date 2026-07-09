@@ -699,6 +699,16 @@ const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now", mode: "auto
   api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when, mode }) });
 const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/${nb}/scale-index/status`);
 
+// 三系统构建状态聚合(kg=抽取/unified_kg=概念合并/scale_index=检索索引)——镜像后端
+// index_status() 的返回形状(backend/app/services/sqlite_repository.py)。scale_index
+// 原样复用既有 ScaleIndexStatus 类型,避免重复定义漂移。
+type IndexStatus = {
+  kg: { ready: boolean; building: boolean; pending_sources: number };
+  unified_kg: { dirty: boolean; building: boolean; last_rebuild_at: string };
+  scale_index: ScaleIndexStatus;
+};
+const fetchIndexStatus = (nb: string) => api<IndexStatus>(`/notebooks/${nb}/index-status`);
+
 function formatRelativeTime(iso: string): string {
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return "";
