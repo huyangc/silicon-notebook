@@ -8695,6 +8695,28 @@ class SQLiteRepository:
             return self._vector_cache.get(
                 f"{active_notebook_id}:fed_rxgraph", version, _load)
 
+    def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
+        """P2 共提桥 → 图 extra_edges:每条 mention_edges 行转一条软边
+        (claim_object_id ↔ f"cluster:{concept_canonical_id}", 权重 mention_edge_weight)。
+        claim 是已在图内的 KG 对象节点;cluster router 由既有 cluster_groups 机制生成
+        ——mention_edges 只指向跨 >=2 源的 concept canonical(构造保证),故 router 必存在;
+        偶发缺失由 build_ppr_graph / _gather_kg_graph 的 key 查表静默跳过(可接受降级)。
+
+        一次 SELECT(数万行级),不加每边 SQL;flag 关或表空返 []。fail-open:任何异常返 []
+        (派生数据,绝不因共提层崩掉图构建)。"""
+        if not self.settings.mention_bridge_enabled:
+            return []
+        try:
+            w = float(self.settings.mention_edge_weight)
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT claim_object_id, concept_canonical_id FROM mention_edges "
+                    "WHERE notebook_id=?", (notebook_id,)).fetchall()
+            return [(r["claim_object_id"], f"cluster:{r['concept_canonical_id']}", w)
+                    for r in rows]
+        except Exception:
+            return []
+
     def _ppr_graph(self, notebook_id: str):
         """Build (and version-cache) the graph-mode PPR graph: KG nodes + chunk
         nodes + relation/membership/synonym(+variant) edges. Always spans active
@@ -8717,8 +8739,13 @@ class SQLiteRepository:
                                        "FROM chunks WHERE notebook_id=?", (nb,)).fetchone()
                 clu_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                                      "FROM concept_clusters WHERE notebook_id=?", (nb,)).fetchone()
+                # mention_seq(P2 共提桥):派生 mention_edges 上次重建时的 kg_mutation_seq。
+                # O(1) unified_kg_state 单行读——mention 数据变更(重建/flag/权重)须让图缓存失效。
+                men_ver = db.execute("SELECT COALESCE(mention_seq,-1) AS ms FROM unified_kg_state "
+                                     "WHERE notebook_id=?", (nb,)).fetchone()
                 version_parts.append((nb, obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
-                                      chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"]))
+                                      chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"],
+                                      men_ver["ms"] if men_ver else -1))
         # runtime_dim 入键(T3/R4):emb_synonym 边由向量矩阵派生,切
         # EMBED_RUNTIME_DIM 后旧空间算出的图不能再服役。
         from app.services.vector_index import resolve_runtime_dim
@@ -8726,7 +8753,8 @@ class SQLiteRepository:
                    self.settings.ppr_variant_edge_weight,
                    self.settings.ppr_emb_synonym_enabled, self.settings.ppr_emb_synonym_threshold,
                    self.settings.ppr_emb_synonym_topk,
-                   resolve_runtime_dim(self.settings),)
+                   resolve_runtime_dim(self.settings),
+                   self.settings.mention_bridge_enabled, self.settings.mention_edge_weight,)
 
         def _load():
             ph = ",".join("?" for _ in USABLE_STATUSES)
@@ -8773,6 +8801,10 @@ class SQLiteRepository:
                         self.settings.ppr_emb_synonym_topk,
                         self.settings.ppr_emb_synonym_max_entities,
                         ef_construction=self.settings.hnsw_ef_construction)
+            # P2 共提桥:每 participant 一次 mention_edges SELECT,追加 claim↔cluster 软边,
+            # 让 PPR 质量在 claim 与跨文档概念 router 间流动。
+            for nb in participants:
+                extra_edges = extra_edges + self._mention_extra_edges(nb)
             return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
 
         return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
@@ -8807,16 +8839,22 @@ class SQLiteRepository:
             self.settings.ppr_emb_synonym_threshold,
             self.settings.ppr_emb_synonym_topk,
             resolve_runtime_dim(self.settings),
+            self.settings.mention_bridge_enabled,
+            self.settings.mention_edge_weight,
         )
         with self._connect() as db:
             st = db.execute(
-                "SELECT kg_mutation_seq, cluster_mutation_seq FROM unified_kg_state "
+                "SELECT kg_mutation_seq, cluster_mutation_seq, mention_seq FROM unified_kg_state "
                 "WHERE notebook_id=?",
                 (notebook_id,),
             ).fetchone()
             seq = int(st["kg_mutation_seq"]) if st else 0
             cseq = int(st["cluster_mutation_seq"]) if st else 0
-        return seq, cseq, settings_tail
+            mseq = int(st["mention_seq"]) if (st and st["mention_seq"] is not None) else -1
+        # mention_seq(P2 共提桥)折进 settings_tail:同一 unified_kg_state 单行读,零新增
+        # 查询;经 settings_tail 进 memo 比较 + _compute_scale_version_cold 的 *settings_tail
+        # 流入磁盘 manifest.version —— 共提桥重建(mention_edges 变)使旧 scale 索引判 stale。
+        return seq, cseq, settings_tail + (mseq,)
 
     def _compute_scale_version_cold(self, notebook_id: str, seq: int,
                                      settings_tail: tuple) -> list:
@@ -9271,6 +9309,9 @@ class SQLiteRepository:
                         self.settings.ppr_emb_synonym_max_entities,
                         ef_construction=self.settings.hnsw_ef_construction,
                     )
+            # P2 共提桥:scale CSR 节点空间含 cluster router(下方 hub 装配),故 claim↔cluster
+            # 软边同样适用;仅 whole-notebook(not scoped)路径追加,与 variant/synonym 一致。
+            extra_edges = extra_edges + self._mention_extra_edges(notebook_id)
 
         # node_ids: kg nodes first, then chunk nodes, then cluster hubs.
         # Hubs are pre-appended HERE (before edge assembly) rather than

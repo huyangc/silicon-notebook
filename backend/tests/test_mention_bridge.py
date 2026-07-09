@@ -119,6 +119,19 @@ def test_seq_gate_and_flag(repo):
 # --------------------------------------------------------------------------- #
 # Task 4: sibling_peers(共提兄弟)+ resolve_comparison_peers(共提优先/社区回退)
 # --------------------------------------------------------------------------- #
+def test_ppr_graph_contains_mention_edges(repo):
+    nb = _seed_bridge_nb(repo)
+    G, key_to_idx, _ = repo._ppr_graph(nb.id)
+    # 桥 claim 节点应连到 GQA/MQA 的 cluster router
+    with repo._connect() as db:
+        row = db.execute("SELECT claim_object_id, concept_canonical_id FROM mention_edges "
+                         "WHERE notebook_id=? LIMIT 1", (nb.id,)).fetchone()
+    a = key_to_idx.get(row["claim_object_id"])
+    b = key_to_idx.get(f"cluster:{row['concept_canonical_id']}")
+    assert a is not None and b is not None
+    assert G.has_edge(a, b)
+
+
 def test_sibling_peers_returns_comention_partner(repo):
     from app.services.communities import sibling_peers
     nb = _seed_bridge_nb(repo)
