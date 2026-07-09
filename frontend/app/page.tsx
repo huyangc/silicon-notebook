@@ -4570,6 +4570,7 @@ export default function Home() {
           <div className="kg-view-body">
             <aside className="kg-rail">
               <input className="kg-search" placeholder="搜索节点名称或类型…" value={kgSearch} onChange={(e) => handleKgSearchChange(e.target.value)} />
+              {!isReader && (
               <div className="kg-rail-section">
                 <h3>图谱处理</h3>
                 <div className="kg-action-stack">
@@ -4602,6 +4603,7 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+              )}
               <div className="kg-rail-section">
                 <h3>当前视图</h3>
                 <div className="tag-row">
@@ -4651,7 +4653,7 @@ export default function Home() {
                     {scaleIndexStatus && (() => {
                       const s = scaleIndexStatus;
                       const v = describeScaleIndex(s);
-                      const clickable = v.primaryOp !== null;
+                      const clickable = v.primaryOp !== null && !isReader;
                       const color = v.tone === "warn" ? "var(--color-warn, #b97a00)"
                         : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
                       const label = `检索索引：${v.stateLabel}${v.state === "indexed" ? ` · ${s.n_nodes} 节点` : ""}`;
