@@ -122,8 +122,10 @@ class _OutlineLLM:
                 {"title": "B", "scope": "sb", "sub_queries": ["qb"]}]})
         if "ONE section" in content:
             self.section_calls.append(content)
-            if self._fail_left > 0:
-                self._fail_left -= 1
+            # 持久失败:被选中的节(scope=sb)每次调用都抛。_draft_section 现对空/失败
+            # 有界重试一次——单次失败会被重试恢复,故编排容错测试需持久失败的节;
+            # 按 scope 定选(而非按调用序)保证并发下确定性。n_fail_sections>0 → B 节失败。
+            if self._fail_left > 0 and "Section scope: sb" in content:
                 raise RuntimeError("boom")
             return json.dumps({"markdown": "## X\nbody [k1]", "grounded": True})
         if "EXECUTIVE SUMMARY" in content:
@@ -547,3 +549,29 @@ def test_run_backcompat_plans_then_generates(repo, monkeypatch):
     monkeypatch.setattr(repo,"get_report", lambda n,r: {"status":"outline_ready","outline":[{"title":"A"}]})
     eng.run("nb","rid","q", auto_generate=True)
     assert calls==["plan","gen"]
+
+
+def test_draft_section_empty_content_marks_failed_and_observable(repo):
+    # 思考型模型偶发 content 空 → chat_json "{}" → markdown 空。修复前本节在 _assemble
+    # 里静默消失;现应有界重试→仍空则标 failed(渲染「本节生成失败」note)+ 补 model_error。
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    class _EmptyLLM:
+        configured = True
+        model = "m"
+        def __init__(self):
+            self.calls = 0
+        def chat_json(self, *a, **k):
+            self.calls += 1
+            return "{}"
+
+    stub = _EmptyLLM()
+    eng = _mk_engine(repo, stub)
+    nb = _mk_nb(repo)
+    notes = []
+    repo._note_model_error = lambda stage, model, exc: notes.append(stage)  # spy 可观测
+    out = eng._draft_section(nb.id, {"title": "T", "scope": "S"}, "q", ReasoningResult())
+    assert stub.calls == 2                                   # 空 markdown 触发重试
+    assert out["markdown"] == ""
+    assert out.get("failed") is True and out.get("error")   # 不再静默:标 failed→渲染 note
+    assert "report_section" in notes                        # report_engine 首次有 model_error 可观测

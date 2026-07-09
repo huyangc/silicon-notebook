@@ -63,7 +63,9 @@ class _RaisingLLM:
 
 
 def test_answer_llm_failure_recorded(repo):
-    """答案 LLM 抛异常 → model_errors 记一条 stage=answer;答案降级(deterministic)而非中断。"""
+    """答案 LLM 抛异常 → model_errors 记 stage=answer;答案诚实降级(synthesis_failed)而非中断。
+    (合成失败——空 content 或抛错——统一走 _answer_with_retry:有界重试 + 诚实降级 +
+    可观测;不再冒充成 "Retrieved N passage(s)" 那样的成功占位。)"""
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
     repo.llm_client = _RaisingLLM()
@@ -73,7 +75,8 @@ def test_answer_llm_failure_recorded(repo):
 
     stages = [e.stage for e in resp.model_errors]
     assert "answer" in stages
-    assert resp.llm_mode == "deterministic"   # 降级,未中断
+    assert resp.llm_mode == "synthesis_failed"   # 诚实降级,未中断
+    assert not resp.conclusion.startswith("Retrieved ")
 
 
 def test_embed_failure_recorded(repo, monkeypatch):
