@@ -72,6 +72,26 @@ def test_scale_index_loads_and_invalidates_on_change(repo):
     assert repo._scale_index(nb.id) is None                 # 索引过期不返回
 
 
+def test_resolve_fold_escalates_to_full_after_kg_rebuild(repo):
+    """索引建成后若发生过「刷新图谱」(全量重聚类,推进 last_rebuild_at),fold 只把 delta
+    新源拼接进旧索引、不重读全量图,却在末尾把 version 盖成最新 → 索引标最新实则陈旧
+    (旧节点重聚类没进索引)。故 _resolve_scale_mode 检测到 last_rebuild_at > built_at
+    时把 fold 升级成 full,让重聚类真正收敛。加新源(incremental_fuse)不碰 last_rebuild_at,
+    故「纯新增来源」不会被误升级。"""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [{"local_id": "a", "object_type": "concept",
+        "payload": {"name": "X", "section_path": ""}, "evidence": []}], [])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    # 索引刚建成、其后无 rebuild → fold 保持 fold(不误升级)。
+    assert repo._resolve_scale_mode(nb.id, "fold") == "fold"
+    # 模拟索引建成后的一次「刷新图谱」:last_rebuild_at 推进到明显更晚。
+    with repo._write() as db:
+        db.execute("UPDATE unified_kg_state SET last_rebuild_at=? WHERE notebook_id=?",
+                   ("2099-01-01T00:00:00", nb.id))
+    assert repo._resolve_scale_mode(nb.id, "fold") == "full"
+
+
 def _seed_small_base(repo):
     """Create a notebook, mark it base, seed 2 concepts + 1 relation, unify KG."""
     nb = repo.create_notebook(NotebookCreate(name="base"))
