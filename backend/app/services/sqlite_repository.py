@@ -6827,6 +6827,12 @@ class SQLiteRepository:
                 except Exception as exc:  # noqa: BLE001
                     self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
                                          "notebook_id": notebook_id, "error": str(exc)[:200]})
+                # 共提桥接层(派生)同款增量:自带 mention_seq 闸,KG 未变即秒级 no-op。
+                try:
+                    self.rebuild_mention_bridge(notebook_id)
+                except Exception as exc:  # noqa: BLE001
+                    self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
+                                         "notebook_id": notebook_id, "error": str(exc)[:200]})
                 # 增量:聚类被跳过(输入未变),但社区可能未建/过期 → rebuild_communities
                 # 自带版本闸,只在需要时建(纯图、无 LLM、秒级)。这让「只需重建社区」的
                 # 场景在原有刷新流程里零额外成本达成;fail-open,不拖垮跳过路径。
@@ -7111,6 +7117,12 @@ class SQLiteRepository:
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "canonical_relations_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
+        # 共提桥接层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
+        try:
+            self.rebuild_mention_bridge(notebook_id, force=True)
+        except Exception as exc:  # noqa: BLE001
+            self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
+                                 "notebook_id": notebook_id, "error": str(exc)[:200]})
         # Proactively refresh the viz-only index so the next KG-view open doesn't
         # pay a lazy build (and to cover same-second in-place edits the version
         # tuple can miss). Fail-open: a viz build error must never break rebuild.
@@ -7196,6 +7208,150 @@ class SQLiteRepository:
                 "UPDATE unified_kg_state SET canonical_rel_seq=? WHERE notebook_id=?",
                 (seq, notebook_id))
         return len(rows)
+
+    def rebuild_mention_bridge(self, notebook_id: str, force: bool = False) -> int:
+        """从 claim 文本确定性提取「claim→跨源概念」mention 边与概念共提对(零 LLM)。
+
+        流程:跨 >=2 源的 concept 簇 → 别名表(mention_scan.build_alias_table)→
+        rebuild 作用域临时 trigram FTS(claim 折叠名)→ 每别名 phrase MATCH 召回
+        候选 → 统一 alnum-lookaround 边界(boundary_hit)后校验 → DF 双门(命中
+        claim 数超 max(floor, cap×claims)的泛词整体丢弃 + 事件计数)→ 聚合
+        claim→{canonical} 全量重写 mention_edges + 两两组合(a<b)concept_comentions。
+
+        seq 闸同 rebuild_canonical_relations(mention_seq==kg_mutation_seq 且表非空
+        → 跳过,force 绕过;重写后写回入口捕获的 seq)。flag 关时清表返回 0。
+        文本/别名一律 NFKC 折叠 + lower(与 build_alias_table 的别名折叠对齐,全/半角
+        互通)。派生数据,fail-open 由调用方负责。返回写入的 mention_edges 行数。"""
+        self.get_notebook(notebook_id)
+        if not self.settings.mention_bridge_enabled:
+            with self._write() as db:
+                db.execute("DELETE FROM mention_edges WHERE notebook_id=?", (notebook_id,))
+                db.execute("DELETE FROM concept_comentions WHERE notebook_id=?", (notebook_id,))
+            return 0
+        # seq 闸(照抄 rebuild_canonical_relations,列名换 mention_seq)。
+        with self._connect() as db:
+            st = db.execute(
+                "SELECT kg_mutation_seq, mention_seq FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,)).fetchone()
+            cnt = db.execute(
+                "SELECT COUNT(*) AS c FROM mention_edges WHERE notebook_id=?",
+                (notebook_id,)).fetchone()["c"]
+        seq = int(st["kg_mutation_seq"]) if st else 0
+        if (not force and st is not None and st["mention_seq"] == seq and cnt > 0):
+            return int(cnt)
+
+        import unicodedata as _ud
+        from itertools import combinations as _combinations
+        from app.services.kg.mention_scan import build_alias_table, boundary_hit
+
+        def _fold(t: str) -> str:
+            return _ud.normalize("NFKC", t or "").lower()
+
+        # 1) 跨源 concept 簇(成员横跨 >=2 个非空 source_id)。claim 簇(KL- 前缀)
+        #    是被扫描的文本、不作别名目标,故按 object_type='concept' 过滤。
+        clusters: Dict[str, dict] = {}
+        with self._connect() as db:
+            cur = db.execute(
+                "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src "
+                "FROM concept_clusters cc "
+                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+                "WHERE cc.notebook_id=? AND cc.object_type='concept'",
+                (notebook_id,))
+            for r in cur:
+                ent = clusters.setdefault(r["cid"], {"name": r["cname"], "srcs": set()})
+                if r["src"]:
+                    ent["srcs"].add(r["src"])
+            # 2) claim 集合(text = payload.name;NFKC+lower 折叠;len<10 跳过)。
+            claim_rows = db.execute(
+                "SELECT id, json_extract(payload,'$.name') AS nm FROM knowledge_objects "
+                "WHERE notebook_id=? AND object_type='claim' AND status!='deprecated'",
+                (notebook_id,)).fetchall()
+        cross = [(cid, ent["name"]) for cid, ent in clusters.items() if len(ent["srcs"]) >= 2]
+        claims: List[Tuple[str, str]] = []
+        for r in claim_rows:
+            folded = _fold(r["nm"])
+            if len(folded) < 10:
+                continue
+            claims.append((r["id"], folded))
+        alias_table = build_alias_table(cross)   # {canonical_id: {alias,...}}(已 NFKC+lower)
+        # alias -> {canonical_id,...}(同一 alias 理论上可属多个 canonical)。
+        alias_to_canons: Dict[str, Set[str]] = {}
+        for cid, aliases in alias_table.items():
+            for a in aliases:
+                alias_to_canons.setdefault(a, set()).add(cid)
+
+        claim_hits: Dict[str, Dict[str, str]] = {}   # claim_id -> {canonical_id: matched_alias}
+        dropped = 0
+        n_claims = len(claims)
+        if cross and claims and alias_to_canons:
+            df_gate = max(self.settings.mention_alias_df_floor,
+                          self.settings.mention_alias_df_cap * n_claims)
+            rowid_map = {i: claims[i - 1] for i in range(1, n_claims + 1)}
+            # 3) rebuild 作用域临时 trigram FTS。整个生命周期(建表→填充→查询→DROP)
+            #    在同一写事务内串行完成,避免与其它 notebook 并发 rebuild 争用这张共享
+            #    临时表;这是独立于主写事务(DELETE×2+INSERT+seq)的另一写事务,满足
+            #    "FTS 建表/查询在主事务外"。trigram=子串语义,故每候选仍须过 boundary_hit。
+            with self._write() as db:
+                try:
+                    db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS mention_scan_fts "
+                               "USING fts5(text, tokenize='trigram')")
+                    db.execute("DELETE FROM mention_scan_fts")
+                    db.executemany(
+                        "INSERT INTO mention_scan_fts(rowid, text) VALUES (?,?)",
+                        [(i, folded) for i, (_cid, folded) in enumerate(claims, 1)])
+                    # 4) 每别名 phrase MATCH 召回 → boundary_hit 校验 → DF 双门。
+                    for alias in sorted(alias_to_canons):
+                        if len(alias) < 3:     # trigram 最短查询=3;别名门已保证,双保险
+                            continue
+                        canons = alias_to_canons[alias]
+                        match_expr = '"' + alias.replace('"', '""') + '"'
+                        hits = []
+                        for row in db.execute(
+                                "SELECT rowid FROM mention_scan_fts WHERE mention_scan_fts MATCH ?",
+                                (match_expr,)):
+                            claim_id, folded = rowid_map[row["rowid"]]
+                            if boundary_hit(alias, folded):
+                                hits.append(claim_id)
+                        if len(hits) > df_gate:    # 泛词:整体丢弃 + 计数
+                            dropped += 1
+                            continue
+                        for claim_id in hits:
+                            d = claim_hits.setdefault(claim_id, {})
+                            for c in canons:
+                                d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
+                finally:
+                    db.execute("DROP TABLE IF EXISTS mention_scan_fts")
+        if dropped > 0:
+            self.event_log.emit({"kind": "mention_alias_df_dropped",
+                                 "notebook_id": notebook_id, "dropped": dropped})
+
+        # 5) 聚合:mention_edges(每 claim×命中 canonical 一行);concept_comentions
+        #    按 claim 去重后两两组合(a<b)累计 bridge_claims。全量重写 + seq 写回。
+        edges = [(notebook_id, claim_id, canon, alias)
+                 for claim_id, canon_map in claim_hits.items()
+                 for canon, alias in canon_map.items()]
+        comention: Dict[Tuple[str, str], int] = {}
+        for canon_map in claim_hits.values():
+            for a, b in _combinations(sorted(canon_map), 2):
+                comention[(a, b)] = comention.get((a, b), 0) + 1
+        cm_rows = [(notebook_id, a, b, n) for (a, b), n in comention.items()]
+        with self._write() as db:
+            db.execute("DELETE FROM mention_edges WHERE notebook_id=?", (notebook_id,))
+            db.execute("DELETE FROM concept_comentions WHERE notebook_id=?", (notebook_id,))
+            for i in range(0, len(edges), 1000):
+                db.executemany(
+                    "INSERT INTO mention_edges "
+                    "(notebook_id, claim_object_id, concept_canonical_id, matched_alias) "
+                    "VALUES (?,?,?,?)", edges[i:i + 1000])
+            for i in range(0, len(cm_rows), 1000):
+                db.executemany(
+                    "INSERT INTO concept_comentions "
+                    "(notebook_id, canonical_a, canonical_b, bridge_claims) "
+                    "VALUES (?,?,?,?)", cm_rows[i:i + 1000])
+            db.execute(
+                "UPDATE unified_kg_state SET mention_seq=? WHERE notebook_id=?",
+                (seq, notebook_id))
+        return len(edges)
 
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,

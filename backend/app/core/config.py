@@ -103,6 +103,18 @@ class Settings(BaseSettings):
     community_peers_topk: int = Field(8, validation_alias="COMMUNITY_PEERS_TOPK")
     community_rerank_candidates: int = Field(200, validation_alias="COMMUNITY_RERANK_CANDIDATES")
 
+    # 共提桥接层(P2):claim 文本确定性提取 mention 边/共提对,治对比题坍缩。默认开(零 LLM,有界)。
+    mention_bridge_enabled: bool = Field(True, validation_alias="MENTION_BRIDGE_ENABLED")
+    # 别名 DF 双门:命中 claim 数 > max(floor, cap×总claims) 判泛词整体丢弃(如 "model"),事件计数。
+    # 比例门管大库("model" 8% vs GQA 0.3%);绝对下限 floor 防小库误杀真实高频概念
+    # (200 claims 的库里 GQA 命中 10 条是正常信号,2%×200=4 会误杀)。
+    mention_alias_df_cap: float = Field(0.02, validation_alias="MENTION_ALIAS_DF_CAP")
+    mention_alias_df_floor: int = Field(20, validation_alias="MENTION_ALIAS_DF_FLOOR")
+    # mention 边在 PPR 图中的权重(与 variant 边同量级)。
+    mention_edge_weight: float = Field(0.5, validation_alias="MENTION_EDGE_WEIGHT")
+    # sibling_peers 的最小桥 claim 数(低于此不算同类伙伴)。
+    sibling_min_bridge: int = Field(2, validation_alias="SIBLING_MIN_BRIDGE")
+
     # 推理搜索 (mode=reasoning) 专用 LLM 端点（可选）。三项全部非空时推理路径改用此
     # 模型，与全局 OPENAI_COMPAT_* 解耦；任一为空 → 整体回退全局。超时/重试沿用
     # reasoning_timeout_seconds / reasoning_max_retries，此处不另设。

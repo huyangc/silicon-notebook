@@ -12,7 +12,9 @@ import unicodedata
 from typing import Dict, List, Set, Tuple
 
 _PAREN_ACRONYM_RE = re.compile(r"^(.*\S)\s*\(([^)]+)\)\s*$")
-_ACR_RE = re.compile(r"^[A-Za-z0-9]{3,8}$")
+# 缩写 token 必须含 ≥1 字母:纯数字 token(如年份 "2018")不是缩写。否则
+# "BERT (2018)" 会把 "2018" 当缩写别名、把无关的年份提及桥进共提图。
+_ACR_RE = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9]{3,8}$")
 _ASCII_RE = re.compile(r"^[\x00-\x7f]+$")
 
 
@@ -57,6 +59,10 @@ def build_alias_table(clusters: List[Tuple[str, str]], *, latin_min: int = 4,
             else:
                 gated.add(nm.lower())
         kept = {a for a in gated if _long_enough(a, latin_min, cjk_min)} | exempt
+        # 纯数字 token 绝非概念别名(年份/计数)。逆序惯例 "ACR (Full)" 下,
+        # "BERT (2018)" 会把 "2018" 当"全名"塞进 gated 并过长度门 —— 在此统一
+        # 滤除,不论它经 gated/exempt 哪条路径进来(缩写侧已由 _ACR_RE 要求字母)。
+        kept = {a for a in kept if not a.isdigit()}
         if kept:
             out[cid] = kept
     return out
