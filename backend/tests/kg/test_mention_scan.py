@@ -3,7 +3,10 @@ from app.services.kg.mention_scan import build_alias_table, boundary_hit, is_lat
 
 def test_alias_table_full_head_acronym():
     at = build_alias_table([("K-gqa", "Grouped-query attention (GQA)")])
-    assert {"grouped-query attention (gqa)", "grouped-query attention", "gqa"} <= at["K-gqa"]
+    assert {"grouped-query attention", "gqa"} <= at["K-gqa"]
+    # 括号模式命中时整串原名不再入表(评审 Fix 2):整串出现处头名+缩写必然
+    # 同时以合法 lookaround 边界命中,整串别名纯冗余、徒增 FTS 查询。
+    assert "grouped-query attention (gqa)" not in at["K-gqa"]
 
 
 def test_alias_length_gates():
@@ -30,3 +33,24 @@ def test_boundary_hit_latin_word_boundary():
 def test_boundary_hit_cjk_substring():
     assert boundary_hit("铸币平价", "在金本位下铸币平价决定汇率")
     assert is_latin("rope") and not is_latin("铸币平价")
+
+
+def test_reverse_acronym_order_gets_working_aliases():
+    at = build_alias_table([("K-rag", "RAG (Retrieval-Augmented Generation)")])
+    assert "rag" in at["K-rag"]
+    assert "retrieval-augmented generation" in at["K-rag"]
+
+
+def test_paren_suffixed_full_alias_matches_in_prose():
+    assert boundary_hit("grouped-query attention (gqa)",
+                        "the model uses grouped-query attention (gqa) for efficiency")
+
+
+def test_mixed_alias_latin_edge_not_glued():
+    assert boundary_hit("bert模型", "本文基于bert模型微调")
+    assert not boundary_hit("bert模型", "本文基于superbert模型微调")
+
+
+def test_nfkc_folds_fullwidth_in_alias_table():
+    at = build_alias_table([("K-gqa", "Grouped-query attention (ＧＱＡ)")])
+    assert "gqa" in at["K-gqa"]
