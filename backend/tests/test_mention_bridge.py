@@ -114,3 +114,47 @@ def test_seq_gate_and_flag(repo):
     assert n1 >= 5
     repo.settings.mention_bridge_enabled = False
     assert repo.rebuild_mention_bridge(nb.id, force=True) == 0   # flag 关 → 清空/不建
+
+
+# --------------------------------------------------------------------------- #
+# Task 4: sibling_peers(共提兄弟)+ resolve_comparison_peers(共提优先/社区回退)
+# --------------------------------------------------------------------------- #
+def test_sibling_peers_returns_comention_partner(repo):
+    from app.services.communities import sibling_peers
+    nb = _seed_bridge_nb(repo)
+    peers = sibling_peers(repo, nb.id, "Grouped-query attention (GQA)", top_k=5)
+    assert peers and "Multi-Query Attention" in peers[0][0]
+    assert peers[0][1] == 2
+
+
+def test_sibling_peers_respects_min_bridge(repo):
+    from app.services.communities import sibling_peers
+    nb = _seed_bridge_nb(repo)
+    repo.settings.sibling_min_bridge = 3          # 唯一共提对 bridge_claims=2 < 3 → 全过滤
+    assert sibling_peers(repo, nb.id, "Grouped-query attention (GQA)") == []
+
+
+def test_sibling_peers_unresolved_focal_silent_empty(repo):
+    """焦点解析不到 → [](不 emit,由调用方回退社区路径兜底文案)。"""
+    from app.services.communities import sibling_peers
+    nb = _seed_bridge_nb(repo)
+    assert sibling_peers(repo, nb.id, "No Such Concept XYZ") == []
+
+
+def test_resolve_comparison_peers_prefers_comention_then_community(repo, monkeypatch):
+    """共提优先→回退社区:直接单测抽出的共享 helper(免 mock LLM)。"""
+    from app.services import communities as C
+    nb = _seed_bridge_nb(repo)
+    # 有 concept_comentions → source=comention,名单来自共提兄弟(本 fixture 未建社区数据)
+    names, source = C.resolve_comparison_peers(
+        repo, nb.id, "Grouped-query attention (GQA)", "compare gqa and mqa",
+        top_k=5, candidates=50)
+    assert source == "comention"
+    assert any("Multi-Query Attention" in n for n in names)
+    # 抬高门槛让 sibling_peers 空 → 回退 community_peers(打桩验证被调用 + 结果透传 + source 标记)
+    monkeypatch.setattr(C, "community_peers", lambda *a, **k: ["STUB-COMMUNITY-PEER"])
+    repo.settings.sibling_min_bridge = 99
+    names2, source2 = C.resolve_comparison_peers(
+        repo, nb.id, "Grouped-query attention (GQA)", "q", top_k=5, candidates=50)
+    assert source2 == "community"
+    assert names2 == ["STUB-COMMUNITY-PEER"]

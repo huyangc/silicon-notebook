@@ -529,9 +529,9 @@ class ReasoningRetriever:
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
                                      detail={"query": pq, "found": len(new), "phase": "action"}))
             elif decision.next_action == "expand_community":
-                # 横向对比:焦点 → base 库所在社区 → 兄弟实体,逐个发子查询。
+                # 横向对比:焦点 → 兄弟实体(共提优先、社区回退),逐个发子查询。
                 # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
-                from app.services.communities import community_peers, first_base_notebook_id
+                from app.services.communities import resolve_comparison_peers, first_base_notebook_id
                 focal_name = decision.community_focal or (
                     max(collected.values(), key=lambda h: h.score).payload.get("name", "")
                     if collected else "")
@@ -542,19 +542,21 @@ class ReasoningRetriever:
                                      detail={"reason": "no_focal_or_done", "focal": focal_name}))
                 else:
                     community_focals_done.add(fkey)
+                    peers, peer_source = [], "community"
                     try:
                         base_nb = first_base_notebook_id(self.repo, notebook_id)
-                        peers = community_peers(
-                            self.repo, base_nb, focal_name, question,
-                            top_k=self.settings.community_peers_topk,
-                            candidates=self.settings.community_rerank_candidates) if base_nb else []
+                        if base_nb:
+                            peers, peer_source = resolve_comparison_peers(
+                                self.repo, base_nb, focal_name, question,
+                                top_k=self.settings.community_peers_topk,
+                                candidates=self.settings.community_rerank_candidates)
                     except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
-                        # community 层任何故障(缺表 community_members / 数据异常)都不该
-                        # 拖垮 reasoning 或深度报告的社区/横向对比节 —— 跳过社区扩展、继续。
+                        # community/共提层任何故障(缺表 / 数据异常)都不该拖垮 reasoning 或
+                        # 深度报告的社区/横向对比节 —— 跳过扩展、继续。
                         record(TraceStep(step_type="skip",
-                                         summary="跳过 expand_community(社区层不可用)",
+                                         summary="跳过 expand_community(对比层不可用)",
                                          detail={"reason": "community_error", "error": str(exc)[:120]}))
-                        peers = []
+                        peers, peer_source = [], "community"
                     added, names = 0, []
                     for pname in peers:
                         raise_if_cancelled(self.cancel_event)
@@ -571,9 +573,14 @@ class ReasoningRetriever:
                         if pname not in used_queries:
                             used_queries.append(pname)
                         names.append(pname)
-                    record(TraceStep(step_type="expand_community",
-                                     summary=f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}",
-                                     detail={"focal": focal_name, "peers": names, "new": added}))
+                    # 文案随来源切:共提命中 →「横向对比(共提)…个同类实体」,社区回退 → 原文案。
+                    # step_type 不变(前端「对比」标签零改动);detail 增 source 供观测。
+                    summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
+                               if peer_source == "comention"
+                               else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
+                    record(TraceStep(step_type="expand_community", summary=summary,
+                                     detail={"focal": focal_name, "peers": names,
+                                             "new": added, "source": peer_source}))
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
