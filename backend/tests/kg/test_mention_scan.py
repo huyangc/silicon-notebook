@@ -54,3 +54,9 @@ def test_mixed_alias_latin_edge_not_glued():
 def test_nfkc_folds_fullwidth_in_alias_table():
     at = build_alias_table([("K-gqa", "Grouped-query attention (ＧＱＡ)")])
     assert "gqa" in at["K-gqa"]
+
+
+def test_digit_only_paren_token_not_acronym():
+    at = build_alias_table([("K-bert", "BERT (2018)")])
+    assert "2018" not in at.get("K-bert", set())
+    assert "bert" in at.get("K-bert", set())
