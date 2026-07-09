@@ -39,8 +39,11 @@ export type ScaleIndexView = {
   state: ScaleIndexState;
   stateLabel: string;
   tone: ScaleIndexTone;
-  // 徽章点击 / 看板卡主按钮的主动作;indexed 与忙碌态为 null(indexed 只提供全量重建)。
-  primaryOp: "build" | "update" | null;
+  // 徽章点击 / 看板卡主按钮的主动作。stale 时按有无「可增量的新增来源」分流:
+  //   有新增来源 → "update"(fold 增量收进);无(过期由图谱/概念变更等非-source 写入引起)
+  //   → "rebuild"(fold 只认新增 source、会空转且仍过期,只有全量重建能清过期)。
+  //   indexed 与忙碌态为 null(indexed 只提供全量重建 canRebuild)。
+  primaryOp: "build" | "update" | "rebuild" | null;
   // 全量重建入口:任意「已建成」索引且非忙碌时可用(仅看板卡片暴露)。
   canRebuild: boolean;
 };
@@ -62,13 +65,15 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
   const applicable = s.eligible || s.exists;
   const stateLabel = !applicable ? "不需要" : STATE_LABELS[state];
   const tone: ScaleIndexTone = !applicable ? "muted" : state === "indexed" ? "ok" : "warn";
-  const primaryOp: "build" | "update" | null =
+  const primaryOp: "build" | "update" | "rebuild" | null =
     !applicable || busy
       ? null
       : state === "unindexed" || state === "suggested"
         ? "build"
         : state === "stale"
-          ? "update"
+          // 过期但没有可增量的新增来源(过期由图谱/概念变更等非-source 写入引起)→ fold 会
+          // 命中后端空操作守卫、白点且仍过期,故主按钮直接给全量重建;有新增来源才走 update(fold)。
+          ? ((s.unindexed_sources ?? 0) > 0 ? "update" : "rebuild")
           : null;
   const canRebuild = s.exists && !busy;
   return { state, stateLabel, tone, primaryOp, canRebuild };

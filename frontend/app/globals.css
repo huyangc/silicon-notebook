@@ -3908,6 +3908,13 @@ button.chat-session-card {
   background: rgba(17, 24, 32, 0.36);
 }
 
+/* 确认框(infoModal)永远压在其它 utility-modal(z:60,如「看板/索引与构建」弹窗)之上 ——
+   否则同层级下 DOM 靠后的看板会盖住先渲染的确认框(bug:点更新后确认框被界面盖住)。
+   低于 toast(z:90)。 */
+.utility-modal-top {
+  z-index: 80;
+}
+
 .utility-modal-card.narrow {
   width: min(520px, 100%);
 }
