@@ -4377,7 +4377,7 @@ export default function Home() {
                           </div>
                           <div className="index-sub">{sub}</div>
                         </div>
-                        {!busy && (
+                        {!busy && !isReader && (
                           <div className="index-ctas">
                             {(!kg.ready || kg.pending_sources > 0) && (
                               <button
@@ -4423,7 +4423,7 @@ export default function Home() {
                           </div>
                           <div className="index-sub">跨文档概念聚类；重算并刷新图谱索引（不重新抽取来源）</div>
                         </div>
-                        {!busy && (
+                        {!busy && !isReader && (
                           <div className="index-ctas">
                             <button type="button" className={`index-cta${uk.dirty ? " primary" : ""}`} onClick={confirmRefreshUnifiedKg}>重新合并</button>
                           </div>
@@ -4468,20 +4468,22 @@ export default function Home() {
                             </div>
                           )}
                         </div>
-                        <div className="index-ctas">
-                          {busy ? (
-                            <button type="button" className="index-cta" disabled={cancelingScaleIndex} onClick={handleCancelScaleIndex}>
-                              {cancelingScaleIndex ? "取消中…" : "取消"}
-                            </button>
-                          ) : (
-                            <>
-                              {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
-                              {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
-                              {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
-                              {v.tone !== "muted" && <button type="button" className="index-cta" onClick={runScaleIndexIdle}>空闲时建</button>}
-                            </>
-                          )}
-                        </div>
+                        {!isReader && (
+                          <div className="index-ctas">
+                            {busy ? (
+                              <button type="button" className="index-cta" disabled={cancelingScaleIndex} onClick={handleCancelScaleIndex}>
+                                {cancelingScaleIndex ? "取消中…" : "取消"}
+                              </button>
+                            ) : (
+                              <>
+                                {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
+                                {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
+                                {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                                {v.tone !== "muted" && <button type="button" className="index-cta" onClick={runScaleIndexIdle}>空闲时建</button>}
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })()}
