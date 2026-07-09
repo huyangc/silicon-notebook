@@ -73,6 +73,8 @@ def boundary_hit(alias: str, text_lower: str) -> bool:
     # - Latin 别名:等效词边界(rope 不命中 europe);
     # - 尾括号别名:")后跟空格/标点/行尾"能命中(\b 在 ')' 后永假,旧写法判死此类别名);
     # - 混排别名(bert模型):Latin 侧不被粘连(superbert模型 不命中);
-    # - 纯 CJK:邻字符是 CJK,非 alnum → 子串语义保持。
+    # - 纯 CJK:邻字符是 CJK/标点/行首尾等非 alnum → 子串语义保持;但紧邻字母/数字时
+    #   同样被 lookaround 拦截而不命中(如"图3铸币平价"中的"铸币平价"贴着数字 3),
+    #   与混排别名(superbert模型)拦截 bert 同一机制、对称的召回代价,非纯 CJK 例外。
     pat = r"(?<![a-zA-Z0-9])" + re.escape(alias) + r"(?![a-zA-Z0-9])"
     return re.search(pat, text_lower) is not None
