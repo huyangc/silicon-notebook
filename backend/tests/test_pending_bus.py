@@ -83,7 +83,6 @@ def test_submit_without_notify_does_not_mark(monkeypatch):
 
 
 def test_online_user_ids_reflects_register_unregister():
-    from app.services.pending_bus import PendingBus
     bus = PendingBus()
     assert bus.online_user_ids() == set()
     q1 = bus.register("user-aaa")
