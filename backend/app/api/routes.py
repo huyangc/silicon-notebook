@@ -1099,6 +1099,15 @@ def rebuild_scale_index(notebook_id: str, body: RebuildScaleIndexRequest = Rebui
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@router.post("/notebooks/{notebook_id}/scale-index/cancel", dependencies=[Depends(require_notebook_access)])
+def cancel_scale_index(notebook_id: str) -> dict:
+    """取消检索索引:排队中→出队;构建中→拒绝(不可打断)。"""
+    try:
+        return repository().cancel_scale_index(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
 @router.get("/notebooks/{notebook_id}/scale-index/status", dependencies=[Depends(require_notebook_access)])
 def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
     try:

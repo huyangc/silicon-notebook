@@ -10264,6 +10264,28 @@ class SQLiteRepository:
         self._run_scale_op(notebook_id, mode)
         return {"status": "building", "notebook_id": notebook_id}
 
+    def _dequeue_scale_idle(self, notebook_id: str) -> bool:
+        """从空闲重建队列移除 notebook(加锁,幂等)。返回是否移除了一项。"""
+        with self._scale_building_lock:
+            return self._scale_idle_queue.pop(notebook_id, None) is not None
+
+    def cancel_scale_index(self, notebook_id: str) -> dict:
+        """取消检索索引构建:
+        - state=queued(在空闲队列)→ 出队,cancelled=True。
+        - state=building(后台守护线程在建)→ 无句柄不可协作打断,cancelled=False,
+          reason=building_not_interruptible(前端提示「正在构建,完成后自动更新」)。
+        - 其它 → 幂等 no-op,cancelled=False。
+        返回 {cancelled, state(取消后的新 state), reason}。"""
+        self.get_notebook(notebook_id)  # KeyError → 404
+        if notebook_id in self._scale_building:
+            return {"cancelled": False,
+                    "state": self.scale_index_status(notebook_id)["state"],
+                    "reason": "building_not_interruptible"}
+        removed = self._dequeue_scale_idle(notebook_id)
+        return {"cancelled": bool(removed),
+                "state": self.scale_index_status(notebook_id)["state"],
+                "reason": "" if removed else "not_queued"}
+
     def _maybe_enqueue_scale_fold(self, notebook_id: str) -> None:
         """After content is added, if the notebook ALREADY has a scale index and
         auto-fold is enabled, enqueue an idle incremental fold so the new
