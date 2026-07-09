@@ -140,3 +140,38 @@ def test_admin_users_lists_username_and_counts(client):
     assert rows["z00123456"]["role"] == "user"
     # 展示用户名,但内部 id 仍是 user-<hex>(未统一)
     assert rows["z00123456"]["id"].startswith("user-")
+
+
+def test_admin_users_is_online_reflects_pending_bus(client):
+    from app.services.pending_bus import pending_bus
+    admin = _auth_admin(client)
+    _auth(client, "z00123456")
+    rows = {r["username"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+    uid = rows["z00123456"]["id"]
+    assert rows["z00123456"]["is_online"] is False        # 未连接 → 离线
+    q = pending_bus.register(uid)
+    try:
+        rows2 = {r["username"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+        assert rows2["z00123456"]["is_online"] is True     # 有连接 → 在线
+    finally:
+        pending_bus.unregister(uid, q)
+    rows3 = {r["username"]: r for r in client.get("/api/admin/users", headers=admin).json()}
+    assert rows3["z00123456"]["is_online"] is False        # 断开 → 离线
+
+
+def test_admin_online_endpoint_lists_connected(client):
+    from app.services.pending_bus import pending_bus
+    admin = _auth_admin(client)
+    _auth(client, "z00123456")
+    uid = {r["username"]: r for r in client.get("/api/admin/users", headers=admin).json()}["z00123456"]["id"]
+    q = pending_bus.register(uid)
+    try:
+        data = client.get("/api/admin/online", headers=admin).json()
+        assert uid in data["online_ids"]
+    finally:
+        pending_bus.unregister(uid, q)
+
+
+def test_admin_online_forbidden_for_regular_user(client):
+    b = _auth(client, "z00123456")
+    assert client.get("/api/admin/online", headers=b).status_code == 403

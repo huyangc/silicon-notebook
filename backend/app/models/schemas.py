@@ -705,6 +705,7 @@ class AdminUserUsage(BaseModel):
     conversations: int
     reports: int
     last_active: Optional[str] = None
+    is_online: bool = False
 
 
 class AdminUserNotebook(BaseModel):

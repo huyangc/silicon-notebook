@@ -1369,11 +1369,15 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
 
 
 @router.get("/admin/users", response_model=List[AdminUserUsage])
-def list_admin_users(user: UserProfile = Depends(get_current_user)) -> List[AdminUserUsage]:
-    """管理员用户使用总览:所有用户 + 用量统计。仅 admin。"""
+async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> List[AdminUserUsage]:
+    """管理员用户使用总览:所有用户 + 用量统计 + 当前在线。仅 admin。
+    重的用量聚合放线程池,回 loop 线程读 pending_bus(免锁快照)。"""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户总览")
-    return [AdminUserUsage(**row) for row in repository().list_user_usage()]
+    loop = asyncio.get_running_loop()
+    rows = await loop.run_in_executor(None, repository().list_user_usage)
+    online = pending_bus.online_user_ids()
+    return [AdminUserUsage(**row, is_online=row["id"] in online) for row in rows]
 
 
 @router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])
@@ -1382,6 +1386,14 @@ def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_curr
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户笔记本")
     return [AdminUserNotebook(**row) for row in repository().list_user_notebooks(user_id)]
+
+
+@router.get("/admin/online")
+async def list_online_users(user: UserProfile = Depends(get_current_user)) -> dict:
+    """当前在线用户 id 集合(持有实时流连接)。仅 admin,纯读内存零 DB。"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可查看在线状态")
+    return {"online_ids": sorted(pending_bus.online_user_ids())}
 
 
 # --- 待确认中心 (Pending Actions Center) ---------------------------------
