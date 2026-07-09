@@ -10111,6 +10111,22 @@ class SQLiteRepository:
                 eff_dim = _rrd(self.settings) or self.settings.embed_dim
                 if int(idx.manifest.get("dim", eff_dim)) != int(eff_dim):
                     return "full"
+                # 非源结构变更守卫:索引建成后若发生过「刷新图谱」(全量重聚类,推进
+                # unified_kg_state.last_rebuild_at),fold 只把 delta 新源拼接进旧索引、
+                # 不重读全量图(_gather_kg_graph 只取 delta 源)——旧节点的重聚类不会进
+                # 索引,fold 却在末尾把 manifest.version 盖成当前(索引标最新、实则陈旧)。
+                # 故索引 built_at 早于最近一次全量重建时升级 full,让重聚类真正收敛进索引。
+                # (last_rebuild_at 仅由 rebuild 路径写,加新源的 incremental_fuse 不碰它,
+                # 故不会把「纯新增来源」误判为需要 full。)
+                built_at = str(idx.manifest.get("built_at", ""))
+                if built_at:
+                    with self._connect() as db:
+                        row = db.execute(
+                            "SELECT last_rebuild_at FROM unified_kg_state WHERE notebook_id=?",
+                            (notebook_id,)).fetchone()
+                    last_rebuild = str(row["last_rebuild_at"]) if (row and row["last_rebuild_at"]) else ""
+                    if last_rebuild and last_rebuild > built_at:
+                        return "full"
             try:
                 delta = self._index_delta(notebook_id)
                 if len(delta["delta_sources"]) > self.settings.scale_fold_max_delta_sources:
