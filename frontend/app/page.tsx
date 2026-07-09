@@ -3456,7 +3456,7 @@ export default function Home() {
                       role={clickable ? "button" : undefined}
                       tabIndex={clickable ? 0 : undefined}
                       title={clickable
-                        ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                        ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
                         : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
                       onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
                       onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
@@ -4211,7 +4211,7 @@ export default function Home() {
       )}
 
       {infoModal && (
-        <section className="utility-modal" role="dialog" aria-modal="true">
+        <section className="utility-modal utility-modal-top" role="dialog" aria-modal="true">
           <div className="utility-modal-card narrow">
             <div className="source-modal-header">
               <div>
@@ -4482,7 +4482,8 @@ export default function Home() {
                               <>
                                 {v.primaryOp === "build" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("build")}>构建索引</button>}
                                 {v.primaryOp === "update" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("update")}>更新索引</button>}
-                                {v.canRebuild && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                                {v.primaryOp === "rebuild" && <button type="button" className="index-cta primary" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
+                                {v.canRebuild && v.primaryOp !== "rebuild" && <button type="button" className="index-cta" onClick={() => runScaleIndexOp("rebuild")}>全量重建</button>}
                                 {v.tone !== "muted" && <button type="button" className="index-cta" onClick={runScaleIndexIdle}>空闲时建</button>}
                               </>
                             )}
@@ -4663,7 +4664,7 @@ export default function Home() {
                           role={clickable ? "button" : undefined}
                           tabIndex={clickable ? 0 : undefined}
                           title={clickable
-                            ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                            ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
                             : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
                           onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
                           onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}

@@ -28,9 +28,15 @@ test("suggested → 建议构建, primary=build", () => {
   assert.equal(v.canRebuild, false);
 });
 
-test("stale (exists) → 已过期, primary=update + canRebuild", () => {
-  assert.deepEqual(describeScaleIndex({ ...base, state: "stale", exists: true, stale: true }), {
+test("stale 且有新增来源 → primary=update(fold 增量收进) + canRebuild", () => {
+  assert.deepEqual(describeScaleIndex({ ...base, state: "stale", exists: true, stale: true, unindexed_sources: 3 }), {
     state: "stale", stateLabel: "已过期", tone: "warn", primaryOp: "update", canRebuild: true,
+  });
+});
+
+test("stale 但无新增来源(过期由图谱/概念变更引起)→ primary=rebuild(fold 会空转,须全量重建才清过期)", () => {
+  assert.deepEqual(describeScaleIndex({ ...base, state: "stale", exists: true, stale: true, unindexed_sources: 0 }), {
+    state: "stale", stateLabel: "已过期", tone: "warn", primaryOp: "rebuild", canRebuild: true,
   });
 });
 
