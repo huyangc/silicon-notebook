@@ -3513,6 +3513,7 @@ button.chat-session-card {
 .index-cta:hover { background: #f6f8fb; }
 .index-cta.primary { background: #0b0b0c; color: #fff; border-color: #0b0b0c; }
 .index-cta.primary:hover { background: #26262a; }
+.index-cta:disabled { opacity: .55; cursor: default; }
 
 .answer-model-error {
   display: block;

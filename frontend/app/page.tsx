@@ -713,13 +713,8 @@ type IndexStatus = {
 };
 const fetchIndexStatus = (nb: string) => api<IndexStatus>(`/notebooks/${nb}/index-status`);
 
-// 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
-// (完整重抽/重新合并/构建-更新-全量重建)执行前一律经此弹窗,文案模板一致
-// (动作名 + 后果 + 「后台进行,完成后自动更新」)。非破坏性动作(首次构建/补连孤立
-// 节点)不经过此函数,直接执行——与既有设计一致(见 relinkFromKgView 注释)。
-function confirmIndexAction(message: string): boolean {
-  return window.confirm(message);
-}
+// confirmIndexAction 移到组件内部(见 Home() 内定义)——需要闭包 setInfoModal 才能弹
+// 定制样式弹窗,放在模块级够不到 state。
 
 function formatRelativeTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -1064,6 +1059,27 @@ export default function Home() {
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
+  // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
+  // (完整重抽/重新合并/构建-更新-全量重建)执行前一律经此弹窗,与「删除来源」「删除
+  // 会话」等既有破坏性操作共用同一套 setInfoModal 定制样式弹窗(向上统一,而非退到
+  // 原生 window.confirm)。异步/回调式:调用后立即返回,modal 先渲染,onConfirm 在用户
+  // 点「确定」时才执行——调用方需以回调改造调用点,不能当同步布尔值 `if (confirm(...))` 用。
+  // message 沿用既有「动作名？\n\n后果说明」模板,按首个 \n\n 拆成弹窗的标题/正文。
+  // 非破坏性动作(首次构建/补连孤立节点)不经过此函数,直接执行——与既有设计一致
+  // (见 relinkFromKgView 注释)。
+  function confirmIndexAction(message: string, onConfirm: () => void) {
+    const splitAt = message.indexOf("\n\n");
+    const title = splitAt >= 0 ? message.slice(0, splitAt).replace(/[？?]$/, "") : "确认操作";
+    const body = splitAt >= 0 ? message.slice(splitAt + 2) : message;
+    setInfoModal({
+      title,
+      message: body,
+      actions: [
+        { label: "取消", action: () => {} },
+        { label: "确定", danger: true, action: onConfirm },
+      ],
+    });
+  }
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
     setBuildingKg(true);
@@ -1074,11 +1090,12 @@ export default function Home() {
   // Trigger full re-extract: clears existing KG and rebuilds from all sources.
   // 破坏性(清空重抽)——统一确认(与概念合并/检索索引三系统一致的确认机制+文案模板)。
   const startKgRebuild = (nb: string) => {
-    if (!confirmIndexAction("完整重抽知识图谱？\n\n将清空现有知识图谱并重新抽取全部来源。后台进行，完成后自动更新。")) return;
-    setBuildingKg(true);
-    rebuildKg(nb)
-      .then(() => setToast("已开始完整重抽（后台进行，可能需要数分钟）；完成后会自动更新"))
-      .catch((e) => { reportError(e); setBuildingKg(false); });
+    confirmIndexAction("完整重抽知识图谱？\n\n将清空现有知识图谱并重新抽取全部来源。后台进行，完成后自动更新。", () => {
+      setBuildingKg(true);
+      rebuildKg(nb)
+        .then(() => setToast("已开始完整重抽（后台进行，可能需要数分钟）；完成后会自动更新"))
+        .catch((e) => { reportError(e); setBuildingKg(false); });
+    });
   };
   // 侧栏收起状态持久化(localStorage;隐私模式等读写失败静默降级)
   useEffect(() => {
@@ -1093,8 +1110,11 @@ export default function Home() {
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView，完成后按当前范围重拉）。
   // While a build runs, poll the notebook until kg_ready flips — the build can
   // take minutes, so the button reflects real progress instead of a fixed guess.
+  // 面板(analytics/「索引与构建」看板)打开时让位给下方聚合轮询 effect 独占轮询——否则
+  // 同一构建期间两条 effect 各自 6s 打一次 /notebooks 与 /index-status,服务端开销加倍。
+  // 完工检测(flag 复位 + toast)相应搬进聚合 effect;面板关闭后本 effect 照常接管到底。
   useEffect(() => {
-    if (!buildingKg || !currentNotebookId) return;
+    if (!buildingKg || !currentNotebookId || analytics) return;
     const nb = currentNotebookId;
     let cancelled = false;
     const poll = window.setInterval(async () => {
@@ -1113,7 +1133,7 @@ export default function Home() {
       if (!cancelled) { setBuildingKg(false); setToast("构建仍在后台进行，请稍后刷新查看状态"); }
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
-  }, [buildingKg, currentNotebookId]);
+  }, [buildingKg, currentNotebookId, analytics]);
   // Scale-index (CSR graph + ANN) status: only meaningful for base-tier libraries.
   // 任意库选中时拉一次检索索引状态(与 tier 解耦:大个人库也显示/可建);构建中由下方 effect 轮询。
   useEffect(() => {
@@ -1129,8 +1149,9 @@ export default function Home() {
   }, [currentNotebookId]);
   // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
   // until building flips false, with a 20min safety cap so the button never spins forever.
+  // 同上:面板打开时让位给聚合轮询 effect(见其完工检测),避免与 /scale-index/status 重复轮询。
   useEffect(() => {
-    if (!buildingScaleIndex || !currentNotebookId) return;
+    if (!buildingScaleIndex || !currentNotebookId || analytics) return;
     const nb = currentNotebookId;
     let cancelled = false;
     const poll = window.setInterval(async () => {
@@ -1148,10 +1169,16 @@ export default function Home() {
       if (!cancelled) { setBuildingScaleIndex(false); setToast("索引仍在后台构建，请稍后查看"); }
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
-  }, [buildingScaleIndex, currentNotebookId]);
+  }, [buildingScaleIndex, currentNotebookId, analytics]);
   // 「索引与构建」看板弹窗打开期间,若三系统任一在忙(本地忙碌位,或聚合端点报告的
   // kg/概念合并后台在建),轮询聚合端点(6s)保持面板内三行状态新鲜；modal 关闭或全部
   // 空闲时自动停止,不额外占用轮询。
+  // 面板打开期间本 effect 独占轮询(上方 buildingKg/buildingScaleIndex 两条 legacy poll
+  // effect 各自加了 `analytics` 跳过守卫,面板开着时不再重复打 /notebooks 与
+  // /scale-index/status)——完工检测(flag 复位 + toast)相应搬来这里,否则面板开着时
+  // legacy effect 不跑、标志位与完成提示永远等不到。知识图谱完工额外补一次
+  // /notebooks 拉全量 NotebookSummary(index-status 只回填 kg_ready/pending 三个字段,
+  // 侧栏「补抽 N 篇」等大量读 currentNotebook 全量字段的地方需要真正刷新)。
   useEffect(() => {
     if (!analytics || !currentNotebookId) return;
     const busy = buildingKg || kgRefreshBusy || buildingScaleIndex
@@ -1164,6 +1191,17 @@ export default function Home() {
         if (cancelled) return;
         setIndexStatus(s);
         setScaleIndexStatus(s.scale_index);
+        if (buildingKg && !s.kg.building) {
+          setBuildingKg(false);
+          setToast("知识图谱构建完成 ✓ 可用严格推理");
+          api<NotebookSummary>(`/notebooks/${nb}`)
+            .then((refreshed) => { if (!cancelled) setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur)); })
+            .catch(() => {});
+        }
+        if (buildingScaleIndex && !s.scale_index.building) {
+          setBuildingScaleIndex(false);
+          setToast(s.scale_index.stale ? "索引重建结束（仍有更新未纳入）" : "检索索引重建完成 ✓");
+        }
       }).catch(() => {});
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
@@ -1213,9 +1251,8 @@ export default function Home() {
   const runScaleIndexOp = (op: ScaleIndexOp) => {
     const s = scaleIndexStatus;
     if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
-    if (confirmIndexAction(scaleIndexOpConfirm(op, s))) {
-      startScaleIndexRebuild(currentNotebookId, "now", SCALE_OP_MODE[op]);
-    }
+    const nb = currentNotebookId;
+    confirmIndexAction(scaleIndexOpConfirm(op, s), () => startScaleIndexRebuild(nb, "now", SCALE_OP_MODE[op]));
   };
   // 取消检索索引:排队中→出队成功,刷新聚合状态;构建中(不可协作打断)→按后端 reason 提示。
   const handleCancelScaleIndex = async () => {
@@ -2641,9 +2678,7 @@ export default function Home() {
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   function confirmRefreshUnifiedKg() {
     if (kgRefreshBusy || buildingKg) return;
-    if (confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新抽取来源）。后台进行，完成后自动更新。")) {
-      refreshUnifiedKg();
-    }
+    confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新抽取来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
   }
 
   async function reviewPendingMerges() {
@@ -4397,7 +4432,10 @@ export default function Home() {
                   {(() => {
                     const s = indexStatus.scale_index;
                     const v = describeScaleIndex(s);
-                    const busy = v.state === "building" || v.state === "queued";
+                    // 本地忙碌位兜底(与知识图谱/概念合并两行一致):server-derived state 靠聚合轮询
+                    // 6s 才刷新一次,点击构建/更新/全量重建的瞬间先靠本地 buildingScaleIndex 立即
+                    // 切到「取消」态,避免残留可点的旧按钮。
+                    const busy = buildingScaleIndex || v.state === "building" || v.state === "queued";
                     const tsSuffix = s.last_built_at ? ` · 上次 ${formatRelativeTime(s.last_built_at)}` : "";
                     const color = v.tone === "warn" ? "var(--color-warn, #b97a00)" : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
                     const desc = v.tone === "muted" ? "库较小，走暴力检索即可，无需索引"
@@ -4595,7 +4633,7 @@ export default function Home() {
                       title="概念合并状态；点击上方「重新合并」按钮可手动刷新"
                       style={{ color: unifiedKgStatus.dirty ? "var(--color-warn, #b97a00)" : undefined }}
                     >
-                      {kgRefreshBusy ? "重建中…" : unifiedKgStatus.dirty ? "待重建" : "已同步"}
+                      {kgRefreshBusy ? "重建中…" : unifiedKgStatus.dirty ? "待重建" : "最新"}
                     </span>
                     {unifiedKgStatus.last_rebuild_at && (
                       <span className="tag">上次重建 · {formatRelativeTime(unifiedKgStatus.last_rebuild_at)}</span>
