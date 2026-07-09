@@ -9718,6 +9718,7 @@ class SQLiteRepository:
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
             "watermark_sources": watermark_sources,
+            "built_at": _now(),
             # Pre-persist stage timings only (persist/total aren't known until
             # after this dict is serialized to manifest.json by save_scale_index
             # below). The RETURNED manifest gets persist+total appended after
@@ -9875,6 +9876,7 @@ class SQLiteRepository:
 
             # chunk ANN:增量 add delta chunk 向量(若原有 chunk_ann)
             manifest = dict(idx.manifest)
+            manifest["built_at"] = _now()
             if idx.chunk_ann_path and idx.chunk_ann_labels is not None:
                 ch_vids, ch_mat = _delta_vecs("chunk_embeddings", "chunk_id", list(d_chunks))
                 cann = si.add_items_to_ann(
@@ -10052,6 +10054,7 @@ class SQLiteRepository:
                 base["stale_reason"] = "dim_mismatch"
             base.update({
                 "stale": bool(version_stale or delta_over or dim_stale),
+                "last_built_at": str(manifest.get("built_at", "")),
                 "manifest_dim": int(manifest.get("dim", 0)),
                 "runtime_dim": int(eff_dim),
                 "n_nodes": int(manifest.get("n_nodes", 0)),
@@ -10061,8 +10064,8 @@ class SQLiteRepository:
                 "has_chunk_ann": bool(manifest.get("has_chunk_ann", False))})
             return base
         # 未建/构建中:补齐既有字段的默认值(保持 schema 稳定)
-        base.update({"stale": False, "n_nodes": 0, "n_chunks": 0, "n_ann": 0,
-                     "n_chunk_ann": 0, "has_chunk_ann": False})
+        base.update({"stale": False, "last_built_at": "", "n_nodes": 0, "n_chunks": 0,
+                     "n_ann": 0, "n_chunk_ann": 0, "has_chunk_ann": False})
         return base
 
     def index_status(self, notebook_id: str) -> dict:
