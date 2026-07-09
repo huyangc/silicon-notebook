@@ -1,9 +1,14 @@
 """Mention-bridge 匹配核:别名表构建 + 命中校验。纯函数、零 IO。
 
-trigram FTS 召回候选后,Latin 别名必须过 \\b 词边界后校验(trigram 是子串
-语义,rope 会命中 europe);CJK 无词边界概念,子串即命中。"""
+trigram FTS 召回候选后,必须过统一 alnum-lookaround 边界后校验(trigram 是子串
+语义,rope 会命中 europe)。
+
+调用方约定:claim 文本必须先 NFKC 折叠 + lower 再传入 boundary_hit——别名侧在
+build_alias_table 内已做同样的 NFKC+lower,两侧折叠一致才能对上(全角ＧＱＡ/
+（）等折到半角;Task 3 的摄取路径负责对文本做同样折叠)。"""
 from __future__ import annotations
 import re
+import unicodedata
 from typing import Dict, List, Set, Tuple
 
 _PAREN_ACRONYM_RE = re.compile(r"^(.*\S)\s*\(([^)]+)\)\s*$")
@@ -23,19 +28,34 @@ def build_alias_table(clusters: List[Tuple[str, str]], *, latin_min: int = 4,
                       cjk_min: int = 3) -> Dict[str, Set[str]]:
     out: Dict[str, Set[str]] = {}
     for cid, name in clusters:
-        nm = (name or "").strip()
+        # NFKC 先折(全角字母/括号→半角),再 strip/lower;与 boundary_hit 的
+        # 调用方约定(文本同样 NFKC+lower)配对,否则全角缩写永不命中。
+        nm = unicodedata.normalize("NFKC", name or "").strip()
         gated, exempt = set(), set()
         if nm:
-            gated.add(nm.lower())
             m = _PAREN_ACRONYM_RE.match(nm)
             if m:
-                head, acr = m.group(1).strip(), m.group(2).strip()
-                gated.add(head.lower())
-                if _ACR_RE.match(acr):
-                    # 括号缩写绕过 latin_min:显式 "(ACR)" 模式 precision 高,
-                    # GQA/MQA/SFT 等 3 位缩写是共提桥最有价值的别名;
-                    # 长度下限由 _ACR_RE 的 {3,8} 承担(trigram 最短查询=3)。
-                    exempt.add(acr.lower())
+                # 括号模式命中时,整串原名不入别名表:整串出现处其组件必然
+                # 同时以合法边界命中(头名是整串前缀、后随空格/括号,非 alnum),
+                # 整串别名纯冗余、徒增 FTS 查询;整串仅在无括号模式时作全名入表。
+                head, paren = m.group(1).strip(), m.group(2).strip()
+                head_acr = bool(_ACR_RE.match(head))
+                paren_acr = bool(_ACR_RE.match(paren))
+                if head_acr and not paren_acr:
+                    # 逆序惯例 "ACR (Full Name)":头=缩写绕过长度门,
+                    # 括号内=全名走长度门(与正序对称)。
+                    exempt.add(head.lower())
+                    gated.add(paren.lower())
+                else:
+                    gated.add(head.lower())
+                    if paren_acr:
+                        # 正序惯例 "Full Name (ACR)"。括号缩写绕过 latin_min:
+                        # 显式 "(ACR)" 模式 precision 高,GQA/MQA/SFT 等 3 位
+                        # 缩写是共提桥最有价值的别名;长度下限由 _ACR_RE 的
+                        # {3,8} 承担(trigram 最短查询=3)。
+                        exempt.add(paren.lower())
+            else:
+                gated.add(nm.lower())
         kept = {a for a in gated if _long_enough(a, latin_min, cjk_min)} | exempt
         if kept:
             out[cid] = kept
@@ -43,6 +63,10 @@ def build_alias_table(clusters: List[Tuple[str, str]], *, latin_min: int = 4,
 
 
 def boundary_hit(alias: str, text_lower: str) -> bool:
-    if is_latin(alias):
-        return re.search(r"\b" + re.escape(alias) + r"\b", text_lower) is not None
-    return alias in text_lower
+    # 统一 alnum-lookaround 边界:匹配两端不得紧邻 [a-zA-Z0-9]。
+    # - Latin 别名:等效词边界(rope 不命中 europe);
+    # - 尾括号别名:")后跟空格/标点/行尾"能命中(\b 在 ')' 后永假,旧写法判死此类别名);
+    # - 混排别名(bert模型):Latin 侧不被粘连(superbert模型 不命中);
+    # - 纯 CJK:邻字符是 CJK,非 alnum → 子串语义保持。
+    pat = r"(?<![a-zA-Z0-9])" + re.escape(alias) + r"(?![a-zA-Z0-9])"
+    return re.search(pat, text_lower) is not None
