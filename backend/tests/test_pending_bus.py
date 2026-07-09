@@ -80,3 +80,25 @@ def test_submit_without_notify_does_not_mark(monkeypatch):
     done.wait(2.0)
     t.join(2.0)
     assert called == []
+
+
+def test_online_user_ids_reflects_register_unregister():
+    from app.services.pending_bus import PendingBus
+    bus = PendingBus()
+    assert bus.online_user_ids() == set()
+    q1 = bus.register("user-aaa")
+    bus.register("user-bbb")
+    assert bus.online_user_ids() == {"user-aaa", "user-bbb"}
+    # 同一 user 第二条连接不改变成员集合
+    q1b = bus.register("user-aaa")
+    assert bus.online_user_ids() == {"user-aaa", "user-bbb"}
+    # 断开 user-aaa 的一条,仍在线(还有一条)
+    bus.unregister("user-aaa", q1)
+    assert "user-aaa" in bus.online_user_ids()
+    # 断开最后一条 → 下线
+    bus.unregister("user-aaa", q1b)
+    assert bus.online_user_ids() == {"user-bbb"}
+    # 返回的是快照,修改它不影响内部状态
+    snap = bus.online_user_ids()
+    snap.add("user-zzz")
+    assert "user-zzz" not in bus.online_user_ids()

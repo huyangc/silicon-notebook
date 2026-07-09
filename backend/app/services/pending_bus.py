@@ -46,6 +46,11 @@ class PendingBus:
             if not conns:
                 self._conns.pop(user_id, None)
 
+    def online_user_ids(self) -> set[str]:
+        """当前持有 ≥1 条连接(实时流)的 user_id 集合 = 在线用户。
+        仅事件循环线程调用:与 register/unregister 同线程,免锁快照。"""
+        return set(self._conns.keys())
+
     def flush_buffer(self, user_id: str) -> list[dict]:
         """取出并清空该 user 的缓冲事件(新连接补发用)。"""
         with self._lock:
