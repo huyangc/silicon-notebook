@@ -12205,24 +12205,21 @@ class SQLiteRepository:
                 ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
             answer, llm_grounded, anchors = "", False, []
+            synth_failed = False
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
             if self.llm_client.configured and (selected or kg_id_map):
-                try:
-                    if overlay_on:
-                        answer, llm_grounded, anchors = self._answer_mix(
-                            question, selected, kg_block, kg_id_map, history,
-                            cancel_event=cancel_event, notebook_id=notebook_id)
-                    else:
-                        answer, llm_grounded, anchors = self._answer_chunks(
-                            question, selected, history, cancel_event=cancel_event,
-                            notebook_id=notebook_id)
-                except AskCancelled:
-                    raise
-                except Exception as exc:
-                    self.event_log.logger.exception("answer failed for %s", notebook_id)
-                    self._note_model_error("answer", self.settings.openai_compat_model, exc)
-                    answer, llm_grounded, anchors = "", False, []
+                # 空 content 有界重试 + 诚实降级 + 可观测(见 _answer_with_retry docstring)。
+                answer, llm_grounded, anchors, _ok = self._answer_with_retry(
+                    lambda: (self._answer_mix(
+                                 question, selected, kg_block, kg_id_map, history,
+                                 cancel_event=cancel_event, notebook_id=notebook_id)
+                             if overlay_on else
+                             self._answer_chunks(
+                                 question, selected, history, cancel_event=cancel_event,
+                                 notebook_id=notebook_id)),
+                    getattr(self.llm_client, "model", None) or self.settings.openai_compat_model)
+                synth_failed = not _ok
             ask_stage("answer_llm", _t)
 
             # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
@@ -12267,7 +12264,17 @@ class SQLiteRepository:
             if answer:
                 conclusion = _MARKER_RE.sub("", answer).strip()
                 llm_mode = "grounded" if grounded else "ungrounded"
+            elif synth_failed:
+                # 诚实降级:LLM 跑了但没产出答案(空 content 或抛错)——不冒充成
+                # "Retrieved N passage(s)" 那样的成功样子;如实说明并保留下方证据(citations)。
+                llm_mode = "synthesis_failed"
+                conclusion = (
+                    f"已检索到 {len(selected)} 条相关内容,但本次答案合成未产出内容"
+                    "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。"
+                    if selected else
+                    "本次答案合成未产出内容,请重试该问题。")
             else:
+                # deterministic:未配 LLM(synth 未跑)→ 有内容仍如实报「检索到 N 段」。
                 llm_mode = "deterministic"
                 conclusion = (
                     f"Retrieved {len(selected)} relevant passage(s) for this question."
@@ -12840,6 +12847,29 @@ class SQLiteRepository:
                              + "\n\n" + context_block)
         return context_block
 
+    def _answer_with_retry(self, synth, model_label):
+        """答案合成有界重试(治思考型模型偶发空 content)。synth() 返回
+        (answer, grounded, anchors);answer 空(思考型模型偶把输出预算耗在
+        reasoning_content 上→content 空→chat_json 兜底 "{}"→空 answer,不抛异常、
+        status=ok)或抛错 → 重试一次("{}" 不入 LLM 缓存,故重试是真·重掷);两次皆空/
+        抛错 → emit 一条 model_error(空 content 本身静默不可见,补此条让"检索到却答不出"
+        可追踪:前端横幅 + events.jsonl)。返回 (answer, grounded, anchors, ok)。"""
+        answer, grounded, anchors = "", False, []
+        for _ in range(2):
+            try:
+                answer, grounded, anchors = synth()
+            except AskCancelled:
+                raise
+            except Exception as exc:
+                self._note_model_error("answer", model_label, exc)
+                answer, grounded, anchors = "", False, []
+            if answer:
+                return answer, grounded, anchors, True
+        self._note_model_error("answer", model_label, RuntimeError(
+            "answer synthesis produced empty content after retry "
+            "(reasoning model likely spent output budget on discarded chain-of-thought)"))
+        return answer, grounded, anchors, False
+
     def _answer_reasoning(
         self,
         notebook_id,
@@ -12997,32 +13027,13 @@ class SQLiteRepository:
             synth_failed = False
             raise_if_cancelled(cancel_event)
             if self.reasoning_llm_client.configured and (top_hits or elements or chunks):
-                _amodel = self.settings.reasoning_llm_model or self.settings.openai_compat_model
-                # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,
-                # 被 _stream_chat_content 丢弃)上 → content 空 → chat_json 返回 "{}" → 空
-                # answer(不抛异常、status=ok)。非确定失败,重试一次多半拿到真答案;两次皆空
-                # /抛错才降级。("{}" 不入 LLM 缓存,故重试是真·重掷而非复读旧结果。)
-                for _attempt in range(2):
-                    try:
-                        answer, llm_grounded, anchors = self._answer_reasoning(
-                            notebook_id, question, top_hits, elements, history,
-                            cancel_event=cancel_event, chunks=chunks)
-                    except AskCancelled:
-                        raise
-                    except Exception as exc:
-                        self._note_model_error("answer", _amodel, exc)
-                        answer, llm_grounded, anchors = "", False, []
-                    if answer:
-                        break
-                if not answer:
-                    synth_failed = True
-                    # 空 content 路径 status=ok、不抛异常 → 原先零 model_error、运维不可见;
-                    # 显式补一条,让"检索到却答不出"可追踪(前端横幅 + events.jsonl)。
-                    self._note_model_error(
-                        "answer", _amodel,
-                        RuntimeError("answer synthesis produced empty content after retry "
-                                     "(reasoning model likely spent output budget on "
-                                     "discarded chain-of-thought)"))
+                # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
+                answer, llm_grounded, anchors, _ok = self._answer_with_retry(
+                    lambda: self._answer_reasoning(
+                        notebook_id, question, top_hits, elements, history,
+                        cancel_event=cancel_event, chunks=chunks),
+                    self.settings.reasoning_llm_model or self.settings.openai_compat_model)
+                synth_failed = not _ok
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
@@ -13157,16 +13168,14 @@ class SQLiteRepository:
                         for i, r in enumerate(reports)]
                     ppr_chunks = community_chunks + ppr_chunks
                     answer, llm_grounded, anchors = "", False, []
+                    synth_failed = False
                     if getattr(self.llm_client, "configured", False):
-                        try:
-                            answer, llm_grounded, anchors = self._answer_chunks(
+                        answer, llm_grounded, anchors, _ok = self._answer_with_retry(
+                            lambda: self._answer_chunks(
                                 question, ppr_chunks, history, cancel_event=cancel_event,
-                                notebook_id=notebook_id)
-                        except AskCancelled:
-                            raise
-                        except Exception as exc:
-                            self._note_model_error("answer", self.settings.openai_compat_model, exc)
-                            answer, llm_grounded, anchors = "", False, []
+                                notebook_id=notebook_id),
+                            getattr(self.llm_client, "model", None) or self.settings.openai_compat_model)
+                        synth_failed = not _ok
                     citations: List[Citation] = []
                     by_id = {c.chunk_id: c for c in ppr_chunks}
                     # ppr_chunks = 合成 community_chunks(无 notebook_id,回退本 nb)
@@ -13189,6 +13198,11 @@ class SQLiteRepository:
                     if answer:
                         conclusion = _MARKER_RE.sub("", answer).strip()
                         llm_mode = "grounded" if grounded else "ungrounded"
+                    elif synth_failed:
+                        conclusion = (
+                            f"已检索到 {len(ppr_chunks)} 条跨文档相关内容,但本次答案合成未产出内容"
+                            "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。")
+                        llm_mode = "synthesis_failed"
                     else:
                         conclusion = f"PPR retrieved {len(ppr_chunks)} cross-document passage(s)."
                         llm_mode = "deterministic"
@@ -13311,16 +13325,14 @@ class SQLiteRepository:
                 for c in src_chunks:
                     c.source_title = _titles.get(c.source_id, "")
                 answer, llm_grounded, anchors = "", False, []
+                synth_failed = False
                 if getattr(self.llm_client, "configured", False):
-                    try:
-                        answer, llm_grounded, anchors = self._answer_mix(
+                    answer, llm_grounded, anchors, _ok = self._answer_with_retry(
+                        lambda: self._answer_mix(
                             question, src_chunks, mix_kg_block, mix_id_map, history,
-                            cancel_event=cancel_event, notebook_id=notebook_id)
-                    except AskCancelled:
-                        raise
-                    except Exception as exc:
-                        self._note_model_error("answer", self.settings.openai_compat_model, exc)
-                        answer, llm_grounded, anchors = "", False, []
+                            cancel_event=cancel_event, notebook_id=notebook_id),
+                        getattr(self.llm_client, "model", None) or self.settings.openai_compat_model)
+                    synth_failed = not _ok
                 citations: List[Citation] = []
                 by_id = {c.chunk_id: c for c in src_chunks}
                 # src_chunks 来自 _kg_source_chunks(notebook_id, ...):subgraph 节点虽可能
@@ -13344,6 +13356,11 @@ class SQLiteRepository:
                 if answer:
                     conclusion = _MARKER_RE.sub("", answer).strip()
                     llm_mode = "grounded" if grounded else "ungrounded"
+                elif synth_failed:
+                    conclusion = (
+                        f"已检索到 {len(src_chunks)} 段源原文,但本次答案合成未产出内容"
+                        "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。")
+                    llm_mode = "synthesis_failed"
                 else:
                     conclusion = f"Graph retrieved {len(src_chunks)} source passage(s) for this question."
                     llm_mode = "deterministic"
@@ -13366,9 +13383,10 @@ class SQLiteRepository:
             context_block = self._refine_context(
                 question, context_block, self.llm_client, cancel_event)
             answer, llm_grounded, anchors = "", False, []
+            synth_failed = False
             raise_if_cancelled(cancel_event)
             if getattr(self.llm_client, "configured", False) and id_map:
-                try:
+                def _synth_kg():
                     raw = self.llm_client.chat_json(
                         [{"role": "user",
                           "content": answer_prompt(question, context_block, history)}],
@@ -13378,23 +13396,23 @@ class SQLiteRepository:
                     )
                     raise_if_cancelled(cancel_event)
                     data = json.loads(raw)
-                    if isinstance(data, dict):
-                        answer = str(data.get("answer", "")).strip()
-                        llm_grounded = bool(data.get("grounded", False))
-                        anchors = self._parse_answer_anchors(answer, id_map)
-                        # Scrub citation-shaped tokens that did NOT bind to a real
-                        # id_map entry (out-of-map ids like [k99], malformed [ k1]).
-                        # Unlike the fast path — whose id_map IS top_hits, so the LLM
-                        # rarely invents ids — graph mode shows a wider subgraph and
-                        # the answer LLM occasionally emits markers the strict
-                        # _MARKER_RE can't bind; left in place they read as fabricated
-                        # citations. Strip them so only resolved [k] markers ship.
-                        answer = _strip_unbound_markers(answer, {a.key for a in anchors})
-                except AskCancelled:
-                    raise
-                except Exception as exc:
-                    self._note_model_error("answer", self.settings.openai_compat_model, exc)
-                    answer, llm_grounded, anchors = "", False, []
+                    if not isinstance(data, dict):
+                        return "", False, []
+                    _ans = str(data.get("answer", "")).strip()
+                    _g = bool(data.get("grounded", False))
+                    _anc = self._parse_answer_anchors(_ans, id_map)
+                    # Scrub citation-shaped tokens that did NOT bind to a real
+                    # id_map entry (out-of-map ids like [k99], malformed [ k1]).
+                    # Unlike the fast path — whose id_map IS top_hits, so the LLM
+                    # rarely invents ids — graph mode shows a wider subgraph and
+                    # the answer LLM occasionally emits markers the strict
+                    # _MARKER_RE can't bind; left in place they read as fabricated
+                    # citations. Strip them so only resolved [k] markers ship.
+                    return _strip_unbound_markers(_ans, {a.key for a in _anc}), _g, _anc
+                answer, llm_grounded, anchors, _ok = self._answer_with_retry(
+                    _synth_kg,
+                    getattr(self.llm_client, "model", None) or self.settings.openai_compat_model)
+                synth_failed = not _ok
 
             # classify_evidence keys "grounded" off the relevance of the CITED hit.
             # In the fast path id_map IS built from top_hits, so every anchor is a
@@ -13430,6 +13448,11 @@ class SQLiteRepository:
             if answer:
                 conclusion = _MARKER_RE.sub("", answer).strip()
                 llm_mode = "grounded" if grounded else "ungrounded"
+            elif synth_failed:
+                conclusion = (
+                    f"已检索到 {len(subgraph)} 个相关节点,但本次答案合成未产出内容"
+                    "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。")
+                llm_mode = "synthesis_failed"
             else:
                 conclusion = (
                     f"Graph traversal found {len(subgraph)} node(s) across "

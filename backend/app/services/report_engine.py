@@ -232,19 +232,45 @@ class ReportEngine:
         context_block = (f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
                          if chunk_block else kg_block) or "(no evidence retrieved)"
         client = self.repo.reasoning_llm_client
-        raw = client.chat_json(
-            [{"role": "user", "content": report_section_prompt(
-                section["title"], section["scope"], question, context_block,
-                allow_parametric=self.settings.report_allow_parametric)}],
-            REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
-            **cap_kwargs(client, "report_section_max_tokens"))
-        data = json.loads(raw)
         id_map = {**chunk_map, **kg_map}
-        return {"title": section["title"], "scope": section["scope"],
-                "markdown": str(data.get("markdown", "")).strip(),
-                "grounded": bool(data.get("grounded", False)),
+        # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
+        # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
+        # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。
+        # 有界重试一次("{}" 不入 LLM 缓存,真·重掷);仍空则标 failed(→渲染「本节生成失败」
+        # note,不再静默)+ emit model_error(report_engine 原先零可观测)。章节更长/预算更小
+        # (report_section_max_tokens 仅 answer 的一半),故比 ask 更易触发。
+        markdown, grounded = "", False
+        for _ in range(2):
+            try:
+                raw = client.chat_json(
+                    [{"role": "user", "content": report_section_prompt(
+                        section["title"], section["scope"], question, context_block,
+                        allow_parametric=self.settings.report_allow_parametric)}],
+                    REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
+                    **cap_kwargs(client, "report_section_max_tokens"))
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    markdown = str(data.get("markdown", "")).strip()
+                    grounded = bool(data.get("grounded", False))
+            except AskCancelled:
+                raise
+            except Exception:
+                markdown, grounded = "", False
+            if markdown:
+                break
+        base = {"title": section["title"], "scope": section["scope"],
+                "markdown": markdown, "grounded": grounded,
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
+        if not markdown:
+            self.repo._note_model_error(
+                "report_section",
+                self.settings.reasoning_llm_model or self.settings.openai_compat_model,
+                RuntimeError(f"report section '{section['title']}' produced empty content after retry "
+                             "(reasoning model likely spent output budget on discarded chain-of-thought)"))
+            base["failed"] = True
+            base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
+        return base
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
