@@ -13,6 +13,7 @@ export type ScaleIndexStatus = {
   delta_chunks?: number;
   unindexed_sources?: number;
   delta_searchable?: boolean;
+  last_built_at?: string;
   n_nodes: number;
   n_chunks: number;
   n_ann: number;
@@ -47,7 +48,7 @@ export type ScaleIndexView = {
 const STATE_LABELS: Record<ScaleIndexState, string> = {
   building: "构建中…",
   queued: "已排队（空闲时建）",
-  indexed: "已同步",
+  indexed: "最新",
   stale: "已过期",
   suggested: "建议构建",
   unindexed: "未构建",

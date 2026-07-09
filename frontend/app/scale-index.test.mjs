@@ -36,7 +36,7 @@ test("stale (exists) → 已过期, primary=update + canRebuild", () => {
 
 test("indexed → 已同步, no primary but canRebuild", () => {
   assert.deepEqual(describeScaleIndex({ ...base, state: "indexed", exists: true }), {
-    state: "indexed", stateLabel: "已同步", tone: "ok", primaryOp: null, canRebuild: true,
+    state: "indexed", stateLabel: "最新", tone: "ok", primaryOp: null, canRebuild: true,
   });
 });
 
