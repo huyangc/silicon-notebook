@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
-import { fetchAdminUsers, type AdminUserUsage } from "./api.ts";
+import { fetchAdminUsers, fetchOnlineIds, type AdminUserUsage } from "./api.ts";
 import { formatLastActive, logsDrillHref } from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
 import "./usage.css";
@@ -20,6 +20,7 @@ export default function AdminUsagePage() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [expanded, setExpanded] = useState<string | null>(null);
   const [nbCache, setNbCache] = useState<Record<string, NotebookCacheEntry>>({});
+  const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     (async () => {
@@ -31,12 +32,25 @@ export default function AdminUsagePage() {
         }
         const rows = await fetchAdminUsers();
         setState({ kind: "ready", rows });
+        setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setState(msg === "forbidden" ? { kind: "forbidden" } : { kind: "error", message: msg });
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    const timer = setInterval(async () => {
+      try {
+        setOnlineIds(new Set(await fetchOnlineIds()));
+      } catch {
+        // 忽略瞬时失败,下个周期重试
+      }
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [state.kind]);
 
   async function toggleExpand(userId: string) {
     if (expanded === userId) {
@@ -90,7 +104,14 @@ export default function AdminUsagePage() {
                       {isOpen ? "▾" : "▸"}
                     </button>
                   </td>
-                  <td>{u.username}</td>
+                  <td>
+                    <span
+                      className={`usage-dot ${onlineIds.has(u.id) ? "usage-dot-online" : "usage-dot-offline"}`}
+                      aria-label={onlineIds.has(u.id) ? "在线" : "离线"}
+                      title={onlineIds.has(u.id) ? "在线" : "离线"}
+                    />
+                    {u.username}
+                  </td>
                   <td>{u.role === "admin" ? "管理员" : "用户"}</td>
                   <td>{formatLastActive(u.created_at)}</td>
                   <td>{u.notebooks}</td>
