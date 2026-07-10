@@ -289,11 +289,12 @@ class NotebookSharingService:
     # ---------------------------------------------------------------- share
     def share_notebook(self, notebook_id: str) -> dict:
         self._catalog.get_notebook(notebook_id)  # raises KeyError if missing
-        self._store.set_share_token(notebook_id, f"shr-{secrets.token_urlsafe(16)}")
-        row = self._store.notebook_row(notebook_id)
+        token = self._store.set_share_token(
+            notebook_id, f"shr-{secrets.token_urlsafe(16)}"
+        )
         stats = self.notebook_copy_stats(notebook_id)
         return {
-            "share_token": row["share_token"],
+            "share_token": token,
             "copyable": stats["copyable"],
             "size": stats["size"],
         }

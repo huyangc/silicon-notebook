@@ -9,18 +9,24 @@ def _repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings())
 
 
-def test_invalidate_clears_matrix_keys_for_both_tables(tmp_path, monkeypatch):
+def test_invalidate_clears_matrix_keys_for_all_embedding_tables(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     nb = "nb-x"
-    repo._vector_cache.get(f"{nb}:matrix:knowledge_embeddings", ("knowledge_embeddings", 0, ""), lambda: {})
-    repo._vector_cache.get(f"{nb}:matrix:element_embeddings", ("element_embeddings", 0, ""), lambda: {})
+    tables = (
+        "knowledge_embeddings",
+        "element_embeddings",
+        "relation_embeddings",
+        "chunk_embeddings",
+    )
+    for table in tables:
+        repo._vector_cache.get(f"{nb}:matrix:{table}", (table, 0, ""), lambda: {})
     repo._vector_cache.get(f"{nb}:kwtok", ("kwtok", 0, ""), lambda: {})
-    assert f"{nb}:matrix:knowledge_embeddings" in repo._vector_cache._store
-    assert f"{nb}:matrix:element_embeddings" in repo._vector_cache._store
+    for table in tables:
+        assert f"{nb}:matrix:{table}" in repo._vector_cache._store
     assert f"{nb}:kwtok" in repo._vector_cache._store
     repo._invalidate_unified_cache(nb)
-    assert f"{nb}:matrix:knowledge_embeddings" not in repo._vector_cache._store
-    assert f"{nb}:matrix:element_embeddings" not in repo._vector_cache._store
+    for table in tables:
+        assert f"{nb}:matrix:{table}" not in repo._vector_cache._store
     assert f"{nb}:kwtok" not in repo._vector_cache._store
 
 

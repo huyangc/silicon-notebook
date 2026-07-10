@@ -111,27 +111,55 @@ class SourceStore:
             for row in rows
         ]
 
-    def notebook_element_sample(self, notebook_id: str) -> List[dict]:
-        """Notebook-wide element sample for schema induction (Task 13). Runs
-        the SAME join _gather_elements always ran (identical row order — the
-        LEFT JOIN keeps the query plan byte-stable) but skips the Python-side
-        vector decode: propose_schemas only reads location_label/text."""
+    def notebook_element_sample(
+        self, notebook_id: str, *, max_chars: int = 8000
+    ) -> List[dict]:
+        """Return a deterministic, character-bounded schema-induction sample.
+
+        Read only the text columns the prompt consumes and stop paging as soon
+        as the rendered ``[location] text`` budget is full.  This keeps both
+        SQLite and Python work bounded for large notebooks and avoids loading
+        the unrelated embedding BLOBs that the old ``_gather_elements`` join
+        selected before truncating in the service.
+        """
+        budget = max(0, int(max_chars))
+        if budget == 0:
+            return []
+
+        out: List[dict] = []
+        rendered_chars = 0
+        after_rowid = 0
+        page_size = 32
         with self.database.connect() as db:
-            rows = db.execute(
-                """
-                SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
-                       s.title AS source_title, em.vector AS vector
-                FROM source_elements e
-                JOIN sources s ON s.id = e.source_id
-                LEFT JOIN element_embeddings em ON em.element_id = e.id
-                WHERE s.notebook_id = ?
-                """,
-                (notebook_id,),
-            ).fetchall()
-        return [
-            {"location_label": row["location_label"], "text": row["text"]}
-            for row in rows
-        ]
+            while rendered_chars < budget:
+                rows = db.execute(
+                    """
+                    SELECT e.rowid AS _rowid, e.location_label,
+                           substr(e.text, 1, ?) AS text
+                    FROM source_elements e
+                    JOIN sources s ON s.id = e.source_id
+                    WHERE s.notebook_id = ? AND e.rowid > ?
+                    ORDER BY e.rowid ASC
+                    LIMIT ?
+                    """,
+                    (budget, notebook_id, after_rowid, page_size),
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    after_rowid = int(row["_rowid"])
+                    location = str(row["location_label"] or "")
+                    prefix = f"[{location}] "
+                    separator_chars = 1 if out else 0
+                    available = budget - rendered_chars - separator_chars - len(prefix)
+                    if available <= 0:
+                        return out
+                    text = str(row["text"] or "")[:available]
+                    out.append({"location_label": location, "text": text})
+                    rendered_chars += separator_chars + len(prefix) + len(text)
+                    if rendered_chars >= budget:
+                        return out
+        return out
 
     # ----------------------------------------------------------------- writes
     def insert_source(

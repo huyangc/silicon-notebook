@@ -67,7 +67,7 @@ class SharingStore:
         self.insert_row = insert_row
 
     # ------------------------------------------------------------ share rows
-    def set_share_token(self, notebook_id: str, token: str) -> None:
+    def set_share_token(self, notebook_id: str, token: str) -> str:
         """Mark shared.  ``token`` is the candidate for a first-time share; an
         already-shared notebook keeps its existing token (idempotent re-share)
         — the read-choose-write stays inside ONE write transaction exactly as
@@ -85,6 +85,7 @@ class SharingStore:
                 "UPDATE notebooks SET is_shared = 1, share_token = ?, updated_at = ? WHERE id = ?",
                 (chosen, self.now(), notebook_id),
             )
+        return str(chosen)
 
     def clear_share(self, notebook_id: str) -> None:
         """Unshare + kick every member in ONE write transaction."""

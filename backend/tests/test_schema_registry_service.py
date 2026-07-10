@@ -187,3 +187,31 @@ def test_propose_schemas_without_elements_skips_llm(repo, monkeypatch):
     monkeypatch.setattr(repo, "llm_client", fake)
     assert repo.propose_schemas(nb.id) == []
     assert fake.calls == 0
+
+
+def test_propose_schemas_unconfigured_does_not_scan_notebook(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    monkeypatch.setattr(
+        repo._runtime.source_store,
+        "notebook_element_sample",
+        lambda notebook_id: (_ for _ in ()).throw(
+            AssertionError("unconfigured schema induction must not scan elements")
+        ),
+    )
+
+    assert not repo.llm_client.configured
+    assert repo.propose_schemas(nb.id) == []
+
+
+def test_schema_induction_sample_is_bounded_before_prompt_build(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(100):
+        _insert_element(repo, nb.id, f"element-{index}-" + ("x" * 500))
+
+    elements = repo._runtime.source_store.notebook_element_sample(nb.id)
+    rendered = "\n".join(
+        f"[{element['location_label']}] {element['text']}" for element in elements
+    )
+
+    assert len(rendered) <= 8000
+    assert len(elements) < 100

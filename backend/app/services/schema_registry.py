@@ -163,8 +163,10 @@ class SchemaRegistryService:
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         with self.database.connect() as db:
             existing = self.knowledge.existing_schema_types(db)
-        elements = self.sources.notebook_element_sample(notebook_id)
         llm_client = self.models.llm_client
+        if not llm_client.configured:
+            return [m for m in self.list_object_schemas() if m.status == "proposed"]
+        elements = self.sources.notebook_element_sample(notebook_id)
         if llm_client.configured and elements:
             sample = "\n".join(
                 f"[{e['location_label']}] {e['text']}" for e in elements

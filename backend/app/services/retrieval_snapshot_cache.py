@@ -22,7 +22,7 @@ through this cache — one owner, no facade-only copies.
 funnels through (``KgMutationCoordinator.invalidate_unified_cache`` delegates
 here; the frozen per-operation phase matrix in mutation_phases.json is
 untouched). It evicts exactly the frozen families — the embedding matrices
-(both tables), kwtok, EVERY fed_rxgraph entry, ppr_graph, entchunk,
+(all four embedding tables), kwtok, EVERY fed_rxgraph entry, ppr_graph, entchunk,
 elemchunk, edge_centrality, clustermap and copystats — plus this notebook's
 unified-cache entries. ``{nb}:edge_support`` deliberately stays out: it is
 versioned by canonical_rel_seq and self-invalidates on table rewrites.
@@ -61,10 +61,15 @@ class RetrievalSnapshotCache:
         for key in [k for k in self.unified_cache if k[0] == notebook_id]:
             self.unified_cache.pop(key, None)
         # Matrices are stored under "{nb}:matrix:{table}" (see _vector_matrix). The old
-        # "{nb}:knowledge" key never matched (dead no-op). Invalidate BOTH embedding
-        # tables so an in-place re-embed (same row count + same-second created_at, i.e.
-        # an unchanged version tuple) cannot serve a stale vector.
-        for table in ("knowledge_embeddings", "element_embeddings"):
+        # "{nb}:knowledge" key never matched (dead no-op). Invalidate all four
+        # embedding tables so an in-place re-embed (same row count + same-second
+        # created_at, i.e. an unchanged version tuple) cannot serve stale vectors.
+        for table in (
+            "knowledge_embeddings",
+            "element_embeddings",
+            "relation_embeddings",
+            "chunk_embeddings",
+        ):
             self.vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
         self.vector_cache.invalidate(f"{notebook_id}:kwtok")
         # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE

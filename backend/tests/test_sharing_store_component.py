@@ -65,10 +65,10 @@ def test_store_is_wired_on_runtime(repo):
 
 def test_set_share_token_reuses_existing_token(store):
     nb = _seed_notebook(store)
-    store.set_share_token(nb, "shr-first")
+    assert store.set_share_token(nb, "shr-first") == "shr-first"
     assert store.find_by_token("shr-first") == nb
     # already shared -> the candidate token must NOT replace the existing one
-    store.set_share_token(nb, "shr-second")
+    assert store.set_share_token(nb, "shr-second") == "shr-first"
     assert store.find_by_token("shr-second") is None
     assert store.find_by_token("shr-first") == nb
 

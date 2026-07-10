@@ -66,7 +66,7 @@ def test_snapshot_cache_get_peek_invalidate_delegate_to_vector_cache(repo):
 
 def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     """invalidate_kg preserves the Task-14 eviction exactly: the embedding
-    matrices (both tables), kwtok, EVERY fed_rxgraph entry (keyed by the
+    matrices (all four embedding tables), kwtok, EVERY fed_rxgraph entry (keyed by the
     ACTIVE notebook, so all participants sweep it), ppr_graph, entchunk,
     elemchunk, edge_centrality, clustermap and copystats families plus this
     notebook's unified-cache entries. `edge_support` stays out (versioned by
@@ -76,6 +76,8 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     families = [
         f"{nb}:matrix:knowledge_embeddings",
         f"{nb}:matrix:element_embeddings",
+        f"{nb}:matrix:relation_embeddings",
+        f"{nb}:matrix:chunk_embeddings",
         f"{nb}:kwtok",
         f"{nb}:ppr_graph",
         f"{nb}:entchunk",

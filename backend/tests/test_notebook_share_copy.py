@@ -424,3 +424,22 @@ def test_copy_skips_object_schemas_and_backfills_fts(repo):
         # 词法搜索索引已按副本 backfill(源 2 个 name 非空对象 → 副本 2 行)
         assert db.execute(
             "SELECT COUNT(*) FROM kg_objects_fts WHERE notebook_id=?", (new.id,)).fetchone()[0] == 2
+
+
+def test_share_returns_transaction_token_if_concurrent_unshare_wins(repo, monkeypatch):
+    nb = _mk_nb(repo, "race")
+    store = repo._runtime.sharing_store
+    original = store.set_share_token
+
+    def set_then_unshare(notebook_id, candidate):
+        selected = original(notebook_id, candidate)
+        store.clear_share(notebook_id)
+        return selected
+
+    monkeypatch.setattr(store, "set_share_token", set_then_unshare)
+
+    out = repo.share_notebook(nb)
+
+    assert isinstance(out["share_token"], str)
+    assert out["share_token"].startswith("shr-")
+    assert repo.find_notebook_by_share_token(out["share_token"]) is None

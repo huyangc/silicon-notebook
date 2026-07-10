@@ -926,10 +926,80 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/tests/test_repository_runtime.py",
 }
 
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    TASK2_ALLOWED_MEMBER_FILES
+    | TASK4_ALLOWED_MEMBER_FILES
+    | TASK5_ALLOWED_MEMBER_FILES
+    | TASK6_ALLOWED_MEMBER_FILES
+    | TASK7_ALLOWED_MEMBER_FILES
+    | TASK8_ALLOWED_MEMBER_FILES
+    | TASK9_ALLOWED_MEMBER_FILES
+    | TASK10_ALLOWED_MEMBER_FILES
+    | TASK11_ALLOWED_MEMBER_FILES
+    | TASK12_ALLOWED_MEMBER_FILES
+    | TASK13_ALLOWED_MEMBER_FILES
+    | TASK14_ALLOWED_MEMBER_FILES
+    | TASK15_ALLOWED_MEMBER_FILES
+    | TASK16_ALLOWED_MEMBER_FILES
+    | TASK17_ALLOWED_MEMBER_FILES
+    | TASK18_ALLOWED_MEMBER_FILES
+)
+
+# Broad member+file allowances are safe for tests and the three deliberately
+# transitional compatibility facades only.  Every other production consumer
+# must match one exact current site so adding a fresh facade dependency in the
+# same file cannot disappear behind an old task allowance.
+LEGACY_COMPATIBILITY_MEMBER_ALLOWLIST_FILES = {
+    "backend/app/services/sqlite_repository.py",
+    "backend/app/services/sqlite_identity.py",
+    "backend/app/services/sqlite_notebook_sharing.py",
+}
+ACTIVE_PRODUCTION_MEMBER_SITES = {
+    ("SQLiteRepository", "backend/app/api/deps.py:12"),
+    ("_runtime", "backend/app/api/deps.py:20"),
+    ("_runtime", "backend/app/api/deps.py:23"),
+    ("_runtime", "backend/app/api/deps.py:26"),
+    ("_runtime", "backend/app/api/deps.py:29"),
+    ("_runtime", "backend/app/api/deps.py:32"),
+    ("resolve_session", "backend/app/api/deps.py:58"),
+    ("current_user", "backend/app/api/deps.py:62"),
+    ("upload_sources", "backend/app/eval/speed.py:80"),
+    ("parse_source", "backend/app/eval/speed.py:82"),
+    ("delete_notebook", "backend/app/eval/speed.py:90"),
+    ("SQLiteRepository", "backend/app/eval/speed.py:98"),
+    ("llm_client", "backend/app/eval/speed.py:102"),
+    ("create_notebook", "backend/app/eval/speed.py:109"),
+    ("extract_source", "backend/app/eval/speed.py:114"),
+    ("_runtime", "backend/app/services/communities.py:28"),
+    ("_runtime", "backend/app/services/communities.py:34"),
+    ("event_log", "backend/app/services/communities.py:40"),
+    ("event_log", "backend/app/services/communities.py:45"),
+    ("_runtime", "backend/app/services/communities.py:77"),
+    ("settings", "backend/app/services/communities.py:78"),
+}
+REVIEW_FIX_ALLOWED_CONSUMERS = {
+    ("_runtime", "backend/tests/test_notebook_share_copy.py:431"),
+    ("share_notebook", "backend/tests/test_notebook_share_copy.py:441"),
+    (
+        "find_notebook_by_share_token",
+        "backend/tests/test_notebook_share_copy.py:445",
+    ),
+}
+
 
 def _normalize_consumer_site(site: str) -> str:
     path = site.rsplit(":", 1)[0]
     return f"{path}:<line>" if path in LINE_NUMBER_INSENSITIVE_FILES else site
+
+
+def _member_file_site_allowed(name: str, site: str, *, frozen: bool) -> bool:
+    path = site.rsplit(":", 1)[0]
+    broad_match = (path, name) in ALL_TASK_ALLOWED_MEMBER_FILES
+    if frozen:
+        return broad_match
+    if path.startswith("backend/tests/") or path in LEGACY_COMPATIBILITY_MEMBER_ALLOWLIST_FILES:
+        return broad_match
+    return (name, site) in ACTIVE_PRODUCTION_MEMBER_SITES
 
 CONSUMER_ROOTS = (
     ROOT / "backend" / "app" / "api",
@@ -1352,20 +1422,18 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES | TASK18_ALLOWED_MEMBER_FILES)
-                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
+                    and not _member_file_site_allowed(name, site, frozen=False)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES | TASK18_ALLOWED_MEMBER_FILES)
-                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
+                    and not _member_file_site_allowed(name, site, frozen=True)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
     recorded = {name: sites for name, sites in recorded.items() if sites}
@@ -1391,6 +1459,15 @@ def test_ambiguous_surface_members_have_explicit_owners():
 
     for name, owner in EXPLICIT_OWNERS.items():
         assert surface[name]["owner"] == owner, name
+
+
+def test_member_file_allowlist_does_not_hide_new_production_sites():
+    assert _member_file_site_allowed(
+        "_runtime", "backend/app/services/communities.py:28", frozen=False
+    )
+    assert not _member_file_site_allowed(
+        "_runtime", "backend/app/services/communities.py:9999", frozen=False
+    )
 
 
 def test_frozen_members_still_exist_with_the_same_callable_signatures():
