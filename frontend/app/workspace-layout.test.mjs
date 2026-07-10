@@ -114,7 +114,7 @@ test("session manager groups cleanup controls above the scrollable session list"
 });
 
 test("switching or leaving a notebook clears any pending ask-job reconnect to avoid cross-notebook state bleed", () => {
-  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string) {");
+  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string)");
   const openNotebookEnd = page.indexOf("\n  }\n", openNotebookStart);
   assert.ok(openNotebookStart > -1);
   const openNotebookBody = page.slice(openNotebookStart, openNotebookEnd);
@@ -125,4 +125,37 @@ test("switching or leaving a notebook clears any pending ask-job reconnect to av
   assert.ok(showCollectionStart > -1);
   const showCollectionBody = page.slice(showCollectionStart, showCollectionEnd);
   assert.ok(showCollectionBody.includes("setReconnectJob(null);"));
+});
+
+test("ask results are owned by a run and workspace epoch", () => {
+  assert.match(page, /const askRunEpochRef = useRef\(0\);/);
+  assert.match(page, /const workspaceEpochRef = useRef\(0\);/);
+  assert.match(page, /const ownsRun = \(\) =>[\s\S]*askRunEpochRef\.current === runEpoch[\s\S]*workspaceEpochRef\.current === workspaceEpoch/);
+  assert.match(page, /if \(!ownsRun\(\)\) return;[\s\S]*setTurns/);
+});
+
+test("logout aborts local work and remounts the authenticated application", () => {
+  const start = page.indexOf("async function handleLogout() {");
+  const end = page.indexOf("\n  }", start);
+  const body = page.slice(start, end);
+  assert.ok(body.includes("askAbortRef.current?.abort()"));
+  assert.ok(body.includes("setCurrentUser(null)"));
+  assert.ok(body.includes("window.location.reload()"));
+});
+
+test("shared notebook transitions always use the atomic notebook opener", () => {
+  const copyStart = page.indexOf("async function handleCopyShared");
+  const leaveEnd = page.indexOf("// E. owner", copyStart);
+  const transitions = page.slice(copyStart, leaveEnd);
+  assert.ok(transitions.includes("await openNotebook(String(created.id))"));
+  assert.ok(transitions.includes("await openNotebook(String(joined.id))"));
+  assert.equal(transitions.includes("setCurrentNotebookId(String(created.id))"), false);
+  assert.equal(transitions.includes("setCurrentNotebookId(String(joined.id))"), false);
+});
+
+test("frontend capabilities mirror backend write and admin boundaries", () => {
+  assert.match(page, /const capabilities = \{[\s\S]*canWriteNotebook: !isReader[\s\S]*canManageSchemas: currentUser\?\.role === "admin"/);
+  assert.match(page, /readOnly=\{!capabilities\.canGovernKnowledge\}/);
+  assert.match(page, /readOnly=\{!capabilities\.canManageReports\}/);
+  assert.match(page, /schemaModalOpen && capabilities\.canManageSchemas/);
 });

@@ -229,7 +229,7 @@ class TestConfirmEndpoint:
         repo = _make_repo(monkeypatch)
         tc = _client(repo, monkeypatch)
         nb_id, cid = _seed_pending_conflict(repo)
-        cand = repo.get_conflict_candidate(cid)
+        cand = repo.get_conflict_candidate(nb_id, cid)
         winner_ref = cand["winner_ref"]
         loser_ref = cand["right_ref"] if winner_ref == cand["left_ref"] else cand["left_ref"]
 
@@ -267,6 +267,18 @@ class TestConfirmEndpoint:
         nb = repo.create_notebook(NotebookCreate(name="c-nb"))
         r = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/kcc-nonexistent/confirm")
         assert r.status_code == 404
+
+    def test_candidate_cannot_be_confirmed_through_another_notebook(self, tmp_path, monkeypatch):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        tc = _client(repo, monkeypatch)
+        victim_nb, cid = _seed_pending_conflict(repo)
+        other_nb = repo.create_notebook(NotebookCreate(name="other-nb"))
+
+        r = tc.post(f"/api/notebooks/{other_nb.id}/kg/conflicts/{cid}/confirm")
+
+        assert r.status_code == 404
+        assert repo.get_conflict_candidate(victim_nb, cid)["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -337,3 +349,15 @@ class TestRejectEndpoint:
         nb = repo.create_notebook(NotebookCreate(name="r-nb"))
         r = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/kcc-nonexistent/reject")
         assert r.status_code == 404
+
+    def test_candidate_cannot_be_rejected_through_another_notebook(self, tmp_path, monkeypatch):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        tc = _client(repo, monkeypatch)
+        victim_nb, cid = _seed_pending_conflict(repo)
+        other_nb = repo.create_notebook(NotebookCreate(name="other-nb"))
+
+        r = tc.post(f"/api/notebooks/{other_nb.id}/kg/conflicts/{cid}/reject")
+
+        assert r.status_code == 404
+        assert repo.get_conflict_candidate(victim_nb, cid)["status"] == "pending"

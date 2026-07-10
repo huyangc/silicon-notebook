@@ -5,7 +5,7 @@ env_file）必须锚定到仓库根，与进程启动时的 CWD 无关。
 backend/ 再起 uvicorn，CLI 从仓库根跑 —— 同一套相对默认值 `.local/...` 在两种
 启动方式下解析到两个不同目录，导致 CLI 建好的索引服务端看不到。修复：
 Settings 用 model_validator(mode="after") 统一把相对路径重写为仓库根锚定的
-绝对路径，绝对 env 覆盖原样尊重、非 sqlite 的 database_url 不动。
+绝对路径，绝对 env 覆盖原样尊重；未实现的 database_url 后端直接拒绝。
 """
 import os
 
@@ -109,20 +109,20 @@ class TestRelativeEnvValuesAlsoAnchored:
         assert s.database_url == expected
 
 
-class TestNonSqliteDatabaseUrlUntouched:
-    """非 sqlite 的 database_url（如 postgres://）不属于本修复范围，原样保留。"""
+class TestNonSqliteDatabaseUrlRejected:
+    """未实现对应 repository 时必须 fail fast，不能静默写入本地 SQLite。"""
 
-    def test_postgres_url_untouched(self, monkeypatch):
+    def test_postgres_url_rejected(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@host:5432/db")
         monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        assert s.database_url == "postgres://user:pass@host:5432/db"
+        with pytest.raises(ValueError, match="only sqlite"):
+            Settings()
 
-    def test_mysql_url_untouched(self, monkeypatch):
+    def test_mysql_url_rejected(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "mysql://user:pass@host/db")
         monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        assert s.database_url == "mysql://user:pass@host/db"
+        with pytest.raises(ValueError, match="only sqlite"):
+            Settings()
 
 
 class TestSqlitePathPropertySlashForms:
@@ -148,7 +148,8 @@ class TestEnvFileAnchored:
 
     def test_env_file_is_absolute_repo_root_env(self):
         env_file = Settings.model_config.get("env_file")
-        assert env_file == str(_ROOT_DIR / ".env")
+        expected = None if os.environ.get("SILICON_NOTEBOOK_ENV_FILE") == "" else str(_ROOT_DIR / ".env")
+        assert env_file == expected
 
     def test_missing_env_file_does_not_raise(self, tmp_path, monkeypatch):
         """指向不存在的 .env 时 pydantic-settings 静默忽略，不应报错（本仓库根下

@@ -687,7 +687,20 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
         return {"table": table, "total": total, "converted": 0, "skipped_bad": 0}
 
     use_pool = workers > 1
-    executor = ProcessPoolExecutor(max_workers=workers) if use_pool else None
+    executor = None
+    if use_pool:
+        try:
+            executor = ProcessPoolExecutor(max_workers=workers)
+        except (OSError, PermissionError, NotImplementedError) as exc:
+            # Restricted containers/macOS sandboxes may reject POSIX semaphore
+            # discovery before the pool exists. This is the same availability
+            # failure class as a pool that dies later: retain correctness and
+            # lose only the parallel speedup.
+            print(
+                f"  [blob] {table}: 进程池不可用,回退串行(fallback to serial): {exc}",
+                flush=True,
+            )
+            use_pool = False
     try:
         while True:
             with repo._write() as db:

@@ -9,13 +9,23 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _reset_singleton_caches():
-    """每个测试前后都清空 lru_cache 单例，防止测试间缓存污染
-    （尤其是 test_auth.py 用不同 DATABASE_URL 注入 tmp_path 后缓存的 repository）。"""
+def _reset_singleton_caches(tmp_path, monkeypatch):
+    """Give every test an isolated default DB/storage/log root and clear singletons.
+
+    Individual tests may override or delete these variables after this fixture
+    starts. The default prevents a partial ``Settings(database_url=...)`` from
+    touching the developer's real ``.local/storage`` and makes the suite safe
+    in linked worktrees and CI sandboxes.
+    """
     from app.core.config import get_settings
     from app.api import deps
+    repository_factory = deps.repository
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'default.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("LLM_LOG_PATH", str(tmp_path / "logs" / "llm.jsonl"))
     get_settings.cache_clear()
-    deps.repository.cache_clear()
+    repository_factory.cache_clear()
     yield
     get_settings.cache_clear()
-    deps.repository.cache_clear()
+    repository_factory.cache_clear()

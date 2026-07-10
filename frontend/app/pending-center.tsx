@@ -42,7 +42,12 @@ export function usePendingActions(enabled: boolean) {
   }, []);
 
   useEffect(() => {
-    if (!enabled || !getToken()) return;
+    if (!enabled || !getToken()) {
+      setSnapshot({ count: 0, items: [] });
+      setDoneItems([]);
+      setToast(null);
+      return;
+    }
     stoppedRef.current = false;
 
     // REST 兜底:先拉一次秒开

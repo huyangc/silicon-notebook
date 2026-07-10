@@ -378,6 +378,36 @@ def test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals(re
         assert dangling_emb == 0
 
 
+def test_copy_sweeper_only_removes_expired_copy_jobs(repo):
+    """A second copy must never delete another copy that is still active."""
+    owner = "user-local"
+    current_id = _mk_nb(repo, "active-copy", owner)
+    expired_id = _mk_nb(repo, "expired-copy", owner)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET status='copying', created_at=? WHERE id=?",
+            (_now(), current_id),
+        )
+        db.execute(
+            "UPDATE notebooks SET status='copying', created_at='2000-01-01T00:00:00' WHERE id=?",
+            (expired_id,),
+        )
+
+    assert repo._sweep_stuck_copies(created_by=owner) == 1
+    with repo._connect() as db:
+        assert db.execute("SELECT 1 FROM notebooks WHERE id=?", (current_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM notebooks WHERE id=?", (expired_id,)).fetchone() is None
+
+
+def test_public_notebook_update_rejects_internal_status():
+    """The copy sentinel is an internal lifecycle state, never API input."""
+    from pydantic import ValidationError
+    from app.models.schemas import NotebookUpdate
+
+    with pytest.raises(ValidationError):
+        NotebookUpdate(status="copying")
+
+
 def test_copy_skips_object_schemas_and_backfills_fts(repo):
     """B1 回归:源库有自定义 object_schema(object_type 全局唯一)时,拷贝不撞主键、不拷该表;
     I1:拷完 kg_objects_fts 已按副本重建(拷完即搜)。"""

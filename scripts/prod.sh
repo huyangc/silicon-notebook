@@ -8,12 +8,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_PYTHON="/opt/homebrew/Caskroom/miniconda/base/bin/python"
-PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
-
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="python3"
-fi
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cleanup() {
   if [[ -n "${BACKEND_PID:-}" ]]; then
@@ -62,6 +57,14 @@ fi
 # shellcheck source=scripts/autotune.sh
 source "$ROOT_DIR/scripts/autotune.sh"
 
+BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+if [[ "$BACKEND_HOST" != "127.0.0.1" && "$BACKEND_HOST" != "localhost" && "$BACKEND_HOST" != "::1" ]]; then
+  if [[ -z "${SILICON_NOTEBOOK_ADMIN_PASSWORD:-}" || "${SILICON_NOTEBOOK_ADMIN_PASSWORD}" == "admin" ]]; then
+    echo "错误: 对外监听 $BACKEND_HOST 前必须设置非默认 SILICON_NOTEBOOK_ADMIN_PASSWORD。" >&2
+    exit 1
+  fi
+fi
+
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
   exit 1
@@ -78,13 +81,13 @@ else
   echo "SKIP_BUILD=1 — skipping 'npm run build' (expecting a prebuilt frontend/.next)"
 fi
 
-# BACKEND_HOST=0.0.0.0 to expose the API beyond localhost (e.g. server deploys).
+# 默认只监听 loopback；显式 BACKEND_HOST=0.0.0.0 才对外暴露，并触发上面的密码预检。
 # --workers 1: process-internal caches and dedup sets (e.g. VectorCache, extraction
 # pools) are per-process and NOT shared across workers — N workers would mean N×
 # memory and N independent (inconsistent) caches, not more throughput.
 cd "$ROOT_DIR/backend"
 "$PYTHON_BIN" -m uvicorn app.main:app \
-  --host "${BACKEND_HOST:-0.0.0.0}" \
+  --host "$BACKEND_HOST" \
   --port "${PORT:-8000}" \
   --workers 1 \
   >>"$BACKEND_LOG" 2>&1 &
@@ -94,7 +97,7 @@ cd "$ROOT_DIR/frontend"
 npm run start -- -p "${FRONTEND_PORT:-3000}" >>"$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
 
-echo "backend  : http://${BACKEND_HOST:-0.0.0.0}:${PORT:-8000}   (PID $BACKEND_PID, log $BACKEND_LOG)"
+echo "backend  : http://${BACKEND_HOST}:${PORT:-8000}   (PID $BACKEND_PID, log $BACKEND_LOG)"
 echo "frontend : http://0.0.0.0:${FRONTEND_PORT:-3000}   (PID $FRONTEND_PID, log $FRONTEND_LOG)"
 echo "(the backend's first log line prints the resolved absolute db/storage/log paths — check it if unsure which .local a launch is using)"
 

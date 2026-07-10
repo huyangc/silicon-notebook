@@ -20,7 +20,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - KG-native grounded Q&A: sentence-level `[k_i]` citations (rendered as compact numbered references, including model-emitted numeric groups like `[1, 2, 3]` when they map to known references), multi-turn conversations, 1-hop KG neighbour expansion, and a live, expandable one-line agent trace for reasoning mode
 - **Typed query-time inference in reasoning mode:** the agent can call `follow_chain` to compose an evidence-backed two-hop `A→B→C` path into a transient `A→C` inference for `derived_from / kind_of / prerequisite_of / precedes / part_of`. Both direct hops remain independently citable relation evidence, rejected/ungrounded/scope-conflicting paths fail closed, the inferred conclusion is explicitly marked as reasoning, and no inferred edge is written back to the KG. It keeps the production schema at v9: no migration, new index, or historical backfill is required; bounded samples use the existing source/target relation indexes and ambiguous high-degree paths are skipped.
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). `base` is the authoritative reference KG (e.g. an analog-design textbook); `personal` is the user's own notes. `federated_retrieve` gathers candidates across `base ∪ active personal`, tags each hit with its tier, applies a base-authority weight in ranking, and on a base↔personal contradiction the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor. The notebook actions menu ("分析") offers "设为基准库 / 取消基准库" to mark a notebook as the base KG and back (via `POST /api/notebooks/{id}/tier`)
-- **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; users see only their own notebooks. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, default `admin`); the admin owns pre-existing notebooks and is the only user who can mark a notebook as the base KG. Base notebooks are hidden from regular users' lists but are still used as authoritative retrieval context at ask time. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
+- **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; users see only their own notebooks. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it); the admin owns pre-existing notebooks and is the only user who can mark a notebook as the base KG. Base notebooks are hidden from regular users' lists but are still used as authoritative retrieval context at ask time. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
 - Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
 - Deep report (two-phase background job): a notebook-level "深度报告" action turns one question into a multi-section technical report. **Phase 1 (seconds)**: a STORM-style multi-perspective planner — grounded in a zero-LLM corpus scout (source titles + KG hits + chunk provenance, so the outline is not planned blind) — pre-writes an outline where each section carries its expert perspectives, cross-perspective tensions, and an evidence-sufficiency verdict (充足/薄弱/缺失 + gap note, from a zero-LLM retrieval probe + a Judge on the rewrite model); the user reviews/edits it in an outline editor before committing. **Phase 2 (minutes, on confirm)**: each section runs a full `reasoning` deep-dive independently (sections run in parallel, each with its own retrieval budget), each is drafted with a three-tier evidence discipline (`[k]` in-corpus citation / `（推断）` in-corpus inference / `【通识】` general-knowledge, marked and flagged unverified), then a summary pass adds an executive summary, references, and — only when a section lacked in-corpus support — a one-line limitation note. A depth control (five named levels 概览/标准/深入/详尽/穷尽, default 标准 — the per-section reflect-step budget, popover next to the generate button) trades thoroughness for latency; sections deep-dive in parallel up to `KG_JOB_CONCURRENCY`, and the UI shows live per-section progress (`section_status`). Runs as a cancellable background job; each report downloads as `.md`, or multi-select for a `reports.zip`
 - Edge trust & curation: per-edge trust signals (evidence / corroboration / type-validity) plus a curator review queue; reviewer-rejected edges are excluded from graph reasoning
@@ -155,7 +155,9 @@ npm run start
 `npm run start` runs `scripts/prod.sh`: `next build` + `next start` for the frontend,
 `uvicorn --workers 1` for the backend, both logging to `.local/logs/`. Set `SKIP_BUILD=1`
 to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
-`BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports.
+`BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports. The backend
+defaults to `127.0.0.1`; binding it to a non-loopback address requires a non-default
+`SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
 
 > **One-time migration** — if you previously launched with `npm run dev` (or manually `cd
 > backend && uvicorn ...`) on a version before path-anchoring landed, your data may be
@@ -171,7 +173,7 @@ to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
 
 ```bash
 curl -s http://127.0.0.1:8000/api/health   # {"status":"ok","llm_configured":...}
-bash scripts/check.sh                        # backend offline smoke + frontend tests + tsc
+bash scripts/check.sh                        # hermetic smoke + full pytest + frontend test/tsc/build
 ```
 
 The backend writes structured JSONL logs under `.local/logs/` (`requests` / `events` /
@@ -422,9 +424,11 @@ behavior, not env-gated.
 **User accounts:**
 
 ```text
-SILICON_NOTEBOOK_ADMIN_PASSWORD   # admin login password (reset on every boot; default "admin")
+SILICON_NOTEBOOK_ADMIN_PASSWORD   # admin login password (local default "admin"; production/non-loopback
+                                  # startup requires a non-default value)
 SILICON_NOTEBOOK_AUTH_OPTIONAL    # true = no-token requests act as admin (local/testing only);
                                   # false (default) = login required for all requests
+AUTH_SESSION_TOUCH_INTERVAL_SECONDS # sliding-session DB write interval (default 300)
 ```
 
 **MinerU (PDF parsing):**
@@ -540,7 +544,7 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 
   Keep `MINERU_MODE=off` in `.env.example` so other environments stay offline-safe by default.
 
-**URL sources ("Add link") prefer local MinerU.** A pasted PDF URL is parsed by the local MinerU service whenever one is configured (`MINERU_MODE=http`/`cli`): the backend downloads the PDF and runs it through the same local-MinerU→pypdf path as file uploads, so on an intranet deployment internal PDFs never leave the network. The `MINERU_API_TOKEN` cloud (mineru.net) path is used only as a fallback when no local MinerU is configured — and once local is in use it is never silently called. Adding a URL requires *either* a local MinerU or the cloud token.
+**URL sources ("Add link") prefer local MinerU.** A pasted public PDF URL is parsed by the local MinerU service whenever one is configured (`MINERU_MODE=http`/`cli`): the backend downloads the PDF and runs it through the same local-MinerU→pypdf path as file uploads. For SSRF protection, the downloader validates the initial target and every redirect and rejects localhost, private, link-local, and reserved addresses; import internal documents through file upload instead. The `MINERU_API_TOKEN` cloud (mineru.net) path is used only as a fallback when no local MinerU is configured — and once local is in use it is never silently called. Adding a URL requires *either* a local MinerU or the cloud token.
 
 MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion degrades to pypdf so uploads never block, while pipeline logs and the source `error_message` keep the fallback diagnostic; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
 
@@ -661,7 +665,7 @@ Exit codes are the verdict — safe to wire directly into CI or a script gate: `
 - LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; tier-aware federation and the base-wins conflict rule activate automatically once a notebook is marked `base`.
 - Article Studio works from title/abstract text and linked source elements; first-class article full-text upload and richer relation scoring are next (Tier 3).
-- PostgreSQL + pgvector are not required for the local beta and are deferred.
+- PostgreSQL + pgvector are not required for the local beta and are deferred. Until a PostgreSQL repository exists, non-`sqlite:///` `DATABASE_URL` values fail fast instead of silently falling back to a local database.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
 - User memory remains manual opt-in only; no automatic memory behavior has been added.
 
@@ -673,7 +677,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — `mineru_mode=off`, no real LLM/embedding keys) covering upload/parse, structural Markdown parsing, KG windowing, concurrent embedding with per-batch DB writes, float32 vector matrix build and cache, hybrid retrieval (keyword/vector/None modes), multi-turn `ask`, status machine (`extracted` = green), article research, feedback, JSON fence cleanup, and restart persistence. Also runs frontend `node --test app/*.test.mjs` and Next.js `tsc --noEmit` when `frontend/node_modules` is present.
+This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — the repository `.env` is disabled and no real LLM/embedding key is inherited), the complete backend pytest suite, every recursively discovered frontend `*.test.mjs`, Next.js `tsc --noEmit`, and the production frontend build. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 ## Development Workflow
 

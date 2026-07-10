@@ -162,16 +162,14 @@ def test_render_subgraph_context_k_ids():
 
 
 def test_render_subgraph_context_edge_annotation():
-    """Edge annotation line: '[k2] Node B --derived_from--> [k1] Node A'."""
+    """Edge annotation preserves the extracted source → target direction."""
     from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
                             {"derived_from"}, max_depth=1, max_fan_out=10)
     ctx, id_map = render_subgraph_context(sub, id_offset=0)
     # The context block must contain the chain annotation
-    assert "derived_from" in ctx
-    assert "[k2]" in ctx
-    assert "[k1]" in ctx
+    assert "[k1] Node A --derived_from--> [k2] Node B" in ctx
 
 
 def test_render_subgraph_context_id_offset():
@@ -203,7 +201,7 @@ def test_ask_request_mode_graph_accepted():
 
 
 def test_render_subgraph_context_chain_format():
-    """Full chain annotation: '[k2] B --derived_from--> [k1] A'."""
+    """Full chain annotation: '[k1] A --derived_from--> [k2] B'."""
     from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],

@@ -2,12 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_PYTHON="/opt/homebrew/Caskroom/miniconda/base/bin/python"
-PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="python3"
-fi
+# Verification must not inherit a developer's repo-root .env or accidentally
+# call paid/network model services. Tests opt into any provider explicitly.
+export SILICON_NOTEBOOK_ENV_FILE=""
+export OPENAI_COMPAT_BASE_URL="" OPENAI_COMPAT_API_KEY="" OPENAI_COMPAT_MODEL=""
+export REASONING_LLM_BASE_URL="" REASONING_LLM_API_KEY="" REASONING_LLM_MODEL=""
+export REWRITE_LLM_BASE_URL="" REWRITE_LLM_API_KEY="" REWRITE_LLM_MODEL=""
+export KG_LLM_BASE_URL="" KG_LLM_API_KEY="" KG_LLM_MODEL=""
+export EMBED_PROVIDER="" EMBED_BASE_URL="" EMBED_API_KEY="" EMBED_MODEL=""
+export RERANK_MODEL="" RERANK_API_KEY=""
+export MINERU_MODE="off" MINERU_API_TOKEN=""
 
 mkdir -p "$ROOT_DIR/.local/pycache"
 export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
@@ -33,6 +39,9 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/services/prompts.py" \
   "$ROOT_DIR/backend/app/services/query_rewrite.py" \
   "$ROOT_DIR/backend/app/services/reasoning_retrieval.py" \
+  "$ROOT_DIR/backend/app/services/remote_sources.py" \
+  "$ROOT_DIR/backend/app/services/batch_ingest.py" \
+  "$ROOT_DIR/backend/app/services/kg/scheduler.py" \
   "$ROOT_DIR/backend/app/services/repository.py" \
   "$ROOT_DIR/backend/app/services/retrieval.py" \
   "$ROOT_DIR/backend/app/services/sqlite_repository.py" \
@@ -49,10 +58,14 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_backend.py
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ask_modes_contract.py"
 
-if [[ -d "$ROOT_DIR/frontend/node_modules" ]]; then
-  cd "$ROOT_DIR/frontend"
-  npm run test
-  npm run lint
-else
-  echo "frontend/node_modules not found; skipping frontend lint"
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m pytest -p no:cacheprovider "$ROOT_DIR/backend/tests"
+
+if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
+  echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
+  exit 1
 fi
+
+cd "$ROOT_DIR/frontend"
+npm run test
+npm run lint
+npm run build

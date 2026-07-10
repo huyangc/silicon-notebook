@@ -1,11 +1,13 @@
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.auth_utils import verify_password
+import pytest
 
 
 def _repo(tmp_path, password="admin"):
     s = Settings(
         database_url=f"sqlite:///{tmp_path}/t.db",
+        storage_dir=str(tmp_path / "storage"),
         SILICON_NOTEBOOK_ADMIN_PASSWORD=password,
     )
     return SQLiteRepository(s)
@@ -33,3 +35,12 @@ def test_admin_id_stays_user_local(tmp_path):
     repo = _repo(tmp_path)
     assert repo.current_user().id == "user-local"
     assert repo.current_user().role == "admin"
+
+
+def test_production_rejects_default_admin_password(tmp_path):
+    with pytest.raises(ValueError, match="non-default"):
+        Settings(
+            database_url=f"sqlite:///{tmp_path}/t.db",
+            environment="production",
+            admin_password="admin",
+        )

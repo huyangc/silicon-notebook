@@ -11,3 +11,14 @@ def test_submit_job_propagates_contextvar():
     finally:
         _REQUEST_USER.reset(token)
         scheduler.reset()
+
+
+def test_submit_window_propagates_contextvar():
+    scheduler.reset()
+    token = _REQUEST_USER.set("USER-WINDOW")
+    try:
+        fut = scheduler.submit_window(lambda: _REQUEST_USER.get())
+        assert fut.result(timeout=5) == "USER-WINDOW"
+    finally:
+        _REQUEST_USER.reset(token)
+        scheduler.reset()
