@@ -908,8 +908,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--rebuild-only", action="store_true",
                    help="kg 阶段:跳过抽取,直接 rebuild_unified_kg + 节点向量 + scale index(base tier 时)。")
     p.add_argument("--fresh", action="store_true",
-                   help="kg 阶段:清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑"
-                        "(用于只换了 KG 模型/阈值、数据没变的场景)。")
+                   help="清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑"
+                        "(kg 与 all 阶段的收尾 rebuild 均适用;用于只换了 KG 模型/阈值、"
+                        "数据没变的场景)。")
     p.add_argument("--allow-no-embed", action="store_true",
                    help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
     p.add_argument("--pool-report-interval", type=int, default=15,
