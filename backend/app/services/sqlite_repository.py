@@ -246,7 +246,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 @dataclass(frozen=True)
@@ -1114,6 +1114,19 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 )
                 """
             )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS kg_rebuild_checkpoint (
+                    notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    input_version TEXT NOT NULL,
+                    stage         TEXT NOT NULL,
+                    item_key      TEXT NOT NULL,
+                    payload       TEXT NOT NULL,
+                    created_at    TEXT NOT NULL,
+                    PRIMARY KEY (notebook_id, input_version, stage, item_key)
+                )
+                """
+            )
             # Lightweight column migrations for pre-existing databases.
             # SQLite has no `ADD COLUMN IF NOT EXISTS`; guard via PRAGMA so this
             # runs idempotently on every init.
@@ -1418,6 +1431,64 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 """
             )
             self._add_column_if_missing(db, "unified_kg_state", "mention_seq", "INTEGER NOT NULL DEFAULT -1")
+
+    def _migration_10(self) -> None:
+        """rebuild 断点续跑:kg_rebuild_checkpoint 版本键崩溃恢复日志,让 merge 审查 /
+        概念描述两个 LLM 阶段可中断续跑。
+
+        已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
+        _migration_8/_migration_9 同款两层写法(baseline 双写 + 独立迁移)。"""
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS kg_rebuild_checkpoint (
+                    notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    input_version TEXT NOT NULL,
+                    stage         TEXT NOT NULL,
+                    item_key      TEXT NOT NULL,
+                    payload       TEXT NOT NULL,
+                    created_at    TEXT NOT NULL,
+                    PRIMARY KEY (notebook_id, input_version, stage, item_key)
+                )
+                """
+            )
+
+    def _rebuild_ckpt_gc(self, notebook_id: str, input_version: str) -> None:
+        """删掉本 notebook 里 input_version 不等于当前值的所有 checkpoint 行(表有界)。
+        rebuild 开头调一次:数据/算法版本一变,旧决策自动失效。"""
+        with self._write() as db:
+            db.execute(
+                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND input_version!=?",
+                (notebook_id, input_version))
+
+    def _rebuild_ckpt_clear(self, notebook_id: str) -> None:
+        """删掉本 notebook 的全部 checkpoint(所有版本/阶段)。--fresh 用,强制两个 LLM 阶段重跑。"""
+        with self._write() as db:
+            db.execute("DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=?", (notebook_id,))
+
+    def _rebuild_ckpt_load(self, notebook_id: str, input_version: str, stage: str) -> Dict[str, dict]:
+        """载入某阶段在当前 input_version 下已完成的 item:{item_key: payload_dict}。"""
+        with self._connect() as db:
+            return {
+                r["item_key"]: json.loads(r["payload"])
+                for r in db.execute(
+                    "SELECT item_key, payload FROM kg_rebuild_checkpoint "
+                    "WHERE notebook_id=? AND input_version=? AND stage=?",
+                    (notebook_id, input_version, stage)).fetchall()
+            }
+
+    def _rebuild_ckpt_put(self, notebook_id: str, input_version: str, stage: str,
+                          rows: List[Tuple[str, dict]]) -> None:
+        """把一批已完成 item 落库(一个写事务,幂等 REPLACE)。rows=[(item_key, payload_dict)]。"""
+        if not rows:
+            return
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO kg_rebuild_checkpoint "
+                "(notebook_id, input_version, stage, item_key, payload, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                [(notebook_id, input_version, stage, k, json.dumps(v), now) for k, v in rows])
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
