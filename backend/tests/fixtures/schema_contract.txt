@@ -163,6 +163,12 @@ kg_objects_fts_docsize.sz|BLOB|0|None|0
 kg_objects_fts_idx.segid||1|None|1
 kg_objects_fts_idx.term||1|None|2
 kg_objects_fts_idx.pgno||0|None|0
+kg_rebuild_checkpoint.notebook_id|TEXT|1|None|1
+kg_rebuild_checkpoint.input_version|TEXT|1|None|2
+kg_rebuild_checkpoint.stage|TEXT|1|None|3
+kg_rebuild_checkpoint.item_key|TEXT|1|None|4
+kg_rebuild_checkpoint.payload|TEXT|1|None|0
+kg_rebuild_checkpoint.created_at|TEXT|1|None|0
 knowledge_embeddings.object_id|TEXT|0|None|1
 knowledge_embeddings.notebook_id|TEXT|1|None|0
 knowledge_embeddings.vector|TEXT|1|None|0
