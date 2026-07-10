@@ -34,7 +34,7 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 
 ## Architecture Boundaries
 
-- `SQLiteRepository` remains the public local-persistence facade, while cohesive SQLite domains are extracted incrementally. Identity, per-user model settings, admin usage queries, and auth-session lifecycle now live in `backend/app/services/sqlite_identity.py`; the facade inherits that implementation and keeps the existing API and request-context exports compatible.
+- `SQLiteRepository` remains the public local-persistence facade, while cohesive SQLite domains are extracted incrementally. Identity, per-user model settings, admin usage queries, and auth-session lifecycle live in `backend/app/services/sqlite_identity.py`; share tokens, deep-copy lifecycle, reader membership, and read-access ownership live in `backend/app/services/sqlite_notebook_sharing.py`. The facade inherits both implementations and keeps the existing APIs plus request/copy helper exports compatible.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
