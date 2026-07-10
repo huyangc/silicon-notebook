@@ -13,13 +13,20 @@ def test_ask_disconnect_documentation_matches_detached_worker_contract():
     readme = _read("README.md")
     readme_zh = _read("README_zh.md")
     architecture = _read("architecture.md")
+    fangan_done = _read("fangan_done.md")
 
     assert "A transport disconnect only stops delivery to that client" in agents
     assert "continues in the background" in readme
     assert "断开连接只会停止当前客户端继续接收" in readme_zh
     assert "transport 断连只停止向该客户端继续推送" in architecture
+    assert "transport 断连只停止向该客户端推送" in fangan_done
+    assert "只有显式中断才取消 worker" in fangan_done
     assert "frontend abort/client disconnect" not in agents
     assert "Client disconnect / abort must propagate" not in agents
+    assert (
+        "前端 abort / 客户端断开会让 `/ask/stream` 设置后端 cancellation event"
+        not in fangan_done
+    )
 
 
 def test_tier_documentation_matches_exact_score_tie_contract():
