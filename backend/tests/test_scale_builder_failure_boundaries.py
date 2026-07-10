@@ -103,6 +103,88 @@ def test_runtime_owns_scale_builder(repo):
     assert builder.artifacts is repo._runtime.scale_artifact_store
 
 
+def _strongly_references(value, target, seen=None):
+    """Inspect callback storage without traversing arbitrary domain objects."""
+    import functools
+    import inspect
+
+    if value is target:
+        return True
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return False
+    seen = seen or set()
+    marker = id(value)
+    if marker in seen:
+        return False
+    seen.add(marker)
+    if inspect.ismethod(value):
+        return _strongly_references(value.__self__, target, seen) or \
+            _strongly_references(value.__func__, target, seen)
+    if isinstance(value, functools.partial):
+        return any(
+            _strongly_references(part, target, seen)
+            for part in (value.func, value.args, value.keywords)
+        )
+    if inspect.isfunction(value):
+        stored = [value.__defaults__, value.__kwdefaults__]
+        stored.extend(
+            cell.cell_contents
+            for cell in (value.__closure__ or ())
+            if cell is not None
+        )
+        return any(
+            _strongly_references(part, target, seen) for part in stored
+        )
+    if isinstance(value, dict):
+        return any(
+            _strongly_references(part, target, seen)
+            for pair in value.items()
+            for part in pair
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(
+            _strongly_references(part, target, seen) for part in value
+        )
+    return False
+
+
+def test_scale_builder_callbacks_do_not_retain_repository_facade(repo):
+    builder = repo._runtime.scale_builder
+    callbacks = {
+        name: getattr(builder, name)
+        for name in {
+            "get_notebook",
+            "version",
+            "load_scale",
+            "full_viz_graph",
+            "relations_for_notebook",
+            "cluster_map",
+            "incremental_fuse_source",
+            "invalidate_scale_cache",
+            "cache_viz",
+            "notify_index_done",
+        }
+    }
+    callbacks.update(
+        {
+            f"projections.{name}": getattr(builder.projections, name)
+            for name in {
+                "connect",
+                "in_batches",
+                "ent_chunk_map",
+                "mention_extra_edges",
+                "vector_matrix",
+            }
+        }
+    )
+    retained = [
+        name
+        for name, callback in callbacks.items()
+        if _strongly_references(callback, repo)
+    ]
+    assert retained == []
+
+
 def test_fold_failure_before_swap_keeps_old_artifact(
     repo, indexed_notebook, monkeypatch
 ):
@@ -122,6 +204,76 @@ def test_fold_failure_before_swap_keeps_old_artifact(
     assert manifest.read_bytes() == before
     assert store.load_scale(indexed_notebook) is not None
     assert indexed_notebook not in repo._scale_building
+
+
+def test_fold_second_rename_failure_rolls_old_artifact_back(
+    repo, indexed_notebook, monkeypatch
+):
+    from app.repositories.filesystem import scale_artifact_store as store_module
+
+    store = repo._runtime.scale_artifact_store
+    builder = repo._runtime.scale_builder
+    live_dir = store.scale_dir(indexed_notebook)
+    manifest = live_dir / "manifest.json"
+    before = manifest.read_bytes()
+    real_rename = store_module.os.rename
+    rename_calls = []
+    injected = OSError("injected second rename failure")
+
+    def fail_second_rename(source, target):
+        rename_calls.append((source, target))
+        if len(rename_calls) == 2:
+            raise injected
+        return real_rename(source, target)
+
+    monkeypatch.setattr(store_module.os, "rename", fail_second_rename)
+    with pytest.raises(OSError, match="injected second rename failure") as caught:
+        builder.fold(indexed_notebook)
+
+    assert caught.value is injected
+    assert len(rename_calls) == 3
+    assert manifest.read_bytes() == before
+    assert store.load_scale(indexed_notebook) is not None
+    assert not live_dir.with_name(live_dir.name + ".old").exists()
+    staging = live_dir.with_name(live_dir.name + ".tmp")
+    assert staging.is_dir()
+    assert store.prepare_fold_directory(indexed_notebook) == staging
+    assert list(staging.iterdir()) == []
+
+
+def test_fold_rollback_failure_preserves_old_and_primary_exception(
+    repo, indexed_notebook, monkeypatch
+):
+    from app.repositories.filesystem import scale_artifact_store as store_module
+
+    store = repo._runtime.scale_artifact_store
+    builder = repo._runtime.scale_builder
+    live_dir = store.scale_dir(indexed_notebook)
+    before = (live_dir / "manifest.json").read_bytes()
+    real_rename = store_module.os.rename
+    rename_calls = []
+    primary = OSError("injected publish failure")
+    rollback = OSError("injected rollback failure")
+
+    def fail_publish_and_rollback(source, target):
+        rename_calls.append((source, target))
+        if len(rename_calls) == 2:
+            raise primary
+        if len(rename_calls) == 3:
+            raise rollback
+        return real_rename(source, target)
+
+    monkeypatch.setattr(store_module.os, "rename", fail_publish_and_rollback)
+    with pytest.raises(OSError, match="injected publish failure") as caught:
+        builder.fold(indexed_notebook)
+
+    assert caught.value is primary
+    assert len(rename_calls) == 3
+    old_dir = live_dir.with_name(live_dir.name + ".old")
+    assert not live_dir.exists()
+    assert (old_dir / "manifest.json").read_bytes() == before
+    assert live_dir.with_name(live_dir.name + ".tmp").is_dir()
+    assert any("rollback" in note for note in getattr(primary, "__notes__", []))
 
 
 def test_full_save_failure_keeps_existing_cached_artifact(

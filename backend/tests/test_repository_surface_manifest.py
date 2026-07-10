@@ -175,6 +175,7 @@ TASK18_ALLOWED_IMPORTS = {
 # compatibility facade to assemble an end-to-end runtime fixture.
 TASK19_ALLOWED_IMPORTS = {
     ("backend/tests/test_scale_builder_failure_boundaries.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/app/services/sqlite_repository.py", 116, "app.services.repository", "UploadedSourceFile"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -902,7 +903,7 @@ TASK19_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
     for name in {
         "_build_viz_graph_arrays", "_derive_object_graph_lite", "_runtime_dim",
-        "_viz_arrays_from_graph",
+        "_viz_arrays_from_graph", "incremental_fuse_source",
     }
 } | {
     ("backend/tests/test_scale_builder_failure_boundaries.py", name)

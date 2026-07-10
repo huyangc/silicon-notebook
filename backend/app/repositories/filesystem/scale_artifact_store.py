@@ -93,11 +93,23 @@ class ScaleArtifactStore:
 
     def swap_fold_directory(self, notebook_id: str, temporary) -> None:
         """Atomic-swap sequence (caller holds the building lock):
-        live → .old, temporary → live, rm .old."""
+        live → .old, temporary → live, rm .old. If publishing temporary
+        fails after the first rename, restore .old → live before re-raising
+        the original publish error. A failed rollback leaves .old intact."""
         out_dir = str(self.scale_dir(notebook_id))
         old_dir = out_dir + ".old"
         if os.path.exists(old_dir):
             shutil.rmtree(old_dir)
         os.rename(out_dir, old_dir)
-        os.rename(str(temporary), out_dir)
+        try:
+            os.rename(str(temporary), out_dir)
+        except Exception as publish_error:
+            try:
+                os.rename(old_dir, out_dir)
+            except Exception as rollback_error:
+                publish_error.add_note(
+                    "scale fold rollback failed; previous artifact remains "
+                    f"at {old_dir}: {rollback_error!r}"
+                )
+            raise
         shutil.rmtree(old_dir, ignore_errors=True)

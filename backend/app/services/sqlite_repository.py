@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -141,6 +142,14 @@ from app.services.knowledge_lifecycle import (  # noqa: F401 — compatibility e
     _concept_desc_sig,
     _fast_loads,
 )
+
+
+def _repository_from_weakref(reference):
+    """Resolve a facade compatibility seam without retaining the facade."""
+    repository = reference()
+    if repository is None:
+        raise RuntimeError("SQLiteRepository is no longer available")
+    return repository
 
 
 def _new_id(prefix: str) -> str:
@@ -330,58 +339,87 @@ class SQLiteRepository:
         # matrix caches (they move with their domain in Gate 7), the memoized
         # `_scale_index_version` key, the LRU/lock-table state above (tests
         # reassign `_scale_idx_cache`; Task 20 transfers ownership) and the
-        # model-error note.  Every lambda resolves at call time — post-
-        # construction monkeypatches stay observed.
+        # model-error note. Every callback resolves at call time through a
+        # weak reference — post-construction monkeypatches stay observed
+        # without creating facade→runtime→adapter→facade retention cycles.
+        repository_ref = weakref.ref(self)
         self._runtime.wire_scale_artifacts(
-            connect=lambda: self._connect(),
-            in_batches=lambda ids: self._in_batches(ids),
-            ent_chunk_map=lambda notebook_id: self._ent_chunk_map(notebook_id),
+            connect=lambda: _repository_from_weakref(repository_ref)._connect(),
+            in_batches=lambda ids: _repository_from_weakref(
+                repository_ref
+            )._in_batches(ids),
+            ent_chunk_map=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._ent_chunk_map(notebook_id),
             mention_extra_edges=lambda notebook_id: (
-                self._mention_extra_edges(notebook_id)
+                _repository_from_weakref(repository_ref)._mention_extra_edges(
+                    notebook_id
+                )
             ),
             vector_matrix=lambda db, notebook_id, table, id_column: (
-                self._vector_matrix(db, notebook_id, table, id_column)
+                _repository_from_weakref(repository_ref)._vector_matrix(
+                    db, notebook_id, table, id_column
+                )
             ),
-            version=lambda notebook_id: self._scale_index_version(notebook_id),
-            scale_cache=lambda: self._scale_idx_cache,
-            load_lock=lambda: self._scale_idx_load_lock,
-            load_locks=lambda: self._scale_idx_load_locks,
+            version=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._scale_index_version(notebook_id),
+            scale_cache=lambda: _repository_from_weakref(
+                repository_ref
+            )._scale_idx_cache,
+            load_lock=lambda: _repository_from_weakref(
+                repository_ref
+            )._scale_idx_load_lock,
+            load_locks=lambda: _repository_from_weakref(
+                repository_ref
+            )._scale_idx_load_locks,
             note_model_error=lambda stage, model, exc: (
-                self._note_model_error(stage, model, exc)
+                _repository_from_weakref(repository_ref)._note_model_error(
+                    stage, model, exc
+                )
             ),
         )
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
         # Task 19: full/fold/viz orchestration is runtime-owned. Every
-        # remaining facade collaborator is resolved late so existing
-        # monkeypatch/transaction/cache identity seams remain observable.
+        # remaining facade collaborator is resolved late through the same
+        # weak reference so monkeypatch/transaction/cache identity seams stay
+        # observable without the builder retaining this facade.
         self._runtime.wire_scale_builder(
-            get_notebook=lambda notebook_id: self.get_notebook(notebook_id),
-            version=lambda notebook_id: self._scale_index_version(notebook_id),
-            load_scale=lambda notebook_id: self._scale_index(
-                notebook_id, allow_stale=True
-            ),
-            full_viz_graph=lambda notebook_id: self._unified_graph_full(
-                notebook_id, "object"
-            ),
-            relations_for_notebook=lambda notebook_id: self.relations_for_notebook(
-                notebook_id
-            ),
-            cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
+            get_notebook=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            ).get_notebook(notebook_id),
+            version=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._scale_index_version(notebook_id),
+            load_scale=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._scale_index(notebook_id, allow_stale=True),
+            full_viz_graph=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._unified_graph_full(notebook_id, "object"),
+            relations_for_notebook=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            ).relations_for_notebook(notebook_id),
+            cluster_map=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            ).cluster_map(notebook_id),
             incremental_fuse_source=lambda notebook_id, source_id: (
-                self.incremental_fuse_source(notebook_id, source_id)
+                _repository_from_weakref(repository_ref).incremental_fuse_source(
+                    notebook_id, source_id
+                )
             ),
-            invalidate_scale_cache=lambda notebook_id: self._scale_idx_cache.pop(
-                notebook_id, None
-            ),
-            cache_viz=lambda notebook_id, index: self._viz_idx_cache.__setitem__(
-                notebook_id, index
-            ),
+            invalidate_scale_cache=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._scale_idx_cache.pop(notebook_id, None),
+            cache_viz=lambda notebook_id, index: _repository_from_weakref(
+                repository_ref
+            )._viz_idx_cache.__setitem__(notebook_id, index),
             building=self._scale_building,
             building_lock=self._scale_building_lock,
-            notify_index_done=lambda notebook_id: self._notify_index_done(
-                notebook_id
-            ),
+            notify_index_done=lambda notebook_id: _repository_from_weakref(
+                repository_ref
+            )._notify_index_done(notebook_id),
         )
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
         self._scale_scheduler_started = False
