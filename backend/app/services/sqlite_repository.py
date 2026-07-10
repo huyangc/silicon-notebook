@@ -132,6 +132,15 @@ except ImportError:  # pragma: no cover
     _fast_loads = json.loads
 
 
+def _new_id(prefix: str) -> str:
+    """Collision-proof surrogate row id: prefix + full 128-bit uuid hex.
+    (Historically these used only the first 10 hex chars of uuid4().hex = 40
+    bits, which birthday-collides on tables with one row per item at
+    multi-million-row scale — concept_clusters on a giant KG hit
+    `UNIQUE constraint failed: concept_clusters.id`.)"""
+    return f"{prefix}-{uuid4().hex}"
+
+
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
 USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
@@ -1836,7 +1845,7 @@ class SQLiteRepository:
         if not is_valid_username(username):
             raise ValueError("invalid username")
         norm = normalize_username(username)
-        user_id = f"user-{uuid4().hex[:10]}"
+        user_id = _new_id("user")
         now = _now()
         pw_hash, pw_salt, pw_iters = hash_password(password)
         email = f"{norm}@users.silicon-notebook.local"
@@ -2021,7 +2030,7 @@ class SQLiteRepository:
         """Minimal creation: only name + description (purpose). When the user
         leaves the description blank it is flagged auto (purpose_auto=1) and
         later derived from the first batch of uploaded sources."""
-        notebook_id = f"nb-{uuid4().hex[:10]}"
+        notebook_id = _new_id("nb")
         now = _now()
         purpose = (payload.purpose or "").strip()
         purpose_auto = 0 if purpose else 1
@@ -2230,13 +2239,13 @@ class SQLiteRepository:
         无 FK,同 delete_notebook 一样显式删)。"""
         self._sweep_stuck_copies()
         src = self.get_notebook(source_notebook_id)  # KeyError if missing
-        new_id = f"nb-{uuid4().hex[:10]}"
+        new_id = _new_id("nb")
         now = _now()
         name = new_name or f"{src.name} (副本)"
 
         def _nid(old: str) -> str:
             prefix = old.split("-", 1)[0] if old else "id"
-            return f"{prefix}-{uuid4().hex[:10]}"
+            return _new_id(prefix)
 
         def _chunked_insert(table: str, rows: List[dict]) -> None:
             for i in range(0, len(rows), _COPY_CHUNK):
@@ -2843,7 +2852,7 @@ class SQLiteRepository:
         from app.services.kg.parsing import parse_elements
         f = pathlib.Path(tmpdir) / f"{name}.md"
         f.write_text(text, encoding="utf-8")
-        sid = f"src-{uuid.uuid4().hex[:10]}"
+        sid = _new_id("src")
         now = _now()
         els = parse_elements(text, source_file=str(f))
         with self._write() as db:
@@ -2859,7 +2868,7 @@ class SQLiteRepository:
                     """INSERT INTO source_elements
                        (id, source_id, element_type, location_label, text, metadata, created_at)
                        VALUES (?, ?, ?, ?, ?, '{}', ?)""",
-                    (f"el-{uuid.uuid4().hex[:10]}", sid, el.type,
+                    (_new_id("el"), sid, el.type,
                      f"L{el.line_start}-{el.line_end}", el.text, now))
         return sid
 
@@ -2914,7 +2923,7 @@ class SQLiteRepository:
         now = _now()
         with self._write() as db:
             for file in payload.files:
-                source_id = f"src-{uuid4().hex[:10]}"
+                source_id = _new_id("src")
                 db.execute(
                     """
                     INSERT INTO sources
@@ -2964,7 +2973,7 @@ class SQLiteRepository:
             if not probe.ok:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
                 continue
-            source_id = f"src-{uuid4().hex[:10]}"
+            source_id = _new_id("src")
             now = _now()
             with self._write() as db:
                 db.execute(
@@ -3004,7 +3013,7 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         imported: List[SourceSummary] = []
         for file in files:
-            source_id = f"src-{uuid4().hex[:10]}"
+            source_id = _new_id("src")
             file_name = _safe_filename(file.file_name)
             digest = hashlib.sha256(file.content).hexdigest()
             source_dir = self.storage_dir / "notebooks" / notebook_id
@@ -3626,7 +3635,7 @@ class SQLiteRepository:
         source = self.get_source(source_id)
         elements = self.source_elements(source_id)
         now = _now()
-        run_id = f"run-{uuid4().hex[:10]}"
+        run_id = _new_id("run")
         doc_type_id = _normalize_doc_type(getattr(source, "doc_type", "") or "") or "academic_paper"
         kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type_id, "academic")
         with self._write() as db:
@@ -3914,7 +3923,7 @@ class SQLiteRepository:
                               target_chars=self.settings.chunk_target_chars,
                               overlap_chars=self.settings.chunk_overlap_chars)
         now = _now()
-        rows = [(f"ck-{uuid4().hex[:12]}", notebook_id, source_id, c["text"],
+        rows = [(_new_id("ck"), notebook_id, source_id, c["text"],
                  c["section_path"], json.dumps(c["element_ids"]), now) for c in chunks]
         with self._write() as db:
             # chunks_fts 是词法派生索引(无 source_id 列,不随 chunks 的 FK 级联),须同事务
@@ -4497,7 +4506,7 @@ class SQLiteRepository:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        f"rel-{uuid4().hex[:10]}", notebook_id, source_id,
+                        _new_id("rel"), notebook_id, source_id,
                         rel["source_object_id"], rel["target_object_id"],
                         rel["edge_type"],
                         json.dumps(rel.get("evidence", []), ensure_ascii=False),
@@ -4518,7 +4527,7 @@ class SQLiteRepository:
         now = _now()
         local_to_id: Dict[str, str] = {}
         for obj in objects:
-            local_to_id[obj["local_id"]] = f"ko-{uuid4().hex[:10]}"
+            local_to_id[obj["local_id"]] = _new_id("ko")
             obj["_oid"] = local_to_id[obj["local_id"]]   # _embed_objects_batch 依赖
         from app.services.retrieval import relation_embed_text, _payload_text
         local_to_name = {o["local_id"]: _payload_text(o["payload"])[:80] for o in objects}
@@ -4531,7 +4540,7 @@ class SQLiteRepository:
             spans = [e.get("quoted_span", "") for e in rel.get("evidence", [])
                      if isinstance(e, dict)]
             db_relations.append({
-                "_rid": f"rel-{uuid4().hex[:10]}",
+                "_rid": _new_id("rel"),
                 "source_object_id": s, "target_object_id": t,
                 "edge_type": rel["edge_type"], "evidence": rel.get("evidence", []),
                 "text": relation_embed_text(
@@ -4682,7 +4691,7 @@ class SQLiteRepository:
             existing_triples.add(triple)
             src = src_by_id.get(e["source_object_id"], "")
             new_rows.append((
-                f"rel-{uuid4().hex[:10]}", notebook_id,
+                _new_id("rel"), notebook_id,
                 src if src in valid_src else None,   # NULL if source gone (FK-safe)
                 e["source_object_id"], e["target_object_id"], e["edge_type"],
                 json.dumps([{"basis": e["basis"], "quote": ""}], ensure_ascii=False),
@@ -4990,7 +4999,7 @@ class SQLiteRepository:
                 db.execute(
                     "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
                     "VALUES (?,?,?,?,?,?,?,?)",
-                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"],
+                    (_new_id("cc"), notebook_id, r["canonical_id"],
                      r["member_object_id"], r["canonical_name"], object_type,
                      r.get("canonical_description", ""), now))
             # P0-A: bump the cluster-write change signal in the SAME commit as the
@@ -5019,7 +5028,7 @@ class SQLiteRepository:
                 db.execute(
                     "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
                     "VALUES (?,?,?,?,?,?,?,?)",
-                    (f"cc-{uuid4().hex[:10]}", notebook_id, r["canonical_id"], r["member_object_id"],
+                    (_new_id("cc"), notebook_id, r["canonical_id"], r["member_object_id"],
                      r["canonical_name"], object_type, "", now))
                 added += 1
             # P0-A: only bump when a row actually landed (a no-op call — every
@@ -5151,7 +5160,7 @@ class SQLiteRepository:
                         db.execute(
                             "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
                             "VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                            (f"cm-{uuid4().hex[:10]}", notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
+                            (_new_id("cm"), notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
         from app.services.kg_merge import seed_claim, seed_formula, seed_procedure
         _TYPES = {"claim": (seed_claim, "KL-"), "formula": (seed_formula, "KF-"),
                   "procedure": (seed_procedure, "KP-")}
@@ -5369,7 +5378,7 @@ class SQLiteRepository:
         with self._write() as db:
             db.execute(
                 "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                (f"mc-{uuid4().hex[:10]}", notebook_id, a, b, score, now, now))
+                (_new_id("mc"), notebook_id, a, b, score, now, now))
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
         self.get_notebook(notebook_id)
@@ -5449,7 +5458,7 @@ class SQLiteRepository:
         adjudication (set_conflict_status in T1, write-back in apply_conflict_resolution T4).
         """
         now = _now()
-        cid = f"kcc-{uuid4().hex[:10]}"
+        cid = _new_id("kcc")
         with self._write() as db:
             db.execute(
                 """
@@ -6752,7 +6761,7 @@ class SQLiteRepository:
                     cid = seed_to_canonical.get(r["seed"])
                     if cid is None:
                         continue
-                    buf.append((f"cc-{uuid4().hex[:10]}", notebook_id, cid, r["object_id"],
+                    buf.append((_new_id("cc"), notebook_id, cid, r["object_id"],
                                 canonical_names.get(cid, ""), object_type,
                                 desc_by_cid.get(cid, ""), desc_sig_by_cid.get(cid, ""), now))
                     if len(buf) >= 1000:
@@ -7067,7 +7076,7 @@ class SQLiteRepository:
                 "INSERT INTO concept_merge_candidates "
                 "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?, 'pending', ?, ?)",
-                [(f"mc-{uuid4().hex[:10]}", notebook_id, ca, cb, sa, sb, score, now, now)
+                [(_new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
                  for sa, sb, ca, cb, score in sd["pending_seeds"]])
         _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
         self._invalidate_unified_cache(notebook_id)
@@ -7466,7 +7475,7 @@ class SQLiteRepository:
             for comm in comms:
                 if len(comm) < min_size:
                     continue
-                cid = f"cm-{uuid4().hex[:10]}"
+                cid = _new_id("cm")
                 members = sorted(comm)
                 db.execute(
                     "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
@@ -7783,7 +7792,7 @@ class SQLiteRepository:
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
-        oid = f"ko-{uuid4().hex[:10]}"
+        oid = _new_id("ko")
         now = _now()
         with self._write() as db:
             db.execute(
@@ -7844,7 +7853,7 @@ class SQLiteRepository:
             ).fetchone()
             if existing is not None:
                 return self._promotion_row_to_dict(existing)
-            cand_id = f"promo-{uuid4().hex[:10]}"
+            cand_id = _new_id("promo")
             db.execute(
                 """
                 INSERT INTO promotion_candidates
@@ -7982,7 +7991,7 @@ class SQLiteRepository:
                 )
             else:
                 # No match: insert a fresh base object at status='approved'.
-                base_object_id = f"ko-{uuid4().hex[:10]}"
+                base_object_id = _new_id("ko")
                 db.execute(
                     """
                     INSERT INTO knowledge_objects
@@ -13531,7 +13540,7 @@ class SQLiteRepository:
         # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
         # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
         response.index_required = self._needs_index(notebook_id)
-        answer_id = f"ans-{uuid4().hex[:10]}"
+        answer_id = _new_id("ans")
         now = _now()
         payload = response.model_dump()
         payload["answer_id"] = answer_id
@@ -13570,7 +13579,7 @@ class SQLiteRepository:
                     (now, conversation_id),
                 )
                 return conversation_id
-        new_id = f"conv-{uuid4().hex[:10]}"
+        new_id = _new_id("conv")
         db.execute(
             "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -13585,7 +13594,7 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         question = payload.question.strip()
         now = _now()
-        job_id = f"askjob-{uuid4().hex[:10]}"
+        job_id = _new_id("askjob")
         with self._write() as db:
             conversation_id = self._ensure_conversation(
                 db, notebook_id, payload.conversation_id, question)
@@ -13847,7 +13856,7 @@ class SQLiteRepository:
     # --- 深度报告 ---
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
         self.get_notebook(notebook_id)          # 不存在则 KeyError
-        rid = f"rep-{uuid4().hex[:10]}"
+        rid = _new_id("rep")
         now = _now()
         with self._write() as db:
             db.execute(
@@ -14055,7 +14064,7 @@ class SQLiteRepository:
         if payload.rating not in {"useful", "not_useful"}:
             raise ValueError("rating must be useful or not_useful")
         now = _now()
-        feedback_id = f"fb-{uuid4().hex[:10]}"
+        feedback_id = _new_id("fb")
         with self._write() as db:
             answer = db.execute(
                 "SELECT notebook_id FROM answers WHERE id = ?",
