@@ -12,11 +12,11 @@
 2. 被这些测试覆盖的生产代码。
 3. `README.md`、`README_zh.md`、`AGENTS.md` 与本文。
 
-第一阶段用 `backend/tests/test_architecture_documentation.py` 固定三个容易漂移的架构契约：
+第一阶段用 `backend/tests/test_architecture_documentation.py` 固定以下容易漂移的架构契约：
 
 - Ask stream 的 transport 断连与用户显式取消是两种事件；前者不取消 detached worker。
-- 两层检索不按 tier 改写相关度；`base` 只处理完全相同分数的次序。
-- notebook 内页是来源栏 + Ask/Knowledge 主区域的两列 workspace；Studio 动作位于顶部工具栏或对话框，不占固定右栏。
+- 检索联合范围按 mode 区分；知识对象的 exact-score `base` 次序不能泛化到 chunk 或 relation 检索。
+- notebook 内页是来源栏 + 主区域的两列 workspace，主区域有问答 / 知识库 / 深度报告三个 tab；没有固定 Studio 右栏。
 
 本地 beta 保持 FastAPI + SQLite + Next.js 的双进程形态，不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 pypdf 回退。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
@@ -57,7 +57,7 @@ facade 通过继承复用这两个实现，并保持既有 repository 方法、�
 - `kg-type-mark.tsx` 保存答案与图谱共用的知识类型标记。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 
-notebook 内页采用来源栏 + Ask/Knowledge 主区域的两列 workspace。Knowledge Graph 以全屏 overlay 打开；文章研究、Mind Map、Infographic、治理队列和其他 Studio 类动作从顶部分析工具栏进入，并在对话框或独立视图显示。
+notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供问答 / 知识库 / 深度报告三个 tab。全屏 Knowledge Graph、看板和 Schema 是独立顶栏动作；「分析」菜单本身只含晋升队列（admin）、tier 切换（admin）与边审查队列。当前没有文章研究、思维导图、信息图或派生规则入口，也没有固定 Studio 右栏。
 
 ### 2.5 配置边界
 
@@ -85,7 +85,7 @@ notebook 内页采用来源栏 + Ask/Knowledge 主区域的两列 workspace。Kn
   → 标记 unified KG / index 维护状态，由独立维护路径处理
 ```
 
-source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析会清理旧的抽取与数据库派生状态，但保留原始文件；它会重建 source element、chunk、embedding 和后续抽取结果。删除 source 还会移除存储的本地文件和依赖该 source 的文章研究产物。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
+source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析保留 source 行与原始文件；它替换旧 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。当前代码没有额外的文章产物清理步骤。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
 
 ### 3.2 Ask 与 detached job
 
@@ -113,7 +113,9 @@ transport disconnect / navigation / refresh
 
 ### 3.3 联合检索与回答合成
 
-所有 Ask mode 都可在当前 personal notebook 与可参与的 base notebook 之间联合检索，并给 hit/anchor 标记 `tier`。`federated_retrieve` 的相关度 score 不乘 tier 常数，也不设置 tier 配额或地板；排序以 score 为第一键，只在 score 完全相同时让 base 先排。因此相关度更高的 personal 命中始终可以排在 base 命中之前。
+联合范围按检索路径区分：`chunk` 基线只读取 active notebook 的 chunk；启用 KG overlay 或 PPR 时，才可能加入 federated KG 上下文与 base-backed chunk。`graph` 和 `reasoning` 使用 federated KG 路径。
+
+知识对象 `federated_retrieve()` 跨 active + base 收集并标记 tier，其相关度 score 不乘 tier 常数，也不设置 tier 配额或地板；exact-score 的 `base` 次序只适用于知识对象命中。因此相关度更高的 personal knowledge hit 仍在前。`federated_retrieve_relations()` 的关系命中只按 score 降序，不使用 base 平局次序。
 
 base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 证据矛盾，答案服从 base，并明确披露差异。这是 synthesis policy，不是 retrieval score policy，也不参与 grounding 阈值。
 
@@ -135,8 +137,10 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 - **断连不等于取消**：transport 断连只停止向该客户端继续推送；detached Ask worker 仍执行并可持久化。只有显式 cancel endpoint 能设置 cancellation event。
 - **显式中断端到端**：前端 interrupt 控件拿已返回的 `job_id` 调 cancel endpoint；worker 与流式 LLM 在保存最终回答前检查取消状态。
-- **tier 不改分**：base/personal 对 retrieval score 无幅度影响；完全平局时 base 作为第二排序键。base-wins 矛盾规则只属于回答合成。
-- **两列 workspace**：固定区域只有来源栏与 Ask/Knowledge 主区域；Studio 类功能不占固定右侧栏。
+- **检索范围按 mode**：`chunk` 基线只读 active notebook；KG overlay/PPR 才可加入 federated KG/base-backed chunk；`graph`/`reasoning` 走 federated KG。
+- **tier 次序只限知识对象**：`federated_retrieve()` 的 knowledge hit 完全平局时 base 作为第二排序键；relation hit 仍只按 score。base-wins 矛盾规则只属于回答合成。
+- **两列三 tab workspace**：固定区域只有来源栏与主区域；主区域含问答、知识库、深度报告，当前没有固定 Studio 右侧栏。
+- **source cleanup 边界**：reparse 保留 source 行和原始文件，替换解析/分块/embedding 并清理抽取派生；delete 再删除 source 行与本地文件。
 - **维护工作显式可观测**：Ask 不承担整库 embedding、KG rebuild 或 scale-index build。图与索引状态必须可查询，重建/刷新由独立任务完成。
 - **证据与治理一致**：只有 usable knowledge status 进入检索；所有图消费者排除 `review_status='rejected'` 的关系，并保持存储的 `source_object_id → target_object_id` 方向。
 - **兼容 facade**：本阶段不改变 endpoint、SQLite schema、repository 公共方法、旧 import、前端交互或异步任务语义。
@@ -162,7 +166,7 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 整改按已批准设计分六个独立阶段，每阶段单独提交/PR、同步最新 `master` 并运行完整门禁：
 
-1. **行为契约与文档对齐**：修正 Ask disconnect、tier 排序与 workspace 文档漂移，重写本文并加入文档契约测试；不改运行时代码。
+1. **行为契约与文档对齐**：修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。
 2. **Notebook 规模策略与 Repository ports**：引入中性 `NotebookScaleProfile`，让 copy 与 retrieval 分别消费自己的策略；把巨型 repository Protocol 拆成领域小 Protocol，同时保留兼容组合类型。
 3. **FastAPI routers 与前端 API client**：按 notebook/source/ask/knowledge/report/admin 拆 router；统一前端 JSON、NDJSON、Blob、认证和错误解析。
 4. **SQLite migrations 与模型边界**：把 migration registry、DDL 与 schema helper 迁到 `sqlite_migrations.py`；按领域拆 Pydantic 模型并从 `schemas.py` re-export 旧符号。

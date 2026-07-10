@@ -19,8 +19,9 @@
 文档必须追随前两项，不能用过期文字反向改变已经上线且被测试固定的语义。当前需要首先对齐的契约是：
 
 - Ask transport 断连只停止向该客户端继续推送；detached worker 继续执行并持久化结果。只有用户显式点击中断、调用 `POST /notebooks/{id}/ask/jobs/{job_id}/cancel` 时才取消 worker。
-- `base` 与 `personal` 命中的相关度不乘 tier 权重；只在 score 完全相同时让 `base` 先排。回答阶段遇到矛盾仍按 prompt 规则服从 base 并披露差异。
-- notebook workspace 是来源栏 + Ask/Knowledge 主区域的两列结构；Studio 不是固定第三栏。
+- 检索必须按 mode 描述：`chunk` 基线只读取 active notebook 的 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 使用 federated KG 路径。知识对象 `federated_retrieve()` 的相关度不乘 tier 权重，exact-score 的 `base` 次序只适用于知识对象命中；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答阶段遇到矛盾仍按 prompt 规则服从 base 并披露差异。
+- notebook workspace 是来源栏 + 主区域的两列结构，主区域有问答 / 知识库 / 深度报告三个 tab；不恢复固定 Studio 第三栏。「分析」菜单只含晋升队列（admin）、tier 切换（admin）与边审查队列；看板、Schema 和全屏知识图谱是其他顶栏动作，当前不暴露已退役的内容生成或派生规则入口。
+- source 生命周期必须分清：重新解析保留 source 行与原始文件，替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge；删除执行同一 source-derived cleanup 后删除 source 行（由外键级联 source-owned records）和本地文件，不宣称会清理文章产物。
 
 ## 现有结构判断
 
@@ -37,7 +38,7 @@
 
 ### 阶段 1：行为契约与文档对齐
 
-修复 Ask disconnect、tier 排序和 workspace 结构的文档漂移；重写过期的 `architecture.md`，增加文档契约测试。无运行时代码改动。
+修复 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace 与 source cleanup 的文档漂移；清除已退役 Article/derived-rule 的当前行为声明，重写过期的 `architecture.md`，增加文档契约测试。无运行时代码改动。
 
 ### 阶段 2：Notebook 规模策略与 Repository ports
 
