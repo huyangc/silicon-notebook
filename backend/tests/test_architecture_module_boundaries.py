@@ -74,13 +74,45 @@ def test_request_identity_exports_remain_backwards_compatible():
     assert sqlite_repository.reset_request_user is sqlite_identity.reset_request_user
 
 
-def test_sqlite_sharing_domain_is_inherited_not_reimplemented():
-    assert issubclass(SQLiteRepository, SQLiteNotebookSharingMixin)
+def test_sqlite_sharing_domain_is_composed_with_explicit_delegates():
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.services.notebook_sharing import (
+        NotebookCopyService,
+        NotebookSharingService,
+    )
+
+    # Task 9: the facade no longer inherits the sharing mixin — every frozen
+    # member is an explicit facade delegate onto the composed service layer.
+    assert not issubclass(SQLiteRepository, SQLiteNotebookSharingMixin)
     for method_name in SHARING_METHODS:
-        assert method_name not in SQLiteRepository.__dict__
-        assert getattr(SQLiteRepository, method_name) is getattr(
-            SQLiteNotebookSharingMixin, method_name
-        )
+        assert method_name in SQLiteRepository.__dict__, method_name
+
+    service_methods = (
+        "share_notebook", "unshare_notebook", "find_notebook_by_share_token",
+        "notebook_copy_stats", "shared_preview", "shared_by_me",
+        "copy_notebook", "sweep_stuck_copies",
+        "user_can_access_notebook", "is_member", "user_can_read_notebook",
+        "user_can_read_source", "user_can_read_answer",
+        "add_member", "remove_member", "kick_all_members", "list_members",
+        "join_shared", "leave_notebook",
+        "source_owner", "conversation_owner", "answer_owner",
+    )
+    for method_name in service_methods:
+        assert method_name in NotebookSharingService.__dict__, method_name
+
+    for method_name in ("copy_notebook", "sweep_stuck_copies"):
+        assert method_name in NotebookCopyService.__dict__, method_name
+
+    store_methods = (
+        "set_share_token", "clear_share", "find_by_token",
+        "list_shared_by_owner", "user_can_access_notebook", "is_member",
+        "add_member", "remove_member", "kick_all_members", "list_members",
+        "source_owner", "conversation_owner", "answer_owner",
+        "snapshot_copy_rows", "insert_copy_rows", "compensate_copy",
+        "sweep_stale_copies",
+    )
+    for method_name in store_methods:
+        assert method_name in SharingStore.__dict__, method_name
 
 
 def test_sharing_helpers_remain_backwards_compatible():

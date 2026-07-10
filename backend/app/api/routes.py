@@ -12,10 +12,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
-    admin_query_repository,
-    identity_repository, notebook_catalog_repository,
-    repository, require_notebook_access, require_notebook_read,
-    require_notebook_write, get_current_user,
+    admin_query_repository, identity_repository,
+    notebook_access_repository, notebook_catalog_repository,
+    notebook_sharing_repository, repository, require_notebook_access,
+    require_notebook_read, require_notebook_write, get_current_user,
 )
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
@@ -248,7 +248,7 @@ def list_notebooks() -> List[NotebookSummary]:
 # 注意:静态段路由必须在 /notebooks/{notebook_id} 之前注册,否则 "shared-by-me" 被当作 {notebook_id}。
 @router.get("/notebooks/shared-by-me", response_model=List[SharedByMeItem])
 def shared_by_me_route(user: UserProfile = Depends(get_current_user)) -> List[SharedByMeItem]:
-    return [SharedByMeItem(**it) for it in repository().shared_by_me(user.id)]
+    return [SharedByMeItem(**it) for it in notebook_sharing_repository().shared_by_me(user.id)]
 
 
 @router.post("/notebooks", response_model=NotebookSummary)
@@ -367,7 +367,7 @@ async def upload_sources(
 
 @router.get("/sources/{source_id}", response_model=SourceDetail)
 def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceDetail:
-    if not repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return repository().get_source(source_id)
@@ -377,7 +377,7 @@ def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) ->
 
 @router.post("/sources/{source_id}/parse", response_model=SourceSummary)
 def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceSummary:
-    if repository().source_owner(source_id) != user.id:
+    if notebook_access_repository().source_owner(source_id) != user.id:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return repository().parse_source(source_id)
@@ -387,7 +387,7 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
 def source_elements(source_id: str, user: UserProfile = Depends(get_current_user)) -> List[SourceElement]:
-    if not repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return repository().source_elements(source_id)
@@ -397,7 +397,7 @@ def source_elements(source_id: str, user: UserProfile = Depends(get_current_user
 
 @router.delete("/sources/{source_id}", status_code=204)
 def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    if repository().source_owner(source_id) != user.id:
+    if notebook_access_repository().source_owner(source_id) != user.id:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         repository().delete_source(source_id)
@@ -704,7 +704,7 @@ def list_conversations(notebook_id: str) -> List[ConversationSummary]:
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
 def get_conversation(conversation_id: str, user: UserProfile = Depends(get_current_user)) -> ConversationDetail:
-    if repository().conversation_owner(conversation_id) != user.id:
+    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     try:
         return repository().get_conversation(conversation_id)
@@ -714,7 +714,7 @@ def get_conversation(conversation_id: str, user: UserProfile = Depends(get_curre
 
 @router.patch("/conversations/{conversation_id}")
 def rename_conversation(conversation_id: str, payload: ConversationRenameRequest, user: UserProfile = Depends(get_current_user)):
-    if repository().conversation_owner(conversation_id) != user.id:
+    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     try:
         repository().rename_conversation(conversation_id, payload.title)
@@ -725,7 +725,7 @@ def rename_conversation(conversation_id: str, payload: ConversationRenameRequest
 
 @router.delete("/conversations/{conversation_id}")
 def delete_conversation(conversation_id: str, user: UserProfile = Depends(get_current_user)):
-    if repository().conversation_owner(conversation_id) != user.id:
+    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     try:
         repository().delete_conversation(conversation_id)
@@ -798,7 +798,7 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
              dependencies=[Depends(require_notebook_access)])
 def share_notebook_route(notebook_id: str) -> ShareResponse:
     try:
-        return ShareResponse(**repository().share_notebook(notebook_id))
+        return ShareResponse(**notebook_sharing_repository().share_notebook(notebook_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -807,46 +807,47 @@ def share_notebook_route(notebook_id: str) -> ShareResponse:
                dependencies=[Depends(require_notebook_access)])
 def unshare_notebook_route(notebook_id: str) -> None:
     try:
-        repository().unshare_notebook(notebook_id)
+        notebook_sharing_repository().unshare_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get("/shared/{token}", response_model=SharedPreview)
 def shared_preview_route(token: str, user: UserProfile = Depends(get_current_user)) -> SharedPreview:
-    nb_id = repository().find_notebook_by_share_token(token)
+    sharing = notebook_sharing_repository()
+    nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    return SharedPreview(**repository().shared_preview(nb_id))
+    return SharedPreview(**sharing.shared_preview(nb_id))
 
 
 @router.post("/shared/{token}/copy", response_model=NotebookSummary)
 def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
-    repo = repository()
-    nb_id = repo.find_notebook_by_share_token(token)
+    sharing = notebook_sharing_repository()
+    nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if not repo.notebook_copy_stats(nb_id)["copyable"]:
+    if not sharing.notebook_copy_stats(nb_id)["copyable"]:
         raise HTTPException(status_code=409, detail="notebook too large to copy")
-    return repo.copy_notebook(nb_id, new_owner_id=user.id)
+    return sharing.copy_notebook(nb_id, new_owner_id=user.id)
 
 
 @router.post("/shared/{token}/join", response_model=NotebookSummary)
 def join_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
     """大库只读加入:凭 share_token 成为只读成员。小库应走 copy 而非 join。"""
-    repo = repository()
-    nb_id = repo.find_notebook_by_share_token(token)
+    sharing = notebook_sharing_repository()
+    nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if repo.notebook_copy_stats(nb_id)["copyable"]:
+    if sharing.notebook_copy_stats(nb_id)["copyable"]:
         raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
-    return repo.join_shared(nb_id, user.id)
+    return sharing.join_shared(nb_id, user.id)
 
 
 @router.delete("/notebooks/{notebook_id}/membership", status_code=204)
 def leave_notebook_route(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> None:
     """退出只读共享:只删自己的成员记录(幂等,不影响他人)。"""
-    repository().leave_notebook(notebook_id, user.id)
+    notebook_sharing_repository().leave_notebook(notebook_id, user.id)
 
 
 @router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_access)])
@@ -1052,7 +1053,7 @@ def delete_report(notebook_id: str, report_id: str) -> dict:
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
 def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile = Depends(get_current_user)) -> FeedbackResponse:
-    if not repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
+    if not notebook_access_repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
         raise HTTPException(status_code=404, detail="Answer not found")
     try:
         return repository().submit_feedback(answer_id, payload)

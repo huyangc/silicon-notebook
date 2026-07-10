@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import get_settings
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.schemas import UserProfile
-from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, SourceRepository, AskStreamPort
+from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, AskStreamPort
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -26,7 +26,10 @@ def notebook_catalog_repository() -> NotebookCatalogRepository:
     return repository()._runtime.catalog  # type: ignore[attr-defined]
 
 def notebook_access_repository() -> NotebookAccessRepository:
-    return repository()
+    return repository()._runtime.sharing  # type: ignore[attr-defined]
+
+def notebook_sharing_repository() -> NotebookSharingRepository:
+    return repository()._runtime.sharing  # type: ignore[attr-defined]
 
 def source_repository() -> SourceRepository:
     return repository()
@@ -72,7 +75,7 @@ async def require_notebook_write(
 ) -> str:
     """写守卫:仅 owner。非 owner → 404(不泄露存在性)。"""
     allowed = await run_in_threadpool(
-        repository().user_can_access_notebook, notebook_id, user.id
+        notebook_access_repository().user_can_access_notebook, notebook_id, user.id
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
@@ -84,7 +87,7 @@ async def require_notebook_read(
 ) -> str:
     """读守卫:owner ∪ 只读成员。非授权 → 404(不泄露存在性)。"""
     allowed = await run_in_threadpool(
-        repository().user_can_read_notebook, notebook_id, user.id
+        notebook_access_repository().user_can_read_notebook, notebook_id, user.id
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")

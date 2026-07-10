@@ -110,6 +110,7 @@ TASK8_ALLOWED_IMPORTS = {
     ("backend/tests/test_notebook_store_component.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/tests/test_notebook_summary_query.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+TASK9_ALLOWED_IMPORTS: set[tuple[str, int, str, str]] = set()
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -160,6 +161,31 @@ TASK8_ALLOWED_CONSUMERS = {
     ("mark_notebook_base", "backend/app/api/routes.py:785"),
     ("set_notebook_personal", "backend/app/api/routes.py:787"),
 }
+# Task 9 moves the sharing/access routes onto the typed
+# notebook_sharing_repository()/notebook_access_repository() accessors; these
+# are the frozen repository() call sites they replace.
+TASK9_ALLOWED_CONSUMERS = {
+    ("shared_by_me", "backend/app/api/routes.py:248"),
+    ("user_can_read_source", "backend/app/api/routes.py:367"),
+    ("source_owner", "backend/app/api/routes.py:377"),
+    ("user_can_read_source", "backend/app/api/routes.py:387"),
+    ("source_owner", "backend/app/api/routes.py:397"),
+    ("conversation_owner", "backend/app/api/routes.py:704"),
+    ("conversation_owner", "backend/app/api/routes.py:714"),
+    ("conversation_owner", "backend/app/api/routes.py:725"),
+    ("share_notebook", "backend/app/api/routes.py:797"),
+    ("unshare_notebook", "backend/app/api/routes.py:806"),
+    ("find_notebook_by_share_token", "backend/app/api/routes.py:813"),
+    ("shared_preview", "backend/app/api/routes.py:816"),
+    ("find_notebook_by_share_token", "backend/app/api/routes.py:822"),
+    ("notebook_copy_stats", "backend/app/api/routes.py:825"),
+    ("copy_notebook", "backend/app/api/routes.py:827"),
+    ("find_notebook_by_share_token", "backend/app/api/routes.py:834"),
+    ("notebook_copy_stats", "backend/app/api/routes.py:837"),
+    ("join_shared", "backend/app/api/routes.py:839"),
+    ("leave_notebook", "backend/app/api/routes.py:845"),
+    ("user_can_read_answer", "backend/app/api/routes.py:1051"),
+}
 TASK2_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {
@@ -204,6 +230,16 @@ MASTER_V10_ALLOWED_PATCHES = {
 # patch seat onto the runtime SqliteDatabase.connect component seam.
 TASK8_ALLOWED_PATCHES = {
     ("backend/tests/test_notebook_counts_batched.py", 115, "_connect", "repo"),
+}
+# Task 9 late-binding proofs: the copy service must observe post-construction
+# patches of the module seams (_new_id / _COPY_CHUNK) and the facade
+# _insert_row seat (failure injection for compensation coverage).
+TASK9_ALLOWED_PATCHES = {
+    ("backend/tests/test_notebook_copy_service.py", 115, "_new_id", "sqlite_repository"),
+    ("backend/tests/test_notebook_copy_service.py", 140, "_COPY_CHUNK", "sqlite_repository"),
+    ("backend/tests/test_notebook_copy_service.py", 168, "_insert_row", "repo"),
+    ("backend/tests/test_notebook_copy_service.py", 189, "_COPY_CHUNK", "sqlite_repository"),
+    ("backend/tests/test_notebook_copy_service.py", 199, "_insert_row", "repo"),
 }
 TASK5_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
@@ -308,6 +344,32 @@ TASK8_ALLOWED_MEMBER_FILES = {
         "SQLiteRepository", "create_notebook", "current_user", "get_notebook",
         "list_notebooks", "mark_notebook_base", "notebook_analytics",
         "search_notebook", "_kg_building", "_runtime",
+    }
+}
+# Task 9: the sharing/deep-copy mixin body is recomposed into SharingStore +
+# NotebookCopyService/NotebookSharingService; the facade keeps
+# frozen-signature delegates, so the mixin module's internal self-call sites
+# disappear.  The facade's wire_sharing lambda adds one _insert_row seat
+# reference; the two component test files consume the facade at fresh sites.
+TASK9_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_notebook_sharing.py", name)
+    for name in {
+        "_connect", "_insert_row", "_notebook_from_row",
+        "_scale_index_version", "_sweep_stuck_copies", "_vector_cache",
+        "_write", "add_member", "get_notebook", "is_member", "list_members",
+        "notebook_copy_stats", "remove_member", "settings", "storage_dir",
+        "user_can_access_notebook", "user_can_read_notebook",
+    }
+} | {
+    ("backend/app/services/sqlite_repository.py", "_insert_row"),
+} | {
+    ("backend/tests/test_sharing_store_component.py", name)
+    for name in {"SQLiteRepository", "_runtime"}
+} | {
+    ("backend/tests/test_notebook_copy_service.py", name)
+    for name in {
+        "SQLiteRepository", "_COPY_CHUNK", "_insert_row", "_new_id",
+        "_runtime", "copy_notebook", "storage_dir",
     }
 }
 
@@ -719,6 +781,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK4_ALLOWED_IMPORTS
                     or site in TASK7_ALLOWED_IMPORTS
                     or site in TASK8_ALLOWED_IMPORTS
+                    or site in TASK9_ALLOWED_IMPORTS
                 )
 
 
@@ -730,7 +793,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -752,21 +815,21 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}

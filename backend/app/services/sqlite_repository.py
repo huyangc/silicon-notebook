@@ -92,8 +92,8 @@ from app.services.sqlite_identity import (
 )
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
 from app.repositories.sqlite.migrations import SqliteMigrator, SCHEMA_VERSION
-from app.services.sqlite_notebook_sharing import (
-    SQLiteNotebookSharingMixin,
+from app.services.sqlite_notebook_sharing import (  # noqa: F401 — compatibility exports
+    SQLiteNotebookSharingMixin,  # Task 9: no longer in the facade MRO; kept importable
     _remap_json_ids,
 )
 from app.services.parsers import parse_source_file, mineru_content_list_to_elements
@@ -261,7 +261,7 @@ class ChunkRetrievalPlan:
     fuse_k: int              # == chunk_mmr_k（复刻 multi 分支 quota_fuse 复用同一 knob）
 
 
-class SQLiteRepository(SQLiteNotebookSharingMixin):
+class SQLiteRepository:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -276,6 +276,14 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
             ),
         )
         self.storage_dir = self._resolve_path(settings.storage_dir)
+        # Task 9: finish the sharing/deep-copy composition with facade-bound
+        # late seams — the _insert_row seat and the memoized copy-stats keep
+        # honouring per-instance monkeypatches, storage_dir stays live.
+        self._runtime.wire_sharing(
+            insert_row=lambda db, table, data: self._insert_row(db, table, data),
+            copy_stats=lambda notebook_id: self.notebook_copy_stats(notebook_id),
+            storage_dir=lambda: self.storage_dir,
+        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
@@ -847,6 +855,95 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
 
     def delete_notebook(self, notebook_id: str) -> None:
         return self._runtime.catalog.delete_notebook(notebook_id)
+
+    # ------------------------------------------------------------------
+    # Sharing / membership / deep-copy domain (Task 9): composed
+    # NotebookSharingService + NotebookCopyService + SharingStore delegates.
+    # Frozen public signatures; the facade keeps notebook_copy_stats' own
+    # scale-profile memo (cross-domain bridge) and the _insert_row seat.
+    # ------------------------------------------------------------------
+    def share_notebook(self, notebook_id: str) -> dict:
+        return self._runtime.sharing.share_notebook(notebook_id)
+
+    def unshare_notebook(self, notebook_id: str) -> None:
+        return self._runtime.sharing.unshare_notebook(notebook_id)
+
+    def find_notebook_by_share_token(self, token: str) -> "str | None":
+        return self._runtime.sharing.find_notebook_by_share_token(token)
+
+    def notebook_copy_stats(self, notebook_id: str) -> dict:
+        return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).copy_stats(notebook_id)
+
+    def shared_preview(self, notebook_id: str) -> dict:
+        return self._runtime.sharing.shared_preview(notebook_id)
+
+    def shared_by_me(self, user_id: str) -> list:
+        return self._runtime.sharing.shared_by_me(user_id)
+
+    @staticmethod
+    def _insert_row(db, table: str, data: dict) -> None:
+        columns = list(data.keys())
+        db.execute(
+            f"INSERT INTO {table} ({','.join(columns)}) "
+            f"VALUES ({','.join('?' * len(columns))})",
+            [data[column] for column in columns],
+        )
+
+    def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
+        return self._runtime.sharing.sweep_stuck_copies(created_by)
+
+    def copy_notebook(
+        self,
+        source_notebook_id: str,
+        *,
+        new_owner_id: str,
+        new_name: "str | None" = None,
+    ) -> NotebookSummary:
+        return self._runtime.sharing.copy_notebook(
+            source_notebook_id, new_owner_id=new_owner_id, new_name=new_name
+        )
+
+    def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
+        return self._runtime.sharing.user_can_access_notebook(notebook_id, user_id)
+
+    def is_member(self, notebook_id: str, user_id: str) -> bool:
+        return self._runtime.sharing.is_member(notebook_id, user_id)
+
+    def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
+        return self._runtime.sharing.user_can_read_notebook(notebook_id, user_id)
+
+    def user_can_read_source(self, source_id: str, user_id: str) -> bool:
+        return self._runtime.sharing.user_can_read_source(source_id, user_id)
+
+    def add_member(self, notebook_id: str, user_id: str) -> None:
+        return self._runtime.sharing.add_member(notebook_id, user_id)
+
+    def remove_member(self, notebook_id: str, user_id: str) -> None:
+        return self._runtime.sharing.remove_member(notebook_id, user_id)
+
+    def kick_all_members(self, notebook_id: str) -> None:
+        return self._runtime.sharing.kick_all_members(notebook_id)
+
+    def list_members(self, notebook_id: str) -> list:
+        return self._runtime.sharing.list_members(notebook_id)
+
+    def join_shared(self, notebook_id: str, user_id: str) -> NotebookSummary:
+        return self._runtime.sharing.join_shared(notebook_id, user_id)
+
+    def leave_notebook(self, notebook_id: str, user_id: str) -> None:
+        return self._runtime.sharing.leave_notebook(notebook_id, user_id)
+
+    def source_owner(self, source_id: str) -> "str | None":
+        return self._runtime.sharing.source_owner(source_id)
+
+    def conversation_owner(self, conversation_id: str) -> "str | None":
+        return self._runtime.sharing.conversation_owner(conversation_id)
+
+    def answer_owner(self, answer_id: str) -> "str | None":
+        return self._runtime.sharing.answer_owner(answer_id)
+
+    def user_can_read_answer(self, answer_id: str, user_id: str) -> bool:
+        return self._runtime.sharing.user_can_read_answer(answer_id, user_id)
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         """Delete all KG artifacts for a notebook (objects, relations, clusters,

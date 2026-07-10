@@ -1792,11 +1792,11 @@ class NotebookCopyService:
     ) -> NotebookSummary: ...
 ~~~
 
-- [ ] **Step 1: Write RED transaction, compensation and late-binding tests**
+- [x] **Step 1: Write RED transaction, compensation and late-binding tests**
 
 Inject failures after destination sentinel creation and after the first table chunk. Assert only the destination/files are compensated. Patch `sqlite_repository._COPY_CHUNK` and `_new_id` after repository construction and assert the copy operation observes the patched values.
 
-- [ ] **Step 2: Run tests and confirm RED**
+- [x] **Step 2: Run tests and confirm RED**
 
 ~~~bash
 cd backend
@@ -1809,15 +1809,15 @@ python -m pytest \
 
 Expected: missing sharing store/service.
 
-- [ ] **Step 3: Move share/member SQL and keep copy orchestration in a service**
+- [x] **Step 3: Move share/member SQL and keep copy orchestration in a service**
 
 SharingStore owns rows and connection-taking copy primitives. NotebookCopyService owns ID remap, chunked transactions, filesystem copy and compensation. It reads `RepositoryCompatibilitySeams.new_id()` and `copy_chunk_size()` during every operation.
 
-- [ ] **Step 4: Replace sharing mixin inheritance and route types**
+- [x] **Step 4: Replace sharing mixin inheritance and route types**
 
 Remove `SQLiteNotebookSharingMixin` from the facade MRO; preserve the old class/helper imports as compatibility exports. Access guards use `notebook_access_repository()`; sharing routes use `notebook_sharing_repository()`.
 
-- [ ] **Step 5: Run focused tests and confirm GREEN**
+- [x] **Step 5: Run focused tests and confirm GREEN**
 
 ~~~bash
 cd backend
@@ -1830,7 +1830,7 @@ python -m pytest \
   tests/test_architecture_module_boundaries.py -q
 ~~~
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ~~~bash
 git add backend/app/repositories/sqlite/sharing_store.py \
@@ -1849,7 +1849,7 @@ git add backend/app/repositories/sqlite/sharing_store.py \
 git commit -m "refactor(repository): compose sharing and notebook copy services"
 ~~~
 
-- [ ] **Step 7: Run Review Gate 3**
+- [x] **Step 7: Run Review Gate 3**
 
 ~~~bash
 cd backend

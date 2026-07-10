@@ -11,8 +11,10 @@ from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
+from app.repositories.sqlite.sharing_store import SharingStore
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
+from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,13 @@ class RepositoryRuntime:
             queries=self.queries,
             identity=self.identity,
         )
+        # Sharing/deep-copy composition is finished by wire_sharing(): its
+        # collaborators (facade _insert_row seat, notebook_copy_stats memo,
+        # storage_dir) are facade-bound seams that only exist once the facade
+        # constructor reaches them.  Construction stays lazy — no seam calls.
+        self.sharing_store: "SharingStore | None" = None
+        self.notebook_copies: "NotebookCopyService | None" = None
+        self.sharing: "NotebookSharingService | None" = None
         self.event_log = EventLogger(settings, channel="events", per_user=True)
         if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
             self.event_log.logger.warning(
@@ -62,3 +71,36 @@ class RepositoryRuntime:
             self.event_log,
             ask_context,
         )
+
+    def wire_sharing(
+        self,
+        *,
+        insert_row: Callable[..., None],
+        copy_stats: Callable[[str], dict],
+        storage_dir: Callable[[], Path],
+    ) -> NotebookSharingService:
+        """Compose the sharing domain (Task 9) once the facade-bound seams
+        exist: ``insert_row`` = the facade's ``_insert_row`` compatibility
+        seat, ``copy_stats`` = the facade's memoized ``notebook_copy_stats``,
+        ``storage_dir`` resolves the live storage root."""
+        self.sharing_store = SharingStore(
+            self.database,
+            self.settings,
+            now=self.seams.now,
+            insert_row=insert_row,
+        )
+        self.notebook_copies = NotebookCopyService(
+            store=self.sharing_store,
+            catalog=self.catalog,
+            seams=self.seams,
+            storage_dir=storage_dir,
+        )
+        self.sharing = NotebookSharingService(
+            store=self.sharing_store,
+            copies=self.notebook_copies,
+            catalog=self.catalog,
+            summaries=self.notebook_summaries,
+            database=self.database,
+            copy_stats=copy_stats,
+        )
+        return self.sharing
