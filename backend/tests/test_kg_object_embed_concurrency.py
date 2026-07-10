@@ -73,3 +73,23 @@ def test_embed_objects_batch_failed_batch_isolated(repo):
     with repo._connect() as db:
         (n,) = db.execute("SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()
     assert n == 20
+
+
+def test_embed_objects_batch_workers_use_emb_kg_thread_prefix(repo):
+    """Task 11 pin: the object-embedding pool keeps its ``emb-kg`` thread-name
+    prefix through the SourceEmbeddingService extraction."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    names = set()
+
+    class _NameEmbedder(_ConcEmbedder):
+        def embed_texts(self, texts):
+            with self._lock:
+                names.add(threading.current_thread().name)
+            return super().embed_texts(texts)
+
+    items = [{"_oid": f"ko-{i}", "payload": {"name": f"Concept number {i}"}}
+             for i in range(25)]
+    repo.embedder = _NameEmbedder(dim=8)
+    repo._embed_objects_batch(nb.id, items)
+    assert names
+    assert all(name.startswith("emb-kg") for name in names)

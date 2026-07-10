@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List
 
 from app.models.schemas import (
@@ -15,6 +13,10 @@ from app.models.schemas import (
     NotebookTemplate,
     NotebookUpdate,
 )
+# Canonical implementation lives with the SourceFileStore (Task 11); the
+# private alias keeps this module's delete_notebook cleanup call sites and
+# historical importers unchanged.
+from app.repositories.source_files import delete_source_file as _delete_source_file
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.notebook_store import NotebookStore, USABLE_STATUSES
@@ -28,20 +30,6 @@ def _created_label(value: str) -> str:
     except ValueError:
         dt = datetime.now()
     return f"{dt.year}年{dt.month}月{dt.day}日"
-
-
-def _delete_source_file(file_path: str) -> None:
-    """Remove one stored source file, then its per-notebook directory when the
-    file was the last one in it.  The facade's `_delete_file` compatibility
-    wrapper delegates here so source deletion shares the same implementation."""
-    if not file_path:
-        return
-    path = Path(file_path)
-    if path.exists() and path.is_file():
-        path.unlink()
-    notebook_dir = path.parent
-    if notebook_dir.exists() and not any(notebook_dir.iterdir()):
-        shutil.rmtree(notebook_dir, ignore_errors=True)
 
 
 class NotebookSummaryQuery:

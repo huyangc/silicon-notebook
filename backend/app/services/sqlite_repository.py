@@ -82,7 +82,7 @@ from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
 from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
-from app.services.notebook_catalog import NotebookSummaryQuery, _delete_source_file
+from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.sqlite_identity import (
     _REQUEST_USER,
     get_request_user,
@@ -91,7 +91,7 @@ from app.services.sqlite_identity import (
     set_request_user,
 )
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
-from app.repositories.sqlite.chunk_store import ChunkWrite
+from app.repositories.source_files import safe_filename as _safe_filename
 from app.repositories.sqlite.migrations import SqliteMigrator, SCHEMA_VERSION
 from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.sqlite_notebook_sharing import (  # noqa: F401 — compatibility exports
@@ -290,6 +290,20 @@ class SQLiteRepository:
         # per call) so transaction-counting/failure-injection monkeypatches
         # keep observing them; the seat itself is the shared database lock.
         self._runtime.wire_persistence(write=lambda: self._write())
+        # Task 11: the embed/chunk pipeline rides three facade-bound late
+        # seams — the mutable embedder attribute (tests swap fakes in
+        # post-construction), the _flush_object_vectors MASTER_V10 seat
+        # (incremental object-vector commits stay per-instance patchable) and
+        # the _mark_unified_kg_dirty KG seat (stays facade-owned until Gate 5).
+        self._runtime.wire_source_pipeline(
+            embedder=lambda: self.embedder,
+            flush_object_vectors=lambda notebook_id, rows: self._flush_object_vectors(
+                notebook_id, rows
+            ),
+            mark_unified_dirty=lambda notebook_id: self._mark_unified_kg_dirty(
+                notebook_id
+            ),
+        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
@@ -1321,10 +1335,9 @@ class SQLiteRepository:
             source_id = _new_id("src")
             file_name = _safe_filename(file.file_name)
             digest = hashlib.sha256(file.content).hexdigest()
-            source_dir = self.storage_dir / "notebooks" / notebook_id
-            source_dir.mkdir(parents=True, exist_ok=True)
-            stored_path = source_dir / f"{source_id}_{file_name}"
-            stored_path.write_bytes(file.content)
+            stored_path = self._runtime.source_files.write_upload(
+                notebook_id, source_id, file_name, file.content
+            )
             self._runtime.source_store.insert_source(
                 source_id=source_id,
                 notebook_id=notebook_id,
@@ -1989,66 +2002,12 @@ class SQLiteRepository:
             raise
 
     def _source_raw_text(self, source, elements) -> str:
-        """Raw document text for windowing: read the stored .md/.txt file when
-        present, else reconstruct from element texts."""
-        path = getattr(source, "file_path", "") or ""
-        if path and (path.endswith(".md") or path.endswith(".markdown") or path.endswith(".txt")):
-            try:
-                resolved = self._resolve_path(path)
-                return Path(resolved).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                pass
-        return "\n\n".join(e.text for e in elements)
+        return self._runtime.source_files.read_source_text(
+            getattr(source, "file_path", "") or "", elements
+        )
 
     def _embed_source(self, source_id: str) -> None:
-        if not self.settings.embedder_configured:
-            return
-        source = self.get_source(source_id)
-        notebook_id = source.notebook_id
-        elements = self.source_elements(source_id)
-        pending = [el for el in elements if el.text.strip()]
-        if not pending:
-            return
-        import concurrent.futures as _cf
-
-        trunc = self.settings.embed_truncate_chars
-        size = max(1, self.settings.embed_batch_size)
-        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
-
-        # Pre-create the embedder's HTTP client single-threaded to avoid a lazy-init
-        # race when many worker threads first touch it (no-op for fakes).
-        ensure = getattr(self.embedder, "_ensure", None)
-        if callable(ensure):
-            try:
-                ensure()
-            except Exception:  # noqa: BLE001 — warm-up only
-                pass
-
-        def _embed_only(els: list) -> list:
-            texts = [el.text[:trunc] for el in els]
-            try:
-                vectors = self.embedder.embed_texts(texts)
-            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
-                self.event_log.logger.warning(
-                    "embed batch failed (%d elements) for source %s: %s",
-                    len(els), source_id, exc,
-                )
-                return []
-            return [(el.id, vector) for el, vector in zip(els, vectors)]
-
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        rows = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-el") as pool:
-            for part in pool.map(_embed_only, batches):
-                rows.extend(part)
-        now = _now()
-        if rows:
-            self._runtime.embedding_store.replace_element_vectors(
-                source_id, notebook_id, rows, created_at=now
-            )
-        self.event_log.logger.info(
-            "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
-        )
+        return self._runtime.source_embedding.embed_source(source_id)
 
     def _embed_knowledge(
         self,
@@ -2081,180 +2040,26 @@ class SQLiteRepository:
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict],
                              progress=None, commit_every: Optional[int] = None) -> None:
-        """并发计算 payload 向量,**每 commit_every 批 flush 一次**(增量提交:中断可续跑、
-        内存不攒全量)。每批计算失败照旧 log+跳过(best-effort)。"""
-        if not self.settings.embedder_configured:
-            return
-        pending = []
-        for it in items:
-            text = _payload_text(it["payload"]).strip()
-            if text:
-                pending.append((it["_oid"], text[:2000]))
-        if not pending:
-            if progress:
-                progress(0, 0)
-            return
-        import concurrent.futures as _cf
-
-        size = max(1, self.settings.embed_batch_size)
-        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
-        commit_every = commit_every or max(1, self.settings.embed_commit_batches)
-        ensure = getattr(self.embedder, "_ensure", None)
-        if callable(ensure):
-            try:
-                ensure()
-            except Exception:  # noqa: BLE001 — warm-up only
-                pass
-
-        def _embed_only(batch) -> list:
-            texts = [t for _, t in batch]
-            try:
-                vectors = self.embedder.embed_texts(texts)
-            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
-                self.event_log.logger.warning(
-                    "embed kg-objects batch failed (%d) for %s: %s",
-                    len(batch), notebook_id, exc,
-                )
-                return []
-            return [(oid, vec) for (oid, _), vec in zip(batch, vectors)]
-
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        total = len(pending)
-        done = 0
-        buf: list = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-kg") as pool:
-            for bi, part in enumerate(pool.map(_embed_only, batches), 1):
-                buf.extend(part)
-                done += len(batches[bi - 1])
-                if bi % commit_every == 0:
-                    self._flush_object_vectors(notebook_id, buf)
-                    buf = []
-                    if progress:
-                        progress(done, total)
-        if buf:
-            self._flush_object_vectors(notebook_id, buf)
-        if progress:
-            progress(total, total)
+        return self._runtime.source_embedding.embed_objects_batch(
+            notebook_id, items, progress=progress, commit_every=commit_every
+        )
 
     def _embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
-        """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
-        rel_items: [{"_rid": str, "text": str}]。best-effort,失败跳过。"""
-        if not self.settings.embedder_configured:
-            return
-        pending = [(it["_rid"], it["text"][:2000]) for it in rel_items if it.get("text", "").strip()]
-        if not pending:
-            return
-        import concurrent.futures as _cf
-        size = max(1, self.settings.embed_batch_size)
-        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
-        ensure = getattr(self.embedder, "_ensure", None)
-        if callable(ensure):
-            try:
-                ensure()
-            except Exception:  # noqa: BLE001 — warm-up only
-                pass
-
-        def _embed_only(batch) -> list:
-            try:
-                vectors = self.embedder.embed_texts([t for _, t in batch])
-            except Exception as exc:  # noqa: BLE001 — best-effort per batch
-                self.event_log.logger.warning(
-                    "embed kg-relations batch failed (%d) for %s: %s",
-                    len(batch), notebook_id, exc)
-                return []
-            return [(rid, vec) for (rid, _), vec in zip(batch, vectors)]
-
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        rows = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-rel") as pool:
-            for part in pool.map(_embed_only, batches):
-                rows.extend(part)
-        if not rows:
-            return
-        self._runtime.embedding_store.replace_relation_vectors(
-            notebook_id, rows, created_at=_now()
+        return self._runtime.source_embedding.embed_relations_batch(
+            notebook_id, rel_items
         )
 
     def _build_chunks_for_source(self, source_id: str) -> None:
-        """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
-        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。"""
-        from app.services.chunking import build_chunks
-        src = self.get_source(source_id)
-        notebook_id = src.notebook_id
-        elements = self._runtime.chunk_store.source_elements_for_chunking(source_id)
-        chunks = build_chunks(elements,
-                              target_chars=self.settings.chunk_target_chars,
-                              overlap_chars=self.settings.chunk_overlap_chars)
-        rows = [ChunkWrite(id=_new_id("ck"), text=c["text"],
-                           section_path=c["section_path"],
-                           element_ids=tuple(c["element_ids"])) for c in chunks]
-        self._runtime.chunk_store.replace_source_chunks(
-            source_id, notebook_id, rows, created_at=_now()
-        )
-        # Unconditionally bump kg_mutation_seq: chunk rows just changed, and every
-        # chunk-derived cache (:elemchunk/:entchunk/:ppr_graph/scale-index version)
-        # keys off the seq. Without this, kg_auto_extract=False (default) + no
-        # existing KG never reaches the extract-path _mark_unified_kg_dirty, so a
-        # freshly uploaded source's chunks stay invisible to warm caches forever
-        # (no TTL, no other invalidation). Dirty=1 is also semantically right for
-        # a pure chunk upload: a new source means the unified KG is stale anyway.
-        self._mark_unified_kg_dirty(notebook_id)
+        return self._runtime.source_chunking.build_chunks_for_source(source_id)
 
     def _embed_chunks_for_source(self, source_id: str) -> None:
-        """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
-        if not self.settings.embedder_configured:
-            return
-        notebook_id = self.get_source(source_id).notebook_id
-        rows = self._runtime.chunk_store.source_chunks(source_id)
-        items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
-        self._embed_chunks_batch(notebook_id, items)
+        return self._runtime.source_embedding.embed_chunks_for_source(source_id)
 
     def _chunk_and_embed_source(self, source_id: str) -> None:
-        """build + embed(供回填脚本/测试同步调用)。"""
-        self._build_chunks_for_source(source_id)
-        self._embed_chunks_for_source(source_id)
+        return self._runtime.source_chunking.chunk_and_embed_source(source_id)
 
     def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
-        """并发调用 embedder(resilience 由 DashscopeEmbedder 层负责), 落 chunk_embeddings。
-        每批失败时 log + 跳过(best-effort)。"""
-        if not self.settings.embedder_configured or not items:
-            return
-        pending = []
-        for it in items:
-            text = (it["payload"].get("text") or "").strip()
-            if text:
-                pending.append((it["_oid"], text[:2000]))
-        if not pending:
-            return
-        import concurrent.futures as _cf
-        size = max(1, self.settings.embed_batch_size)
-        batches = [pending[i:i+size] for i in range(0, len(pending), size)]
-        ensure = getattr(self.embedder, "_ensure", None)
-        if callable(ensure):
-            try:
-                ensure()
-            except Exception:  # noqa: BLE001 — warm-up only
-                pass
-
-        def _emb(batch):
-            try:
-                vecs = self.embedder.embed_texts([t for _, t in batch])
-            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
-                self.event_log.logger.warning("embed chunks batch failed (%d) for %s: %s",
-                                              len(batch), notebook_id, exc)
-                return []
-            return [(cid, v) for (cid, _), v in zip(batch, vecs)]
-
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        out = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-ck") as pool:
-            for part in pool.map(_emb, batches):
-                out.extend(part)
-        if not out:
-            return
-        self._runtime.embedding_store.replace_chunk_vectors(
-            notebook_id, out, created_at=_now()
-        )
+        return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)
 
     def _knowledge_vectors(
         self,
@@ -12691,7 +12496,7 @@ class SQLiteRepository:
         return f"{len(elements)} parsed text element(s). {first}"
 
     def _delete_file(self, file_path: str) -> None:
-        return _delete_source_file(file_path)
+        return self._runtime.source_files.delete(file_path)
 
 
 def _now() -> str:
@@ -12715,11 +12520,6 @@ def _as_str_list(value: object) -> List[str]:
     if value:
         return [str(value).strip()]
     return []
-
-
-def _safe_filename(file_name: str) -> str:
-    cleaned = Path(file_name).name.replace("/", "_").replace("\\", "_").strip()
-    return cleaned or "source.bin"
 
 
 def _snippet(text: str, needle: str) -> str:

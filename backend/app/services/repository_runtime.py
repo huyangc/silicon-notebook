@@ -7,6 +7,7 @@ from typing import Any, Callable
 from app.core import ask_context
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
+from app.repositories.source_files import SourceFileStore
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.identity_store import IdentityStore
@@ -18,6 +19,8 @@ from app.repositories.sqlite.source_store import SourceStore
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
+from app.services.source_chunking import SourceChunkingService
+from app.services.source_embedding import SourceEmbeddingService
 
 
 @dataclass(frozen=True)
@@ -55,10 +58,23 @@ class RepositoryRuntime:
         )
         self.source_store = SourceStore(self.database, now=seams.now)
         self.chunk_store = ChunkStore(self.database)
+        # Source file persistence resolves storage_dir through the database
+        # boundary's resolve_path — no facade seams, so construction is eager.
+        self.source_files = SourceFileStore(
+            self.database.resolve_path(settings.storage_dir),
+            resolve_path=self.database.resolve_path,
+        )
         # Vector persistence is finished by wire_persistence(): its write seat
         # is the facade's `_write` compatibility seam, which only exists once
         # the facade constructor reaches it. Construction stays lazy.
         self.embedding_store: "EmbeddingStore | None" = None
+        # The source embed/chunk pipeline is finished by wire_source_pipeline():
+        # its collaborators (facade embedder attribute, _flush_object_vectors
+        # seat, _mark_unified_kg_dirty seat, the wired EmbeddingStore) are
+        # facade-bound seams that only exist once the facade constructor
+        # reaches them.  Construction stays lazy — no seam calls.
+        self.source_embedding: "SourceEmbeddingService | None" = None
+        self.source_chunking: "SourceChunkingService | None" = None
         # Sharing/deep-copy composition is finished by wire_sharing(): its
         # collaborators (facade _insert_row seat, notebook_copy_stats memo,
         # storage_dir) are facade-bound seams that only exist once the facade
@@ -89,6 +105,44 @@ class RepositoryRuntime:
         failure injection — keep observing every vector flush."""
         self.embedding_store = EmbeddingStore(write=write)
         return self.embedding_store
+
+    def wire_source_pipeline(
+        self,
+        *,
+        embedder: Callable[[], Any],
+        flush_object_vectors: Callable[[str, list], None],
+        mark_unified_dirty: Callable[[str], None],
+    ) -> tuple[SourceEmbeddingService, SourceChunkingService]:
+        """Compose the source embed/chunk pipeline (Task 11) once the
+        facade-bound seams exist: ``embedder`` resolves the facade's mutable
+        ``self.embedder`` at call time (tests swap in fakes post-construction),
+        ``flush_object_vectors`` is the facade's ``_flush_object_vectors``
+        MASTER_V10 seat (incremental object-vector commits stay observable and
+        interruptible), ``mark_unified_dirty`` the facade's
+        ``_mark_unified_kg_dirty`` KG seat. Requires wire_persistence() first —
+        vector flushes land on the already-wired EmbeddingStore."""
+        if self.embedding_store is None:
+            raise RuntimeError("wire_source_pipeline requires wire_persistence() first")
+        self.source_embedding = SourceEmbeddingService(
+            settings=self.settings,
+            sources=self.source_store,
+            chunks=self.chunk_store,
+            vectors=self.embedding_store,
+            embedder=embedder,
+            event_log=self.event_log,
+            flush_object_vectors=flush_object_vectors,
+            now=self.seams.now,
+        )
+        self.source_chunking = SourceChunkingService(
+            settings=self.settings,
+            sources=self.source_store,
+            chunks=self.chunk_store,
+            embedding=self.source_embedding,
+            new_id=self.seams.new_id,
+            now=self.seams.now,
+            mark_unified_dirty=mark_unified_dirty,
+        )
+        return self.source_embedding, self.source_chunking
 
     def wire_sharing(
         self,

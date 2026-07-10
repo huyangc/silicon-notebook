@@ -116,6 +116,10 @@ TASK9_ALLOWED_IMPORTS: set[tuple[str, int, str, str]] = set()
 TASK10_ALLOWED_IMPORTS = {
     ("backend/app/services/sqlite_repository.py", 114, "app.services.repository", "UploadedSourceFile"),
 }
+# Task 11 swaps two facade import lines in place (notebook_catalog loses
+# _delete_source_file, the ChunkWrite import becomes the source_files
+# safe_filename import), so no frozen compatibility import site shifts.
+TASK11_ALLOWED_IMPORTS: set[tuple[str, int, str, str]] = set()
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -254,6 +258,17 @@ TASK10_ALLOWED_PATCHES = {
     ("backend/tests/test_sources_page_batched.py", 183, "_connect", "repo"),
     ("backend/tests/test_embedding_store_component.py", 59, "_write", "repo"),
     ("backend/tests/test_embedding_store_component.py", 135, "_write", "repo"),
+}
+# Task 11 late-binding proofs: the embed/chunk services must observe
+# post-construction patches of the facade _flush_object_vectors seat (spy +
+# propagating failure injection — the incremental-commit/resume contract),
+# the facade _mark_unified_kg_dirty seat, and the module _new_id seam that
+# mints ck-* chunk ids.
+TASK11_ALLOWED_PATCHES = {
+    ("backend/tests/test_source_chunking_service.py", 103, "_new_id", "sqlite_repository"),
+    ("backend/tests/test_source_chunking_service.py", 119, "_mark_unified_kg_dirty", "repo"),
+    ("backend/tests/test_source_embedding_service.py", 181, "_flush_object_vectors", "repo"),
+    ("backend/tests/test_source_embedding_service.py", 202, "_flush_object_vectors", "repo"),
 }
 TASK5_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
@@ -412,6 +427,42 @@ TASK10_ALLOWED_MEMBER_FILES = {
 } | {
     ("backend/tests/test_chunk_store_component.py", name)
     for name in {"SQLiteRepository", "create_notebook", "_connect", "_runtime", "_write"}
+}
+# Task 11: the source-file / embedding / chunking bodies move to
+# SourceFileStore + SourceEmbeddingService + SourceChunkingService; the facade
+# keeps frozen-signature delegates, so _embed_chunks_batch's only internal
+# facade call site (inside _embed_chunks_for_source) disappears.  The three
+# component test files consume the facade/new seams at fresh sites, and the
+# two extended concurrency suites gain appended thread-name-prefix pins.
+TASK11_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", "_embed_chunks_batch"),
+} | {
+    ("backend/tests/test_source_file_store.py", name)
+    for name in {
+        "SQLiteRepository", "_delete_file", "_runtime", "_source_raw_text",
+        "storage_dir",
+    }
+} | {
+    ("backend/tests/test_source_embedding_service.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "embedder", "_connect",
+        "_write", "_runtime", "_embed_source", "_embed_objects_batch",
+        "_embed_relations_batch", "_embed_chunks_for_source",
+        "_embed_chunks_batch", "_build_chunks_for_source",
+    }
+} | {
+    ("backend/tests/test_source_chunking_service.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "_connect", "_write",
+        "_runtime", "_build_chunks_for_source", "_mark_unified_kg_dirty",
+        "_new_id",
+    }
+} | {
+    ("backend/tests/test_embed_concurrency.py", name)
+    for name in {"create_notebook", "embedder", "_embed_source"}
+} | {
+    ("backend/tests/test_kg_object_embed_concurrency.py", name)
+    for name in {"create_notebook", "embedder", "_embed_objects_batch"}
 }
 
 TASK7_COMPAT_PROPERTIES = {
@@ -824,6 +875,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK8_ALLOWED_IMPORTS
                     or site in TASK9_ALLOWED_IMPORTS
                     or site in TASK10_ALLOWED_IMPORTS
+                    or site in TASK11_ALLOWED_IMPORTS
                 )
 
 
@@ -835,7 +887,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -864,14 +916,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
