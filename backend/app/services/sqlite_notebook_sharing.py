@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 from app.models.schemas import NotebookSummary
+from app.services.notebook_scale import NotebookScaleFacts
 
 
 def _now() -> str:
@@ -98,45 +99,12 @@ class SQLiteNotebookSharingMixin:
         return row["id"] if row else None
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
-        """Return memoized copy-size totals and the configured size decision."""
-        version = (
-            tuple(self._scale_index_version(notebook_id)),
-            self.settings.notebook_copy_max_bytes,
-            self.settings.notebook_copy_max_rows,
-        )
+                return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).copy_stats(notebook_id)
 
-        def _load() -> dict:
-            with self._connect() as db:
-                def one(sql):
-                    return db.execute(sql, (notebook_id,)).fetchone()[0]
-
-                byte_count = one(
-                    "SELECT COALESCE(SUM(file_size), 0) FROM sources WHERE notebook_id = ?"
-                )
-                source_count = one("SELECT COUNT(*) FROM sources WHERE notebook_id = ?")
-                chunk_count = one("SELECT COUNT(*) FROM chunks WHERE notebook_id = ?")
-                node_count = one(
-                    "SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id = ?"
-                )
-                edge_count = one(
-                    "SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id = ?"
-                )
-            copyable = (
-                byte_count <= self.settings.notebook_copy_max_bytes
-                and chunk_count + node_count <= self.settings.notebook_copy_max_rows
-            )
-            return {
-                "copyable": copyable,
-                "size": {
-                    "bytes": byte_count,
-                    "sources": source_count,
-                    "chunks": chunk_count,
-                    "nodes": node_count,
-                    "edges": edge_count,
-                },
-            }
-
-        return self._vector_cache.get(f"{notebook_id}:copystats", version, _load)
+    def load_notebook_scale_facts(self, notebook_id: str) -> NotebookScaleFacts:
+        with self._connect() as db:
+            one = lambda sql: int(db.execute(sql, (notebook_id,)).fetchone()[0])
+            return NotebookScaleFacts(one("SELECT COALESCE(SUM(file_size), 0) FROM sources WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM sources WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM chunks WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id = ?"))
 
     def shared_preview(self, notebook_id: str) -> dict:
         notebook = self.get_notebook(notebook_id)

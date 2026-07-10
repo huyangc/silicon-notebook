@@ -9545,7 +9545,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                     "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
         if total_chunks > self.settings.index_suggest_chunk_threshold:
             return True
-        return not self.notebook_copy_stats(notebook_id)["copyable"]
+        return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).index_eligible(notebook_id, tier=tier, has_disk_index=bool(exists), total_chunks=int(total_chunks))
 
     def scale_index_status(self, notebook_id: str) -> dict:
         """scale 索引状态(供在线重建入口 UX)。exists=磁盘有 manifest;
@@ -13342,9 +13342,8 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         False(那是恒定成本·最终一致态,由「N 源待索引」徽章覆盖,不重复提示)。
         两处判定都廉价:copystats 版本 memo;_scale_index(allow_stale) 经磁盘身份缓存 O(1)。"""
         try:
-            if self.notebook_copy_stats(notebook_id)["copyable"]:
-                return False
-            return self._scale_index(notebook_id, allow_stale=True) is None
+            has_index = self._scale_index(notebook_id, allow_stale=True) is not None
+            return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).requires_index(notebook_id, has_disk_index=has_index)
         except Exception:  # noqa: BLE001 — 判定失败不拖垮 ask,退化为不提示
             return False
 
