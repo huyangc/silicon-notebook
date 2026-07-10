@@ -32,6 +32,10 @@ class RetrievalService:
         """HippoRAG 式 PPR 跨文档传播检索 → List[RetrievedChunk]。"""
         return self._repo._ppr_retrieve(*args, **kwargs)
 
+    def follow_chain(self, *args, **kwargs):
+        """沿受控可传递关系做查询期两跳组合 → FollowChainResult。"""
+        return self._repo._follow_chain(*args, **kwargs)
+
     def node_context(self, *args, **kwargs):
         """取某对象的邻域上下文。"""
         return self._repo.node_context(*args, **kwargs)

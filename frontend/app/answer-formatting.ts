@@ -35,6 +35,12 @@ export type MarkdownBlock =
   | { type: "unordered-list"; items: string[] }
   | { type: "ordered-list"; items: string[] };
 
+const ANCHOR_MARKER_GROUP_RE = /\[((?:k\d+\s*,\s*)*k\d+)\]/g;
+
+function anchorKeysFromMarker(markerBody: string): string[] {
+  return markerBody.split(",").map((part) => part.trim()).filter(Boolean);
+}
+
 export function buildAnswerReferences(
   answerText: string,
   anchors: AnswerAnchorLike[] = [],
@@ -44,15 +50,22 @@ export function buildAnswerReferences(
   const references: AnswerReference[] = [];
   const seen = new Set<string>();
 
-  for (const match of answerText.matchAll(/\[(k\d+)\]/g)) {
-    const key = match[1];
-    const anchor = anchorsByKey.get(key);
-    if (!anchor || seen.has(key)) continue;
-    seen.add(key);
-    references.push({
-      id: `anchor:${key}`,
-      displayLabel: `[${references.length + 1}]`,
-      anchor,
+  for (const match of answerText.matchAll(ANCHOR_MARKER_GROUP_RE)) {
+    const keys = anchorKeysFromMarker(match[1]);
+    const matchedAnchors = keys.map((key) => anchorsByKey.get(key));
+
+    // A grouped marker is one evidence claim. Never bind only its known subset:
+    // if any key is unknown, leave the entire marker unbound.
+    if (matchedAnchors.length === 0 || matchedAnchors.some((anchor) => !anchor)) continue;
+
+    keys.forEach((key, index) => {
+      if (seen.has(key)) return;
+      seen.add(key);
+      references.push({
+        id: `anchor:${key}`,
+        displayLabel: `[${references.length + 1}]`,
+        anchor: matchedAnchors[index]!,
+      });
     });
   }
 
@@ -109,7 +122,19 @@ export function referenceByCitationKey(references: AnswerReference[]): Record<st
 
 export function renderTextWithReferenceNumbers(text: string, references: AnswerReference[]): string {
   const byKey = referenceByAnchorKey(references);
-  return text.replace(/\[(k\d+)\]/g, (token, key: string) => byKey[key]?.displayLabel ?? token);
+  return text.replace(ANCHOR_MARKER_GROUP_RE, (token, markerBody: string) => {
+    const keys = anchorKeysFromMarker(markerBody);
+    const matchedReferences = keys.map((key) => byKey[key]);
+    if (matchedReferences.length === 0 || matchedReferences.some((reference) => !reference)) {
+      return token;
+    }
+    const displayNumbers = matchedReferences.map(
+      (reference) => reference!.displayLabel.match(/^\[(\d+)\]$/)?.[1],
+    );
+    return displayNumbers.every(Boolean)
+      ? `[${displayNumbers.join(", ")}]`
+      : matchedReferences.map((reference) => reference!.displayLabel).join(", ");
+  });
 }
 
 export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {

@@ -232,9 +232,11 @@ def plan_prompt(question: str, history_block: str = "") -> str:
 
 REFLECT_SCHEMA_HINT = (
     '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
-    'search_elements|ppr_retrieve|expand_community","expand":{"object_id":"","edge_type":null,'
+    'search_elements|ppr_retrieve|expand_community|follow_chain","expand":{"object_id":"","edge_type":null,'
     '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
-    '"prefer":"balanced","reason":""},"community_focal":"","elements_query":"","ppr_query":"","reason":""}'
+    '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
+    '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
+    '"community_focal":"","elements_query":"","ppr_query":"","reason":""}'
 )
 
 
@@ -262,6 +264,14 @@ def reflect_prompt(question: str, candidates_summary: str) -> str:
         "of-its-kind, and those peers are missing from candidates; pull the entity's "
         "SEMANTIC COMMUNITY members across documents (set community_focal to the entity "
         "name, e.g. 'DeepSeek-V4'). Use for 'X vs other Y' questions.\n"
+        "- follow_chain: the question requires an explicit A→B→C derivation. Set "
+        "follow_chain.start_object_id to a candidate id, optional target_object_id, "
+        "optional edge_type, and direction=out|in|both. This action performs a "
+        "fail-closed, evidence-backed TWO-hop composition and returns a query-time "
+        "inference. It only supports same-type derived_from, kind_of, "
+        "prerequisite_of, precedes, or part_of chains. NEVER request it for supports, "
+        "depends_on, contrasts_with, about, defines, used_in, composed_of, or mixed "
+        "edge types because those are not safely transitive.\n"
         "Before choosing answer, check aspect by aspect that every part the "
         "question explicitly asks for (each layer / entity / requirement it "
         "names) is covered by the candidates; if an asked-for aspect has no "

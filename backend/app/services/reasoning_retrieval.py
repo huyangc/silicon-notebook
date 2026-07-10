@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -34,6 +35,9 @@ _PER_QUERY_LIMIT = 8
 # 多达 50 次全图 PageRank。镜像 search_elements 的 reasoning_max_element_searches。
 # 注:run() 初检索后的 seed pass 不计入此上限(它是保证基线、非 agent 动作)。
 _MAX_PPR_RETRIEVES = 3
+# follow_chain 每次最多形成少量两跳路径，但 agent 若不断换起点仍可能把关系
+# evidence 上下文撑爆；与 PPR 动作同样设内部硬上限，不增加环境变量。
+_MAX_FOLLOW_CHAIN_ACTIONS = 3
 
 # Reflect 循环中,当上一步检索动作未带来任何新证据时,附加到候选摘要里的提示。
 # 目的:让模型"知道"重复检索已无收益,从而自主决定直接作答(而非被强制收尾),
@@ -91,6 +95,10 @@ class ReflectDecision:
     community_focal: str = ""
     elements_query: str = ""
     ppr_query: str = ""
+    chain_start_object_id: str = ""
+    chain_target_object_id: str = ""
+    chain_edge_type: Optional[str] = None
+    chain_direction: str = "out"
     reason: str = ""
 
 
@@ -100,6 +108,8 @@ class ReasoningResult:
     elements: List[RetrievedElement] = field(default_factory=list)
     trace: List[TraceStep] = field(default_factory=list)
     chunks: List[RetrievedChunk] = field(default_factory=list)
+    # 查询期类型化两跳推论；只进入本轮上下文/trace，不写回 KG。
+    chains: List[object] = field(default_factory=list)
     # 子查询执行账目({"query","new","tries"}),供报告管线做知识缺口分析。
     attempted: List[dict] = field(default_factory=list)
 
@@ -149,6 +159,12 @@ class ReasoningRetriever:
     def ppr_retrieve(self, notebook_id, query):
         return self.repo.retrieval.ppr_retrieve(notebook_id, query)
 
+    def follow_chain(self, notebook_id, start_object_id, edge_type=None,
+                     target_object_id="", direction="out"):
+        return self.repo.retrieval.follow_chain(
+            notebook_id, start_object_id, edge_type=edge_type,
+            target_object_id=target_object_id, direction=direction)
+
     # --- LLM 决策点 ---
     def plan(self, question, history=""):
         raise_if_cancelled(self.cancel_event)
@@ -181,7 +197,8 @@ class ReasoningRetriever:
                 return answer_decision
             action = str(data.get("next_action", "answer"))
             if action not in ("answer", "expand_graph", "add_subquery",
-                               "search_elements", "ppr_retrieve", "expand_community"):
+                               "search_elements", "ppr_retrieve", "expand_community",
+                               "follow_chain"):
                 action = "answer"
             d = ReflectDecision(
                 sufficient=bool(data.get("sufficient", False)),
@@ -204,6 +221,14 @@ class ReasoningRetriever:
             d.community_focal = str(data.get("community_focal", "")).strip()
             d.elements_query = str(data.get("elements_query", "")).strip()
             d.ppr_query = str(data.get("ppr_query", "")).strip()
+            chain = data.get("follow_chain")
+            if isinstance(chain, dict):
+                d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
+                d.chain_target_object_id = str(chain.get("target_object_id", "")).strip()
+                cet = chain.get("edge_type")
+                d.chain_edge_type = str(cet).strip() if cet else None
+                cdir = str(chain.get("direction", "out"))
+                d.chain_direction = cdir if cdir in ("out", "in", "both") else "out"
             return d
         except AskCancelled:
             raise
@@ -246,7 +271,7 @@ class ReasoningRetriever:
             return list(items), [], 0
         return list(items[:head]), list(items[-tail:]), len(items) - head - tail
 
-    def _summarize(self, collected, elements, chunks):
+    def _summarize(self, collected, elements, chunks, chains=()):
         lines = []
 
         def _kg_line(rk):
@@ -268,6 +293,16 @@ class ReasoningRetriever:
             if omitted:
                 lines.append(f"-（省略中间 {omitted} {noun},以下为最近加入）")
             lines.extend(render(x) for x in tail)
+        for chain in chains[-6:]:
+            try:
+                h1, h2 = chain.hops
+                lines.append(
+                    f"- [inference] {h1.source_name} --{chain.inferred_edge_type}--> "
+                    f"{h2.target_name} via {h1.target_name} "
+                    f"(trust={chain.chain_trust:.2f}, query-time only)"
+                )
+            except Exception:
+                continue
         return "\n".join(lines) if lines else "(no candidates yet)"
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None, max_steps=None):
@@ -280,6 +315,7 @@ class ReasoningRetriever:
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
         chunks: List[RetrievedChunk] = []
+        chains: List[object] = []
         seen_chunks: set = set()
         visited: set = set()
 
@@ -393,6 +429,7 @@ class ReasoningRetriever:
         used_queries = list(dict.fromkeys(s.query for s in subqueries))
         # 同一 run 内已 expand_community 过的焦点(防反复触发)。
         community_focals_done: set = set()
+        follow_chain_done: set = set()
 
         steps = 0
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
@@ -404,10 +441,11 @@ class ReasoningRetriever:
         stale = 1 if no_progress else 0
         elements_searches = 0
         ppr_searches = 0
+        follow_chain_searches = 0
         while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
             steps += 1
-            summary = self._summarize(collected, elements, chunks)
+            summary = self._summarize(collected, elements, chunks, chains)
             if no_progress:
                 summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
             # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -436,7 +474,7 @@ class ReasoningRetriever:
                                      "no_progress": no_progress, "stale": stale}))
             if decision.next_action == "answer" or decision.sufficient:
                 break
-            before = len(collected) + len(elements) + len(chunks)
+            before = len(collected) + len(elements) + len(chunks) + len(chains)
             if decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
                 if not oid or oid in visited:
@@ -536,6 +574,101 @@ class ReasoningRetriever:
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
                                      detail={"query": pq, "found": len(new), "phase": "action"}))
+            elif decision.next_action == "follow_chain":
+                action_key = (
+                    decision.chain_start_object_id,
+                    decision.chain_target_object_id,
+                    decision.chain_edge_type or "",
+                    decision.chain_direction,
+                )
+                if not decision.chain_start_object_id:
+                    record(TraceStep(
+                        step_type="skip", summary="跳过 follow_chain(缺少起点)",
+                        detail={"reason": "missing_chain_start"}))
+                elif decision.chain_start_object_id not in collected:
+                    # The reflect model may only authorize deterministic graph
+                    # traversal from evidence already retrieved in this run.  Do
+                    # not let a guessed/arbitrary object id become a side channel
+                    # into another active/base graph.
+                    record(TraceStep(
+                        step_type="skip", summary="跳过 follow_chain(起点不在当前候选中)",
+                        detail={"reason": "chain_start_not_candidate",
+                                "start_object_id": decision.chain_start_object_id}))
+                elif action_key in follow_chain_done:
+                    record(TraceStep(
+                        step_type="skip", summary="跳过重复 follow_chain",
+                        detail={"reason": "duplicate_follow_chain",
+                                "start_object_id": decision.chain_start_object_id}))
+                elif follow_chain_searches >= _MAX_FOLLOW_CHAIN_ACTIONS:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=f"跳过 follow_chain(已达次数上限 {_MAX_FOLLOW_CHAIN_ACTIONS})",
+                        detail={"reason": "follow_chain_cap"}))
+                else:
+                    follow_chain_done.add(action_key)
+                    follow_chain_searches += 1
+                    try:
+                        candidate_relevance = float(
+                            collected[decision.chain_start_object_id].relevance)
+                    except (TypeError, ValueError):
+                        candidate_relevance = 0.0
+                    if not math.isfinite(candidate_relevance):
+                        candidate_relevance = 0.0
+                    candidate_relevance = max(0.0, min(1.0, candidate_relevance))
+                    try:
+                        chain_result = self.follow_chain(
+                            notebook_id, decision.chain_start_object_id,
+                            edge_type=decision.chain_edge_type,
+                            target_object_id=decision.chain_target_object_id,
+                            direction=decision.chain_direction)
+                    except Exception:
+                        chain_result = None
+                    raise_if_cancelled(self.cancel_event)
+                    new_chains = []
+                    if chain_result is not None:
+                        seen_paths = {
+                            tuple(h.relation_id for h in c.hops): c for c in chains
+                        }
+                        for chain in chain_result.inferences:
+                            path_key = tuple(h.relation_id for h in chain.hops)
+                            existing = seen_paths.get(path_key)
+                            if existing is None:
+                                chain.query_relevance = candidate_relevance
+                                seen_paths[path_key] = chain
+                                chains.append(chain)
+                                new_chains.append(chain)
+                            else:
+                                existing.query_relevance = max(
+                                    float(existing.query_relevance or 0.0),
+                                    candidate_relevance,
+                                )
+                        for node in chain_result.nodes:
+                            collected.setdefault(node.object_id, node)
+                    if new_chains:
+                        first = new_chains[0]
+                        h1, h2 = first.hops
+                        summary_text = (
+                            f"两跳推导:{h1.source_name} --{first.inferred_edge_type}--> "
+                            f"{h2.target_name}（经 {h1.target_name}）,新增 {len(new_chains)} 条"
+                        )
+                        best_trust = max(c.chain_trust for c in new_chains)
+                    else:
+                        summary_text = "两跳推导未找到满足证据/类型/适用条件的路径"
+                        best_trust = 0.0
+                    record(TraceStep(
+                        step_type="follow_chain", summary=summary_text,
+                        detail={"hops": 2, "count": len(new_chains),
+                                "chain_trust": round(best_trust, 4),
+                                "edge_type": decision.chain_edge_type,
+                                "direction": decision.chain_direction,
+                                "paths": [{
+                                    "source": chain.source_name,
+                                    "via": chain.via_name,
+                                    "target": chain.target_name,
+                                    "edge_type": chain.inferred_edge_type,
+                                    "trust": round(chain.chain_trust, 4),
+                                    "validity_scope": chain.validity_scope,
+                                } for chain in new_chains[:4]]}))
             elif decision.next_action == "expand_community":
                 # 横向对比:焦点 → 兄弟实体(共提优先、社区回退),逐个发子查询。
                 # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
@@ -592,7 +725,9 @@ class ReasoningRetriever:
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
-            no_progress = (len(collected) + len(elements) + len(chunks)) == before
+            no_progress = (
+                len(collected) + len(elements) + len(chunks) + len(chains)
+            ) == before
             stale = stale + 1 if no_progress else 0
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if stale >= self.settings.reasoning_stale_limit:
@@ -604,7 +739,8 @@ class ReasoningRetriever:
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
         top_n = effective_top_n(self.settings, top_n, len(used_queries))
-        answer_detail = {"elements": len(elements), "top_n": top_n}
+        answer_detail = {"elements": len(elements), "top_n": top_n,
+                         "chains": len(chains)}
         raise_if_cancelled(self.cancel_event)
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
@@ -625,5 +761,6 @@ class ReasoningRetriever:
                          detail=answer_detail))
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
+            chains=chains,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])

@@ -102,11 +102,23 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
     relations: List[dict] = []
     for edge in graph.edges:
         if edge.source_id in kept and edge.target_id in kept:
+            # Keep the raw quote for graph verification/backward compatibility,
+            # and bind it to the same SourceElement evidence shape used by nodes
+            # whenever possible.  follow_chain can then expose each ORIGINAL hop
+            # as an element-grounded relation anchor; old/unbound rows still
+            # degrade to source-level quote evidence rather than being invented.
+            edge_evidence = []
+            for ev in edge.evidence:
+                bound = _bind_quote(ev.quote, elements, source_id, source_title)
+                if bound:
+                    edge_evidence.append({"quote": ev.quote, **bound})
+                elif (ev.quote or "").strip():
+                    edge_evidence.append({"quote": ev.quote})
             relations.append({
                 "source_local_id": edge.source_id,
                 "target_local_id": edge.target_id,
                 "edge_type": edge.type,
-                "evidence": [{"quote": ev.quote} for ev in edge.evidence],
+                "evidence": edge_evidence,
             })
     return objects, relations
 

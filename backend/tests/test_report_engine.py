@@ -255,24 +255,28 @@ def test_assemble_multikey_citation_renumbered(repo):
     assert "SrcA" in md and "SrcB" in md
 
 
-def test_assemble_multikey_drops_unknown_keys(repo):
-    """复合引用里混入未知/幻觉 key → 只保留已知的;全未知则整段剥除。"""
+def test_assemble_multikey_fails_closed_if_any_key_is_unknown(repo):
+    """任一本节未知 key 使整个复合 marker fail closed，且不产生部分 reference。"""
     nb = _mk_nb(repo)
     eng = _mk_engine(repo, _OutlineLLM())
     outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
     sections = [
         {"title": "A", "scope": "sa",
-         "markdown": "## A\n部分已知 [k1, k9]。全幻觉 [k8, k9]。", "grounded": True,
-         "id_map": {"k1": {"object_id": "c1", "object_type": "chunk", "name": "N1",
-                           "source_title": "SrcA", "location_label": "§1", "tier": "base"}},
+         "markdown": "## A\n不完整前提 [k2001, k9999]。", "grounded": True,
+         "id_map": {"k2001": {
+             "object_id": "rel-ab", "object_type": "relation",
+             "name": "A --derived_from--> B", "source_title": "SrcA",
+             "location_label": "§1", "tier": "base",
+         }},
          "attempted": []},
     ]
     rid = repo.create_report(nb.id, "q")
     md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
     body = md.split("## 参考文献")[0]
-    assert "[k1]" in body                             # [k1, k9] → 只留已知 k1
-    assert "k9" not in body and "k8" not in body      # 未知全剥除
-    assert "全幻觉 。" in body or "全幻觉  。" in body   # [k8, k9] 整段剥除(留空)
+    assert "k2001" not in body and "k9999" not in body
+    assert "不完整前提 。" in body or "不完整前提  。" in body
+    assert references == []
+    assert "## 参考文献" not in md
 
 
 def test_assemble_all_grounded_has_no_limitation_note(repo):
@@ -332,6 +336,51 @@ def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
     # 参考文献段列出 [k1]/[k2] + 标题
     assert "## 参考文献" in md
     assert "[k1]" in md.split("## 参考文献")[1] and "Razavi Analog CMOS" in md.split("## 参考文献")[1]
+
+
+def test_assemble_keeps_same_source_relation_anchors_distinct(repo):
+    """同一来源里的两跳关系证据是两条不同前提，必须按 relation id 分别编号；
+    不能沿用 chunk 的按来源去重而把第二跳吞掉，且引用 metadata 要逐条保留。"""
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    sections = [{
+        "title": "A", "scope": "sa", "grounded": True,
+        "markdown": "## A\n前提一 [k2001]，前提二 [k2002]。",
+        "id_map": {
+            "k2001": {
+                "object_id": "rel-ab", "object_type": "relation",
+                "name": "A --derived_from--> B", "source_id": "source-1",
+                "source_title": "同一篇论文", "location_label": "§1",
+                "tier": "base",
+            },
+            "k2002": {
+                "object_id": "rel-bc", "object_type": "relation",
+                "name": "B --derived_from--> C", "source_id": "source-1",
+                "source_title": "同一篇论文", "location_label": "§2",
+                "tier": "personal",
+            },
+        },
+        "attempted": [],
+    }]
+
+    md, gaps, references = eng._assemble(
+        nb.id, repo.create_report(nb.id, "q"), "q", outline, sections)
+
+    assert gaps == []
+    assert "[k1]" in md.split("## 参考文献")[0]
+    assert "[k2]" in md.split("## 参考文献")[0]
+    assert [r["key"] for r in references] == ["k1", "k2"]
+    assert [r["object_id"] for r in references] == ["rel-ab", "rel-bc"]
+    assert [r["object_type"] for r in references] == ["relation", "relation"]
+    assert [r["name"] for r in references] == [
+        "A --derived_from--> B", "B --derived_from--> C"]
+    assert [r["label"] for r in references] == [
+        "同一篇论文 · A --derived_from--> B",
+        "同一篇论文 · B --derived_from--> C",
+    ]
+    assert [r["location_label"] for r in references] == ["§1", "§2"]
+    assert [r["tier"] for r in references] == ["base", "personal"]
 
 
 def test_assemble_no_citations_omits_references(repo):

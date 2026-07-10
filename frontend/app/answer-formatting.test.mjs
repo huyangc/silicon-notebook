@@ -46,6 +46,47 @@ test("numbers cited anchors by first appearance and reuses repeated markers", ()
   assert.equal(renderTextWithReferenceNumbers(text, references), "先看 [1]，再看 [2]，最后回到 [1]。");
 });
 
+test("numbers every anchor in a grouped k marker by first appearance", () => {
+  const groupedAnchors = [
+    { key: "k2002", object_id: "rel-2", object_type: "relation", label: "Second hop" },
+    { key: "k2001", object_id: "rel-1", object_type: "relation", label: "First hop" },
+    { key: "k2003", object_id: "rel-3", object_type: "relation", label: "Third hop" },
+  ];
+  const text = "推导依据 [k2001, k2002]，补充 [k2003, k2001]。";
+  const references = buildAnswerReferences(text, groupedAnchors, []);
+
+  assert.deepEqual(
+    references.map((reference) => [reference.anchor?.key, reference.displayLabel]),
+    [
+      ["k2001", "[1]"],
+      ["k2002", "[2]"],
+      ["k2003", "[3]"],
+    ],
+  );
+  assert.equal(renderTextWithReferenceNumbers(text, references), "推导依据 [1, 2]，补充 [3, 1]。");
+});
+
+test("fails a mixed known and unknown grouped k marker closed without partial binding", () => {
+  const text = "已知 [k2001]，不可部分绑定 [k2001, k2999]。";
+  const references = buildAnswerReferences(text, [
+    { key: "k2001", object_id: "rel-1", object_type: "relation", label: "Known hop" },
+  ], []);
+
+  assert.deepEqual(references.map((reference) => reference.anchor?.key), ["k2001"]);
+  assert.equal(
+    renderTextWithReferenceNumbers(text, references),
+    "已知 [1]，不可部分绑定 [k2001, k2999]。",
+  );
+});
+
+test("does not add the known subset when the only grouped k marker contains an unknown key", () => {
+  const references = buildAnswerReferences("推导 [k2001, k2999]。", [
+    { key: "k2001", object_id: "rel-1", object_type: "relation", label: "Known hop" },
+  ], []);
+
+  assert.deepEqual(references, []);
+});
+
 test("falls back to sequential citation numbers when no anchors are cited", () => {
   const references = buildAnswerReferences("没有 anchor。", [], [
     { label: "A", source_id: "s", element_id: "e1", location_label: "p.1", quoted_span: "quote 1" },
