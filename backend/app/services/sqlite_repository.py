@@ -155,25 +155,18 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex}"
 
 
-# Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
-# 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
-# Canonical definition moved to the notebook_store component (Task 8); this
-# module-level name stays as the frozen compatibility export.
-from app.repositories.sqlite.notebook_store import USABLE_STATUSES
-
-
-class KnowledgeGraphTooLargeError(Exception):
-    """Raised by knowledge_graph() (legacy GET /notebooks/{id}/graph) when the
-    notebook exceeds settings.viz_sync_build_max_objects — that endpoint has
-    no bounded fallback (unlike unified_graph), so it refuses outright rather
-    than materializing an unbounded in-memory graph. The route maps this to
-    HTTP 413."""
+# Knowledge status vocabularies + the graph size guard. Canonical definitions
+# moved to app.services.knowledge_contracts (Task 13); these module-level
+# names stay as the frozen compatibility exports (SAME objects).
+from app.services.knowledge_contracts import (  # noqa: F401 — compatibility exports
+    KNOWLEDGE_STATUSES,
+    KnowledgeGraphTooLargeError,
+    USABLE_STATUSES,
+)
 
 # Default notebook-name placeholders the frontend creates; name auto-fill only
 # overwrites these (never a user-chosen name).
 _DEFAULT_NOTEBOOK_NAMES = {"", "未命名笔记本", "Untitled notebook"}
-
-KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project_specific")
 
 # KG object types retrieved during ask(), in priority order.
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
@@ -644,42 +637,24 @@ class SQLiteRepository:
 
     def _migration_10(self) -> None:
         return self._migrator._migration_10()
+    # Gate-5 migration (Task 13): the four rebuild-checkpoint helpers moved to
+    # UnifiedKgStore (kg_rebuild_checkpoint row-level read/writes on the same
+    # shared database lock). These frozen-signature delegates stay callable;
+    # rebuild_unified_kg and the test patch seats target the store seam.
     def _rebuild_ckpt_gc(self, notebook_id: str, input_version: str) -> None:
-        """删掉本 notebook 里 input_version 不等于当前值的所有 checkpoint 行(表有界)。
-        rebuild 开头调一次:数据/算法版本一变,旧决策自动失效。"""
-        with self._write() as db:
-            db.execute(
-                "DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=? AND input_version!=?",
-                (notebook_id, input_version))
+        self._runtime.unified_kg.checkpoint_gc(notebook_id, input_version)
 
     def _rebuild_ckpt_clear(self, notebook_id: str) -> None:
-        """删掉本 notebook 的全部 checkpoint(所有版本/阶段)。--fresh 用,强制两个 LLM 阶段重跑。"""
-        with self._write() as db:
-            db.execute("DELETE FROM kg_rebuild_checkpoint WHERE notebook_id=?", (notebook_id,))
+        self._runtime.unified_kg.checkpoint_clear(notebook_id)
 
     def _rebuild_ckpt_load(self, notebook_id: str, input_version: str, stage: str) -> Dict[str, dict]:
-        """载入某阶段在当前 input_version 下已完成的 item:{item_key: payload_dict}。"""
-        with self._connect() as db:
-            return {
-                r["item_key"]: json.loads(r["payload"])
-                for r in db.execute(
-                    "SELECT item_key, payload FROM kg_rebuild_checkpoint "
-                    "WHERE notebook_id=? AND input_version=? AND stage=?",
-                    (notebook_id, input_version, stage)).fetchall()
-            }
+        return self._runtime.unified_kg.checkpoint_load(notebook_id, input_version, stage)
 
     def _rebuild_ckpt_put(self, notebook_id: str, input_version: str, stage: str,
                           rows: List[Tuple[str, dict]]) -> None:
-        """把一批已完成 item 落库(一个写事务,幂等 REPLACE)。rows=[(item_key, payload_dict)]。"""
-        if not rows:
-            return
-        now = _now()
-        with self._write() as db:
-            db.executemany(
-                "INSERT OR REPLACE INTO kg_rebuild_checkpoint "
-                "(notebook_id, input_version, stage, item_key, payload, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                [(notebook_id, input_version, stage, k, json.dumps(v), now) for k, v in rows])
+        self._runtime.unified_kg.checkpoint_put(
+            notebook_id, input_version, stage, rows, _now()
+        )
 
     def _recover_interrupted_jobs(self) -> None:
         return self._migrator.recover_interrupted_jobs()
@@ -696,13 +671,9 @@ class SQLiteRepository:
         return self._runtime.notebook_summaries.count(db, table, column, value)
 
     def _count_knowledge(self, db: sqlite3.Connection, notebook_id: str, object_type: str) -> int:
-        placeholders = ",".join("?" for _ in USABLE_STATUSES)
-        row = db.execute(
-            f"SELECT COUNT(*) AS count FROM knowledge_objects "
-            f"WHERE notebook_id = ? AND object_type = ? AND status IN ({placeholders})",
-            (notebook_id, object_type, *USABLE_STATUSES),
-        ).fetchone()
-        return int(row["count"])
+        return self._runtime.knowledge.count_knowledge(
+            db, notebook_id, object_type, USABLE_STATUSES
+        )
 
     def _has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
         return self._runtime.notebook_summaries.has_kg(db, notebook_id)
@@ -732,109 +703,35 @@ class SQLiteRepository:
 
     @staticmethod
     def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
-        """PURE: parse an evidence JSON TEXT column value into the set of distinct
-        source_ids it references (Evidence.source_id is present on every item —
-        confirmed in app/models/schemas.py; a merged object's evidence can span
-        multiple sources, which is exactly why a per-object single source_id
-        column is insufficient and this reverse table exists)."""
-        try:
-            items = json.loads(evidence_json or "[]")
-        except json.JSONDecodeError:
-            items = []
-        return {
-            item.get("source_id")
-            for item in items
-            if isinstance(item, dict) and item.get("source_id")
-        }
+        """PURE parse of an evidence JSON TEXT value into its distinct
+        source_ids — canonical body lives on KnowledgeStore (Task 13)."""
+        from app.repositories.sqlite.knowledge_store import KnowledgeStore
+        return KnowledgeStore.source_ids_from_evidence(evidence_json)
 
     def _upsert_knowledge_object_sources(
         self, db: sqlite3.Connection, object_id: str, notebook_id: str, evidence_json: Optional[str]
     ) -> None:
-        """Forward maintenance: replace object_id's rows in the reverse index with
-        the source_ids its CURRENT evidence references. Called by every write path
-        that creates/updates a knowledge_objects row with evidence (store_kg,
-        confirm_promotion insert/merge, merge_knowledge). Delete-then-insert keeps
-        this correct even when evidence shrinks (not currently possible, but cheap
-        to keep safe)."""
-        db.execute("DELETE FROM knowledge_object_sources WHERE object_id = ?", (object_id,))
-        source_ids = self._source_ids_from_evidence(evidence_json)
-        if source_ids:
-            db.executemany(
-                "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                "VALUES (?, ?, ?)",
-                [(object_id, sid, notebook_id) for sid in source_ids],
-            )
+        self._runtime.knowledge.replace_object_sources(
+            db, object_id, notebook_id, evidence_json
+        )
 
     @staticmethod
     def _delete_knowledge_object_sources(db: sqlite3.Connection, object_ids: List[str]) -> None:
-        """Deletion coherence: drop reverse-index rows for objects that are
-        actually removed from knowledge_objects (source delete/reparse path).
-        merge_knowledge does NOT call this — it deprecates the losing object
-        in place rather than deleting it, so that object's evidence (now folded
-        into the target too, but still physically present on its own row) must
-        stay indexed until it is truly deleted."""
-        if not object_ids:
-            return
-        placeholders = ",".join("?" for _ in object_ids)
-        db.execute(
-            f"DELETE FROM knowledge_object_sources WHERE object_id IN ({placeholders})",
-            object_ids,
-        )
+        from app.repositories.sqlite.knowledge_store import KnowledgeStore
+        KnowledgeStore.delete_object_sources(db, object_ids)
 
     def _source_index_backfilled(self, db: sqlite3.Connection, notebook_id: str) -> bool:
-        row = db.execute(
-            "SELECT source_index_backfilled FROM unified_kg_state WHERE notebook_id=?",
-            (notebook_id,),
-        ).fetchone()
-        return bool(row and row["source_index_backfilled"])
+        return self._runtime.knowledge.source_index_backfilled(db, notebook_id)
 
     def _mark_source_index_backfilled(self, db: sqlite3.Connection, notebook_id: str) -> None:
-        now = _now()
-        db.execute(
-            """
-            INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, source_index_backfilled, updated_at)
-            VALUES (?, 0, 0, 1, ?)
-            ON CONFLICT(notebook_id) DO UPDATE SET
-              source_index_backfilled=1,
-              updated_at=excluded.updated_at
-            """,
-            (notebook_id, now),
-        )
+        self._runtime.knowledge.mark_source_index_backfilled(db, notebook_id)
 
     def _find_stale_knowledge_ids_for_source(
         self, db: sqlite3.Connection, source_id: str, notebook_id: str
     ) -> List[str]:
-        """Return knowledge_objects.id values whose evidence references source_id.
-
-        Fast path (backfilled notebooks): a single indexed SQL lookup against
-        knowledge_object_sources — O(matches), not O(notebook size).
-
-        Legacy path (not yet backfilled): the original full-evidence-JSON scan
-        of every object in the notebook — but the scan the caller was about to
-        pay anyway is reused to populate knowledge_object_sources for every
-        object encountered, and the notebook is marked backfilled, so it is
-        provably the LAST time this notebook pays the O(N) cost (backfill-on-
-        first-use)."""
-        if self._source_index_backfilled(db, notebook_id):
-            rows = db.execute(
-                "SELECT DISTINCT object_id FROM knowledge_object_sources "
-                "WHERE source_id = ? AND notebook_id = ?",
-                (source_id, notebook_id),
-            ).fetchall()
-            return [r["object_id"] for r in rows]
-
-        stale_knowledge_ids: List[str] = []
-        knowledge_rows = db.execute(
-            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchall()
-        for row in knowledge_rows:
-            source_ids = self._source_ids_from_evidence(row["evidence"])
-            self._upsert_knowledge_object_sources(db, row["id"], notebook_id, row["evidence"])
-            if source_id in source_ids:
-                stale_knowledge_ids.append(row["id"])
-        self._mark_source_index_backfilled(db, notebook_id)
-        return stale_knowledge_ids
+        return self._runtime.knowledge.stale_object_ids_for_source(
+            db, source_id, notebook_id
+        )
 
     def _clear_source_extraction_state(
         self,
@@ -844,24 +741,9 @@ class SQLiteRepository:
         *,
         clear_embeddings: bool,
     ) -> None:
-        # KG writes directly to knowledge_objects; find stale objects by evidence source_id
-        # (see _find_stale_knowledge_ids_for_source for the reverse-index/legacy-scan split).
-        stale_knowledge_ids = self._find_stale_knowledge_ids_for_source(db, source_id, notebook_id)
-
-        if stale_knowledge_ids:
-            placeholders = ",".join("?" for _ in stale_knowledge_ids)
-            db.execute(
-                f"DELETE FROM knowledge_embeddings WHERE object_id IN ({placeholders})",
-                stale_knowledge_ids,
-            )
-            db.execute(
-                f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
-                stale_knowledge_ids,
-            )
-            self._delete_knowledge_object_sources(db, stale_knowledge_ids)
-        db.execute("DELETE FROM extraction_runs WHERE source_id = ?", (source_id,))
-        if clear_embeddings:
-            db.execute("DELETE FROM element_embeddings WHERE source_id = ?", (source_id,))
+        self._runtime.knowledge.clear_source_extraction_state(
+            db, source_id, notebook_id, clear_embeddings=clear_embeddings
+        )
 
     def _knowledge_objects(
         self,
@@ -1061,27 +943,7 @@ class SQLiteRepository:
         """
         self.get_notebook(notebook_id)
         with self._write() as db:
-            db.execute("DELETE FROM kg_objects_fts WHERE notebook_id=?", (notebook_id,))
-            rows = db.execute(
-                "SELECT id, payload FROM knowledge_objects "
-                "WHERE notebook_id=? AND status != 'deprecated'",
-                (notebook_id,),
-            ).fetchall()
-            fts_rows = []
-            for r in rows:
-                try:
-                    payload = json.loads(r["payload"] or "{}")
-                except Exception:
-                    payload = {}
-                name = (payload.get("name") or "").strip()
-                if name:
-                    fts_rows.append((r["id"], notebook_id, name))
-            if fts_rows:
-                db.executemany(
-                    "INSERT INTO kg_objects_fts(object_id, notebook_id, name) VALUES (?,?,?)",
-                    fts_rows,
-                )
-        return len(fts_rows) if fts_rows else 0
+            return self._runtime.knowledge.backfill_fts(db, notebook_id)
 
     def backfill_chunk_fts(self, notebook_id: str) -> int:
         """从 chunks 重建 chunks_fts(DELETE+re-INSERT)。返回写入行数。
@@ -1154,13 +1016,8 @@ class SQLiteRepository:
         if not hits:
             return []
         ids = [h["object_id"] for h in hits]
-        placeholders = ",".join("?" for _ in ids)
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT id, object_type, status, payload FROM knowledge_objects "
-                f"WHERE id IN ({placeholders})",
-                ids,
-            ).fetchall()
+            rows = self._runtime.knowledge.object_meta_rows(db, ids)
         meta: dict = {}
         for r in rows:
             if r["status"] == "deprecated":
@@ -1198,14 +1055,8 @@ class SQLiteRepository:
         if not hits:
             return hits
         ids = [h["object_id"] for h in hits]
-        placeholders = ",".join("?" for _ in ids)
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT member_object_id, canonical_id, canonical_name "
-                f"FROM concept_clusters "
-                f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
-                [notebook_id] + ids,
-            ).fetchall()
+            rows = self._runtime.unified_kg.cluster_fold_rows(db, notebook_id, ids)
         fold: dict[str, tuple[str, str]] = {
             r["member_object_id"]: (r["canonical_id"], r["canonical_name"])
             for r in rows
@@ -1235,10 +1086,10 @@ class SQLiteRepository:
         ids via a bounded concept_clusters lookup so search results share the same
         id space as the viz graph — enabling click-to-expand on search hits.
         """
-        from app.services.kg.search import fts_search, merge_search_hits
+        from app.services.kg.search import merge_search_hits
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            lex = fts_search(db, notebook_id, q, k)
+            lex = self._runtime.knowledge.fts_search(db, notebook_id, q, k)
         sem = self._semantic_search(notebook_id, q, k)
         merged = merge_search_hits(lex, sem, k)
         hydrated = self._hydrate_search_hits(notebook_id, merged)
@@ -1637,31 +1488,14 @@ class SQLiteRepository:
         row in ONE write transaction — the exact commit boundary the inline
         _run_extraction body always had."""
         with self._write() as db:
-            self._clear_source_extraction_state(db, source_id, notebook_id, clear_embeddings=False)
-            self._delete_relations_for_source(db, source_id)
-            db.execute(
-                "DELETE FROM knowledge_embeddings WHERE object_id IN "
-                "(SELECT id FROM knowledge_objects WHERE source_id = ?)",
-                (source_id,),
+            self._runtime.knowledge.begin_extraction_run(
+                db, source_id, notebook_id, run_id, created_at
             )
-            direct_ids = [
-                r["id"] for r in db.execute(
-                    "SELECT id FROM knowledge_objects WHERE source_id = ?", (source_id,)
-                ).fetchall()
-            ]
-            db.execute("DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,))
-            self._delete_knowledge_object_sources(db, direct_ids)
-            db.execute(
-                """INSERT INTO extraction_runs
-                   (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
-                   VALUES (?, ?, ?, 'kg', 'running', '', ?, ?)""",
-                (run_id, notebook_id, source_id, created_at, created_at))
 
     def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:
         with self._write() as db:
-            db.execute(
-                "UPDATE extraction_runs SET status=?, error_message=?, updated_at=? WHERE id=?",
-                (status, message, _now(), run_id),
+            self._runtime.knowledge.finish_extraction_run(
+                db, run_id, status, message, _now()
             )
 
     def _notebook_tier(self, notebook_id: str) -> str:
@@ -1835,17 +1669,7 @@ class SQLiteRepository:
         that have no bespoke card."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated' "
-                "GROUP BY object_type",
-                (notebook_id,),
-            ).fetchall()
-            label_rows = db.execute(
-                "SELECT object_type, label FROM object_schemas"
-            ).fetchall()
-        labels = {r["object_type"]: (r["label"] or r["object_type"]) for r in label_rows}
-        counts = {row["object_type"]: int(row["c"]) for row in rows}
+            counts, labels = self._runtime.knowledge.type_counts(db, notebook_id)
         ordered = [t for t in OBJECT_SCHEMAS if t in counts]
         ordered += [t for t in counts if t not in OBJECT_SCHEMAS]
         return [
@@ -1908,39 +1732,9 @@ class SQLiteRepository:
         limit = max(1, min(int(limit), 200))
         schema = self.effective_schemas().get(object_type)
 
-        base_query = (
-            "FROM knowledge_objects "
-            "WHERE notebook_id = ? AND object_type = ?"
-        )
-        params: List[object] = [notebook_id, object_type]
-        if status:
-            base_query += " AND status = ?"
-            params.append(status)
-
         with self._connect() as db:
-            total = db.execute(
-                f"SELECT COUNT(*) c {base_query}", params
-            ).fetchone()["c"]
-            rows = db.execute(
-                f"SELECT * {base_query} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
-                (*params, limit, offset),
-            ).fetchall()
-
-        objects: List[dict] = []
-        for row in rows:
-            keys = row.keys()
-            objects.append(
-                {
-                    "id": row["id"],
-                    "payload": json.loads(row["payload"] or "{}"),
-                    "evidence": [
-                        Evidence(**item)
-                        for item in json.loads(row["evidence"] or "[]")
-                    ],
-                    "status": row["status"],
-                    "owner": row["owner"],
-                    "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
-                }
+            total, objects = self._runtime.knowledge.list_knowledge_page(
+                db, notebook_id, object_type, status, offset, limit
             )
 
         items = [self._knowledge_record(object_type, obj, schema) for obj in objects]
@@ -1951,223 +1745,38 @@ class SQLiteRepository:
             limit=limit,
         )
 
-    # --- Editable extraction-schema registry ----------------------------
+    # --- Editable extraction-schema registry (Task 13: SchemaRegistryService
+    # --- owns validation/sampling/LLM induction; KnowledgeStore owns rows) ---
     @staticmethod
     def _object_schema_from_row(row) -> ObjectSchemaModel:
-        return ObjectSchemaModel(
-            object_type=row["object_type"],
-            plural=row["plural"] or f"{row['object_type']}s",
-            fields=json.loads(row["fields"] or "[]"),
-            primary=row["primary_field"] or "",
-            description=row["description"] or "",
-            label=row["label"] or row["object_type"],
-            list_fields=json.loads(row["list_fields"] or "[]"),
-            source=row["source"] or "builtin",
-            status=row["status"] or "active",
-            rationale=row["rationale"] or "",
-            notebook_id=row["notebook_id"] if "notebook_id" in row.keys() else "",
-        )
+        from app.services.schema_registry import object_schema_from_row
+        return object_schema_from_row(row)
 
     def effective_schemas(self) -> Dict[str, ObjectSchema]:
         """Active object schemas as an ObjectSchema registry for extraction —
         DB rows overlaid on the code defaults."""
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM object_schemas WHERE status = 'active'"
-            ).fetchall()
-        registry: Dict[str, ObjectSchema] = {}
-        for row in rows:
-            registry[row["object_type"]] = ObjectSchema(
-                type=row["object_type"],
-                plural=row["plural"] or f"{row['object_type']}s",
-                fields=json.loads(row["fields"] or "[]"),
-                primary=row["primary_field"] or "",
-                description=row["description"] or "",
-                list_fields=json.loads(row["list_fields"] or "[]"),
-            )
-        for object_type, schema in OBJECT_SCHEMAS.items():
-            registry.setdefault(object_type, schema)
-        return registry
+        return self._runtime.schema_registry.effective_schemas()
 
     def list_object_schemas(self) -> List[ObjectSchemaModel]:
-        with self._connect() as db:
-            rows = db.execute("SELECT * FROM object_schemas").fetchall()
-        models = [self._object_schema_from_row(row) for row in rows]
-        order = {"active": 0, "disabled": 1, "proposed": 2}
-        models.sort(key=lambda m: (order.get(m.status, 3), m.object_type))
-        return models
+        return self._runtime.schema_registry.list_object_schemas()
 
     def create_object_schema(self, payload: ObjectSchemaCreate) -> ObjectSchemaModel:
-        object_type = payload.object_type.strip().lower().replace(" ", "_")
-        if not object_type:
-            raise ValueError("object_type is required")
-        now = _now()
-        with self._write() as db:
-            exists = db.execute(
-                "SELECT 1 FROM object_schemas WHERE object_type = ?", (object_type,)
-            ).fetchone()
-            if exists is not None:
-                raise ValueError(f"object type '{object_type}' already exists")
-            db.execute(
-                """
-                INSERT INTO object_schemas
-                (object_type, plural, fields, primary_field, description, label,
-                 list_fields, source, status, rationale, notebook_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'custom', 'active', '', '', ?, ?)
-                """,
-                (
-                    object_type,
-                    payload.plural.strip() or f"{object_type}s",
-                    json.dumps(payload.fields, ensure_ascii=False),
-                    payload.primary.strip() or (payload.fields[0] if payload.fields else ""),
-                    payload.description.strip(),
-                    payload.label.strip() or object_type,
-                    json.dumps(payload.list_fields, ensure_ascii=False),
-                    now,
-                    now,
-                ),
-            )
-            row = db.execute(
-                "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
-            ).fetchone()
-        return self._object_schema_from_row(row)
+        return self._runtime.schema_registry.create_object_schema(payload)
 
     def update_object_schema(
         self, object_type: str, payload: ObjectSchemaUpdate
     ) -> ObjectSchemaModel:
-        updates: List[str] = []
-        values: List[object] = []
-        if payload.plural is not None:
-            updates.append("plural = ?")
-            values.append(payload.plural.strip())
-        if payload.fields is not None:
-            updates.append("fields = ?")
-            values.append(json.dumps(payload.fields, ensure_ascii=False))
-        if payload.primary is not None:
-            updates.append("primary_field = ?")
-            values.append(payload.primary.strip())
-        if payload.description is not None:
-            updates.append("description = ?")
-            values.append(payload.description.strip())
-        if payload.label is not None:
-            updates.append("label = ?")
-            values.append(payload.label.strip())
-        if payload.list_fields is not None:
-            updates.append("list_fields = ?")
-            values.append(json.dumps(payload.list_fields, ensure_ascii=False))
-        if payload.status is not None:
-            status = payload.status.strip()
-            if status not in {"active", "disabled", "proposed"}:
-                raise ValueError(f"invalid schema status: {status}")
-            updates.append("status = ?")
-            values.append(status)
-        with self._write() as db:
-            row = db.execute(
-                "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(object_type)
-            if updates:
-                updates.append("updated_at = ?")
-                values.append(_now())
-                values.append(object_type)
-                db.execute(
-                    f"UPDATE object_schemas SET {', '.join(updates)} WHERE object_type = ?",
-                    values,
-                )
-            row = db.execute(
-                "SELECT * FROM object_schemas WHERE object_type = ?", (object_type,)
-            ).fetchone()
-        return self._object_schema_from_row(row)
+        return self._runtime.schema_registry.update_object_schema(object_type, payload)
 
     def delete_object_schema(self, object_type: str) -> None:
-        with self._write() as db:
-            row = db.execute(
-                "SELECT source FROM object_schemas WHERE object_type = ?",
-                (object_type,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(object_type)
-            if row["source"] == "builtin":
-                raise ValueError("builtin schemas can be disabled but not deleted")
-            db.execute(
-                "DELETE FROM object_schemas WHERE object_type = ?", (object_type,)
-            )
+        self._runtime.schema_registry.delete_object_schema(object_type)
 
     def propose_schemas(self, notebook_id: str) -> List[ObjectSchemaModel]:
         """Schema induction (suggestion mode): inspect the notebook's content and
         propose NEW object types the current schema does not cover. Proposals are
         stored with status='proposed' for curator approval; never auto-activated.
         Requires the LLM; offline this is a no-op that returns existing proposals."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            existing = {
-                r["object_type"]
-                for r in db.execute(
-                    "SELECT object_type FROM object_schemas"
-                ).fetchall()
-            }
-            elements = self._gather_elements(db, notebook_id)
-        if self.llm_client.configured and elements:
-            sample = "\n".join(
-                f"[{e['location_label']}] {e['text']}" for e in elements
-            )[:8000]
-            data: dict = {}
-            try:
-                raw = self.llm_client.chat_json(
-                    [
-                        {
-                            "role": "user",
-                            "content": schema_induction_prompt(
-                                sorted(existing), sample
-                            ),
-                        }
-                    ],
-                    SCHEMA_INDUCTION_HINT,
-                )
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    data = parsed
-            except Exception:
-                data = {}
-            now = _now()
-            with self._write() as db:
-                for item in data.get("new_types") or []:
-                    if not isinstance(item, dict):
-                        continue
-                    object_type = (
-                        str(item.get("object_type", "")).strip().lower().replace(" ", "_")
-                    )
-                    fields = [
-                        str(f).strip()
-                        for f in (item.get("fields") or [])
-                        if str(f).strip()
-                    ]
-                    if not object_type or object_type in existing or not fields:
-                        continue
-                    primary = str(item.get("primary", "")).strip() or fields[0]
-                    db.execute(
-                        """
-                        INSERT INTO object_schemas
-                        (object_type, plural, fields, primary_field, description, label,
-                         list_fields, source, status, rationale, notebook_id, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, '[]', 'induced', 'proposed', ?, ?, ?, ?)
-                        """,
-                        (
-                            object_type,
-                            str(item.get("plural", "")).strip() or f"{object_type}s",
-                            json.dumps(fields, ensure_ascii=False),
-                            primary,
-                            str(item.get("description", "")).strip(),
-                            str(item.get("label", "")).strip() or object_type,
-                            str(item.get("rationale", "")).strip(),
-                            notebook_id,
-                            now,
-                            now,
-                        ),
-                    )
-                    existing.add(object_type)
-        return [m for m in self.list_object_schemas() if m.status == "proposed"]
+        return self._runtime.schema_registry.propose_schemas(notebook_id)
 
     def knowledge_graph(self, notebook_id: str) -> KnowledgeGraph:
         """KG-native graph: nodes = non-deprecated knowledge objects (4 KG types),
@@ -2188,9 +1797,7 @@ class SQLiteRepository:
         misleadingly-partial one."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            nb_count = db.execute(
-                "SELECT COUNT(*) c FROM knowledge_objects "
-                "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)).fetchone()["c"]
+            nb_count = self._runtime.knowledge.count_active_objects(db, notebook_id)
         if int(nb_count) > self.settings.viz_sync_build_max_objects:
             raise KnowledgeGraphTooLargeError(
                 f"notebook {notebook_id} has {nb_count} objects "
@@ -2199,9 +1806,7 @@ class SQLiteRepository:
                 "use /notebooks/{id}/unified-kg instead (bounded/paginated)."
             )
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT id, object_type, status, payload FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated'", (notebook_id,)).fetchall()
+            rows = self._runtime.knowledge.graph_node_rows(db, notebook_id)
         nodes = [
             KnowledgeNode(id=r["id"], object_type=r["object_type"],
                           headline=self._kg_headline(json.loads(r["payload"] or "{}")),
@@ -2223,23 +1828,9 @@ class SQLiteRepository:
                       relations: List[dict]) -> int:
         now = _now()
         with self._write() as db:
-            for rel in relations:
-                db.execute(
-                    """
-                    INSERT INTO knowledge_relations
-                    (id, notebook_id, source_id, source_object_id, target_object_id,
-                     edge_type, evidence, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        _new_id("rel"), notebook_id, source_id,
-                        rel["source_object_id"], rel["target_object_id"],
-                        rel["edge_type"],
-                        json.dumps(rel.get("evidence", []), ensure_ascii=False),
-                        now,
-                    ),
-                )
-        return len(relations)
+            return self._runtime.knowledge.add_relations(
+                db, notebook_id, source_id, relations, now
+            )
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
@@ -2288,11 +1879,8 @@ class SQLiteRepository:
         for i in range(0, len(objects), CHUNK):
             chunk = objects[i:i + CHUNK]
             with self._write() as db:
-                db.executemany(
-                    "INSERT INTO knowledge_objects "
-                    "(id, notebook_id, object_type, status, owner, payload, evidence, "
-                    "source_candidate_id, source_id, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, '', ?, ?, NULL, ?, ?, ?)",
+                self._runtime.knowledge.insert_object_chunk(
+                    db,
                     [(o["_oid"], notebook_id, o["object_type"], auto_status,
                       json.dumps(o["payload"], ensure_ascii=False),
                       json.dumps(o["evidence"], ensure_ascii=False),
@@ -2304,11 +1892,7 @@ class SQLiteRepository:
                     if (o["payload"].get("name") or "").strip()
                 ]
                 if fts_rows:
-                    db.executemany(
-                        "INSERT INTO kg_objects_fts(object_id, notebook_id, name) "
-                        "VALUES (?, ?, ?)",
-                        fts_rows,
-                    )
+                    self._runtime.knowledge.insert_kg_fts_rows(db, fts_rows)
                 # Forward maintenance (P0-4 reverse index): fresh inserts never had
                 # prior rows, so a plain batched INSERT suffices (no DELETE-first).
                 kos_rows = [
@@ -2319,18 +1903,12 @@ class SQLiteRepository:
                     )
                 ]
                 if kos_rows:
-                    db.executemany(
-                        "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                        "VALUES (?, ?, ?)",
-                        kos_rows,
-                    )
+                    self._runtime.knowledge.insert_object_source_rows(db, kos_rows)
         for i in range(0, len(db_relations), CHUNK):
             chunk = db_relations[i:i + CHUNK]
             with self._write() as db:
-                db.executemany(
-                    "INSERT INTO knowledge_relations "
-                    "(id, notebook_id, source_id, source_object_id, target_object_id, "
-                    "edge_type, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                self._runtime.knowledge.insert_relation_chunk(
+                    db,
                     [(r["_rid"], notebook_id, source_id,
                       r["source_object_id"], r["target_object_id"], r["edge_type"],
                       json.dumps(r["evidence"], ensure_ascii=False), now) for r in chunk],
@@ -2426,12 +2004,7 @@ class SQLiteRepository:
 
         if new_rows:
             with self._write() as db:
-                db.executemany(
-                    "INSERT INTO knowledge_relations "
-                    "(id, notebook_id, source_id, source_object_id, target_object_id, "
-                    "edge_type, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    new_rows,
-                )
+                self._runtime.knowledge.insert_relation_chunk(db, new_rows)
             # Match store_kg / delete_notebook_kg so the in-memory rustworkx graph
             # (and PPR/federated caches) pick up the new edges.
             self._invalidate_unified_cache(notebook_id)
@@ -2449,19 +2022,7 @@ class SQLiteRepository:
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM knowledge_relations WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
-        return [
-            {
-                "id": r["id"], "source_id": r["source_id"],
-                "source_object_id": r["source_object_id"],
-                "target_object_id": r["target_object_id"], "edge_type": r["edge_type"],
-                "evidence": json.loads(r["evidence"] or "[]"),
-            }
-            for r in rows
-        ]
+            return self._runtime.knowledge.relations_for_notebook(db, notebook_id)
 
     # --- Track E: edge trust review queue + curation feedback loop ----------
     _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
@@ -2694,13 +2255,7 @@ class SQLiteRepository:
             raise ValueError(
                 f"review_status must be one of {sorted(self._REVIEW_STATUSES)}, got {status!r}")
         with self._write() as db:
-            cur = db.execute(
-                "UPDATE knowledge_relations SET review_status=? "
-                "WHERE id=? AND notebook_id=?",
-                (status, rel_id, notebook_id),
-            )
-            if cur.rowcount == 0:
-                raise KeyError(f"relation {rel_id!r} not found in notebook {notebook_id!r}")
+            self._runtime.governance.update_edge_review(db, notebook_id, rel_id, status)
         # review_status flips in place (relation COUNT unchanged) — bump the
         # monotonic seq so seq-keyed fast paths (_scale_index_version /
         # _cluster_input_version) don't serve a stale version for this edit.
@@ -2711,7 +2266,7 @@ class SQLiteRepository:
         self._invalidate_unified_cache(notebook_id)
 
     def _delete_relations_for_source(self, db, source_id: str) -> None:
-        db.execute("DELETE FROM knowledge_relations WHERE source_id = ?", (source_id,))
+        self._runtime.knowledge.delete_relations_for_source(db, source_id)
 
     # --- Concept-cluster / merge-candidate CRUD (Task 5) -------------------
 
@@ -2719,15 +2274,10 @@ class SQLiteRepository:
                        object_type: str = "concept") -> None:
         now = _now()
         with self._write() as db:
-            db.execute("DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
-                       (notebook_id, object_type))
-            for r in rows:
-                db.execute(
-                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (_new_id("cc"), notebook_id, r["canonical_id"],
-                     r["member_object_id"], r["canonical_name"], object_type,
-                     r.get("canonical_description", ""), now))
+            self._runtime.governance.delete_clusters(db, notebook_id, object_type)
+            self._runtime.governance.insert_clusters(
+                db, notebook_id, object_type, rows, now
+            )
             # P0-A: bump the cluster-write change signal in the SAME commit as the
             # DELETE+INSERT above — _scale_index_version's memo relies on this
             # being atomic with the content change (no window where clusters moved
@@ -2743,20 +2293,10 @@ class SQLiteRepository:
     def append_clusters(self, notebook_id: str, rows: list, object_type: str = "concept") -> int:
         """追加写 concept_clusters(不 DELETE);member_object_id 幂等(已在则跳过)。返回新增数。"""
         now = _now()
-        added = 0
         with self._write() as db:
-            existing = {r["member_object_id"] for r in db.execute(
-                "SELECT member_object_id FROM concept_clusters WHERE notebook_id=? AND object_type=?",
-                (notebook_id, object_type)).fetchall()}
-            for r in rows:
-                if r["member_object_id"] in existing:
-                    continue
-                db.execute(
-                    "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (_new_id("cc"), notebook_id, r["canonical_id"], r["member_object_id"],
-                     r["canonical_name"], object_type, "", now))
-                added += 1
+            added = self._runtime.governance.insert_clusters(
+                db, notebook_id, object_type, rows, now
+            )
             # P0-A: only bump when a row actually landed (a no-op call — every
             # member already present — must not manufacture a fake change signal).
             if added:
@@ -2883,10 +2423,9 @@ class SQLiteRepository:
                 now = _now()
                 with self._write() as db:
                     for c in cands:
-                        db.execute(
-                            "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
-                            "VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                            (_new_id("cm"), notebook_id, c["canonical_a"], c["canonical_b"], c["score"], now, now))
+                        self._runtime.governance.insert_merge_candidate(
+                            db, notebook_id, c["canonical_a"], c["canonical_b"],
+                            c["score"], now, id_prefix="cm")
         from app.services.kg_merge import seed_claim, seed_formula, seed_procedure
         _TYPES = {"claim": (seed_claim, "KL-"), "formula": (seed_formula, "KF-"),
                   "procedure": (seed_procedure, "KP-")}
@@ -3091,58 +2630,46 @@ class SQLiteRepository:
 
         def _load():
             with self._connect() as db:
-                rows = db.execute(
-                    "SELECT member_object_id, canonical_id FROM concept_clusters WHERE notebook_id=?",
-                    (notebook_id,),
-                ).fetchall()
-            return {r["member_object_id"]: r["canonical_id"] for r in rows}
+                return self._runtime.unified_kg.cluster_map_rows(db, notebook_id)
 
         return self._vector_cache.get(f"{notebook_id}:clustermap", version, _load)
 
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
         now = _now()
         with self._write() as db:
-            db.execute(
-                "INSERT INTO concept_merge_candidates (id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) VALUES (?,?,?,?,?, 'pending', ?, ?)",
-                (_new_id("mc"), notebook_id, a, b, score, now, now))
+            self._runtime.governance.write_merge_candidate(
+                db, notebook_id, a, b, score, now
+            )
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            rows = db.execute("SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
-        return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
+            return self._runtime.governance.pending_merges(db, notebook_id)
 
     def _pending_merges_batch(self, notebook_id: str, limit: int) -> List[dict]:
         """Bounded fetch of pending merge candidates, LIMITed in SQL instead of
         materializing the whole pending set and Python-slicing it (perf-audit
-        P1-1). No ORDER BY is specified — SQLite returns rows in rowid order
-        by default absent one, matching the implicit order the old
-        `pending_merges(nb)[:limit]` slice relied on, so this is order-locked
-        to the previous behavior for equal-size batches."""
+        P1-1)."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM concept_merge_candidates WHERE notebook_id=? AND status='pending' LIMIT ?",
-                (notebook_id, limit),
-            ).fetchall()
-        return [{"id": r["id"], "canonical_a": r["canonical_a"], "canonical_b": r["canonical_b"], "score": r["score"], "status": r["status"]} for r in rows]
+            return self._runtime.governance.pending_merges_batch(
+                db, notebook_id, limit
+            )
 
     def _has_pending_merges(self, notebook_id: str) -> bool:
         """Cheap continuation test for the merge-review drain loop — EXISTS
         instead of materializing all pending rows just to check non-emptiness
         (perf-audit P1-1)."""
         with self._connect() as db:
-            row = db.execute(
-                "SELECT EXISTS(SELECT 1 FROM concept_merge_candidates WHERE notebook_id=? AND status='pending') AS e",
-                (notebook_id,),
-            ).fetchone()
-        return bool(row["e"])
+            return self._runtime.governance.has_pending_merges(db, notebook_id)
 
     def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
         if status not in ("confirmed", "rejected"):
             raise ValueError(f"invalid merge status: {status!r}")
         with self._write() as db:
-            db.execute("UPDATE concept_merge_candidates SET status=?, updated_at=? WHERE id=? AND notebook_id=?", (status, _now(), candidate_id, notebook_id))
+            self._runtime.governance.set_merge_decision(
+                db, notebook_id, candidate_id, status, _now()
+            )
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
         self.get_notebook(notebook_id)
@@ -3184,31 +2711,18 @@ class SQLiteRepository:
         adjudication (set_conflict_status in T1, write-back in apply_conflict_resolution T4).
         """
         now = _now()
-        cid = _new_id("kcc")
         with self._write() as db:
-            db.execute(
-                """
-                INSERT INTO kg_conflict_candidates
-                  (id, notebook_id, kind, left_ref, right_ref,
-                   conflict_type, resolution, winner_ref, resolved_payload,
-                   confidence, rationale, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-                """,
-                (cid, notebook_id, kind, left_ref, right_ref,
-                 conflict_type, resolution, winner_ref, resolved_payload,
-                 confidence, rationale, now, now),
+            return self._runtime.governance.write_conflict_candidate(
+                db, notebook_id, kind, left_ref, right_ref,
+                conflict_type, resolution, winner_ref, resolved_payload,
+                confidence, rationale, now,
             )
-        return cid
 
     def pending_conflicts(self, notebook_id: str) -> List[dict]:
         """Return all conflict candidates with status='pending' for a notebook."""
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM kg_conflict_candidates WHERE notebook_id=? AND status='pending'",
-                (notebook_id,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+            return self._runtime.governance.pending_conflicts(db, notebook_id)
 
     def set_conflict_status(self, notebook_id: str, candidate_id: str, status: str) -> None:
         """Update status to 'applied' or 'rejected' (+ updated_at).
@@ -3220,22 +2734,15 @@ class SQLiteRepository:
         if status not in ("applied", "rejected"):
             raise ValueError(f"invalid conflict status: {status!r}")
         with self._write() as db:
-            cur = db.execute(
-                "UPDATE kg_conflict_candidates SET status=?, updated_at=? "
-                "WHERE id=? AND notebook_id=?",
-                (status, _now(), candidate_id, notebook_id),
+            self._runtime.governance.set_conflict_status(
+                db, notebook_id, candidate_id, status, _now()
             )
-            if cur.rowcount == 0:
-                raise KeyError(f"conflict candidate {candidate_id!r} not found")
 
     def get_conflict_candidate(self, notebook_id: str, candidate_id: str) -> Optional[dict]:
         """Fetch one conflict candidate inside its notebook authorization scope."""
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT * FROM kg_conflict_candidates WHERE id=? AND notebook_id=?",
-                (candidate_id, notebook_id),
-            ).fetchone()
-        return dict(row) if row is not None else None
+        return self._runtime.governance.get_conflict_candidate(
+            notebook_id, candidate_id
+        )
 
     def apply_conflict_resolution(
         self,
@@ -3330,11 +2837,7 @@ class SQLiteRepository:
         # update_knowledge replaces the entire payload column, so we must
         # preserve fields (section_path, validity_scope, steps, …) not
         # included in the adjudicator's resolved_payload.
-        with self._connect() as _db:
-            _row = _db.execute(
-                "SELECT payload FROM knowledge_objects WHERE id=? AND notebook_id=?",
-                (target, notebook_id),
-            ).fetchone()
+        _row = self._runtime.knowledge.get_object_row(notebook_id, target)
         existing_payload: dict = json.loads(_row["payload"] or "{}") if _row else {}
         merged_payload = {**existing_payload, **resolved_payload}
         self.update_knowledge(
@@ -3730,13 +3233,9 @@ class SQLiteRepository:
                 else:
                     status = "deferred"
                     unsure += 1
-                db.execute(
-                    """
-                    UPDATE concept_merge_candidates
-                    SET status=?, confidence=?, rationale=?, reviewed_by='llm', updated_at=?
-                    WHERE id=? AND notebook_id=?
-                    """,
-                    (status, confidence, decision["rationale"], now, candidate_id, notebook_id),
+                self._runtime.governance.record_merge_review(
+                    db, notebook_id, candidate_id, status, confidence,
+                    decision["rationale"], now,
                 )
         if confirmed or rejected:
             self._mark_unified_kg_dirty(notebook_id)
@@ -3745,9 +3244,7 @@ class SQLiteRepository:
 
     def merge_review_job_status(self, notebook_id: str) -> dict:
         with self._connect() as db:
-            row = db.execute(
-                "SELECT status,total,done,error FROM merge_review_jobs WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
+            row = self._runtime.governance.merge_review_job_row(db, notebook_id)
         if row is None:
             return {"status": "idle", "total": 0, "done": 0, "error": ""}
         return {"status": row["status"], "total": int(row["total"]),
@@ -3762,23 +3259,11 @@ class SQLiteRepository:
         a healthy run strictly shrinks the queue and terminates."""
         self.get_notebook(notebook_id)
         with self._write() as db:
-            row = db.execute("SELECT status FROM merge_review_jobs WHERE notebook_id=?",
-                             (notebook_id,)).fetchone()
-            if row is not None and row["status"] == "running":
+            total = self._runtime.governance.begin_merge_review_job(
+                db, notebook_id, _now()
+            )
+            if total is None:
                 return {"status": "running", "already": True}
-            total = db.execute(
-                "SELECT COUNT(*) c FROM concept_merge_candidates "
-                "WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchone()["c"]
-            now = _now()
-            db.execute(
-                """
-                INSERT INTO merge_review_jobs (notebook_id,status,total,done,started_at,updated_at,error)
-                VALUES (?, 'running', ?, 0, ?, ?, '')
-                ON CONFLICT(notebook_id) DO UPDATE SET
-                  status='running', total=excluded.total, done=0,
-                  started_at=excluded.started_at, updated_at=excluded.updated_at, error=''
-                """,
-                (notebook_id, total, now, now))
         done, stalls, error, final = 0, 0, "", "done"
         max_batches = (total // max(1, batch)) + 3
         try:
@@ -3789,8 +3274,8 @@ class SQLiteRepository:
                 reviewed = int(summary.get("reviewed", 0))
                 done += reviewed
                 with self._write() as db:
-                    db.execute("UPDATE merge_review_jobs SET done=?, updated_at=? WHERE notebook_id=?",
-                               (done, _now(), notebook_id))
+                    self._runtime.governance.set_merge_review_progress(
+                        db, notebook_id, done, _now())
                 if reviewed == 0:
                     stalls += 1
                     if stalls >= 2:
@@ -3802,14 +3287,12 @@ class SQLiteRepository:
             error, final = f"{type(exc).__name__}: {exc}", "failed"
             self.event_log.logger.exception("merge review job failed for %s", notebook_id)
         with self._write() as db:
-            db.execute("UPDATE merge_review_jobs SET status=?, error=?, updated_at=? WHERE notebook_id=?",
-                       (final, error, _now(), notebook_id))
+            self._runtime.governance.finish_merge_review_job(
+                db, notebook_id, final, error, _now())
         return {"status": final, "total": total, "done": done, "error": error}
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
-        with self._connect() as db:
-            rows = db.execute("SELECT canonical_a, canonical_b, status FROM concept_merge_candidates WHERE notebook_id=? AND status IN ('confirmed','rejected')", (notebook_id,)).fetchall()
-        return {(r["canonical_a"], r["canonical_b"]): r["status"] for r in rows}
+        return self._runtime.governance.decided_pairs(notebook_id)
 
     def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
         """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
@@ -3818,29 +3301,15 @@ class SQLiteRepository:
         cluster's min-member changes; seed names don't). Legacy rows written
         before the seed_a/seed_b columns existed carry '' → fall back to
         strip-"K-"(canonical), matching the old decided_pairs key derivation."""
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT canonical_a, canonical_b, seed_a, seed_b, status "
-                "FROM concept_merge_candidates WHERE notebook_id=? "
-                "AND status IN ('confirmed','rejected','deferred')",
-                (notebook_id,),
-            ).fetchall()
-        def _strip(cid: str) -> str:
-            return cid[2:] if cid.startswith("K-") else cid
-        out: Dict[frozenset, str] = {}
-        for r in rows:
-            a = r["seed_a"] or _strip(r["canonical_a"])
-            b = r["seed_b"] or _strip(r["canonical_b"])
-            out[frozenset((a, b))] = r["status"]
-        return out
+        return self._runtime.governance.decided_seed_pairs(notebook_id)
 
     def concept_whitelist_terms(self) -> set:
         with self._connect() as db:
-            return {r["term"] for r in db.execute("SELECT term FROM concept_whitelist").fetchall()}
+            return self._runtime.governance.concept_whitelist_terms(db)
 
     def concept_whitelist_list(self) -> List[dict]:
         with self._connect() as db:
-            rows = db.execute("SELECT term, note, created_at FROM concept_whitelist ORDER BY term").fetchall()
+            rows = self._runtime.governance.concept_whitelist_rows(db)
         return [{"term": r["term"], "note": r["note"], "created_at": r["created_at"]} for r in rows]
 
     def concept_whitelist_add(self, term: str, note: str = "") -> dict:
@@ -3850,16 +3319,13 @@ class SQLiteRepository:
             raise ValueError("empty term")
         now = _now()
         with self._write() as db:
-            db.execute(
-                "INSERT OR REPLACE INTO concept_whitelist (term, note, created_at) VALUES (?, ?, ?)",
-                (t, note, now),
-            )
+            self._runtime.governance.add_whitelist_term(db, t, note, now)
         return {"term": t, "note": note, "created_at": now}
 
     def concept_whitelist_remove(self, term: str) -> None:
         from app.services.kg.filters import _norm
         with self._write() as db:
-            db.execute("DELETE FROM concept_whitelist WHERE term = ?", (_norm(term),))
+            self._runtime.governance.remove_whitelist_term(db, _norm(term))
 
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         for key in [k for k in self._unified_cache if k[0] == notebook_id]:
@@ -3942,23 +3408,9 @@ class SQLiteRepository:
         version unchanged — a new/changed embedding is a real reason to recluster.
         """
         with self._connect() as db:
-            st = db.execute(
-                "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
-            seq = int(st["kg_mutation_seq"]) if st else 0
-            obj_c = db.execute(
-                "SELECT COUNT(*) AS c FROM knowledge_objects "
-                "WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,)).fetchone()["c"]
-            dec_c = db.execute(
-                "SELECT COUNT(*) AS c FROM concept_merge_candidates "
-                "WHERE notebook_id=? AND status IN ('confirmed','rejected')",
-                (notebook_id,)).fetchone()["c"]
-            emb_c = 0
-            if not exclude_emb_count:
-                emb_c = db.execute(
-                    "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
+            seq, obj_c, dec_c, emb_c = self._runtime.unified_kg.cluster_input_facts(
+                db, notebook_id, exclude_emb_count=exclude_emb_count
+            )
         # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
         # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
         from app.services.vector_index import resolve_runtime_dim
@@ -3988,22 +3440,13 @@ class SQLiteRepository:
         # place kg_mutation_seq advances, and every mutation funnels through here,
         # so _cluster_input_version sees a deterministic change on any edit —
         # including same-second in-place edits (rename/decision-flip/re-embed) that
-        # a timestamp MAX at 1s resolution would miss. Reference the table's own
-        # current value (+1), NOT excluded, so an existing row increments rather
-        # than resets to the inserted literal (1). First mutation -> seq 1.
+        # a timestamp MAX at 1s resolution would miss. The upsert (store-owned
+        # since Task 13) references the table's own current value (+1), NOT
+        # excluded, so an existing row increments rather than resets to the
+        # inserted literal (1). First mutation -> seq 1.
         now = _now()
         with self._write() as db:
-            db.execute(
-                """
-                INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, updated_at)
-                VALUES (?, 1, 1, ?)
-                ON CONFLICT(notebook_id) DO UPDATE SET
-                  dirty=1,
-                  kg_mutation_seq=unified_kg_state.kg_mutation_seq+1,
-                  updated_at=excluded.updated_at
-                """,
-                (notebook_id, now),
-            )
+            self._runtime.unified_kg.mark_dirty(db, notebook_id, now)
         # Re-arm maybe_auto_index's once-set: the index this nb was previously
         # judged against (fresh/absent) is now stale by construction (KG just
         # changed), so the next write-path or read-path fallback call should
@@ -4020,25 +3463,13 @@ class SQLiteRepository:
         本 helper 在调用方已持有的写事务 db 内执行(写簇+bump 同 commit,原子——
         不存在"簇写了、seq 没 bump"的窗口)。kg_mutation_seq 不在此处动:rebuild
         刻意保持它稳定(幂等,见 _cluster_input_version),clusters 的变化信号独立成列。"""
-        db.execute(
-            """
-            INSERT INTO unified_kg_state (notebook_id, dirty, cluster_mutation_seq, updated_at)
-            VALUES (?, 0, 1, ?)
-            ON CONFLICT(notebook_id) DO UPDATE SET
-              cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,
-              updated_at=excluded.updated_at
-            """,
-            (notebook_id, _now()),
-        )
+        self._runtime.unified_kg.bump_cluster_seq(db, notebook_id, _now())
 
     def unified_kg_status(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            row = db.execute("SELECT * FROM unified_kg_state WHERE notebook_id=?", (notebook_id,)).fetchone()
-            clusters = db.execute(
-                "SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchone()["c"]
+            row = self._runtime.unified_kg.state_row(db, notebook_id)
+            clusters = self._runtime.unified_kg.distinct_cluster_count(db, notebook_id)
         viz = self._viz_index_probe(notebook_id)
         viz_building = notebook_id in self._viz_building
         if row is None:
@@ -4058,17 +3489,13 @@ class SQLiteRepository:
         """{(canonical_src, edge_type, canonical_tgt): (support_count, source_count)}。
         版本 = canonical_rel_seq(O(1) 行读),表重建后自动失效。"""
         with self._connect() as db:
-            st = db.execute(
-                "SELECT canonical_rel_seq FROM unified_kg_state WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
+            st = self._runtime.unified_kg.state_row(db, notebook_id)
         seq = int(st["canonical_rel_seq"]) if st else -1
 
         def _load():
             out: Dict[tuple, tuple] = {}
             with self._connect() as db:
-                for r in db.execute(
-                        "SELECT canonical_src, edge_type, canonical_tgt, support_count, source_count "
-                        "FROM canonical_relations WHERE notebook_id=?", (notebook_id,)):
+                for r in self._runtime.unified_kg.edge_support_rows(db, notebook_id):
                     out[(r["canonical_src"], r["edge_type"], r["canonical_tgt"])] = (
                         int(r["support_count"]), int(r["source_count"]))
             return out
@@ -4566,13 +3993,9 @@ class SQLiteRepository:
         _ver = self._cluster_input_version(notebook_id)
         if not force:
             with self._connect() as db:
-                row = db.execute(
-                    "SELECT cluster_input_version, cluster_count FROM unified_kg_state WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()
-                cc = db.execute(
-                    "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()
-            if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc and cc["c"] > 0:
+                row = self._runtime.unified_kg.state_row(db, notebook_id)
+                cc = self._runtime.unified_kg.concept_clusters_count(db, notebook_id)
+            if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc > 0:
                 cached = int(row["cluster_count"] or 0)
                 self.event_log.logger.info(
                     "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
@@ -4615,9 +4038,9 @@ class SQLiteRepository:
         _ck_ver = self._cluster_input_version(notebook_id, exclude_emb_count=True)
         try:
             if fresh:
-                self._rebuild_ckpt_clear(notebook_id)
+                self._runtime.unified_kg.checkpoint_clear(notebook_id)
             else:
-                self._rebuild_ckpt_gc(notebook_id, _ck_ver)
+                self._runtime.unified_kg.checkpoint_gc(notebook_id, _ck_ver)
         except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
             self.event_log.logger.warning("rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
         from uuid import uuid4 as _uuid4
@@ -4675,7 +4098,8 @@ class SQLiteRepository:
                 # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
                 id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
                 # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
-                cached = self._rebuild_ckpt_load(notebook_id, _ck_ver, "merge_review")
+                cached = self._runtime.unified_kg.checkpoint_load(
+                    notebook_id, _ck_ver, "merge_review")
                 todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
 
                 def _persist(chunk_decisions):
@@ -4684,7 +4108,8 @@ class SQLiteRepository:
                               "canonical_name": d.get("canonical_name", "")})
                             for d in chunk_decisions if d.get("candidate_id") in id_to_key]
                     if rows:
-                        self._rebuild_ckpt_put(notebook_id, _ck_ver, "merge_review", rows)
+                        self._runtime.unified_kg.checkpoint_put(
+                            notebook_id, _ck_ver, "merge_review", rows, _now())
 
                 new = review_merge_candidates(
                     self.kg_llm_client, todo,
@@ -4743,7 +4168,8 @@ class SQLiteRepository:
                     old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
             # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
             try:
-                desc_ckpt = self._rebuild_ckpt_load(notebook_id, _ck_ver, "concept_desc")
+                desc_ckpt = self._runtime.unified_kg.checkpoint_load(
+                    notebook_id, _ck_ver, "concept_desc")
             except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
                 self.event_log.logger.warning(
                     "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
@@ -4831,7 +4257,8 @@ class SQLiteRepository:
                             _ck_buf.append((cid, {"description": desc, "sig": sig}))
                             if len(_ck_buf) >= _DESC_CKPT_FLUSH:
                                 try:
-                                    self._rebuild_ckpt_put(notebook_id, _ck_ver, "concept_desc", _ck_buf)
+                                    self._runtime.unified_kg.checkpoint_put(
+                                        notebook_id, _ck_ver, "concept_desc", _ck_buf, _now())
                                 except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
                                     self.event_log.logger.warning(
                                         "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
@@ -4843,7 +4270,8 @@ class SQLiteRepository:
                                 pass
                     if _ck_buf:
                         try:
-                            self._rebuild_ckpt_put(notebook_id, _ck_ver, "concept_desc", _ck_buf)
+                            self._runtime.unified_kg.checkpoint_put(
+                                notebook_id, _ck_ver, "concept_desc", _ck_buf, _now())
                         except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
                             self.event_log.logger.warning(
                                 "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
@@ -4885,11 +4313,9 @@ class SQLiteRepository:
         now = _now()
         _t = _time.perf_counter()
         with self._write() as db:
-            db.execute("DELETE FROM concept_merge_candidates WHERE notebook_id=? AND status='pending'", (notebook_id,))
-            db.executemany(
-                "INSERT INTO concept_merge_candidates "
-                "(id,notebook_id,canonical_a,canonical_b,seed_a,seed_b,score,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?, 'pending', ?, ?)",
+            self._runtime.governance.delete_pending_merges(db, notebook_id)
+            self._runtime.governance.insert_pending_merge_rows(
+                db,
                 [(_new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
                  for sa, sb, ca, cb, score in sd["pending_seeds"]])
         _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
@@ -4898,41 +4324,21 @@ class SQLiteRepository:
         # path: every canonical has ≥1 seed and every concept seed has a canonical).
         cluster_count = len(set(seed_to_canonical.values()))
         with self._write() as db:
-            object_count = db.execute(
-                "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,),
-            ).fetchone()["c"]
-            relation_count = db.execute(
-                "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchone()["c"]
-            # CRITICAL: this UPSERT stores cluster_input_version=_ver (captured at
-            # ENTRY, reflecting the seq this rebuild consumed) and clears dirty=0,
-            # but MUST NOT touch kg_mutation_seq — omit it from both the column list
-            # and the SET so an existing row's counter is PRESERVED. Bumping it here
-            # would advance the version past what was just stored (gate never skips);
-            # resetting it would lose mutations that arrived mid-rebuild.
-            db.execute(
-                """
-                INSERT INTO unified_kg_state
-                (notebook_id, dirty, cluster_input_version, last_rebuild_at, object_count, relation_count, cluster_count, updated_at)
-                VALUES (?, 0, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(notebook_id) DO UPDATE SET
-                  dirty=0,
-                  cluster_input_version=excluded.cluster_input_version,
-                  last_rebuild_at=excluded.last_rebuild_at,
-                  object_count=excluded.object_count,
-                  relation_count=excluded.relation_count,
-                  cluster_count=excluded.cluster_count,
-                  updated_at=excluded.updated_at
-                """,
-                (notebook_id, _ver, now, object_count, relation_count, cluster_count, now),
+            # CRITICAL: the store's finish_rebuild_state UPSERT stores
+            # cluster_input_version=_ver (captured at ENTRY, reflecting the seq
+            # this rebuild consumed) and clears dirty=0, but MUST NOT touch
+            # kg_mutation_seq — the column is omitted from both the column list
+            # and the SET so an existing row's counter is PRESERVED. Bumping it
+            # here would advance the version past what was just stored (gate
+            # never skips); resetting it would lose mutations that arrived
+            # mid-rebuild.
+            self._runtime.unified_kg.finish_rebuild_state(
+                db, notebook_id, _ver, cluster_count, now
             )
         # Final cleanup: drop only THIS run's scratch rows (run_id-scoped so a
         # concurrent rebuild with a different run_id is unaffected).
         with self._write() as db:
-            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
-                       (notebook_id, run_id))
+            self._runtime.unified_kg.clear_scratch_run(db, notebook_id, run_id)
         _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
         # canonical 关系层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
         try:
@@ -4980,12 +4386,8 @@ class SQLiteRepository:
         现有行数)。派生数据,fail-open 由调用方负责。"""
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            st = db.execute(
-                "SELECT kg_mutation_seq, canonical_rel_seq FROM unified_kg_state WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
-            cnt = db.execute(
-                "SELECT COUNT(*) AS c FROM canonical_relations WHERE notebook_id=?",
-                (notebook_id,)).fetchone()["c"]
+            st = self._runtime.unified_kg.state_row(db, notebook_id)
+            cnt = self._runtime.unified_kg.canonical_relations_count(db, notebook_id)
         seq = int(st["kg_mutation_seq"]) if st else 0
         if (not force and st is not None and st["canonical_rel_seq"] == seq and cnt > 0):
             return int(cnt)
@@ -5020,16 +4422,9 @@ class SQLiteRepository:
                  json.dumps(ent["samples"]), now)
                 for (s, et, t), ent in agg.items()]
         with self._write() as db:
-            db.execute("DELETE FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
-            for i in range(0, len(rows), 1000):
-                db.executemany(
-                    "INSERT INTO canonical_relations "
-                    "(notebook_id, canonical_src, edge_type, canonical_tgt, "
-                    " support_count, source_count, sample_relation_ids, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)", rows[i:i + 1000])
-            db.execute(
-                "UPDATE unified_kg_state SET canonical_rel_seq=? WHERE notebook_id=?",
-                (seq, notebook_id))
+            self._runtime.unified_kg.replace_canonical_relations(
+                db, notebook_id, rows, seq
+            )
         return len(rows)
 
     def rebuild_mention_bridge(self, notebook_id: str, force: bool = False) -> int:
@@ -5049,17 +4444,12 @@ class SQLiteRepository:
         self.get_notebook(notebook_id)
         if not self.settings.mention_bridge_enabled:
             with self._write() as db:
-                db.execute("DELETE FROM mention_edges WHERE notebook_id=?", (notebook_id,))
-                db.execute("DELETE FROM concept_comentions WHERE notebook_id=?", (notebook_id,))
+                self._runtime.unified_kg.clear_mention_bridge(db, notebook_id)
             return 0
         # seq 闸(照抄 rebuild_canonical_relations,列名换 mention_seq)。
         with self._connect() as db:
-            st = db.execute(
-                "SELECT kg_mutation_seq, mention_seq FROM unified_kg_state WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
-            cnt = db.execute(
-                "SELECT COUNT(*) AS c FROM mention_edges WHERE notebook_id=?",
-                (notebook_id,)).fetchone()["c"]
+            st = self._runtime.unified_kg.state_row(db, notebook_id)
+            cnt = self._runtime.unified_kg.mention_edges_count(db, notebook_id)
         seq = int(st["kg_mutation_seq"]) if st else 0
         if (not force and st is not None and st["mention_seq"] == seq and cnt > 0):
             return int(cnt)
@@ -5162,21 +4552,9 @@ class SQLiteRepository:
                 comention[(a, b)] = comention.get((a, b), 0) + 1
         cm_rows = [(notebook_id, a, b, n) for (a, b), n in comention.items()]
         with self._write() as db:
-            db.execute("DELETE FROM mention_edges WHERE notebook_id=?", (notebook_id,))
-            db.execute("DELETE FROM concept_comentions WHERE notebook_id=?", (notebook_id,))
-            for i in range(0, len(edges), 1000):
-                db.executemany(
-                    "INSERT INTO mention_edges "
-                    "(notebook_id, claim_object_id, concept_canonical_id, matched_alias) "
-                    "VALUES (?,?,?,?)", edges[i:i + 1000])
-            for i in range(0, len(cm_rows), 1000):
-                db.executemany(
-                    "INSERT INTO concept_comentions "
-                    "(notebook_id, canonical_a, canonical_b, bridge_claims) "
-                    "VALUES (?,?,?,?)", cm_rows[i:i + 1000])
-            db.execute(
-                "UPDATE unified_kg_state SET mention_seq=? WHERE notebook_id=?",
-                (seq, notebook_id))
+            self._runtime.unified_kg.replace_mention_bridge(
+                db, notebook_id, edges, cm_rows, seq
+            )
         return len(edges)
 
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
@@ -5196,12 +4574,8 @@ class SQLiteRepository:
         # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
         # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
         with self._connect() as _db:
-            _st = _db.execute(
-                "SELECT kg_mutation_seq, community_seq FROM unified_kg_state WHERE notebook_id=?",
-                (notebook_id,)).fetchone()
-            _cnt = _db.execute(
-                "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=? AND level=?",
-                (notebook_id, level)).fetchone()
+            _st = self._runtime.unified_kg.state_row(_db, notebook_id)
+            _cnt = self._runtime.unified_kg.communities_count(_db, notebook_id, level)
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
         if (not force and _st is not None and _st["community_seq"] == _seq
                 and _cnt and _cnt["c"] > 0):
@@ -5282,29 +4656,18 @@ class SQLiteRepository:
                     deg[idx2can[_i]] = float(_d)
         now = _now()
         min_size = self.settings.community_min_size
-        kept = 0
+        # Policy (min-size filter + id minting + member ordering) stays here;
+        # the store owns the two-table full rewrite.
+        kept_rows = [(_new_id("cm"), sorted(comm))
+                     for comm in comms if len(comm) >= min_size]
+        kept = len(kept_rows)
         with self._write() as db:
-            db.execute("DELETE FROM communities WHERE notebook_id=? AND level=?", (notebook_id, level))
-            db.execute("DELETE FROM community_members WHERE notebook_id=? AND level=?", (notebook_id, level))
-            for comm in comms:
-                if len(comm) < min_size:
-                    continue
-                cid = _new_id("cm")
-                members = sorted(comm)
-                db.execute(
-                    "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (cid, notebook_id, level, json.dumps(members), len(members), now))
-                db.executemany(
-                    "INSERT INTO community_members "
-                    "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
-                    "VALUES (?,?,?,?,?,?)",
-                    [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0)) for m in members])
-                kept += 1
+            self._runtime.unified_kg.replace_communities(
+                db, notebook_id, level, kept_rows, names, deg, now
+            )
         # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
         with self._write() as db:
-            db.execute("UPDATE unified_kg_state SET community_seq=? WHERE notebook_id=?",
-                       (_seq, notebook_id))
+            self._runtime.unified_kg.set_community_seq(db, notebook_id, _seq)
         self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
                              "level": level, "communities": kept, "nodes": n_nodes})
         return kept
@@ -5312,10 +4675,7 @@ class SQLiteRepository:
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
         """Member-id lists of each detected community (for summaries / global search)."""
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT member_ids FROM communities WHERE notebook_id=? AND level=? ORDER BY size DESC, id ASC",
-                (notebook_id, level)).fetchall()
-        return [json.loads(r["member_ids"]) for r in rows]
+            return self._runtime.unified_kg.community_member_ids(db, notebook_id, level)
 
     def summarize_communities(self, notebook_id: str, level: int = 0) -> int:
         """For each detected community, generate an LLM report (title/summary/
@@ -5327,9 +4687,8 @@ class SQLiteRepository:
             return 0
         from app.services.prompts import community_report_prompt, COMMUNITY_REPORT_SCHEMA_HINT
         with self._connect() as db:
-            crows = db.execute(
-                "SELECT id, member_ids FROM communities WHERE notebook_id=? AND level=?",
-                (notebook_id, level)).fetchall()
+            crows = self._runtime.unified_kg.community_rows_for_summary(
+                db, notebook_id, level)
         done = 0
         for cr in crows:
             members = json.loads(cr["member_ids"] or "[]")
@@ -5366,20 +4725,15 @@ class SQLiteRepository:
             if not summary:
                 continue
             with self._write() as db:
-                db.execute("UPDATE communities SET title=?, summary=?, findings=? WHERE id=?",
-                           (title, summary, json.dumps(findings), cr["id"]))
+                self._runtime.unified_kg.set_community_summary(
+                    db, cr["id"], title, summary, json.dumps(findings))
             done += 1
         return done
 
     def get_community_reports(self, notebook_id: str, level: int = 0) -> List[dict]:
         """Persisted community reports (only those summarized). For global search."""
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT member_ids, title, summary, findings FROM communities "
-                "WHERE notebook_id=? AND level=? AND summary!='' ORDER BY size DESC, id ASC",
-                (notebook_id, level)).fetchall()
-        return [{"member_ids": json.loads(r["member_ids"] or "[]"), "title": r["title"],
-                 "summary": r["summary"], "findings": json.loads(r["findings"] or "[]")} for r in rows]
+            return self._runtime.unified_kg.community_reports(db, notebook_id, level)
 
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
@@ -5660,26 +5014,14 @@ class SQLiteRepository:
             if nb_row and nb_row["tier"] == "base":
                 raise ValueError("cannot propose from a base notebook — use the review gate")
             # Idempotency: return any active (non-approved, non-rejected) proposal.
-            existing = db.execute(
-                "SELECT * FROM promotion_candidates "
-                "WHERE object_id=? AND status NOT IN ('approved','rejected')",
-                (object_id,),
-            ).fetchone()
+            existing = self._runtime.governance.active_promotion_for_object(db, object_id)
             if existing is not None:
                 return self._promotion_row_to_dict(existing)
             cand_id = _new_id("promo")
-            db.execute(
-                """
-                INSERT INTO promotion_candidates
-                (id, notebook_id, object_id, object_type, status, reason,
-                 reviewed_by, base_match_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'proposed', '', '', '', ?, ?)
-                """,
-                (cand_id, notebook_id, object_id, obj["object_type"], now, now),
+            self._runtime.governance.insert_promotion_candidate(
+                db, cand_id, notebook_id, object_id, obj["object_type"], now
             )
-            row = db.execute(
-                "SELECT * FROM promotion_candidates WHERE id=?", (cand_id,)
-            ).fetchone()
+            row = self._runtime.governance.promotion_candidate_row(db, cand_id)
         return self._promotion_row_to_dict(row)
 
     def list_promotion_queue(self, status_filter: Optional[str] = None) -> List[dict]:
@@ -5692,18 +5034,7 @@ class SQLiteRepository:
         knowledge_objects lookup for the whole queue instead of a per-row
         SELECT — was N+1 (one round-trip per candidate)."""
         with self._connect() as db:
-            if status_filter:
-                rows = db.execute(
-                    "SELECT * FROM promotion_candidates WHERE status=? "
-                    "ORDER BY created_at ASC, id ASC",
-                    (status_filter,),
-                ).fetchall()
-            else:
-                rows = db.execute(
-                    "SELECT * FROM promotion_candidates "
-                    "WHERE status IN ('proposed','under_review') "
-                    "ORDER BY created_at ASC, id ASC"
-                ).fetchall()
+            rows = self._runtime.governance.promotion_queue_rows(db, status_filter)
             object_ids = list(dict.fromkeys(r["object_id"] for r in rows))
             obj_by_id: Dict[str, sqlite3.Row] = {}
             for i in range(0, len(object_ids), self._IN_CHUNK):
@@ -5736,184 +5067,83 @@ class SQLiteRepository:
         """
         now = _now()
         with self._write() as db:
-            cand = db.execute(
-                "SELECT * FROM promotion_candidates WHERE id=?", (candidate_id,)
-            ).fetchone()
+            cand = self._runtime.governance.promotion_candidate_row(db, candidate_id)
             if cand is None:
                 raise KeyError(candidate_id)
             if cand["status"] == "rejected":
                 raise ValueError("cannot approve a rejected promotion candidate")
-            object_type = cand["object_type"]
-
-            base_row = db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
-            if base_row is None:
-                raise ValueError("no base notebook — mark one with mark_notebook_base() first")
-            base_nb_id = base_row["id"]
-
-            # Idempotency: if already approved, return the existing base object.
-            if cand["status"] == "approved":
-                existing = db.execute(
-                    "SELECT id FROM knowledge_objects "
-                    "WHERE notebook_id=? AND source_candidate_id=? "
-                    "ORDER BY created_at ASC, id ASC LIMIT 1",
-                    (base_nb_id, candidate_id),
-                ).fetchone()
-                base_object_id = existing["id"] if existing else (cand["base_match_id"] or "")
+            was_approved = cand["status"] == "approved"
+            src_payload = (
+                json.loads(
+                    (db.execute(
+                        "SELECT payload FROM knowledge_objects WHERE id=?",
+                        (cand["object_id"],)).fetchone() or {"payload": None})["payload"]
+                    or "{}"
+                )
+                if not was_approved
+                else {}
+            )
+            approval = self._runtime.governance.approve_promotion_in_transaction(
+                db, candidate_id, now
+            )
+            # Idempotency: an already-approved candidate returns the existing
+            # base object with NO post-commit hooks — exactly the old
+            # early-return-inside-the-transaction behavior.
+            if was_approved:
                 return {
                     "candidate_id": candidate_id,
-                    "base_object_id": base_object_id,
+                    "base_object_id": approval.base_object_id,
                     "merged_into": cand["base_match_id"] or "",
                 }
 
-            # Fetch the personal object being promoted.
-            src = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id=?", (cand["object_id"],)
-            ).fetchone()
-            if src is None:
-                raise KeyError(cand["object_id"])
-            src_payload = json.loads(src["payload"] or "{}")
-            src_evidence = json.loads(src["evidence"] or "[]")
-
-            # Cross-corpus dedup against existing base objects of the same type.
-            base_objs = db.execute(
-                "SELECT id, payload, evidence FROM knowledge_objects "
-                "WHERE notebook_id=? AND object_type=? AND status IN ({})".format(
-                    ",".join("?" for _ in USABLE_STATUSES)
-                ),
-                (base_nb_id, object_type, *USABLE_STATUSES),
-            ).fetchall()
-            base_match_id = self._find_base_dedup_match(
-                object_type, src_payload, base_objs
-            )
-
-            if base_match_id:
-                # Merge: combine evidence into the matched base object; keep its id.
-                matched = next(b for b in base_objs if b["id"] == base_match_id)
-                merged_evidence = self._merge_evidence_lists(
-                    json.loads(matched["evidence"] or "[]"), src_evidence
-                )
-                db.execute(
-                    "UPDATE knowledge_objects SET evidence=?, updated_at=? WHERE id=?",
-                    (json.dumps(merged_evidence, ensure_ascii=False), now, base_match_id),
-                )
-                base_object_id = base_match_id
-                merged_into = base_match_id
-                self._upsert_knowledge_object_sources(
-                    db, base_object_id, base_nb_id, json.dumps(merged_evidence, ensure_ascii=False)
-                )
-            else:
-                # No match: insert a fresh base object at status='approved'.
-                base_object_id = _new_id("ko")
-                db.execute(
-                    """
-                    INSERT INTO knowledge_objects
-                    (id, notebook_id, object_type, status, owner, payload, evidence,
-                     source_candidate_id, source_id, created_at, updated_at)
-                    VALUES (?, ?, ?, 'approved', '', ?, ?, ?, '', ?, ?)
-                    """,
-                    (
-                        base_object_id,
-                        base_nb_id,
-                        object_type,
-                        json.dumps(src_payload, ensure_ascii=False),
-                        json.dumps(src_evidence, ensure_ascii=False),
-                        candidate_id,
-                        now,
-                        now,
-                    ),
-                )
-                merged_into = ""
-                self._upsert_knowledge_object_sources(
-                    db, base_object_id, base_nb_id, json.dumps(src_evidence, ensure_ascii=False)
-                )
-
-            db.execute(
-                "UPDATE promotion_candidates "
-                "SET status='approved', base_match_id=?, reviewed_by='curator', updated_at=? "
-                "WHERE id=?",
-                (base_match_id, now, candidate_id),
-            )
-
         # Embed the new base object's payload (best-effort; outside the txn so a
         # failing embedder never blocks approval). Only for freshly-inserted ones.
-        if not base_match_id:
-            self._embed_knowledge(base_object_id, base_nb_id, src_payload)
-        self._invalidate_unified_cache(base_nb_id)
-        self._mark_unified_kg_dirty(base_nb_id)
+        if approval.created_new_object:
+            self._embed_knowledge(
+                approval.base_object_id, approval.base_notebook_id, src_payload
+            )
+        self._invalidate_unified_cache(approval.base_notebook_id)
+        self._mark_unified_kg_dirty(approval.base_notebook_id)
         return {
             "candidate_id": candidate_id,
-            "base_object_id": base_object_id,
-            "merged_into": merged_into,
+            "base_object_id": approval.base_object_id,
+            "merged_into": "" if approval.created_new_object else approval.base_object_id,
         }
 
     @staticmethod
     def _seed_fn_for(object_type: str):
         """Return the kg_merge seed function for a KG object type."""
-        from app.services.kg_merge import (
-            seed_claim, seed_concept, seed_formula, seed_procedure,
-        )
-        return {
-            "concept": seed_concept,
-            "claim": seed_claim,
-            "formula": seed_formula,
-            "procedure": seed_procedure,
-        }.get(object_type, seed_claim)
+        from app.repositories.sqlite.governance_store import seed_fn_for
+        return seed_fn_for(object_type)
 
     def _find_base_dedup_match(
         self, object_type: str, src_payload: dict, base_objs: List[sqlite3.Row]
     ) -> str:
-        """Exact-seed dedup (v1): return the id of an existing base object whose
-        normalized seed matches the source payload, else ''. This works at cold
-        start without vectors (the plan's v1 shortcut)."""
-        seed_fn = self._seed_fn_for(object_type)
-        src_seed = seed_fn({"name": src_payload.get("name", ""), "payload": src_payload})
-        if not src_seed:
-            return ""
-        for b in base_objs:
-            bp = json.loads(b["payload"] or "{}")
-            b_seed = seed_fn({"name": bp.get("name", ""), "payload": bp})
-            if b_seed and b_seed == src_seed:
-                return b["id"]
-        return ""
+        """Exact-seed dedup (v1) — canonical body lives with the governance
+        store's promotion primitive (Task 13)."""
+        from app.repositories.sqlite.governance_store import find_base_dedup_match
+        return find_base_dedup_match(object_type, src_payload, base_objs)
 
     @staticmethod
     def _merge_evidence_lists(base_ev: list, src_ev: list) -> list:
         """Union two evidence lists, deduping on (source_id, element_id, quoted_span)."""
-        seen = set()
-        merged: list = []
-        for ev in [*base_ev, *src_ev]:
-            if not isinstance(ev, dict):
-                continue
-            key = (ev.get("source_id"), ev.get("element_id"), ev.get("quoted_span"))
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(ev)
-        return merged
+        from app.repositories.sqlite.governance_store import merge_evidence_lists
+        return merge_evidence_lists(base_ev, src_ev)
 
     def reject_promotion(self, candidate_id: str, reason: str = "") -> dict:
         """Reject a promotion candidate. The personal object is left untouched.
         Raises KeyError if missing; ValueError if already approved."""
         now = _now()
         with self._write() as db:
-            cand = db.execute(
-                "SELECT * FROM promotion_candidates WHERE id=?", (candidate_id,)
-            ).fetchone()
+            cand = self._runtime.governance.promotion_candidate_row(db, candidate_id)
             if cand is None:
                 raise KeyError(candidate_id)
             if cand["status"] == "approved":
                 raise ValueError("cannot reject an approved promotion candidate")
-            db.execute(
-                "UPDATE promotion_candidates "
-                "SET status='rejected', reason=?, reviewed_by='curator', updated_at=? "
-                "WHERE id=?",
-                (reason, now, candidate_id),
+            self._runtime.governance.set_promotion_rejected(
+                db, candidate_id, reason, now
             )
-            row = db.execute(
-                "SELECT * FROM promotion_candidates WHERE id=?", (candidate_id,)
-            ).fetchone()
+            row = self._runtime.governance.promotion_candidate_row(db, candidate_id)
         return self._promotion_row_to_dict(row)
 
     def update_knowledge(
@@ -5921,39 +5151,14 @@ class SQLiteRepository:
     ) -> RuleCard:
         now = _now()
         with self._write() as db:
-            row = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-                (knowledge_id, notebook_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(knowledge_id)
-            if payload.status is not None and payload.status not in KNOWLEDGE_STATUSES:
-                raise ValueError(f"invalid status: {payload.status}")
-            new_payload = (
-                json.dumps(payload.payload, ensure_ascii=False)
-                if payload.payload is not None
-                else row["payload"]
+            row = self._runtime.governance.update_object_in_transaction(
+                db, notebook_id, knowledge_id, payload, now
             )
-            new_status = payload.status if payload.status is not None else row["status"]
-            new_owner = payload.owner if payload.owner is not None else row["owner"]
-            # Stamp last_reviewed whenever a curator changes status.
-            last_reviewed = now if payload.status is not None else (
-                row["last_reviewed"] if "last_reviewed" in row.keys() else ""
-            )
-            db.execute(
-                "UPDATE knowledge_objects SET payload = ?, status = ?, owner = ?, "
-                "last_reviewed = ?, updated_at = ? WHERE id = ? AND notebook_id = ?",
-                (new_payload, new_status, new_owner, last_reviewed, now, knowledge_id, notebook_id),
-            )
-            row = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-                (knowledge_id, notebook_id),
-            ).fetchone()
         # WS4: re-embed payload-level vector when the payload was edited.
         if payload.payload is not None:
             try:
                 self._embed_knowledge(
-                    knowledge_id, row["notebook_id"], json.loads(new_payload or "{}")
+                    knowledge_id, row["notebook_id"], json.loads(row["payload"] or "{}")
                 )
             except Exception:
                 pass
@@ -6095,39 +5300,9 @@ class SQLiteRepository:
             raise ValueError("cannot merge a knowledge object into itself")
         now = _now()
         with self._write() as db:
-            src = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-                (source_id, notebook_id),
-            ).fetchone()
-            tgt = db.execute(
-                "SELECT * FROM knowledge_objects WHERE id = ? AND notebook_id = ?",
-                (into_id, notebook_id),
-            ).fetchone()
-            if src is None or tgt is None:
-                raise KeyError(source_id if src is None else into_id)
-            if src["object_type"] != tgt["object_type"]:
-                raise ValueError("can only merge knowledge objects of the same type")
-            merged: List[dict] = json.loads(tgt["evidence"] or "[]")
-            seen = {(e.get("element_id"), e.get("quoted_span")) for e in merged}
-            for item in json.loads(src["evidence"] or "[]"):
-                key = (item.get("element_id"), item.get("quoted_span"))
-                if key not in seen:
-                    merged.append(item)
-                    seen.add(key)
-            merged_json = json.dumps(merged, ensure_ascii=False)
-            db.execute(
-                "UPDATE knowledge_objects SET evidence = ?, updated_at = ? WHERE id = ?",
-                (merged_json, now, into_id),
+            row = self._runtime.governance.merge_objects_in_transaction(
+                db, notebook_id, source_id, into_id, now
             )
-            # into_id's evidence gained items (possibly new source_ids) from source_id;
-            # source_id itself only flips status (its own evidence/reverse-index rows
-            # are unchanged and stay correct until the object is actually deleted).
-            self._upsert_knowledge_object_sources(db, into_id, notebook_id, merged_json)
-            db.execute(
-                "UPDATE knowledge_objects SET status = 'deprecated', last_reviewed = ?, updated_at = ? WHERE id = ?",
-                (now, now, source_id),
-            )
-            row = db.execute("SELECT * FROM knowledge_objects WHERE id = ?", (into_id,)).fetchone()
         # merge deprecates one object in place (COUNT unchanged) — bump the
         # monotonic seq so _scale_index_version / _cluster_input_version fast
         # paths (keyed on kg_mutation_seq) don't miss this same-second edit.
@@ -9236,9 +8411,9 @@ class SQLiteRepository:
             # 49 万对象生产实测数十分钟)。FTS 词法有界兜底:kg_objects_fts 覆盖
             # 全部对象(含 delta),候选的语义分仍由下方按候选 evidence 元素向量
             # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
-            from app.services.kg.search import fts_search
             with self._connect() as db:
-                lex = fts_search(db, notebook_id, query, k=self.settings.chunk_recall)
+                lex = self._runtime.knowledge.fts_search(
+                    db, notebook_id, query, k=self.settings.chunk_recall)
             self.event_log.emit({
                 "kind": "kg_bruteforce_refused", "notebook_id": notebook_id,
                 "site": "_retrieve_scored", "lexical_candidates": len(lex),
@@ -9795,9 +8970,9 @@ class SQLiteRepository:
         from app.services.vector_index import query_sims
         hits, fts_error = [], ""
         try:
-            from app.services.kg.search import chunk_fts_search
             with self._connect() as db:
-                hits = chunk_fts_search(db, notebook_id, query, k=recall)
+                hits = self._runtime.knowledge.chunk_fts_search(
+                    db, notebook_id, query, k=recall)
         except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
             fts_error = f"{type(exc).__name__}: {exc}"
         event = {
@@ -9873,9 +9048,9 @@ class SQLiteRepository:
 
         # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
         try:
-            from app.services.kg.search import chunk_fts_search
             with self._connect() as db:
-                lex = chunk_fts_search(db, notebook_id, query, k=recall)
+                lex = self._runtime.knowledge.chunk_fts_search(
+                    db, notebook_id, query, k=recall)
             for h in lex:
                 cid = h["chunk_id"]
                 if cid not in chunk_sims:
@@ -9961,9 +9136,9 @@ class SQLiteRepository:
             return []
         recall = recall or self.settings.chunk_recall
         try:
-            from app.services.kg.search import chunk_fts_search
             with self._connect() as db:
-                hits = chunk_fts_search(db, notebook_id, needle, k=recall)
+                hits = self._runtime.knowledge.chunk_fts_search(
+                    db, notebook_id, needle, k=recall)
             if not hits:
                 return []
             chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])

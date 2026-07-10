@@ -8,10 +8,10 @@ from app.models.schemas import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
-# NotebookSummary type counts.  Canonical definition lives here at the
-# component layer; app.services.sqlite_repository re-exports it as the frozen
-# compatibility name `USABLE_STATUSES`.
-USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
+# NotebookSummary type counts.  Task 13 moved the canonical definition to
+# app.services.knowledge_contracts; this re-export keeps the Task-8 import
+# sites (facade / notebook_catalog) pointing at the SAME tuple.
+from app.services.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 
 
 class NotebookStore:

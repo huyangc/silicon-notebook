@@ -273,15 +273,19 @@ def test_concept_desc_checkpoint_periodic_flush_at_16(repo, monkeypatch):
             "evidence": [{"quoted_span": f"topic {i} quote beta"}],
         }], [])
 
+    # Gate 5 (Task 13): checkpoint persistence moved to UnifiedKgStore —
+    # the canonical patch seat is the store's checkpoint_put, which
+    # rebuild_unified_kg now calls directly (the facade _rebuild_ckpt_put
+    # wrapper stays callable but is no longer the seam).
     put_calls = {"concept_desc": 0}
-    orig_put = repo._rebuild_ckpt_put
+    orig_put = repo._runtime.unified_kg.checkpoint_put
 
-    def _spy_put(notebook_id, input_version, stage, rows):
+    def _spy_put(notebook_id, input_version, stage, rows, now):
         if stage == "concept_desc":
             put_calls["concept_desc"] += 1
-        return orig_put(notebook_id, input_version, stage, rows)
+        return orig_put(notebook_id, input_version, stage, rows, now)
 
-    monkeypatch.setattr(repo, "_rebuild_ckpt_put", _spy_put)
+    monkeypatch.setattr(repo._runtime.unified_kg, "checkpoint_put", _spy_put)
 
     repo.rebuild_unified_kg(nb.id, force=True)
 
@@ -309,7 +313,8 @@ def test_concept_desc_checkpoint_put_failure_does_not_abort_rebuild(repo, monkey
     def _boom_put(*a, **kw):
         raise RuntimeError("simulated checkpoint put failure")
 
-    monkeypatch.setattr(repo, "_rebuild_ckpt_put", _boom_put)
+    # Gate 5 (Task 13): fail-open injection rides the store seam (see above).
+    monkeypatch.setattr(repo._runtime.unified_kg, "checkpoint_put", _boom_put)
 
     n = repo.rebuild_unified_kg(nb.id, force=True)   # 不应抛出——fail-open
     assert isinstance(n, int) and n > 0

@@ -10,15 +10,19 @@ from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.source_files import SourceFileStore
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.embedding_store import EmbeddingStore
+from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
+from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
+from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
@@ -59,6 +63,14 @@ class RepositoryRuntime:
         )
         self.source_store = SourceStore(self.database, now=seams.now)
         self.chunk_store = ChunkStore(self.database)
+        # Task 13: the three knowledge-domain persistence stores share the ONE
+        # database boundary. Their primitives are connection-taking — the
+        # facade keeps every transaction/connection boundary (its `_write` /
+        # `_connect` compatibility seams stay the observable commit points),
+        # so construction is eager and seam-free.
+        self.knowledge = KnowledgeStore(self.database, seams)
+        self.governance = GovernanceStore(self.database, seams)
+        self.unified_kg = UnifiedKgStore(self.database)
         # Source file persistence resolves storage_dir through the database
         # boundary's resolve_path — no facade seams, so construction is eager.
         self.source_files = SourceFileStore(
@@ -102,6 +114,16 @@ class RepositoryRuntime:
             settings,
             self.event_log,
             ask_context,
+        )
+        # Task 13: schema CRUD + LLM-backed induction. Depends on the model
+        # provider (late-bound per-user llm_client property), so it composes
+        # after `models`.
+        self.schema_registry = SchemaRegistryService(
+            self.notebook_store,
+            self.knowledge,
+            self.source_store,
+            self.models,
+            settings,
         )
 
     def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStore:

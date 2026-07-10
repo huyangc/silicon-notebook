@@ -1,35 +1,9 @@
-"""KG 节点搜索纯逻辑:FTS5 词法查询 + 词法/语义结果合并。DB/ANN 由调用方提供。"""
+"""KG 节点搜索纯逻辑:词法/语义结果合并。
+
+Task 13:FTS SQL(fts_search / chunk_fts_search)移入
+app.repositories.sqlite.knowledge_store.KnowledgeStore;本模块只保留纯合并。"""
 from __future__ import annotations
 from typing import List, Dict
-
-
-def fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
-    """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
-    [{object_id, name, score, match:'lexical'}]。q 空 → []。"""
-    needle = (q or "").strip()
-    if not needle:
-        return []
-    rows = db.execute(
-        "SELECT object_id, name, bm25(kg_objects_fts) AS rank "
-        "FROM kg_objects_fts WHERE notebook_id=? AND kg_objects_fts MATCH ? "
-        "ORDER BY rank LIMIT ?",
-        (notebook_id, '"' + needle.replace('"', '""') + '"', k)).fetchall()
-    return [{"object_id": r["object_id"], "name": r["name"],
-             "score": -float(r["rank"]), "match": "lexical"} for r in rows]
-
-
-def chunk_fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
-    """FTS5 MATCH(chunks_fts, trigram)。notebook 维度过滤。返回
-    [{chunk_id, score, match:'lexical'}]。q 空 → []。"""
-    needle = (q or "").strip()
-    if not needle:
-        return []
-    rows = db.execute(
-        "SELECT chunk_id, bm25(chunks_fts) AS rank FROM chunks_fts "
-        "WHERE notebook_id=? AND chunks_fts MATCH ? ORDER BY rank LIMIT ?",
-        (notebook_id, '"' + needle.replace('"', '""') + '"', k)).fetchall()
-    return [{"chunk_id": r["chunk_id"], "score": -float(r["rank"]),
-             "match": "lexical"} for r in rows]
 
 
 def merge_search_hits(lexical: List[Dict], semantic: List[Dict], k: int = 30) -> List[Dict]:

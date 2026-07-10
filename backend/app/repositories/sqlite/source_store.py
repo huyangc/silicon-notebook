@@ -111,6 +111,28 @@ class SourceStore:
             for row in rows
         ]
 
+    def notebook_element_sample(self, notebook_id: str) -> List[dict]:
+        """Notebook-wide element sample for schema induction (Task 13). Runs
+        the SAME join _gather_elements always ran (identical row order — the
+        LEFT JOIN keeps the query plan byte-stable) but skips the Python-side
+        vector decode: propose_schemas only reads location_label/text."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                """
+                SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
+                       s.title AS source_title, em.vector AS vector
+                FROM source_elements e
+                JOIN sources s ON s.id = e.source_id
+                LEFT JOIN element_embeddings em ON em.element_id = e.id
+                WHERE s.notebook_id = ?
+                """,
+                (notebook_id,),
+            ).fetchall()
+        return [
+            {"location_label": row["location_label"], "text": row["text"]}
+            for row in rows
+        ]
+
     # ----------------------------------------------------------------- writes
     def insert_source(
         self,

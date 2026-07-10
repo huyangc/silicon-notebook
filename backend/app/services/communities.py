@@ -4,7 +4,8 @@
  · sibling_peers(P2):concept_comentions 跨源共提对,直接查表零 LLM、静默 fail-open;
  · community_peers:base 库 Louvain 社区 + 廉价词法重排,miss 时 emit community_unavailable
    事件(绝不静默零召回)。
-两路焦点解析共用 _resolve_focal(lower(canonical_name)==_norm(focal))。"""
+两路焦点解析共用同一归一化 + UnifiedKgStore.resolve_focal(Task 13:本模块只保留
+编排/重排/事件,持久化读一律走 repo._runtime.unified_kg,不再直连数据库)。"""
 from __future__ import annotations
 from typing import List, Optional, Tuple
 
@@ -13,51 +14,38 @@ def _norm(s: str) -> str:
     return " ".join((s or "").split()).lower()
 
 
-def _resolve_focal(db, notebook_id: str, focal_name: str) -> Optional[str]:
+def _resolve_focal(store, notebook_id: str, focal_name: str) -> Optional[str]:
     """focal 名 → canonical_id(共提/社区两路共用的焦点解析:lower(canonical_name)==_norm(focal),
     多簇取成员最多者)。入参空 / 解析不到 → None。**不 emit 事件**——sibling_peers 走静默、
     community_peers 拿到 None 后自行补 community_unavailable 事件。"""
     key = _norm(focal_name)
     if not notebook_id or not key:
         return None
-    row = db.execute(
-        "SELECT canonical_id FROM concept_clusters WHERE notebook_id=? AND lower(canonical_name)=? "
-        "GROUP BY canonical_id ORDER BY COUNT(*) DESC LIMIT 1", (notebook_id, key)).fetchone()
-    return row["canonical_id"] if row else None
+    return store.resolve_focal(notebook_id, key)
 
 
 def first_base_notebook_id(repo, active_nb: str) -> Optional[str]:
-    with repo._connect() as db:
-        row = db.execute(
-            "SELECT id FROM notebooks WHERE tier='base' AND id != ? ORDER BY updated_at DESC LIMIT 1",
-            (active_nb,)).fetchone()
-    return row["id"] if row else None
+    return repo._runtime.unified_kg.first_base_notebook_id(active_nb)
 
 
 def community_peers(repo, base_nb: str, focal_name: str, query: str, *,
                     top_k: int, candidates: int) -> List[str]:
     from app.services.retrieval import keyword_score
+    store = repo._runtime.unified_kg
     key = _norm(focal_name)
     if not base_nb or not key:
         return []
-    with repo._connect() as db:
-        focal_can = _resolve_focal(db, base_nb, focal_name)
-        if not focal_can:
-            repo.event_log.emit({"kind": "community_unavailable", "notebook_id": base_nb,
-                                 "reason": "focal_unresolved", "focal": focal_name})
-            return []
-        crow = db.execute(
-            "SELECT community_id FROM community_members WHERE notebook_id=? AND canonical_id=? "
-            "ORDER BY level DESC LIMIT 1", (base_nb, focal_can)).fetchone()
-        if not crow:
-            repo.event_log.emit({"kind": "community_unavailable", "notebook_id": base_nb,
-                                 "reason": "not_built", "focal": focal_name})
-            return []
-        rows = db.execute(
-            "SELECT canonical_name, centrality FROM community_members "
-            "WHERE notebook_id=? AND community_id=? AND canonical_id!=? "
-            "ORDER BY centrality DESC LIMIT ?", (base_nb, crow["community_id"], focal_can, candidates)
-        ).fetchall()
+    focal_can = _resolve_focal(store, base_nb, focal_name)
+    if not focal_can:
+        repo.event_log.emit({"kind": "community_unavailable", "notebook_id": base_nb,
+                             "reason": "focal_unresolved", "focal": focal_name})
+        return []
+    community_id = store.top_community_for(base_nb, focal_can)
+    if not community_id:
+        repo.event_log.emit({"kind": "community_unavailable", "notebook_id": base_nb,
+                             "reason": "not_built", "focal": focal_name})
+        return []
+    rows = store.community_member_peers(base_nb, community_id, focal_can, candidates)
     ranked = sorted(rows, key=lambda r: (keyword_score(query, r["canonical_name"] or ""),
                                          r["centrality"]), reverse=True)
     seen, out = set(), []
@@ -86,25 +74,12 @@ def sibling_peers(repo, notebook_id: str, focal_name: str, *,
     未来其它调用方可指向活动库自身。返回 [(canonical_name, bridge_claims), ...] 降序。
     任何异常 / 焦点解析不到 / 无共提数据 → [](静默,不 emit;由调用方回退社区路径兜底文案)。"""
     try:
+        store = repo._runtime.unified_kg
         min_b = int(getattr(repo.settings, "sibling_min_bridge", 2))
-        with repo._connect() as db:
-            cid = _resolve_focal(db, notebook_id, focal_name)
-            if not cid:
-                return []
-            rows = db.execute(
-                "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
-                "WHERE notebook_id=? AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
-                "ORDER BY bridge_claims DESC LIMIT ?",
-                (notebook_id, cid, cid, min_b, top_k)).fetchall()
-            out: List[Tuple[str, int]] = []
-            for r in rows:
-                other = r["canonical_b"] if r["canonical_a"] == cid else r["canonical_a"]
-                nm = db.execute(
-                    "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? "
-                    "AND canonical_id=? LIMIT 1", (notebook_id, other)).fetchone()
-                if nm and nm["canonical_name"]:
-                    out.append((nm["canonical_name"], int(r["bridge_claims"])))
-            return out
+        cid = _resolve_focal(store, notebook_id, focal_name)
+        if not cid:
+            return []
+        return store.comention_peers(notebook_id, cid, min_b, top_k)
     except Exception:
         return []
 

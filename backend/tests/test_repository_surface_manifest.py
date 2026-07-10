@@ -132,6 +132,15 @@ TASK12_ALLOWED_IMPORTS = {
     ("backend/tests/test_source_ingestion_failure_boundaries.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/tests/test_source_ingestion_failure_boundaries.py", 21, "app.services.sqlite_repository", "_now"),
 }
+# Task 13: the three new knowledge-domain test files import the compatibility
+# exports at fresh sites (the facade's own frozen import lines are untouched).
+TASK13_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowledge_store_contract.py", 13, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_knowledge_store_contract.py", 13, "app.services.sqlite_repository", "_now"),
+    ("backend/tests/test_schema_registry_service.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_schema_registry_service.py", 18, "app.services.sqlite_repository", "_now"),
+    ("backend/tests/test_repository_module_boundaries.py", 99, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -263,12 +272,23 @@ TASK5_ALLOWED_PATCHES = {
     ("backend/tests/test_sqlite_database_component.py", 0, "_write", "repo"),
 }
 # master v10 新成员上的测试探针(成员本身经 MASTER_V10_ALLOWED_NEW_MEMBERS 豁免,
-# fixture 冻结成员集不扩)。Gate 5 搬迁时这些 patch 座随成员迁到组件 seam。
+# fixture 冻结成员集不扩)。Gate 5(Task 13)兑现了"搬迁时 patch 座随成员迁到组件
+# seam"的约定:test_rebuild_checkpoint 的两个 _rebuild_ckpt_put 座已迁到
+# repo._runtime.unified_kg.checkpoint_put(store seam,静态扫描不再计为 facade
+# patch),故此处只剩 _flush_object_vectors(Task 11 保留的 facade 座)。
 MASTER_V10_ALLOWED_PATCHES = {
     ("backend/tests/test_node_embed_incremental.py", 56, "_flush_object_vectors", "repo"),
     ("backend/tests/test_node_embed_incremental.py", 63, "_flush_object_vectors", "repo"),
-    ("backend/tests/test_rebuild_checkpoint.py", 284, "_rebuild_ckpt_put", "repo"),
-    ("backend/tests/test_rebuild_checkpoint.py", 312, "_rebuild_ckpt_put", "repo"),
+}
+# Task 13: the schema-registry characterization suite swaps the llm client
+# through the frozen mutable llm_client property (production-compatible seam —
+# the setter writes the runtime model provider the SchemaRegistryService
+# consumes).
+TASK13_ALLOWED_PATCHES = {
+    ("backend/tests/test_schema_registry_service.py", 157, "llm_client", "repo"),
+    ("backend/tests/test_schema_registry_service.py", 177, "llm_client", "repo"),
+    ("backend/tests/test_schema_registry_service.py", 180, "llm_client", "repo"),
+    ("backend/tests/test_schema_registry_service.py", 187, "llm_client", "repo"),
 }
 # Task 8 migrates the list_notebooks query-count spy from the facade _connect
 # patch seat onto the runtime SqliteDatabase.connect component seam.
@@ -601,6 +621,58 @@ TASK12_ALLOWED_MEMBER_FILES = {
         "llm_client", "mineru_client", "mineru_cloud_client",
         "parse_source_file", "process_source", "settings", "upload_sources",
     }
+}
+
+# Task 13: knowledge/governance/unified-KG persistence moves to
+# KnowledgeStore + GovernanceStore + UnifiedKgStore and schema orchestration
+# to SchemaRegistryService; the facade keeps frozen-signature delegates, so
+# the moved bodies' internal self-call sites disappear from the facade file.
+# communities.py consumes the unified store instead of repo._connect, the two
+# modified suites (checkpoint-seat migration, chunk-FTS import move) reference
+# the runtime seam at fresh sites, and the three new Task-13 test files
+# consume the facade at fresh sites.
+TASK13_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_delete_knowledge_object_sources", "_delete_relations_for_source",
+        "_find_base_dedup_match", "_find_stale_knowledge_ids_for_source",
+        "_mark_source_index_backfilled", "_merge_evidence_lists",
+        "_object_schema_from_row", "_seed_fn_for", "_source_index_backfilled",
+        "_upsert_knowledge_object_sources", "list_object_schemas",
+    }
+} | {
+    ("backend/app/services/communities.py", name)
+    for name in {"_connect", "_runtime", "event_log", "settings"}
+} | {
+    ("backend/tests/test_rebuild_checkpoint.py", name)
+    for name in {
+        "_cluster_input_version", "_runtime", "_write", "create_notebook",
+        "rebuild_unified_kg", "settings", "store_kg",
+    }
+} | {
+    ("backend/tests/test_chunk_retrieval.py", name)
+    for name in {"_connect", "_runtime"}
+} | {
+    # the fake-repo suite composes a real UnifiedKgStore for the Task-13
+    # communities seam — its frozen event_log assertion sites shift lines
+    ("backend/tests/test_community_peers.py", "event_log"),
+} | {
+    ("backend/tests/test_knowledge_store_contract.py", name)
+    for name in {
+        "KNOWLEDGE_STATUSES", "KnowledgeGraphTooLargeError", "SQLiteRepository",
+        "USABLE_STATUSES", "_connect", "_mark_unified_kg_dirty", "_now",
+        "_runtime", "_test_insert_object", "_write", "create_notebook",
+    }
+} | {
+    ("backend/tests/test_schema_registry_service.py", name)
+    for name in {
+        "SQLiteRepository", "_now", "_runtime", "_write", "create_notebook",
+        "create_object_schema", "delete_object_schema", "effective_schemas",
+        "list_object_schemas", "llm_client", "propose_schemas", "settings",
+        "update_object_schema",
+    }
+} | {
+    ("backend/tests/test_repository_module_boundaries.py", "SQLiteRepository"),
 }
 
 TASK7_COMPAT_PROPERTIES = {
@@ -1015,6 +1087,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK10_ALLOWED_IMPORTS
                     or site in TASK11_ALLOWED_IMPORTS
                     or site in TASK12_ALLOWED_IMPORTS
+                    or site in TASK13_ALLOWED_IMPORTS
                 )
 
 
@@ -1026,7 +1099,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -1055,14 +1128,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
