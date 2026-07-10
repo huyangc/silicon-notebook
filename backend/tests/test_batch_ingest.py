@@ -176,7 +176,7 @@ def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
         calls["build_nb"] = nb
         return {"built": ["s1", "s2"], "failed": [], "skipped": []}
 
-    def fake_rebuild(nb, progress=None, force=False):
+    def fake_rebuild(nb, progress=None, force=False, fresh=False):
         calls["rebuild_nb"] = nb
         return 7
 
@@ -217,7 +217,8 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(SQLiteRepository, "_run_extraction", lambda self, sid: None)
-    monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", lambda self, nb, progress=None, force=False: 0)
+    monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg",
+                        lambda self, nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
     rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1",
                   "--allow-no-embed"])
@@ -249,7 +250,8 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     def _no_build(nb):
         raise AssertionError("build_notebook_kg must not be called when limit is set")
     monkeypatch.setattr(repo, "build_notebook_kg", _no_build)
-    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb, progress=None, force=False: 0)
+    monkeypatch.setattr(repo, "rebuild_unified_kg",
+                        lambda nb, progress=None, force=False, fresh=False: 0)
 
     repo.settings.kg_llm_base_url = "http://kg.example"
     repo.settings.kg_llm_api_key = "k"
@@ -460,7 +462,7 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted.append(sid))
     rebuild_calls = []
     monkeypatch.setattr(repo, "rebuild_unified_kg",
-                        lambda nb, progress=None, force=False: (rebuild_calls.append(nb), 5)[1])
+                        lambda nb, progress=None, force=False, fresh=False: (rebuild_calls.append(nb), 5)[1])
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
     res = bi.run_all(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
@@ -485,7 +487,8 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-flags")
     monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
-    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb, progress=None, force=False: 0)
+    monkeypatch.setattr(repo, "rebuild_unified_kg",
+                        lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
     configure_calls = []
@@ -494,9 +497,9 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     seen_embed_conc = {}
     real_rebuild = repo.rebuild_unified_kg
 
-    def _spy_rebuild(nb, progress=None, force=False):  # rebuild 在 try 内 → 此刻应已被覆盖为 conc
+    def _spy_rebuild(nb, progress=None, force=False, fresh=False):  # rebuild 在 try 内 → 此刻应已被覆盖为 conc
         seen_embed_conc["during"] = repo.settings.embed_concurrency
-        return real_rebuild(nb, progress=progress, force=force)
+        return real_rebuild(nb, progress=progress, force=force, fresh=fresh)
     monkeypatch.setattr(repo, "rebuild_unified_kg", _spy_rebuild)
 
     orig_embed_conc = repo.settings.embed_concurrency
@@ -536,7 +539,8 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
     extracted = []
     monkeypatch.setattr(repo, "extract_source", lambda sid: extracted.append(sid))
     # process_source 不应被调用(全部走 resume 路径);若被调用会因无 elements 抛错并计 failed
-    monkeypatch.setattr(repo, "rebuild_unified_kg", lambda nb, progress=None, force=False: 0)
+    monkeypatch.setattr(repo, "rebuild_unified_kg",
+                        lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
     res = bi.run_all(repo, nb_id, files, workers=2, conc=2)
@@ -1157,3 +1161,88 @@ def test_arg_parser_backfill_source_index_phase():
 
     args2 = bi.build_arg_parser().parse_args(["backfill-source-index", "--all-notebooks"])
     assert args2.all_notebooks is True
+
+
+# ── Task 6: CLI --fresh 贯通 ──────────────────────────────────────────────────
+
+def test_kg_fresh_flag_clears_checkpoint(repo, monkeypatch):
+    """run_kg(fresh=True) 把 fresh 透传给 rebuild_unified_kg;rebuild_only=True 时
+    force 本就该是 True(两个显式入口都成立)。"""
+    from app.services import batch_ingest
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    seen = {}
+    def _fake_rebuild(notebook_id, progress=None, force=False, fresh=False):
+        seen["force"] = force
+        seen["fresh"] = fresh
+        return 0
+    monkeypatch.setattr(repo, "rebuild_unified_kg", _fake_rebuild)
+    batch_ingest.run_kg(repo, nb.id, rebuild_only=True, fresh=True)
+    assert seen == {"force": True, "fresh": True}
+
+
+def test_kg_fresh_alone_forces_rebuild(repo, monkeypatch):
+    """run_kg(fresh=True) 即便 rebuild_only=False,也必须让 rebuild 调用带 force=True——
+    否则 fresh 清空 checkpoint 后,仍会被 rebuild_unified_kg 里 force=False 的跳过门挡回
+    缓存簇数,merge 审查/概念描述根本没有重跑,--fresh 变成假 no-op(Task 3 review 揪出的
+    整合缺口,这里钉死回归)。"""
+    from app.services import batch_ingest
+    from app.models.schemas import NotebookCreate
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    monkeypatch.setattr(
+        repo, "build_notebook_kg",
+        lambda notebook_id, *, progress=None: {"built": [], "failed": [], "skipped": []})
+    seen = {}
+    def _fake_rebuild(notebook_id, progress=None, force=False, fresh=False):
+        seen["force"] = force
+        seen["fresh"] = fresh
+        return 0
+    monkeypatch.setattr(repo, "rebuild_unified_kg", _fake_rebuild)
+    batch_ingest.run_kg(repo, nb.id, rebuild_only=False, fresh=True)
+    assert seen == {"force": True, "fresh": True}
+
+
+def test_run_all_fresh_flag_forces_rebuild(repo, monkeypatch, tmp_path):
+    """同款漏洞回归,但对 run_all:其末尾 rebuild 调用原先硬编码 force=False,加 fresh 后
+    必须变成 force=fresh,否则 --fresh 对 all 阶段也是假 no-op。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-all-fresh")
+    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    seen = {}
+    def _fake_rebuild(nb, progress=None, force=False, fresh=False):
+        seen["force"] = force
+        seen["fresh"] = fresh
+        return 0
+    monkeypatch.setattr(repo, "rebuild_unified_kg", _fake_rebuild)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+
+    bi.run_all(repo, nb_id, bi.iter_files(d), workers=1, conc=1, fresh=True)
+
+    assert seen == {"force": True, "fresh": True}
+
+
+def test_arg_parser_has_fresh_flag():
+    args = bi.build_arg_parser().parse_args(["kg"])
+    assert args.fresh is False
+    args2 = bi.build_arg_parser().parse_args(["kg", "--fresh"])
+    assert args2.fresh is True
+
+
+def test_main_kg_fresh_dispatches_force_and_fresh(repo, monkeypatch):
+    """端到端:CLI argv → main() → run_kg → repo.rebuild_unified_kg 收到 force=True、
+    fresh=True。main() 内部自建新 repo 实例,故按 test_main_all_ingests_then_runs_kg 的
+    惯例在 SQLiteRepository 类级打桩(而非 fixture 的 repo 实例)。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-cli-fresh")
+    monkeypatch.setenv("EMBED_PROVIDER", "")   # main 自建 repo → embedder 未配,--allow-no-embed 绕过
+    seen = {}
+    def _fake_rebuild(self, nb, progress=None, force=False, fresh=False):
+        seen["force"] = force
+        seen["fresh"] = fresh
+        return 0
+    monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg", _fake_rebuild)
+
+    rc = bi.main(["kg", "--notebook-id", nb_id, "--rebuild-only", "--fresh", "--allow-no-embed"])
+
+    assert rc == 0
+    assert seen == {"force": True, "fresh": True}

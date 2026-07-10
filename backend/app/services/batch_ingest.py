@@ -295,7 +295,7 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4,
 
 
 def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
-           no_rebuild: bool = False, rebuild_only: bool = False,
+           no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
            report_interval: int = 15) -> dict:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
@@ -303,6 +303,9 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
       rebuild_only=True  — 跳过抽取,直接 rebuild_unified_kg + 节点向量(含 scale index)。
       no_rebuild=True    — 只抽取,跳过 rebuild_unified_kg 和 scale index(大批量分批抽,最后一批再 rebuild)。
       两者互斥;互斥时抛 ValueError。
+      fresh=True         — 清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑(模型/阈值换了、
+                            数据没变时用);隐含 force=True(否则清完 checkpoint 仍会被 force=False 的
+                            门控挡回缓存簇数,--fresh 变假 no-op)。
 
     Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
     repo.build_scale_index(notebook_id) 使索引与新簇同步。
@@ -373,10 +376,12 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
         # ── Rebuild 阶段(有 LLM:概念描述/merge-review)→ 同样开 pool 自报 ────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
         with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
-            # force=rebuild_only:rebuild_only 是显式「只重建」入口(用户主动重聚),
-            # 必须重算;普通 kg 阶段走门控(force=False),无新文件时跳过重聚(本次优化点)。
+            # force=(rebuild_only or fresh):rebuild_only 是显式「只重建」入口(用户主动重聚),
+            # fresh 是显式「清 checkpoint 强制重裁」入口——两者都必须绕过跳过门,否则 fresh 清完
+            # checkpoint 后仍被 force=False 的门控挡回缓存簇数,--fresh 变假 no-op。普通 kg 阶段两者
+            # 皆 False 时走门控(force=False),无新文件时跳过重聚(本次优化点)。
             clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
-                                               force=rebuild_only)
+                                               force=(rebuild_only or fresh), fresh=fresh)
             res["clusters"] = clusters
             log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
             print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
@@ -399,7 +404,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
 
 
 def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None,
-            report_interval: int = 15) -> dict:
+            report_interval: int = 15, fresh: bool = False) -> dict:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
     跨源并发提交到全局 KG job 池;**末尾一次** rebuild_unified_kg + 补节点向量(+ scale index)。
 
@@ -416,6 +421,9 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
         传导,故必须显式 configure。
       conc    → repo.settings.embed_concurrency=conc 覆盖 EMBED_CONCURRENCY
         (process_source 内的后台 chunk embed 用它)。
+
+    fresh=True — 透传给末尾的 rebuild_unified_kg:清空 rebuild checkpoint 并强制
+      merge 审查/概念描述全量重跑(隐含 force=True,理由同 run_kg)。
     """
     from app.services.kg import scheduler as _sched
     from app.services.kg.scheduler import submit_job
@@ -486,10 +494,12 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
         # ── 末尾一次(有 LLM:概念描述/merge-review)→ 同样开 pool 自报 ───────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
         with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
-            # 门控(force=False):自动收尾重聚。无新增/变更时(如重跑同一批)输入版本
-            # 未变 → 跳过整段重聚,直接返回缓存簇数(本次优化点)。
+            # 门控(force=fresh):自动收尾重聚,除非显式 --fresh。无新增/变更且非 fresh 时
+            # (如重跑同一批)输入版本未变 → 跳过整段重聚,直接返回缓存簇数(本次优化点);
+            # fresh=True 必须同时 force=True,否则清完 checkpoint 仍被门控挡回缓存,
+            # --fresh 变假 no-op(同 run_kg)。
             clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
-                                               force=False)
+                                               force=fresh, fresh=fresh)
             res["clusters"] = clusters
             log({"phase": "all", "status": "rebuilt", "clusters": clusters})
             print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
@@ -897,6 +907,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "大批量分批抽取用法:重复 'kg --limit N --no-rebuild',最后一次 'kg --rebuild-only'。")
     p.add_argument("--rebuild-only", action="store_true",
                    help="kg 阶段:跳过抽取,直接 rebuild_unified_kg + 节点向量 + scale index(base tier 时)。")
+    p.add_argument("--fresh", action="store_true",
+                   help="kg 阶段:清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑"
+                        "(用于只换了 KG 模型/阈值、数据没变的场景)。")
     p.add_argument("--allow-no-embed", action="store_true",
                    help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
     p.add_argument("--pool-report-interval", type=int, default=15,
@@ -997,7 +1010,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _t = time.perf_counter()
         r = run_all(repo, notebook_id, iter_files(args.input_dir),
                     workers=args.workers, conc=args.embed_conc, log=log,
-                    report_interval=args.pool_report_interval)
+                    report_interval=args.pool_report_interval,
+                    fresh=getattr(args, "fresh", False))
         print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
         return 0
 
@@ -1011,11 +1025,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.phase == "kg":
         no_rebuild = getattr(args, "no_rebuild", False)
         rebuild_only = getattr(args, "rebuild_only", False)
-        print(f"phase=kg limit={args.limit} no_rebuild={no_rebuild} rebuild_only={rebuild_only}",
-              flush=True)
+        fresh = getattr(args, "fresh", False)
+        print(f"phase=kg limit={args.limit} no_rebuild={no_rebuild} rebuild_only={rebuild_only} "
+              f"fresh={fresh}", flush=True)
         _t = time.perf_counter()
         r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
-                   no_rebuild=no_rebuild, rebuild_only=rebuild_only,
+                   no_rebuild=no_rebuild, rebuild_only=rebuild_only, fresh=fresh,
                    report_interval=args.pool_report_interval)
         print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
