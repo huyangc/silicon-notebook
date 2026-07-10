@@ -244,3 +244,72 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
     repo.rebuild_unified_kg(nb.id, force=True)
     assert fake.calls == first              # 二跑零新增(old_desc 此刻仍为空,
                                              # 唯一可能的命中源是 concept_desc checkpoint)
+
+
+def test_concept_desc_checkpoint_periodic_flush_at_16(repo, monkeypatch):
+    """概念描述阶段的周期 flush 分支(_DESC_CKPT_FLUSH=16,PHASE2 循环内
+    `if len(_ck_buf) >= _DESC_CKPT_FLUSH`)此前从未被测试覆盖过——已有用例的工作项
+    数量都远小于 16,只会走循环结束后的 remainder flush。这里造 17 个互不相同的
+    跨源同名 concept(各 2 member,total=2 → 都触发描述生成),驱动至少 17 个描述
+    工作项:flush-at-16 一次 + remainder 一次,单次 rebuild 内
+    _rebuild_ckpt_put(stage='concept_desc') 必须被调用 ≥2 次。"""
+    fake = _CountingDescLLM()
+    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", True, raising=False)
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    # 17 个 distinct concept 名,每个都跨两个 source 各出现一次(exact-name seed
+    # 合并 → 每个 canonical total members=2),互不相似 → 不会触发 merge-review。
+    for i in range(17):
+        name = f"concept topic {i}"
+        repo.store_kg(nb.id, f"s{i}a", [{
+            "local_id": f"a{i}", "object_type": "concept",
+            "payload": {"name": name, "section_path": ""},
+            "evidence": [{"quoted_span": f"topic {i} quote alpha"}],
+        }], [])
+        repo.store_kg(nb.id, f"s{i}b", [{
+            "local_id": f"b{i}", "object_type": "concept",
+            "payload": {"name": name, "section_path": ""},
+            "evidence": [{"quoted_span": f"topic {i} quote beta"}],
+        }], [])
+
+    put_calls = {"concept_desc": 0}
+    orig_put = repo._rebuild_ckpt_put
+
+    def _spy_put(notebook_id, input_version, stage, rows):
+        if stage == "concept_desc":
+            put_calls["concept_desc"] += 1
+        return orig_put(notebook_id, input_version, stage, rows)
+
+    monkeypatch.setattr(repo, "_rebuild_ckpt_put", _spy_put)
+
+    repo.rebuild_unified_kg(nb.id, force=True)
+
+    assert fake.calls == 17                  # 17 个 canonical 都触发了描述 LLM 调用
+    assert put_calls["concept_desc"] >= 2    # flush-at-16 一次 + remainder 一次(非仅 1 次)
+
+
+def test_concept_desc_checkpoint_put_failure_does_not_abort_rebuild(repo, monkeypatch):
+    """Fix 1 的 fail-open 证明:_rebuild_ckpt_put 每次调用都抛错时,
+    rebuild_unified_kg 仍必须完整跑完(返回 cluster 数、不抛异常)——对应全局约束
+    "checkpoint 落库失败,绝不能抛出打断 rebuild"。用单 canonical(autoc 为空、
+    不会触发 merge-review)隔离验证,只专注概念描述阶段的 checkpoint 落库路径。"""
+    fake = _CountingDescLLM()
+    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", True, raising=False)
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, "s1", [{"local_id": "a", "object_type": "concept",
+        "payload": {"name": "bandgap reference", "section_path": ""},
+        "evidence": [{"quoted_span": "bandgap ref circuit"}]}], [])
+    repo.store_kg(nb.id, "s2", [{"local_id": "b", "object_type": "concept",
+        "payload": {"name": "bandgap reference", "section_path": ""},
+        "evidence": [{"quoted_span": "bandgap ref circuit"}]}], [])
+
+    def _boom_put(*a, **kw):
+        raise RuntimeError("simulated checkpoint put failure")
+
+    monkeypatch.setattr(repo, "_rebuild_ckpt_put", _boom_put)
+
+    n = repo.rebuild_unified_kg(nb.id, force=True)   # 不应抛出——fail-open
+    assert isinstance(n, int) and n > 0
