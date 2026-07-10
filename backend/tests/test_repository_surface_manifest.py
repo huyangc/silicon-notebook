@@ -90,6 +90,7 @@ TASK2_ALLOWED_IMPORTS = {
 TASK4_ALLOWED_IMPORTS = {
     ("backend/app/api/deps.py", 12, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/app/services/sqlite_repository.py", 112, "app.services.repository", "UploadedSourceFile"),
+    ("backend/tests/test_sqlite_database_component.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -134,6 +135,16 @@ TASK2_ALLOWED_MEMBER_FILES = {
 TASK3_ALLOWED_NEW_MEMBERS = {"load_notebook_scale_facts"}
 TASK4_ALLOWED_PATCHES = {
     ("backend/tests/test_repository_runtime.py", 19, "_now", "sqlite_repository"),
+}
+TASK5_ALLOWED_PATCHES = {
+    ("backend/tests/test_sqlite_database_component.py", 0, "_write", "repo"),
+}
+TASK5_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {"db_path", "_write_lock", "_connect", "_write"}
+} | {
+    ("backend/tests/test_sqlite_database_component.py", name)
+    for name in {"SQLiteRepository", "_write_lock", "_runtime", "db_path"}
 }
 
 # Internal line numbers in this source file are intentionally not API surface:
@@ -538,7 +549,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    assert recorded | TASK4_ALLOWED_PATCHES == actual | TASK4_ALLOWED_PATCHES
+    assert recorded | TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES == actual | TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES
     assert (
         "backend/tests/test_scale_index_repo.py",
         1094,
@@ -566,14 +577,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES)
+                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES)
+                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
@@ -618,6 +629,10 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
             continue
         if kind == "constant":
             assert hasattr(SQLiteRepository, name), name
+            continue
+        if name in {"db_path", "_write_lock"}:
+            member = inspect.getattr_static(SQLiteRepository, name)
+            assert isinstance(member, property) and member.fset is not None, name
             continue
         if kind in {"instance_attribute", "mutable_property"} and not hasattr(
             SQLiteRepository, name

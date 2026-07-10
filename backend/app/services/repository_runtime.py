@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.core.config import Settings
+from app.repositories.sqlite.database import SqliteDatabase
 
 
 @dataclass(frozen=True)
@@ -20,3 +21,4 @@ class RepositoryRuntime:
         self.settings = settings
         self.root_dir = root_dir
         self.seams = seams
+        self.database = SqliteDatabase(settings, root_dir)

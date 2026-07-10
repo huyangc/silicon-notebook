@@ -25,5 +25,8 @@ def test_runtime_construction_does_not_evaluate_seams():
 
     calls = []
     seams = RepositoryCompatibilitySeams(*(lambda *args, _name=name: calls.append(_name) for name in ("id", "now", "chunk", "remap")))
-    RepositoryRuntime(settings=object(), root_dir=Path("."), seams=seams)
+    class MinimalSettings:
+        sqlite_path = ":memory:"
+
+    RepositoryRuntime(settings=MinimalSettings(), root_dir=Path("."), seams=seams)
     assert calls == []

@@ -298,7 +298,6 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 remap_json_ids=lambda value, maps: _remap_json_ids(value, maps),
             ),
         )
-        self.db_path = self._resolve_path(settings.sqlite_path)
         self.storage_dir = self._resolve_path(settings.storage_dir)
         self._system_llm_client = OpenAICompatibleClient(settings)
         self._user_llm_clients: Dict[str, OpenAICompatibleClient] = {}
@@ -394,7 +393,6 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         # C7: same bounded-LRU rework as _scale_idx_cache above.
         self._viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
         self._vector_cache = VectorCache(max_entries=self.settings.vector_cache_max_entries)
-        self._write_lock = threading.RLock()
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
@@ -488,31 +486,34 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         self._system_rerank_client = client
 
     def _resolve_path(self, value: str) -> Path:
-        path = Path(value)
-        if not path.is_absolute():
-            path = self.root_dir / path
-        return path
+        return self._runtime.database.resolve_path(value)
+
+    @property
+    def db_path(self) -> Path:
+        return self._runtime.database.db_path
+
+    @db_path.setter
+    def db_path(self, value: Path) -> None:
+        self._runtime.database.db_path = value
+
+    @property
+    def _write_lock(self):
+        return self._runtime.database.write_lock
+
+    @_write_lock.setter
+    def _write_lock(self, value) -> None:
+        self._runtime.database.write_lock = value
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=self.settings.db_busy_timeout_ms / 1000)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute(f"PRAGMA busy_timeout = {int(self.settings.db_busy_timeout_ms)}")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA cache_size = -65536")
-        connection.execute("PRAGMA temp_store = MEMORY")
-        connection.execute("PRAGMA mmap_size = 268435456")
-        return connection
+        return self._runtime.database.connect()
 
     @contextmanager
     def _write(self):
         """串行化写事务：进程内同一时刻只有一个写者进 SQLite，并发写线程在
         Python 层排队而非裸抢 SQLite 写锁（后者即 `database is locked` 的根因）。
         纯读保持用 _connect()，不受影响（WAL 支持并发读）。"""
-        with self._write_lock:
-            with self._connect() as db:
-                yield db
+        with self._runtime.database.write() as db:
+            yield db
 
     def _migrate(self) -> list[int]:
         """Schema 版本闸：按 PRAGMA user_version 顺序应用尚未跑过的迁移步骤。
