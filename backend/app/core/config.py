@@ -204,6 +204,7 @@ class Settings(BaseSettings):
     # embedding：每条截断长度、每条 API 批大小、落库分块大小。
     embed_truncate_chars: int = Field(2000, validation_alias="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, validation_alias="EMBED_BATCH_SIZE")
+    embed_commit_batches: int = Field(50, validation_alias="EMBED_COMMIT_BATCHES")
     embed_persist_chunk: int = Field(200, validation_alias="EMBED_PERSIST_CHUNK")
     # 元素向量化并发度（并行发出的 batch 请求数；dashscope 单请求 batch≤10）。
     # 注意：批量并发上传多文档时，每文档各自以此并发嵌入，峰值会叠加，过高会打爆

@@ -530,7 +530,10 @@ def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int
                     "SELECT id, payload FROM knowledge_objects "
                     "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)).fetchall()
             ]
-            repo._backfill_knowledge_embeddings(db, notebook_id, objects)
+            def _p(done, total):
+                end = "\n" if done >= total else "\r"
+                print(f"  节点向量: {done}/{total}", end=end, flush=True)
+            repo._backfill_knowledge_embeddings(db, notebook_id, objects, progress=_p)
     finally:
         repo.settings.embed_concurrency = orig_conc
     # Backfilling node vectors changes the ANN inputs → mark dirty so the cluster

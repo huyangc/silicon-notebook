@@ -3209,9 +3209,22 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 (object_id, notebook_id, encode_vector(vector), _now()),
             )
 
-    def _embed_objects_batch(self, notebook_id: str, items: List[dict]) -> None:
-        """并发 COMPUTE payload 向量, 再用一次写事务持久化到 knowledge_embeddings。
-        每批计算失败照旧 log + 跳过(best-effort)。"""
+    def _flush_object_vectors(self, notebook_id: str, rows: list) -> None:
+        """把一批 (oid, vector) 落 knowledge_embeddings(一个写事务,幂等 REPLACE)。"""
+        if not rows:
+            return
+        from app.services.vector_index import encode_vector
+        now = _now()
+        with self._write() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+                [(oid, notebook_id, encode_vector(vec), now) for oid, vec in rows],
+            )
+
+    def _embed_objects_batch(self, notebook_id: str, items: List[dict],
+                             progress=None, commit_every: Optional[int] = None) -> None:
+        """并发计算 payload 向量,**每 commit_every 批 flush 一次**(增量提交:中断可续跑、
+        内存不攒全量)。每批计算失败照旧 log+跳过(best-effort)。"""
         if not self.settings.embedder_configured:
             return
         pending = []
@@ -3220,11 +3233,14 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
             if text:
                 pending.append((it["_oid"], text[:2000]))
         if not pending:
+            if progress:
+                progress(0, 0)
             return
         import concurrent.futures as _cf
 
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+        commit_every = commit_every or max(1, self.settings.embed_commit_batches)
         ensure = getattr(self.embedder, "_ensure", None)
         if callable(ensure):
             try:
@@ -3245,19 +3261,22 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
             return [(oid, vec) for (oid, _), vec in zip(batch, vectors)]
 
         workers = max(1, min(self.settings.embed_concurrency, len(batches)))
-        rows = []
+        total = len(pending)
+        done = 0
+        buf: list = []
         with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-kg") as pool:
-            for part in pool.map(_embed_only, batches):
-                rows.extend(part)
-        if not rows:
-            return
-        from app.services.vector_index import encode_vector
-        now = _now()
-        with self._write() as db:
-            db.executemany(
-                "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                [(oid, notebook_id, encode_vector(vec), now) for oid, vec in rows],
-            )
+            for bi, part in enumerate(pool.map(_embed_only, batches), 1):
+                buf.extend(part)
+                done += len(batches[bi - 1])
+                if bi % commit_every == 0:
+                    self._flush_object_vectors(notebook_id, buf)
+                    buf = []
+                    if progress:
+                        progress(done, total)
+        if buf:
+            self._flush_object_vectors(notebook_id, buf)
+        if progress:
+            progress(total, total)
 
     def _embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
@@ -3461,7 +3480,8 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         return vectors
 
     def _backfill_knowledge_embeddings(self, db: sqlite3.Connection,
-                                       notebook_id: str, objects: List[dict]) -> None:
+                                       notebook_id: str, objects: List[dict],
+                                       progress=None) -> None:
         """Embed + persist any knowledge objects missing a vector, concurrently
         (reuses the concurrent _embed_objects_batch). No-op when all are embedded
         or no embedder. Lets ask() build a complete knowledge matrix without
@@ -3482,7 +3502,9 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
             if o["id"] not in have and _payload_text(o.get("payload", {})).strip()
         ]
         if missing:
-            self._embed_objects_batch(notebook_id, missing)
+            self._embed_objects_batch(notebook_id, missing, progress=progress)
+        elif progress:
+            progress(0, 0)
 
     def _backfill_relation_embeddings(self, notebook_id: str) -> None:
         """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。无 embedder 则 no-op。"""
