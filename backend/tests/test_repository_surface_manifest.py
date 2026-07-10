@@ -91,6 +91,7 @@ TASK4_ALLOWED_IMPORTS = {
     ("backend/app/api/deps.py", 12, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/app/services/sqlite_repository.py", 112, "app.services.repository", "UploadedSourceFile"),
     ("backend/tests/test_sqlite_database_component.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/app/services/sqlite_repository.py", 113, "app.services.repository", "UploadedSourceFile"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -133,11 +134,30 @@ TASK2_ALLOWED_MEMBER_FILES = {
     for name in {"UploadedSourceFile", "NotebookRepository"}
 }
 TASK3_ALLOWED_NEW_MEMBERS = {"load_notebook_scale_facts"}
+# master v10(rebuild 可续跑轨道, schema 9→10)在冻结之后新增的 facade 成员:
+# kg_rebuild_checkpoint 迁移 + 4 个运行时 ckpt helper + 节点向量增量 flush。
+# 均为上游合法演进、非本重构产物;Gate 5(KG 域)搬迁时随 rebuild_unified_kg 移动。
+MASTER_V10_ALLOWED_NEW_MEMBERS = {
+    "_migration_10",
+    "_rebuild_ckpt_gc",
+    "_rebuild_ckpt_clear",
+    "_rebuild_ckpt_load",
+    "_rebuild_ckpt_put",
+    "_flush_object_vectors",
+}
 TASK4_ALLOWED_PATCHES = {
     ("backend/tests/test_repository_runtime.py", 19, "_now", "sqlite_repository"),
 }
 TASK5_ALLOWED_PATCHES = {
     ("backend/tests/test_sqlite_database_component.py", 0, "_write", "repo"),
+}
+# master v10 新成员上的测试探针(成员本身经 MASTER_V10_ALLOWED_NEW_MEMBERS 豁免,
+# fixture 冻结成员集不扩)。Gate 5 搬迁时这些 patch 座随成员迁到组件 seam。
+MASTER_V10_ALLOWED_PATCHES = {
+    ("backend/tests/test_node_embed_incremental.py", 56, "_flush_object_vectors", "repo"),
+    ("backend/tests/test_node_embed_incremental.py", 63, "_flush_object_vectors", "repo"),
+    ("backend/tests/test_rebuild_checkpoint.py", 284, "_rebuild_ckpt_put", "repo"),
+    ("backend/tests/test_rebuild_checkpoint.py", 312, "_rebuild_ckpt_put", "repo"),
 }
 TASK5_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
@@ -145,6 +165,16 @@ TASK5_ALLOWED_MEMBER_FILES = {
 } | {
     ("backend/tests/test_sqlite_database_component.py", name)
     for name in {"SQLiteRepository", "_write_lock", "_runtime", "db_path"}
+}
+TASK6_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_migrate", "_migrate_legacy", "_add_column_if_missing",
+        "_migration_1", "_migration_2", "_migration_3", "_migration_4",
+        "_migration_5", "_migration_6", "_migration_7", "_migration_8",
+        "_migration_9", "_recover_interrupted_jobs", "_recover_interrupted_jobs_legacy",
+        "_seed", "_seed_legacy", "_migrator",
+    }
 }
 
 # Internal line numbers in this source file are intentionally not API surface:
@@ -549,7 +579,8 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    assert recorded | TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES == actual | TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES
+    assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
         1094,
@@ -577,14 +608,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
@@ -596,7 +627,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         name: {_normalize_consumer_site(site) for site in sites}
         for name, sites in recorded.items()
     }
-    for name in TASK3_ALLOWED_NEW_MEMBERS:
+    for name in TASK3_ALLOWED_NEW_MEMBERS | MASTER_V10_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

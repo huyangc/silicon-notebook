@@ -62,9 +62,11 @@
       "backend/tests/test_admin_users.py:3",
       "backend/tests/test_canonical_relations.py:7",
       "backend/tests/test_community_members_schema.py:52",
-      "backend/tests/test_follow_chain_repository.py:275",
+      "backend/tests/test_follow_chain_repository.py:278",
       "backend/tests/test_legacy_db_compat.py:82",
       "backend/tests/test_mention_bridge.py:7",
+      "backend/tests/test_rebuild_checkpoint.py:27",
+      "backend/tests/test_rebuild_checkpoint.py:41",
       "backend/tests/test_schema_version_migration.py:25",
       "backend/tests/test_schema_version_migration.py:46",
       "compatibility:app.services.sqlite_repository"
@@ -184,6 +186,7 @@
       "backend/tests/test_model_errors.py:15",
       "backend/tests/test_node_context.py:3",
       "backend/tests/test_node_context_steps.py:3",
+      "backend/tests/test_node_embed_incremental.py:3",
       "backend/tests/test_notebook_copy_stats_memo.py:21",
       "backend/tests/test_notebook_counts_batched.py:12",
       "backend/tests/test_notebook_meta.py:10",
@@ -206,6 +209,7 @@
       "backend/tests/test_reasoning_retrieval.py:144",
       "backend/tests/test_reasoning_stream.py:27",
       "backend/tests/test_rebuild_cache.py:20",
+      "backend/tests/test_rebuild_checkpoint.py:5",
       "backend/tests/test_rebuild_communities.py:13",
       "backend/tests/test_rebuild_desc_cache.py:16",
       "backend/tests/test_rebuild_instrumentation.py:19",
@@ -804,9 +808,10 @@
   },
   "_backfill_knowledge_embeddings": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:533",
+      "backend/app/services/batch_ingest.py:546",
       "backend/tests/test_ask_vector_matrix.py:125",
       "backend/tests/test_dim_invariants.py:133",
+      "backend/tests/test_node_embed_incremental.py:84",
       "scripts/backfill_kg_embeddings.py:66"
     ],
     "kind": "private_wrapper",
@@ -821,7 +826,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, db: 'sqlite3.Connection', notebook_id: 'str', objects: 'List[dict]') -> 'None'"
+    "signature": "(self, db: 'sqlite3.Connection', notebook_id: 'str', objects: 'List[dict]', progress=None) -> 'None'"
   },
   "_backfill_relation_embeddings": {
     "consumers": [
@@ -999,6 +1004,12 @@
       "backend/tests/test_rebuild_cache.py:86",
       "backend/tests/test_rebuild_cache.py:88",
       "backend/tests/test_rebuild_cache.py:94",
+      "backend/tests/test_rebuild_checkpoint.py:214",
+      "backend/tests/test_rebuild_checkpoint.py:238",
+      "backend/tests/test_rebuild_checkpoint.py:341",
+      "backend/tests/test_rebuild_checkpoint.py:342",
+      "backend/tests/test_rebuild_checkpoint.py:355",
+      "backend/tests/test_rebuild_checkpoint.py:356",
       "backend/tests/test_runtime_dim_cache_keys.py:159",
       "backend/tests/test_runtime_dim_cache_keys.py:160",
       "backend/tests/test_runtime_dim_cache_keys.py:162",
@@ -1009,7 +1020,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'str'"
+    "signature": "(self, notebook_id: 'str', *, exclude_emb_count: 'bool' = False) -> 'str'"
   },
   "_compute_scale_version_cold": {
     "consumers": [
@@ -1071,14 +1082,14 @@
       "backend/app/services/batch_ingest.py:185",
       "backend/app/services/batch_ingest.py:267",
       "backend/app/services/batch_ingest.py:281",
-      "backend/app/services/batch_ingest.py:328",
-      "backend/app/services/batch_ingest.py:347",
-      "backend/app/services/batch_ingest.py:438",
-      "backend/app/services/batch_ingest.py:526",
-      "backend/app/services/batch_ingest.py:544",
-      "backend/app/services/batch_ingest.py:552",
-      "backend/app/services/batch_ingest.py:681",
-      "backend/app/services/batch_ingest.py:837",
+      "backend/app/services/batch_ingest.py:331",
+      "backend/app/services/batch_ingest.py:350",
+      "backend/app/services/batch_ingest.py:446",
+      "backend/app/services/batch_ingest.py:536",
+      "backend/app/services/batch_ingest.py:557",
+      "backend/app/services/batch_ingest.py:565",
+      "backend/app/services/batch_ingest.py:694",
+      "backend/app/services/batch_ingest.py:850",
       "backend/app/services/communities.py:30",
       "backend/app/services/communities.py:43",
       "backend/app/services/communities.py:90",
@@ -1298,40 +1309,40 @@
       "backend/tests/test_auth_migration.py:20",
       "backend/tests/test_auth_migration.py:27",
       "backend/tests/test_batch_ingest.py:105",
-      "backend/tests/test_batch_ingest.py:1059",
-      "backend/tests/test_batch_ingest.py:1076",
-      "backend/tests/test_batch_ingest.py:1098",
-      "backend/tests/test_batch_ingest.py:1115",
-      "backend/tests/test_batch_ingest.py:1136",
-      "backend/tests/test_batch_ingest.py:1149",
+      "backend/tests/test_batch_ingest.py:1063",
+      "backend/tests/test_batch_ingest.py:1080",
+      "backend/tests/test_batch_ingest.py:1102",
+      "backend/tests/test_batch_ingest.py:1119",
+      "backend/tests/test_batch_ingest.py:1140",
+      "backend/tests/test_batch_ingest.py:1153",
       "backend/tests/test_batch_ingest.py:119",
       "backend/tests/test_batch_ingest.py:126",
       "backend/tests/test_batch_ingest.py:152",
       "backend/tests/test_batch_ingest.py:165",
-      "backend/tests/test_batch_ingest.py:226",
-      "backend/tests/test_batch_ingest.py:321",
-      "backend/tests/test_batch_ingest.py:351",
-      "backend/tests/test_batch_ingest.py:384",
-      "backend/tests/test_batch_ingest.py:396",
-      "backend/tests/test_batch_ingest.py:416",
-      "backend/tests/test_batch_ingest.py:426",
-      "backend/tests/test_batch_ingest.py:468",
-      "backend/tests/test_batch_ingest.py:544",
+      "backend/tests/test_batch_ingest.py:227",
+      "backend/tests/test_batch_ingest.py:323",
+      "backend/tests/test_batch_ingest.py:353",
+      "backend/tests/test_batch_ingest.py:386",
+      "backend/tests/test_batch_ingest.py:398",
+      "backend/tests/test_batch_ingest.py:418",
+      "backend/tests/test_batch_ingest.py:428",
+      "backend/tests/test_batch_ingest.py:470",
+      "backend/tests/test_batch_ingest.py:548",
       "backend/tests/test_batch_ingest.py:55",
-      "backend/tests/test_batch_ingest.py:616",
-      "backend/tests/test_batch_ingest.py:652",
-      "backend/tests/test_batch_ingest.py:671",
-      "backend/tests/test_batch_ingest.py:701",
-      "backend/tests/test_batch_ingest.py:720",
-      "backend/tests/test_batch_ingest.py:733",
-      "backend/tests/test_batch_ingest.py:761",
-      "backend/tests/test_batch_ingest.py:784",
-      "backend/tests/test_batch_ingest.py:800",
-      "backend/tests/test_batch_ingest.py:824",
-      "backend/tests/test_batch_ingest.py:832",
+      "backend/tests/test_batch_ingest.py:620",
+      "backend/tests/test_batch_ingest.py:656",
+      "backend/tests/test_batch_ingest.py:675",
+      "backend/tests/test_batch_ingest.py:705",
+      "backend/tests/test_batch_ingest.py:724",
+      "backend/tests/test_batch_ingest.py:737",
+      "backend/tests/test_batch_ingest.py:765",
+      "backend/tests/test_batch_ingest.py:788",
+      "backend/tests/test_batch_ingest.py:804",
+      "backend/tests/test_batch_ingest.py:828",
+      "backend/tests/test_batch_ingest.py:836",
       "backend/tests/test_batch_ingest.py:85",
-      "backend/tests/test_batch_ingest.py:910",
-      "backend/tests/test_batch_ingest.py:987",
+      "backend/tests/test_batch_ingest.py:914",
+      "backend/tests/test_batch_ingest.py:991",
       "backend/tests/test_canonical_relations.py:130",
       "backend/tests/test_canonical_relations.py:21",
       "backend/tests/test_canonical_relations.py:85",
@@ -1455,6 +1466,8 @@
       "backend/tests/test_node_context.py:67",
       "backend/tests/test_node_context.py:83",
       "backend/tests/test_node_context.py:84",
+      "backend/tests/test_node_embed_incremental.py:26",
+      "backend/tests/test_node_embed_incremental.py:79",
       "backend/tests/test_notebook_copy_stats_memo.py:110",
       "backend/tests/test_notebook_copy_stats_memo.py:111",
       "backend/tests/test_notebook_counts_batched.py:115",
@@ -1503,6 +1516,10 @@
       "backend/tests/test_rebuild_cache.py:322",
       "backend/tests/test_rebuild_cache.py:328",
       "backend/tests/test_rebuild_cache.py:74",
+      "backend/tests/test_rebuild_checkpoint.py:232",
+      "backend/tests/test_rebuild_checkpoint.py:28",
+      "backend/tests/test_rebuild_checkpoint.py:43",
+      "backend/tests/test_rebuild_checkpoint.py:48",
       "backend/tests/test_rebuild_communities.py:119",
       "backend/tests/test_rebuild_communities.py:134",
       "backend/tests/test_rebuild_communities.py:149",
@@ -2026,7 +2043,7 @@
     "owner": "QueryStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', items: 'List[dict]') -> 'None'"
+    "signature": "(self, notebook_id: 'str', items: 'List[dict]', progress=None, commit_every: 'Optional[int]' = None) -> 'None'"
   },
   "_embed_query": {
     "consumers": [
@@ -2832,8 +2849,8 @@
   },
   "_mark_source_index_backfilled": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:789",
-      "backend/app/services/batch_ingest.py:823",
+      "backend/app/services/batch_ingest.py:802",
+      "backend/app/services/batch_ingest.py:836",
       "backend/app/services/sqlite_repository.py:1693"
     ],
     "kind": "private_wrapper",
@@ -2845,7 +2862,7 @@
   "_mark_unified_kg_dirty": {
     "consumers": [
       "backend/app/scripts/reembed_kg.py:28",
-      "backend/app/services/batch_ingest.py:539",
+      "backend/app/services/batch_ingest.py:552",
       "backend/app/services/sqlite_repository.py:2507",
       "backend/app/services/sqlite_repository.py:2730",
       "backend/app/services/sqlite_repository.py:2902",
@@ -2863,8 +2880,8 @@
       "backend/app/services/sqlite_repository.py:7468",
       "backend/app/services/sqlite_repository.py:7636",
       "backend/tests/test_auto_scale_index.py:148",
-      "backend/tests/test_batch_ingest.py:287",
-      "backend/tests/test_batch_ingest.py:310",
+      "backend/tests/test_batch_ingest.py:289",
+      "backend/tests/test_batch_ingest.py:312",
       "backend/tests/test_incremental_fusion.py:452",
       "backend/tests/test_incremental_fusion.py:568",
       "backend/tests/test_incremental_fusion.py:606",
@@ -2891,22 +2908,22 @@
       {
         "base": "repo",
         "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 287,
-        "target": "_mark_unified_kg_dirty"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 310,
-        "target": "_mark_unified_kg_dirty"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
         "file": "backend/tests/test_kg_building_flag.py",
         "line": 42,
+        "target": "_mark_unified_kg_dirty"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 289,
+        "target": "_mark_unified_kg_dirty"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 312,
         "target": "_mark_unified_kg_dirty"
       }
     ],
@@ -4049,16 +4066,17 @@
   "_run_extraction": {
     "consumers": [
       "backend/app/eval/speed.py:109",
-      "backend/app/services/batch_ingest.py:359",
+      "backend/app/services/batch_ingest.py:362",
       "backend/app/services/sqlite_repository.py:2483",
       "backend/app/services/sqlite_repository.py:2727",
       "backend/app/services/sqlite_repository.py:2909",
+      "backend/tests/test_batch_ingest.py:1211",
       "backend/tests/test_batch_ingest.py:219",
-      "backend/tests/test_batch_ingest.py:246",
-      "backend/tests/test_batch_ingest.py:285",
-      "backend/tests/test_batch_ingest.py:308",
-      "backend/tests/test_batch_ingest.py:460",
-      "backend/tests/test_batch_ingest.py:487",
+      "backend/tests/test_batch_ingest.py:247",
+      "backend/tests/test_batch_ingest.py:287",
+      "backend/tests/test_batch_ingest.py:310",
+      "backend/tests/test_batch_ingest.py:462",
+      "backend/tests/test_batch_ingest.py:489",
       "backend/tests/test_chunk_embed.py:99",
       "backend/tests/test_kg_llm_client.py:54",
       "backend/tests/test_kg_relink_repository.py:188",
@@ -4079,48 +4097,6 @@
     "kind": "private_wrapper",
     "owner": "QueryStore",
     "patch_targets": [
-      {
-        "base": "SQLiteRepository",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 219,
-        "target": "_run_extraction"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 246,
-        "target": "_run_extraction"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 285,
-        "target": "_run_extraction"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 308,
-        "target": "_run_extraction"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 460,
-        "target": "_run_extraction"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 487,
-        "target": "_run_extraction"
-      },
       {
         "base": "repo",
         "compatibility": "test-only",
@@ -4168,6 +4144,55 @@
         "compatibility": "test-only",
         "file": "backend/tests/test_resolve_notebook_conflicts.py",
         "line": 331,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "SQLiteRepository",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 219,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 247,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 287,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 310,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 462,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 489,
+        "target": "_run_extraction"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1211,
         "target": "_run_extraction"
       }
     ],
@@ -4375,8 +4400,8 @@
   },
   "_scale_index": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:388",
-      "backend/app/services/batch_ingest.py:499",
+      "backend/app/services/batch_ingest.py:393",
+      "backend/app/services/batch_ingest.py:509",
       "backend/app/services/sqlite_repository.py:10125",
       "backend/app/services/sqlite_repository.py:10129",
       "backend/app/services/sqlite_repository.py:10654",
@@ -4659,8 +4684,8 @@
   },
   "_set_source_status": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:358",
-      "backend/app/services/batch_ingest.py:360",
+      "backend/app/services/batch_ingest.py:361",
+      "backend/app/services/batch_ingest.py:363",
       "backend/app/services/sqlite_repository.py:2482",
       "backend/app/services/sqlite_repository.py:2484",
       "backend/app/services/sqlite_repository.py:2617",
@@ -4668,9 +4693,9 @@
       "backend/app/services/sqlite_repository.py:2724",
       "backend/app/services/sqlite_repository.py:2764",
       "backend/app/services/sqlite_repository.py:2776",
-      "backend/tests/test_batch_ingest.py:247",
-      "backend/tests/test_batch_ingest.py:286",
-      "backend/tests/test_batch_ingest.py:309"
+      "backend/tests/test_batch_ingest.py:248",
+      "backend/tests/test_batch_ingest.py:288",
+      "backend/tests/test_batch_ingest.py:311"
     ],
     "kind": "private_wrapper",
     "owner": "SourceIngestionService",
@@ -4679,21 +4704,21 @@
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 247,
+        "line": 248,
         "target": "_set_source_status"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 286,
+        "line": 288,
         "target": "_set_source_status"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 309,
+        "line": 311,
         "target": "_set_source_status"
       }
     ],
@@ -4739,7 +4764,7 @@
   },
   "_source_ids_from_evidence": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:808",
+      "backend/app/services/batch_ingest.py:821",
       "backend/app/services/sqlite_repository.py:1617",
       "backend/app/services/sqlite_repository.py:1689",
       "backend/app/services/sqlite_repository.py:3906",
@@ -4763,11 +4788,11 @@
   "_source_index_backfilled": {
     "consumers": [
       "backend/app/services/sqlite_repository.py:1675",
-      "backend/tests/test_batch_ingest.py:1063",
-      "backend/tests/test_batch_ingest.py:1099",
-      "backend/tests/test_batch_ingest.py:1100",
-      "backend/tests/test_batch_ingest.py:1137",
-      "backend/tests/test_batch_ingest.py:1150",
+      "backend/tests/test_batch_ingest.py:1067",
+      "backend/tests/test_batch_ingest.py:1103",
+      "backend/tests/test_batch_ingest.py:1104",
+      "backend/tests/test_batch_ingest.py:1141",
+      "backend/tests/test_batch_ingest.py:1154",
       "backend/tests/test_source_reverse_index.py:120",
       "backend/tests/test_source_reverse_index.py:132",
       "backend/tests/test_source_reverse_index.py:158",
@@ -5487,11 +5512,11 @@
   "_write": {
     "consumers": [
       "backend/app/scripts/reembed_kg.py:18",
-      "backend/app/services/batch_ingest.py:706",
-      "backend/app/services/batch_ingest.py:782",
-      "backend/app/services/batch_ingest.py:788",
-      "backend/app/services/batch_ingest.py:797",
-      "backend/app/services/batch_ingest.py:822",
+      "backend/app/services/batch_ingest.py:719",
+      "backend/app/services/batch_ingest.py:795",
+      "backend/app/services/batch_ingest.py:801",
+      "backend/app/services/batch_ingest.py:810",
+      "backend/app/services/batch_ingest.py:835",
       "backend/app/services/sqlite_identity.py:108",
       "backend/app/services/sqlite_identity.py:133",
       "backend/app/services/sqlite_identity.py:287",
@@ -5602,19 +5627,19 @@
       "backend/tests/test_ask_vector_matrix.py:87",
       "backend/tests/test_auto_scale_index.py:111",
       "backend/tests/test_auto_scale_index.py:36",
-      "backend/tests/test_batch_ingest.py:1040",
+      "backend/tests/test_batch_ingest.py:1044",
       "backend/tests/test_batch_ingest.py:116",
-      "backend/tests/test_batch_ingest.py:237",
-      "backend/tests/test_batch_ingest.py:269",
-      "backend/tests/test_batch_ingest.py:367",
-      "backend/tests/test_batch_ingest.py:387",
-      "backend/tests/test_batch_ingest.py:419",
-      "backend/tests/test_batch_ingest.py:529",
-      "backend/tests/test_batch_ingest.py:600",
-      "backend/tests/test_batch_ingest.py:691",
+      "backend/tests/test_batch_ingest.py:238",
+      "backend/tests/test_batch_ingest.py:271",
+      "backend/tests/test_batch_ingest.py:369",
+      "backend/tests/test_batch_ingest.py:389",
+      "backend/tests/test_batch_ingest.py:421",
+      "backend/tests/test_batch_ingest.py:532",
+      "backend/tests/test_batch_ingest.py:604",
+      "backend/tests/test_batch_ingest.py:695",
       "backend/tests/test_batch_ingest.py:71",
-      "backend/tests/test_batch_ingest.py:723",
-      "backend/tests/test_batch_ingest.py:874",
+      "backend/tests/test_batch_ingest.py:727",
+      "backend/tests/test_batch_ingest.py:878",
       "backend/tests/test_canonical_relations.py:104",
       "backend/tests/test_canonical_relations.py:164",
       "backend/tests/test_canonical_relations.py:59",
@@ -5688,6 +5713,8 @@
       "backend/tests/test_mix_answer.py:29",
       "backend/tests/test_mix_overlay.py:45",
       "backend/tests/test_model_errors.py:31",
+      "backend/tests/test_node_embed_incremental.py:43",
+      "backend/tests/test_node_embed_incremental.py:76",
       "backend/tests/test_notebook_copy_stats_memo.py:49",
       "backend/tests/test_notebook_counts_batched.py:77",
       "backend/tests/test_notebook_share_copy.py:113",
@@ -5741,6 +5768,7 @@
       "backend/tests/test_rebuild_cache.py:139",
       "backend/tests/test_rebuild_cache.py:272",
       "backend/tests/test_rebuild_cache.py:96",
+      "backend/tests/test_rebuild_checkpoint.py:348",
       "backend/tests/test_rebuild_communities.py:116",
       "backend/tests/test_rebuild_communities.py:225",
       "backend/tests/test_rebuild_communities.py:241",
@@ -5847,11 +5875,29 @@
   "_write_cluster_map_streamed": {
     "consumers": [
       "backend/app/services/sqlite_repository.py:6358",
-      "backend/app/services/sqlite_repository.py:6382"
+      "backend/app/services/sqlite_repository.py:6382",
+      "backend/tests/test_rebuild_checkpoint.py:217",
+      "backend/tests/test_rebuild_checkpoint.py:224",
+      "backend/tests/test_rebuild_checkpoint.py:243"
     ],
     "kind": "private_wrapper",
     "owner": "KnowledgeGovernanceService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_rebuild_checkpoint.py",
+        "line": 224,
+        "target": "_write_cluster_map_streamed"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_rebuild_checkpoint.py",
+        "line": 243,
+        "target": "_write_cluster_map_streamed"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', object_type: 'str', seed_to_canonical: 'Dict[str, str]', canonical_names: 'Dict[str, str]', desc_by_cid: 'Optional[Dict[str, str]]' = None, desc_sig_by_cid: 'Optional[Dict[str, str]]' = None, run_id: 'str' = '') -> 'None'"
   },
@@ -6247,12 +6293,13 @@
     "consumers": [
       "backend/app/api/routes.py:859",
       "backend/app/scripts/build_kg.py:13",
-      "backend/app/services/batch_ingest.py:339",
+      "backend/app/services/batch_ingest.py:342",
       "backend/app/services/sqlite_repository.py:2562",
+      "backend/tests/test_batch_ingest.py:1192",
       "backend/tests/test_batch_ingest.py:183",
-      "backend/tests/test_batch_ingest.py:251",
-      "backend/tests/test_batch_ingest.py:290",
-      "backend/tests/test_batch_ingest.py:312",
+      "backend/tests/test_batch_ingest.py:252",
+      "backend/tests/test_batch_ingest.py:292",
+      "backend/tests/test_batch_ingest.py:314",
       "backend/tests/test_conflict_e2e.py:166",
       "backend/tests/test_conflict_e2e.py:230",
       "backend/tests/test_kg_building_flag.py:43",
@@ -6280,7 +6327,14 @@
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 251,
+        "line": 252,
+        "target": "build_notebook_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1192,
         "target": "build_notebook_kg"
       }
     ],
@@ -6289,14 +6343,14 @@
   },
   "build_scale_index": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:390",
-      "backend/app/services/batch_ingest.py:500",
-      "backend/app/services/batch_ingest.py:515",
+      "backend/app/services/batch_ingest.py:395",
+      "backend/app/services/batch_ingest.py:510",
+      "backend/app/services/batch_ingest.py:525",
       "backend/app/services/sqlite_repository.py:9148",
       "backend/app/services/sqlite_repository.py:9159",
       "backend/app/services/sqlite_repository.py:9561",
       "backend/tests/test_auto_scale_index.py:83",
-      "backend/tests/test_batch_ingest.py:586",
+      "backend/tests/test_batch_ingest.py:590",
       "backend/tests/test_chunk_bruteforce_guard.py:165",
       "backend/tests/test_chunk_retrieval.py:100",
       "backend/tests/test_chunk_retrieval.py:150",
@@ -6379,15 +6433,15 @@
       {
         "base": "repo",
         "compatibility": "test-only",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 586,
+        "file": "backend/tests/test_scale_index_repo.py",
+        "line": 872,
         "target": "build_scale_index"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
-        "file": "backend/tests/test_scale_index_repo.py",
-        "line": 872,
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 590,
         "target": "build_scale_index"
       }
     ],
@@ -6668,6 +6722,8 @@
       "backend/tests/test_ask_vector_matrix.py:86",
       "backend/tests/test_auto_scale_index.py:35",
       "backend/tests/test_autotune_wiring.py:49",
+      "backend/tests/test_batch_ingest.py:1173",
+      "backend/tests/test_batch_ingest.py:1191",
       "backend/tests/test_bm25_rrf.py:111",
       "backend/tests/test_bm25_rrf.py:57",
       "backend/tests/test_bm25_rrf.py:80",
@@ -6890,6 +6946,8 @@
       "backend/tests/test_node_context_steps.py:26",
       "backend/tests/test_node_context_steps.py:39",
       "backend/tests/test_node_context_steps.py:60",
+      "backend/tests/test_node_embed_incremental.py:35",
+      "backend/tests/test_node_embed_incremental.py:69",
       "backend/tests/test_notebook_copy_stats_memo.py:104",
       "backend/tests/test_notebook_copy_stats_memo.py:125",
       "backend/tests/test_notebook_copy_stats_memo.py:141",
@@ -6971,6 +7029,16 @@
       "backend/tests/test_reasoning_retrieval.py:425",
       "backend/tests/test_rebuild_cache.py:303",
       "backend/tests/test_rebuild_cache.py:54",
+      "backend/tests/test_rebuild_checkpoint.py:139",
+      "backend/tests/test_rebuild_checkpoint.py:156",
+      "backend/tests/test_rebuild_checkpoint.py:205",
+      "backend/tests/test_rebuild_checkpoint.py:260",
+      "backend/tests/test_rebuild_checkpoint.py:301",
+      "backend/tests/test_rebuild_checkpoint.py:334",
+      "backend/tests/test_rebuild_checkpoint.py:373",
+      "backend/tests/test_rebuild_checkpoint.py:60",
+      "backend/tests/test_rebuild_checkpoint.py:71",
+      "backend/tests/test_rebuild_checkpoint.py:80",
       "backend/tests/test_rebuild_communities.py:72",
       "backend/tests/test_rebuild_desc_cache.py:120",
       "backend/tests/test_rebuild_desc_cache.py:169",
@@ -7233,7 +7301,7 @@
   "create_user": {
     "consumers": [
       "backend/app/api/auth_routes.py:17",
-      "backend/tests/test_batch_ingest.py:317",
+      "backend/tests/test_batch_ingest.py:319",
       "backend/tests/test_debug_logs.py:33",
       "backend/tests/test_event_logging.py:108",
       "backend/tests/test_event_logging.py:71",
@@ -7546,6 +7614,7 @@
       "backend/tests/test_mix_overlay.py:13",
       "backend/tests/test_model_errors.py:24",
       "backend/tests/test_model_errors.py:92",
+      "backend/tests/test_node_embed_incremental.py:21",
       "backend/tests/test_notebook_copy_stats_memo.py:35",
       "backend/tests/test_notebook_meta.py:43",
       "backend/tests/test_overlay_guard_order.py:27",
@@ -7565,6 +7634,8 @@
       "backend/tests/test_reasoning_retrieval.py:165",
       "backend/tests/test_reasoning_stream.py:30",
       "backend/tests/test_rebuild_cache.py:34",
+      "backend/tests/test_rebuild_checkpoint.py:120",
+      "backend/tests/test_rebuild_checkpoint.py:21",
       "backend/tests/test_rebuild_communities.py:24",
       "backend/tests/test_rebuild_desc_cache.py:30",
       "backend/tests/test_rebuild_instrumentation.py:35",
@@ -7788,9 +7859,9 @@
   },
   "extract_source": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:468",
+      "backend/app/services/batch_ingest.py:476",
       "backend/app/services/reextract.py:18",
-      "backend/tests/test_batch_ingest.py:537",
+      "backend/tests/test_batch_ingest.py:540",
       "backend/tests/test_kg_repository.py:381"
     ],
     "kind": "method",
@@ -7800,7 +7871,7 @@
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 537,
+        "line": 540,
         "target": "extract_source"
       }
     ],
@@ -8056,9 +8127,9 @@
       "backend/app/api/routes.py:873",
       "backend/app/api/routes.py:887",
       "backend/app/services/batch_ingest.py:207",
-      "backend/app/services/batch_ingest.py:386",
-      "backend/app/services/batch_ingest.py:498",
-      "backend/app/services/batch_ingest.py:840",
+      "backend/app/services/batch_ingest.py:391",
+      "backend/app/services/batch_ingest.py:508",
+      "backend/app/services/batch_ingest.py:853",
       "backend/app/services/sqlite_notebook_sharing.py:142",
       "backend/app/services/sqlite_notebook_sharing.py:244",
       "backend/app/services/sqlite_notebook_sharing.py:522",
@@ -8633,7 +8704,7 @@
       "backend/app/scripts/gen_recall_gold.py:37",
       "backend/app/scripts/gen_recall_gold.py:46",
       "backend/app/scripts/gen_recall_gold.py:53",
-      "backend/app/services/batch_ingest.py:322",
+      "backend/app/services/batch_ingest.py:325",
       "backend/app/services/sqlite_repository.py:11614",
       "backend/app/services/sqlite_repository.py:11618",
       "backend/app/services/sqlite_repository.py:11656",
@@ -8663,11 +8734,12 @@
       "backend/tests/test_ask_vector_matrix.py:109",
       "backend/tests/test_ask_vector_matrix.py:118",
       "backend/tests/test_ask_vector_matrix.py:135",
-      "backend/tests/test_batch_ingest.py:282",
-      "backend/tests/test_batch_ingest.py:300",
-      "backend/tests/test_batch_ingest.py:456",
-      "backend/tests/test_batch_ingest.py:484",
-      "backend/tests/test_batch_ingest.py:514",
+      "backend/tests/test_batch_ingest.py:1208",
+      "backend/tests/test_batch_ingest.py:284",
+      "backend/tests/test_batch_ingest.py:302",
+      "backend/tests/test_batch_ingest.py:458",
+      "backend/tests/test_batch_ingest.py:486",
+      "backend/tests/test_batch_ingest.py:517",
       "backend/tests/test_chunk_concept_walk.py:113",
       "backend/tests/test_chunk_concept_walk.py:126",
       "backend/tests/test_chunk_retrieval.py:230",
@@ -8796,41 +8868,6 @@
       {
         "base": "repo",
         "compatibility": "production-compatible",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 282,
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 300,
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 456,
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 484,
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "file": "backend/tests/test_batch_ingest.py",
-        "line": 514,
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
         "file": "backend/tests/test_kg_relink_repository.py",
         "line": 187,
         "target": "llm_client"
@@ -8840,6 +8877,48 @@
         "compatibility": "production-compatible",
         "file": "backend/tests/test_runtime_dim_bypasses.py",
         "line": 237,
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 284,
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 302,
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 458,
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 486,
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 517,
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1208,
         "target": "llm_client"
       }
     ],
@@ -9309,7 +9388,7 @@
     "consumers": [
       "backend/app/api/routes.py:324",
       "backend/app/api/routes.py:359",
-      "backend/app/services/batch_ingest.py:458",
+      "backend/app/services/batch_ingest.py:466",
       "backend/app/services/sqlite_repository.py:2309",
       "backend/app/services/sqlite_repository.py:2365",
       "backend/app/services/sqlite_repository.py:2792",
@@ -9504,18 +9583,22 @@
     "consumers": [
       "backend/app/api/routes.py:1072",
       "backend/app/scripts/recluster_kg.py:15",
-      "backend/app/services/batch_ingest.py:378",
-      "backend/app/services/batch_ingest.py:491",
+      "backend/app/services/batch_ingest.py:383",
+      "backend/app/services/batch_ingest.py:501",
       "backend/tests/test_auto_scale_index.py:82",
       "backend/tests/test_autotune_wiring.py:53",
+      "backend/tests/test_batch_ingest.py:1179",
+      "backend/tests/test_batch_ingest.py:1200",
+      "backend/tests/test_batch_ingest.py:1217",
+      "backend/tests/test_batch_ingest.py:1243",
       "backend/tests/test_batch_ingest.py:184",
       "backend/tests/test_batch_ingest.py:220",
-      "backend/tests/test_batch_ingest.py:252",
-      "backend/tests/test_batch_ingest.py:462",
-      "backend/tests/test_batch_ingest.py:488",
-      "backend/tests/test_batch_ingest.py:495",
-      "backend/tests/test_batch_ingest.py:500",
-      "backend/tests/test_batch_ingest.py:539",
+      "backend/tests/test_batch_ingest.py:253",
+      "backend/tests/test_batch_ingest.py:464",
+      "backend/tests/test_batch_ingest.py:490",
+      "backend/tests/test_batch_ingest.py:498",
+      "backend/tests/test_batch_ingest.py:503",
+      "backend/tests/test_batch_ingest.py:542",
       "backend/tests/test_canonical_relations.py:124",
       "backend/tests/test_canonical_relations.py:80",
       "backend/tests/test_chunk_bruteforce_guard.py:164",
@@ -9577,6 +9660,18 @@
       "backend/tests/test_rebuild_cache.py:367",
       "backend/tests/test_rebuild_cache.py:372",
       "backend/tests/test_rebuild_cache.py:379",
+      "backend/tests/test_rebuild_checkpoint.py:142",
+      "backend/tests/test_rebuild_checkpoint.py:146",
+      "backend/tests/test_rebuild_checkpoint.py:159",
+      "backend/tests/test_rebuild_checkpoint.py:161",
+      "backend/tests/test_rebuild_checkpoint.py:226",
+      "backend/tests/test_rebuild_checkpoint.py:244",
+      "backend/tests/test_rebuild_checkpoint.py:286",
+      "backend/tests/test_rebuild_checkpoint.py:314",
+      "backend/tests/test_rebuild_checkpoint.py:337",
+      "backend/tests/test_rebuild_checkpoint.py:362",
+      "backend/tests/test_rebuild_checkpoint.py:377",
+      "backend/tests/test_rebuild_checkpoint.py:383",
       "backend/tests/test_rebuild_desc_cache.py:129",
       "backend/tests/test_rebuild_desc_cache.py:148",
       "backend/tests/test_rebuild_desc_cache.py:156",
@@ -9673,6 +9768,13 @@
       {
         "base": "repo",
         "compatibility": "test-only",
+        "file": "backend/tests/test_scale_index_repo.py",
+        "line": 231,
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 184,
         "target": "rebuild_unified_kg"
@@ -9688,47 +9790,68 @@
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 252,
+        "line": 253,
         "target": "rebuild_unified_kg"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 462,
+        "line": 464,
         "target": "rebuild_unified_kg"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 488,
+        "line": 490,
         "target": "rebuild_unified_kg"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 500,
+        "line": 503,
         "target": "rebuild_unified_kg"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 539,
+        "line": 542,
         "target": "rebuild_unified_kg"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
-        "file": "backend/tests/test_scale_index_repo.py",
-        "line": 231,
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1179,
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1200,
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1217,
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "SQLiteRepository",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_batch_ingest.py",
+        "line": 1243,
         "target": "rebuild_unified_kg"
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', progress: 'Optional[Callable[[str, int, int], None]]' = None, force: 'bool' = False) -> 'int'"
+    "signature": "(self, notebook_id: 'str', progress: 'Optional[Callable[[str, int, int], None]]' = None, force: 'bool' = False, fresh: 'bool' = False) -> 'int'"
   },
   "reject_conflict": {
     "consumers": [
@@ -9799,8 +9922,8 @@
     "consumers": [
       "backend/app/api/routes.py:890",
       "backend/app/services/sqlite_repository.py:2525",
-      "backend/tests/test_batch_ingest.py:288",
-      "backend/tests/test_batch_ingest.py:311",
+      "backend/tests/test_batch_ingest.py:290",
+      "backend/tests/test_batch_ingest.py:313",
       "backend/tests/test_kg_rebuild_relink_api.py:102",
       "backend/tests/test_kg_rebuild_relink_api.py:84",
       "backend/tests/test_kg_rebuild_relink_api.py:90",
@@ -9816,14 +9939,14 @@
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 288,
+        "line": 290,
         "target": "relink_notebook_kg"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
-        "line": 311,
+        "line": 313,
         "target": "relink_notebook_kg"
       }
     ],
@@ -10333,25 +10456,25 @@
       "backend/app/services/batch_ingest.py:263",
       "backend/app/services/batch_ingest.py:264",
       "backend/app/services/batch_ingest.py:294",
-      "backend/app/services/batch_ingest.py:314",
-      "backend/app/services/batch_ingest.py:315",
-      "backend/app/services/batch_ingest.py:321",
-      "backend/app/services/batch_ingest.py:397",
-      "backend/app/services/batch_ingest.py:424",
-      "backend/app/services/batch_ingest.py:425",
-      "backend/app/services/batch_ingest.py:426",
-      "backend/app/services/batch_ingest.py:427",
-      "backend/app/services/batch_ingest.py:428",
-      "backend/app/services/batch_ingest.py:429",
-      "backend/app/services/batch_ingest.py:506",
-      "backend/app/services/batch_ingest.py:507",
-      "backend/app/services/batch_ingest.py:508",
-      "backend/app/services/batch_ingest.py:521",
-      "backend/app/services/batch_ingest.py:523",
-      "backend/app/services/batch_ingest.py:524",
-      "backend/app/services/batch_ingest.py:535",
-      "backend/app/services/batch_ingest.py:972",
-      "backend/app/services/batch_ingest.py:978",
+      "backend/app/services/batch_ingest.py:317",
+      "backend/app/services/batch_ingest.py:318",
+      "backend/app/services/batch_ingest.py:324",
+      "backend/app/services/batch_ingest.py:402",
+      "backend/app/services/batch_ingest.py:432",
+      "backend/app/services/batch_ingest.py:433",
+      "backend/app/services/batch_ingest.py:434",
+      "backend/app/services/batch_ingest.py:435",
+      "backend/app/services/batch_ingest.py:436",
+      "backend/app/services/batch_ingest.py:437",
+      "backend/app/services/batch_ingest.py:516",
+      "backend/app/services/batch_ingest.py:517",
+      "backend/app/services/batch_ingest.py:518",
+      "backend/app/services/batch_ingest.py:531",
+      "backend/app/services/batch_ingest.py:533",
+      "backend/app/services/batch_ingest.py:534",
+      "backend/app/services/batch_ingest.py:548",
+      "backend/app/services/batch_ingest.py:989",
+      "backend/app/services/batch_ingest.py:995",
       "backend/app/services/communities.py:89",
       "backend/app/services/sqlite_identity.py:119",
       "backend/app/services/sqlite_identity.py:321",
@@ -10635,12 +10758,12 @@
       "backend/tests/test_auto_scale_index.py:96",
       "backend/tests/test_autotune_wiring.py:38",
       "backend/tests/test_batch_ingest.py:175",
-      "backend/tests/test_batch_ingest.py:254",
-      "backend/tests/test_batch_ingest.py:255",
       "backend/tests/test_batch_ingest.py:256",
-      "backend/tests/test_batch_ingest.py:498",
-      "backend/tests/test_batch_ingest.py:502",
-      "backend/tests/test_batch_ingest.py:507",
+      "backend/tests/test_batch_ingest.py:257",
+      "backend/tests/test_batch_ingest.py:258",
+      "backend/tests/test_batch_ingest.py:501",
+      "backend/tests/test_batch_ingest.py:505",
+      "backend/tests/test_batch_ingest.py:510",
       "backend/tests/test_bm25_rrf.py:127",
       "backend/tests/test_bm25_rrf.py:67",
       "backend/tests/test_bm25_rrf.py:79",
@@ -10800,6 +10923,14 @@
       "backend/tests/test_reasoning_ppr.py:258",
       "backend/tests/test_reasoning_ppr.py:68",
       "backend/tests/test_reasoning_retrieval.py:249",
+      "backend/tests/test_rebuild_checkpoint.py:120",
+      "backend/tests/test_rebuild_checkpoint.py:137",
+      "backend/tests/test_rebuild_checkpoint.py:154",
+      "backend/tests/test_rebuild_checkpoint.py:203",
+      "backend/tests/test_rebuild_checkpoint.py:258",
+      "backend/tests/test_rebuild_checkpoint.py:299",
+      "backend/tests/test_rebuild_checkpoint.py:332",
+      "backend/tests/test_rebuild_checkpoint.py:372",
       "backend/tests/test_rebuild_communities.py:161",
       "backend/tests/test_rebuild_communities.py:170",
       "backend/tests/test_relation_ann.py:166",
@@ -10958,7 +11089,7 @@
   },
   "storage_dir": {
     "consumers": [
-      "backend/app/services/batch_ingest.py:988",
+      "backend/app/services/batch_ingest.py:1005",
       "backend/app/services/sqlite_notebook_sharing.py:260",
       "backend/app/services/sqlite_notebook_sharing.py:261",
       "backend/app/services/sqlite_repository.py:2332",
@@ -11057,6 +11188,8 @@
       "backend/tests/test_node_context.py:31",
       "backend/tests/test_node_context.py:50",
       "backend/tests/test_node_context.py:96",
+      "backend/tests/test_node_embed_incremental.py:39",
+      "backend/tests/test_node_embed_incremental.py:73",
       "backend/tests/test_notebook_copy_stats_memo.py:40",
       "backend/tests/test_overlay_guard_order.py:33",
       "backend/tests/test_p4_kg_shrink.py:118",
@@ -11082,6 +11215,14 @@
       "backend/tests/test_rebuild_cache.py:55",
       "backend/tests/test_rebuild_cache.py:56",
       "backend/tests/test_rebuild_cache.py:87",
+      "backend/tests/test_rebuild_checkpoint.py:129",
+      "backend/tests/test_rebuild_checkpoint.py:207",
+      "backend/tests/test_rebuild_checkpoint.py:210",
+      "backend/tests/test_rebuild_checkpoint.py:265",
+      "backend/tests/test_rebuild_checkpoint.py:270",
+      "backend/tests/test_rebuild_checkpoint.py:302",
+      "backend/tests/test_rebuild_checkpoint.py:305",
+      "backend/tests/test_rebuild_checkpoint.py:374",
       "backend/tests/test_rebuild_desc_cache.py:121",
       "backend/tests/test_rebuild_desc_cache.py:125",
       "backend/tests/test_rebuild_desc_cache.py:170",
@@ -11450,7 +11591,7 @@
     "consumers": [
       "backend/app/api/routes.py:356",
       "backend/app/services/batch_ingest.py:229",
-      "backend/app/services/batch_ingest.py:461",
+      "backend/app/services/batch_ingest.py:469",
       "backend/tests/test_repository_api_contract.py:109",
       "scripts/smoke_backend.py:1008",
       "scripts/smoke_backend.py:1020",
