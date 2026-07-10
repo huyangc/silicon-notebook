@@ -231,6 +231,13 @@ class ReportEngine:
         kg_block = "" if kg_block == "(none)" else kg_block
         context_block = (f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
                          if chunk_block else kg_block) or "(no evidence retrieved)"
+        chain_map = {}
+        if getattr(result, "chains", None):
+            from app.services.kg.follow_chain import render_follow_chain_context
+            chain_block, chain_map = render_follow_chain_context(
+                result.chains, id_offset=2000)
+            if chain_block and chain_block != "(none)":
+                context_block = f"{context_block}\n\n{chain_block}"
         client = self.repo.reasoning_llm_client
         raw = client.chat_json(
             [{"role": "user", "content": report_section_prompt(
@@ -239,7 +246,7 @@ class ReportEngine:
             REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
             **cap_kwargs(client, "report_section_max_tokens"))
         data = json.loads(raw)
-        id_map = {**chunk_map, **kg_map}
+        id_map = {**chunk_map, **kg_map, **chain_map}
         return {"title": section["title"], "scope": section["scope"],
                 "markdown": str(data.get("markdown", "")).strip(),
                 "grounded": bool(data.get("grounded", False)),
@@ -266,7 +273,7 @@ class ReportEngine:
                 progress=f"章节 {done}/{len(outline)} 完成 · {running} 进行中")
 
         _PHASE = {"plan": "规划", "reflect": "深挖", "retrieve": "深挖", "expand": "深挖",
-                  "ppr": "深挖", "fallback": "深挖"}
+                  "ppr": "深挖", "follow_chain": "深挖", "fallback": "深挖"}
 
         def _one(i, section):
             raise_if_cancelled(self.cancel_event)
@@ -365,15 +372,22 @@ class ReportEngine:
         except Exception:
             pass
 
-        # --- 全局引用重编号(按来源去重):节内 [k_i] → 全局 [k{N}] ---
+        # --- 全局引用重编号(普通证据按来源、relation 按边 id 去重) ---
         references: List[dict] = []
         ref_pos: Dict[str, int] = {}       # dedup key -> 全局 1-based
 
-        def _dk(ctx):                       # 去重键:source_id > source_title > object_id
+        def _dk(ctx):                       # 普通知识按来源去重;关系证据按边 id 去重
+            if str(ctx.get("object_type") or "") == "relation":
+                return f"relation:{str(ctx.get('object_id') or '')}"
             return str(ctx.get("source_id") or ctx.get("source_title")
                        or ctx.get("object_id") or "")
 
         def _label(ctx):
+            if str(ctx.get("object_type") or "") == "relation":
+                source = str(ctx.get("source_title") or "").strip()
+                relation = str(ctx.get("name") or ctx.get("object_id") or "").strip()
+                return f"{source} · {relation}" if source and relation else (
+                    source or relation or "(unnamed)")
             return (str(ctx.get("source_title") or ctx.get("name")
                         or ctx.get("object_id") or "").strip() or "(unnamed)")
 
@@ -384,11 +398,14 @@ class ReportEngine:
             def _sub(m, _id_map=id_map):
                 # 支持单 key [k1] 与逗号复合 [k1, k3](LLM 常不按 [k1][k3] 而吐逗号):
                 # 逐 key 重映射到全局、bracket 内去重;全未知则整段剥除(幻觉/未知 marker)。
+                # 复合 marker 是一个证据组：先完整验证，再产生任何全局编号副作用。
+                local_keys = [_raw.strip() for _raw in m.group(1).split(",")]
+                contexts = [_id_map.get(key) for key in local_keys]
+                if any(not ctx for ctx in contexts):
+                    return ""
+
                 out_keys: List[str] = []
-                for _raw in m.group(1).split(","):
-                    ctx = _id_map.get(_raw.strip())
-                    if not ctx:
-                        continue
+                for ctx in contexts:
                     dk = _dk(ctx)
                     if dk not in ref_pos:
                         ref_pos[dk] = len(references) + 1

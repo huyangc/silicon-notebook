@@ -41,6 +41,36 @@ test("expand_community/ppr 有短标签(不回退长英文串→徽章不溢出�
   );
 });
 
+test("follow_chain uses a concise label and renders hops, inference count, and trust", () => {
+  const step = {
+    step_type: "follow_chain",
+    summary: "沿关系链形成 3 条查询期推论",
+    detail: { hops: 2, count: 3, chain_trust: 0.784 },
+  };
+
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "推导");
+  assert.equal(getTraceStepDetail(step), "2 跳 · 3 条 · 可信度 78%");
+});
+
+test("follow_chain detail omits unavailable metrics and clamps trust percentages", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "follow_chain",
+      summary: "未形成推论",
+      detail: { hops: 2, count: 0 },
+    }),
+    "2 跳 · 0 条",
+  );
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "follow_chain",
+      summary: "推论可信度",
+      detail: { chain_trust: 1.2 },
+    }),
+    "可信度 100%",
+  );
+});
+
 test("sums per-step durations into a total label for the collapsed row", () => {
   const steps = [
     { step_type: "plan", summary: "规划", detail: {}, duration_ms: 1200 },

@@ -55,6 +55,38 @@ def test_bind_quote_fuzzy_not_exact():
     assert q not in text_norm, "precondition: quote must NOT be an exact substring"
 
 
+def test_build_records_binds_relation_quote_to_source_element():
+    """Relation evidence keeps raw quote and gains element-level provenance."""
+    quote_a = "Premise A is established"
+    quote_b = "Conclusion B follows"
+    edge_quote = "Premise A therefore leads to Conclusion B"
+    elements = [
+        _el("e1", quote_a),
+        _el("e2", f"{quote_b}. {edge_quote}"),
+    ]
+    g = KnowledgeGraph(
+        doc_id="doc.md", doc_type="academic",
+        nodes=[
+            Node(id="A", type="Claim", name=quote_a,
+                 evidence=[Evidence(file="doc.md", char_start=0, char_end=10,
+                                    line_start=1, line_end=1, quote=quote_a)]),
+            Node(id="B", type="Claim", name=quote_b,
+                 evidence=[Evidence(file="doc.md", char_start=11, char_end=20,
+                                    line_start=2, line_end=2, quote=quote_b)]),
+        ],
+        edges=[Edge(
+            id="R", type="derived_from", source_id="A", target_id="B",
+            evidence=[Evidence(file="doc.md", char_start=21, char_end=40,
+                               line_start=2, line_end=2, quote=edge_quote)],
+        )],
+    )
+    _objects, relations = kg_ingest.build_records(
+        g, source_id="s1", source_title="Doc", elements=elements)
+    assert relations[0]["evidence"][0]["quote"] == edge_quote
+    assert relations[0]["evidence"][0]["element_id"] == "e2"
+    assert relations[0]["evidence"][0]["source_title"] == "Doc"
+
+
 class FakeClient:
     configured = True
     def __init__(self, payload): self._p = payload
