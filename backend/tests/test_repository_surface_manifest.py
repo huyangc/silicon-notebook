@@ -106,6 +106,10 @@ TASK7_ALLOWED_IMPORTS = {
     ("backend/tests/test_query_store_component.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/tests/test_model_provider_runtime.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+TASK8_ALLOWED_IMPORTS = {
+    ("backend/tests/test_notebook_store_component.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_notebook_summary_query.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -141,6 +145,20 @@ TASK7_ALLOWED_CONSUMERS = {
     ("delete_session", "backend/app/api/auth_routes.py:41"),
     ("list_user_usage", "backend/app/api/routes.py:1378"),
     ("list_user_notebooks", "backend/app/api/routes.py:1388"),
+}
+# Task 8 moves the notebook-catalog routes onto the typed
+# notebook_catalog_repository() accessor; these are the frozen repository()
+# call sites they replace.
+TASK8_ALLOWED_CONSUMERS = {
+    ("list_notebook_templates", "backend/app/api/routes.py:237"),
+    ("list_notebooks", "backend/app/api/routes.py:242"),
+    ("create_notebook", "backend/app/api/routes.py:253"),
+    ("notebook_analytics", "backend/app/api/routes.py:267"),
+    ("update_notebook", "backend/app/api/routes.py:278"),
+    ("delete_notebook", "backend/app/api/routes.py:286"),
+    ("search_notebook", "backend/app/api/routes.py:544"),
+    ("mark_notebook_base", "backend/app/api/routes.py:785"),
+    ("set_notebook_personal", "backend/app/api/routes.py:787"),
 }
 TASK2_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -181,6 +199,11 @@ MASTER_V10_ALLOWED_PATCHES = {
     ("backend/tests/test_node_embed_incremental.py", 63, "_flush_object_vectors", "repo"),
     ("backend/tests/test_rebuild_checkpoint.py", 284, "_rebuild_ckpt_put", "repo"),
     ("backend/tests/test_rebuild_checkpoint.py", 312, "_rebuild_ckpt_put", "repo"),
+}
+# Task 8 migrates the list_notebooks query-count spy from the facade _connect
+# patch seat onto the runtime SqliteDatabase.connect component seam.
+TASK8_ALLOWED_PATCHES = {
+    ("backend/tests/test_notebook_counts_batched.py", 115, "_connect", "repo"),
 }
 TASK5_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
@@ -259,6 +282,32 @@ TASK7_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_sources_pagination.py", name)
     for name in {
         "create_notebook", "_write", "search_notebook",
+    }
+}
+# Task 8: notebook rows/summary projection/catalog orchestration move to the
+# NotebookStore + NotebookSummaryQuery + NotebookCatalogService components; the
+# facade keeps frozen-signature delegates, so its own internal call sites for
+# the moved projection helpers disappear.  The two component test files and the
+# migrated query-count spy consume the facade/new seams at fresh sites.
+TASK8_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_NOTEBOOK_COUNT_TYPES", "_base_notebook_info",
+        "_count_pending_kg_sources", "_knowledge_type_counts",
+        "_notebook_from_row",
+    }
+} | {
+    ("backend/tests/test_notebook_counts_batched.py", name)
+    for name in {"_connect", "_runtime", "list_notebooks"}
+} | {
+    ("backend/tests/test_notebook_store_component.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "_runtime"}
+} | {
+    ("backend/tests/test_notebook_summary_query.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "current_user", "get_notebook",
+        "list_notebooks", "mark_notebook_base", "notebook_analytics",
+        "search_notebook", "_kg_building", "_runtime",
     }
 }
 
@@ -669,6 +718,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK2_ALLOWED_IMPORTS
                     or site in TASK4_ALLOWED_IMPORTS
                     or site in TASK7_ALLOWED_IMPORTS
+                    or site in TASK8_ALLOWED_IMPORTS
                 )
 
 
@@ -680,7 +730,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -702,21 +752,21 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}

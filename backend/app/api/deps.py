@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import get_settings
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.schemas import UserProfile
-from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, SourceRepository, AskStreamPort
+from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, SourceRepository, AskStreamPort
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -21,6 +21,9 @@ def identity_repository() -> IdentityRepository:
 
 def admin_query_repository() -> AdminQueryRepository:
     return repository()._runtime.queries  # type: ignore[attr-defined]
+
+def notebook_catalog_repository() -> NotebookCatalogRepository:
+    return repository()._runtime.catalog  # type: ignore[attr-defined]
 
 def notebook_access_repository() -> NotebookAccessRepository:
     return repository()

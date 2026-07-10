@@ -9,8 +9,10 @@ from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.services.model_provider import RuntimeModelProvider
+from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,18 @@ class RepositoryRuntime:
             self.model_config_cache,
         )
         self.queries = QueryStore(self.database)
+        self.notebook_store = NotebookStore(
+            self.database,
+            new_id=seams.new_id,
+            now=seams.now,
+        )
+        self.notebook_summaries = NotebookSummaryQuery(self.database)
+        self.catalog = NotebookCatalogService(
+            store=self.notebook_store,
+            summaries=self.notebook_summaries,
+            queries=self.queries,
+            identity=self.identity,
+        )
         self.event_log = EventLogger(settings, channel="events", per_user=True)
         if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
             self.event_log.logger.warning(

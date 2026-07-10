@@ -81,8 +81,8 @@ def _normalize_doc_type(doc_type: str) -> str:
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
-from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
+from app.services.notebook_catalog import NotebookSummaryQuery, _delete_source_file
 from app.services.sqlite_identity import (
     _REQUEST_USER,
     get_request_user,
@@ -154,7 +154,9 @@ def _new_id(prefix: str) -> str:
 
 # Knowledge statuses that may be surfaced in answers/retrieval (§12 governance).
 # 'deprecated' is excluded; 'conflict' is retrieved but flagged elsewhere.
-USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
+# Canonical definition moved to the notebook_store component (Task 8); this
+# module-level name stays as the frozen compatibility export.
+from app.repositories.sqlite.notebook_store import USABLE_STATUSES
 
 
 class KnowledgeGraphTooLargeError(Exception):
@@ -334,7 +336,9 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         self._viz_building_lock = threading.Lock()
         # KG build/rebuild 的进行中标志（进程内；重启后天然为空=未构建，无需 reconcile）。
         # get_notebook 回填 NotebookSummary.kg_building，前端刷新后据此把「构建中」接回。
-        self._kg_building: set = set()
+        # 集合本体归 NotebookCatalogService 所有（get_notebook 在那读成员资格）；
+        # facade 别名同一个 set 对象，KG build/rebuild 路径照旧 add/discard。
+        self._kg_building: set = self._runtime.catalog.kg_building
         self._kg_building_lock = threading.Lock()
         # WS2a: 在途 ask 的 {job_id: cancel_event} 进程内注册表——cancel 端点据此
         # set 对应 worker 的 cancel_event（唯一真取消入口；断连不再取消）。
@@ -598,11 +602,7 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
     def _seed_legacy(self) -> None:
         return self._migrator.seed()
     def _count(self, db: sqlite3.Connection, table: str, column: str, value: str) -> int:
-        row = db.execute(
-            f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?",
-            (value,),
-        ).fetchone()
-        return int(row["count"])
+        return self._runtime.notebook_summaries.count(db, table, column, value)
 
     def _count_knowledge(self, db: sqlite3.Connection, notebook_id: str, object_type: str) -> int:
         placeholders = ",".join("?" for _ in USABLE_STATUSES)
@@ -614,11 +614,7 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         return int(row["count"])
 
     def _has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
-        row = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
-            (notebook_id,),
-        ).fetchone()
-        return bool(row[0])
+        return self._runtime.notebook_summaries.has_kg(db, notebook_id)
 
     def _source_has_kg(self, db: sqlite3.Connection, source_id: str) -> bool:
         """True iff the source has ≥1 knowledge_objects row with a matching source_id."""
@@ -629,18 +625,7 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         return bool(row[0])
 
     def _count_pending_kg_sources(self, db: sqlite3.Connection, notebook_id: str) -> int:
-        """Count sources in the notebook that are PARSED (have ≥1 source_elements row)
-        but have NO KG (no knowledge_objects row with that source_id)."""
-        row = db.execute(
-            """
-            SELECT COUNT(*) FROM sources s
-            WHERE s.notebook_id = ?
-              AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)
-              AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '')
-            """,
-            (notebook_id,),
-        ).fetchone()
-        return int(row[0])
+        return self._runtime.notebook_summaries.count_pending_kg_sources(db, notebook_id)
 
     def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
         """True iff some tier='base' notebook has any knowledge_objects."""
@@ -652,24 +637,7 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
             return bool(conn.execute(sql).fetchone()[0])
 
     def _base_notebook_info(self, db: "sqlite3.Connection | None" = None) -> "tuple[str, bool]":
-        """(基准库名, 是否有 KG) —— 一次查询同时供 NotebookSummary 的 base_notebook_name
-        与 base_kg_available,避免每条 summary 各查一次(net-zero 于原 base_kg_available)。
-        基准库全局唯一(mark_notebook_base 会降级其它 tier='base'),取最早创建者;has_kg
-        沿用 _any_base_notebook_has_kg 相同的 EXISTS 语义,保证 base_kg_available 值不变。
-        无基准库 → ("", False)。"""
-        sql = ("SELECT nb.name, "
-               "EXISTS(SELECT 1 FROM knowledge_objects ko "
-               "JOIN notebooks b ON b.id = ko.notebook_id WHERE b.tier = 'base') "
-               "FROM notebooks nb WHERE nb.tier = 'base' "
-               "ORDER BY nb.created_at ASC LIMIT 1")
-        if db is not None:
-            row = db.execute(sql).fetchone()
-        else:
-            with self._connect() as conn:
-                row = conn.execute(sql).fetchone()
-        if not row:
-            return ("", False)
-        return (row[0] or "", bool(row[1]))
+        return self._runtime.notebook_summaries.base_notebook_info(db)
 
     @staticmethod
     def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
@@ -857,171 +825,28 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         return objects
 
     def list_notebooks(self) -> List[NotebookSummary]:
-        """自有库(access=owner)∪ 经只读共享加入的库(access=reader)。
-
-        status='copying' 是 copy_notebook 分批写入期间的哨兵状态(P1-4),半拷贝
-        的副本必须排除,不然用户能看到/点进一个字段还没写全的空壳 notebook。
-        """
-        uid = self.current_user().id
-        out: List[NotebookSummary] = []
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM notebooks WHERE created_by = ? AND status != 'copying' "
-                "ORDER BY created_at ASC",
-                (uid,),
-            ).fetchall()
-            for row in rows:
-                nb = self._notebook_from_row(db, row)
-                nb.access = "owner"
-                out.append(nb)
-            joined = db.execute(
-                "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
-                "JOIN notebooks nb ON nb.id = m.notebook_id "
-                "LEFT JOIN users u ON u.id = nb.created_by "
-                "WHERE m.user_id = ? AND nb.status != 'copying' "
-                "ORDER BY m.added_at ASC", (uid,)).fetchall()
-            for row in joined:
-                nb = self._notebook_from_row(db, row)
-                nb.access = "reader"
-                nb.shared_from = row["_owner_username"] or ""
-                out.append(nb)
-        return out
+        return self._runtime.catalog.list_notebooks()
 
     def list_notebook_templates(self) -> List[NotebookTemplate]:
-        return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
+        return self._runtime.catalog.list_notebook_templates()
 
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
-        """Minimal creation: only name + description (purpose). When the user
-        leaves the description blank it is flagged auto (purpose_auto=1) and
-        later derived from the first batch of uploaded sources."""
-        notebook_id = _new_id("nb")
-        now = _now()
-        purpose = (payload.purpose or "").strip()
-        purpose_auto = 0 if purpose else 1
-
-        with self._write() as db:
-            db.execute(
-                """
-                INSERT INTO notebooks
-                (id, name, purpose, primary_domain, status, created_by, created_at, updated_at,
-                 purpose_auto)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    notebook_id,
-                    payload.name,
-                    purpose,
-                    "Semiconductor",
-                    "draft",
-                    self.current_user().id,
-                    now,
-                    now,
-                    purpose_auto,
-                ),
-            )
-            row = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
-            return self._notebook_from_row(db, row)
+        return self._runtime.catalog.create_notebook(payload)
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary:
-        """status='copying' rows (copy_notebook's in-progress sentinel, P1-4)
-        are treated as not-yet-existing: every other repository method guards
-        with self.get_notebook(...) before acting, and a half-copied notebook
-        must not be usable by any of them until the copy finishes."""
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT * FROM notebooks WHERE id = ? AND status != 'copying'",
-                (notebook_id,)).fetchone()
-            if row is None:
-                raise KeyError(notebook_id)
-            summary = self._notebook_from_row(db, row)
-        summary.kg_building = notebook_id in self._kg_building
-        return summary
+        return self._runtime.catalog.get_notebook(notebook_id)
 
     def update_notebook(self, notebook_id: str, payload: NotebookUpdate) -> NotebookSummary:
-        self.get_notebook(notebook_id)
-        updates: List[str] = []
-        values: List[str] = []
-        if payload.name is not None:
-            updates.append("name = ?")
-            values.append(payload.name.strip() or "Untitled notebook")
-        if payload.purpose is not None:
-            updates.append("purpose = ?")
-            values.append(payload.purpose.strip())
-            # A user-edited description is manual; stop auto-regenerating it.
-            updates.append("purpose_auto = ?")
-            values.append(0)
-        if payload.primary_domain is not None:
-            updates.append("primary_domain = ?")
-            values.append(payload.primary_domain.strip() or "Semiconductor")
-        if payload.target_users is not None:
-            updates.append("target_users = ?")
-            values.append(payload.target_users.strip())
-        if payload.access_scope is not None:
-            updates.append("access_scope = ?")
-            values.append(payload.access_scope.strip())
-        for field in ("expected_questions", "source_types", "taxonomy"):
-            value = getattr(payload, field)
-            if value is not None:
-                updates.append(f"{field} = ?")
-                values.append(json.dumps(value, ensure_ascii=False))
-        if updates:
-            updates.append("updated_at = ?")
-            values.append(_now())
-            values.append(notebook_id)
-            with self._write() as db:
-                db.execute(
-                    f"UPDATE notebooks SET {', '.join(updates)} WHERE id = ?",
-                    values,
-                )
-        return self.get_notebook(notebook_id)
+        return self._runtime.catalog.update_notebook(notebook_id, payload)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
-        """Mark a notebook as THE single authoritative base KG (tier='base').
-        基准库全局唯一:同一事务里先把其它 tier='base' 的 notebook 降级为
-        'personal'，再把目标设为 'base'。Idempotent; raises KeyError if missing."""
-        self.get_notebook(notebook_id)  # raises KeyError if missing
-        with self._write() as db:
-            db.execute(
-                "UPDATE notebooks SET tier='personal', updated_at=? WHERE tier='base' AND id != ?",
-                (_now(), notebook_id),
-            )
-            db.execute(
-                "UPDATE notebooks SET tier='base', updated_at=? WHERE id=?",
-                (_now(), notebook_id),
-            )
+        return self._runtime.catalog.mark_notebook_base(notebook_id)
 
     def set_notebook_personal(self, notebook_id: str) -> None:
-        """Reset a notebook back to the personal tier (tier='personal').
-        Symmetric inverse of mark_notebook_base; idempotent.
-        Raises KeyError if the notebook does not exist."""
-        self.get_notebook(notebook_id)  # raises KeyError if missing
-        with self._write() as db:
-            db.execute(
-                "UPDATE notebooks SET tier='personal', updated_at=? WHERE id=?",
-                (_now(), notebook_id),
-            )
+        return self._runtime.catalog.set_notebook_personal(notebook_id)
 
     def delete_notebook(self, notebook_id: str) -> None:
-        self.get_notebook(notebook_id)
-        with self._write() as db:
-            source_rows = db.execute(
-                "SELECT file_path FROM sources WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
-            # knowledge_embeddings has no FK to notebooks (see DDL ~line 300), so
-            # deleting the notebooks row does NOT cascade to it. Delete it here so
-            # every public delete caller leaves zero orphan embedding rows.
-            # (element_embeddings DOES cascade transitively via
-            # source_elements -> sources -> notebooks, so it needs no explicit delete.)
-            db.execute(
-                "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
-                (notebook_id,),
-            )
-            db.execute("DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,))
-            db.execute("DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,))
-            db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
-        for row in source_rows:
-            self._delete_file(row["file_path"])
+        return self._runtime.catalog.delete_notebook(notebook_id)
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         """Delete all KG artifacts for a notebook (objects, relations, clusters,
@@ -6840,7 +6665,7 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         return self._rule_card(item)
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:
-        return self._runtime.queries.search_notebook(notebook_id, query)
+        return self._runtime.catalog.search_notebook(notebook_id, query)
 
     def _note_model_error(self, stage: str, model: str, exc: Exception) -> None:
         return self._runtime.models.note_model_error(stage, model, exc)
@@ -12799,75 +12624,18 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         )
 
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
-        return self._runtime.queries.notebook_analytics(notebook_id)
+        return self._runtime.catalog.notebook_analytics(notebook_id)
 
-    # object_type -> counts-dict key mapping shared by _notebook_from_row and
-    # its batched sibling _knowledge_type_counts_for_notebooks (C5: N+1 fix —
-    # was 6 separate _count_knowledge COUNT(*) queries per notebook, one per
-    # object_type; a single GROUP BY object_type query gets all 6 in one
-    # round trip, restricted to USABLE_STATUSES same as the old per-type
-    # queries).
-    _NOTEBOOK_COUNT_TYPES: Dict[str, str] = {
-        "rule": "rules", "case": "cases", "checklist": "checklist_items",
-        "method": "methods", "risk": "risks", "glossary": "glossary",
-    }
+    # object_type -> counts-dict key mapping (C5 batched GROUP BY projection).
+    # Canonical map lives on NotebookSummaryQuery; the facade keeps the frozen
+    # compatibility name pointing at the same object.
+    _NOTEBOOK_COUNT_TYPES: Dict[str, str] = NotebookSummaryQuery._NOTEBOOK_COUNT_TYPES
 
     def _knowledge_type_counts(self, db: sqlite3.Connection, notebook_id: str) -> Dict[str, int]:
-        """{counts-dict key: count} for the 6 knowledge object_types
-        _notebook_from_row surfaces, via ONE GROUP BY query instead of 6
-        separate _count_knowledge calls. Same USABLE_STATUSES filter and same
-        zero-default for absent types as the old per-type COUNT(*) calls."""
-        placeholders = ",".join("?" for _ in USABLE_STATUSES)
-        rows = db.execute(
-            f"SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-            f"WHERE notebook_id = ? AND status IN ({placeholders}) "
-            f"GROUP BY object_type",
-            (notebook_id, *USABLE_STATUSES),
-        ).fetchall()
-        by_type = {r["object_type"]: int(r["c"]) for r in rows}
-        return {
-            key: by_type.get(otype, 0)
-            for otype, key in self._NOTEBOOK_COUNT_TYPES.items()
-        }
+        return self._runtime.notebook_summaries.knowledge_type_counts(db, notebook_id)
 
     def _notebook_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> NotebookSummary:
-        # 注意:kg_building 仅经 get_notebook 回填为真值;list_notebooks 等走
-        # _notebook_from_row 的路径恒为 False（当前无消费方读列表里的该字段）。
-        counts = {
-            "sources": self._count(db, "sources", "notebook_id", row["id"]),
-            **self._knowledge_type_counts(db, row["id"]),
-        }
-        keys = row.keys()
-
-        def _list(field: str) -> List[str]:
-            if field not in keys or not row[field]:
-                return []
-            try:
-                value = json.loads(row[field])
-                return [str(v) for v in value] if isinstance(value, list) else []
-            except (json.JSONDecodeError, TypeError):
-                return []
-
-        base_name, base_has_kg = self._base_notebook_info(db)
-        return NotebookSummary(
-            id=row["id"],
-            name=row["name"],
-            purpose=row["purpose"],
-            primary_domain=row["primary_domain"],
-            status=row["status"],
-            counts=counts,
-            created_label=_created_label(row["created_at"]),
-            target_users=row["target_users"] if "target_users" in keys else "",
-            expected_questions=_list("expected_questions"),
-            source_types=_list("source_types"),
-            taxonomy=_list("taxonomy"),
-            access_scope=row["access_scope"] if "access_scope" in keys else "",
-            tier=row["tier"] if "tier" in keys else "personal",
-            kg_ready=self._has_kg(db, row["id"]),
-            base_kg_available=base_has_kg,
-            base_notebook_name=base_name,
-            kg_pending_sources=self._count_pending_kg_sources(db, row["id"]),
-        )
+        return self._runtime.notebook_summaries.from_row(db, row)
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
         """Single-row path (get_source) — 3 point queries. list_sources /
@@ -13029,14 +12797,7 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         return f"{len(elements)} parsed text element(s). {first}"
 
     def _delete_file(self, file_path: str) -> None:
-        if not file_path:
-            return
-        path = Path(file_path)
-        if path.exists() and path.is_file():
-            path.unlink()
-        notebook_dir = path.parent
-        if notebook_dir.exists() and not any(notebook_dir.iterdir()):
-            shutil.rmtree(notebook_dir, ignore_errors=True)
+        return _delete_source_file(file_path)
 
 
 def _now() -> str:

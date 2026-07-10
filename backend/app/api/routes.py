@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
     admin_query_repository,
-    identity_repository,
+    identity_repository, notebook_catalog_repository,
     repository, require_notebook_access, require_notebook_read,
     require_notebook_write, get_current_user,
 )
@@ -237,12 +237,12 @@ def detect_doc_types(payload: DetectDocTypesRequest) -> List[DetectedDocType]:
 
 @router.get("/notebook-templates", response_model=List[NotebookTemplate])
 def list_notebook_templates() -> List[NotebookTemplate]:
-    return repository().list_notebook_templates()
+    return notebook_catalog_repository().list_notebook_templates()
 
 
 @router.get("/notebooks", response_model=List[NotebookSummary])
 def list_notebooks() -> List[NotebookSummary]:
-    return repository().list_notebooks()
+    return notebook_catalog_repository().list_notebooks()
 
 
 # 注意:静态段路由必须在 /notebooks/{notebook_id} 之前注册,否则 "shared-by-me" 被当作 {notebook_id}。
@@ -253,13 +253,13 @@ def shared_by_me_route(user: UserProfile = Depends(get_current_user)) -> List[Sh
 
 @router.post("/notebooks", response_model=NotebookSummary)
 def create_notebook(payload: NotebookCreate) -> NotebookSummary:
-    return repository().create_notebook(payload)
+    return notebook_catalog_repository().create_notebook(payload)
 
 
 @router.get("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_read)])
 def get_notebook(notebook_id: str) -> NotebookSummary:
     try:
-        return repository().get_notebook(notebook_id)
+        return notebook_catalog_repository().get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -267,7 +267,7 @@ def get_notebook(notebook_id: str) -> NotebookSummary:
 @router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics, dependencies=[Depends(require_notebook_read)])
 def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
     try:
-        return repository().notebook_analytics(notebook_id)
+        return notebook_catalog_repository().notebook_analytics(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -278,7 +278,7 @@ def update_notebook(
     payload: NotebookUpdate,
 ) -> NotebookSummary:
     try:
-        return repository().update_notebook(notebook_id, payload)
+        return notebook_catalog_repository().update_notebook(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -286,7 +286,7 @@ def update_notebook(
 @router.delete("/notebooks/{notebook_id}", status_code=204, dependencies=[Depends(require_notebook_access)])
 def delete_notebook(notebook_id: str) -> None:
     try:
-        repository().delete_notebook(notebook_id)
+        notebook_catalog_repository().delete_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -544,7 +544,7 @@ def search_notebook(
     q: str = Query(""),
 ) -> NotebookSearchResponse:
     try:
-        return repository().search_notebook(notebook_id, q)
+        return notebook_catalog_repository().search_notebook(notebook_id, q)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -784,11 +784,12 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
     if tier not in {"base", "personal"}:
         raise HTTPException(status_code=400, detail="tier must be 'base' or 'personal'")
     try:
+        catalog = notebook_catalog_repository()
         if tier == "base":
-            repository().mark_notebook_base(notebook_id)
+            catalog.mark_notebook_base(notebook_id)
         else:
-            repository().set_notebook_personal(notebook_id)
-        return repository().get_notebook(notebook_id)
+            catalog.set_notebook_personal(notebook_id)
+        return catalog.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

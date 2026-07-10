@@ -1670,7 +1670,7 @@ class NotebookCatalogService:
     ) -> NotebookSearchResponse: ...
 ~~~
 
-- [ ] **Step 1: Write RED row, summary and query-count tests**
+- [x] **Step 1: Write RED row, summary and query-count tests**
 
 ~~~python
 def test_summary_query_keeps_list_kg_building_false(repo):
@@ -1681,7 +1681,7 @@ def test_summary_query_keeps_list_kg_building_false(repo):
     assert repo.get_notebook(notebook.id).kg_building is True
 ~~~
 
-- [ ] **Step 2: Run tests and confirm RED**
+- [x] **Step 2: Run tests and confirm RED**
 
 ~~~bash
 cd backend
@@ -1693,15 +1693,15 @@ python -m pytest \
 
 Expected: missing notebook store/catalog modules.
 
-- [ ] **Step 3: Move row SQL and cross-table projection separately**
+- [x] **Step 3: Move row SQL and cross-table projection separately**
 
 Move CRUD/tier row SQL to NotebookStore. Move counts/base-KG/pending-source aggregation and `_notebook_from_row` to NotebookSummaryQuery. Inject QueryStore into NotebookCatalogService and make `search_notebook` a one-line application delegate; keep the cross-table SQL and ordering in the Task-7 query adapter. Keep DB deletion committed before file deletion and preserve orphan knowledge-embedding cleanup.
 
-- [ ] **Step 4: Wire the catalog and typed routes**
+- [x] **Step 4: Wire the catalog and typed routes**
 
 Construct one NotebookCatalogService in runtime; facade methods delegate explicitly. Notebook routes use `notebook_catalog_repository()`. Keep endpoint paths, error types and response models unchanged.
 
-- [ ] **Step 5: Run focused tests and confirm GREEN**
+- [x] **Step 5: Run focused tests and confirm GREEN**
 
 ~~~bash
 cd backend
@@ -1714,7 +1714,7 @@ python -m pytest \
   tests/test_two_tier_federated.py -q
 ~~~
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ~~~bash
 git add backend/app/repositories/sqlite/notebook_store.py \
