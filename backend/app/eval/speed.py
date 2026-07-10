@@ -75,7 +75,9 @@ def _truncate_on_paragraph(text: str, limit: int) -> str:
 
 
 def _insert_source(repo, nb_id, name, text, tmpdir):
-    return repo.eval_insert_source_for_test(nb_id, name, text, tmpdir)
+    from app.repositories.ports import UploadedSourceFile
+    created = repo.upload_sources(nb_id, [UploadedSourceFile(name, "text/markdown", text.encode())])
+    return created[0].id
 
 
 def _cleanup(repo, nb_id):

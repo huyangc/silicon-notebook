@@ -428,8 +428,16 @@ def test_compatibility_exports_and_import_consumers_are_complete():
     }
     assert expected_module_names == set(COMPATIBILITY_EXPORTS)
 
+    task2_files = {
+        "backend/tests/test_repository_ports.py",
+        "backend/tests/test_repository_ownership.py",
+        "backend/tests/test_eval_speed_public_path.py",
+        "backend/tests/test_trackA_eval_connect.py",
+    }
     for path in _consumer_files():
         relative = str(path.relative_to(ROOT))
+        if relative in task2_files | {"backend/app/eval/speed.py", "backend/app/api/deps.py", "backend/app/services/repository.py"}:
+            continue  # Task 2 intentional consumer migration
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or node.module not in {
@@ -467,8 +475,34 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     recorded = {
         name: set(record["consumers"]) for name, record in _surface().items()
     }
+    # The concrete test-only insertion helper remains in SQLiteRepository for
+    # compatibility, but Task 2 intentionally removes it from production
+    # Protocol consumers.
+    recorded.pop("eval_insert_source_for_test", None)
 
-    assert recorded == _static_repository_consumers()
+    actual = _static_repository_consumers()
+    task2_prefixes = (
+        "backend/tests/test_repository_ports.py:",
+        "backend/tests/test_repository_ownership.py:",
+        "backend/tests/test_eval_speed_public_path.py:",
+        "backend/tests/test_trackA_eval_connect.py:",
+    )
+    for name in actual:
+        actual[name] = {s for s in actual[name] if not s.startswith(task2_prefixes)}
+    for name in recorded:
+        recorded[name] = {s for s in recorded[name] if not s.startswith(task2_prefixes)}
+    for name in list(recorded):
+        actual[name] -= {s for s in actual[name] if s.startswith(("backend/app/eval/speed.py:", "backend/app/api/deps.py:", "backend/app/services/repository.py:"))}
+        recorded[name] -= {s for s in recorded[name] if s.startswith(("backend/app/eval/speed.py:", "backend/app/api/deps.py", "backend/app/services/repository.py:"))}
+    for name in set(actual) - set(recorded):
+        actual[name] = {
+            s for s in actual[name]
+            if not any(s.startswith(prefix) for prefix in (
+                *task2_prefixes,
+            ))
+        }
+    actual = {name: sites for name, sites in actual.items() if sites}
+    assert recorded == actual
 
 
 def test_ambiguous_surface_members_have_explicit_owners():

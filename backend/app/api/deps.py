@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.models.schemas import UserProfile
-from app.services.repository import NotebookRepository
+from app.repositories.ports import NotebookRepository, IdentityRepository, NotebookAccessRepository, SourceRepository, AskStreamPort
 from app.services.sqlite_repository import (
     SQLiteRepository, set_request_user, reset_request_user,
 )
@@ -16,6 +16,18 @@ from app.services.sqlite_repository import (
 @lru_cache
 def repository() -> NotebookRepository:
     return SQLiteRepository(get_settings())
+
+def identity_repository() -> IdentityRepository:
+    return repository()
+
+def notebook_access_repository() -> NotebookAccessRepository:
+    return repository()
+
+def source_repository() -> SourceRepository:
+    return repository()
+
+def ask_stream_repository() -> AskStreamPort:
+    return repository()
 
 
 def _bearer_token(request: Request) -> str:
