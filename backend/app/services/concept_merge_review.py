@@ -101,6 +101,7 @@ def review_merge_candidates(
     candidates: List[dict],
     batch_size: int = 30,
     max_workers: int = 1,
+    on_chunk=None,
 ) -> List[dict]:
     """LLM-adjudicate concept-merge candidates in bounded chunks. NEVER raises.
 
@@ -113,11 +114,24 @@ def review_merge_candidates(
     ``llm_client`` is used as-passed inside worker threads — the caller resolves
     any ContextVar-backed client in the main thread; we must not re-resolve it
     from a worker (the request-user ContextVar is not copied into raw threads).
+
+    ``on_chunk``, if given, is called once per chunk with that chunk's decisions
+    — always in the main thread, even for the concurrent path (callbacks never
+    run inside a worker). Intended for incremental checkpointing; any exception
+    it raises is swallowed and logged, never affecting the return value.
     """
     if not getattr(llm_client, "configured", False) or not candidates:
         return []
     step = max(1, int(batch_size or 30))
     chunks = [candidates[i:i + step] for i in range(0, len(candidates), step)]
+
+    def _emit(decs: List[dict]) -> None:
+        if on_chunk is None:
+            return
+        try:
+            on_chunk(decs)
+        except Exception:  # noqa: BLE001 — 持久化失败绝不能打断 fail-open 的 review
+            logger.warning("merge-review: on_chunk 回调失败,已忽略")
 
     out: List[dict] = []
     if max_workers > 1 and len(chunks) > 1:
@@ -126,13 +140,16 @@ def review_merge_candidates(
         ) as pool:
             futures = [pool.submit(_review_chunk, llm_client, chunk) for chunk in chunks]
             for fut in concurrent.futures.as_completed(futures):
-                # _review_chunk is already total, but guard the future boundary too:
-                # a worker exception must never re-raise out of this function.
                 try:
-                    out.extend(fut.result())
+                    decs = fut.result()
                 except Exception:  # noqa: BLE001 — belt-and-suspenders
                     logger.warning("merge-review: chunk failed in worker; skipping")
+                    continue
+                _emit(decs)
+                out.extend(decs)
     else:
         for chunk in chunks:
-            out.extend(_review_chunk(llm_client, chunk))
+            decs = _review_chunk(llm_client, chunk)
+            _emit(decs)
+            out.extend(decs)
     return out

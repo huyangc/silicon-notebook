@@ -285,3 +285,22 @@ def test_worker_exception_is_swallowed():
 
     out = review_merge_candidates(_Boom(), _cands(4), batch_size=1, max_workers=4)
     assert out == []
+
+
+def test_on_chunk_fires_per_chunk_and_covers_all_decisions():
+    """on_chunk 每块调用一次,累计决策 == 返回决策;回调抛异常不影响返回。"""
+    seen_chunks = []
+
+    def on_chunk(decs):
+        seen_chunks.append(list(decs))
+        raise RuntimeError("持久化失败也不能打断 review")  # 必须被吞
+
+    cands = _cands(5)                       # 5 候选
+    decisions = review_merge_candidates(
+        _ReviewLLM(), cands, batch_size=2, on_chunk=on_chunk)  # → 3 块(2,2,1)
+
+    assert len(seen_chunks) == 3            # 每块一次
+    flat = [d for chunk in seen_chunks for d in chunk]
+    # on_chunk 收到的决策并集 == 函数返回的决策
+    assert sorted(d["candidate_id"] for d in flat) == \
+           sorted(d["candidate_id"] for d in decisions)
