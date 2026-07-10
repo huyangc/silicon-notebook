@@ -6378,7 +6378,12 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                     (notebook_id,)).fetchall():
                     old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
             # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
-            desc_ckpt = self._rebuild_ckpt_load(notebook_id, _ver, "concept_desc")
+            try:
+                desc_ckpt = self._rebuild_ckpt_load(notebook_id, _ver, "concept_desc")
+            except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
+                self.event_log.logger.warning(
+                    "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
+                desc_ckpt = {}
             # Total members per canonical = Σ members_count over its seeds. Keep
             # only multi-member (cross-doc merged) canonicals — same cost bound as
             # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
@@ -6461,7 +6466,11 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                             desc_sig_by_cid[cid] = sig
                             _ck_buf.append((cid, {"description": desc, "sig": sig}))
                             if len(_ck_buf) >= _DESC_CKPT_FLUSH:
-                                self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                                try:
+                                    self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                                except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
+                                    self.event_log.logger.warning(
+                                        "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
                                 _ck_buf = []
                         if progress is not None:
                             try:
@@ -6469,7 +6478,11 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                             except Exception:
                                 pass
                     if _ck_buf:
-                        self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                        try:
+                            self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                        except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
+                            self.event_log.logger.warning(
+                                "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
         if _desc_ran:
             _stage(f"concept: descriptions {len(desc_by_cid)} "
                    f"({_time.perf_counter() - _t_desc:.1f}s)")
