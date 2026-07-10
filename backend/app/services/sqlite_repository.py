@@ -323,6 +323,33 @@ class SQLiteRepository:
         self._scale_idx_load_locks: Dict[str, threading.Lock] = {}
         # C7: same bounded-LRU rework as _scale_idx_cache above.
         self._viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
+        # Task 18: the scale/viz artifact READ adapters (IndexProjectionStore /
+        # ScaleArtifactCatalog over the runtime-eager ScaleArtifactStore) ride
+        # facade-bound late seams — the `_connect` read seat, the `_in_batches`
+        # IN-chunking helper, the retrieval-owned ent-chunk/mention/vector-
+        # matrix caches (they move with their domain in Gate 7), the memoized
+        # `_scale_index_version` key, the LRU/lock-table state above (tests
+        # reassign `_scale_idx_cache`; Task 20 transfers ownership) and the
+        # model-error note.  Every lambda resolves at call time — post-
+        # construction monkeypatches stay observed.
+        self._runtime.wire_scale_artifacts(
+            connect=lambda: self._connect(),
+            in_batches=lambda ids: self._in_batches(ids),
+            ent_chunk_map=lambda notebook_id: self._ent_chunk_map(notebook_id),
+            mention_extra_edges=lambda notebook_id: (
+                self._mention_extra_edges(notebook_id)
+            ),
+            vector_matrix=lambda db, notebook_id, table, id_column: (
+                self._vector_matrix(db, notebook_id, table, id_column)
+            ),
+            version=lambda notebook_id: self._scale_index_version(notebook_id),
+            scale_cache=lambda: self._scale_idx_cache,
+            load_lock=lambda: self._scale_idx_load_lock,
+            load_locks=lambda: self._scale_idx_load_locks,
+            note_model_error=lambda stage, model, exc: (
+                self._note_model_error(stage, model, exc)
+            ),
+        )
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
@@ -3222,33 +3249,11 @@ class SQLiteRepository:
         carries that signal at O(1), so this probe never touches concept_clusters
         at all; the real COUNT/MAX only run in _compute_scale_version_cold on a
         memo miss."""
-        # runtime_dim 是 settings_tail 的一员(T3/R4):它经
-        # _compute_scale_version_cold 流入 _scale_index_version,进而与磁盘
-        # manifest.version 对照 —— 切 EMBED_RUNTIME_DIM 后旧维 scale 索引必须
-        # 判 stale(而非 ANN 查询恒空)。
-        from app.services.vector_index import resolve_runtime_dim
-        settings_tail = (
-            self.settings.ppr_variant_edge_weight,
-            self.settings.ppr_emb_synonym_enabled,
-            self.settings.ppr_emb_synonym_threshold,
-            self.settings.ppr_emb_synonym_topk,
-            resolve_runtime_dim(self.settings),
-            self.settings.mention_bridge_enabled,
-            self.settings.mention_edge_weight,
-        )
-        with self._connect() as db:
-            st = db.execute(
-                "SELECT kg_mutation_seq, cluster_mutation_seq, mention_seq FROM unified_kg_state "
-                "WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchone()
-            seq = int(st["kg_mutation_seq"]) if st else 0
-            cseq = int(st["cluster_mutation_seq"]) if st else 0
-            mseq = int(st["mention_seq"]) if (st and st["mention_seq"] is not None) else -1
-        # mention_seq(P2 共提桥)折进 settings_tail:同一 unified_kg_state 单行读,零新增
-        # 查询;经 settings_tail 进 memo 比较 + _compute_scale_version_cold 的 *settings_tail
-        # 流入磁盘 manifest.version —— 共提桥重建(mention_edges 变)使旧 scale 索引判 stale。
-        return seq, cseq, settings_tail + (mseq,)
+        # runtime_dim 是 settings_tail 的一员(T3/R4);mention_seq(P2 共提桥)
+        # 折进 settings_tail —— 两者经 _compute_scale_version_cold 流入
+        # _scale_index_version,进而与磁盘 manifest.version 对照。Task 18:单行
+        # 探针读移入 IndexProjectionStore(经 _connect 席位,spy/单飞注入照常观测)。
+        return self._runtime.index_projections.version_signal(notebook_id)
 
     def _compute_scale_version_cold(self, notebook_id: str, seq: int,
                                      settings_tail: tuple) -> list:
@@ -3256,32 +3261,10 @@ class SQLiteRepository:
         unified_kg_state 单行,COUNT/MAX 只在 memo miss 时算)。version list 的
         内容与格式与 P0-A 前逐位一致(clusters 仍在第 8、9 位),磁盘
         manifest.version 兼容性不受影响。只从 _scale_index_version 的 per-nb
-        单飞锁内部调用,不直接对外暴露。"""
-        with self._connect() as db:
-            obj_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-                "FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)).fetchone()
-            rel_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM knowledge_relations WHERE notebook_id=?", (notebook_id,)).fetchone()
-            chunk_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
-            clu_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
-            emb_ver = db.execute(
-                "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
-        return [
-            notebook_id,
-            int(obj_ver["c"]), obj_ver["ts"],
-            int(rel_ver["c"]), rel_ver["ts"],
-            int(chunk_ver["c"]), chunk_ver["ts"],
-            int(clu_ver["c"]), clu_ver["ts"],
-            int(emb_ver["c"]), emb_ver["ts"],
-            *settings_tail,
-        ]
+        单飞锁内部调用,不直接对外暴露。Task 18:五表聚合读移入
+        IndexProjectionStore.version_facts(经 _connect 席位);settings_tail
+        仍由本方法追加 —— 与 memo 键取自同一次探针,list 格式逐位不变。"""
+        return self._runtime.index_projections.version_facts(notebook_id) + list(settings_tail)
 
     def _scale_index_version(self, notebook_id: str) -> list:
         """JSON-serializable version key for the scale index of one notebook.
@@ -3390,101 +3373,23 @@ class SQLiteRepository:
             return version
 
     def _read_manifest_version(self, out_dir: str):
-        """廉价读 out_dir/manifest.json 的 version 字段(几 KB,sub-ms)。用于
-        allow_stale 检索路径校验「进程缓存里的 stale 实例是否仍是当前磁盘索引」——
-        磁盘索引只在 rebuild/fold 时换(新 version),与 kg_mutation_seq 无关。
-        文件缺失/损坏/无 version → None(fail-soft,调用方回退到重新 load)。"""
-        mpath = os.path.join(out_dir, "manifest.json")
-        try:
-            with open(mpath) as fh:
-                return json.load(fh).get("version")
-        except (OSError, ValueError):
-            return None
+        """廉价读 out_dir/manifest.json 的 version 字段(几 KB,sub-ms)。
+        文件缺失/损坏/无 version → None(fail-soft)。Task 18:移入
+        ScaleArtifactStore(磁盘 manifest 探针 O(1) 语义不变)。"""
+        return self._runtime.scale_artifact_store.read_manifest_version(out_dir)
 
     def _scale_index(self, notebook_id: str, allow_stale: bool = False):
-        """Return a valid ScaleIndex or None.
-
-        exact(allow_stale=False):manifest.version == 当前 DB 版本 cur 才算有效,
-        否则 None——viz/status 等要求与 DB 强一致的调用方语义不变。
-
-        allow_stale=True(检索热路径「取磁盘已索引部分」):按**磁盘索引身份**
-        (manifest.json 的 version)缓存复用。磁盘索引只在 rebuild/fold 时换,与
-        kg_mutation_seq(每写 bump)无关——所以摄取造成 cur 漂移时,不再每查询重建
-        stale 实例 + 重载 ~10GB ANN handle,而是复用同一进程缓存实例(handle memoize
-        存活)。cold-load 走 per-nb 单飞锁,防 N 个并发查询各载 8GB 造成内存尖峰。
-        stale-serve 与 scale_search_include_delta 无关地正确:ANN 核=磁盘已索引部分,
-        flag=ON 时 delta 新鲜度来自检索侧 ⊕delta 暴力块,不来自这个核。"""
-        from app.services.kg import scale_index as si
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        cur = self._scale_index_version(notebook_id)
-        cached = self._scale_idx_cache.get(notebook_id)
-        if cached is not None and cached.manifest.get("version") == cur:
-            return cached
-        if not allow_stale:
-            # version-exact:字节不变——load,manifest==cur 才 cache 并返回,否则 None。
-            idx = si.load_scale_index(out_dir)
-            if idx is None:
-                return None
-            if idx.manifest.get("version") == cur:
-                self._scale_idx_cache[notebook_id] = idx
-                return idx
-            return None
-        # allow_stale:按磁盘身份复用。cached 若仍是当前磁盘索引(其 version == 磁盘
-        # manifest version)→ 直接返回(handle 存活,零重载)。
-        disk_ver = self._read_manifest_version(out_dir)
-        if disk_ver is None:
-            return None   # 无索引
-        if cached is not None and cached.manifest.get("version") == disk_ver:
-            return cached
-        # cold:单飞加载。全局锁只护锁表,load 在 per-nb 锁内、不持全局锁。
-        with self._scale_idx_load_lock:
-            nb_lock = self._scale_idx_load_locks.get(notebook_id)
-            if nb_lock is None:
-                nb_lock = threading.Lock()
-                self._scale_idx_load_locks[notebook_id] = nb_lock
-        with nb_lock:
-            # double-check:等锁期间别的线程可能已加载好当前磁盘索引。
-            cached = self._scale_idx_cache.get(notebook_id)
-            disk_ver = self._read_manifest_version(out_dir)
-            if disk_ver is None:
-                return None
-            if cached is not None and cached.manifest.get("version") == disk_ver:
-                return cached
-            idx = si.load_scale_index(out_dir)
-            if idx is None:
-                return None
-            self._scale_idx_cache[notebook_id] = idx
-            return idx
+        """Return a valid ScaleIndex or None.  Task 18:exact/allow_stale 语义
+        (磁盘身份缓存复用 + per-nb 单飞 cold-load)整体移入
+        ScaleArtifactCatalog.load —— catalog 只读、不含 builder,读取永不触发
+        重建(base 离线 ANN / active 暴力的成本分离不变量)。"""
+        return self._runtime.scale_catalog.load(notebook_id, allow_stale=allow_stale)
 
     def _open_scale_ann(self, idx, kind: str):
-        """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例(进程缓存,版本变→新实例→重开)。
-        kind='kg'→ann.bin/ann_labels;'chunk'→chunk_ann.bin/chunk_ann_labels;
-        'relation'→relation_ann.bin/relation_ann_labels。失败/无工件→None。"""
-        import hnswlib
-        _attr_by_kind = {"kg": "ann_handle", "chunk": "chunk_ann_handle",
-                         "relation": "relation_ann_handle"}
-        _path_by_kind = {"kg": "ann_path", "chunk": "chunk_ann_path",
-                         "relation": "relation_ann_path"}
-        _labels_by_kind = {"kg": "ann_labels", "chunk": "chunk_ann_labels",
-                          "relation": "relation_ann_labels"}
-        attr = _attr_by_kind[kind]
-        cached = getattr(idx, attr, None)
-        if cached is not None:
-            return cached
-        path = getattr(idx, _path_by_kind[kind], None)
-        labels = getattr(idx, _labels_by_kind[kind], None)
-        if not path or not labels:
-            return None
-        from app.services.vector_index import resolve_runtime_dim as _rrd
-        dim = int(idx.manifest.get("dim", _rrd(self.settings) or self.settings.embed_dim))
-        try:
-            h = hnswlib.Index(space="cosine", dim=dim)
-            h.load_index(path, max_elements=len(labels))
-        except Exception as exc:  # noqa: BLE001 — fail-open
-            self._note_model_error(f"scale_ann_open_{kind}", self.settings.embed_model, exc)
-            return None
-        setattr(idx, attr, h)
-        return h
+        """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例。失败/无工件→None。
+        Task 18:移入 ScaleArtifactCatalog.open_ann(manifest dim 探针 + fail-open
+        回退语义不变)。"""
+        return self._runtime.scale_catalog.open_ann(idx, kind)
 
     def _spawn_viz_build(self, notebook_id: str) -> None:
         """Kick off a background (de-duplicated) viz-index build. Mirrors
@@ -3524,12 +3429,11 @@ class SQLiteRepository:
         scale = self._scale_index(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
             return scale
-        from app.services.kg import viz_index as vi
         cur = self._scale_index_version(notebook_id)
         cached = self._viz_idx_cache.get(notebook_id)
         if cached is not None and cached.manifest.get("version") == cur:
             return cached
-        idx = vi.load_viz_index(self._viz_index_dir(notebook_id))
+        idx = self._runtime.scale_artifact_store.load_viz(notebook_id)
         if idx is not None:
             if idx.manifest.get("version") == cur:
                 self._viz_idx_cache[notebook_id] = idx
@@ -3541,10 +3445,7 @@ class SQLiteRepository:
             # option; mirrors _scale_index's allow_stale non-caching).
             self._spawn_viz_build(notebook_id)
             return idx
-        with self._connect() as db:
-            count = db.execute(
-                "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,)).fetchone()["c"]
+        count = self._runtime.index_projections.effective_object_count(notebook_id)
         if int(count) <= self.settings.viz_sync_build_max_objects:
             self.build_viz_index(notebook_id)   # sync lazy build; sets cache on success
             return self._viz_idx_cache.get(notebook_id)
@@ -3562,8 +3463,7 @@ class SQLiteRepository:
                     "viz_nodes": int(m.get("n_viz_nodes", len(scale.viz_ids))),
                     "viz_edges": int(m.get("n_viz_edges", len(scale.viz_edges or []))),
                     "viz_stale": False}
-        from app.services.kg import viz_index as vi
-        idx = vi.load_viz_index(self._viz_index_dir(notebook_id))
+        idx = self._runtime.scale_artifact_store.load_viz(notebook_id)
         if idx is None:
             return {"viz_indexed": False, "viz_nodes": 0, "viz_edges": 0, "viz_stale": False}
         m = idx.manifest
@@ -3579,249 +3479,15 @@ class SQLiteRepository:
         and build the undirected edge set used by both build_scale_index and
         _active_kg_delta.  Single source of truth — no duplicated _add_undirected.
 
-        source_ids : None (default) = whole notebook, byte-identical to the
-        pre-scoping behaviour.  A list = only objects/relations/chunks from those
-        sources (delta domain); memberships limited to gathered objects; the
-        variant/synonym extra_edges are skipped (delta is small, connectivity
-        comes from relations/cluster-hub/cross-layer bridges).  An empty list
-        returns ([], [], [], [], {}) (as_arrays=True: ([], (empty arrays), [], [], {})).
-
-        synonym_edges : None (default) = current behaviour — this method loads
-        the KG embedding matrix itself and calls emb_synonym_edges() internally
-        (whole-notebook / unscoped path only). Pass a pre-computed
-        [(id_a,id_b,sim), ...] list (e.g. from build_scale_index, which already
-        loaded the matrix and built the hnsw index once for both the ann.bin
-        persist AND the synonym KNN) to SKIP the internal matrix load + KNN
-        call entirely and merge the given edges into extra_edges instead —
-        avoids doing the single most expensive build step (hnsw construction)
-        twice. Only meaningful when source_ids is None; scoped/delta callers
-        never pass this (variant/synonym edges are already skipped when scoped).
-
-        as_arrays : False (default) = current behaviour, edges as a Python
-        list of (str,str,float) tuples plus a `seen_undir` tuple set for
-        dedup — byte-identical to before, used by every existing caller
-        (_active_kg_delta, scoped/delta paths, etc). True (build_scale_index
-        only) = same node_ids, but edges come back as three int32/int32/
-        float32 numpy arrays (src_idx, tgt_idx, w) already encoded against
-        `index = {nid: i for i, nid in enumerate(node_ids)}`, deduped via an
-        encoded-pair-key np.unique instead of a Python tuple set — avoids the
-        ~5GB of Python-object overhead a 10M+-edge notebook's `edges` list +
-        `seen_undir` set costs. Dedup keeps the FIRST-seen weight for a given
-        undirected pair, matching the string path's `if key in seen_undir:
-        return` short-circuit (relations → memberships → extra_edges →
-        cluster-hub insertion order, exactly as below). Both directions are
-        present in the output arrays, self-loops are dropped, and cluster hub
-        ids are appended to node_ids BEFORE edge assembly (so the index dict
-        is complete for one array-encoding pass instead of growing mid-way).
-
-        Returns
-        -------
-        (node_ids, edges, chunk_ids, kg_node_ids, membership_counts)
-          node_ids          : list[str]  — kg node ids + chunk_ids + cluster hub ids
-          edges             : list[(str,str,float)] — undirected (both dirs, deduped)
-                               OR (as_arrays=True) (src:int32[], tgt:int32[], w:float32[])
-          chunk_ids         : list[str]  — raw chunk ids (stable subset of node_ids)
-          kg_node_ids       : list[str]  — KG object ids (for idf / n_kg_nodes)
-          membership_counts : dict[str,int] — {object_id: len(chunks)} for IDF
+        Task 18: the gathered graph snapshot (scoping/synonym/as_arrays 语义、
+        edge 编码与 dedup 顺序、返回元组形状 全部逐位不变) 移入
+        IndexProjectionStore.graph_rows —— 见该方法 docstring 的完整契约。
+        source_ids=[] 仍返回 ([], [], [], [], {})(as_arrays=True 时 edges 为空数组三元组)。
         """
-        from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
-        import numpy as np
-
-        ph = ",".join("?" for _ in USABLE_STATUSES)
-        scoped = source_ids is not None
-        if scoped and not source_ids:
-            if as_arrays:
-                empty = np.empty(0, dtype=np.int32)
-                return [], (empty, empty, np.empty(0, dtype=np.float32)), [], [], {}
-            return [], [], [], [], {}
-        clauses = [("", ())]
-        if scoped:
-            clauses = [
-                (f" AND source_id IN ({','.join('?' for _ in b)})", tuple(b))
-                for b in self._in_batches(source_ids)
-            ]
-        kg_nodes: Dict[str, dict] = {}
-        relations: list = []
-        chunk_ids: list = []
-        cluster_groups: Dict[str, list] = {}
-
-        with self._connect() as db:
-            for src_clause, src_params in clauses:
-                for r in db.execute(
-                        f"SELECT id, object_type, payload FROM knowledge_objects "
-                        f"WHERE notebook_id=? AND status IN ({ph}){src_clause}",
-                        (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
-                    kg_nodes[r["id"]] = {
-                        "type": r["object_type"],
-                        "name": json.loads(r["payload"] or "{}").get("name", ""),
-                    }
-            for src_clause, src_params in clauses:
-                for r in db.execute(
-                        f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=? AND review_status!='rejected'{src_clause}",
-                        (notebook_id, *src_params)).fetchall():
-                    relations.append(dict(r))
-            for src_clause, src_params in clauses:
-                for r in db.execute(
-                        f"SELECT id FROM chunks WHERE notebook_id=?{src_clause}",
-                        (notebook_id, *src_params)).fetchall():
-                    chunk_ids.append(r["id"])
-            for r in db.execute(
-                    "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
-                cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-
-        # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
-        ent_chunk_map = self._ent_chunk_map(notebook_id)
-        _kg_keys = set(kg_nodes.keys())
-        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items()
-                       if (not scoped or oid in _kg_keys) for cid in cids]
-        membership_counts: Dict[str, int] = {
-            oid: len(cids) for oid, cids in ent_chunk_map.items()
-            if (not scoped or oid in _kg_keys)}
-        del ent_chunk_map, _kg_keys
-
-        # Extra edges: variant pairs + optional synonym pairs (whole-notebook only)
-        extra_edges = []
-        if not scoped:
-            extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
-            if synonym_edges is not None:
-                # Caller (build_scale_index) already computed these — reusing
-                # the SAME hnsw build it also persists as ann.bin, instead of
-                # this method loading the matrix + building hnsw again.
-                extra_edges = extra_edges + list(synonym_edges)
-            else:
-                with self._connect() as db:
-                    ann_ids_raw, ann_matrix_raw = self._vector_matrix(
-                        db, notebook_id, "knowledge_embeddings", "object_id")
-                ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
-                has_vecs = bool(ann_ids) and ann_matrix_raw is not None and len(ann_matrix_raw)
-                if has_vecs and self.settings.ppr_emb_synonym_enabled:
-                    extra_edges = extra_edges + emb_synonym_edges(
-                        ann_ids, np.asarray(ann_matrix_raw),
-                        self.settings.ppr_emb_synonym_threshold,
-                        self.settings.ppr_emb_synonym_topk,
-                        self.settings.ppr_emb_synonym_max_entities,
-                        ef_construction=self.settings.hnsw_ef_construction,
-                    )
-            # P2 共提桥:scale CSR 节点空间含 cluster router(下方 hub 装配),故 claim↔cluster
-            # 软边同样适用;仅 whole-notebook(not scoped)路径追加,与 variant/synonym 一致。
-            extra_edges = extra_edges + self._mention_extra_edges(notebook_id)
-
-        # node_ids: kg nodes first, then chunk nodes, then cluster hubs.
-        # Hubs are pre-appended HERE (before edge assembly) rather than
-        # discovered while walking cluster_groups interleaved with
-        # _add_undirected calls — final node_ids content/order is identical
-        # either way (hub eligibility only depends on `members` vs the
-        # kg+chunk node_ids_set, never on edges), but the array path needs a
-        # COMPLETE id→index map before it can encode any edge, so both paths
-        # share this single hub-discovery pass.
-        node_ids: list = list(kg_nodes.keys()) + chunk_ids
-        node_ids_set: set = set(node_ids)
-        hub_members: List[Tuple[str, str]] = []  # (hub_id, member_id) pairs to wire as edges below
-        for canonical_id, members in cluster_groups.items():
-            present = [m for m in members if m in node_ids_set]
-            if not present:
-                continue
-            hub_id = f"cluster:{canonical_id}"
-            if hub_id not in node_ids_set:
-                node_ids.append(hub_id)
-                node_ids_set.add(hub_id)
-            for m in present:
-                hub_members.append((hub_id, m))
-        del cluster_groups
-
-        if as_arrays:
-            index = {nid: i for i, nid in enumerate(node_ids)}
-            n = len(node_ids)
-            # Collect all directed (a,b,w) contributions in encoding order —
-            # relations → memberships → extra_edges → hub_members — same
-            # precedence order as the string path's _add_undirected calls,
-            # so first-seen-wins dedup below picks the same winning weight.
-            a_list: List[int] = []
-            b_list: List[int] = []
-            w_list: List[float] = []
-            for rel in relations:
-                sa = index.get(rel["source_object_id"])
-                sb = index.get(rel["target_object_id"])
-                if sa is not None and sb is not None and sa != sb:
-                    a_list.append(sa); b_list.append(sb); w_list.append(1.0)
-            del relations
-            for oid, cid in memberships:
-                sa = index.get(oid); sb = index.get(cid)
-                if sa is not None and sb is not None and sa != sb:
-                    a_list.append(sa); b_list.append(sb); w_list.append(1.0)
-            del memberships
-            for a, b, w in extra_edges:
-                sa = index.get(a); sb = index.get(b)
-                if sa is not None and sb is not None and sa != sb:
-                    a_list.append(sa); b_list.append(sb); w_list.append(float(w))
-            del extra_edges
-            for hub_id, m in hub_members:
-                sa = index.get(hub_id); sb = index.get(m)
-                if sa is not None and sb is not None and sa != sb:
-                    a_list.append(sa); b_list.append(sb); w_list.append(1.0)
-            del hub_members
-
-            if not a_list:
-                empty = np.empty(0, dtype=np.int32)
-                kg_node_ids: list = list(kg_nodes.keys())
-                return node_ids, (empty, empty, np.empty(0, dtype=np.float32)), chunk_ids, kg_node_ids, membership_counts
-
-            a_arr = np.asarray(a_list, dtype=np.int64)
-            b_arr = np.asarray(b_list, dtype=np.int64)
-            w_arr = np.asarray(w_list, dtype=np.float64)
-            del a_list, b_list, w_list
-            # Undirected dedup: canonical (lo,hi) pair encoded as one int64 key
-            # (lo*n + hi); np.unique(..., return_index=True) keeps the FIRST
-            # occurrence of each key — matches the string path's `if key in
-            # seen_undir: return` (first-wins) semantics exactly, given the
-            # same relations→memberships→extra→hub encoding order above.
-            lo = np.minimum(a_arr, b_arr)
-            hi = np.maximum(a_arr, b_arr)
-            keys = lo * n + hi
-            _, first_idx = np.unique(keys, return_index=True)
-            first_idx.sort()  # np.unique sorts by key value, not first-seen order — restore it
-            src_u = a_arr[first_idx]
-            tgt_u = b_arr[first_idx]
-            w_u = w_arr[first_idx]
-            del a_arr, b_arr, w_arr, lo, hi, keys, first_idx
-
-            # Emit both directions (src->tgt and tgt->src), matching the
-            # string path's edges.append((a,b,w)); edges.append((b,a,w)).
-            src_final = np.concatenate([src_u, tgt_u]).astype(np.int32, copy=False)
-            tgt_final = np.concatenate([tgt_u, src_u]).astype(np.int32, copy=False)
-            w_final = np.concatenate([w_u, w_u]).astype(np.float32, copy=False)
-            del src_u, tgt_u, w_u
-
-            kg_node_ids = list(kg_nodes.keys())
-            return node_ids, (src_final, tgt_final, w_final), chunk_ids, kg_node_ids, membership_counts
-
-        # Build undirected edges (single _add_undirected closure, shared state)
-        edges: List[Tuple[str, str, float]] = []
-        seen_undir: set = set()
-
-        def _add_undirected(a: str, b: str, w: float) -> None:
-            if a == b:
-                return
-            key = (a, b) if a < b else (b, a)
-            if key in seen_undir:
-                return
-            seen_undir.add(key)
-            edges.append((a, b, w))
-            edges.append((b, a, w))
-
-        for rel in relations:
-            _add_undirected(rel["source_object_id"], rel["target_object_id"], 1.0)
-        for oid, cid in memberships:
-            _add_undirected(oid, cid, 1.0)
-        for a, b, w in extra_edges:
-            _add_undirected(a, b, w)
-        for hub_id, m in hub_members:
-            _add_undirected(hub_id, m, 1.0)
-
-        kg_node_ids: list = list(kg_nodes.keys())
-        return node_ids, edges, chunk_ids, kg_node_ids, membership_counts
+        rows = self._runtime.index_projections.graph_rows(
+            notebook_id, source_ids, synonym_edges=synonym_edges, as_arrays=as_arrays)
+        return (rows.node_ids, rows.edges, rows.chunk_ids,
+                rows.kg_node_ids, rows.membership_counts)
 
     def build_scale_index(self, notebook_id: str, on_stage: Optional[Callable[[str, int], None]] = None) -> dict:
         """Offline: read KG from SQLite for ONE notebook, build CSR transition +
@@ -3890,7 +3556,6 @@ class SQLiteRepository:
         which are observability-only and documented here).
         """
         from app.services.kg import scale_index as si
-        from app.services.vector_index import build_matrix
 
         import gc
         import numpy as np
@@ -3936,22 +3601,16 @@ class SQLiteRepository:
         # can be reused for both the synonym-edge KNN pass and the persisted
         # ann.bin — see perf note in the docstring above.
         #
-        # Direct load (Task 2): bypasses _vector_matrix()/_vector_cache on
-        # purpose — a build's kg/chunk matrices are multi-GB, single-use, and
-        # would otherwise sit in the LRU cache outliving the build (or evict
-        # useful query-time entries). n_hint=COUNT(*) lets build_matrix
-        # preallocate instead of accumulating 490k+ small ndarrays pre-vstack.
-        def _kg_matrix():
-            with self._connect() as db:
-                n_hint = db.execute(
-                    "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
-                rows = db.execute(
-                    "SELECT object_id AS vid, vector FROM knowledge_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchall()
-                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint, runtime_dim=self._runtime_dim())
-
-        ann_ids_raw, ann_matrix_raw = _timed("kg_matrix", _kg_matrix)
+        # Direct load (Task 2 → Task 18: IndexProjectionStore.embedding_matrix):
+        # bypasses _vector_matrix()/_vector_cache on purpose — a build's
+        # kg/chunk matrices are multi-GB, single-use, and would otherwise sit
+        # in the LRU cache outliving the build (or evict useful query-time
+        # entries). n_hint=COUNT(*) preallocation + runtime_dim truncation
+        # live in the store, unchanged.
+        projections = self._runtime.index_projections
+        ann_ids_raw, ann_matrix_raw = _timed(
+            "kg_matrix", lambda: projections.embedding_matrix(
+                notebook_id, "knowledge_embeddings", "object_id"))
         ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
         ann_matrix = ann_matrix_raw
         if ann_ids and ann_matrix is not None:
@@ -3962,8 +3621,8 @@ class SQLiteRepository:
             ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
 
         def _build_kg_ann():
-            # CRITICAL alignment: ann_labels IS ann_ids from the _kg_matrix()
-            # load above (single source of truth — _vector_matrix returns
+            # CRITICAL alignment: ann_labels IS ann_ids from the kg_matrix
+            # load above (single source of truth — embedding_matrix returns
             # (ids, matrix) row-aligned), so labels 0..n-1 assigned here match
             # ann_labels' row order exactly, which save_scale_index later
             # verifies via get_current_count() == len(ann_labels).
@@ -4035,21 +3694,13 @@ class SQLiteRepository:
         # Chunk-level ANN vectors/labels (Task 1): chunks that have a row in
         # chunk_embeddings. Persisted as chunk_ann.bin so query-time chunk
         # retrieval can ANN-narrow candidates on large persisted-index notebooks.
-        # Direct load (Task 2): same rationale as _kg_matrix above — bypasses
+        # Direct load (Task 2): same rationale as the kg matrix above — bypasses
         # _vector_matrix()/_vector_cache so this multi-GB matrix never becomes
         # a cache entry, and loads as late as possible (right before the ANN
         # build that consumes it) rather than living for the whole build.
-        def _chunk_matrix():
-            with self._connect() as db:
-                n_hint = db.execute(
-                    "SELECT COUNT(*) AS c FROM chunk_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
-                rows = db.execute(
-                    "SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchall()
-                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint, runtime_dim=self._runtime_dim())
-
-        c_ids_raw, c_mat_raw = _timed("chunk_matrix", _chunk_matrix)
+        c_ids_raw, c_mat_raw = _timed(
+            "chunk_matrix", lambda: projections.embedding_matrix(
+                notebook_id, "chunk_embeddings", "chunk_id"))
         chunk_ann_labels = list(c_ids_raw) if c_ids_raw else []
         chunk_ann_vectors = (np.asarray(c_mat_raw, dtype=np.float32)
                              if chunk_ann_labels and c_mat_raw is not None else None)
@@ -4061,20 +3712,12 @@ class SQLiteRepository:
         # _retrieve_relations_scored can ANN-narrow candidates on large
         # persisted-index notebooks instead of the full-matrix top_k_sims path
         # (which is the thing the #171-style cold-matrix guard exists to avoid
-        # on multi-GB relation matrices). Direct load: same rationale as
-        # _kg_matrix/_chunk_matrix above — bypasses _vector_matrix()/
-        # _vector_cache so this matrix never becomes a cache entry.
-        def _relation_matrix():
-            with self._connect() as db:
-                n_hint = db.execute(
-                    "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
-                rows = db.execute(
-                    "SELECT relation_id AS vid, vector FROM relation_embeddings WHERE notebook_id=?",
-                    (notebook_id,)).fetchall()
-                return build_matrix(((r["vid"], r["vector"]) for r in rows), n_hint=n_hint, runtime_dim=self._runtime_dim())
-
-        rel_ids_raw, rel_mat_raw = _timed("relation_matrix", _relation_matrix)
+        # on multi-GB relation matrices). Direct load: same rationale as the
+        # kg/chunk matrices above — bypasses _vector_matrix()/_vector_cache so
+        # this matrix never becomes a cache entry.
+        rel_ids_raw, rel_mat_raw = _timed(
+            "relation_matrix", lambda: projections.embedding_matrix(
+                notebook_id, "relation_embeddings", "relation_id"))
         relation_ann_labels = list(rel_ids_raw) if rel_ids_raw else []
         relation_ann_vectors = (np.asarray(rel_mat_raw, dtype=np.float32)
                                 if relation_ann_labels and rel_mat_raw is not None else None)
@@ -4091,11 +3734,7 @@ class SQLiteRepository:
         gc.collect()  # viz-graph build scratch, before persist (writes transition/ann/viz to disk)
 
         n_kg = len(kg_node_ids)
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        with self._connect() as db:
-            watermark_sources = sorted(
-                r["id"] for r in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall())
+        watermark_sources = sorted(projections.source_ids(notebook_id))
         # manifest dim = 工件实际维(截断后的 ann_vectors 列数),不信配置 —— 运行时
         # 截断开启时三 ANN 均建在同一 runtime_dim 空间,manifest 记录真相以便 load/
         # 查询侧的 dim 守卫据实比较(T5;空矩阵回退到运行时生效维)。
@@ -4122,8 +3761,9 @@ class SQLiteRepository:
             "build_ms": dict(timings),
         }
         persist_started = time.perf_counter()
-        saved_manifest = si.save_scale_index(
-            out_dir,
+        # Task 18: 7-file persist goes through the filesystem store (same
+        # kg.scale_index.save_scale_index writer, same layout/manifest bytes).
+        saved_manifest = self._runtime.scale_artifact_store.save_full(notebook_id, dict(
             node_ids=node_ids,
             transition=transition,
             idf=idf,
@@ -4143,7 +3783,7 @@ class SQLiteRepository:
             relation_ann_labels=relation_ann_labels,
             prebuilt_ann=kg_ann_index,
             ef_construction=self.settings.hnsw_ef_construction,
-        )
+        ))
         persist_ms = round((time.perf_counter() - persist_started) * 1000)
         timings["persist"] = persist_ms
         self.event_log.emit({
@@ -4186,7 +3826,6 @@ class SQLiteRepository:
         import numpy as np
         import scipy.sparse as sp
         from app.services.kg import scale_index as si
-        from app.services.vector_index import build_matrix
 
         idx = self._scale_index(notebook_id, allow_stale=True)
         if idx is None:
@@ -4230,11 +3869,11 @@ class SQLiteRepository:
                 list(idx.node_ids), idx.transition, idx.idf, idx.chunk_index,
                 d_nodes, d_edges, d_chunks, d_idf_map)
 
-            out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-            tmp_dir = out_dir + ".tmp"
-            if os.path.exists(tmp_dir):
-                shutil.rmtree(tmp_dir)
-            os.makedirs(tmp_dir, exist_ok=True)
+            # Task 18: tmp 目录的重置/交换序列归 ScaleArtifactStore(live→.old、
+            # tmp→live、rm .old 逐步不变);fold 的工件装配仍写 tmp(Task 19 移交)。
+            artifact_store = self._runtime.scale_artifact_store
+            out_dir = str(artifact_store.scale_dir(notebook_id))
+            tmp_dir = str(artifact_store.prepare_fold_directory(notebook_id))
 
             # 非 ANN 工件:node_ids/idf/chunk_index/graph
             sp.save_npz(os.path.join(tmp_dir, "graph.npz"), transition)
@@ -4246,20 +3885,12 @@ class SQLiteRepository:
             # fallback 用运行时生效维(旧 manifest 无 dim 键 + 运行时开的边角)。
             dim = int(idx.manifest.get("dim", self._runtime_dim() or self.settings.embed_dim))
 
-            def _delta_vecs(table, col, ids):
-                if not ids:
-                    return [], []
+            # delta 向量装载(Task 18):IndexProjectionStore.embedding_matrix 的
+            # object_ids 分支 —— 分批 IN、连接跨生成器保持、runtime_dim 截断不变。
+            projections = self._runtime.index_projections
 
-                def _rows():
-                    with self._connect() as db:
-                        for batch in self._in_batches(ids):
-                            ph = ",".join("?" for _ in batch)
-                            for r in db.execute(
-                                    f"SELECT {col} AS vid, vector FROM {table} "
-                                    f"WHERE notebook_id=? AND {col} IN ({ph})",
-                                    (notebook_id, *batch)).fetchall():
-                                yield r["vid"], r["vector"]
-                return build_matrix(_rows(), runtime_dim=self._runtime_dim())
+            def _delta_vecs(table, col, ids):
+                return projections.embedding_matrix(notebook_id, table, col, object_ids=ids)
 
             # ANN(KG 对象):增量 add delta 对象向量
             kg_vids, kg_mat = _delta_vecs("knowledge_embeddings", "object_id", list(kg_set))
@@ -4314,12 +3945,8 @@ class SQLiteRepository:
                     shutil.copy2(src, os.path.join(tmp_dir, f))
 
             # manifest:水位=当前全部 source、version bump、counts
-            with self._connect() as db:
-                watermark = sorted(r["id"] for r in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall())
-                total_chunks = db.execute(
-                    "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
+            watermark = sorted(projections.source_ids(notebook_id))
+            total_chunks = projections.total_chunk_count(notebook_id)
             manifest.update({
                 "version": self._scale_index_version(notebook_id),
                 "watermark_sources": watermark,
@@ -4331,13 +3958,8 @@ class SQLiteRepository:
                 json.dump(manifest, fh)
 
             # 原子交换(锁内):out_dir → .old,tmp → out_dir,rm .old
-            old_dir = out_dir + ".old"
             with self._scale_building_lock:
-                if os.path.exists(old_dir):
-                    shutil.rmtree(old_dir)
-                os.rename(out_dir, old_dir)
-                os.rename(tmp_dir, out_dir)
-                shutil.rmtree(old_dir, ignore_errors=True)
+                artifact_store.swap_fold_directory(notebook_id, tmp_dir)
                 self._scale_idx_cache.pop(notebook_id, None)  # 失效进程缓存 → 下次 reload
             ok = True
             return manifest
@@ -4353,29 +3975,24 @@ class SQLiteRepository:
 
     def _index_delta(self, notebook_id: str) -> dict:
         """按 manifest 水位算 delta:水位后新增的 source 及其 chunk 数。
-        无 manifest(未索引)→ 全部 source/chunk 视为 delta(语义:纯暴力)。"""
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        mpath = os.path.join(out_dir, "manifest.json")
-        with self._connect() as db:
-            cur_sources = [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
-            if not os.path.exists(mpath):
-                nchunks = db.execute(
-                    "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
-                return {"delta_sources": sorted(cur_sources),
-                        "delta_chunks": int(nchunks), "indexed": False}
-            with open(mpath) as fh:
-                watermark = set(json.load(fh).get("watermark_sources", []))
-            delta_sources = sorted(s for s in cur_sources if s not in watermark)
-            if not delta_sources:
-                return {"delta_sources": [], "delta_chunks": 0, "indexed": True}
-            nchunks = 0
-            for batch in self._in_batches(delta_sources):
-                ph = ",".join("?" for _ in batch)
-                nchunks += db.execute(
-                    f"SELECT COUNT(*) c FROM chunks WHERE notebook_id=? AND source_id IN ({ph})",
-                    (notebook_id, *batch)).fetchone()["c"]
-        return {"delta_sources": delta_sources, "delta_chunks": int(nchunks), "indexed": True}
+        无 manifest(未索引)→ 全部 source/chunk 视为 delta(语义:纯暴力)。
+        Task 18:manifest 水位读归 ScaleArtifactStore、source/chunk 计数读归
+        IndexProjectionStore(分批 IN 经 _in_batches 席位,_IN_CHUNK patch 照常生效)。"""
+        projections = self._runtime.index_projections
+        artifact_store = self._runtime.scale_artifact_store
+        cur_sources = projections.source_ids(notebook_id)
+        manifest = artifact_store.read_manifest(artifact_store.scale_dir(notebook_id))
+        if manifest is None:
+            return {"delta_sources": sorted(cur_sources),
+                    "delta_chunks": projections.total_chunk_count(notebook_id),
+                    "indexed": False}
+        watermark = set(manifest.get("watermark_sources", []))
+        delta_sources = sorted(s for s in cur_sources if s not in watermark)
+        if not delta_sources:
+            return {"delta_sources": [], "delta_chunks": 0, "indexed": True}
+        return {"delta_sources": delta_sources,
+                "delta_chunks": projections.delta_chunk_count(notebook_id, delta_sources),
+                "indexed": True}
 
     def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
                               exists: "bool | None" = None, total_chunks: "int | None" = None) -> bool:
@@ -4391,14 +4008,12 @@ class SQLiteRepository:
         if tier is None:
             tier = self.get_notebook(notebook_id).tier
         if exists is None:
-            exists = os.path.exists(
-                os.path.join(self.settings.storage_dir, "kg_index", notebook_id, "manifest.json"))
+            exists = (self._runtime.scale_artifact_store.scale_dir(notebook_id)
+                      / "manifest.json").exists()
         if tier == "base" or exists:
             return True
         if total_chunks is None:
-            with self._connect() as db:
-                total_chunks = db.execute(
-                    "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
+            total_chunks = self._runtime.index_projections.total_chunk_count(notebook_id)
         if total_chunks > self.settings.index_suggest_chunk_threshold:
             return True
         return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).index_eligible(notebook_id, tier=tier, has_disk_index=bool(exists), total_chunks=int(total_chunks))
@@ -4410,14 +4025,12 @@ class SQLiteRepository:
         state 状态机(unindexed|suggested|building|indexed|stale):building 优先,
         未索引按总 chunk 阈值分 unindexed/suggested,已索引按版本失配/delta 阈值分 indexed/stale。"""
         nb = self.get_notebook(notebook_id)  # KeyError → 404
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        mpath = os.path.join(out_dir, "manifest.json")
+        artifact_store = self._runtime.scale_artifact_store
+        out_dir = artifact_store.scale_dir(notebook_id)
         building = notebook_id in self._scale_building
-        exists = os.path.exists(mpath)
+        exists = (out_dir / "manifest.json").exists()
         delta = self._index_delta(notebook_id)
-        with self._connect() as db:
-            total_chunks = db.execute(
-                "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()["c"]
+        total_chunks = self._runtime.index_projections.total_chunk_count(notebook_id)
         eligible = self._scale_index_eligible(notebook_id, tier=nb.tier, exists=exists, total_chunks=total_chunks)
         base = {"exists": exists, "building": building, "eligible": eligible,
                 "delta_chunks": int(delta["delta_chunks"]), "total_chunks": int(total_chunks),
@@ -4434,8 +4047,7 @@ class SQLiteRepository:
         elif not exists:
             base["state"] = "suggested" if total_chunks > self.settings.index_suggest_chunk_threshold else "unindexed"
         else:
-            with open(mpath) as fh:
-                manifest = json.load(fh)
+            manifest = artifact_store.read_manifest(out_dir)
             version_stale = manifest.get("version") != self._scale_index_version(notebook_id)
             delta_over = delta["delta_chunks"] > self.settings.index_stale_delta_threshold
             # 运行时维切换后旧索引(manifest.dim ≠ 生效维)必须重建:ANN 建在旧空间,
@@ -4842,14 +4454,14 @@ class SQLiteRepository:
         return derive_unified_graph(nodes, edges, self.cluster_map(notebook_id))
 
     def _viz_index_dir(self, notebook_id: str) -> str:
-        return os.path.join(str(self.settings.storage_dir), "kg_viz", notebook_id)
+        return str(self._runtime.scale_artifact_store.viz_dir(notebook_id))
 
     def build_viz_index(self, notebook_id: str) -> Optional[dict]:
         """Build + persist a viz-only index under {storage_dir}/kg_viz/{nb}/ so the
         KG-view fast paths light up for notebooks without a full scale index.
         json_extract names avoid the 300k-row json.loads. Returns manifest, or
-        None for an empty graph (no non-deprecated objects). Caches on success."""
-        from app.services.kg import viz_index as vi
+        None for an empty graph (no non-deprecated objects). Caches on success.
+        Task 18: 落盘/回读经 ScaleArtifactStore(同一 kg.viz_index 写读器,字节不变)。"""
         self.get_notebook(notebook_id)
         full = self._derive_object_graph_lite(notebook_id)
         if not full["nodes"]:
@@ -4861,11 +4473,12 @@ class SQLiteRepository:
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
         }
-        out_dir = self._viz_index_dir(notebook_id)
-        vi.save_viz_index(out_dir, viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
-                          viz_types=viz_types, viz_names=viz_names,
-                          viz_payload=viz_payload, manifest=manifest)
-        self._viz_idx_cache[notebook_id] = vi.load_viz_index(out_dir)
+        artifact_store = self._runtime.scale_artifact_store
+        artifact_store.save_viz(notebook_id, dict(
+            viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
+            viz_types=viz_types, viz_names=viz_names,
+            viz_payload=viz_payload, manifest=manifest))
+        self._viz_idx_cache[notebook_id] = artifact_store.load_viz(notebook_id)
         return manifest
 
     def _active_kg_delta(self, notebook_id: str):
@@ -4883,8 +4496,9 @@ class SQLiteRepository:
         # 直接返空——省掉 _index_delta 对 delta_sources 的分批 COUNT(生产 48,739 源、
         # 55 批,结果本会被丢弃)。gate 结果与「先 _index_delta 再判 indexed」一致:
         # _index_delta 的 indexed 恰是 manifest 是否存在。
-        out_dir = os.path.join(self.settings.storage_dir, "kg_index", notebook_id)
-        if (os.path.exists(os.path.join(out_dir, "manifest.json"))
+        scale_manifest = (self._runtime.scale_artifact_store.scale_dir(notebook_id)
+                          / "manifest.json")
+        if (scale_manifest.exists()
                 and not self.settings.scale_search_include_delta):
             # 同一原则第四处:已索引库的图基底只含已索引部分(核心 CSR 本身),水位后
             # delta 由 auto-fold 收进索引后自然可达。未索引的 active 小库(下方
@@ -5063,8 +4677,8 @@ class SQLiteRepository:
         base_ver = tuple(
             (bid, tuple(idx.manifest.get("version", [])))
             for bid, idx in base_indexes)
-        active_indexed = os.path.exists(
-            os.path.join(self.settings.storage_dir, "kg_index", notebook_id, "manifest.json"))
+        active_indexed = (self._runtime.scale_artifact_store.scale_dir(notebook_id)
+                          / "manifest.json").exists()
         # Drop the churning active_ver from the key ONLY when the active notebook is
         # ITSELF indexed and delta is gated off: then _active_kg_delta early-returns
         # empty (its gate = active manifest exists), so the combined graph is fully

@@ -165,6 +165,12 @@ TASK16_ALLOWED_IMPORTS = {
 TASK17_ALLOWED_IMPORTS = {
     ("backend/tests/test_retrieval_snapshot_cache_runtime.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+# Task 18: the new scale-artifact catalog test file imports the compatibility
+# export at a fresh site (the facade's own frozen import lines are untouched;
+# the artifact-compatibility test file consumes only the filesystem store).
+TASK18_ALLOWED_IMPORTS = {
+    ("backend/tests/test_scale_artifact_catalog.py", 22, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -867,6 +873,24 @@ TASK17_ALLOWED_MEMBER_FILES = {
     for name in {"_invalidate_unified_cache", "_runtime", "_vector_cache"}
 }
 
+# Task 18: the scale/viz artifact READ adapters move behind the runtime
+# (IndexProjectionStore / ScaleArtifactStore / ScaleArtifactCatalog); the
+# facade keeps frozen-signature delegates, so the moved bodies' internal
+# self-call sites disappear from the facade file (`_read_manifest_version` /
+# `_viz_index_dir` were only ever called from the moved read paths).  The new
+# catalog test file consumes the facade at fresh sites.
+TASK18_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {"_read_manifest_version", "_viz_index_dir"}
+} | {
+    ("backend/tests/test_scale_artifact_catalog.py", name)
+    for name in {
+        "SQLiteRepository", "_gather_kg_graph", "_runtime", "_scale_index",
+        "_scale_index_version", "build_scale_index", "create_notebook",
+        "embedder", "settings", "store_kg",
+    }
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -1292,6 +1316,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK15_ALLOWED_IMPORTS
                     or site in TASK16_ALLOWED_IMPORTS
                     or site in TASK17_ALLOWED_IMPORTS
+                    or site in TASK18_ALLOWED_IMPORTS
                 )
 
 
@@ -1332,14 +1357,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES | TASK18_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES | TASK18_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}

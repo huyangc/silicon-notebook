@@ -7,12 +7,14 @@ from typing import Any, Callable
 from app.core import ask_context
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
+from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 from app.repositories.source_files import SourceFileStore
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
@@ -26,6 +28,7 @@ from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
+from app.services.scale_artifact_catalog import ScaleArtifactCatalog
 from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
@@ -82,6 +85,19 @@ class RepositoryRuntime:
             self.database.resolve_path(settings.storage_dir),
             resolve_path=self.database.resolve_path,
         )
+        # Task 18: scale/viz artifact FILE persistence is seam-free (raw
+        # settings.storage_dir paths + the pure kg.scale_index / kg.viz_index
+        # load/save modules), so the runtime owns and constructs it eagerly.
+        # The DB projections + read catalog over it are finished by
+        # wire_scale_artifacts() — their collaborators (the facade `_connect`
+        # read seam, the `_in_batches` IN-chunking helper, the retrieval-owned
+        # ent-chunk/mention/vector-matrix caches, the memoized version key,
+        # the LRU cache + cold-load lock table and the model-error note) are
+        # facade-bound seams that only exist once the facade constructor
+        # reaches them.  Construction stays lazy — no seam calls.
+        self.scale_artifact_store = ScaleArtifactStore(settings)
+        self.index_projections: "IndexProjectionStore | None" = None
+        self.scale_catalog: "ScaleArtifactCatalog | None" = None
         # Vector persistence is finished by wire_persistence(): its write seat
         # is the facade's `_write` compatibility seam, which only exists once
         # the facade constructor reaches it. Construction stays lazy.
@@ -312,6 +328,55 @@ class RepositoryRuntime:
             now=self.seams.now,
         )
         return self.kg_mutations
+
+    def wire_scale_artifacts(
+        self,
+        *,
+        connect: Callable[[], Any],
+        in_batches: Callable[..., Any],
+        ent_chunk_map: Callable[[str], dict],
+        mention_extra_edges: Callable[[str], list],
+        vector_matrix: Callable[..., Any],
+        version: Callable[[str], list],
+        scale_cache: Callable[[], Any],
+        load_lock: Callable[[], Any],
+        load_locks: Callable[[], dict],
+        note_model_error: Callable[..., None],
+    ) -> ScaleArtifactCatalog:
+        """Compose the scale/viz artifact READ adapters (Task 18) once the
+        facade-bound seams exist.  ``connect`` resolves the facade's
+        ``_connect`` compatibility seat per call (the frozen version-probe
+        spies / gated-slow-connection single-flight tests keep observing
+        every projection query); ``in_batches`` resolves the facade helper so
+        the frozen ``_IN_CHUNK`` class patch keeps flowing; the ent-chunk /
+        mention-edge / vector-matrix providers are retrieval-owned caches
+        that stay facade-late until their domain moves (Gate 7).  The catalog
+        applies the exact/allow_stale semantics and the lazy ANN open over
+        the eager ScaleArtifactStore; it holds NO builder — reading can never
+        schedule a rebuild.  ``version`` resolves the facade's memoized
+        ``_scale_index_version`` and ``scale_cache``/``load_lock``/
+        ``load_locks`` resolve the facade's LRU + single-flight state per
+        call (tests reassign them; Task 20 transfers that state into
+        ScaleArtifactRuntime by identity and composes THESE same objects as
+        ``scale_artifacts`` without recreating them)."""
+        self.index_projections = IndexProjectionStore(
+            self.settings,
+            connect=connect,
+            in_batches=in_batches,
+            ent_chunk_map=ent_chunk_map,
+            mention_extra_edges=mention_extra_edges,
+            vector_matrix=vector_matrix,
+        )
+        self.scale_catalog = ScaleArtifactCatalog(
+            artifacts=self.scale_artifact_store,
+            settings=self.settings,
+            version=version,
+            scale_cache=scale_cache,
+            load_lock=load_lock,
+            load_locks=load_locks,
+            note_model_error=note_model_error,
+        )
+        return self.scale_catalog
 
     def wire_knowledge_lifecycle(
         self,
