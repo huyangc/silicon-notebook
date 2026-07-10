@@ -91,7 +91,8 @@ from app.services.sqlite_identity import (
     set_request_user,
 )
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
-from app.repositories.source_files import safe_filename as _safe_filename
+from app.services.source_ingestion import SourcePipelineHooks
+from app.repositories.source_files import safe_filename as _safe_filename  # noqa: F401 — compatibility export
 from app.repositories.sqlite.migrations import SqliteMigrator, SCHEMA_VERSION
 from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.sqlite_notebook_sharing import (  # noqa: F401 — compatibility exports
@@ -302,6 +303,68 @@ class SQLiteRepository:
             ),
             mark_unified_dirty=lambda notebook_id: self._mark_unified_kg_dirty(
                 notebook_id
+            ),
+        )
+        # Task 12: the ingestion orchestration rides facade-bound late seams —
+        # the `_write` transaction seat, the parse/summarize/model seams whose
+        # frozen patch targets live on this facade or its module namespace
+        # (repo.source_elements / repo._summarize_source / module
+        # parse_source_file / per-user llm & kg_llm properties), and TEMPORARY
+        # facade-owned KG/catalog callbacks that Gate 5 replaces with real
+        # services.  Every lambda resolves at call time — post-construction
+        # monkeypatches stay observed.
+        self._runtime.wire_source_ingestion(
+            write=lambda: self._write(),
+            source_elements=lambda source_id: self.source_elements(source_id),
+            summarize_source=lambda title, elements: self._summarize_source(
+                title, elements
+            ),
+            source_type_from_name=lambda file_name: self._source_type_from_name(
+                file_name
+            ),
+            parse_file=lambda source_id, file_path, file_name, client: (
+                parse_source_file(source_id, file_path, file_name, client)
+            ),
+            mineru_client=lambda: self.mineru_client,
+            mineru_cloud_client=lambda: self.mineru_cloud_client,
+            llm=lambda: self.llm_client,
+            kg_llm=lambda: self.kg_llm_client,
+            normalize_doc_type=_normalize_doc_type,
+            default_notebook_names=_DEFAULT_NOTEBOOK_NAMES,
+            clear_source_extraction_state=(
+                lambda db, source_id, notebook_id, clear_embeddings: (
+                    self._clear_source_extraction_state(
+                        db, source_id, notebook_id, clear_embeddings=clear_embeddings
+                    )
+                )
+            ),
+            begin_extraction_run=lambda source_id, notebook_id, run_id, created_at: (
+                self._begin_extraction_run(source_id, notebook_id, run_id, created_at)
+            ),
+            finish_extraction_run=lambda run_id, status, message: (
+                self._finish_extraction_run(run_id, status, message)
+            ),
+            notebook_tier=lambda notebook_id: self._notebook_tier(notebook_id),
+            concept_whitelist_terms=lambda: self.concept_whitelist_terms(),
+            notebook_has_kg=lambda notebook_id: self._notebook_has_kg(notebook_id),
+            store_kg=lambda notebook_id, source_id, objects, relations: (
+                self.store_kg(notebook_id, source_id, objects, relations)
+            ),
+            incremental_fuse_source=lambda notebook_id, source_id: (
+                self.incremental_fuse_source(notebook_id, source_id)
+            ),
+            maybe_auto_index=lambda notebook_id: self.maybe_auto_index(notebook_id),
+            invalidate_unified_cache=lambda notebook_id: (
+                self._invalidate_unified_cache(notebook_id)
+            ),
+            notebook_meta_row=lambda notebook_id: self._notebook_meta_row(notebook_id),
+            notebook_meta_sources=lambda notebook_id, pending_source_id: (
+                self._notebook_meta_sources(notebook_id, pending_source_id)
+            ),
+            apply_notebook_meta=lambda notebook_id, guard_name, name, purpose: (
+                self._apply_notebook_meta(
+                    notebook_id, guard_name=guard_name, name=name, purpose=purpose
+                )
             ),
         )
         from app.services.embedding import make_embedder
@@ -1243,31 +1306,28 @@ class SQLiteRepository:
     def get_source(self, source_id: str) -> SourceDetail:
         return self._runtime.source_store.get_source(source_id)
 
-    def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]:
-        self.get_notebook(notebook_id)
-        source_ids: List[str] = []
-        with self._write() as db:
-            # One shared transaction for the whole batch — all-or-nothing,
-            # exactly as the former inline loop behaved.
-            for file in payload.files:
-                source_id = _new_id("src")
-                self._runtime.source_store.insert_source(
-                    source_id=source_id,
-                    notebook_id=notebook_id,
-                    title=file.file_name,
-                    source_type=self._source_type_from_name(file.file_name),
-                    status="imported",
-                    parse_status="metadata-only",
-                    file_name=file.file_name,
-                    file_path="",
-                    file_size=file.file_size,
-                    file_hash="",
-                    summary="File metadata imported. Upload the file to parse source elements.",
-                    doc_type=_normalize_doc_type(file.doc_type),
-                    connection=db,
+    def _source_pipeline_hooks(self) -> SourcePipelineHooks:
+        """Task 12: mint FRESH hooks on every ingestion call from the facade's
+        own bound seats — post-construction per-instance monkeypatches
+        (_run_extraction, _mark_unified_kg_dirty, ...) keep being observed.
+        Gate 5 replaces these temporary callbacks with real services.  Never
+        store the hooks (not on the runtime, not on the facade)."""
+        return SourcePipelineHooks(
+            should_extract_kg=self._should_extract_kg,
+            extract_source=self._run_extraction,
+            mark_unified_dirty=self._mark_unified_kg_dirty,
+            augment_notebook_metadata=lambda notebook_id, source_id: (
+                self._augment_notebook_meta(
+                    notebook_id, pending_source_id=source_id
                 )
-                source_ids.append(source_id)
-        return [self.get_source(source_id) for source_id in source_ids]
+            ),
+            maybe_enqueue_scale_fold=self._maybe_enqueue_scale_fold,
+        )
+
+    def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]:
+        return self._runtime.source_ingestion.import_sources(
+            notebook_id, payload, self._source_pipeline_hooks()
+        )
 
     def add_url_sources(
         self,
@@ -1275,46 +1335,9 @@ class SQLiteRepository:
         urls: Iterable[str],
         scheduler: Optional[Callable[[str], None]] = None,
     ) -> AddUrlSourcesResult:
-        """逐 URL 初筛(非 PDF/不可达/超限→rejected,不建来源);通过的建 source_url
-        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。"""
-        self.get_notebook(notebook_id)  # KeyError if missing
-        # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
-        if not (self.mineru_client.configured or self.mineru_cloud_client.configured):
-            raise MinerUCloudNotConfigured(
-                "未配置 PDF 解析服务（本地 MINERU_MODE=http/cli 或云端 MINERU_API_TOKEN）"
-            )
-        created: List[SourceSummary] = []
-        rejected: List[RejectedUrl] = []
-        for raw in urls:
-            url = (raw or "").strip()
-            if not url:
-                continue
-            probe = remote_sources.probe_pdf(url)
-            if not probe.ok:
-                rejected.append(RejectedUrl(url=url, reason=probe.reason))
-                continue
-            source_id = _new_id("src")
-            self._runtime.source_store.insert_source(
-                source_id=source_id,
-                notebook_id=notebook_id,
-                title=probe.display_name,
-                source_type="pdf",
-                status="queued",
-                parse_status="queued",
-                file_name=probe.display_name,
-                file_path="",
-                source_url=url,
-                file_size=probe.content_length,
-                file_hash="",
-                summary="链接已添加，解析排队中。",
-                doc_type="",
-            )
-            if scheduler is not None:
-                scheduler(source_id)
-            else:
-                self.process_source(source_id)
-            created.append(self.get_source(source_id))
-        return AddUrlSourcesResult(created=created, rejected=rejected)
+        return self._runtime.source_ingestion.add_url_sources(
+            notebook_id, urls, scheduler, self._source_pipeline_hooks()
+        )
 
     def upload_sources(
         self,
@@ -1322,42 +1345,9 @@ class SQLiteRepository:
         files: Iterable[UploadedSourceFile],
         scheduler: Optional[Callable[[str], None]] = None,
     ) -> List[SourceSummary]:
-        """Register uploaded files and kick off processing.
-
-        With a ``scheduler`` (e.g. ``BackgroundTasks.add_task``) the heavy
-        parse/embed/extract pipeline runs out of band and each source is
-        returned in the ``queued`` state. Without one (tests, scripts) the
-        pipeline runs synchronously before returning.
-        """
-        self.get_notebook(notebook_id)
-        imported: List[SourceSummary] = []
-        for file in files:
-            source_id = _new_id("src")
-            file_name = _safe_filename(file.file_name)
-            digest = hashlib.sha256(file.content).hexdigest()
-            stored_path = self._runtime.source_files.write_upload(
-                notebook_id, source_id, file_name, file.content
-            )
-            self._runtime.source_store.insert_source(
-                source_id=source_id,
-                notebook_id=notebook_id,
-                title=file_name,
-                source_type=self._source_type_from_name(file_name),
-                status="queued",
-                parse_status="queued",
-                file_name=file_name,
-                file_path=str(stored_path),
-                file_size=len(file.content),
-                file_hash=digest,
-                summary="Uploaded; parsing is queued.",
-                doc_type=_normalize_doc_type(file.doc_type),
-            )
-            if scheduler is not None:
-                scheduler(source_id)
-            else:
-                self.process_source(source_id)
-            imported.append(self.get_source(source_id))
-        return imported
+        return self._runtime.source_ingestion.upload_sources(
+            notebook_id, files, scheduler, self._source_pipeline_hooks()
+        )
 
     def _set_source_status(
         self,
@@ -1367,17 +1357,8 @@ class SQLiteRepository:
         summary: Optional[str] = None,
         error_message: str = "",
     ) -> None:
-        self._runtime.source_store.set_status(
+        self._runtime.source_ingestion.set_source_status(
             source_id, status, summary=summary, error_message=error_message
-        )
-        # Emit every status-machine transition so it is visible in the event log.
-        self.event_log.emit(
-            {
-                "kind": "status",
-                "source_id": source_id,
-                "status": status,
-                "error": error_message or "",
-            }
         )
 
     def _notebook_has_kg(self, notebook_id: str) -> bool:
@@ -1438,8 +1419,7 @@ class SQLiteRepository:
         return langs
 
     def _should_extract_kg(self, notebook_id: str) -> bool:
-        """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""
-        return self.settings.kg_auto_extract or self._notebook_has_kg(notebook_id)
+        return self._runtime.source_ingestion.should_extract_kg(notebook_id)
 
     def build_notebook_kg(self, notebook_id: str, *, progress=None) -> dict:
         """按需对该 notebook 下"尚无 KG"的 source 抽取(复用 _run_extraction)。
@@ -1553,319 +1533,81 @@ class SQLiteRepository:
     def _parse_url_via_local(
         self, source_id: str, url: str, file_name: str
     ) -> List[SourceElement]:
-        """下载 URL 到临时文件，走本地 MinerU(http/cli)/pypdf 解析（数据不出网）。
-
-        复用 parse_source_file 的「本地 MinerU 失败→pypdf 兜底」路径，与文件上传一致；
-        全程不触达 mineru.net 云端。解析后无论成败都清理临时文件。
-        """
-        fd, tmp = tempfile.mkstemp(suffix=".pdf")
-        os.close(fd)
-        tmp_path = Path(tmp)
-        try:
-            remote_sources.download_pdf(url, tmp_path)
-            return parse_source_file(
-                source_id, str(tmp_path), file_name or "source.pdf", self.mineru_client
-            )
-        finally:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        return self._runtime.source_ingestion.parse_url_via_local(
+            source_id, url, file_name
+        )
 
     def process_source(self, source_id: str) -> SourceSummary:
-        """Run the full parse -> embed -> extract pipeline with a status machine.
-
-        States: queued -> parsing -> parsed -> extracting -> extracted (or failed).
-
-        Each stage is timed and logged to the `events` channel so a "stuck"
-        upload can be traced to the exact step (parse / embed / extract) and how
-        long it has been running.
-        """
-        source = self.get_source(source_id)
-        notebook_id = source.notebook_id
-        now = _now()
-        pipeline_started = time.perf_counter()
-
-        def stage(name: str, status: str, started: float, **extra) -> None:
-            self.event_log.emit(
-                {
-                    "kind": "pipeline",
-                    "source_id": source_id,
-                    "notebook_id": notebook_id,
-                    "file_name": source.file_name,
-                    "stage": name,
-                    "status": status,
-                    "latency_ms": round((time.perf_counter() - started) * 1000),
-                    **extra,
-                }
-            )
-
-        self._set_source_status(source_id, "parsing")
-        try:
-            t = time.perf_counter()
-            stage("parse", "start", t)
-            # URL 来源：本地 MinerU 已配置则优先本地（下载到临时文件，数据不出网），
-            # 否则走 mineru.net 云端；本地文件来源走 MinerU(http/cli)/pypdf。
-            # 本地优先时绝不静默回落云端——内网部署不能把内部 PDF 外发。
-            if source.source_url:
-                if self.mineru_client.configured:
-                    elements = self._parse_url_via_local(
-                        source_id, source.source_url, source.file_name
-                    )
-                    mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
-                    parser_mode = f"mineru_local({self.mineru_client.mode})"
-                else:
-                    content_list = self.mineru_cloud_client.parse_url(
-                        source.source_url, data_id=source_id
-                    )
-                    elements = mineru_content_list_to_elements(source_id, content_list)
-                    mineru_error = str(getattr(self.mineru_cloud_client, "last_error", "") or "")
-                    parser_mode = "mineru_cloud"
-            else:
-                elements = parse_source_file(
-                    source_id, source.file_path, source.file_name, self.mineru_client
-                )
-                mineru_error = str(getattr(self.mineru_client, "last_error", "") or "")
-                parser_mode = str(getattr(self.mineru_client, "mode", ""))
-            element_parsers = sorted(
-                {
-                    str(element.metadata.get("parser", ""))
-                    for element in elements
-                    if element.metadata.get("parser")
-                }
-            )
-            stage(
-                "parse",
-                "done",
-                t,
-                elements=len(elements),
-                parser_mode=parser_mode,
-                actual_parsers=element_parsers,
-                mineru_error=mineru_error[:500],
-            )
-            summary = self._summarize_source(source.title, elements)
-            with self._write() as db:
-                self._clear_source_extraction_state(
-                    db,
-                    source_id,
-                    source.notebook_id,
-                    clear_embeddings=True,
-                )
-                self._runtime.source_store.replace_elements(
-                    db,
-                    source_id,
-                    [
-                        SourceElementWrite(
-                            id=f"el-{source_id}-{index:04d}",
-                            element_type=element.element_type,
-                            location_label=element.location_label,
-                            text=element.text,
-                            metadata=element.metadata,
-                        )
-                        for index, element in enumerate(elements, start=1)
-                    ],
-                    created_at=now,
-                )
-            self._set_source_status(source_id, "parsed", summary=summary)
-
-            # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
-            # best-effort: 失败不阻塞既有 parse->extract 流水线。
-            try:
-                self._build_chunks_for_source(source_id)
-            except Exception:
-                self.event_log.logger.exception("chunk build failed for %s", source_id)
-
-            # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
-            # concurrent with KG extraction, so a large doc's slow embed never blocks
-            # the KG result. 'extracted'/green below is gated on EXTRACTION only.
-            import threading
-
-            embed_started = time.perf_counter()
-            stage("embed", "start", embed_started)
-
-            def _embed_bg() -> None:
-                try:
-                    self._embed_source(source_id)
-                    self._embed_chunks_for_source(source_id)   # chunk 向量后台补, 不阻塞流水线
-                    stage("embed", "done", embed_started)
-                except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
-                    stage("embed", "error", embed_started,
-                          error=f"{type(exc).__name__}: {exc}")
-                    self.event_log.logger.exception(
-                        "background embed failed for %s", source_id
-                    )
-
-            embed_ctx = contextvars.copy_context()
-            embed_thread = threading.Thread(
-                target=lambda: embed_ctx.run(_embed_bg),
-                name=f"embed-{source_id}", daemon=True
-            )
-            embed_thread.start()
-
-            if self._should_extract_kg(notebook_id):
-                self._set_source_status(source_id, "extracting")
-                t = time.perf_counter()
-                stage("extract", "start", t)
-                self._run_extraction(source_id)
-                stage("extract", "done", t)
-                try:
-                    self._mark_unified_kg_dirty(source.notebook_id)
-                except Exception:
-                    self.event_log.logger.exception("unified-KG dirty mark failed for source %s", source_id)
-            # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
-            # instead of a silent success that looks like a real result.
-            empty_hint = ""
-            if not elements and source.file_name.lower().endswith(".pdf"):
-                empty_hint = (
-                    "No extractable text — likely a scanned/image PDF. "
-                    "Enable MinerU (MINERU_MODE) or add OCR to parse it."
-                )
-            fallback_hint = ""
-            if (
-                source.file_name.lower().endswith(".pdf")
-                and self.mineru_client.configured
-                and elements
-                and "mineru" not in element_parsers
-            ):
-                fallback_hint = (
-                    "MinerU did not produce usable elements; fell back to pypdf text extraction. "
-                    "Check MinerU settings/logs if layout, formula, or table fidelity is expected."
-                )
-                if mineru_error:
-                    fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
-            # Auto-fill notebook name/description from sources (only while name is a
-            # default placeholder / purpose is still auto). Persist BEFORE marking the
-            # source 'extracted' so the frontend's extracted-triggered refetch shows
-            # the fresh name/description live. Best-effort: never fail the pipeline.
-            try:
-                self._augment_notebook_meta(source.notebook_id, pending_source_id=source_id)
-            except Exception:
-                self.event_log.logger.exception(
-                    "notebook meta augmentation failed for %s", source_id
-                )
-            self._set_source_status(
-                source_id,
-                "extracted",
-                error_message=empty_hint or fallback_hint,
-            )
-            # KG ('extracted'/green) set above; wait for the background element
-            # embedding to finish before declaring the whole pipeline done.
-            embed_thread.join()
-            stage("pipeline", "done", pipeline_started, elements=len(elements))
-        except Exception as exc:
-            stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
-            self.event_log.logger.exception("process_source failed for %s", source_id)
-            self._set_source_status(
-                source_id,
-                "failed",
-                summary="Parsing failed; see source error.",
-                error_message=str(exc),
-            )
-        # Content-add settle point: if this notebook already has a scale index,
-        # enqueue an idle incremental fold so the new (post-watermark) source
-        # becomes semantically searchable. Idle queue coalesces batch runs (many
-        # process_source calls) into a single fold. Never builds a fresh index;
-        # helper is fail-safe (never raises).
-        self._maybe_enqueue_scale_fold(source.notebook_id)
-        return self.get_source(source_id)
+        return self._runtime.source_ingestion.process_source(
+            source_id, self._source_pipeline_hooks()
+        )
 
     def parse_source(self, source_id: str) -> SourceSummary:
-        # Manual (re)parse is always synchronous so the response reflects the result.
-        return self.process_source(source_id)
+        return self._runtime.source_ingestion.parse_source(
+            source_id, self._source_pipeline_hooks()
+        )
 
     def _augment_notebook_meta(self, notebook_id: str, pending_source_id: str = "") -> None:
-        """Auto-fill the notebook name (while it is still a default placeholder)
-        and/or description (while purpose_auto=1) from its processed sources.
-        No-op for fields the user has set. `pending_source_id` is the source whose
-        pipeline is finishing (still 'extracting'); it is counted so the FIRST
-        source already produces a name/description."""
+        return self._runtime.source_ingestion.augment_notebook_metadata(
+            notebook_id, pending_source_id
+        )
+
+    # --- TEMPORARY Task-12 catalog callbacks (Task 13/15 move this SQL into
+    # --- the notebook/source stores); the ingestion service owns the
+    # --- metadata-augmentation BUSINESS body and calls back through the
+    # --- constructor-injected seams below.
+    def _notebook_meta_row(self, notebook_id: str) -> Optional[dict]:
         with self._connect() as db:
             nb = db.execute(
                 "SELECT name, purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
             ).fetchone()
-            if nb is None:
-                return
-            cur_name = (nb["name"] or "").strip()
-            need_name = cur_name in _DEFAULT_NOTEBOOK_NAMES
-            need_desc = ("purpose_auto" in nb.keys() and nb["purpose_auto"] == 1)
-            if not (need_name or need_desc):
-                return
+        if nb is None:
+            return None
+        return {
+            "name": nb["name"],
+            "purpose_auto": ("purpose_auto" in nb.keys() and nb["purpose_auto"] == 1),
+        }
+
+    def _notebook_meta_sources(
+        self, notebook_id: str, pending_source_id: str = ""
+    ) -> List[dict]:
+        with self._connect() as db:
             rows = db.execute(
                 "SELECT title, doc_type, summary FROM sources "
                 "WHERE notebook_id = ? AND (status = 'extracted' OR id = ?) "
                 "ORDER BY created_at ASC",
                 (notebook_id, pending_source_id),
             ).fetchall()
-        if not rows:
-            return
-        titles = [r["title"] for r in rows]
-        labels = []
-        for r in rows:
-            profile = PROFILES.get(_normalize_doc_type(r["doc_type"]))
-            label = profile.label if profile else "自动检测"
-            if label not in labels:
-                labels.append(label)
+        return [
+            {"title": r["title"], "doc_type": r["doc_type"], "summary": r["summary"]}
+            for r in rows
+        ]
 
-        name_val, desc_val = "", ""
-        if self.llm_client.configured:
-            block = "\n".join(
-                f"- {r['title']} "
-                f"[{(PROFILES.get(_normalize_doc_type(r['doc_type'])) or get_profile('academic_paper')).label}] "
-                f"{(r['summary'] or '')[:200]}"
-                for r in rows[:20]
-            )
-            try:
-                raw = self.llm_client.chat_json(
-                    [{"role": "user", "content": notebook_meta_prompt(block)}],
-                    NOTEBOOK_META_SCHEMA_HINT,
-                )
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    name_val = str(parsed.get("name", "")).strip()
-                    desc_val = str(parsed.get("description", "")).strip()
-            except Exception:
-                name_val, desc_val = "", ""
-
-        # Deterministic fallbacks (LLM off or failed).
-        if need_desc and not desc_val:
-            shown = "、".join(titles[:5]) + ("等" if len(titles) > 5 else "")
-            desc_val = f"本笔记本收录了 {len(titles)} 个来源：{shown}。"
-            if labels:
-                desc_val += f"文档类型涵盖 {'、'.join(labels)}。"
-        if need_name and not name_val:
-            name_val = (titles[0] or "").strip()[:40]
-
+    def _apply_notebook_meta(
+        self, notebook_id: str, *, guard_name, name: str, purpose: str
+    ) -> None:
         with self._write() as db:
-            if need_name and name_val:
+            if name:
                 # Optimistic guard: only overwrite if the name is still the
                 # placeholder we read (no clobber of a concurrent rename).
                 db.execute(
                     "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
-                    (name_val[:120], _now(), notebook_id, nb["name"]),
+                    (name, _now(), notebook_id, guard_name),
                 )
-            if need_desc and desc_val:
+            if purpose:
                 db.execute(
                     "UPDATE notebooks SET purpose = ?, updated_at = ? "
                     "WHERE id = ? AND purpose_auto = 1",
-                    (desc_val[:1000], _now(), notebook_id),
+                    (purpose, _now(), notebook_id),
                 )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
         return self._runtime.source_store.source_elements(source_id)
 
     def delete_source(self, source_id: str) -> None:
-        source = self.get_source(source_id)
-        with self._write() as db:
-            self._clear_source_extraction_state(
-                db,
-                source_id,
-                source.notebook_id,
-                clear_embeddings=True,
-            )
-            self._runtime.source_store.delete_source_row(db, source_id)
-        self._delete_file(source.file_path)
-        self._invalidate_unified_cache(source.notebook_id)
-        self._mark_unified_kg_dirty(source.notebook_id)
+        self._runtime.source_ingestion.delete_source(
+            source_id, self._source_pipeline_hooks()
+        )
 
     def extract_source(self, source_id: str) -> None:
         """Public entry to (re-)extract a single source's KG in place. Delegates to
@@ -1877,50 +1619,25 @@ class SQLiteRepository:
     def _relink_extra_relations(
         self, objects: List[dict], relations: List[dict], source_id: str
     ) -> List[dict]:
-        """PURE: propose deterministic relink edges for degree-0 nodes within ONE
-        source's freshly-extracted (objects, relations), returning them in the same
-        shape build_records emits so store_kg can remap local→DB ids and persist
-        them with the SAME review_status/source_id as LLM edges.
-
-        Adapts the (objects, relations) extraction shape to the relink core's node
-        dict, then maps each new edge back to a relation dict. No DB / IO."""
-        from app.services.kg.relink import complete_isolated_edges
-
-        nodes = [
-            {
-                "id": o["local_id"],
-                "object_type": o["object_type"],
-                "name": (o.get("payload") or {}).get("name", ""),
-                "source_id": source_id,
-                "element_ids": {
-                    ev.get("element_id")
-                    for ev in o.get("evidence", [])
-                    if ev.get("element_id")
-                },
-            }
-            for o in objects
-        ]
-        edges = [(r["source_local_id"], r["target_local_id"]) for r in relations]
-        extra = complete_isolated_edges(nodes, edges)
-        return [
-            {
-                "source_local_id": e["source_object_id"],
-                "target_local_id": e["target_object_id"],
-                "edge_type": e["edge_type"],
-                "evidence": [{"basis": e["basis"], "quote": ""}],
-            }
-            for e in extra
-        ]
+        return self._runtime.source_ingestion.relink_extra_relations(
+            objects, relations, source_id
+        )
 
     def _run_extraction(self, source_id: str) -> None:
-        source = self.get_source(source_id)
-        elements = self.source_elements(source_id)
-        now = _now()
-        run_id = _new_id("run")
-        doc_type_id = _normalize_doc_type(getattr(source, "doc_type", "") or "") or "academic_paper"
-        kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type_id, "academic")
+        return self._runtime.source_ingestion.run_extraction(source_id)
+
+    # --- TEMPORARY Task-12 KG callbacks (Task 13/15 targets: KnowledgeStore /
+    # --- KnowledgeLifecycleService).  The ingestion service owns the
+    # --- extraction ORCHESTRATION and calls back through these seams so no
+    # --- SQL leaks into the application service.
+    def _begin_extraction_run(
+        self, source_id: str, notebook_id: str, run_id: str, created_at: str
+    ) -> None:
+        """Reset one source's prior KG artefacts and open its extraction_runs
+        row in ONE write transaction — the exact commit boundary the inline
+        _run_extraction body always had."""
         with self._write() as db:
-            self._clear_source_extraction_state(db, source_id, source.notebook_id, clear_embeddings=False)
+            self._clear_source_extraction_state(db, source_id, notebook_id, clear_embeddings=False)
             self._delete_relations_for_source(db, source_id)
             db.execute(
                 "DELETE FROM knowledge_embeddings WHERE object_id IN "
@@ -1938,68 +1655,21 @@ class SQLiteRepository:
                 """INSERT INTO extraction_runs
                    (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)
                    VALUES (?, ?, ?, 'kg', 'running', '', ?, ?)""",
-                (run_id, source.notebook_id, source_id, now, now))
-        try:
-            if not getattr(self.kg_llm_client, "configured", False):
-                with self._write() as db:
-                    db.execute("UPDATE extraction_runs SET status='completed', error_message='no-llm', updated_at=? WHERE id=?", (_now(), run_id))
-                return
-            raw_text = self._source_raw_text(source, elements)
-            n_chars = kg_ingest.plan_window_size(
-                len(raw_text), self.settings.kg_extract_workers,
-                self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
-                override=self.settings.kg_window_target_chars,
+                (run_id, notebook_id, source_id, created_at, created_at))
+
+    def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:
+        with self._write() as db:
+            db.execute(
+                "UPDATE extraction_runs SET status=?, error_message=?, updated_at=? WHERE id=?",
+                (status, message, _now(), run_id),
             )
-            whitelist = self.concept_whitelist_terms()
-            with self._connect() as db:
-                _nb = db.execute(
-                    "SELECT tier FROM notebooks WHERE id=?", (source.notebook_id,)
-                ).fetchone()
-            base_filter = bool(_nb and _nb["tier"] == "base")
-            graph = kg_ingest.extract_graph(
-                self.kg_llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
-                n=n_chars,
-                m=self.settings.kg_window_overlap_chars,
-                whitelist=whitelist,
-                refine=self.settings.kg_refine_enabled,
-                gleaning_rounds=(self.settings.kg_gleaning_rounds if self.settings.kg_gleaning_enabled else 0),
-                base_filter=base_filter,
-            )
-            warn = self.settings.kg_window_warn_threshold
-            if graph.total_windows > warn:
-                self.event_log.logger.warning(
-                    "KG windows %s exceed warn threshold %s for source %s (%s) — "
-                    "extracting in full, no truncation",
-                    graph.total_windows, warn, source_id, source.file_name,
-                )
-            objects, relations = kg_ingest.build_records(graph, source.id, source.title, elements)
-            # Reconnect degree-0 nodes BEFORE store_kg, so the relink edges go
-            # through the same local→DB remap + review_status/source_id as LLM
-            # edges (esp. gleaning, which emits edgeless nodes). Intra-source only.
-            if getattr(self.settings, "kg_relink_enabled", True):
-                relations = relations + self._relink_extra_relations(
-                    objects, relations, source.id
-                )
-            n_obj, n_rel = self.store_kg(source.notebook_id, source.id, objects, relations)
-            try:
-                self.incremental_fuse_source(source.notebook_id, source.id)
-            except Exception:
-                self.event_log.logger.exception("incremental_fuse_source failed for %s", source_id)
-            try:
-                self.maybe_auto_index(source.notebook_id)
-            except Exception:
-                self.event_log.logger.exception("maybe_auto_index failed for %s", source.notebook_id)
-            fw, tw = graph.failed_windows, graph.total_windows
-            with self._write() as db:
-                db.execute("UPDATE extraction_runs SET status='completed', error_message=?, updated_at=? WHERE id=?",
-                           (f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} "
-                            f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
-                            f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped}", _now(), run_id))
-        except Exception as exc:
-            with self._write() as db:
-                db.execute("UPDATE extraction_runs SET status='failed', error_message=?, updated_at=? WHERE id=?",
-                           (str(exc), _now(), run_id))
-            raise
+
+    def _notebook_tier(self, notebook_id: str) -> str:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()
+        return str(row["tier"]) if row is not None and row["tier"] else ""
 
     def _source_raw_text(self, source, elements) -> str:
         return self._runtime.source_files.read_source_text(

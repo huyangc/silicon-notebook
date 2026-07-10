@@ -305,8 +305,8 @@ def test_build_notebook_kg_calls_resolve_when_enabled(repo, monkeypatch):
     repo.settings.kg_conflict_resolution_enabled = True
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    # build_notebook_kg requires a real LLM, so we monkeypatch _run_extraction too
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    # build_notebook_kg requires a real LLM, so we monkeypatch run_extraction too
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     # Also ensure llm_client.configured is True (needed by build_notebook_kg guard)
     repo.llm_client.configured = True
 
@@ -328,7 +328,7 @@ def test_build_notebook_kg_skips_resolve_when_disabled(repo, monkeypatch):
     repo.llm_client.configured = True
     repo.settings.kg_conflict_resolution_enabled = False
 
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
 
     repo.build_notebook_kg(nb_id)
 

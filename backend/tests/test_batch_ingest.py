@@ -216,7 +216,7 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     不再走 build_notebook_kg。无向量模式下抽取 no-op,但 parse 流程跑通,3 个 source 建成。"""
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
-    monkeypatch.setattr(SQLiteRepository, "_run_extraction", lambda self, sid: None)
+    monkeypatch.setattr("app.services.source_ingestion.SourceIngestionService.run_extraction", lambda self, sid: None)
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg",
                         lambda self, nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
@@ -244,8 +244,8 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
                 (f"src-lim-{i}", nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
                  0, f"h{i}", "", "", "parsed", now, now))
     extracted_calls = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted_calls.append(sid))
-    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted_calls.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
 
     def _no_build(nb):
         raise AssertionError("build_notebook_kg must not be called when limit is set")
@@ -284,8 +284,8 @@ def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-conc")
     sids = _seed_sources(repo, nb_id, 6, "src-c")
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
-    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
     monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
     seen = []
@@ -307,8 +307,8 @@ def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
     def _extract(sid):
         if sid == bad:
             raise RuntimeError("boom")
-    monkeypatch.setattr(repo, "_run_extraction", _extract)
-    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _extract)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
     monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
     out = repo.build_notebook_kg(nb_id)
@@ -459,7 +459,7 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)                        # 2 个 docN.md + 1 个 nested.md = 3
     nb_id = bi.ensure_notebook(repo, None, "nb-all")
     extracted = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted.append(sid))
     rebuild_calls = []
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: (rebuild_calls.append(nb), 5)[1])
@@ -486,7 +486,7 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-flags")
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
@@ -1208,7 +1208,7 @@ def test_run_all_fresh_flag_forces_rebuild(repo, monkeypatch, tmp_path):
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-all-fresh")
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     seen = {}
     def _fake_rebuild(nb, progress=None, force=False, fresh=False):
         seen["force"] = force

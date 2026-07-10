@@ -21,6 +21,7 @@ from app.services.notebook_catalog import NotebookCatalogService, NotebookSummar
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
+from app.services.source_ingestion import SourceIngestionService
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,12 @@ class RepositoryRuntime:
         # reaches them.  Construction stays lazy — no seam calls.
         self.source_embedding: "SourceEmbeddingService | None" = None
         self.source_chunking: "SourceChunkingService | None" = None
+        # Source ingestion orchestration is finished by wire_source_ingestion():
+        # its collaborators (facade _write seat, facade-owned parse/summarize/
+        # model seams and the TEMPORARY KG callbacks that Gate 5 replaces with
+        # real services) are facade-bound seams that only exist once the facade
+        # constructor reaches them.  Construction stays lazy — no seam calls.
+        self.source_ingestion: "SourceIngestionService | None" = None
         # Sharing/deep-copy composition is finished by wire_sharing(): its
         # collaborators (facade _insert_row seat, notebook_copy_stats memo,
         # storage_dir) are facade-bound seams that only exist once the facade
@@ -143,6 +150,88 @@ class RepositoryRuntime:
             mark_unified_dirty=mark_unified_dirty,
         )
         return self.source_embedding, self.source_chunking
+
+    def wire_source_ingestion(
+        self,
+        *,
+        write: Callable[[], Any],
+        source_elements: Callable[[str], list],
+        summarize_source: Callable[..., str],
+        source_type_from_name: Callable[[str], str],
+        parse_file: Callable[..., list],
+        mineru_client: Callable[[], Any],
+        mineru_cloud_client: Callable[[], Any],
+        llm: Callable[[], Any],
+        kg_llm: Callable[[], Any],
+        normalize_doc_type: Callable[[str], str],
+        default_notebook_names: Any,
+        clear_source_extraction_state: Callable[..., None],
+        begin_extraction_run: Callable[..., None],
+        finish_extraction_run: Callable[..., None],
+        notebook_tier: Callable[[str], str],
+        concept_whitelist_terms: Callable[[], set],
+        notebook_has_kg: Callable[[str], bool],
+        store_kg: Callable[..., tuple],
+        incremental_fuse_source: Callable[..., None],
+        maybe_auto_index: Callable[[str], None],
+        invalidate_unified_cache: Callable[[str], None],
+        notebook_meta_row: Callable[[str], Any],
+        notebook_meta_sources: Callable[..., list],
+        apply_notebook_meta: Callable[..., None],
+    ) -> SourceIngestionService:
+        """Compose the source ingestion orchestration (Task 12) once the
+        facade-bound seams exist.  ``write`` is the facade's ``_write``
+        compatibility seat resolved per call (transaction counting / failure
+        injection keep observing every ingestion commit boundary);
+        ``source_elements``/``summarize_source``/``parse_file`` and the model
+        client seams stay facade/module late-bound so frozen patch targets
+        (repo.source_elements, repo._summarize_source, module
+        parse_source_file, per-user llm/kg_llm properties) keep working; the
+        remaining callables are TEMPORARY facade-owned KG/catalog callbacks —
+        Task 13/15 replace them with KnowledgeStore /
+        KnowledgeLifecycleService dependencies.  Requires
+        wire_source_pipeline() first — the chunk/embed collaborators must
+        already be composed."""
+        if self.source_embedding is None or self.source_chunking is None:
+            raise RuntimeError(
+                "wire_source_ingestion requires wire_source_pipeline() first"
+            )
+        self.source_ingestion = SourceIngestionService(
+            settings=self.settings,
+            notebooks=self.notebook_store,
+            sources=self.source_store,
+            source_files=self.source_files,
+            chunking=self.source_chunking,
+            embedding=self.source_embedding,
+            event_log=self.event_log,
+            new_id=self.seams.new_id,
+            now=self.seams.now,
+            write=write,
+            source_elements=source_elements,
+            summarize_source=summarize_source,
+            source_type_from_name=source_type_from_name,
+            parse_file=parse_file,
+            mineru_client=mineru_client,
+            mineru_cloud_client=mineru_cloud_client,
+            llm=llm,
+            kg_llm=kg_llm,
+            normalize_doc_type=normalize_doc_type,
+            default_notebook_names=default_notebook_names,
+            clear_source_extraction_state=clear_source_extraction_state,
+            begin_extraction_run=begin_extraction_run,
+            finish_extraction_run=finish_extraction_run,
+            notebook_tier=notebook_tier,
+            concept_whitelist_terms=concept_whitelist_terms,
+            notebook_has_kg=notebook_has_kg,
+            store_kg=store_kg,
+            incremental_fuse_source=incremental_fuse_source,
+            maybe_auto_index=maybe_auto_index,
+            invalidate_unified_cache=invalidate_unified_cache,
+            notebook_meta_row=notebook_meta_row,
+            notebook_meta_sources=notebook_meta_sources,
+            apply_notebook_meta=apply_notebook_meta,
+        )
+        return self.source_ingestion
 
     def wire_sharing(
         self,

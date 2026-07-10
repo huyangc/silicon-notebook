@@ -15,7 +15,7 @@ from app.api.deps import (
     admin_query_repository, identity_repository,
     notebook_access_repository, notebook_catalog_repository,
     notebook_sharing_repository, repository, require_notebook_access,
-    require_notebook_read, require_notebook_write, get_current_user,
+    require_notebook_read, require_notebook_write, get_current_user, source_repository,
 )
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
@@ -298,7 +298,7 @@ def list_sources(
     limit: int = Query(50, ge=1, le=200),
     q: str = Query(""),
 ) -> PaginatedSources:
-    return repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
+    return source_repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
 
 
 @router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
@@ -309,7 +309,7 @@ def import_sources(
     try:
         for file in payload.files:
             _validate_source_file(file.file_name)
-        return repository().import_sources(notebook_id, payload)
+        return source_repository().import_sources(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -319,7 +319,7 @@ def add_url_sources(
     notebook_id: str,
     payload: AddUrlSourcesRequest,
 ) -> AddUrlSourcesResult:
-    repo = repository()
+    repo = source_repository()
     try:
         return repo.add_url_sources(
             notebook_id,
@@ -339,7 +339,7 @@ async def upload_sources(
     doc_types: List[str] = Form(default=[]),
 ) -> List[SourceSummary]:
     try:
-        repo = repository()
+        repo = source_repository()
         uploaded_files = []
         for index, file in enumerate(files):
             file_name = file.filename or "source.bin"
@@ -370,7 +370,7 @@ def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) ->
     if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return repository().get_source(source_id)
+        return source_repository().get_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -380,7 +380,7 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
     if notebook_access_repository().source_owner(source_id) != user.id:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return repository().parse_source(source_id)
+        return source_repository().parse_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -390,7 +390,7 @@ def source_elements(source_id: str, user: UserProfile = Depends(get_current_user
     if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return repository().source_elements(source_id)
+        return source_repository().source_elements(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -400,7 +400,7 @@ def delete_source(source_id: str, user: UserProfile = Depends(get_current_user))
     if notebook_access_repository().source_owner(source_id) != user.id:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        repository().delete_source(source_id)
+        source_repository().delete_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 

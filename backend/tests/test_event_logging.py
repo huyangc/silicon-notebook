@@ -166,3 +166,16 @@ def test_repo_no_warn_when_log_dirs_aligned(tmp_path, caplog):
             llm_log_path=str(tmp_path / "logs" / "llm.jsonl"),  # 对齐
         ))
     assert not any("EVENT_LOG_DIR" in r.getMessage() for r in caplog.records)
+
+
+def test_ingestion_service_shares_the_per_user_event_logger(tmp_path):
+    """Task 12: the ingestion orchestration moved into SourceIngestionService
+    must keep logging through the repository's per-user EventLogger — the
+    same object, not a second channel."""
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    repo = SQLiteRepository(Settings(
+        database_url=f"sqlite:///{tmp_path}/t.db",
+        event_log_dir=str(tmp_path / "logs"),
+    ))
+    assert repo._runtime.source_ingestion.event_log is repo.event_log

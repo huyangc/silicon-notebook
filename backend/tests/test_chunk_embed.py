@@ -96,7 +96,7 @@ def test_process_source_builds_chunks(repo, monkeypatch):
                                          "location_label": "p1", "text": "chunk content " * 30,
                                          "metadata": {}})()])
     # 隔离重步骤: KG 抽取/摘要置 no-op, 聚焦验证 chunk 接线本身。
-    monkeypatch.setattr(repo, "_run_extraction", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_summarize_source", lambda *a, **k: "")
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     import uuid; sid = f"src-{uuid.uuid4().hex[:8]}"; now = "2026-01-01T00:00:00"

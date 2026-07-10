@@ -50,6 +50,6 @@ def test_extraction_passes_kg_llm_client_to_extract_graph(repo, monkeypatch):
         db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?,?)", ("src-x", nb.id, "T", "md", "extracted", "extracted", now, now))
     monkeypatch.setattr(repo, "source_elements", lambda sid: [])
-    monkeypatch.setattr(repo, "_source_raw_text", lambda s, e: "MoE 是一种架构。")
+    monkeypatch.setattr(repo._runtime.source_files, "read_source_text", lambda path, elements: "MoE 是一种架构。")
     repo._run_extraction("src-x")
     assert captured.get("client") is kg_stub

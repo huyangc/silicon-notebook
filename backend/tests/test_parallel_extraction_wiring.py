@@ -58,3 +58,7 @@ def test_upload_dispatches_via_submit_job(tmp_path, monkeypatch):
     assert r.status_code == 200
     assert len(calls) == 1
     assert calls[0][1][0].startswith("src-")
+    # Task 12: the scheduled callable stays the repository's process_source
+    # delegate — upload dispatch keeps riding the KG job pool (never inline,
+    # never a raw service method without the fresh compatibility hooks).
+    assert getattr(calls[0][0], "__name__", "") == "process_source"

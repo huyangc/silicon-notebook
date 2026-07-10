@@ -120,6 +120,18 @@ TASK10_ALLOWED_IMPORTS = {
 # _delete_source_file, the ChunkWrite import becomes the source_files
 # safe_filename import), so no frozen compatibility import site shifts.
 TASK11_ALLOWED_IMPORTS: set[tuple[str, int, str, str]] = set()
+# Task 12 inserts the SourcePipelineHooks import above the facade's frozen
+# UploadedSourceFile compatibility import (shifting it to line 115) and the
+# two new ingestion test files + the event-logging append import the
+# compatibility exports at fresh sites.
+TASK12_ALLOWED_IMPORTS = {
+    ("backend/app/services/sqlite_repository.py", 115, "app.services.repository", "UploadedSourceFile"),
+    ("backend/tests/test_event_logging.py", 176, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_source_ingestion_service.py", 28, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_source_ingestion_service.py", 28, "app.services.sqlite_repository", "_now"),
+    ("backend/tests/test_source_ingestion_failure_boundaries.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_source_ingestion_failure_boundaries.py", 21, "app.services.sqlite_repository", "_now"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -195,6 +207,17 @@ TASK9_ALLOWED_CONSUMERS = {
     ("leave_notebook", "backend/app/api/routes.py:845"),
     ("user_can_read_answer", "backend/app/api/routes.py:1051"),
 }
+# Task 12 moves the source ingestion routes onto the typed
+# source_repository() accessor; these are the frozen repository() call sites
+# they replace.
+TASK12_ALLOWED_CONSUMERS = {
+    ("list_sources_page", "backend/app/api/routes.py:298"),
+    ("import_sources", "backend/app/api/routes.py:309"),
+    ("get_source", "backend/app/api/routes.py:370"),
+    ("parse_source", "backend/app/api/routes.py:380"),
+    ("source_elements", "backend/app/api/routes.py:390"),
+    ("delete_source", "backend/app/api/routes.py:400"),
+}
 TASK2_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {
@@ -221,6 +244,18 @@ MASTER_V10_ALLOWED_NEW_MEMBERS = {
     "_flush_object_vectors",
 }
 TASK7_ALLOWED_NEW_MEMBERS = {"pending_actions_projection_rows"}
+# Task 12 new facade members: the fresh per-call hooks builder plus the
+# TEMPORARY KG/catalog SQL callbacks the ingestion service calls back through
+# (Task 13/15 move them into KnowledgeStore / the notebook & source stores).
+TASK12_ALLOWED_NEW_MEMBERS = {
+    "_source_pipeline_hooks",
+    "_begin_extraction_run",
+    "_finish_extraction_run",
+    "_notebook_tier",
+    "_notebook_meta_row",
+    "_notebook_meta_sources",
+    "_apply_notebook_meta",
+}
 TASK4_ALLOWED_PATCHES = {
     ("backend/tests/test_repository_runtime.py", 19, "_now", "sqlite_repository"),
 }
@@ -269,6 +304,39 @@ TASK11_ALLOWED_PATCHES = {
     ("backend/tests/test_source_chunking_service.py", 119, "_mark_unified_kg_dirty", "repo"),
     ("backend/tests/test_source_embedding_service.py", 181, "_flush_object_vectors", "repo"),
     ("backend/tests/test_source_embedding_service.py", 202, "_flush_object_vectors", "repo"),
+}
+# Task 12 migrates every _run_extraction / _set_source_status /
+# _source_raw_text facade patch seat onto the canonical
+# SourceIngestionService / SourceFileStore components (frozen sites below
+# stop appearing in the static scan); the two new ingestion test files pin
+# the fresh-hooks late-binding proof on the facade _run_extraction seat and
+# replay parse_source_file through the module compatibility namespace.
+TASK12_ALLOWED_PATCHES = {
+    # migrated frozen seats (facade wrappers are no longer test patch targets)
+    ("backend/tests/test_batch_ingest.py", 219, "_run_extraction", "SQLiteRepository"),
+    ("backend/tests/test_batch_ingest.py", 247, "_run_extraction", "repo"),
+    ("backend/tests/test_batch_ingest.py", 248, "_set_source_status", "repo"),
+    ("backend/tests/test_batch_ingest.py", 287, "_run_extraction", "repo"),
+    ("backend/tests/test_batch_ingest.py", 288, "_set_source_status", "repo"),
+    ("backend/tests/test_batch_ingest.py", 310, "_run_extraction", "repo"),
+    ("backend/tests/test_batch_ingest.py", 311, "_set_source_status", "repo"),
+    ("backend/tests/test_batch_ingest.py", 462, "_run_extraction", "repo"),
+    ("backend/tests/test_batch_ingest.py", 489, "_run_extraction", "repo"),
+    ("backend/tests/test_batch_ingest.py", 1211, "_run_extraction", "repo"),
+    ("backend/tests/test_chunk_embed.py", 99, "_run_extraction", "repo"),
+    ("backend/tests/test_kg_llm_client.py", 53, "_source_raw_text", "repo"),
+    ("backend/tests/test_kg_relink_repository.py", 188, "_run_extraction", "repo"),
+    ("backend/tests/test_kg_repository.py", 380, "_run_extraction", "repo"),
+    ("backend/tests/test_p4_kg_shrink.py", 82, "_run_extraction", "repo"),
+    ("backend/tests/test_p4_kg_shrink.py", 96, "_run_extraction", "repo"),
+    ("backend/tests/test_resolve_notebook_conflicts.py", 309, "_run_extraction", "repo"),
+    ("backend/tests/test_resolve_notebook_conflicts.py", 331, "_run_extraction", "repo"),
+    # fresh Task-12 probes (fresh-hooks proof + module parse seam replay)
+    ("backend/tests/test_source_ingestion_failure_boundaries.py", 80, "parse_source_file", "facade_mod"),
+    ("backend/tests/test_source_ingestion_service.py", 155, "parse_source_file", "facade_mod"),
+    ("backend/tests/test_source_ingestion_service.py", 253, "parse_source_file", "facade_mod"),
+    ("backend/tests/test_source_ingestion_service.py", 260, "_run_extraction", "repo"),
+    ("backend/tests/test_source_ingestion_service.py", 332, "parse_source_file", "facade_mod"),
 }
 TASK5_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
@@ -463,6 +531,76 @@ TASK11_ALLOWED_MEMBER_FILES = {
 } | {
     ("backend/tests/test_kg_object_embed_concurrency.py", name)
     for name in {"create_notebook", "embedder", "_embed_objects_batch"}
+}
+# Task 12: the ingestion orchestration (import/URL/upload/process/parse/
+# delete, status machine, metadata augmentation, URL-local parse and
+# per-source extraction) moves to SourceIngestionService behind fresh
+# per-call hooks; the facade keeps frozen-signature delegates, so the moved
+# bodies' internal self-call sites disappear from the facade file.  The
+# migrated patch seats' consumer residue, the modified suites' service-level
+# probes (repo._runtime.source_ingestion...) and the two new ingestion test
+# files consume the facade/new seams at fresh sites.
+TASK12_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "UploadedSourceFile", "_build_chunks_for_source", "_delete_file",
+        "_embed_chunks_for_source", "_embed_source", "_parse_url_via_local",
+        "_relink_extra_relations", "_source_raw_text", "get_source",
+        "process_source",
+    }
+} | {
+    ("backend/tests/test_batch_ingest.py", name)
+    for name in {"_run_extraction", "_set_source_status", "_runtime"}
+} | {
+    ("backend/tests/test_chunk_embed.py", name)
+    for name in {"_run_extraction", "_runtime"}
+} | {
+    ("backend/tests/test_event_logging.py", name)
+    for name in {"SQLiteRepository", "event_log", "_runtime"}
+} | {
+    ("backend/tests/test_kg_llm_client.py", name)
+    for name in {"_source_raw_text", "_runtime"}
+} | {
+    ("backend/tests/test_kg_relink_repository.py", name)
+    for name in {"_run_extraction", "_runtime"}
+} | {
+    ("backend/tests/test_kg_repository.py", name)
+    for name in {"_run_extraction", "_runtime"}
+} | {
+    ("backend/tests/test_kg_source_status.py", name)
+    for name in {"_set_source_status", "create_notebook", "event_log", "get_source"}
+} | {
+    ("backend/tests/test_p4_kg_shrink.py", name)
+    for name in {"_run_extraction", "_runtime"}
+} | {
+    ("backend/tests/test_pipeline_concurrency.py", name)
+    for name in {
+        "_connect", "_runtime", "create_notebook", "create_user", "embedder",
+        "process_source",
+    }
+} | {
+    ("backend/tests/test_resolve_notebook_conflicts.py", name)
+    for name in {"_run_extraction", "_runtime"}
+} | {
+    ("backend/tests/test_url_sources.py", name)
+    for name in {"_connect", "add_url_sources", "create_notebook"}
+} | {
+    ("backend/tests/test_source_ingestion_service.py", name)
+    for name in {
+        "SQLiteRepository", "_now", "_connect", "_write", "_run_extraction",
+        "_runtime", "create_notebook", "embedder", "event_log", "get_source",
+        "llm_client", "parse_source_file", "process_source",
+        "relations_for_notebook", "settings", "upload_sources",
+    }
+} | {
+    ("backend/tests/test_source_ingestion_failure_boundaries.py", name)
+    for name in {
+        "SQLiteRepository", "_now", "_augment_notebook_meta", "_connect",
+        "_write", "_runtime", "add_url_sources", "create_notebook",
+        "delete_source", "embedder", "get_notebook", "get_source",
+        "llm_client", "mineru_client", "mineru_cloud_client",
+        "parse_source_file", "process_source", "settings", "upload_sources",
+    }
 }
 
 TASK7_COMPAT_PROPERTIES = {
@@ -876,6 +1014,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK9_ALLOWED_IMPORTS
                     or site in TASK10_ALLOWED_IMPORTS
                     or site in TASK11_ALLOWED_IMPORTS
+                    or site in TASK12_ALLOWED_IMPORTS
                 )
 
 
@@ -887,7 +1026,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -911,19 +1050,19 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
@@ -939,7 +1078,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     for name in TASK3_ALLOWED_NEW_MEMBERS | MASTER_V10_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
-    for name in TASK7_ALLOWED_NEW_MEMBERS:
+    for name in TASK7_ALLOWED_NEW_MEMBERS | TASK12_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

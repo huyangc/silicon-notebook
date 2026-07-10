@@ -97,3 +97,59 @@ def test_extracted_set_before_element_embedding_finishes(repo, tmp_path):
     with repo._connect() as db:
         (n,) = db.execute("SELECT COUNT(*) FROM element_embeddings WHERE source_id=?", (sid,)).fetchone()
     assert n >= 1, "element embeddings must be persisted once the pipeline completes"
+
+
+def test_background_embed_thread_inherits_request_context(repo, tmp_path, monkeypatch):
+    """后台元素向量线程必须经 copy_context() 继承 _REQUEST_USER —— per-user
+    模型解析/日志隔离的命脉;Task 12 摄取编排搬进 SourceIngestionService 后
+    该传播不得丢失。"""
+    from app.core.request_context import (
+        get_request_user, set_request_user, reset_request_user,
+    )
+
+    md = tmp_path / "ctx.md"
+    md.write_text("# Doc\n\nContext propagation body.\n", encoding="utf-8")
+    user = repo.create_user("a00123456", "pw123456")
+    nb = repo.create_notebook(NotebookCreate(name="ctx"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._connect() as db:
+        db.execute(
+            """INSERT INTO sources (id, notebook_id, title, source_type, status, parse_status,
+               file_name, file_path, file_size, file_hash, summary, doc_type, created_at, updated_at)
+               VALUES (?,?,?, 'markdown','queued','queued', 'ctx.md', ?, 0, '', '', 'academic_paper', ?, ?)""",
+            (sid, nb.id, "Doc", str(md), now, now))
+
+    seen = []
+    embedding_service = repo._runtime.source_embedding
+    original_embed_source = embedding_service.embed_source
+
+    def spy(source_id):
+        # Runs ON the background embed thread: it must carry the copied
+        # request context AND the embed-<sid> thread identity.
+        current = get_request_user()
+        seen.append(
+            (threading.current_thread().name.startswith("embed-"),
+             getattr(current, "id", None))
+        )
+        return original_embed_source(source_id)
+
+    monkeypatch.setattr(embedding_service, "embed_source", spy)
+
+    class _CtxEmbedder:
+        def embed_texts(self, texts):
+            return [[0.1] * 8 for _ in texts]
+
+        def embed_query(self, text):
+            return [0.0] * 8
+
+        def _ensure(self):
+            pass
+
+    repo.embedder = _CtxEmbedder()
+    token = set_request_user(user)
+    try:
+        repo.process_source(sid)
+    finally:
+        reset_request_user(token)
+    assert seen == [(True, user.id)]
