@@ -86,9 +86,12 @@ from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredErr
 from app.services.sqlite_identity import (
     SQLiteIdentityMixin,
     _REQUEST_USER,
+    get_request_user,
+    request_user_id,
     reset_request_user,
     set_request_user,
 )
+from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
 from app.services.sqlite_notebook_sharing import (
     SQLiteNotebookSharingMixin,
     _remap_json_ids,
@@ -285,6 +288,16 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
+        self._runtime = RepositoryRuntime(
+            settings=self.settings,
+            root_dir=self.root_dir,
+            seams=RepositoryCompatibilitySeams(
+                new_id=lambda prefix: _new_id(prefix),
+                now=lambda: _now(),
+                copy_chunk_size=lambda: _COPY_CHUNK,
+                remap_json_ids=lambda value, maps: _remap_json_ids(value, maps),
+            ),
+        )
         self.db_path = self._resolve_path(settings.sqlite_path)
         self.storage_dir = self._resolve_path(settings.storage_dir)
         self._system_llm_client = OpenAICompatibleClient(settings)

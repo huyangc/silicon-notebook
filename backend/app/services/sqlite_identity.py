@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextvars
 import json
 import secrets
 from datetime import datetime, timedelta
@@ -10,31 +9,9 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.models.schemas import UserProfile
 from app.services.model_config import ResolvedModelConfig, resolve_effective_config
-
-
-# Request-scoped identity belongs to the identity boundary rather than the
-# 14k-line repository implementation.  sqlite_repository re-exports these
-# names for backwards compatibility with routes, workers, and existing tests.
-_REQUEST_USER: "contextvars.ContextVar[UserProfile | None]" = contextvars.ContextVar(
-    "request_user", default=None
+from app.core.request_context import (
+    _REQUEST_USER, get_request_user, request_user_id, set_request_user, reset_request_user,
 )
-
-
-def set_request_user(user: "UserProfile | None"):
-    """Set the current request user and keep per-user logging aligned."""
-    from app.core.event_logging import set_log_owner
-
-    tok_user = _REQUEST_USER.set(user)
-    tok_owner = set_log_owner(user.id if user is not None else None)
-    return tok_user, tok_owner
-
-
-def reset_request_user(token) -> None:
-    from app.core.event_logging import reset_log_owner
-
-    tok_user, tok_owner = token
-    _REQUEST_USER.reset(tok_user)
-    reset_log_owner(tok_owner)
 
 
 def _now() -> str:

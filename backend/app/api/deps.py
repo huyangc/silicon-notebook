@@ -6,11 +6,10 @@ from fastapi import Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
+from app.core.request_context import set_request_user, reset_request_user
 from app.models.schemas import UserProfile
 from app.repositories.ports import NotebookRepository, IdentityRepository, NotebookAccessRepository, SourceRepository, AskStreamPort
-from app.services.sqlite_repository import (
-    SQLiteRepository, set_request_user, reset_request_user,
-)
+from app.services.sqlite_repository import SQLiteRepository
 
 
 @lru_cache

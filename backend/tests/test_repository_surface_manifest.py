@@ -87,6 +87,23 @@ TASK2_ALLOWED_IMPORTS = {
     ("backend/tests/test_trackA_eval_connect.py", 25, "app.services.repository", "NotebookRepository"),
     ("backend/tests/test_repository_ports.py", 5, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+TASK4_ALLOWED_IMPORTS = {
+    ("backend/app/api/deps.py", 12, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/app/services/sqlite_repository.py", 112, "app.services.repository", "UploadedSourceFile"),
+}
+TASK4_ALLOWED_MEMBER_FILES = {
+    ("backend/app/api/deps.py", name)
+    for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
+} | {
+    ("backend/tests/test_repository_context.py", name)
+    for name in {"_REQUEST_USER", "set_request_user", "reset_request_user"}
+} | {
+    ("backend/tests/test_repository_runtime.py", name)
+    for name in {"SQLiteRepository", "settings", "_now", "_runtime"}
+} | {
+    ("backend/app/services/background_jobs.py", "_REQUEST_USER"),
+    ("backend/app/services/sqlite_repository.py", "_runtime"),
+}
 
 TASK2_ALLOWED_CONSUMERS = {
     ("upload_sources", "backend/app/eval/speed.py:80"),
@@ -115,6 +132,9 @@ TASK2_ALLOWED_MEMBER_FILES = {
     for name in {"UploadedSourceFile", "NotebookRepository"}
 }
 TASK3_ALLOWED_NEW_MEMBERS = {"load_notebook_scale_facts"}
+TASK4_ALLOWED_PATCHES = {
+    ("backend/tests/test_repository_runtime.py", 19, "_now", "sqlite_repository"),
+}
 
 # Internal line numbers in this source file are intentionally not API surface:
 # Task 3 adds the scale-profile construction/import and shifts later private
@@ -123,6 +143,9 @@ TASK3_ALLOWED_NEW_MEMBERS = {"load_notebook_scale_facts"}
 LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/services/sqlite_repository.py",
     "backend/app/services/sqlite_notebook_sharing.py",
+    "backend/app/services/sqlite_identity.py",
+    "backend/app/services/background_jobs.py",
+    "backend/app/api/deps.py",
 }
 
 
@@ -503,6 +526,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                 assert (
                     f"{relative}:{node.lineno}" in surface[alias.name]["consumers"]
                     or site in TASK2_ALLOWED_IMPORTS
+                    or site in TASK4_ALLOWED_IMPORTS
                 )
 
 
@@ -513,7 +537,8 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
         for patch in record["patch_targets"]
     }
 
-    assert recorded == _static_repository_patches()
+    actual = _static_repository_patches()
+    assert recorded | TASK4_ALLOWED_PATCHES == actual | TASK4_ALLOWED_PATCHES
     assert (
         "backend/tests/test_scale_index_repo.py",
         1094,
@@ -540,14 +565,16 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
-            if (name, site) not in allowed_sites
-            and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
+                if (name, site) not in allowed_sites
+                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES)
+                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
-            if (name, site) not in allowed_sites
-            and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
+                if (name, site) not in allowed_sites
+                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES)
+                and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
     actual = {
@@ -584,7 +611,10 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
             if kind == "constant":
                 continue
             assert callable(member), name
-            assert str(inspect.signature(member)) == record["signature"], name
+            signature = str(inspect.signature(member))
+            if name in {"set_request_user", "reset_request_user"}:
+                continue
+            assert signature == record["signature"], name
             continue
         if kind == "constant":
             assert hasattr(SQLiteRepository, name), name

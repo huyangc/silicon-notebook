@@ -28,9 +28,8 @@ _log = logging.getLogger("silicon_notebook.jobs")
 def _resolve_job_user() -> str | None:
     """在 job 线程(copy_context 已传播)里解析发起用户 id。"""
     try:
-        from app.services.sqlite_repository import _REQUEST_USER
-        u = _REQUEST_USER.get()
-        return u.id if u is not None else None
+        from app.core.request_context import request_user_id
+        return request_user_id()
     except Exception:  # noqa: BLE001
         return None
 
