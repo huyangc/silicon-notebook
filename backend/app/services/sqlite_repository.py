@@ -192,6 +192,12 @@ def _concept_desc_sig(name: str, quotes: List[str]) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _pair_key(a: str, b: str) -> str:
+    """canonical id 对的稳定归一键:排序后用 \x1f 连接,(a,b)/(b,a) 同键。"""
+    x, y = sorted((a, b))
+    return f"{x}\x1f{y}"
+
+
 def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
     keys that actually resolved to an anchor):
@@ -6171,7 +6177,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
 
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
-                           force: bool = False) -> int:
+                           force: bool = False, fresh: bool = False) -> int:
         """Cluster the notebook's Concepts; persist concept_clusters + refresh
         pending candidates (preserving confirmed/rejected). Returns #clusters.
 
@@ -6199,6 +6205,15 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         # both for the skip gate below and for the END-write (so the stored version
         # reflects the inputs this rebuild actually consumed).
         _ver = self._cluster_input_version(notebook_id)
+        # 断点续跑:fresh 清全部 checkpoint(强制两个 LLM 阶段重跑);否则 GC 掉非当前
+        # input_version 的残留(数据/算法版本一变 → 旧决策自动失效)。fail-open。
+        try:
+            if fresh:
+                self._rebuild_ckpt_clear(notebook_id)
+            else:
+                self._rebuild_ckpt_gc(notebook_id, _ver)
+        except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
+            self.event_log.logger.warning("rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
         if not force:
             with self._connect() as db:
                 row = db.execute(
@@ -6290,18 +6305,37 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
             try:
                 cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
                               for i, (a, b, s) in enumerate(autoc)]
-                # Resolve kg_llm_client here in the main thread (ContextVar-backed) and
-                # pass the resolved object into the parallel chunk workers.
-                decisions = review_merge_candidates(
-                    self.kg_llm_client, cand_dicts,
+                # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
+                id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
+                # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
+                cached = self._rebuild_ckpt_load(notebook_id, _ver, "merge_review")
+                todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
+
+                def _persist(chunk_decisions):
+                    rows = [(id_to_key[d["candidate_id"]],
+                             {"decision": d["decision"], "confidence": d["confidence"],
+                              "canonical_name": d.get("canonical_name", "")})
+                            for d in chunk_decisions if d.get("candidate_id") in id_to_key]
+                    if rows:
+                        self._rebuild_ckpt_put(notebook_id, _ver, "merge_review", rows)
+
+                new = review_merge_candidates(
+                    self.kg_llm_client, todo,
                     batch_size=self.settings.kg_merge_review_batch_size,
                     max_workers=self.settings.kg_job_concurrency,
+                    on_chunk=_persist,
                 )
-                by_id = {d["candidate_id"]: d for d in decisions}
+                # 合并 缓存 ∪ 新决策,按 pair_key 索引。
+                decided = dict(cached)
+                for d in new:
+                    k = id_to_key.get(d.get("candidate_id"))
+                    if k:
+                        decided[k] = {"decision": d["decision"], "confidence": d["confidence"]}
                 extra = set()
                 for i, (a, b, s) in enumerate(autoc):
-                    d = by_id.get(f"ac{i}")
-                    if d and d["decision"] == "merge" and d["confidence"] >= self.settings.kg_merge_confirm_threshold:
+                    dec = decided.get(_pair_key(a, b))
+                    if dec and dec.get("decision") == "merge" and \
+                            float(dec.get("confidence", 0)) >= self.settings.kg_merge_confirm_threshold:
                         extra.add(frozenset((a[2:] if a.startswith("K-") else a,
                                             b[2:] if b.startswith("K-") else b)))
             except Exception:
@@ -6312,7 +6346,6 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 extra = set()
             if extra:
                 confirmed = set(confirmed) | extra
-                # reps/members already in RAM — re-cluster is cheap.
                 sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
                                    conflict_fn=_discriminative_conflict, id_prefix="K-",
                                    rep_ann_max=self.settings.kg_cluster_rep_ann_max,
