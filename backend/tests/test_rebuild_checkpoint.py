@@ -364,3 +364,21 @@ def test_node_vector_backfill_preserves_merge_review_checkpoint(repo, monkeypatc
     # 旧代码(checkpoint 键在含 emb_c 的 _ver 上):emb_c 变 → _ver 变 → entry GC
     # 把上一轮 checkpoint 全部清空 → 全部候选重新裁决 → fake.calls 会翻倍。
     assert fake.calls == first
+
+
+def test_fresh_implies_force_even_when_force_false(repo, monkeypatch):
+    """defense-in-depth:fresh=True 即使调用方误传 force=False,也应强制重建并清 checkpoint,
+    而非被 skip-gate 静默跳过(force=force or fresh 在函数边界兜底)。"""
+    monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", False, raising=False)
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [{"local_id": "a", "object_type": "concept",
+                                 "payload": {"name": "widget", "section_path": ""},
+                                 "evidence": []}], [])
+    repo.rebuild_unified_kg(nb.id, force=True)          # 建立 clusters + 存 cluster_input_version
+    # 塞一行残留 checkpoint(任意版本);store_kg/rebuild 之间无变更 → skip-gate 本会跳过。
+    repo._rebuild_ckpt_put(nb.id, "stale-ver", "merge_review",
+                           [("k", {"decision": "merge", "confidence": 1.0})])
+    # force=False + fresh=True:无兜底会命中 skip-gate 提前 return、clear 落空;
+    # 有 force=force or fresh 兜底 → 强制重建 → _rebuild_ckpt_clear 清空整个 notebook。
+    repo.rebuild_unified_kg(nb.id, force=False, fresh=True)
+    assert repo._rebuild_ckpt_load(nb.id, "stale-ver", "merge_review") == {}

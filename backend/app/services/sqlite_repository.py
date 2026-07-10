@@ -6247,6 +6247,10 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         all-objects-in-memory path (guarded by tests/test_unified_kg_repository,
         test_cross_doc_merge, test_kg_merge, test_rebuild_streaming)."""
         self.get_notebook(notebook_id)
+        # fresh 隐含强制重建:fresh 要清 checkpoint 并重裁,只有真正走到 rebuild 分支才有意义。
+        # 两个 CLI caller 已保证 force=(rebuild_only or fresh)/force=fresh;这里在函数边界再兜一层,
+        # 防将来新增 caller 传 force=False+fresh=True 时被 skip-gate 静默跳过、clear 落空(defense-in-depth)。
+        force = force or fresh
         # Content-version of the clustering inputs, captured ONCE at entry. Reused
         # both for the skip gate below and for the END-write (so the stored version
         # reflects the inputs this rebuild actually consumed).
