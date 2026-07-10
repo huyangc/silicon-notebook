@@ -7,11 +7,14 @@ from typing import Any, Callable
 from app.core import ask_context
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
+from app.repositories.sqlite.chunk_store import ChunkStore
+from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.sharing_store import SharingStore
+from app.repositories.sqlite.source_store import SourceStore
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
@@ -50,6 +53,12 @@ class RepositoryRuntime:
             queries=self.queries,
             identity=self.identity,
         )
+        self.source_store = SourceStore(self.database, now=seams.now)
+        self.chunk_store = ChunkStore(self.database)
+        # Vector persistence is finished by wire_persistence(): its write seat
+        # is the facade's `_write` compatibility seam, which only exists once
+        # the facade constructor reaches it. Construction stays lazy.
+        self.embedding_store: "EmbeddingStore | None" = None
         # Sharing/deep-copy composition is finished by wire_sharing(): its
         # collaborators (facade _insert_row seat, notebook_copy_stats memo,
         # storage_dir) are facade-bound seams that only exist once the facade
@@ -71,6 +80,15 @@ class RepositoryRuntime:
             self.event_log,
             ask_context,
         )
+
+    def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStore:
+        """Compose the vector persistence (Task 10) once the facade-bound
+        ``write`` seat exists: it is the facade's ``_write`` compatibility
+        seam (itself delegating to the shared database write lock), resolved
+        at call time so per-instance monkeypatches — transaction counting,
+        failure injection — keep observing every vector flush."""
+        self.embedding_store = EmbeddingStore(write=write)
+        return self.embedding_store
 
     def wire_sharing(
         self,

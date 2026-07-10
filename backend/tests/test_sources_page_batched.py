@@ -138,7 +138,7 @@ def test_extraction_warning_tie_break_matches_per_row(repo):
 def test_list_sources_page_batches_lookups_not_n_plus_1(repo, monkeypatch):
     """A page of N sources must issue exactly 3 lookup queries total (source_
     elements GROUP BY, knowledge_objects DISTINCT, extraction_runs ordered
-    scan) — not 3*N. Spy on the connection boundary."""
+    scan) — not 3*N. Spy on the runtime SqliteDatabase.connect seam."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     for i in range(20):
         _seed_source(repo, nb.id, f"s{i}", f"Doc {i}", f"2026-01-{i + 1:02d}T00:00:00")
@@ -152,7 +152,7 @@ def test_list_sources_page_batches_lookups_not_n_plus_1(repo, monkeypatch):
     # (no cache) but note it in the isolation below instead of asserting on
     # its query count, which is orthogonal to the C5 N+1 fix under test.
     calls = {"source_elements": 0, "knowledge_objects": 0, "extraction_runs": 0}
-    orig_connect = repo._connect
+    orig_connect = repo._runtime.database.connect
 
     class _SpyConn:
         def __init__(self, inner):
@@ -180,7 +180,7 @@ def test_list_sources_page_batches_lookups_not_n_plus_1(repo, monkeypatch):
         def __exit__(self, *exc):
             return self._inner.__exit__(*exc)
 
-    monkeypatch.setattr(repo, "_connect", lambda: _SpyConn(orig_connect()))
+    monkeypatch.setattr(repo._runtime.database, "connect", lambda: _SpyConn(orig_connect()))
     page = repo.list_sources_page(nb.id, offset=0, limit=20)
     assert len(page.items) == 20
     assert calls["source_elements"] == 1, calls

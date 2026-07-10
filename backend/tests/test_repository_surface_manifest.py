@@ -111,6 +111,11 @@ TASK8_ALLOWED_IMPORTS = {
     ("backend/tests/test_notebook_summary_query.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK9_ALLOWED_IMPORTS: set[tuple[str, int, str, str]] = set()
+# Task 10 adds two store imports above the facade's UploadedSourceFile import,
+# shifting the frozen (Task 4) compatibility import site down.
+TASK10_ALLOWED_IMPORTS = {
+    ("backend/app/services/sqlite_repository.py", 114, "app.services.repository", "UploadedSourceFile"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -240,6 +245,15 @@ TASK9_ALLOWED_PATCHES = {
     ("backend/tests/test_notebook_copy_service.py", 168, "_insert_row", "repo"),
     ("backend/tests/test_notebook_copy_service.py", 189, "_COPY_CHUNK", "sqlite_repository"),
     ("backend/tests/test_notebook_copy_service.py", 199, "_insert_row", "repo"),
+}
+# Task 10: the C5 batched-lookup spy migrates from the facade _connect patch
+# seat onto the runtime SqliteDatabase.connect component seam (old frozen site
+# exempted); the embedding-store component tests probe the late-bound facade
+# _write seat (transaction counting + late-binding failure injection).
+TASK10_ALLOWED_PATCHES = {
+    ("backend/tests/test_sources_page_batched.py", 183, "_connect", "repo"),
+    ("backend/tests/test_embedding_store_component.py", 59, "_write", "repo"),
+    ("backend/tests/test_embedding_store_component.py", 135, "_write", "repo"),
 }
 TASK5_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
@@ -371,6 +385,33 @@ TASK9_ALLOWED_MEMBER_FILES = {
         "SQLiteRepository", "_COPY_CHUNK", "_insert_row", "_new_id",
         "_runtime", "copy_notebook", "storage_dir",
     }
+}
+# Task 10: sources/source_elements/chunks rows and the four vector tables move
+# to SourceStore + ChunkStore + EmbeddingStore; the facade keeps
+# frozen-signature delegates, so the moved bodies' internal self-call sites
+# disappear from the facade file. The three component test files and the
+# migrated N+1 spy consume the facade/new seams at fresh sites.
+TASK10_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_count", "_extraction_warning", "_source_from_row", "_source_has_kg",
+        "_sources_from_rows",
+    }
+} | {
+    ("backend/tests/test_sources_page_batched.py", name)
+    for name in {"_connect", "_runtime"}
+} | {
+    ("backend/tests/test_source_store_component.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "_runtime", "_write"}
+} | {
+    ("backend/tests/test_embedding_store_component.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "store_kg", "_connect",
+        "_runtime", "_write",
+    }
+} | {
+    ("backend/tests/test_chunk_store_component.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "_connect", "_runtime", "_write"}
 }
 
 TASK7_COMPAT_PROPERTIES = {
@@ -782,6 +823,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK7_ALLOWED_IMPORTS
                     or site in TASK8_ALLOWED_IMPORTS
                     or site in TASK9_ALLOWED_IMPORTS
+                    or site in TASK10_ALLOWED_IMPORTS
                 )
 
 
@@ -793,7 +835,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -822,14 +864,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}

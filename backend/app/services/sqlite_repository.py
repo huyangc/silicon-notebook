@@ -91,7 +91,9 @@ from app.services.sqlite_identity import (
     set_request_user,
 )
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
+from app.repositories.sqlite.chunk_store import ChunkWrite
 from app.repositories.sqlite.migrations import SqliteMigrator, SCHEMA_VERSION
+from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.sqlite_notebook_sharing import (  # noqa: F401 — compatibility exports
     SQLiteNotebookSharingMixin,  # Task 9: no longer in the facade MRO; kept importable
     _remap_json_ids,
@@ -284,6 +286,10 @@ class SQLiteRepository:
             copy_stats=lambda notebook_id: self.notebook_copy_stats(notebook_id),
             storage_dir=lambda: self.storage_dir,
         )
+        # Task 10: vector flushes stay on the facade's `_write` seat (resolved
+        # per call) so transaction-counting/failure-injection monkeypatches
+        # keep observing them; the seat itself is the shared database lock.
+        self._runtime.wire_persistence(write=lambda: self._write())
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self.mineru_client = MinerUClient(settings)
@@ -1175,95 +1181,76 @@ class SQLiteRepository:
         now = _now()
         els = parse_elements(text, source_file=str(f))
         with self._write() as db:
-            db.execute(
-                """INSERT INTO sources
-                   (id, notebook_id, title, source_type, status, parse_status,
-                    file_name, file_path, file_size, file_hash, summary, doc_type,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, 'markdown', 'extracted', 'parsed', ?, ?, 0, '', '', ?, ?, ?)""",
-                (sid, nb_id, name, f"{name}.md", str(f), "textbook", now, now))
-            for el in els:
-                db.execute(
-                    """INSERT INTO source_elements
-                       (id, source_id, element_type, location_label, text, metadata, created_at)
-                       VALUES (?, ?, ?, ?, ?, '{}', ?)""",
-                    (_new_id("el"), sid, el.type,
-                     f"L{el.line_start}-{el.line_end}", el.text, now))
+            self._runtime.source_store.insert_source(
+                source_id=sid,
+                notebook_id=nb_id,
+                title=name,
+                source_type="markdown",
+                status="extracted",
+                parse_status="parsed",
+                file_name=f"{name}.md",
+                file_path=str(f),
+                file_size=0,
+                file_hash="",
+                summary="",
+                doc_type="textbook",
+                connection=db,
+            )
+            self._runtime.source_store.replace_elements(
+                db,
+                sid,
+                [
+                    SourceElementWrite(
+                        id=_new_id("el"),
+                        element_type=el.type,
+                        location_label=f"L{el.line_start}-{el.line_end}",
+                        text=el.text,
+                        metadata={},
+                    )
+                    for el in els
+                ],
+                created_at=now,
+            )
         return sid
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         self.get_notebook(notebook_id)
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ? ORDER BY created_at ASC",
-                (notebook_id,),
-            ).fetchall()
-            return self._sources_from_rows(db, rows)
+        return self._runtime.source_store.list_sources(notebook_id)
 
     def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
                           q: str = "") -> PaginatedSources:
         """分页 + 可选 q(按 title/file_name 服务端过滤)。万级 source 安全:只取一页 +
         一次 COUNT,不全量进内存。"""
         self.get_notebook(notebook_id)
-        offset = max(0, int(offset))
-        limit = max(1, min(int(limit), 200))
-        needle = (q or "").strip().lower()
-        where = "WHERE notebook_id = ?"
-        params: List[object] = [notebook_id]
-        if needle:
-            where += " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"
-            like = f"%{needle}%"
-            params += [like, like]
-        with self._connect() as db:
-            total = db.execute(
-                f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]
-            rows = db.execute(
-                f"SELECT * FROM sources {where} ORDER BY created_at ASC LIMIT ? OFFSET ?",
-                (*params, limit, offset),
-            ).fetchall()
-            items = self._sources_from_rows(db, rows)
-        return PaginatedSources(items=items, total_count=total, offset=offset, limit=limit)
+        return self._runtime.source_store.list_sources_page(
+            notebook_id, offset=offset, limit=limit, q=q
+        )
 
     def get_source(self, source_id: str) -> SourceDetail:
-        with self._connect() as db:
-            row = db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
-            if row is None:
-                raise KeyError(source_id)
-            summary = self._source_from_row(db, row)
-            return SourceDetail(
-                **summary.model_dump(),
-                file_path=row["file_path"],
-                error_message=row["error_message"],
-            )
+        return self._runtime.source_store.get_source(source_id)
 
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]:
         self.get_notebook(notebook_id)
         source_ids: List[str] = []
-        now = _now()
         with self._write() as db:
+            # One shared transaction for the whole batch — all-or-nothing,
+            # exactly as the former inline loop behaved.
             for file in payload.files:
                 source_id = _new_id("src")
-                db.execute(
-                    """
-                    INSERT INTO sources
-                    (id, notebook_id, title, source_type, status, parse_status, file_name,
-                     file_size, summary, doc_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        source_id,
-                        notebook_id,
-                        file.file_name,
-                        self._source_type_from_name(file.file_name),
-                        "imported",
-                        "metadata-only",
-                        file.file_name,
-                        file.file_size,
-                        "File metadata imported. Upload the file to parse source elements.",
-                        _normalize_doc_type(file.doc_type),
-                        now,
-                        now,
-                    ),
+                self._runtime.source_store.insert_source(
+                    source_id=source_id,
+                    notebook_id=notebook_id,
+                    title=file.file_name,
+                    source_type=self._source_type_from_name(file.file_name),
+                    status="imported",
+                    parse_status="metadata-only",
+                    file_name=file.file_name,
+                    file_path="",
+                    file_size=file.file_size,
+                    file_hash="",
+                    summary="File metadata imported. Upload the file to parse source elements.",
+                    doc_type=_normalize_doc_type(file.doc_type),
+                    connection=db,
                 )
                 source_ids.append(source_id)
         return [self.get_source(source_id) for source_id in source_ids]
@@ -1293,22 +1280,21 @@ class SQLiteRepository:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
                 continue
             source_id = _new_id("src")
-            now = _now()
-            with self._write() as db:
-                db.execute(
-                    """
-                    INSERT INTO sources
-                    (id, notebook_id, title, source_type, status, parse_status,
-                     file_name, file_path, source_url, file_size, file_hash, summary,
-                     created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        source_id, notebook_id, probe.display_name, "pdf",
-                        "queued", "queued", probe.display_name, "", url,
-                        probe.content_length, "", "链接已添加，解析排队中。", now, now,
-                    ),
-                )
+            self._runtime.source_store.insert_source(
+                source_id=source_id,
+                notebook_id=notebook_id,
+                title=probe.display_name,
+                source_type="pdf",
+                status="queued",
+                parse_status="queued",
+                file_name=probe.display_name,
+                file_path="",
+                source_url=url,
+                file_size=probe.content_length,
+                file_hash="",
+                summary="链接已添加，解析排队中。",
+                doc_type="",
+            )
             if scheduler is not None:
                 scheduler(source_id)
             else:
@@ -1339,32 +1325,20 @@ class SQLiteRepository:
             source_dir.mkdir(parents=True, exist_ok=True)
             stored_path = source_dir / f"{source_id}_{file_name}"
             stored_path.write_bytes(file.content)
-            now = _now()
-            with self._write() as db:
-                db.execute(
-                    """
-                    INSERT INTO sources
-                    (id, notebook_id, title, source_type, status, parse_status, file_name,
-                     file_path, file_size, file_hash, summary, doc_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        source_id,
-                        notebook_id,
-                        file_name,
-                        self._source_type_from_name(file_name),
-                        "queued",
-                        "queued",
-                        file_name,
-                        str(stored_path),
-                        len(file.content),
-                        digest,
-                        "Uploaded; parsing is queued.",
-                        _normalize_doc_type(file.doc_type),
-                        now,
-                        now,
-                    ),
-                )
+            self._runtime.source_store.insert_source(
+                source_id=source_id,
+                notebook_id=notebook_id,
+                title=file_name,
+                source_type=self._source_type_from_name(file_name),
+                status="queued",
+                parse_status="queued",
+                file_name=file_name,
+                file_path=str(stored_path),
+                file_size=len(file.content),
+                file_hash=digest,
+                summary="Uploaded; parsing is queued.",
+                doc_type=_normalize_doc_type(file.doc_type),
+            )
             if scheduler is not None:
                 scheduler(source_id)
             else:
@@ -1380,16 +1354,9 @@ class SQLiteRepository:
         summary: Optional[str] = None,
         error_message: str = "",
     ) -> None:
-        fields = ["status = ?", "parse_status = ?", "error_message = ?", "updated_at = ?"]
-        params: List[object] = [status, status, error_message, _now()]
-        if summary is not None:
-            fields.insert(2, "summary = ?")
-            params.insert(2, summary)
-        with self._write() as db:
-            db.execute(
-                f"UPDATE sources SET {', '.join(fields)} WHERE id = ?",
-                (*params, source_id),
-            )
+        self._runtime.source_store.set_status(
+            source_id, status, summary=summary, error_message=error_message
+        )
         # Emit every status-machine transition so it is visible in the event log.
         self.event_log.emit(
             {
@@ -1671,25 +1638,21 @@ class SQLiteRepository:
                     source.notebook_id,
                     clear_embeddings=True,
                 )
-                db.execute("DELETE FROM source_elements WHERE source_id = ?", (source_id,))
-                for index, element in enumerate(elements, start=1):
-                    element_id = f"el-{source_id}-{index:04d}"
-                    db.execute(
-                        """
-                        INSERT INTO source_elements
-                        (id, source_id, element_type, location_label, text, metadata, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            element_id,
-                            source_id,
-                            element.element_type,
-                            element.location_label,
-                            element.text,
-                            json.dumps(element.metadata),
-                            now,
-                        ),
-                    )
+                self._runtime.source_store.replace_elements(
+                    db,
+                    source_id,
+                    [
+                        SourceElementWrite(
+                            id=f"el-{source_id}-{index:04d}",
+                            element_type=element.element_type,
+                            location_label=element.location_label,
+                            text=element.text,
+                            metadata=element.metadata,
+                        )
+                        for index, element in enumerate(elements, start=1)
+                    ],
+                    created_at=now,
+                )
             self._set_source_status(source_id, "parsed", summary=summary)
 
             # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
@@ -1875,23 +1838,7 @@ class SQLiteRepository:
                 )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
-        self.get_source(source_id)
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM source_elements WHERE source_id = ? ORDER BY created_at ASC, id ASC",
-                (source_id,),
-            ).fetchall()
-        return [
-            SourceElement(
-                id=row["id"],
-                source_id=row["source_id"],
-                element_type=row["element_type"],
-                location_label=row["location_label"],
-                text=row["text"],
-                metadata=json.loads(row["metadata"] or "{}"),
-            )
-            for row in rows
-        ]
+        return self._runtime.source_store.source_elements(source_id)
 
     def delete_source(self, source_id: str) -> None:
         source = self.get_source(source_id)
@@ -1902,7 +1849,7 @@ class SQLiteRepository:
                 source.notebook_id,
                 clear_embeddings=True,
             )
-            db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            self._runtime.source_store.delete_source_row(db, source_id)
         self._delete_file(source.file_path)
         self._invalidate_unified_cache(source.notebook_id)
         self._mark_unified_kg_dirty(source.notebook_id)
@@ -2096,13 +2043,9 @@ class SQLiteRepository:
                 rows.extend(part)
         now = _now()
         if rows:
-            from app.services.vector_index import encode_vector
-            with self._write() as db:
-                db.executemany(
-                    "INSERT OR REPLACE INTO element_embeddings "
-                    "(element_id, source_id, notebook_id, vector, created_at) VALUES (?,?,?,?,?)",
-                    [(eid, source_id, notebook_id, encode_vector(vec), now) for eid, vec in rows],
-                )
+            self._runtime.embedding_store.replace_element_vectors(
+                source_id, notebook_id, rows, created_at=now
+            )
         self.event_log.logger.info(
             "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
         )
@@ -2124,28 +2067,17 @@ class SQLiteRepository:
             vector = self.embedder.embed_query(text[:2000])
         except Exception:
             return
-        from app.services.vector_index import encode_vector
-        with self._write() as db:
-            db.execute(
-                """
-                INSERT OR REPLACE INTO knowledge_embeddings
-                (object_id, notebook_id, vector, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (object_id, notebook_id, encode_vector(vector), _now()),
-            )
+        self._runtime.embedding_store.replace_knowledge_vectors(
+            notebook_id, [(object_id, vector)], created_at=_now()
+        )
 
     def _flush_object_vectors(self, notebook_id: str, rows: list) -> None:
         """把一批 (oid, vector) 落 knowledge_embeddings(一个写事务,幂等 REPLACE)。"""
         if not rows:
             return
-        from app.services.vector_index import encode_vector
-        now = _now()
-        with self._write() as db:
-            db.executemany(
-                "INSERT OR REPLACE INTO knowledge_embeddings (object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                [(oid, notebook_id, encode_vector(vec), now) for oid, vec in rows],
-            )
+        self._runtime.embedding_store.replace_knowledge_vectors(
+            notebook_id, rows, created_at=_now()
+        )
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict],
                              progress=None, commit_every: Optional[int] = None) -> None:
@@ -2239,45 +2171,26 @@ class SQLiteRepository:
                 rows.extend(part)
         if not rows:
             return
-        from app.services.vector_index import encode_vector
-        now = _now()
-        with self._write() as db:
-            db.executemany(
-                "INSERT OR REPLACE INTO relation_embeddings (relation_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
-                [(rid, notebook_id, encode_vector(vec), now) for rid, vec in rows])
+        self._runtime.embedding_store.replace_relation_vectors(
+            notebook_id, rows, created_at=_now()
+        )
 
     def _build_chunks_for_source(self, source_id: str) -> None:
         """合并一个 source 的 source_elements 成检索 chunk(纯写库, 无网络)。
-        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。元素 id 形如
-        el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。"""
+        幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。"""
         from app.services.chunking import build_chunks
-        from uuid import uuid4
         src = self.get_source(source_id)
         notebook_id = src.notebook_id
-        with self._connect() as db:
-            erows = db.execute(
-                "SELECT id, element_type, text FROM source_elements "
-                "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
-        elements = [{"id": r["id"], "element_type": r["element_type"], "text": r["text"]} for r in erows]
+        elements = self._runtime.chunk_store.source_elements_for_chunking(source_id)
         chunks = build_chunks(elements,
                               target_chars=self.settings.chunk_target_chars,
                               overlap_chars=self.settings.chunk_overlap_chars)
-        now = _now()
-        rows = [(_new_id("ck"), notebook_id, source_id, c["text"],
-                 c["section_path"], json.dumps(c["element_ids"]), now) for c in chunks]
-        with self._write() as db:
-            # chunks_fts 是词法派生索引(无 source_id 列,不随 chunks 的 FK 级联),须同事务
-            # 手动同步:先删本 source 旧 chunk 的 FTS 行(chunks DELETE 前 join 取 id),再重插。
-            db.execute(
-                "DELETE FROM chunks_fts WHERE chunk_id IN "
-                "(SELECT id FROM chunks WHERE source_id=?)", (source_id,))
-            db.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))  # 级联删 embeddings
-            db.executemany(
-                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                "VALUES (?,?,?,?,?,?,?)", rows)
-            db.executemany(
-                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
-                [(r[0], r[1], r[3]) for r in rows])
+        rows = [ChunkWrite(id=_new_id("ck"), text=c["text"],
+                           section_path=c["section_path"],
+                           element_ids=tuple(c["element_ids"])) for c in chunks]
+        self._runtime.chunk_store.replace_source_chunks(
+            source_id, notebook_id, rows, created_at=_now()
+        )
         # Unconditionally bump kg_mutation_seq: chunk rows just changed, and every
         # chunk-derived cache (:elemchunk/:entchunk/:ppr_graph/scale-index version)
         # keys off the seq. Without this, kg_auto_extract=False (default) + no
@@ -2292,9 +2205,7 @@ class SQLiteRepository:
         if not self.settings.embedder_configured:
             return
         notebook_id = self.get_source(source_id).notebook_id
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT id, text FROM chunks WHERE source_id=?", (source_id,)).fetchall()
+        rows = self._runtime.chunk_store.source_chunks(source_id)
         items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
         self._embed_chunks_batch(notebook_id, items)
 
@@ -2341,12 +2252,9 @@ class SQLiteRepository:
                 out.extend(part)
         if not out:
             return
-        from app.services.vector_index import encode_vector
-        now = _now()
-        with self._write() as db:
-            db.executemany(
-                "INSERT OR REPLACE INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
-                [(cid, notebook_id, encode_vector(v), now) for cid, v in out])
+        self._runtime.embedding_store.replace_chunk_vectors(
+            notebook_id, out, created_at=_now()
+        )
 
     def _knowledge_vectors(
         self,
@@ -12735,124 +12643,13 @@ class SQLiteRepository:
         return self._runtime.notebook_summaries.from_row(db, row)
 
     def _source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
-        """Single-row path (get_source) — 3 point queries. list_sources /
-        list_sources_page use the batched _sources_from_rows sibling instead
-        (C5: was 3 queries * N rows per page — now 3 total per page)."""
-        element_count = self._count(db, "source_elements", "source_id", row["id"])
-        return SourceSummary(
-            id=row["id"],
-            notebook_id=row["notebook_id"],
-            title=row["title"],
-            type=row["source_type"],
-            status=row["status"],
-            summary=row["summary"],
-            element_count=element_count,
-            file_name=row["file_name"],
-            file_size=row["file_size"],
-            file_hash=row["file_hash"],
-            parse_status=row["parse_status"],
-            created_label=_created_label(row["created_at"]),
-            doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
-            source_url=row["source_url"] if "source_url" in row.keys() else "",
-            extraction_warning=self._extraction_warning(db, row["id"]),
-            kg_extracted=self._source_has_kg(db, row["id"]),
-        )
+        return self._runtime.source_store.source_from_row(db, row)
 
     def _sources_from_rows(self, db: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[SourceSummary]:
-        """Batched sibling of _source_from_row for a PAGE of source rows (house
-        pattern, see _hydrate_search_hits): the 3 per-row lookups
-        (source_elements COUNT, latest extraction_runs error_message,
-        knowledge_objects EXISTS) each become ONE `id IN (...)` query for the
-        whole page instead of one query per row — was 3*N round-trips.
-
-        extraction_warning tie-break equivalence: when two extraction_runs
-        rows for the same source share `created_at` (rare but possible at
-        second-granularity timestamps), a per-row "ORDER BY created_at DESC
-        LIMIT 1" and this batched "ORDER BY source_id, created_at DESC" over
-        the SAME idx_extraction_runs_source_created index resolve the tie
-        identically — both walk the same physical index order, so the first
-        row seen per source_id in the batched scan is the same row LIMIT 1
-        would have picked per-id (verified: both orderings are driven by the
-        same btree, whose tie order is deterministic and independent of
-        whether the WHERE clause scopes one id or many via IN)."""
-        if not rows:
-            return []
-        source_ids = [r["id"] for r in rows]
-        element_counts: Dict[str, int] = {}
-        kg_extracted_ids: set = set()
-        latest_error: Dict[str, str] = {}
-        for i in range(0, len(source_ids), self._IN_CHUNK):
-            batch = source_ids[i:i + self._IN_CHUNK]
-            ph = ",".join("?" for _ in batch)
-            for r in db.execute(
-                f"SELECT source_id, COUNT(*) AS c FROM source_elements "
-                f"WHERE source_id IN ({ph}) GROUP BY source_id", batch,
-            ).fetchall():
-                element_counts[r["source_id"]] = int(r["c"])
-            for r in db.execute(
-                f"SELECT DISTINCT source_id FROM knowledge_objects "
-                f"WHERE source_id IN ({ph}) AND source_id != ''", batch,
-            ).fetchall():
-                kg_extracted_ids.add(r["source_id"])
-            for r in db.execute(
-                f"SELECT source_id, error_message FROM extraction_runs "
-                f"WHERE source_id IN ({ph}) ORDER BY source_id, created_at DESC",
-                batch,
-            ).fetchall():
-                latest_error.setdefault(r["source_id"], r["error_message"] or "")
-
-        def _warning(source_id: str) -> Optional[str]:
-            if source_id not in latest_error:
-                return None
-            m = re.search(r"windows_failed=(\d+)/(\d+)", latest_error[source_id])
-            if not m:
-                return None
-            fw = int(m.group(1))
-            if fw <= 0:
-                return None
-            tw = int(m.group(2))
-            return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
-
-        out: List[SourceSummary] = []
-        for row in rows:
-            sid = row["id"]
-            out.append(SourceSummary(
-                id=sid,
-                notebook_id=row["notebook_id"],
-                title=row["title"],
-                type=row["source_type"],
-                status=row["status"],
-                summary=row["summary"],
-                element_count=element_counts.get(sid, 0),
-                file_name=row["file_name"],
-                file_size=row["file_size"],
-                file_hash=row["file_hash"],
-                parse_status=row["parse_status"],
-                created_label=_created_label(row["created_at"]),
-                doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
-                source_url=row["source_url"] if "source_url" in row.keys() else "",
-                extraction_warning=_warning(sid),
-                kg_extracted=sid in kg_extracted_ids,
-            ))
-        return out
+        return self._runtime.source_store.sources_from_rows(db, rows)
 
     def _extraction_warning(self, db: sqlite3.Connection, source_id: str) -> Optional[str]:
-        """Surface a user-facing warning when the latest KG extraction left
-        network-failed windows (degraded run). Parsed from the run's
-        `windows_failed=N/T` token rather than stored on the source row."""
-        run = db.execute(
-            "SELECT error_message FROM extraction_runs WHERE source_id=? "
-            "ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
-        if run is None:
-            return None
-        m = re.search(r"windows_failed=(\d+)/(\d+)", run["error_message"] or "")
-        if not m:
-            return None
-        fw = int(m.group(1))
-        if fw <= 0:
-            return None
-        tw = int(m.group(2))
-        return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
+        return self._runtime.source_store.extraction_warning(db, source_id)
 
     def _source_type_from_name(self, file_name: str) -> str:
         lower_name = file_name.lower()
@@ -12918,14 +12715,6 @@ def _as_str_list(value: object) -> List[str]:
     if value:
         return [str(value).strip()]
     return []
-
-
-def _created_label(value: str) -> str:
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        dt = datetime.now()
-    return f"{dt.year}年{dt.month}月{dt.day}日"
 
 
 def _safe_filename(file_name: str) -> str:
