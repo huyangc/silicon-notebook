@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import List
 
 from app.models.schemas import NotebookSummary
-from app.services.notebook_scale import NotebookScaleFacts
 
 
 def _now() -> str:
@@ -100,11 +99,6 @@ class SQLiteNotebookSharingMixin:
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
                 return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).copy_stats(notebook_id)
-
-    def load_notebook_scale_facts(self, notebook_id: str) -> NotebookScaleFacts:
-        with self._connect() as db:
-            one = lambda sql: int(db.execute(sql, (notebook_id,)).fetchone()[0])
-            return NotebookScaleFacts(one("SELECT COALESCE(SUM(file_size), 0) FROM sources WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM sources WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM chunks WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id = ?"), one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id = ?"))
 
     def shared_preview(self, notebook_id: str) -> dict:
         notebook = self.get_notebook(notebook_id)

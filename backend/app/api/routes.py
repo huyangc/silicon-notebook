@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
+    admin_query_repository,
+    identity_repository,
     repository, require_notebook_access, require_notebook_read,
     require_notebook_write, get_current_user,
 )
@@ -139,7 +141,7 @@ def _mask_key(key: str) -> str:
 
 @router.get("/me/model-settings")
 def get_model_settings(user: UserProfile = Depends(get_current_user)):
-    repo = repository()
+    repo = identity_repository()
     stored = repo.get_user_model_settings(user.id)
     out = {}
     for role in _MODEL_ROLES:
@@ -156,7 +158,7 @@ def get_model_settings(user: UserProfile = Depends(get_current_user)):
 
 @router.put("/me/model-settings")
 def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
-    repo = repository()
+    repo = identity_repository()
     stored = dict(repo.get_user_model_settings(user.id))
     for role in _MODEL_ROLES:
         upd = getattr(payload, role)
@@ -184,7 +186,7 @@ def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(ge
     import time
     if payload.service not in _MODEL_ROLES:
         return ModelTestResult(ok=False, error="未知服务")
-    repo = repository()
+    repo = identity_repository()
     stored = repo.get_user_model_settings(user.id).get(payload.service) or {}
     api_key = payload.api_key if payload.api_key else stored.get("api_key", "")
     base_url, model = payload.base_url.strip(), payload.model.strip()
@@ -1375,7 +1377,7 @@ async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> Lis
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户总览")
     loop = asyncio.get_running_loop()
-    rows = await loop.run_in_executor(None, repository().list_user_usage)
+    rows = await loop.run_in_executor(None, admin_query_repository().list_user_usage)
     online = pending_bus.online_user_ids()
     return [AdminUserUsage(**row, is_online=row["id"] in online) for row in rows]
 
@@ -1385,7 +1387,10 @@ def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_curr
     """某用户名下笔记本详情。仅 admin。"""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户笔记本")
-    return [AdminUserNotebook(**row) for row in repository().list_user_notebooks(user_id)]
+    return [
+        AdminUserNotebook(**row)
+        for row in admin_query_repository().list_user_notebooks(user_id)
+    ]
 
 
 @router.get("/admin/online")

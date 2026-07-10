@@ -21,12 +21,16 @@ def test_runtime_seams_are_late_bound(repo, monkeypatch):
 
 
 def test_runtime_construction_does_not_evaluate_seams():
+    from app.core.config import Settings
     from app.services.repository_runtime import RepositoryCompatibilitySeams, RepositoryRuntime
 
     calls = []
     seams = RepositoryCompatibilitySeams(*(lambda *args, _name=name: calls.append(_name) for name in ("id", "now", "chunk", "remap")))
-    class MinimalSettings:
-        sqlite_path = ":memory:"
-
-    RepositoryRuntime(settings=MinimalSettings(), root_dir=Path("."), seams=seams)
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite:///:memory:",
+        event_log_enabled=False,
+        llm_log_enabled=False,
+    )
+    RepositoryRuntime(settings=settings, root_dir=Path("."), seams=seams)
     assert calls == []

@@ -1,4 +1,6 @@
 from app.services import sqlite_repository
+from app.repositories.sqlite.identity_store import IdentityStore
+from app.repositories.sqlite.query_store import QueryStore
 from app.services.sqlite_identity import SQLiteIdentityMixin
 from app.services.sqlite_notebook_sharing import SQLiteNotebookSharingMixin
 from app.services.sqlite_repository import SQLiteRepository
@@ -11,11 +13,17 @@ IDENTITY_METHODS = (
     "resolve_model_config",
     "create_user",
     "authenticate_user",
-    "list_user_usage",
-    "list_user_notebooks",
     "create_session",
     "resolve_session",
     "delete_session",
+)
+
+QUERY_METHODS = (
+    "list_user_usage",
+    "list_user_notebooks",
+    "notebook_analytics",
+    "search_notebook",
+    "load_notebook_scale_facts",
 )
 
 SHARING_METHODS = (
@@ -45,11 +53,17 @@ SHARING_METHODS = (
 )
 
 
-def test_sqlite_identity_domain_is_inherited_not_reimplemented():
-    assert issubclass(SQLiteRepository, SQLiteIdentityMixin)
+def test_sqlite_identity_domain_is_composed_with_explicit_delegates():
+    assert not issubclass(SQLiteRepository, SQLiteIdentityMixin)
     for method_name in IDENTITY_METHODS:
-        assert method_name not in SQLiteRepository.__dict__
-        assert getattr(SQLiteRepository, method_name) is getattr(SQLiteIdentityMixin, method_name)
+        assert method_name in IdentityStore.__dict__
+        assert method_name in SQLiteRepository.__dict__
+
+
+def test_sqlite_query_domain_is_composed_with_explicit_delegates():
+    for method_name in QUERY_METHODS:
+        assert method_name in QueryStore.__dict__
+        assert method_name in SQLiteRepository.__dict__
 
 
 def test_request_identity_exports_remain_backwards_compatible():

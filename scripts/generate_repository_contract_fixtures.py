@@ -645,10 +645,12 @@ class _FakeMinerUAdapter:
 def _deterministic_runtime() -> Iterator[None]:
     from app.services import auth_utils
     from app.services import embedding
+    from app.services import model_provider
     from app.services import rerank_client
     from app.services import sqlite_identity
     from app.services import sqlite_notebook_sharing
     from app.services import sqlite_repository
+    from app.repositories.sqlite import identity_store
 
     original_hash_password = auth_utils.hash_password
     ids = defaultdict(int)
@@ -675,10 +677,15 @@ def _deterministic_runtime() -> Iterator[None]:
         stack.enter_context(mock.patch.object(sqlite_repository, "_now", lambda: FIXED_TIME))
         stack.enter_context(mock.patch.object(sqlite_identity, "_now", lambda: FIXED_TIME))
         stack.enter_context(mock.patch.object(sqlite_identity, "_session_expiry", lambda *_: FIXED_EXPIRY))
+        stack.enter_context(mock.patch.object(identity_store, "_now", lambda: FIXED_TIME))
+        stack.enter_context(mock.patch.object(identity_store, "_session_expiry", lambda *_: FIXED_EXPIRY))
         stack.enter_context(mock.patch.object(sqlite_notebook_sharing, "_now", lambda: FIXED_TIME))
         stack.enter_context(mock.patch.object(auth_utils, "hash_password", fixed_hash))
         stack.enter_context(
             mock.patch.object(sqlite_repository, "OpenAICompatibleClient", _FakeChatAdapter)
+        )
+        stack.enter_context(
+            mock.patch.object(model_provider, "OpenAICompatibleClient", _FakeChatAdapter)
         )
         stack.enter_context(
             mock.patch.object(sqlite_repository, "MinerUClient", _FakeMinerUAdapter)
@@ -694,6 +701,7 @@ def _deterministic_runtime() -> Iterator[None]:
             )
         )
         stack.enter_context(mock.patch.object(rerank_client, "RerankClient", _FakeRerankAdapter))
+        stack.enter_context(mock.patch.object(model_provider, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(time, "perf_counter", fixed_perf))
         stack.enter_context(mock.patch.object(socket, "create_connection", no_network))
         stack.enter_context(mock.patch.object(socket.socket, "connect", no_network))

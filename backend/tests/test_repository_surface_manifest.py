@@ -93,6 +93,19 @@ TASK4_ALLOWED_IMPORTS = {
     ("backend/tests/test_sqlite_database_component.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/app/services/sqlite_repository.py", 113, "app.services.repository", "UploadedSourceFile"),
 }
+TASK7_ALLOWED_IMPORTS = {
+    ("backend/app/api/routes.py", 19, "app.services.sqlite_repository", "KnowledgeGraphTooLargeError"),
+    ("backend/app/api/routes.py", 21, "app.services.sqlite_repository", "KnowledgeGraphTooLargeError"),
+    ("backend/app/api/routes.py", 91, "app.services.repository", "NotebookRepository"),
+    ("backend/app/api/routes.py", 91, "app.services.repository", "UploadedSourceFile"),
+    ("backend/app/api/routes.py", 93, "app.services.repository", "NotebookRepository"),
+    ("backend/app/api/routes.py", 93, "app.services.repository", "UploadedSourceFile"),
+    ("backend/tests/test_architecture_module_boundaries.py", 4, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_architecture_module_boundaries.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_identity_store_component.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_query_store_component.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_model_provider_runtime.py", 8, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -120,6 +133,15 @@ TASK2_ALLOWED_CONSUMERS = {
     ("NotebookRepository", "backend/app/api/deps.py:10"),
     ("_run_extraction", "backend/app/eval/speed.py:109"),
 }
+TASK7_ALLOWED_CONSUMERS = {
+    ("create_user", "backend/app/api/auth_routes.py:17"),
+    ("create_session", "backend/app/api/auth_routes.py:21"),
+    ("authenticate_user", "backend/app/api/auth_routes.py:27"),
+    ("create_session", "backend/app/api/auth_routes.py:30"),
+    ("delete_session", "backend/app/api/auth_routes.py:41"),
+    ("list_user_usage", "backend/app/api/routes.py:1378"),
+    ("list_user_notebooks", "backend/app/api/routes.py:1388"),
+}
 TASK2_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {
@@ -145,6 +167,7 @@ MASTER_V10_ALLOWED_NEW_MEMBERS = {
     "_rebuild_ckpt_put",
     "_flush_object_vectors",
 }
+TASK7_ALLOWED_NEW_MEMBERS = {"pending_actions_projection_rows"}
 TASK4_ALLOWED_PATCHES = {
     ("backend/tests/test_repository_runtime.py", 19, "_now", "sqlite_repository"),
 }
@@ -176,6 +199,77 @@ TASK6_ALLOWED_MEMBER_FILES = {
         "_seed", "_seed_legacy", "_migrator",
     }
 }
+TASK7_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/model_provider.py", name)
+    for name in {
+        "settings", "current_user", "resolve_model_config", "llm_client",
+        "reasoning_llm_client", "rewrite_llm_client", "kg_llm_client",
+        "rerank_client", "_system_llm_for", "_user_llm_cached",
+        "_llm_for_role", "_system_llm_client", "_user_llm_clients",
+        "_reasoning_llm_client", "_rewrite_llm_client", "_kg_llm_client",
+        "_system_rerank_client", "_user_rerank_clients",
+    }
+} | {
+    ("backend/app/services/sqlite_identity.py", name)
+    for name in {
+        "current_user", "get_user_model_settings", "set_user_model_settings",
+        "_user_profile",
+        "resolve_model_config", "create_user", "authenticate_user",
+        "create_session", "resolve_session", "delete_session",
+        "list_user_usage", "list_user_notebooks", "_user_profile", "_connect",
+        "_write", "settings", "_user_model_cfg_cache",
+    }
+} | {
+    ("backend/app/api/deps.py", "_runtime"),
+    ("backend/tests/test_model_provider_runtime.py", "_ASK_MODEL_ERRORS"),
+} | {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "current_user", "_user_profile", "get_user_model_settings", "set_user_model_settings",
+        "resolve_model_config", "create_user", "authenticate_user",
+        "create_session", "resolve_session", "delete_session",
+        "list_user_usage", "list_user_notebooks", "notebook_analytics",
+        "search_notebook", "load_notebook_scale_facts", "_note_model_error",
+        "_system_llm_for", "_user_llm_cached", "_llm_for_role",
+        "llm_client", "reasoning_llm_client", "rewrite_llm_client",
+        "kg_llm_client", "rerank_client", "_system_llm_client",
+        "_reasoning_llm_client", "_rewrite_llm_client", "_kg_llm_client",
+        "_system_rerank_client", "_user_llm_clients", "_user_rerank_clients",
+    }
+} | {
+    ("backend/app/services/repository_runtime.py", name)
+    for name in {"settings", "_runtime"}
+} | {
+    ("backend/tests/test_identity_store_component.py", name)
+    for name in {"SQLiteRepository", "current_user", "_runtime"}
+} | {
+    ("backend/tests/test_query_store_component.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "search_notebook",
+        "load_notebook_scale_facts", "_runtime",
+    }
+} | {
+    ("backend/tests/test_model_provider_runtime.py", name)
+    for name in {
+        "SQLiteRepository", "llm_client", "rerank_client",
+        "_note_model_error", "_runtime", "event_log",
+    }
+} | {
+    ("backend/tests/test_sources_pagination.py", name)
+    for name in {
+        "create_notebook", "_write", "search_notebook",
+    }
+}
+
+TASK7_COMPAT_PROPERTIES = {
+    "_system_llm_client": True,
+    "_reasoning_llm_client": True,
+    "_rewrite_llm_client": True,
+    "_kg_llm_client": True,
+    "_system_rerank_client": True,
+    "_user_llm_clients": False,
+    "_user_rerank_clients": False,
+}
 
 # Internal line numbers in this source file are intentionally not API surface:
 # Task 3 adds the scale-profile construction/import and shifts later private
@@ -187,6 +281,10 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/services/sqlite_identity.py",
     "backend/app/services/background_jobs.py",
     "backend/app/api/deps.py",
+    "backend/app/api/auth_routes.py",
+    "backend/app/api/routes.py",
+    "backend/tests/test_architecture_module_boundaries.py",
+    "backend/tests/test_repository_runtime.py",
 }
 
 
@@ -568,6 +666,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     f"{relative}:{node.lineno}" in surface[alias.name]["consumers"]
                     or site in TASK2_ALLOWED_IMPORTS
                     or site in TASK4_ALLOWED_IMPORTS
+                    or site in TASK7_ALLOWED_IMPORTS
                 )
 
 
@@ -601,24 +700,25 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
+    recorded = {name: sites for name, sites in recorded.items() if sites}
     actual = {
         name: {_normalize_consumer_site(site) for site in sites}
         for name, sites in actual.items()
@@ -628,6 +728,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         for name, sites in recorded.items()
     }
     for name in TASK3_ALLOWED_NEW_MEMBERS | MASTER_V10_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in TASK7_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual
@@ -664,6 +767,11 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
         if name in {"db_path", "_write_lock"}:
             member = inspect.getattr_static(SQLiteRepository, name)
             assert isinstance(member, property) and member.fset is not None, name
+            continue
+        if name in TASK7_COMPAT_PROPERTIES:
+            member = inspect.getattr_static(SQLiteRepository, name)
+            assert isinstance(member, property), name
+            assert (member.fset is not None) is TASK7_COMPAT_PROPERTIES[name], name
             continue
         if kind in {"instance_attribute", "mutable_property"} and not hasattr(
             SQLiteRepository, name

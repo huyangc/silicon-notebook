@@ -114,3 +114,44 @@ def test_search_notebook_sql_filtered(repo):
     resp_title = repo.search_notebook(nb.id, "bandgap")     # 命中 source title
     assert any(h.scope == "Source" for h in resp_title.hits)
     assert repo.search_notebook(nb.id, "").hits == []        # 空 query 短路
+
+
+def test_search_notebook_preserves_entity_order_and_filters_payload_keys(repo):
+    nb = repo.create_notebook(NotebookCreate(name="needle notebook"))
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET primary_domain = ? WHERE id = ?",
+            ("needle domain", nb.id),
+        )
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-order", nb.id, "needle source", "document", "order.md", "/tmp/order.md",
+             0, "order-hash", "", "", "extracted", now, now),
+        )
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("el-order", "src-order", "paragraph", "p1", "needle element", "{}", now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("ko-order", nb.id, "concept", '{"name":"needle concept"}', "[]", now, now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("ko-key-only", nb.id, "concept", '{"needle_key_only":"unrelated"}', "[]", now, now),
+        )
+
+    hits = repo.search_notebook(nb.id, "needle").hits
+    assert [hit.scope for hit in hits[:4]] == [
+        "Notebook", "Domain", "Source", "Element",
+    ]
+    assert any(hit.label == "needle concept" for hit in hits[4:])
+    assert repo.search_notebook(nb.id, "needle_key_only").hits == []

@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 from app.core.config import Settings
-from app.core.event_logging import EventLogger
+from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.llm import OpenAICompatibleClient, cap_kwargs
 from app.models.schemas import (
     AddUrlSourcesResult,
@@ -53,11 +53,11 @@ from app.models.schemas import (
     PaginatedSources,
     RejectedUrl,
     RuleCard,
-    SearchHit,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
     SourceSummary,
+    UserProfile,
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
@@ -84,7 +84,6 @@ from app.services import remote_sources
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
 from app.services.sqlite_identity import (
-    SQLiteIdentityMixin,
     _REQUEST_USER,
     get_request_user,
     request_user_id,
@@ -226,31 +225,6 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
-# 每次 ask 的模型错误收集槽(请求级;仓库是单例,不能用实例状态)。None = 不在 ask 上下文。
-_ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
-    "ask_model_errors", default=None)
-
-# per-ask 查询 embed 缓存(P1-A):同一 ask 内同文本只打一次 embed 端点。
-# federated 两 tier 同 query、seed pass 与 quota 收尾的原问题此前各自重复 embed
-# (10-20 次网络 RTT/ask)。default None=非 ask 路径逐字节不变;失败(None)不缓存,
-# 保留重试语义;copy_context 线程共享同一 dict,CPython 下最坏=同文本算两次,无害。
-_ASK_EMBED_CACHE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
-    "ask_embed_cache", default=None)
-
-class _UnconfiguredLLMClient:
-    """policy=required 且用户未配置时的占位 client：configured=False 让调用点跳过；
-    若硬调 chat_json 则抛 ModelNotConfiguredError。"""
-    configured = False
-    base_url = ""
-    api_key = ""
-    model = ""
-
-    def chat_json(self, *a, **k):
-        raise ModelNotConfiguredError("请先在设置中配置你的模型服务")
-
-
-_UNCONFIGURED_LLM = _UnconfiguredLLMClient()
-
 # copy_notebook's per-table chunk size (perf-audit P1-4): mirrors store_kg's
 # CHUNK=1000 local constant, but module-level so tests can shrink it to force
 # multiple chunk-boundary transactions without seeding thousands of rows.
@@ -285,7 +259,7 @@ class ChunkRetrievalPlan:
     fuse_k: int              # == chunk_mmr_k（复刻 multi 分支 quota_fuse 复用同一 knob）
 
 
-class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
+class SQLiteRepository(SQLiteNotebookSharingMixin):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -300,64 +274,15 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
             ),
         )
         self.storage_dir = self._resolve_path(settings.storage_dir)
-        self._system_llm_client = OpenAICompatibleClient(settings)
-        self._user_llm_clients: Dict[str, OpenAICompatibleClient] = {}
-        # 推理搜索专用 client：配齐 REASONING_LLM_* → 独立模型实例；否则 None，
-        # 由 reasoning_llm_client 属性动态回退到 self.llm_client。
-        self._reasoning_llm_client = (
-            OpenAICompatibleClient(
-                settings,
-                base_url=settings.reasoning_llm_base_url,
-                api_key=settings.reasoning_llm_api_key,
-                model=settings.reasoning_llm_model,
-            )
-            if settings.reasoning_llm_configured
-            else None
-        )
-        # 查询改写/扩展专用 client(DeepSeek v4-fast 之类快模型)：设了 REWRITE_LLM_MODEL
-        # 即启用(base_url/api_key 缺省复用主端点)；否则 None，由 rewrite_llm_client 回退。
-        self._rewrite_llm_client = (
-            OpenAICompatibleClient(
-                settings,
-                base_url=settings.rewrite_llm_base_url or settings.openai_compat_base_url,
-                api_key=settings.rewrite_llm_api_key or settings.openai_compat_api_key,
-                model=settings.rewrite_llm_model,
-            )
-            if settings.rewrite_llm_configured
-            else None
-        )
-        self._kg_llm_client = (
-            OpenAICompatibleClient(
-                settings,
-                base_url=settings.kg_llm_base_url,
-                api_key=settings.kg_llm_api_key,
-                model=settings.kg_llm_model,
-            )
-            if settings.kg_llm_configured
-            else None
-        )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
-        from app.services.rerank_client import RerankClient
-        self._system_rerank_client = RerankClient(settings)
-        self._user_rerank_clients: Dict[str, RerankClient] = {}
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
-        self.event_log = EventLogger(settings, channel="events", per_user=True)
-        if settings.reasoning_llm_partially_configured:
-            self.event_log.logger.warning(
-                "REASONING_LLM_* 仅部分配置(base_url/api_key/model 需全填)，"
-                "推理搜索将回退到全局 OPENAI_COMPAT_* 模型。")
-        from app.core.event_logging import llm_log_dir_aligned
-        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
-            self.event_log.logger.warning(
-                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
-                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
-                settings.llm_log_path, settings.event_log_dir)
+        self.event_log = self._runtime.event_log
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._unified_cache: Dict[Any, Any] = {}
-        self._user_model_cfg_cache: Dict[str, dict] = {}
+        self._user_model_cfg_cache = self._runtime.identity.model_config_cache
         # Bilingual-query hint: per-notebook detected corpus languages (subset of
         # ["zh","en"]), sampled cheaply and memoized. Staleness is harmless — a
         # wrong guess only over/under-generates FTS keywords, never breaks recall.
@@ -418,72 +343,132 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize()
 
+    def current_user(self) -> UserProfile:
+        return self._runtime.identity.current_user()
+
+    def _user_profile(self, user, profile) -> UserProfile:
+        return self._runtime.identity._user_profile(user, profile)
+
+    def get_user_model_settings(self, user_id: str) -> dict:
+        return self._runtime.identity.get_user_model_settings(user_id)
+
+    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
+        return self._runtime.identity.set_user_model_settings(user_id, settings)
+
+    def resolve_model_config(self, user, role: str) -> ResolvedModelConfig:
+        return self._runtime.identity.resolve_model_config(user, role)
+
+    def create_user(self, username: str, password: str) -> UserProfile:
+        return self._runtime.identity.create_user(username, password)
+
+    def authenticate_user(self, username: str, password: str) -> "UserProfile | None":
+        return self._runtime.identity.authenticate_user(username, password)
+
+    def create_session(self, user_id: str) -> str:
+        return self._runtime.identity.create_session(user_id)
+
+    def resolve_session(self, token: str) -> "UserProfile | None":
+        return self._runtime.identity.resolve_session(token)
+
+    def delete_session(self, token: str) -> None:
+        return self._runtime.identity.delete_session(token)
+
+    def list_user_usage(self) -> List[Dict[str, Any]]:
+        return self._runtime.queries.list_user_usage()
+
+    def list_user_notebooks(self, user_id: str) -> List[Dict[str, Any]]:
+        return self._runtime.queries.list_user_notebooks(user_id)
+
+    def load_notebook_scale_facts(self, notebook_id: str):
+        return self._runtime.queries.load_notebook_scale_facts(notebook_id)
+
+    def pending_actions_projection_rows(self, user_id: str) -> dict:
+        return self._runtime.queries.pending_actions_projection_rows(user_id)
+
     def _system_llm_for(self, role: str):
-        if role == "reasoning_llm":
-            return self._reasoning_llm_client or self._system_llm_client
-        if role == "rewrite_llm":
-            return self._rewrite_llm_client or self._system_llm_client
-        if role == "kg_llm":
-            return self._kg_llm_client or self._system_llm_client
-        return self._system_llm_client
+        return self._runtime.models._system_llm_for(role)
 
     def _user_llm_cached(self, cfg: ResolvedModelConfig):
-        fp = f"{cfg.base_url}|{cfg.api_key}|{cfg.model}"
-        client = self._user_llm_clients.get(fp)
-        if client is None:
-            client = OpenAICompatibleClient(
-                self.settings, base_url=cfg.base_url, api_key=cfg.api_key, model=cfg.model)
-            self._user_llm_clients[fp] = client
-        return client
+        return self._runtime.models._user_llm_cached(cfg)
 
     def _llm_for_role(self, role: str):
-        cfg = self.resolve_model_config(self.current_user(), role)
-        if cfg.source == "user":
-            return self._user_llm_cached(cfg)
-        if cfg.source == "none":
-            return _UNCONFIGURED_LLM
-        return self._system_llm_for(role)
+        return self._runtime.models._llm_for_role(role)
 
     @property
     def llm_client(self):
-        return self._llm_for_role("llm")
+        return self._runtime.models.llm_client
 
     @llm_client.setter
     def llm_client(self, client):
-        # 测试/运行时替换系统默认主 LLM(无用户配置时即此 client)。
-        self._system_llm_client = client
+        self._runtime.models.llm_client = client
 
     @property
     def reasoning_llm_client(self):
-        return self._llm_for_role("reasoning_llm")
+        return self._runtime.models.reasoning_llm_client
 
     @property
     def rewrite_llm_client(self):
-        return self._llm_for_role("rewrite_llm")
+        return self._runtime.models.rewrite_llm_client
 
     @property
     def kg_llm_client(self):
-        return self._llm_for_role("kg_llm")
+        return self._runtime.models.kg_llm_client
 
     @property
     def rerank_client(self):
-        from app.services.rerank_client import RerankClient
-        cfg = self.resolve_model_config(self.current_user(), "rerank")
-        if cfg.source == "user":
-            fp = f"{cfg.base_url}|{cfg.api_key}|{cfg.model}"
-            client = self._user_rerank_clients.get(fp)
-            if client is None:
-                client = RerankClient(self.settings, model=cfg.model,
-                                      base_url=cfg.base_url, api_key=cfg.api_key)
-                self._user_rerank_clients[fp] = client
-            return client
-        if cfg.source == "none":
-            return RerankClient(self.settings, model="", base_url="", api_key="")  # configured=False → 原序
-        return self._system_rerank_client
+        return self._runtime.models.rerank_client
 
     @rerank_client.setter
     def rerank_client(self, client):
-        self._system_rerank_client = client
+        self._runtime.models.rerank_client = client
+
+    @property
+    def _system_llm_client(self):
+        return self._runtime.models._system_llm_client
+
+    @_system_llm_client.setter
+    def _system_llm_client(self, client):
+        self._runtime.models._system_llm_client = client
+
+    @property
+    def _reasoning_llm_client(self):
+        return self._runtime.models._reasoning_llm_client
+
+    @_reasoning_llm_client.setter
+    def _reasoning_llm_client(self, client):
+        self._runtime.models._reasoning_llm_client = client
+
+    @property
+    def _rewrite_llm_client(self):
+        return self._runtime.models._rewrite_llm_client
+
+    @_rewrite_llm_client.setter
+    def _rewrite_llm_client(self, client):
+        self._runtime.models._rewrite_llm_client = client
+
+    @property
+    def _kg_llm_client(self):
+        return self._runtime.models._kg_llm_client
+
+    @_kg_llm_client.setter
+    def _kg_llm_client(self, client):
+        self._runtime.models._kg_llm_client = client
+
+    @property
+    def _system_rerank_client(self):
+        return self._runtime.models._system_rerank_client
+
+    @_system_rerank_client.setter
+    def _system_rerank_client(self, client):
+        self._runtime.models._system_rerank_client = client
+
+    @property
+    def _user_llm_clients(self):
+        return self._runtime.models._user_llm_clients
+
+    @property
+    def _user_rerank_clients(self):
+        return self._runtime.models._user_rerank_clients
 
     def _resolve_path(self, value: str) -> Path:
         return self._runtime.database.resolve_path(value)
@@ -6837,65 +6822,10 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         return self._rule_card(item)
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:
-        self.get_notebook(notebook_id)
-        needle = query.strip().lower()
-        if not needle:
-            return NotebookSearchResponse(query=query, hits=[])
-        like = f"%{needle}%"
-        cap = 20  # 总命中上限(沿用旧 hits[:20]);每实体各取至多 cap,合并后再截断
-        hits: List[SearchHit] = []
-        with self._connect() as db:
-            notebook = db.execute("SELECT * FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
-            # Notebook / Domain:两条,Python 侧判断即可(无需查询)
-            for scope, text in (("Notebook", notebook["name"]), ("Domain", notebook["primary_domain"])):
-                if needle in f"{scope} {text}".lower():
-                    hits.append(SearchHit(scope=scope, notebook_id=notebook_id, label=scope,
-                                          text=_snippet(text or scope, needle), source_id="", element_id=""))
-            src_rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ? AND "
-                "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?) "
-                "ORDER BY created_at ASC LIMIT ?",
-                (notebook_id, like, like, like, cap)).fetchall()
-            for s in src_rows:
-                label = s["title"] or s["file_name"]
-                body = s["summary"] or s["file_name"] or s["title"]
-                hits.append(SearchHit(scope="Source", notebook_id=notebook_id, label=label,
-                                      text=_snippet(body, needle), source_id=s["id"], element_id=""))
-            el_rows = db.execute(
-                "SELECT se.*, s.title AS source_title FROM source_elements se "
-                "JOIN sources s ON s.id = se.source_id WHERE s.notebook_id = ? AND "
-                "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
-                "LIMIT ?",
-                (notebook_id, like, like, like, cap)).fetchall()
-            for e in el_rows:
-                label = f"{e['source_title']} · {e['location_label']}"
-                hits.append(SearchHit(scope="Element", notebook_id=notebook_id, label=label,
-                                      text=_snippet(e["text"] or label, needle),
-                                      source_id=e["source_id"], element_id=e["id"]))
-            ko_rows = db.execute(
-                "SELECT id, object_type, payload FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated' AND LOWER(payload) LIKE ? LIMIT ?",
-                (notebook_id, like, cap)).fetchall()
-            for ko in ko_rows:
-                payload = json.loads(ko["payload"] or "{}")
-                label = OBJECT_TYPE_LABELS.get(ko["object_type"], ko["object_type"])
-                headline = self._knowledge_headline(ko["object_type"], payload)
-                body = self._payload_join(payload)
-                if needle not in f"{label} {headline} {body}".lower():
-                    continue  # payload LIKE 命中但去掉键名/无关字段的假阳
-                hits.append(SearchHit(scope=label, notebook_id=notebook_id, label=headline,
-                                      text=_snippet(body or headline, needle), source_id="", element_id=""))
-        return NotebookSearchResponse(query=query, hits=hits[:20])
+        return self._runtime.queries.search_notebook(notebook_id, query)
 
     def _note_model_error(self, stage: str, model: str, exc: Exception) -> None:
-        """记录一次模型调用失败:始终 emit model_error 事件(L1);若在 ask 上下文
-        (ContextVar 有 sink)则追加到 sink,供 AskResponse.model_errors 回传前端(L2)。"""
-        msg = f"{type(exc).__name__}: {exc}"
-        self.event_log.emit({"kind": "model_error", "stage": stage, "model": model or "",
-                             "error": msg[:300], "status": "error"})
-        sink = _ASK_MODEL_ERRORS.get()
-        if sink is not None:
-            sink.append({"stage": stage, "model": model or "", "message": msg[:200]})
+        return self._runtime.models.note_model_error(stage, model, exc)
 
     def _embed_query(self, query: str) -> Optional[List[float]]:
         """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
@@ -12794,63 +12724,10 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         (propose_promotion 只受 require_notebook_access 守卫),但深链目标
         /promotion-queue 是 admin-only(403),故对非 admin 隐藏该项以免铃铛
         指向一个必 403 的动作。"""
-        items: list[dict] = []
-        with self._connect() as db:
-            my = db.execute(
-                "SELECT id, name FROM notebooks WHERE created_by = ? AND status != 'copying'",
-                (user_id,),
-            ).fetchall()
-            name_of = {r["id"]: r["name"] for r in my}
-            nb_ids = list(name_of.keys())
-
-            if nb_ids:
-                # 一次性判定 admin 身份(单条廉价查询,不按 notebook 重复判定)
-                role_row = db.execute(
-                    "SELECT role FROM users WHERE id = ?", (user_id,),
-                ).fetchone()
-                is_admin = bool(role_row) and role_row["role"] == "admin"
-
-                # ① 深度报告待确认(outline_ready = 大纲已生成、等用户编辑/确认后再 generate)
-                rows = db.execute(
-                    "SELECT id, question, notebook_id, created_at FROM reports "
-                    "WHERE status = 'outline_ready' AND created_by = ? ORDER BY updated_at DESC",
-                    (user_id,),
-                ).fetchall()
-                for r in rows:
-                    items.append({
-                        "type": "report_outline",
-                        "notebook_id": r["notebook_id"],
-                        "notebook_name": name_of.get(r["notebook_id"], ""),
-                        "report_id": r["id"],
-                        "title": (r["question"] or "")[:60],
-                        "created_at": r["created_at"],
-                    })
-
-                # ② 治理三队列(count>0 才出项):概念合并候选/边审查/晋升候选
-                placeholders = ",".join("?" for _ in nb_ids)
-                gov_specs = [
-                    ("merge", "concept_merge_candidates", "status = 'pending'"),
-                    ("edge", "knowledge_relations", "review_status = 'pending'"),
-                ]
-                if is_admin:
-                    gov_specs.append(
-                        ("promotion", "promotion_candidates", "status IN ('proposed','under_review')")
-                    )
-                for subtype, table, pred in gov_specs:
-                    grp = db.execute(
-                        f"SELECT notebook_id, COUNT(*) AS c FROM {table} "
-                        f"WHERE notebook_id IN ({placeholders}) AND {pred} GROUP BY notebook_id",
-                        nb_ids,
-                    ).fetchall()
-                    for g in grp:
-                        if g["c"] > 0:
-                            items.append({
-                                "type": "governance",
-                                "subtype": subtype,
-                                "notebook_id": g["notebook_id"],
-                                "notebook_name": name_of.get(g["notebook_id"], ""),
-                                "count": g["c"],
-                            })
+        projection = self.pending_actions_projection_rows(user_id)
+        items = projection["items"]
+        nb_ids = projection["notebook_ids"]
+        name_of = projection["notebook_names"]
 
         # ③ 索引状态(scale_index_status 自管连接,故在上面的 with 块外调用)
         for nb_id in nb_ids:
@@ -12904,62 +12781,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         )
 
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
-        """Answer-quality + curation + coverage metrics for a notebook (§16)."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            answers_total = int(
-                db.execute(
-                    "SELECT COUNT(*) AS c FROM answers WHERE notebook_id = ?", (notebook_id,)
-                ).fetchone()["c"]
-            )
-            useful = int(
-                db.execute(
-                    "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'useful'",
-                    (notebook_id,),
-                ).fetchone()["c"]
-            )
-            not_useful = int(
-                db.execute(
-                    "SELECT COUNT(*) AS c FROM feedback WHERE notebook_id = ? AND rating = 'not_useful'",
-                    (notebook_id,),
-                ).fetchone()["c"]
-            )
-            low_rated = [
-                row["question"]
-                for row in db.execute(
-                    "SELECT DISTINCT a.question FROM feedback f "
-                    "JOIN answers a ON a.id = f.answer_id "
-                    "WHERE f.notebook_id = ? AND f.rating = 'not_useful' "
-                    "ORDER BY f.created_at DESC LIMIT 10",
-                    (notebook_id,),
-                ).fetchall()
-            ]
-            knowledge_counts = {
-                row["object_type"]: int(row["c"])
-                for row in db.execute(
-                    "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-                    "WHERE notebook_id = ? AND status != 'deprecated' GROUP BY object_type",
-                    (notebook_id,),
-                ).fetchall()
-            }
-            source_status_counts = {
-                row["parse_status"]: int(row["c"])
-                for row in db.execute(
-                    "SELECT parse_status, COUNT(*) AS c FROM sources "
-                    "WHERE notebook_id = ? GROUP BY parse_status",
-                    (notebook_id,),
-                ).fetchall()
-            }
-        rated = useful + not_useful
-        return NotebookAnalytics(
-            answers_total=answers_total,
-            feedback_useful=useful,
-            feedback_not_useful=not_useful,
-            usefulness_rate=round(useful / rated, 3) if rated else 0.0,
-            low_rated_questions=low_rated,
-            knowledge_counts=knowledge_counts,
-            source_status_counts=source_status_counts,
-        )
+        return self._runtime.queries.notebook_analytics(notebook_id)
 
     # object_type -> counts-dict key mapping shared by _notebook_from_row and
     # its batched sibling _knowledge_type_counts_for_notebooks (C5: N+1 fix —
