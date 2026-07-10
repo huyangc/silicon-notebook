@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class UserProfile(BaseModel):
@@ -114,10 +114,13 @@ class NotebookCreate(BaseModel):
 
 
 class NotebookUpdate(BaseModel):
+    # Notebook lifecycle states (notably the internal ``copying`` sentinel)
+    # are repository-owned and must never be writable through the public API.
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     purpose: Optional[str] = None
     primary_domain: Optional[str] = None
-    status: Optional[str] = None
     target_users: Optional[str] = None
     expected_questions: Optional[List[str]] = None
     source_types: Optional[List[str]] = None

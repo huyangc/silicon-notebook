@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test app/*.test.mjs",
+    "test": "node --test $(find app -name '*.test.mjs' -type f -print)",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

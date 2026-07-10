@@ -57,8 +57,11 @@ def _ensure() -> None:
 
 def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
     """Submit one window (LLM call) to the global window pool. The callable is
-    wrapped so _window_active reflects in-flight (running) windows."""
+    wrapped so _window_active reflects in-flight (running) windows. Capture a
+    fresh Context per submission so per-user model routing/log ownership is
+    preserved even when many windows run concurrently."""
     _ensure()
+    ctx = contextvars.copy_context()
 
     def _run():
         global _window_active
@@ -70,7 +73,7 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
             with _active_lock:
                 _window_active -= 1
 
-    return _window_pool.submit(_run)
+    return _window_pool.submit(ctx.run, _run)
 
 
 def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:

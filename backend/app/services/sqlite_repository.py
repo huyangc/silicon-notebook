@@ -1956,28 +1956,47 @@ class SQLiteRepository:
         return token
 
     def resolve_session(self, token: str) -> "UserProfile | None":
-        """命中且未过期 → 滑动续期并返回 user；否则 None（过期行顺手删除）。"""
+        """Resolve a session with a read-mostly, throttled sliding expiry.
+
+        Authentication is on every request; turning every read into a global
+        SQLite write serialized the whole API.  A valid session is now read on
+        the shared read connection and its expiry is touched at most once per
+        configured interval. Expired rows are still removed eagerly.
+        """
         if not token:
             return None
         now = _now()
-        with self._write() as db:
+        with self._connect() as db:
             row = db.execute(
                 "SELECT * FROM auth_sessions WHERE token = ?", (token,)).fetchone()
             if row is None:
                 return None
-            if row["expires_at"] <= now:
+            expired = row["expires_at"] <= now
+            user = None if expired else db.execute(
+                "SELECT * FROM users WHERE id = ?", (row["user_id"],)
+            ).fetchone()
+            profile = None if user is None else db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)
+            ).fetchone()
+        if expired:
+            with self._write() as db:
                 db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
-                return None
-            db.execute(
-                "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token = ?",
-                (now, _session_expiry(), token),
+            return None
+        if user is None:
+            return None
+        touch_before = (
+            datetime.now() - timedelta(
+                seconds=max(1, self.settings.auth_session_touch_interval_seconds)
             )
-            user = db.execute("SELECT * FROM users WHERE id = ?", (row["user_id"],)).fetchone()
-            if user is None:
-                return None
-            profile = db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)).fetchone()
-            return self._user_profile(user, profile)
+        ).replace(microsecond=0).isoformat()
+        if row["last_seen_at"] <= touch_before:
+            with self._write() as db:
+                db.execute(
+                    "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? "
+                    "WHERE token = ? AND last_seen_at = ? AND expires_at > ?",
+                    (now, _session_expiry(), token, row["last_seen_at"], now),
+                )
+        return self._user_profile(user, profile)
 
     def delete_session(self, token: str) -> None:
         with self._write() as db:
@@ -2184,28 +2203,46 @@ class SQLiteRepository:
         )
 
     def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
-        """Self-heal: delete notebook rows stuck in status='copying' (a prior
-        copy_notebook crashed mid-copy). These rows are never returned by
+        """Delete only *expired* notebook rows stuck in ``copying``.
+
+        A copying row is also the visibility sentinel for a live copy.  It is
+        therefore unsafe to sweep every matching row: concurrent copies would
+        delete each other.  Normal Python exceptions compensate their own row
+        immediately; this TTL path exists only for process/power loss.  Rows
+        newer than ``NOTEBOOK_COPY_STALE_SECONDS`` are treated as active.
+
+        These rows are never returned by
         get_notebook/list_notebooks (see the WHERE status!='copying' guards
         there), so they're inert garbage — but their child rows keep
         occupying space until swept. Cascades via ON DELETE CASCADE for every
         child table except knowledge_embeddings (no FK there — same gap
         delete_notebook already works around), so that table gets an explicit
-        cleanup first. Runs at the START of copy_notebook (perf-audit P1-4
-        integrity design) so a retry after a crash starts from a clean slate.
+        cleanup first. Runs at the START of copy_notebook so an old crashed
+        operation is eventually reclaimed without touching a live operation.
         Returns the number of stuck notebooks removed."""
+        cutoff = (
+            datetime.now() - timedelta(seconds=max(1, self.settings.notebook_copy_stale_seconds))
+        ).replace(microsecond=0).isoformat()
         with self._write() as db:
             if created_by is not None:
                 rows = db.execute(
-                    "SELECT id FROM notebooks WHERE status='copying' AND created_by=?",
-                    (created_by,)).fetchall()
+                    "SELECT id FROM notebooks WHERE status='copying' AND created_by=? "
+                    "AND created_at < ?",
+                    (created_by, cutoff)).fetchall()
             else:
                 rows = db.execute(
-                    "SELECT id FROM notebooks WHERE status='copying'").fetchall()
+                    "SELECT id FROM notebooks WHERE status='copying' AND created_at < ?",
+                    (cutoff,)).fetchall()
             stuck_ids = [r["id"] for r in rows]
             if not stuck_ids:
                 return 0
             placeholders = ",".join("?" for _ in stuck_ids)
+            db.execute(
+                f"DELETE FROM kg_objects_fts WHERE notebook_id IN ({placeholders})",
+                stuck_ids)
+            db.execute(
+                f"DELETE FROM chunks_fts WHERE notebook_id IN ({placeholders})",
+                stuck_ids)
             db.execute(
                 f"DELETE FROM knowledge_embeddings WHERE notebook_id IN ({placeholders})",
                 stuck_ids)
@@ -2228,7 +2265,7 @@ class SQLiteRepository:
         的孤儿行)——self._sweep_stuck_copies() 在下次 copy_notebook 开头把它
         连同子行一并清掉(级联覆盖除 knowledge_embeddings 外的全部子表,该表
         无 FK,同 delete_notebook 一样显式删)。"""
-        self._sweep_stuck_copies()
+        self._sweep_stuck_copies(created_by=new_owner_id)
         src = self.get_notebook(source_notebook_id)  # KeyError if missing
         new_id = f"nb-{uuid4().hex[:10]}"
         now = _now()
@@ -2433,6 +2470,13 @@ class SQLiteRepository:
                            (src.status, _now(), new_id))
             return self.get_notebook(new_id)
         except Exception:
+            # This process still owns ``new_id`` and can compensate precisely;
+            # never leave routine exceptions for a later global sweeper.
+            with self._write() as db:
+                db.execute("DELETE FROM kg_objects_fts WHERE notebook_id=?", (new_id,))
+                db.execute("DELETE FROM chunks_fts WHERE notebook_id=?", (new_id,))
+                db.execute("DELETE FROM knowledge_embeddings WHERE notebook_id=?", (new_id,))
+                db.execute("DELETE FROM notebooks WHERE id=? AND status='copying'", (new_id,))
             if copied_files:
                 shutil.rmtree(dst_dir, ignore_errors=True)
             raise
@@ -2546,9 +2590,6 @@ class SQLiteRepository:
         if payload.primary_domain is not None:
             updates.append("primary_domain = ?")
             values.append(payload.primary_domain.strip() or "Semiconductor")
-        if payload.status is not None:
-            updates.append("status = ?")
-            values.append(payload.status.strip() or "draft")
         if payload.target_users is not None:
             updates.append("target_users = ?")
             values.append(payload.target_users.strip())
@@ -2613,6 +2654,8 @@ class SQLiteRepository:
                 "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
                 (notebook_id,),
             )
+            db.execute("DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,))
+            db.execute("DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,))
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
         for row in source_rows:
             self._delete_file(row["file_path"])
@@ -3391,8 +3434,10 @@ class SQLiteRepository:
                         "background embed failed for %s", source_id
                     )
 
+            embed_ctx = contextvars.copy_context()
             embed_thread = threading.Thread(
-                target=_embed_bg, name=f"embed-{source_id}", daemon=True
+                target=lambda: embed_ctx.run(_embed_bg),
+                name=f"embed-{source_id}", daemon=True
             )
             embed_thread.start()
 
@@ -5475,29 +5520,30 @@ class SQLiteRepository:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def set_conflict_status(self, candidate_id: str, status: str) -> None:
+    def set_conflict_status(self, notebook_id: str, candidate_id: str, status: str) -> None:
         """Update status to 'applied' or 'rejected' (+ updated_at).
 
-        No notebook_id scoping here: candidate_id is a globally-unique
-        'kcc-' uuid, so a wrong id surfaces immediately via the not-found
-        guard below rather than silently updating the wrong row.
+        Both identifiers are required even though candidate ids are UUID-like:
+        authorization is notebook-scoped, so object lookup must use the same
+        scope rather than trusting a caller-controlled URL notebook id.
         """
         if status not in ("applied", "rejected"):
             raise ValueError(f"invalid conflict status: {status!r}")
         with self._write() as db:
             cur = db.execute(
-                "UPDATE kg_conflict_candidates SET status=?, updated_at=? WHERE id=?",
-                (status, _now(), candidate_id),
+                "UPDATE kg_conflict_candidates SET status=?, updated_at=? "
+                "WHERE id=? AND notebook_id=?",
+                (status, _now(), candidate_id, notebook_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"conflict candidate {candidate_id!r} not found")
 
-    def get_conflict_candidate(self, candidate_id: str) -> Optional[dict]:
-        """Fetch one conflict candidate by id; returns None if not found."""
+    def get_conflict_candidate(self, notebook_id: str, candidate_id: str) -> Optional[dict]:
+        """Fetch one conflict candidate inside its notebook authorization scope."""
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM kg_conflict_candidates WHERE id=?",
-                (candidate_id,),
+                "SELECT * FROM kg_conflict_candidates WHERE id=? AND notebook_id=?",
+                (candidate_id, notebook_id),
             ).fetchone()
         return dict(row) if row is not None else None
 
@@ -5615,7 +5661,7 @@ class SQLiteRepository:
         logic.  Raises KeyError if the candidate does not exist; raises
         ValueError if it is already decided (not 'pending').
         """
-        row = self.get_conflict_candidate(candidate_id)
+        row = self.get_conflict_candidate(notebook_id, candidate_id)
         if row is None:
             raise KeyError(f"conflict candidate {candidate_id!r} not found")
         if row["status"] != "pending":
@@ -5646,7 +5692,7 @@ class SQLiteRepository:
             winner_ref=row["winner_ref"],
             resolved_payload=resolved_payload,
         )
-        self.set_conflict_status(candidate_id, "applied")
+        self.set_conflict_status(notebook_id, candidate_id, "applied")
         return {**apply_result, "status": "applied", "candidate_id": candidate_id}
 
     def reject_conflict(self, notebook_id: str, candidate_id: str) -> None:
@@ -5655,7 +5701,7 @@ class SQLiteRepository:
         Raises KeyError if the candidate does not exist; raises ValueError if
         it is already decided.
         """
-        row = self.get_conflict_candidate(candidate_id)
+        row = self.get_conflict_candidate(notebook_id, candidate_id)
         if row is None:
             raise KeyError(f"conflict candidate {candidate_id!r} not found")
         if row["status"] != "pending":
@@ -5663,7 +5709,7 @@ class SQLiteRepository:
                 f"conflict candidate {candidate_id!r} is already decided "
                 f"(status={row['status']!r})"
             )
-        self.set_conflict_status(candidate_id, "rejected")
+        self.set_conflict_status(notebook_id, candidate_id, "rejected")
 
     # ------------------------------------------------------------------
     # resolve_notebook_conflicts — Task T5: orchestration
@@ -5929,7 +5975,7 @@ class SQLiteRepository:
                         winner_ref=winner_ref,
                         resolved_payload=resolved_payload,
                     )
-                    self.set_conflict_status(candidate_id, "applied")
+                    self.set_conflict_status(notebook_id, candidate_id, "applied")
                     auto_applied += 1
                 except Exception:  # noqa: BLE001
                     self.event_log.logger.exception(
@@ -8657,7 +8703,11 @@ class SQLiteRepository:
                     ).fetchall()
                     for r in obj_rows:
                         p = json.loads(r["payload"] or "{}")
-                        nodes[r["id"]] = {"type": r["object_type"], "name": p.get("name", "")}
+                        nodes[r["id"]] = {
+                            "type": r["object_type"],
+                            "name": p.get("name", ""),
+                            "tier": tier_map.get(nb_id, "personal"),
+                        }
                     # Track E: rejected edges are excluded from the federated
                     # reasoning graph too (curation feedback loop) — bare
                     # filter; the column is NOT NULL DEFAULT 'pending'
@@ -8694,6 +8744,25 @@ class SQLiteRepository:
 
             return self._vector_cache.get(
                 f"{active_notebook_id}:fed_rxgraph", version, _load)
+
+    def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
+        """Return true if *any* graph participant is above the in-memory guard.
+
+        Federated graph loaders include the active notebook plus every base
+        notebook. Guarding only the active notebook lets a tiny personal
+        notebook pull an arbitrarily large base graph into rustworkx.
+        """
+        with self._connect() as db:
+            participants = [active_notebook_id] + [
+                r["id"] for r in db.execute(
+                    "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+                    (active_notebook_id,),
+                ).fetchall()
+            ]
+        return any(
+            not self.notebook_copy_stats(notebook_id)["copyable"]
+            for notebook_id in participants
+        )
 
     def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
         """P2 共提桥 → 图 extra_edges:每条 mention_edges 行转一条软边
@@ -8732,7 +8801,8 @@ class SQLiteRepository:
             version_parts = []
             for nb in participants:
                 rel_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                                     "FROM knowledge_relations WHERE notebook_id=?", (nb,)).fetchone()
+                                     "FROM knowledge_relations WHERE notebook_id=? "
+                                     "AND review_status!='rejected'", (nb,)).fetchone()
                 obj_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
                                      "FROM knowledge_objects WHERE notebook_id=?", (nb,)).fetchone()
                 chunk_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
@@ -8771,7 +8841,7 @@ class SQLiteRepository:
                         kg_nodes[r["id"]] = {"type": r["object_type"],
                                              "name": json.loads(r["payload"] or "{}").get("name", "")}
                     for r in db.execute("SELECT source_object_id, target_object_id FROM knowledge_relations "
-                                        "WHERE notebook_id=?", (nb,)).fetchall():
+                                        "WHERE notebook_id=? AND review_status!='rejected'", (nb,)).fetchall():
                         relations.append(dict(r))
                     for r in db.execute("SELECT id FROM chunks WHERE notebook_id=?", (nb,)).fetchall():
                         chunk_ids.append(r["id"])
@@ -9264,7 +9334,8 @@ class SQLiteRepository:
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=?{src_clause}", (notebook_id, *src_params)).fetchall():
+                        f"WHERE notebook_id=? AND review_status!='rejected'{src_clause}",
+                        (notebook_id, *src_params)).fetchall():
                     relations.append(dict(r))
             for src_clause, src_params in clauses:
                 for r in db.execute(
@@ -10950,7 +11021,7 @@ class SQLiteRepository:
         from app.services.kg.ppr import run_ppr
         ranked = self.scale_ppr(notebook_id, question)
         if not ranked:
-            if not self.notebook_copy_stats(notebook_id)["copyable"]:
+            if self._federated_graph_is_large(notebook_id):
                 self.event_log.emit({
                     "kind": "ppr_fallback_refused",
                     "notebook_id": notebook_id,
@@ -11866,17 +11937,18 @@ class SQLiteRepository:
         from concurrent.futures import ThreadPoolExecutor
 
         import contextvars as _cv
-        _ctx = _cv.copy_context()
-        def _one(q):
+        tasks = [(q, _cv.copy_context()) for q in sub_queries]
+        def _one(task):
+            q, ctx = task
             try:
-                return _ctx.run(self._retrieve_chunks, notebook_id, q)
+                return ctx.run(self._retrieve_chunks, notebook_id, q)
             except Exception:
                 return ([], [], None)
 
         results = []
         if sub_queries:
             with ThreadPoolExecutor(max_workers=min(len(sub_queries), 8)) as ex:
-                results = list(ex.map(_one, sub_queries))
+                results = list(ex.map(_one, tasks))
         per_query, collected, ids, mat = [], {}, [], None
         for scored, qids, qmat in results:
             per_query.append({c.chunk_id: c for c in scored})
@@ -12459,7 +12531,7 @@ class SQLiteRepository:
         再触发任何检索;小库字节不变。真正的修复是给关系建 ANN 索引(镜像
         chunk_ann,scale index 侧)——这个守卫只是在那之前把 ask 路径钳制在
         O(bounded)。"""
-        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+        if self._federated_graph_is_large(notebook_id):
             self.event_log.emit({
                 "kind": "graph_walk_refused",
                 "notebook_id": notebook_id,
@@ -13232,7 +13304,7 @@ class SQLiteRepository:
             # 并发 graph_walk_refused 事件;顺带省掉 _graph_seed_fusion 的
             # expand_query LLM 调用。放在 PPR 分支之后:大库若有 scale 索引,
             # PPR 分支仍可正常出跨文档答案,不受此守卫影响。
-            if not self.notebook_copy_stats(notebook_id)["copyable"]:
+            if self._federated_graph_is_large(notebook_id):
                 self.event_log.emit({
                     "kind": "graph_walk_refused",
                     "notebook_id": notebook_id,

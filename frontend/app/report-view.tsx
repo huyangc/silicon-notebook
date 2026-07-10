@@ -465,6 +465,7 @@ export interface ReportsPanelProps {
   /** 「待确认中心」深链:指定报告 id 后自动拉详情并打开大纲编辑器,消费后由父组件清空。 */
   focusReportId?: string | null;
   onFocusConsumed?: () => void;
+  readOnly?: boolean;
 }
 
 export function ReportsPanel({
@@ -480,6 +481,7 @@ export function ReportsPanel({
   setToast,
   focusReportId,
   onFocusConsumed,
+  readOnly = false,
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
@@ -740,7 +742,7 @@ export function ReportsPanel({
             <ArrowLeft size={14} /> 返回列表
           </button>
           <div className="report-detail-actions">
-            {isReportActive(active.status) && (
+            {!readOnly && isReportActive(active.status) && (
               <button
                 className="report-action"
                 type="button"
@@ -755,14 +757,16 @@ export function ReportsPanel({
                 <Download size={14} /> 下载 .md
               </button>
             )}
-            <button
-              className={`report-action ${confirmDelete ? "danger" : ""}`}
-              type="button"
-              disabled={actionBusy}
-              onClick={() => void requestDelete()}
-            >
-              <Trash2 size={14} /> {confirmDelete ? "确认删除" : "删除"}
-            </button>
+            {!readOnly && (
+              <button
+                className={`report-action ${confirmDelete ? "danger" : ""}`}
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void requestDelete()}
+              >
+                <Trash2 size={14} /> {confirmDelete ? "确认删除" : "删除"}
+              </button>
+            )}
           </div>
         </div>
         <div className="report-detail-title">
@@ -784,7 +788,7 @@ export function ReportsPanel({
             <p>正在侦察语料并多视角规划大纲（通常几十秒）…{active.progress ? ` ${active.progress}` : ""}</p>
           </div>
         )}
-        {active.status === "outline_ready" && (
+        {active.status === "outline_ready" && !readOnly && (
           <OutlineEditor
             report={active}
             notebookId={notebookId}
@@ -796,6 +800,16 @@ export function ReportsPanel({
             }}
             setToast={setToast}
           />
+        )}
+        {active.status === "outline_ready" && readOnly && (
+          <div className="report-running-hint">
+            <p>该报告大纲等待所有者确认。</p>
+            <ol className="report-outline">
+              {active.outline.map((section, index) => (
+                <li key={`${section.title}-${index}`}>{section.title}</li>
+              ))}
+            </ol>
+          </div>
         )}
         {isReportActive(active.status) && active.status !== "planning" && (
           <div className="report-running-hint">
@@ -856,7 +870,7 @@ export function ReportsPanel({
   // ---- 列表视图 ----
   return (
     <div className="report-panel">
-      <div className="report-compose">
+      {!readOnly && <div className="report-compose">
         <textarea
           className="report-compose-input"
           rows={2}
@@ -918,7 +932,7 @@ export function ReportsPanel({
             </button>
           </div>
         </div>
-      </div>
+      </div>}
       {reports === null ? (
         <p className="tool-hint">加载中…</p>
       ) : reports.length === 0 ? (
@@ -1007,7 +1021,7 @@ export function ReportsPanel({
                         <Download size={16} />
                       </button>
                     )}
-                    {!selectMode && (
+                    {!readOnly && !selectMode && (
                       confirmDeleteId === r.id ? (
                         <span className="report-card-confirm" onClick={(e) => e.stopPropagation()}>
                           <span className="report-card-confirm-text">删除?</span>

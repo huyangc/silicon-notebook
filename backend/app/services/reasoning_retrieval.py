@@ -347,8 +347,16 @@ class ReasoningRetriever:
             attempted: Dict[str, _QueryAttempt] = {}
             if subqueries:
                 with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
-                    # map 保序:第 i 个结果对应第 i 个子查询,与提交顺序一致。
-                    for sq, hits in zip(subqueries, ex.map(_run_search, subqueries)):
+                    # Context must be copied once PER task; a single Context
+                    # cannot be entered concurrently, while a bare executor
+                    # loses per-user model/log routing entirely.
+                    search_futures = [
+                        ex.submit(contextvars.copy_context().run, _run_search, sq)
+                        for sq in subqueries
+                    ]
+                    # futures 按提交顺序 result:第 i 个结果仍对应第 i 个子查询。
+                    for sq, future in zip(subqueries, search_futures):
+                        hits = future.result()
                         raise_if_cancelled(self.cancel_event)
                         rec = attempted.setdefault(_norm_query(sq.query),
                                                    _QueryAttempt(query=sq.query))

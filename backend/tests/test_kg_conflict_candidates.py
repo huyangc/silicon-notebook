@@ -57,7 +57,7 @@ def test_pending_conflicts_only_returns_pending(repo):
     cid1 = repo.write_conflict_candidate(nb.id, "node", "A", "B", conflict_type="temporal")
     cid2 = repo.write_conflict_candidate(nb.id, "edge", "r1", "r2", conflict_type="granularity")
     # apply one
-    repo.set_conflict_status(cid1, "applied")
+    repo.set_conflict_status(nb.id, cid1, "applied")
     pending = repo.pending_conflicts(nb.id)
     assert len(pending) == 1
     assert pending[0]["id"] == cid2
@@ -75,18 +75,18 @@ def test_pending_conflicts_empty_when_none(repo):
 def test_set_conflict_status_applied(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
-    repo.set_conflict_status(cid, "applied")
+    repo.set_conflict_status(nb.id, cid, "applied")
     assert repo.pending_conflicts(nb.id) == []
-    row = repo.get_conflict_candidate(cid)
+    row = repo.get_conflict_candidate(nb.id, cid)
     assert row["status"] == "applied"
 
 
 def test_set_conflict_status_rejected(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
-    repo.set_conflict_status(cid, "rejected")
+    repo.set_conflict_status(nb.id, cid, "rejected")
     assert repo.pending_conflicts(nb.id) == []
-    row = repo.get_conflict_candidate(cid)
+    row = repo.get_conflict_candidate(nb.id, cid)
     assert row["status"] == "rejected"
 
 
@@ -94,7 +94,7 @@ def test_set_conflict_status_rejects_bad_value(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
     with pytest.raises(ValueError):
-        repo.set_conflict_status(cid, "maybe")
+        repo.set_conflict_status(nb.id, cid, "maybe")
 
 
 def test_set_conflict_status_rejects_pending(repo):
@@ -102,7 +102,7 @@ def test_set_conflict_status_rejects_pending(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     cid = repo.write_conflict_candidate(nb.id, "node", "X", "Y")
     with pytest.raises(ValueError):
-        repo.set_conflict_status(cid, "pending")
+        repo.set_conflict_status(nb.id, cid, "pending")
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ def test_get_conflict_candidate_full_fields(repo):
         confidence=0.87,
         rationale="left is more specific",
     )
-    row = repo.get_conflict_candidate(cid)
+    row = repo.get_conflict_candidate(nb.id, cid)
     assert row["kind"] == "edge"
     assert row["left_ref"] == "rel-001"
     assert row["right_ref"] == "rel-002"
@@ -142,7 +142,7 @@ def test_get_conflict_candidate_full_fields(repo):
 def test_get_conflict_candidate_nullable_fields_default_none(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     cid = repo.write_conflict_candidate(nb.id, "node", "A", "B")
-    row = repo.get_conflict_candidate(cid)
+    row = repo.get_conflict_candidate(nb.id, cid)
     assert row["conflict_type"] is None
     assert row["resolution"] is None
     assert row["winner_ref"] is None
@@ -152,7 +152,8 @@ def test_get_conflict_candidate_nullable_fields_default_none(repo):
 
 
 def test_get_conflict_candidate_returns_none_for_unknown_id(repo):
-    assert repo.get_conflict_candidate("does-not-exist") is None
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    assert repo.get_conflict_candidate(nb.id, "does-not-exist") is None
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +177,9 @@ def test_pending_conflicts_isolated_per_notebook(repo):
 
 def test_set_conflict_status_raises_keyerror_for_missing_id(repo):
     """set_conflict_status must raise KeyError (not silently no-op) on unknown id."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
     with pytest.raises(KeyError):
-        repo.set_conflict_status("nonexistent", "applied")
+        repo.set_conflict_status(nb.id, "nonexistent", "applied")
 
 
 def test_pending_conflicts_raises_for_nonexistent_notebook(repo):

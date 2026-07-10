@@ -1352,6 +1352,13 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const askJobIdRef = useRef<string | null>(null);
+  const askNotebookIdRef = useRef<string | null>(null);
+  // Every notebook/session transition advances the workspace epoch. Async
+  // callbacks may update UI only while both their run and workspace epochs
+  // still match, preventing cross-user/notebook/conversation state bleed.
+  const activeNotebookIdRef = useRef<string | null>(null);
+  const workspaceEpochRef = useRef(0);
+  const askRunEpochRef = useRef(0);
   // started 事件落地前(jobId 尚未知晓)点了「停止」:先记下意图,onStart 拿到 jobId 后立即补打 cancel。
   const cancelRequestedRef = useRef(false);
   // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
@@ -1964,11 +1971,21 @@ export default function Home() {
     setSourcesPage(pageNum);
   }
 
-  async function openNotebook(notebookId: string) {
+  async function openNotebook(notebookId: string): Promise<boolean> {
+    const workspaceEpoch = ++workspaceEpochRef.current;
+    askRunEpochRef.current += 1;
+    activeNotebookIdRef.current = null;
+    setAsking(false);
+    setPendingQuestion("");
+    setPendingMode(DEFAULT_ASK_MODE);
+    setPendingTrace([]);
+    setReconnectJob(null);
     const [notebook, sourcesPage] = await Promise.all([
       api<NotebookSummary>(`/notebooks/${notebookId}`),
       api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`)
     ]);
+    if (workspaceEpochRef.current !== workspaceEpoch) return false;
+    activeNotebookIdRef.current = notebookId;
     setCurrentNotebookId(notebookId);
     setCurrentNotebook(notebook);
     setTitleDraft(notebook.name);
@@ -1993,27 +2010,29 @@ export default function Home() {
     setDuplicates(null);
     setSessions([]);
     pollCountRef.current = 0;
-    await loadSessions(notebookId);
+    await loadSessions(notebookId, workspaceEpoch);
+    if (workspaceEpochRef.current !== workspaceEpoch) return false;
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
     window.scrollTo(0, 0);
+    return true;
   }
 
   // --- Pending center: precise deep-link per item type --------------------
   async function openPendingItem(item: PendingItem) {
-    await openNotebook(item.notebook_id);
+    if (!await openNotebook(item.notebook_id)) return;
     if (item.type === "report_outline") {
       switchChatMode("reports");
       if (item.report_id) setPendingReportFocusId(item.report_id);
     } else if (item.type === "governance") {
-      if (item.subtype === "edge") { await openEdgeReviewQueue(); }
+      if (item.subtype === "edge") { await openEdgeReviewQueue(item.notebook_id); }
       else if (item.subtype === "promotion") { await openPromoQueue(); }
-      else { setKgViewOpen(true); }  // merge → KG 图谱视图内联「待确认合并」
+      else { await openKgView(undefined, item.notebook_id); }
     } else if (item.type === "index") {
-      setKgViewOpen(true);  // 索引状态/重建入口在 KG 视图
+      await openKgView(undefined, item.notebook_id);
     }
   }
-  function openDoneItem(d: { notebook_id: string }) {
-    openNotebook(d.notebook_id).then(() => setKgViewOpen(true)).catch(reportError);
+  async function openDoneItem(d: { notebook_id: string }) {
+    if (await openNotebook(d.notebook_id)) await openKgView(undefined, d.notebook_id);
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
@@ -2027,6 +2046,9 @@ export default function Home() {
   }
 
   function showCollection() {
+    workspaceEpochRef.current += 1;
+    askRunEpochRef.current += 1;
+    activeNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
     setSources([]);
@@ -2283,6 +2305,13 @@ export default function Home() {
       setToast("严格推理需先为该 notebook 构建知识图谱");
       return;
     }
+    const notebookId = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const runEpoch = ++askRunEpochRef.current;
+    const ownsRun = () =>
+      askRunEpochRef.current === runEpoch
+      && workspaceEpochRef.current === workspaceEpoch
+      && activeNotebookIdRef.current === notebookId;
     setChatMode("ask");
     setQuestion("");
     setPendingQuestion(q);
@@ -2292,25 +2321,31 @@ export default function Home() {
     cancelRequestedRef.current = false;   // 每次新 ask 复位「停止」意图
     const controller = new AbortController();
     askAbortRef.current = controller;
+    askNotebookIdRef.current = notebookId;
     try {
       const payload = { question: q, conversation_id: conversationId ?? undefined, mode: askMode };
       const response = await readAskStream<AskResponse>(
-        `/notebooks/${currentNotebookId}/ask/stream`,
+        `/notebooks/${notebookId}/ask/stream`,
         payload,
-        (step) => setPendingTrace((previous) => [...previous, step]),
+        (step) => {
+          if (ownsRun()) setPendingTrace((previous) => [...previous, step]);
+        },
         controller.signal,
         (jobId) => {
+          if (!ownsRun()) return;
           askJobIdRef.current = jobId;
           if (cancelRequestedRef.current) {
             // started 落地前已点过「停止」:jobId 当时还不存在,补打 cancel 端点真取消 worker。
             cancelRequestedRef.current = false;
-            api(`/notebooks/${currentNotebookId}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+            api(`/notebooks/${notebookId}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
           }
         },
       );
+      if (!ownsRun()) return;
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
+      if (!ownsRun()) return;
       setQuestion(q);
       if (isAbortError(error)) {
         setToast("已中断回答");
@@ -2318,20 +2353,23 @@ export default function Home() {
       }
       reportError(error);
     } finally {
-      if (askAbortRef.current === controller) askAbortRef.current = null;
-      askJobIdRef.current = null;
-      cancelRequestedRef.current = false;
-      setPendingQuestion("");
-      setPendingMode(DEFAULT_ASK_MODE);
-      setPendingTrace([]);
-      setAsking(false);
+      if (ownsRun()) {
+        if (askAbortRef.current === controller) askAbortRef.current = null;
+        askJobIdRef.current = null;
+        askNotebookIdRef.current = null;
+        cancelRequestedRef.current = false;
+        setPendingQuestion("");
+        setPendingMode(DEFAULT_ASK_MODE);
+        setPendingTrace([]);
+        setAsking(false);
+      }
     }
-    await loadSessions(currentNotebookId);
+    if (ownsRun()) await loadSessions(notebookId, workspaceEpoch);
   }
 
   function abortAsk() {
     const jobId = askJobIdRef.current;
-    const nb = currentNotebookId;
+    const nb = askNotebookIdRef.current;
     // 显式取消 = 打 cancel 端点(真取消后端 worker),再 abort 本地流(立即停读)。
     // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
     if (jobId && nb) {
@@ -2350,14 +2388,26 @@ export default function Home() {
     }
   }
 
-  async function loadSessions(notebookId: string | null = currentNotebookId) {
+  async function loadSessions(
+    notebookId: string | null = currentNotebookId,
+    expectedWorkspaceEpoch = workspaceEpochRef.current,
+  ) {
     if (!notebookId) return;
     const list = await api<ConversationSummary[]>(`/notebooks/${notebookId}/conversations`);
+    if (
+      activeNotebookIdRef.current !== notebookId
+      || workspaceEpochRef.current !== expectedWorkspaceEpoch
+    ) return;
     setSessions(list);
   }
 
   async function openSession(id: string) {
+    const workspaceEpoch = ++workspaceEpochRef.current;
+    askRunEpochRef.current += 1;
+    setAsking(false);
+    setReconnectJob(null);
     const detail = await api<ConversationDetail>(`/conversations/${id}`);
+    if (workspaceEpochRef.current !== workspaceEpoch) return;
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
@@ -2375,14 +2425,24 @@ export default function Home() {
       setPendingTrace(active.trace ?? []);
       setAsking(true);
       askJobIdRef.current = active.job_id;                  // 「停止」可作用于重连的 job
+      askNotebookIdRef.current = activeNotebookIdRef.current;
       reconnectConvIdRef.current = id;
       setReconnectJob({ jobId: active.job_id, seen: (active.trace ?? []).length });
     } else {
       setReconnectJob(null);
+      setAsking(false);
+      askJobIdRef.current = null;
+      askNotebookIdRef.current = null;
     }
   }
 
   function startNewSession() {
+    workspaceEpochRef.current += 1;
+    askRunEpochRef.current += 1;
+    setAsking(false);
+    setReconnectJob(null);
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
     setTurns([]);
     setConversationId(null);
     setAskMode(DEFAULT_ASK_MODE);
@@ -2606,8 +2666,12 @@ export default function Home() {
     setGraph(response);
   }
 
-  async function openKgView(targetNodeId?: string) {
-    if (!currentNotebookId) return;
+  async function openKgView(
+    targetNodeId?: string,
+    notebookId: string | null = currentNotebookId,
+  ) {
+    if (!notebookId) return;
+    const workspaceEpoch = workspaceEpochRef.current;
     setKgViewOpen(true);
     setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
     setKgSearch(""); setKgSearchHits([]); setKgSearchBusy(false);
@@ -2617,10 +2681,14 @@ export default function Home() {
     setPendingKgFocusId(targetNodeId ?? null);
     try {
       const [g, pend, status] = await Promise.all([
-        fetchUnifiedGraph(currentNotebookId, KG_RANGE_DEFAULT),
-        fetchPendingMerges(currentNotebookId),
-        fetchUnifiedKgStatus(currentNotebookId),
+        fetchUnifiedGraph(notebookId, KG_RANGE_DEFAULT),
+        fetchPendingMerges(notebookId),
+        fetchUnifiedKgStatus(notebookId),
       ]);
+      if (
+        activeNotebookIdRef.current !== notebookId
+        || workspaceEpochRef.current !== workspaceEpoch
+      ) return;
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
       setVizBuilding(Boolean(g.viz_building));
     } catch (err) { reportError(err); }
@@ -2870,7 +2938,7 @@ export default function Home() {
     try {
       const created = await copyShared(token);
       await loadNotebookCollection();
-      setCurrentNotebookId(String(created.id));
+      await openNotebook(String(created.id));
       setSharedPreview(null);
       setToast("已拷贝到你的空间");
     } finally {
@@ -2885,7 +2953,7 @@ export default function Home() {
     try {
       const joined = await joinShared(token);
       await loadNotebookCollection();
-      setCurrentNotebookId(String(joined.id));
+      await openNotebook(String(joined.id));
       setSharedPreview(null);
       setToast("已加入只读共享");
     } finally {
@@ -2906,12 +2974,9 @@ export default function Home() {
       if (!stillThere) {
         const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
         if (firstOwned) {
-          setCurrentNotebookId(firstOwned.id);
-          setCurrentNotebook(firstOwned);
-          setTitleDraft(firstOwned.name);
+          await openNotebook(firstOwned.id);
         } else {
-          setCurrentNotebookId(null);
-          setCurrentNotebook(null);
+          showCollection();
         }
       }
       setToast("已退出只读共享");
@@ -2976,9 +3041,10 @@ export default function Home() {
   }
 
   // --- Track E: edge review queue ----------------------------------------
-  async function openEdgeReviewQueue() {
-    if (!currentNotebookId) return;
-    const queue = await fetchEdgeReviewQueue(currentNotebookId);
+  async function openEdgeReviewQueue(notebookId: string | null = currentNotebookId) {
+    if (!notebookId) return;
+    const queue = await fetchEdgeReviewQueue(notebookId);
+    if (activeNotebookIdRef.current !== notebookId) return;
     setEdgeQueue(queue);
     setEdgeReviewOpen(true);
   }
@@ -3018,8 +3084,13 @@ export default function Home() {
 
   async function handleLogout() {
     setAccountMenuOpen(false);
+    workspaceEpochRef.current += 1;
+    askRunEpochRef.current += 1;
+    activeNotebookIdRef.current = null;
+    askAbortRef.current?.abort();
     await logoutUser();
     setCurrentUser(null);
+    window.location.reload();
   }
 
   const ROLE_LABELS: Record<ModelRole, string> = {
@@ -3091,6 +3162,12 @@ export default function Home() {
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
   // 只读共享库(Phase 2):无写权,门控写按钮 + 显示只读徽章/退出入口。
   const isReader = currentNotebook?.access === "reader";
+  const capabilities = {
+    canWriteNotebook: !isReader,
+    canGovernKnowledge: !isReader,
+    canManageReports: !isReader,
+    canManageSchemas: currentUser?.role === "admin",
+  };
   const menuNotebook = menuNotebookId
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
@@ -3339,10 +3416,12 @@ export default function Home() {
                   <LayoutDashboard size={17} />
                   <span>看板</span>
                 </button>
-                <button className="workspace-nav-button" onClick={openSchemas}>
-                  <Database size={17} />
-                  <span>Schema</span>
-                </button>
+                {capabilities.canManageSchemas && (
+                  <button className="workspace-nav-button" onClick={openSchemas}>
+                    <Database size={17} />
+                    <span>Schema</span>
+                  </button>
+                )}
                 <button className="workspace-nav-button" onClick={() => openKgView()}>
                   <Network size={17} />
                   <span>知识图谱</span>
@@ -3359,7 +3438,9 @@ export default function Home() {
                 <button className="workspace-nav-button" onClick={() => setInfoModal({
                   title: "设置",
                   message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与 notebook 编辑入口。`,
-                  actions: [{ label: "编辑当前 notebook", primary: true, action: () => setEditingNotebook(currentNotebook) }]
+                  actions: capabilities.canWriteNotebook
+                    ? [{ label: "编辑当前 notebook", primary: true, action: () => setEditingNotebook(currentNotebook) }]
+                    : []
                 })}>
                   <Settings size={17} />
                   <span>设置</span>
@@ -3744,6 +3825,7 @@ export default function Home() {
                       setKnowledgeStatusFilter(s);
                       loadKnowledge(knowledgeKind, { status: s, page: 0 }).catch(reportError);
                     }}
+                    readOnly={!capabilities.canGovernKnowledge}
                   />
                 )}
 
@@ -3761,6 +3843,7 @@ export default function Home() {
                     setToast={setToast}
                     focusReportId={pendingReportFocusId}
                     onFocusConsumed={() => setPendingReportFocusId(null)}
+                    readOnly={!capabilities.canManageReports}
                   />
                 )}
               </div>
@@ -4501,7 +4584,7 @@ export default function Home() {
         </section>
       )}
 
-      {schemaModalOpen && (
+      {schemaModalOpen && capabilities.canManageSchemas && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSchemaModalOpen(false); }}>
           <div className="utility-modal-card">
             <div className="source-modal-header">
@@ -5447,6 +5530,7 @@ function KnowledgeBrowser({
   total,
   page,
   onPage,
+  readOnly,
 }: {
   kind: KnowledgeKind;
   items: KnowledgeItem[] | null;
@@ -5466,6 +5550,7 @@ function KnowledgeBrowser({
   total: number;
   page: number;
   onPage: (p: number) => void;
+  readOnly?: boolean;
 }) {
   const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
   useEffect(() => { setCtx({}); }, [kind]);
@@ -5492,7 +5577,7 @@ function KnowledgeBrowser({
           {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : value}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
-        <button className="sort-button" onClick={onFindDuplicates}>查重</button>
+        {!readOnly && <button className="sort-button" onClick={onFindDuplicates}>查重</button>}
       </div>
       {duplicates !== null && (
         <div className="knowledge-panel">
@@ -5505,7 +5590,7 @@ function KnowledgeBrowser({
               {group.members.map((member, memberIndex) => (
                 <div className="dup-member" key={member.id}>
                   <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{member.status}</span></span>
-                  {memberIndex > 0 && (
+                  {!readOnly && memberIndex > 0 && (
                     <button className="sort-button" onClick={() => onMerge(member.id, group.members[0].id)}>
                       合并到第 1 条
                     </button>
@@ -5535,23 +5620,32 @@ function KnowledgeBrowser({
                 {(item.applies_to ?? []).map((scope) => <span className="tag" key={scope}>{scope}</span>)}
               </div>
               <div className="knowledge-govern">
-                <label>状态
-                  <select value={item.status} onChange={(event) => onStatus(item.id, event.target.value)}>
-                    {KNOWLEDGE_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
-                  </select>
-                </label>
-                <label>Owner
-                  <input
-                    defaultValue={item.owner ?? ""}
-                    placeholder="未分配"
-                    onBlur={(event) => {
-                      const next = event.target.value.trim();
-                      if (next !== (item.owner ?? "")) onOwner(item.id, next);
-                    }}
-                  />
-                </label>
+                {readOnly ? (
+                  <>
+                    <span className="tag">{item.status}</span>
+                    {item.owner && <span className="tag">Owner {item.owner}</span>}
+                  </>
+                ) : (
+                  <>
+                    <label>状态
+                      <select value={item.status} onChange={(event) => onStatus(item.id, event.target.value)}>
+                        {KNOWLEDGE_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
+                      </select>
+                    </label>
+                    <label>Owner
+                      <input
+                        defaultValue={item.owner ?? ""}
+                        placeholder="未分配"
+                        onBlur={(event) => {
+                          const next = event.target.value.trim();
+                          if (next !== (item.owner ?? "")) onOwner(item.id, next);
+                        }}
+                      />
+                    </label>
+                  </>
+                )}
                 {item.last_reviewed && <span className="tag">reviewed {item.last_reviewed.slice(0, 10)}</span>}
-                {tier === "personal" && item.status !== "deprecated" && onPropose && (
+                {!readOnly && tier === "personal" && item.status !== "deprecated" && onPropose && (
                   <button
                     className="sort-button"
                     title="提交晋升到基准库"

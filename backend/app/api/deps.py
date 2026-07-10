@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import AsyncIterator
 
 from fastapi import Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.models.schemas import UserProfile
@@ -34,7 +35,7 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
     token = _bearer_token(request)
     user: "UserProfile | None" = None
     if token:
-        user = repo.resolve_session(token)
+        user = await run_in_threadpool(repo.resolve_session, token)
         if user is None:
             raise HTTPException(status_code=401, detail="invalid or expired session")
     elif settings.auth_optional:
@@ -53,7 +54,10 @@ async def require_notebook_write(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> str:
     """写守卫:仅 owner。非 owner → 404(不泄露存在性)。"""
-    if not repository().user_can_access_notebook(notebook_id, user.id):
+    allowed = await run_in_threadpool(
+        repository().user_can_access_notebook, notebook_id, user.id
+    )
+    if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
     return notebook_id
 
@@ -62,7 +66,10 @@ async def require_notebook_read(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> str:
     """读守卫:owner ∪ 只读成员。非授权 → 404(不泄露存在性)。"""
-    if not repository().user_can_read_notebook(notebook_id, user.id):
+    allowed = await run_in_threadpool(
+        repository().user_can_read_notebook, notebook_id, user.id
+    )
+    if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
     return notebook_id
 

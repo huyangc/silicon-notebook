@@ -11,6 +11,7 @@ def test_silicon_notebook_prefixed_vars_take_effect(monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", "/data/storage")
     monkeypatch.setenv("SILICON_NOTEBOOK_SINGLE_USER_EMAIL", "ops@example.com")
     monkeypatch.setenv("SILICON_NOTEBOOK_SINGLE_USER_NAME", "Ops")
+    monkeypatch.setenv("SILICON_NOTEBOOK_ADMIN_PASSWORD", "production-secret")
     from app.core.config import Settings
     s = Settings()
     assert s.environment == "production"

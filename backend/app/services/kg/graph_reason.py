@@ -71,6 +71,8 @@ def build_rx_graph(
             "object_type": meta.get("type", ""),
             "name": meta.get("name", ""),
         }
+        if meta.get("tier"):
+            payload["tier"] = meta["tier"]
         if tag_kind:
             payload["kind"] = "entity"
         idx = G.add_node(payload)
@@ -246,10 +248,11 @@ def render_subgraph_context(
         k1: [Formula] Node A
         k2: [Claim] Node B  — ev: "A derives B"
         chain:
-          [k2] Node B --derived_from--> [k1] Node A
+          [k1] Node A --derived_from--> [k2] Node B
 
-    The per-edge chain line carries BOTH endpoint keys (`[k_tgt] tgt
-    --edge_type--> [k_src] src`), mirroring `_answer_context`'s existing
+    The per-edge chain line carries BOTH endpoint keys (`[k_src] src
+    --edge_type--> [k_tgt] tgt`), preserving the extraction/build contract and
+    mirroring `_answer_context`'s existing
     `k2 -[derived_from]-> k1` relation lines so the `[k]` anchor markers remain
     resolvable by `_parse_answer_anchors` / `_MARKER_RE`.
 
@@ -275,9 +278,9 @@ def render_subgraph_context(
         oid = node["object_id"]
         name = node.get("name", oid)
         otype = node.get("object_type", "")
-        # Tier comes from the incoming edge; seed nodes (no edge) default
-        # "personal" since we cannot know their tier without an edge to read.
-        node_tier = edge.get("tier", "personal") if edge else "personal"
+        # Federated graph nodes carry their owning notebook tier. Fall back to
+        # the incoming edge only for legacy/synthetic callers without it.
+        node_tier = node.get("tier") or (edge.get("tier", "personal") if edge else "personal")
         quote = ""
         if edge:
             ev_list = edge.get("evidence", [])
@@ -314,7 +317,7 @@ def render_subgraph_context(
             src_name = id_map[src_key].get("name", "")
         tgt_name = node.get("name", tgt_oid)
         chain_lines.append(
-            f"  [{tgt_key}] {tgt_name} --{etype}--> [{src_key}] {src_name}  (tier={edge_tier})".rstrip()
+            f"  [{src_key}] {src_name} --{etype}--> [{tgt_key}] {tgt_name}  (tier={edge_tier})".rstrip()
         )
 
     if chain_lines:

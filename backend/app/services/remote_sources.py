@@ -6,12 +6,71 @@ Content-Type 以 application/pdf 开头，或响应首字节为 %PDF-，即视�
 from __future__ import annotations
 
 import os
+import ipaddress
+import socket
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlparse, ParseResult
 
 MAX_PDF_BYTES = 200 * 1024 * 1024  # 与 mineru.net 单文件上限一致
+
+
+class UnsafeRemoteSourceURL(ValueError):
+    """The URL is not safe for a server-side outbound request."""
+
+
+def validate_public_http_url(
+    url: str,
+    *,
+    resolver: Callable = socket.getaddrinfo,
+) -> ParseResult:
+    """Validate an outbound URL and require every resolved address to be public.
+
+    The check is intentionally applied immediately before the initial request
+    and again for every redirect.  Rejecting a hostname when *any* answer is
+    private prevents round-robin DNS from mixing public and internal targets.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise UnsafeRemoteSourceURL("URL 必须以 http/https 开头")
+    if not parsed.hostname:
+        raise UnsafeRemoteSourceURL("URL 缺少主机名")
+    if parsed.username is not None or parsed.password is not None:
+        raise UnsafeRemoteSourceURL("URL 不允许包含用户名或密码")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise UnsafeRemoteSourceURL("URL 端口无效") from exc
+    try:
+        answers = resolver(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise UnsafeRemoteSourceURL(f"无法解析 URL 主机：{exc}") from exc
+    if not answers:
+        raise UnsafeRemoteSourceURL("URL 主机没有可用地址")
+    for answer in answers:
+        raw_ip = answer[4][0]
+        try:
+            address = ipaddress.ip_address(raw_ip)
+        except ValueError as exc:
+            raise UnsafeRemoteSourceURL("URL 主机解析结果无效") from exc
+        if not address.is_global:
+            raise UnsafeRemoteSourceURL("URL 指向本机、内网或保留地址")
+    return parsed
+
+
+class _PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-apply the public-address policy to every redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_public_http_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(request: urllib.request.Request, timeout: float):
+    validate_public_http_url(request.full_url)
+    opener = urllib.request.build_opener(_PublicOnlyRedirectHandler())
+    return opener.open(request, timeout=timeout)
 
 
 class FetchResult(NamedTuple):
@@ -97,7 +156,7 @@ def download_pdf(
 
 def _default_opener(url: str, timeout: float):
     request = urllib.request.Request(url, method="GET")
-    return urllib.request.urlopen(request, timeout=timeout)
+    return _safe_urlopen(request, timeout)
 
 
 def _display_name(parsed: ParseResult) -> str:
@@ -110,7 +169,7 @@ def _display_name(parsed: ParseResult) -> str:
 def _default_fetch(url: str, timeout: float) -> FetchResult:
     request = urllib.request.Request(url, method="GET")
     request.add_header("Range", "bytes=0-1023")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _safe_urlopen(request, timeout) as response:
         status = getattr(response, "status", 200) or 200
         content_type = response.headers.get("Content-Type", "") or ""
         content_length = _total_length(response.headers)
