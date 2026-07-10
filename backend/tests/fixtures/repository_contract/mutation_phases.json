@@ -1,0 +1,98 @@
+{
+  "approve_promotion": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "confirm_conflict": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "copy_notebook": {
+    "cache_invalidation": false,
+    "exemption": "deep copy preserves source versions and must not add dirty/version side effects",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": false,
+    "version_bump": false
+  },
+  "delete_source": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "merge_knowledge": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "migration_recovery_seed": {
+    "cache_invalidation": false,
+    "exemption": "startup fixture/migration/recovery/seed writes bypass the online mutation coordinator",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": false,
+    "version_bump": false
+  },
+  "parse_source": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": true,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "process_source": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": true,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "set_edge_review": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "store_kg": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  },
+  "streaming_ask": {
+    "cache_invalidation": false,
+    "exemption": "Ask state is durable application state, not a KG semantic mutation",
+    "index_scheduling": false,
+    "semantic_mutation": false,
+    "unified_dirty": false,
+    "version_bump": false
+  },
+  "update_knowledge": {
+    "cache_invalidation": true,
+    "exemption": "",
+    "index_scheduling": false,
+    "semantic_mutation": true,
+    "unified_dirty": true,
+    "version_bump": true
+  }
+}
