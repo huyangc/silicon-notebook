@@ -1,21 +1,13 @@
 "use client";
 
-import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Copy, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, Upload, X } from "lucide-react";
+import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { BarChart3, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
-import {
-  buildAnswerReferences,
-  computeSourceTierCounts,
-  renderTextWithReferenceNumbers,
-  splitInlineLatex,
-  type AnswerReference,
-} from "./answer-formatting";
-import { AnswerMarkdown } from "./answer-markdown";
-import { placeCitationPopover } from "./citation-popover";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
-import { formatDuration, getReasoningTraceSummary, getTraceStepDetail, TRACE_STEP_LABELS } from "./reasoning-trace";
+import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
+import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
   groupOf, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
@@ -62,6 +54,51 @@ import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
 import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
+import {
+  CHAT_MODES,
+  EMPTY_KNOWLEDGE,
+  KNOWLEDGE_STATUS_OPTIONS,
+  SOURCES_PAGE_SIZE,
+  type AskResponse,
+  type ChatMode,
+  type ChatTurn,
+  type ConceptDetailResp,
+  type ConversationDetail,
+  type ConversationSummary,
+  type DuplicateGroup,
+  type Evidence,
+  type EvidenceItem,
+  type FgLink,
+  type FgNode,
+  type Health,
+  type KgNeighborsResp,
+  type KgObject,
+  type KgOccurrence,
+  type KgProcedureStep,
+  type KgSearchHit,
+  type KgSearchResp,
+  type KnowledgeGraph,
+  type KnowledgeItem,
+  type KnowledgeKind,
+  type KnowledgeRecord,
+  type KnowledgeTypeCount,
+  type MergeReviewJob,
+  type MergeReviewSummary,
+  type NodeContext,
+  type NotebookAnalytics,
+  type NotebookSummary,
+  type ObjectSchema,
+  type PaginatedKnowledge,
+  type PaginatedSources,
+  type PendingMerge,
+  type SearchHit,
+  type SourceElement,
+  type SourceSummary,
+  type UnifiedConceptNode,
+  type UnifiedEdge,
+  type UnifiedGraphResp,
+  type UnifiedKgStatus,
+} from "./workspace-model";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -82,258 +119,6 @@ function fileExtension(name: string): string {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
-type NotebookSummary = {
-  id: string;
-  name: string;
-  purpose: string;
-  primary_domain: string;
-  status: string;
-  counts: Record<string, number>;
-  created_label: string;
-  target_users?: string;
-  expected_questions?: string[];
-  source_types?: string[];
-  taxonomy?: string[];
-  access_scope?: string;
-  tier?: string;
-  kg_ready?: boolean;
-  kg_building?: boolean;
-  base_kg_available?: boolean;
-  base_notebook_name?: string; // 全局唯一基准库名(所有用户只读可见,分析弹窗顶部展示)
-  kg_pending_sources?: number;
-  access?: "owner" | "reader"; // "reader" = 只读共享而来(Phase 2)
-  shared_from?: string;        // reader 时 = 原 owner 用户名
-};
-
-type SourceSummary = {
-  id: string;
-  notebook_id: string;
-  title: string;
-  type: string;
-  status: string;
-  parse_status: string;
-  summary: string;
-  element_count: number;
-  file_name: string;
-  file_size: number;
-  source_url?: string;
-  created_label: string;
-  error_message?: string;
-  extraction_warning?: string | null;
-  kg_extracted?: boolean;
-};
-
-type PaginatedSources = {
-  items: SourceSummary[];
-  total_count: number;
-  offset: number;
-  limit: number;
-};
-const SOURCES_PAGE_SIZE = 50;
-
-type PaginatedKnowledge = {
-  items: KnowledgeRecord[];
-  total_count: number;
-  offset: number;
-  limit: number;
-};
-
-type SourceElement = {
-  id: string;
-  source_id: string;
-  element_type: string;
-  location_label: string;
-  text: string;
-  metadata: Record<string, unknown>;
-};
-
-type SearchHit = {
-  scope: string;
-  notebook_id: string;
-  label: string;
-  text: string;
-  source_id: string;
-  element_id: string;
-};
-
-type Health = {
-  status: string;
-  llm_configured: boolean;
-};
-
-type Evidence = {
-  source_id: string;
-  source_title: string;
-  location_label: string;
-  quoted_span: string;
-  element_id: string;
-};
-
-type AnswerAnchor = {
-  key: string;
-  object_id: string;
-  object_type: string;
-  label: string;
-  name: string;
-  definition?: string | null;
-  snippet?: string | null;
-  source_title: string;
-  location_label: string;
-  tier?: string;
-};
-
-type AskResponse = {
-  answer_id: string;
-  conversation_id: string;
-  conclusion: string;
-  answer: string;
-  grounded: boolean;
-  anchors: AnswerAnchor[];
-  related_knowledge: KnowledgeRecord[];
-  citations: Citation[];
-  llm_mode: string;
-  evidence_level?: "grounded" | "overview" | "inferred";
-  retrieval_query?: string;
-  top_relevance?: number;
-  reasoning_trace?: ReasoningTraceStep[];
-  mode?: AskModeId;
-  model_errors?: { stage: string; model: string; message: string }[];
-  index_required?: boolean;
-};
-
-type ChatTurn = { question: string; response: AskResponse };
-type ConversationSummary = { id: string; title: string; updated_at: string; turn_count: number; used_reasoning?: boolean };
-type ConversationDetail = {
-  id: string;
-  notebook_id: string;
-  title: string;
-  updated_at: string;
-  turn_count: number;
-  turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
-  active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
-};
-
-type Citation = {
-  label: string;
-  source_id: string;
-  element_id: string;
-  location_label: string;
-  quoted_span: string;
-  tier?: string;
-};
-
-type ChatMode = "ask" | "rules" | "reports";
-
-const CHAT_MODES: Array<[ChatMode, string]> = [
-  ["ask", "问答"],
-  ["rules", "知识库"],
-  ["reports", "深度报告"]
-];
-
-// Any object_type string returned by /knowledge-types.
-type KnowledgeKind = string;
-
-type KnowledgeFieldValue = { key: string; value: string };
-type KnowledgeTypeCount = { object_type: string; label: string; count: number };
-
-type ObjectSchema = {
-  object_type: string;
-  plural: string;
-  fields: string[];
-  primary: string;
-  description: string;
-  label: string;
-  list_fields: string[];
-  source: string; // builtin | custom | induced
-  status: string; // active | proposed | disabled
-  rationale: string;
-  notebook_id: string;
-};
-// Generic record returned by GET /notebooks/{id}/knowledge?type=
-type KnowledgeRecord = {
-  id: string;
-  object_type: string;
-  headline?: string;
-  fields: KnowledgeFieldValue[];
-  status: string;
-  owner?: string;
-  last_reviewed?: string;
-  evidence: Evidence[];
-};
-
-const KNOWLEDGE_STATUS_OPTIONS = [
-  "reviewed",
-  "approved",
-  "deprecated",
-  "conflict",
-  "project_specific"
-];
-
-// Loose shape covering every card type the knowledge endpoints return.
-type KnowledgeItem = {
-  id: string;
-  status: string;
-  owner?: string;
-  last_reviewed?: string;
-  evidence: Evidence[];
-  title?: string;
-  statement?: string;
-  applies_to?: string[];
-  recommendation?: string;
-  risk_if_ignored?: string;
-  severity?: string;
-  name?: string;
-  use_when?: string;
-  benefit?: string;
-  limitation?: string;
-  description?: string;
-  term?: string;
-  definition?: string;
-  // Generic-type fields (case/claim/finding/concept/principle/example).
-  headline?: string;
-  object_type?: string;
-  fields?: KnowledgeFieldValue[];
-};
-
-const EMPTY_KNOWLEDGE: Record<string, KnowledgeItem[] | null> = {};
-
-type KnowledgeRef = { id: string; object_type: string; headline: string; status: string };
-type DuplicateGroup = { object_type: string; similarity: number; members: KnowledgeRef[] };
-
-type NotebookAnalytics = {
-  answers_total: number;
-  feedback_useful: number;
-  feedback_not_useful: number;
-  usefulness_rate: number;
-  low_rated_questions: string[];
-  candidate_counts: Record<string, number>;
-  knowledge_counts: Record<string, number>;
-  source_status_counts: Record<string, number>;
-};
-
-
-type KnowledgeNode = { id: string; object_type: string; headline: string; status: string };
-type KnowledgeEdge = { from_id: string; to_id: string; relation: string; label: string };
-type KnowledgeGraph = { nodes: KnowledgeNode[]; edges: KnowledgeEdge[] };
-
-type UnifiedConceptNode = { id: string; object_type: string; payload: { name?: string; [k: string]: unknown } };
-type UnifiedEdge = { source_object_id: string; target_object_id: string; edge_type: string; support_count?: number; source_count?: number };
-type UnifiedGraphResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[]; total_nodes?: number; total_edges?: number; truncated?: boolean; viz_building?: boolean };
-type EvidenceItem = { source_id: string; source_title: string; element_id: string; element_type: string; location_label: string; quoted_span: string; confidence: number; element_text?: string };
-type KgObject = { id: string; object_type: string; payload: { name?: string; section_path?: string; [k: string]: unknown }; evidence: EvidenceItem[]; edge_type?: string };
-type ConceptDetailResp = { canonical_id: string; canonical_name: string; members: KgObject[]; attached: KgObject[]; evidence: EvidenceItem[] };
-type KgOccurrence = { quoted_span?: string; source_title?: string; source_id?: string; element_text?: string; location_label?: string; element_type?: string; confidence?: number };
-type KgProcedureStep = { name: string; element_text: string };
-type NodeContext = { id: string; object_type: string; name: string; section_path: string; occurrences: KgOccurrence[]; definition: string | null; steps: KgProcedureStep[] | null };
-type PendingMerge = { id: string; canonical_a: string; canonical_b: string; score: number; status: string };
-type UnifiedKgStatus = { dirty: boolean; last_rebuild_at: string; objects: number; relations: number; clusters: number; viz_indexed: boolean; viz_nodes: number; viz_edges: number; viz_stale: boolean; viz_building?: boolean };
-type MergeReviewSummary = { reviewed: number; confirmed: number; rejected: number; unsure: number };
-type MergeReviewJob = { status: string; total: number; done: number; error: string };
-type FgNode = { id: string; name: string; type: string; val: number; degree: number; x?: number; y?: number; vx?: number; vy?: number };
-type FgLink = { source: string | FgNode; target: string | FgNode; label: string; sourceCount?: number };
-type KgSearchHit = { object_id: string; name: string; object_type: string; score: number; match: string };
-type KgSearchResp = { query: string; hits: KgSearchHit[] };
-type KgNeighborsResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
 
 const RELATION_LABELS: Record<string, string> = {
   related_concepts: "关联概念",
@@ -350,21 +135,7 @@ const RELATION_LABELS: Record<string, string> = {
   contrasts_with: "contrasts"
 };
 
-const KG_TYPE_LABELS: Record<string, string> = {
-  concept: "Concept",
-  claim: "Claim",
-  formula: "Formula",
-  procedure: "Procedure"
-};
-
 const KG_TYPE_ORDER = ["concept", "claim", "formula", "procedure"];
-
-const KG_TYPE_STYLE: Record<string, { color: string; border: string; text: string; glyph: string }> = {
-  concept: { color: "#2f80ed", border: "#1555a8", text: "C", glyph: "circle" },
-  claim: { color: "#16a085", border: "#0f6f5f", text: "CL", glyph: "triangle" },
-  formula: { color: "#a855f7", border: "#6d28d9", text: "F", glyph: "diamond" },
-  procedure: { color: "#f59e0b", border: "#b45309", text: "P", glyph: "square" }
-};
 
 type InfoModal = {
   title: string;
@@ -784,10 +555,6 @@ function sourceElementDomId(elementId: string): string {
   return `source-element-${elementId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
-function kgTypeLabel(type: string): string {
-  return KG_TYPE_LABELS[type] ?? type.replace(/(^|_)([a-z])/g, (_match, separator, char) => `${separator ? " " : ""}${char.toUpperCase()}`);
-}
-
 function kgNodeName(node: UnifiedConceptNode): string {
   const name = typeof node.payload.name === "string" ? node.payload.name.trim() : "";
   return name || node.id.replace(/^K-/, "");
@@ -802,19 +569,6 @@ function kgPayloadValue(value: unknown): string {
   if (Array.isArray(value)) return value.map(kgPayloadValue).filter(Boolean).join(", ");
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
-}
-
-function KgTypeMark({ type }: { type: string }) {
-  const style = KG_TYPE_STYLE[type] ?? { color: "#64748b", border: "#334155", text: type.slice(0, 2).toUpperCase(), glyph: "circle" };
-  return (
-    <span
-      className={`kg-shape-mark ${style.glyph}`}
-      style={{ background: style.color, borderColor: style.border }}
-      aria-hidden="true"
-    >
-      {style.glyph === "circle" ? style.text : ""}
-    </span>
-  );
 }
 
 function kgTypeBandForce(width: number, height: number, activeTypes: string[]) {
@@ -5132,7 +4886,6 @@ export default function Home() {
     </div>
   );
 }
-
 function NotebookList({
   entries,
   openNotebook,
@@ -5680,381 +5433,6 @@ function KnowledgeBrowser({
         </div>
       )}
       <Pagination page={page} pageSize={50} total={total} onPage={onPage} />
-    </div>
-  );
-}
-
-function InlineFormula({ latex }: { latex: string }) {
-  let html = "";
-  try {
-    html = katex.renderToString(latex, { throwOnError: false, displayMode: false });
-  } catch {
-    html = "";
-  }
-  if (!html) return <code className="answer-inline-code">{latex}</code>;
-  return <span className="answer-inline-formula" dangerouslySetInnerHTML={{ __html: html }} />;
-}
-
-// Render a formula-name / headline string with KaTeX.
-//   isFormula=true  -> the WHOLE text is a Formula object's name (no $ delimiters),
-//                      rendered as one inline formula (raw fallback on katex error).
-//   isFormula=false -> prose: inline-render `$...$` and `\( ... \)` spans, leave the
-//                      rest as plain text (delimiter-free text is never mangled).
-function LatexText({ text, isFormula = false }: { text: string; isFormula?: boolean }) {
-  if (!text) return null;
-  if (isFormula) return <InlineFormula latex={text} />;
-  const segments = splitInlineLatex(text);
-  if (segments.length === 1 && segments[0].type === "text") return <>{segments[0].value}</>;
-  return (
-    <>
-      {segments.map((segment, index) =>
-        segment.type === "math"
-          ? <InlineFormula latex={segment.value} key={`m-${index}`} />
-          : <span key={`t-${index}`}>{segment.value}</span>
-      )}
-    </>
-  );
-}
-
-function referenceTitle(reference: AnswerReference): string {
-  if (reference.anchor) return reference.anchor.name || reference.anchor.label || reference.anchor.key;
-  return reference.citation?.label || reference.displayLabel;
-}
-
-function referenceSnippet(reference: AnswerReference): string {
-  if (reference.anchor) return reference.anchor.definition || reference.anchor.snippet || "";
-  return reference.citation?.quoted_span || "";
-}
-
-function referenceSource(reference: AnswerReference): string {
-  if (reference.anchor) return reference.anchor.source_title || "";
-  return reference.citation?.source_id || "";
-}
-
-function referenceLocation(reference: AnswerReference): string {
-  if (reference.anchor) return reference.anchor.location_label || "";
-  return reference.citation?.location_label || "";
-}
-
-function referenceTier(reference: AnswerReference): string {
-  return reference.anchor?.tier || "";
-}
-
-function CiteChip({
-  reference,
-  selected,
-  onSelect
-}: {
-  reference: AnswerReference;
-  selected: boolean;
-  onSelect: (reference: AnswerReference, event: MouseEvent<HTMLButtonElement>) => void;
-}) {
-  return (
-    <span className="cite-chip-wrap">
-      <button
-        type="button"
-        aria-expanded={selected}
-        className={`cite-chip ${selected ? "active" : ""}`}
-        onClick={(event) => onSelect(reference, event)}
-      >{reference.displayLabel}</button>
-    </span>
-  );
-}
-
-
-async function copyTextToClipboard(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  document.body.removeChild(textarea);
-}
-
-function SelectedReferenceDetail({
-  reference,
-  onOpenKnowledgeGraph
-}: {
-  reference: AnswerReference;
-  onOpenKnowledgeGraph: (objectId?: string) => void;
-}) {
-  const objectType = reference.anchor?.object_type || "";
-  const title = referenceTitle(reference);
-  const snippet = referenceSnippet(reference);
-  const source = referenceSource(reference);
-  const location = referenceLocation(reference);
-  const tier = referenceTier(reference);
-  const isRelationReference = objectType === "relation";
-  const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
-  return (
-    <aside className="cite-detail-card" aria-live="polite">
-      <div className="cite-detail-head">
-        <strong>{reference.displayLabel}</strong>
-        {objectType && <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>}
-        {tier && (
-          <span className={`tier-badge tier-${tier}`} title={tier === "base" ? "来自基准库（权威参考层）" : "来自个人层"}>
-            {tier === "base" ? "base" : "personal"}
-          </span>
-        )}
-        <button
-          type="button"
-          onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
-          disabled={!canLocateInGraph}
-          title={
-            isRelationReference
-              ? "关系引用绑定的是边证据，不是知识节点，无法在知识图谱中定位"
-              : reference.anchor?.object_id
-                ? "在知识图谱中定位"
-                : "该引用没有绑定知识节点"
-          }
-        >
-          <ExternalLink size={14} />
-          {isRelationReference ? "关系证据不可定位" : "知识图谱"}
-        </button>
-      </div>
-      <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>
-      {snippet && <p><LatexText text={snippet} /></p>}
-      {(source || location) && <small>{[source, location].filter(Boolean).join(" · ")}</small>}
-    </aside>
-  );
-}
-
-// 点击引用徽章 → 在徽章处弹出的浮层(替代原来底部固定卡 + 滚动定位,长答案不再来回跳)。
-// fixed 定位锚定被点徽章;点外部 / Esc / 滚动即关闭。
-function CitationPopover({
-  reference,
-  anchorRect,
-  onClose,
-  onOpenKnowledgeGraph,
-}: {
-  reference: AnswerReference;
-  anchorRect: DOMRect;
-  onClose: () => void;
-  onOpenKnowledgeGraph: (objectId?: string) => void;
-}) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [pos, setPos] = useState<{ top: number; left: number }>(
-    () => ({ top: anchorRect.bottom + 6, left: anchorRect.left })
-  );
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos(placeCitationPopover(
-      { top: anchorRect.top, bottom: anchorRect.bottom, left: anchorRect.left },
-      { width: r.width, height: r.height },
-      { width: window.innerWidth, height: window.innerHeight },
-    ));
-  }, [anchorRect]);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: globalThis.KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    const onScroll = () => onClose();
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [onClose]);
-  return (
-    <div ref={ref} className="cite-popover" role="dialog"
-         style={{ position: "fixed", top: pos.top, left: pos.left }}>
-      <SelectedReferenceDetail reference={reference} onOpenKnowledgeGraph={onOpenKnowledgeGraph} />
-    </div>
-  );
-}
-
-function ReasoningTracePanel({ steps, live = false }: { steps: ReasoningTraceStep[]; live?: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const summary = getReasoningTraceSummary(steps, live);
-  return (
-    <div className={`reasoning-trace-panel ${live ? "live" : ""} ${expanded ? "expanded" : "collapsed"}`}>
-      <button
-        aria-expanded={expanded}
-        className="reasoning-trace-summary"
-        onClick={() => setExpanded((value) => !value)}
-        type="button"
-      >
-        <Sparkles size={15} />
-        <span className="reasoning-trace-title">{summary.title}</span>
-        <span className={`reasoning-trace-chip ${summary.latestLabel ? "" : "empty"}`}>{summary.latestLabel || "空"}</span>
-        <strong>{summary.latestSummary}</strong>
-        <small>{summary.latestDetail}</small>
-        <span className="reasoning-trace-count">
-          {summary.stepCountLabel}{summary.totalLabel ? ` · ${summary.totalLabel}` : ""}
-        </span>
-        {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-      </button>
-      {expanded && (
-        <ol className="reasoning-trace-list">
-          {steps.length === 0 ? (
-            <li className="reasoning-trace-empty">等待后端事件…</li>
-          ) : steps.map((step, index) => {
-            const detail = getTraceStepDetail(step);
-            const hasTime = typeof step.duration_ms === "number";
-            return (
-              <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
-                <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
-                <strong>{step.summary}</strong>
-                {(detail || hasTime) && (
-                  <div className="reasoning-trace-meta">
-                    {detail && <small>{detail}</small>}
-                    {hasTime && (
-                      <time className={`reasoning-trace-time ${(step.duration_ms ?? 0) >= 10000 ? "slow" : ""}`}>
-                        {formatDuration(step.duration_ms ?? 0)}
-                      </time>
-                    )}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ol>
-      )}
-    </div>
-  );
-}
-
-function AnswerView({
-  answer,
-  feedbackSent,
-  onFeedback,
-  onOpenKnowledgeGraph,
-  notebookId,
-  onBuildScaleIndex,
-  buildingScaleIndex
-}: {
-  answer: AskResponse;
-  feedbackSent: string;
-  onFeedback: (rating: "useful" | "not_useful") => void;
-  onOpenKnowledgeGraph: (objectId?: string) => void;
-  notebookId: string | null;
-  onBuildScaleIndex: (nb: string) => void;
-  buildingScaleIndex: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-  // 点击引用 → 在点击处弹浮层(reference + 被点徽章的 rect);点外部关闭。替代原底部固定卡 + 滚动。
-  const [citePopover, setCitePopover] = useState<{ reference: AnswerReference; rect: DOMRect } | null>(null);
-  const answerText = answer.answer || answer.conclusion || "";
-  const references = useMemo(
-    () => buildAnswerReferences(answerText, answer.anchors, answer.citations),
-    [answerText, answer.anchors, answer.citations]
-  );
-  useEffect(() => {
-    setCitePopover(null);
-  }, [answer.answer_id]);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 1400);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-
-  async function copyAnswer() {
-    await copyTextToClipboard(renderTextWithReferenceNumbers(answerText, references));
-    setCopied(true);
-  }
-
-  return (
-    <div className="chat-answer">
-      {answer.model_errors && answer.model_errors.length > 0 && (() => {
-        const labelOf = (s: string) =>
-          ({ embed: "向量模型", rerank: "重排模型", answer: "答案模型", rewrite: "改写模型" } as Record<string, string>)[s] ?? s;
-        const names = Array.from(new Set(answer.model_errors.map((e) => labelOf(e.stage)))).join("、");
-        return (
-          <div className="answer-model-error" title={answer.model_errors[0]?.message ?? ""}>
-            ⚠️ 部分模型调用失败（{names}），本次为降级输出，可能不完整或未接地。请检查 API key / 模型服务可用性。
-          </div>
-        );
-      })()}
-      {answer.index_required && (
-        <div className="answer-model-error" title="大库检索强制走索引;未建索引时仅有降级结果">
-          <span>此知识库较大且尚未建立检索索引，当前检索能力受限。</span>
-          <button
-            type="button"
-            className="mode-engine"
-            style={{ marginLeft: 6 }}
-            disabled={buildingScaleIndex}
-            onClick={() => { if (notebookId) onBuildScaleIndex(notebookId); }}
-          >
-            {buildingScaleIndex ? "构建中…" : "构建索引"}
-          </button>
-        </div>
-      )}
-      {(() => {
-        const lvl = answer.evidence_level ?? (answer.grounded ? "grounded" : "inferred");
-        const meta =
-          lvl === "grounded"
-            ? { cls: "answer-grounded", label: "有据" }
-            : lvl === "overview"
-            ? { cls: "answer-overview", label: "概述（仅薄证据，余为推断）" }
-            : { cls: "answer-ungrounded", label: "推断（未命中笔记本依据）" };
-        return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
-      })()}
-      {(() => {
-        const { personal, base } = computeSourceTierCounts(references);
-        if (personal + base === 0) return null;
-        return (
-          <span className="tag source-dist" title="本次引用的来源分布（个人层 / 基准库）">
-            来源 · 个人 {personal}
-            {base > 0 && <> · <strong className="source-dist-base">基准库 {base}</strong></>}
-          </span>
-        );
-      })()}
-      <AnswerMarkdown
-        answer={answerText}
-        anchors={answer.anchors}
-        citations={answer.citations}
-        selectedReferenceId={citePopover?.reference.id ?? null}
-        onReferenceClick={(reference, event) => setCitePopover({ reference, rect: event.currentTarget.getBoundingClientRect() })}
-      />
-      {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
-        <ReasoningTracePanel steps={answer.reasoning_trace} />
-      )}
-      {citePopover && (
-        <CitationPopover
-          reference={citePopover.reference}
-          anchorRect={citePopover.rect}
-          onClose={() => setCitePopover(null)}
-          onOpenKnowledgeGraph={onOpenKnowledgeGraph}
-        />
-      )}
-      <div className="answer-feedback">
-        <button
-          aria-label="有用"
-          className={`answer-action ${feedbackSent === "useful" ? "selected" : ""}`}
-          disabled={Boolean(feedbackSent)}
-          onClick={() => onFeedback("useful")}
-          title="有用"
-          type="button"
-        ><ThumbsUp size={16} /></button>
-        <button
-          aria-label="需改进"
-          className={`answer-action ${feedbackSent === "not_useful" ? "selected" : ""}`}
-          disabled={Boolean(feedbackSent)}
-          onClick={() => onFeedback("not_useful")}
-          title="需改进"
-          type="button"
-        ><ThumbsDown size={16} /></button>
-        <button
-          aria-label={copied ? "已复制" : "复制回答"}
-          className={`answer-action ${copied ? "selected" : ""}`}
-          onClick={() => copyAnswer().catch(() => undefined)}
-          title={copied ? "已复制" : "复制回答"}
-          type="button"
-        >{copied ? <Check size={16} /> : <Copy size={16} />}</button>
-      </div>
     </div>
   );
 }

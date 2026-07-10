@@ -44,6 +44,7 @@ export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
   "$ROOT_DIR/backend/app/services/kg/scheduler.py" \
   "$ROOT_DIR/backend/app/services/repository.py" \
   "$ROOT_DIR/backend/app/services/retrieval.py" \
+  "$ROOT_DIR/backend/app/services/sqlite_identity.py" \
   "$ROOT_DIR/backend/app/services/sqlite_repository.py" \
   "$ROOT_DIR/backend/app/api/deps.py" \
   "$ROOT_DIR/backend/app/api/auth_routes.py" \
