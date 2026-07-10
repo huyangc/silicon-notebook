@@ -55,7 +55,7 @@
 
 三段共用一张**版本键 checkpoint 表**做"崩溃恢复日志"(节点向量除外,它天然以 `knowledge_embeddings` 为 checkpoint)。核心不变式:
 
-- **checkpoint 按 `input_version` 键**,只在 rebuild 开头 GC 掉非当前版本行 —— 数据/算法版本一变自动失效重算,永不用陈旧决策。
+- **checkpoint 按 `input_version` 键**,只在确定要真正重算(跳过闸之后,而非 rebuild 绝对开头)才 GC 掉非当前版本行 —— 数据/算法版本一变自动失效重算,永不用陈旧决策;这版 `input_version` 特指 §4.1 的 `_ck_ver`(排除 emb_c),与顶层跳过闸用的完整版本是两回事。
 - checkpoint 是**恢复日志、非永久缓存**:写簇后权威存储仍是 `concept_clusters`;checkpoint 只为"在写簇/落库前被杀"提供续跑。
 - **落库粒度 = 一块/一组**:merge 审查每块(`KG_MERGE_REVIEW_BATCH_SIZE`)、描述每组、节点向量每 `EMBED_COMMIT_BATCHES` 批,各自一个小写事务。被杀最多丢一块。
 
@@ -66,7 +66,9 @@
 ```sql
 CREATE TABLE IF NOT EXISTS kg_rebuild_checkpoint (
     notebook_id   TEXT NOT NULL,
-    input_version TEXT NOT NULL,   -- _cluster_input_version(nb),进入 rebuild 时捕获
+    input_version TEXT NOT NULL,   -- _cluster_input_version(nb, exclude_emb_count=True)
+                                    -- ("backfill-stable" 版本,进入 rebuild 时捕获;
+                                    --  NOT 顶层跳过闸用的完整版本,见下)
     stage         TEXT NOT NULL,   -- 'merge_review' | 'concept_desc'
     item_key      TEXT NOT NULL,   -- 阶段内 item 的稳定语义键
     payload       TEXT NOT NULL,   -- json:该 item 的已完成结果
@@ -77,12 +79,14 @@ CREATE TABLE IF NOT EXISTS kg_rebuild_checkpoint (
 
 仓库内四个私有 helper:
 
-- `_rebuild_ckpt_gc(db, nb, ver)` → `DELETE ... WHERE notebook_id=? AND input_version != ?`。rebuild 开头(算出 `_ver` 后、concept 阶段前)调一次,清掉上一次不同版本残留,表有界。
-- `_rebuild_ckpt_clear(nb)` → `DELETE ... WHERE notebook_id=?`。`--fresh` 用,清所有版本所有阶段。
+- `_rebuild_ckpt_gc(db, nb, ver)` → `DELETE ... WHERE notebook_id=? AND input_version != ?`。**跳过闸(`if not force`)判定"确实要重算"之后**调一次(而非闸前的绝对入口)—— 用 `_ck_ver = _cluster_input_version(nb, exclude_emb_count=True)`,清掉上一次不同版本残留,表有界。GC 挪到闸后,是为了保住 `force=False` 命中跳过路径时**零 checkpoint 写入**这条不变量(闸前调用曾让"判定跳过"分支也顺带做一次 GC 写,是本轮修复顺带堵上的次要缺陷)。
+- `_rebuild_ckpt_clear(nb)` → `DELETE ... WHERE notebook_id=?`。`--fresh` 用,清所有版本所有阶段;版本无关,挪不挪位置都一样。
 - `_rebuild_ckpt_load(db, nb, ver, stage) -> Dict[item_key, dict]`(payload 已 `json.loads`)。
 - `_rebuild_ckpt_put(nb, ver, stage, rows: List[Tuple[str, dict]])` → 一个 `self._write()` 事务 `INSERT OR REPLACE`。
 
-`--fresh` 语义:`rebuild_unified_kg(fresh=True)` 在入口先 `_rebuild_ckpt_clear(nb)`(优先于 GC),强制 merge 审查 + 描述全量重跑。用于**只换了 KG 模型/阈值、数据没变**(此时 `input_version` 不变,否则会复用旧 LLM 决策)。默认 `fresh=False`;仅 CLI `--fresh` 置真,在线「刷新图谱」不受影响。
+`--fresh` 语义:`rebuild_unified_kg(fresh=True)` 在(挪到闸后的)checkpoint 维护点先 `_rebuild_ckpt_clear(nb)`(优先于 GC),强制 merge 审查 + 描述全量重跑。用于**只换了 KG 模型/阈值、数据没变**(此时 `input_version` 不变,否则会复用旧 LLM 决策)。默认 `fresh=False`;仅 CLI `--fresh` 置真,在线「刷新图谱」不受影响。
+
+**checkpoint 版本 ≠ 跳过闸版本**:顶层跳过闸(§3 步骤 1)继续用完整的 `_cluster_input_version(nb)`(含 `emb_c` = `knowledge_embeddings` COUNT)不变 —— 新增/变化的向量确实是该重新聚类的理由,这条不能省。但两个 LLM checkpoint(merge_review、concept_desc)改用 `_ck_ver = _cluster_input_version(nb, exclude_emb_count=True)`:mechanism 1(节点向量增量提交)会在 backfill 过程中持续推高 `emb_c`,而 `kg_mutation_seq`/`obj_c`/`dec_c` 在 backfill **结束前**保持不变(`_mark_unified_kg_dirty` 只在整段 backfill 结束时调一次)。若两个 checkpoint 仍沿用含 `emb_c` 的完整版本,节点向量阶段中途被杀后的续跑会因为 `emb_c` 已变而被 GC 判定"输入变了",直接清空可能耗时数小时的 merge 审查/描述 checkpoint,被迫从头重新裁决 —— 这正是本轮修复要堵住的口子(见 §5)。`item_key` 已经提供阶段内细粒度正确性,checkpoint 键丢弃 `emb_c` 不影响冲突检测。
 
 ### 4.2 Mechanism 1:节点向量增量提交
 
@@ -115,18 +119,18 @@ if progress: progress(len(pending), len(pending))
 
 `concept_merge_review.review_merge_candidates` 增可选 `on_chunk: Callable[[List[dict]], None] = None`,在并发 `as_completed` 循环与串行循环里**每块决策就绪即调用一次**(在**主线程**,SQLite 写安全);`on_chunk` 自身异常被吞并 warning(持久化失败绝不能拖垮 fail-open 的审查)。
 
-rebuild 的 merge 审查块(`sqlite_repository.py:6889`)改为:
+rebuild 的 merge 审查块(`sqlite_repository.py:6889`)改为(`_ck_ver` = §4.1 的 backfill-stable 版本,**非**顶层跳过闸用的完整版本):
 
 ```
 id_to_key = { f"ac{i}": _pair_key(a, b) for i,(a,b,s) in enumerate(autoc) }   # _pair_key = "\x1f".join(sorted((a,b)))
-cached = _rebuild_ckpt_load(db, nb, _ver, 'merge_review')          # {pair_key: {decision, confidence, canonical_name}}
+cached = _rebuild_ckpt_load(db, nb, _ck_ver, 'merge_review')       # {pair_key: {decision, confidence, canonical_name}}
 todo = [ cand for cand in cand_dicts if id_to_key[cand['id']] not in cached ]
 
 def _persist(chunk_decisions):
     rows = [(id_to_key[d['candidate_id']],
              {'decision': d['decision'], 'confidence': d['confidence'], 'canonical_name': d.get('canonical_name','')})
             for d in chunk_decisions if d['candidate_id'] in id_to_key]
-    if rows: _rebuild_ckpt_put(nb, _ver, 'merge_review', rows)
+    if rows: _rebuild_ckpt_put(nb, _ck_ver, 'merge_review', rows)
 
 new = review_merge_candidates(self.kg_llm_client, todo,
           batch_size=settings.kg_merge_review_batch_size,
@@ -143,15 +147,16 @@ for i,(a,b,s) in enumerate(autoc):
 
 - 键 = **排序后的 canonical id 对**(`_pair_key`),(X,Y) 与 (Y,X) 归一。
 - 被杀在 merge 审查中途 → 重跑重做分钟级聚类 → 首轮 `auto_candidates` 与 `ac{i}` 编号确定性重现 → `todo` 只剩未落库候选 → 只补这些的 LLM。
+- 被杀在**节点向量增量 backfill**(mechanism 1)中途也一样安全:`emb_c` 变了但 `_ck_ver` 不变(已排除 emb_c),GC 认得出上一轮 checkpoint 仍然有效,`todo` 依旧只剩真正未决的候选 —— 见 §5。
 - 外层 `try/except`(现有那圈)保留:审查+持久化任何异常 → `extra=set()`,rebuild 照常写簇。
 
 ### 4.4 Mechanism 3:概念描述 checkpoint
 
-描述阶段(`sqlite_repository.py:6933-7031`)PHASE1 现已有 `old_desc`(从 `concept_clusters` 按 `canonical_id` 载入 `(desc, sig)`)做跨 rebuild 复用。新增**同版本 checkpoint** 作为第一优先复用源:
+描述阶段(`sqlite_repository.py:6933-7031`)PHASE1 现已有 `old_desc`(从 `concept_clusters` 按 `canonical_id` 载入 `(desc, sig)`)做跨 rebuild 复用。新增**同版本 checkpoint** 作为第一优先复用源(版本用 `_ck_ver`,同 §4.1/4.3,排除 `emb_c`):
 
-- PHASE1 载入 `desc_ckpt = _rebuild_ckpt_load(db, nb, _ver, 'concept_desc')`(`{canonical_id: {description, sig}}`)。判定顺序:checkpoint 命中同 sig → 复用并跳过 LLM;否则 `old_desc` 命中同 sig → 复用(现行为);否则入 `work`。
-- PHASE2 `as_completed` 循环里,完成的 `(cid, desc, sig)` 除写入 `desc_by_cid` 外,**缓冲 `_DESC_CKPT_FLUSH`(常量 16)个 flush 一次**到 checkpoint(`_rebuild_ckpt_put(nb, _ver, 'concept_desc', [(cid, {'description':desc,'sig':sig})...])`),循环末尾 flush 余量。仅 `desc` 非空才落。被杀最多丢 16 条描述。
-- 被杀在描述中途 → 重跑 PHASE1 从 checkpoint 命中已完成 canonical → 只补剩余。
+- PHASE1 载入 `desc_ckpt = _rebuild_ckpt_load(db, nb, _ck_ver, 'concept_desc')`(`{canonical_id: {description, sig}}`)。判定顺序:checkpoint 命中同 sig → 复用并跳过 LLM;否则 `old_desc` 命中同 sig → 复用(现行为);否则入 `work`。
+- PHASE2 `as_completed` 循环里,完成的 `(cid, desc, sig)` 除写入 `desc_by_cid` 外,**缓冲 `_DESC_CKPT_FLUSH`(常量 16)个 flush 一次**到 checkpoint(`_rebuild_ckpt_put(nb, _ck_ver, 'concept_desc', [(cid, {'description':desc,'sig':sig})...])`),循环末尾 flush 余量。仅 `desc` 非空才落。被杀最多丢 16 条描述。
+- 被杀在描述中途 → 重跑 PHASE1 从 checkpoint 命中已完成 canonical → 只补剩余。同样地,若被杀点在**节点向量增量 backfill** 中途,`_ck_ver` 对 `emb_c` 漂移免疫,checkpoint 一样能命中 —— 见 §5。
 
 描述最终仍在写簇(stage 6)落 `concept_clusters.canonical_description/_sig` —— checkpoint 只是写簇前的恢复日志。
 
@@ -159,12 +164,12 @@ for i,(a,b,s) in enumerate(autoc):
 
 `--rebuild-only` **保持 `force=True`**(仍重算分钟级聚类),不改语义。小时级三段的复用由上述 checkpoint 与 `missing` 过滤承担:
 
-- 杀在 **merge 审查** → 重做聚类(min)+ merge 审查按 `_ver` 命中 checkpoint,只补剩余候选。
-- 杀在 **描述** → merge 审查此时已完成(其 checkpoint 全命中,`extra` 一致 → 重聚一致 → 描述 canonical id 键有效)+ 描述 checkpoint 命中,只补剩余。
-- 杀在 **节点向量** → 聚类顶层跳过闸命中(`cluster_input_version` 已在 stage 8 落库)→ 直奔 backfill,按 `missing` 续。
-- **数据变了**(seq/算法版本变)→ `input_version` 变 → 两个 checkpoint GC 失效 → 全量重裁/重描述(正确)。
+- 杀在 **merge 审查** → 重做聚类(min)+ merge 审查按 `_ck_ver` 命中 checkpoint,只补剩余候选。
+- 杀在 **描述** → merge 审查此时已完成(其 checkpoint 全命中,`extra` 一致 → 重聚一致 → 描述 canonical id 键有效)+ 描述 checkpoint 按 `_ck_ver` 命中,只补剩余。
+- 杀在 **节点向量**(mechanism 1 增量提交中途)→ `force=True` 下顶层跳过闸本就被 `--rebuild-only` 绕开(不因此改变),下一轮仍会重做分钟级聚类;`emb_c` 已因部分 backfill 提交而变,但 `kg_mutation_seq`/`obj_c`/`dec_c` 在整段 backfill 完成前保持不动(`_mark_unified_kg_dirty` 只在结束时调一次)→ `_ck_ver`(排除 `emb_c`)不变 → merge 审查 / 描述两个 checkpoint 全部命中,**零新增 LLM 调用**,只是白重做了一遍便宜的 CPU 聚类;节点向量本身按 `missing` 过滤续跑(mechanism 1),与聚类互不影响。**订正**:此前以为这里会命中顶层跳过闸、直奔 backfill——那只在"backfill 单次结尾写、崩溃时 emb_c 全新未变"下成立;mechanism 1 改增量提交后 emb_c 会漂移,该假设已不成立,现按实测更正为上述行为,并靠本轮 `_ck_ver` 修复保住"零新增 LLM"这条真正要紧的性质。
+- **数据真变了**(`kg_mutation_seq`/`obj_c`/`dec_c` 变,即 seq/算法版本变,非 emb_c 单独漂移)→ `_ck_ver` 变 → 两个 checkpoint GC 失效 → 全量重裁/重描述(正确)。
 
-新增 CLI:`kg --fresh`(与 `--rebuild-only` 或普通 kg 组合),置 `rebuild_unified_kg(fresh=True)` → 入口清 checkpoint,强制 LLM 两段全量重跑。
+新增 CLI:`kg --fresh`(与 `--rebuild-only` 或普通 kg 组合),置 `rebuild_unified_kg(fresh=True)` → (挪到跳过闸后的)checkpoint 维护点清空,强制 LLM 两段全量重跑。
 
 ## 6. 配置
 
@@ -182,7 +187,7 @@ checkpoint 无开关,恒开(严格改进)。
   - 四个 checkpoint helper。
   - `_embed_objects_batch`:增量提交 + `progress`/`commit_every` 参数;抽 `_flush_object_vectors`。
   - `_backfill_knowledge_embeddings`:增可选 `progress` 透传。
-  - `rebuild_unified_kg`:加 `fresh` 参数;入口 GC/clear checkpoint;merge 审查块与描述块接 checkpoint。
+  - `rebuild_unified_kg`:加 `fresh` 参数;跳过闸判定"确实要重算"之后(而非闸前)GC/clear checkpoint,用排除 `emb_c` 的 `_ck_ver`;merge 审查块与描述块接 checkpoint(同用 `_ck_ver`)。
 - `backend/app/services/concept_merge_review.py`:`review_merge_candidates` 加 `on_chunk`。
 - `backend/app/services/batch_ingest.py`:`backfill_node_embeddings` 传进度打印器;`run_kg` 接 `fresh`;CLI 加 `--fresh`。
 - `backend/app/core/config.py`:`embed_commit_batches`。

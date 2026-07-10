@@ -313,3 +313,54 @@ def test_concept_desc_checkpoint_put_failure_does_not_abort_rebuild(repo, monkey
 
     n = repo.rebuild_unified_kg(nb.id, force=True)   # 不应抛出——fail-open
     assert isinstance(n, int) and n > 0
+
+
+def test_node_vector_backfill_preserves_merge_review_checkpoint(repo, monkeypatch):
+    """节点向量部分 backfill(emb_c 变、kg_mutation_seq 不变)后重跑
+    rebuild_unified_kg(force=True):merge 审查 checkpoint 必须存活(0 新 LLM 调用)。
+
+    Task 5 的节点向量 backfill 增量提交,emb_c(knowledge_embeddings COUNT)会在
+    backfill 过程中持续爬升,但 kg_mutation_seq 只在 backfill 结束时才 bump(经
+    _mark_unified_kg_dirty)。若 checkpoint 键在含 emb_c 的 _cluster_input_version
+    上,backfill 中途崩溃后的续跑会因为 emb_c 变了而被判定"输入变化",entry GC
+    把 merge_review checkpoint 清空,被迫对全部候选重新走一遍(可能数小时的)LLM
+    裁决——这正是本测试要防住的回归。用一次裸 INSERT 模拟"backfill 提交了一行,
+    但还没跑完"的中间状态(不经 store_kg/_mark_unified_kg_dirty,seq 不动)。
+    """
+    fake = _CountingReviewLLM()
+    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", False, raising=False)
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _seed_mergeable(repo, nb.id)
+
+    repo.rebuild_unified_kg(nb.id, force=True)
+    first = fake.calls
+    assert first > 0                        # 首跑确有 merge 审查 LLM
+
+    ver_before = repo._cluster_input_version(nb.id)
+    ck_ver_before = repo._cluster_input_version(nb.id, exclude_emb_count=True)
+
+    # 模拟节点向量部分 backfill 落库一行:直接 INSERT 进 knowledge_embeddings,
+    # 不经 store_kg/_mark_unified_kg_dirty —— 只有 emb_c 的 COUNT 会变,
+    # kg_mutation_seq/obj_c/dec_c 全部不动(镜像 backfill 中途、结束前的状态)。
+    from app.services.vector_index import encode_vector
+    with repo._write() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO knowledge_embeddings "
+            "(object_id, notebook_id, vector, created_at) VALUES (?,?,?,?)",
+            ("dummy-partial-backfill", nb.id, encode_vector([0.0] * 16), "2026-07-10T00:00:00"),
+        )
+
+    ver_after = repo._cluster_input_version(nb.id)
+    ck_ver_after = repo._cluster_input_version(nb.id, exclude_emb_count=True)
+    # 含 emb_c 的版本确实变了(证明这是个有意义的"backfill 中途"模拟,不是空操作)
+    assert ver_after != ver_before
+    # exclude_emb_count 版本对 emb_c 变化免疫 —— Fix 1 的核心保证
+    assert ck_ver_after == ck_ver_before
+
+    repo.rebuild_unified_kg(nb.id, force=True)
+    # 0 新增 LLM 调用 → merge_review checkpoint 存活。
+    # 旧代码(checkpoint 键在含 emb_c 的 _ver 上):emb_c 变 → _ver 变 → entry GC
+    # 把上一轮 checkpoint 全部清空 → 全部候选重新裁决 → fake.calls 会翻倍。
+    assert fake.calls == first
