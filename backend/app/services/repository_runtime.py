@@ -19,6 +19,7 @@ from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.services.kg_mutation import KgMutationCoordinator
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
@@ -94,6 +95,12 @@ class RepositoryRuntime:
         # real services) are facade-bound seams that only exist once the facade
         # constructor reaches them.  Construction stays lazy — no seam calls.
         self.source_ingestion: "SourceIngestionService | None" = None
+        # The KG mutation coordinator is finished by wire_kg_mutations(): its
+        # collaborators (the facade-owned unified/vector caches, the
+        # auto-index once-set, the corpus-language memo and the facade `_write`
+        # transaction seat) only exist once the facade constructor reaches
+        # them.  Construction stays lazy — no seam calls.
+        self.kg_mutations: "KgMutationCoordinator | None" = None
         # Sharing/deep-copy composition is finished by wire_sharing(): its
         # collaborators (facade _insert_row seat, notebook_copy_stats memo,
         # storage_dir) are facade-bound seams that only exist once the facade
@@ -254,6 +261,33 @@ class RepositoryRuntime:
             apply_notebook_meta=apply_notebook_meta,
         )
         return self.source_ingestion
+
+    def wire_kg_mutations(
+        self,
+        *,
+        unified_cache: Any,
+        vector_cache: Any,
+        auto_index_checked: Any,
+        notebook_languages: Any,
+        write: Callable[[], Any],
+    ) -> KgMutationCoordinator:
+        """Compose the KG mutation coordinator (Task 14) once the facade-bound
+        collaborators exist.  The caches/sets are the facade's EXISTING objects
+        passed BY IDENTITY (never replacement copies — Task 17 transfers their
+        ownership later); ``write`` is the facade's ``_write`` compatibility
+        seat resolved per call, so the frozen transaction-phase traces and
+        failure injections keep observing the dirty bump's commit boundary.
+        The unified store and the `_now` clock seam come from this runtime."""
+        self.kg_mutations = KgMutationCoordinator(
+            self.unified_kg,
+            unified_cache,
+            vector_cache,
+            auto_index_checked,
+            notebook_languages,
+            write=write,
+            now=self.seams.now,
+        )
+        return self.kg_mutations
 
     def wire_sharing(
         self,

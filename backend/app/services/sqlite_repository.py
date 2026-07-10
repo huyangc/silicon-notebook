@@ -414,6 +414,21 @@ class SQLiteRepository:
         # 算 notebook_copy_stats() 的 5 个 COUNT。_mark_unified_kg_dirty 在每次 KG
         # 写时 discard,使下一轮变更重新触发评估。
         self._auto_index_checked: set = set()
+        # Task 14: the KG mutation coordinator wraps the four facade-owned
+        # cache/state objects above BY IDENTITY (no replacement copies) plus
+        # the `_write` transaction seat (resolved per call, so per-instance
+        # transaction traces / failure injections keep observing the dirty
+        # bump's commit boundary). The `_invalidate_unified_cache` /
+        # `_mark_unified_kg_dirty` / `_bump_cluster_mutation_seq` wrappers
+        # below delegate to it — every mutation call site keeps funnelling
+        # through those wrappers, so the frozen phase matrix is unchanged.
+        self._runtime.wire_kg_mutations(
+            unified_cache=self._unified_cache,
+            vector_cache=self._vector_cache,
+            auto_index_checked=self._auto_index_checked,
+            notebook_languages=self._notebook_langs_cache,
+            write=lambda: self._write(),
+        )
         # KG-view viz index background build (mirrors _scale_building exactly):
         # guarded set of notebook_ids currently being folded by _spawn_viz_build.
         self._viz_building: set = set()
@@ -3328,44 +3343,10 @@ class SQLiteRepository:
             self._runtime.governance.remove_whitelist_term(db, _norm(term))
 
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
-        for key in [k for k in self._unified_cache if k[0] == notebook_id]:
-            self._unified_cache.pop(key, None)
-        # Matrices are stored under "{nb}:matrix:{table}" (see _vector_matrix). The old
-        # "{nb}:knowledge" key never matched (dead no-op). Invalidate BOTH embedding
-        # tables so an in-place re-embed (same row count + same-second created_at, i.e.
-        # an unchanged version tuple) cannot serve a stale vector.
-        for table in ("knowledge_embeddings", "element_embeddings"):
-            self._vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
-        self._vector_cache.invalidate(f"{notebook_id}:kwtok")
-        # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
-        # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
-        # (e.g. a base notebook) may affect any federated graph that includes it,
-        # so evict every fed_rxgraph entry; tracking participants per key is
-        # overkill for the POC. This explicit eviction also guards against
-        # same-second in-place edits that leave the version tuple unchanged.
-        for key in [k for k in self._vector_cache._store if k.endswith(":fed_rxgraph")]:
-            self._vector_cache.invalidate(key)
-        # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph) —
-        # evict so a same-second KG edit with an unchanged version tuple cannot serve stale.
-        self._vector_cache.invalidate(f"{notebook_id}:ppr_graph")
-        # entity->chunk / element->chunk reverse maps (P0-5) — evict so a same-second
-        # in-place evidence/element_ids edit with an unchanged version tuple cannot
-        # serve a stale membership map to the PPR-fallback / chunk-overlay paths.
-        self._vector_cache.invalidate(f"{notebook_id}:entchunk")
-        self._vector_cache.invalidate(f"{notebook_id}:elemchunk")
-        # review_queue's edge betweenness centrality map (P0-3) — evict so a
-        # same-second in-place edit (e.g. review_status flip) with an unchanged
-        # version tuple cannot serve a stale centrality map.
-        self._vector_cache.invalidate(f"{notebook_id}:edge_centrality")
-        # cluster_map (member_object_id -> canonical_id, P1-2) — evict so a
-        # same-second concept_clusters rewrite (rename / rebuild's DELETE+INSERT,
-        # which can land COUNT and MAX(created_at) on the same values as before)
-        # with an unchanged version tuple cannot serve a stale membership map.
-        self._vector_cache.invalidate(f"{notebook_id}:clustermap")
-        # notebook_copy_stats memo (perf-audit A3) — evict so a same-second
-        # in-place edit with an unchanged version tuple cannot serve a stale
-        # size/copyable verdict to the ask-path guards / share paths.
-        self._vector_cache.invalidate(f"{notebook_id}:copystats")
+        # Task 14: unified/vector cache eviction is coordinator-owned (the
+        # coordinator holds THIS facade's cache objects by identity). Every
+        # mutation call site keeps funnelling through this wrapper.
+        self._runtime.kg_mutations.invalidate_unified_cache(notebook_id)
 
     def _cluster_input_version(self, notebook_id: str, *, exclude_emb_count: bool = False) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
@@ -3436,34 +3417,17 @@ class SQLiteRepository:
         return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()
 
     def _mark_unified_kg_dirty(self, notebook_id: str) -> None:
-        # Bump the monotonic mutation counter on every KG write. This is the ONLY
-        # place kg_mutation_seq advances, and every mutation funnels through here,
-        # so _cluster_input_version sees a deterministic change on any edit —
-        # including same-second in-place edits (rename/decision-flip/re-embed) that
-        # a timestamp MAX at 1s resolution would miss. The upsert (store-owned
-        # since Task 13) references the table's own current value (+1), NOT
-        # excluded, so an existing row increments rather than resets to the
-        # inserted literal (1). First mutation -> seq 1.
-        now = _now()
-        with self._write() as db:
-            self._runtime.unified_kg.mark_dirty(db, notebook_id, now)
-        # Re-arm maybe_auto_index's once-set: the index this nb was previously
-        # judged against (fresh/absent) is now stale by construction (KG just
-        # changed), so the next write-path or read-path fallback call should
-        # re-evaluate rather than trust a stale "checked" verdict.
-        self._auto_index_checked.discard(notebook_id)
-        # Content just changed → the memoized corpus-language hint may be stale
-        # (a new source could add a 2nd language). Drop it; next _notebook_langs
-        # re-samples. This is the single mutation funnel, so it covers chunk adds,
-        # re-chunk, re-embed and KG edits — the cheapest correct invalidation site.
-        self._notebook_langs_cache.pop(notebook_id, None)
+        # Task 14: the kg_mutation_seq dirty bump is coordinator-owned. This
+        # wrapper stays the single funnel every KG write goes through (and the
+        # frozen per-instance patch seat); the coordinator stays the single
+        # place kg_mutation_seq advances — its write transaction rides the
+        # facade `_write` seat, so begin/commit phase traces are unchanged.
+        self._runtime.kg_mutations.mark_unified_kg_dirty(notebook_id)
 
     def _bump_cluster_mutation_seq(self, db, notebook_id: str) -> None:
-        """concept_clusters 写路径的单调计数器 bump。与 _mark_unified_kg_dirty 不同,
-        本 helper 在调用方已持有的写事务 db 内执行(写簇+bump 同 commit,原子——
-        不存在"簇写了、seq 没 bump"的窗口)。kg_mutation_seq 不在此处动:rebuild
-        刻意保持它稳定(幂等,见 _cluster_input_version),clusters 的变化信号独立成列。"""
-        self._runtime.unified_kg.bump_cluster_seq(db, notebook_id, _now())
+        # Task 14: coordinator-owned in-transaction primitive (写簇+bump 同
+        # commit,原子;kg_mutation_seq 不在此处动 — rebuild 刻意保持它稳定)。
+        self._runtime.kg_mutations.bump_cluster_mutation_seq(db, notebook_id)
 
     def unified_kg_status(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)

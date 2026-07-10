@@ -5,6 +5,7 @@ protocols intentionally contain no business logic and are structural seams for
 the later store/service extraction.
 """
 from __future__ import annotations
+import sqlite3
 import threading
 
 from dataclasses import dataclass
@@ -150,6 +151,23 @@ class KnowledgeGovernanceRepository(Protocol):
     def list_promotion_queue(self, status_filter: str | None = None) -> list[dict]: ...
     def approve_promotion(self, candidate_id: str) -> dict: ...
     def reject_promotion(self, candidate_id: str, reason: str = "") -> dict: ...
+
+
+class KgMutationPort(Protocol):
+    """The KG mutation side-effect coordinator's contract (Task 14).
+
+    Every online KG write funnels its post-commit side effects through this
+    port in the frozen per-operation order (mutation_phases.json); deep-copy,
+    migration/recovery/seed and streaming-ask writes are exempt and never call
+    it. ``mark_unified_kg_dirty`` is the ONLY entry that advances
+    kg_mutation_seq; ``bump_cluster_mutation_seq`` runs inside the caller's
+    open write transaction (cluster write + bump commit atomically) and never
+    touches kg_mutation_seq (rebuild keeps it stable for idempotency).
+    """
+
+    def invalidate_unified_cache(self, notebook_id: str) -> None: ...
+    def mark_unified_kg_dirty(self, notebook_id: str) -> None: ...
+    def bump_cluster_mutation_seq(self, connection: sqlite3.Connection, notebook_id: str) -> None: ...
 
 
 class KnowledgeLifecycleRepository(Protocol):

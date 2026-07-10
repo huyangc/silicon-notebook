@@ -141,6 +141,12 @@ TASK13_ALLOWED_IMPORTS = {
     ("backend/tests/test_schema_registry_service.py", 18, "app.services.sqlite_repository", "_now"),
     ("backend/tests/test_repository_module_boundaries.py", 99, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+# Task 14: the two new KG-mutation phase test files import the compatibility
+# export at fresh sites (the facade's own frozen import lines are untouched).
+TASK14_ALLOWED_IMPORTS = {
+    ("backend/tests/test_kg_mutation_phase_matrix.py", 54, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_kg_mutation_failure_boundaries.py", 33, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -675,6 +681,37 @@ TASK13_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_repository_module_boundaries.py", "SQLiteRepository"),
 }
 
+# Task 14: the KG mutation coordinator's phase-matrix and failure-boundary
+# suites consume the facade at fresh sites.  Observation/injection seams are
+# component seams (runtime.database.write / runtime.kg_mutations /
+# runtime.source_embedding / runtime.embedding_store / runtime.governance /
+# runtime.knowledge), so NO fresh facade patch targets are minted — only
+# consumer sites (the mutation entry points under test plus the identity
+# assertions over the coordinator-held facade cache objects).
+TASK14_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_kg_mutation_phase_matrix.py", name)
+    for name in {
+        "SQLiteRepository", "_auto_index_checked", "_connect",
+        "_notebook_langs_cache", "_runtime", "_test_insert_object",
+        "_unified_cache", "_vector_cache", "append_clusters",
+        "apply_conflict_resolution", "approve_promotion", "confirm_conflict",
+        "confirm_merge", "copy_notebook", "create_notebook", "embedder",
+        "mark_notebook_base", "merge_knowledge", "propose_promotion",
+        "rebuild_unified_kg", "reject_merge", "relink_notebook_kg",
+        "review_pending_merges", "set_edge_review", "store_kg",
+        "update_knowledge", "write_clusters", "write_conflict_candidate",
+        "write_merge_candidate",
+    }
+} | {
+    ("backend/tests/test_kg_mutation_failure_boundaries.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "_test_insert_object",
+        "approve_promotion", "confirm_conflict", "create_notebook", "embedder",
+        "mark_notebook_base", "propose_promotion", "store_kg",
+        "update_knowledge", "write_clusters", "write_conflict_candidate",
+    }
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -1088,6 +1125,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK11_ALLOWED_IMPORTS
                     or site in TASK12_ALLOWED_IMPORTS
                     or site in TASK13_ALLOWED_IMPORTS
+                    or site in TASK14_ALLOWED_IMPORTS
                 )
 
 
@@ -1128,14 +1166,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
