@@ -8,6 +8,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   expand: "扩展",
   ppr: "漫游",
   expand_community: "对比",
+  follow_chain: "推导",
   fallback: "原文",
   answer: "合成",
   skip: "跳过",
@@ -42,6 +43,16 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
 
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
   const detail = step.detail ?? {};
+  if (step.step_type === "follow_chain") {
+    const parts: string[] = [];
+    if (typeof detail.hops === "number") parts.push(`${detail.hops} 跳`);
+    if (typeof detail.count === "number") parts.push(`${detail.count} 条`);
+    if (typeof detail.chain_trust === "number") {
+      const percentage = Math.round(Math.max(0, Math.min(1, detail.chain_trust)) * 100);
+      parts.push(`可信度 ${percentage}%`);
+    }
+    return parts.join(" · ");
+  }
   if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
     return `${detail.sub_queries.length} 个子查询`;
   }

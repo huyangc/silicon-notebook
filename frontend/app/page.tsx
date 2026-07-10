@@ -5697,6 +5697,8 @@ function SelectedReferenceDetail({
   const source = referenceSource(reference);
   const location = referenceLocation(reference);
   const tier = referenceTier(reference);
+  const isRelationReference = objectType === "relation";
+  const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
@@ -5710,11 +5712,17 @@ function SelectedReferenceDetail({
         <button
           type="button"
           onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
-          disabled={!reference.anchor?.object_id}
-          title={reference.anchor?.object_id ? "在知识图谱中定位" : "该引用没有绑定知识节点"}
+          disabled={!canLocateInGraph}
+          title={
+            isRelationReference
+              ? "关系引用绑定的是边证据，不是知识节点，无法在知识图谱中定位"
+              : reference.anchor?.object_id
+                ? "在知识图谱中定位"
+                : "该引用没有绑定知识节点"
+          }
         >
           <ExternalLink size={14} />
-          知识图谱
+          {isRelationReference ? "关系证据不可定位" : "知识图谱"}
         </button>
       </div>
       <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>

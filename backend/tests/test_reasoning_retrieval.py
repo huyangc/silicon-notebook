@@ -119,6 +119,8 @@ def test_reflect_prompt_contains_summary_and_schema():
     assert "next_action" in REFLECT_SCHEMA_HINT
     for a in ("answer", "expand_graph", "add_subquery", "search_elements"):
         assert a in REFLECT_SCHEMA_HINT
+    assert "follow_chain" in REFLECT_SCHEMA_HINT
+    assert "start_object_id" in REFLECT_SCHEMA_HINT
 
 
 def test_answer_prompt_has_derivation_rigor_rules():
@@ -403,6 +405,43 @@ def test_reflect_parses_search_elements(rrepo):
     assert d.elements_query == "原文检索词"
 
 
+def test_reflect_parses_follow_chain(rrepo):
+    rr = _rr_with_llm(rrepo, reflect={
+        "next_action": "follow_chain",
+        "follow_chain": {
+            "start_object_id": "ko-a", "target_object_id": "ko-c",
+            "edge_type": "derived_from", "direction": "in",
+        },
+    })
+    d = rr.reflect("q", "s")
+    assert d.next_action == "follow_chain"
+    assert d.chain_start_object_id == "ko-a"
+    assert d.chain_target_object_id == "ko-c"
+    assert d.chain_edge_type == "derived_from"
+    assert d.chain_direction == "in"
+
+
+def _seed_follow_chain(repo):
+    nb = repo.create_notebook(NotebookCreate(name="follow-chain"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "Premise A", "section_path": "A"}, "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "Bridge B", "section_path": "B"}, "evidence": []},
+        {"local_id": "C", "object_type": "claim",
+         "payload": {"name": "Conclusion C", "section_path": "C"}, "evidence": []},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B",
+         "edge_type": "derived_from", "evidence": [{"quote": "A directly yields B"}]},
+        {"source_local_id": "B", "target_local_id": "C",
+         "edge_type": "derived_from", "evidence": [{"quote": "B directly yields C"}]},
+    ])
+    with repo._connect() as db:
+        ids = {json.loads(r["payload"])["name"]: r["id"] for r in db.execute(
+            "SELECT id,payload FROM knowledge_objects WHERE notebook_id=?", (nb.id,))}
+    return nb, ids
+
+
 class _SeqLLM:
     """plan 固定;reflect 按序列返回(耗尽后默认 answer)。"""
     configured = True
@@ -445,6 +484,126 @@ def test_run_expand_graph_records_trace(rrepo):
     res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     assert any(t.step_type == "expand" for t in res.trace)
     assert any(h.object_type == "procedure" for h in res.top_hits)  # 邻居被纳入
+
+
+def test_run_follow_chain_records_trace_and_keeps_transient_chain(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb, ids = _seed_follow_chain(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    streamed = []
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "Premise A derived conclusion"}]},
+        reflects=[
+            {"next_action": "follow_chain", "follow_chain": {
+                "start_object_id": ids["Premise A"],
+                "edge_type": "derived_from", "direction": "out"}},
+            {"next_action": "answer", "sufficient": True},
+        ],
+    )
+    with rrepo._connect() as db:
+        before = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"]
+    res = ReasoningRetriever(rrepo, rrepo.settings).run(
+        nb.id, "Premise A 如何推到 Conclusion C", "", on_step=streamed.append)
+    assert len(res.chains) == 1
+    assert res.chains[0].target_name == "Conclusion C"
+    assert res.chains[0].query_relevance > 0
+    step = next(t for t in res.trace if t.step_type == "follow_chain")
+    assert step.detail["hops"] == 2 and step.detail["count"] == 1
+    assert step.detail["paths"] == [{
+        "source": "Premise A", "via": "Bridge B", "target": "Conclusion C",
+        "edge_type": "derived_from",
+        "trust": pytest.approx(res.chains[0].chain_trust),
+        "validity_scope": {},
+    }]
+    assert any(t.step_type == "follow_chain" for t in streamed)
+    with rrepo._connect() as db:
+        after = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"]
+    assert after == before == 2
+
+
+def test_run_follow_chain_rejects_start_outside_current_candidates(rrepo, monkeypatch):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "follow_chain", "follow_chain": {
+                "start_object_id": "ko-guessed-not-a-candidate",
+                "edge_type": "derived_from", "direction": "out"}},
+            {"next_action": "answer", "sufficient": True},
+        ],
+    )
+    rr = ReasoningRetriever(rrepo, rrepo.settings)
+
+    def unexpected_follow_chain(*_args, **_kwargs):
+        pytest.fail("follow_chain must not run for an arbitrary non-candidate id")
+
+    monkeypatch.setattr(rr, "follow_chain", unexpected_follow_chain)
+    result = rr.run(nb.id, "RTL到GDSII流程", "")
+    skip = next(t for t in result.trace
+                if t.detail.get("reason") == "chain_start_not_candidate")
+    assert skip.step_type == "skip"
+    assert result.chains == []
+
+
+def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
+    nb, ids = _seed_follow_chain(rrepo)
+    chain_result = rrepo._follow_chain(
+        nb.id, ids["Premise A"], edge_type="derived_from")
+    assert chain_result.inferences
+
+    class _ChainAnswerLLM:
+        configured = True
+
+        def __init__(self):
+            self.prompt = ""
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.prompt = messages[-1]["content"]
+            return json.dumps({
+                "answer": (
+                    "Premise A directly yields Bridge B and Bridge B directly "
+                    "yields Conclusion C.[k2001, k2002] "
+                    "（推断）Premise A therefore indirectly yields Conclusion C."
+                ),
+                "grounded": True,
+            })
+
+    llm = _ChainAnswerLLM()
+    rrepo.llm_client = llm
+    rrepo.settings.kg_query_refine_enabled = False
+    answer, grounded, anchors = rrepo._answer_reasoning(
+        nb.id, "derive", chain_result.nodes, [], "",
+        chains=chain_result.inferences)
+    assert grounded is True
+    assert "[Query-time typed inference; NOT directly stated]" in llm.prompt
+    assert "Premise A --derived_from--> Bridge B" in llm.prompt
+    assert "Bridge B --derived_from--> Conclusion C" in llm.prompt
+    assert "attach NO [k] marker" in llm.prompt
+    assert "（推断）" in answer
+    assert [a.object_type for a in anchors] == ["relation", "relation"]
+    assert [a.snippet for a in anchors] == ["A directly yields B", "B directly yields C"]
+
+
+def test_grouped_answer_markers_fail_closed_when_any_key_is_unknown(rrepo):
+    id_map = {
+        "k2001": {
+            "object_id": "rel-ab", "object_type": "relation",
+            "name": "A --derived_from--> B",
+        },
+        "k2002": {
+            "object_id": "rel-bc", "object_type": "relation",
+            "name": "B --derived_from--> C",
+        },
+    }
+    anchors = rrepo._parse_answer_anchors("premises [k2001, k2002]", id_map)
+    assert [a.key for a in anchors] == ["k2001", "k2002"]
+    assert rrepo._parse_answer_anchors("mixed [k2001, k9999]", id_map) == []
 
 
 def test_run_dedups_expand_and_respects_step_cap(rrepo):

@@ -163,16 +163,15 @@ KNOWLEDGE_STATUSES = ("approved", "reviewed", "deprecated", "conflict", "project
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
 
-# Matches the `[k1]` provenance markers the answer LLM appends to grounded
-# sentences; used to resolve markers -> citation anchors and to strip them when
-# deriving the back-compat `conclusion` string.
-_MARKER_RE = re.compile(r"\[(k\d+)\]")
+# Matches both one provenance marker and the comma-group form models commonly
+# emit (`[k1, k3]`). A group binds only when every key exists in id_map.
+_MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
 
 # Tolerant variant that ALSO matches malformed markers with internal whitespace
 # (e.g. `[ k1]`). Used only to scrub citation-shaped tokens that did NOT bind to
 # a real anchor, so no fabricated/malformed marker reaches the user. Kept
-# separate from _MARKER_RE so the strict marker->anchor resolution is unchanged.
-_LOOSE_MARKER_RE = re.compile(r"\[\s*k\d+\s*\]")
+# separate from _MARKER_GROUP_RE so strict anchor resolution is unchanged.
+_LOOSE_MARKER_GROUP_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
 
 
 def _concept_desc_sig(name: str, quotes: List[str]) -> str:
@@ -195,9 +194,12 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
         spaced id with no anchor).
     Collapses the double space a removed mid-sentence marker would leave behind."""
     def _sub(m: re.Match) -> str:
-        key = m.group(0).strip("[]").strip()
-        return f"[{key}]" if key in bound_keys else ""
-    cleaned = _LOOSE_MARKER_RE.sub(_sub, answer or "")
+        keys = [part.strip() for part in m.group(0).strip("[]").split(",")]
+        # Mixed known/unknown groups fail closed. Keeping only the known subset
+        # would silently alter which premises the sentence claims to cite.
+        return ("[" + ", ".join(keys) + "]"
+                if keys and all(key in bound_keys for key in keys) else "")
+    cleaned = _LOOSE_MARKER_GROUP_RE.sub(_sub, answer or "")
     # A stripped marker between words leaves "word  word"; normalise to one space
     # without disturbing newlines / other whitespace runs the model intended.
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
@@ -11681,6 +11683,268 @@ class SQLiteRepository:
             ))
         return out
 
+    def _follow_chain(
+        self,
+        active_notebook_id: str,
+        start_object_id: str,
+        edge_type: Optional[str] = None,
+        target_object_id: str = "",
+        direction: str = "out",
+        max_fan_out: int = 8,
+        max_results: int = 4,
+    ):
+        """查询期、fail-closed 的类型化两跳推理。
+
+        只在起点实际所属的 active/base notebook 内，按已有 source/target 复合索引
+        做两轮局部查询；不构建全图、不跨 notebook 虚构边、不持久化推论。返回
+        FollowChainResult(inferences, nodes)，其中 nodes 是路径端点的
+        RetrievedKnowledge，供 reasoning 候选池复用。
+        """
+        from app.services.kg.follow_chain import (
+            FollowChainResult,
+            TRANSITIVE_EDGE_TYPES,
+            compose_two_hop_paths,
+        )
+
+        start_object_id = str(start_object_id or "").strip()
+        target_object_id = str(target_object_id or "").strip()
+        if not start_object_id or direction not in {"out", "in", "both"}:
+            return FollowChainResult()
+        allowed_types = ([edge_type] if edge_type in TRANSITIVE_EDGE_TYPES
+                         else sorted(TRANSITIVE_EDGE_TYPES) if not edge_type else [])
+        if not allowed_types:
+            return FollowChainResult()
+        max_fan_out = max(1, min(int(max_fan_out), 16))
+        max_results = max(1, min(int(max_results), 16))
+        status_ph = ",".join("?" for _ in USABLE_STATUSES)
+
+        with self._connect() as db:
+            # Authorization/scope gate: an action may only start from the active
+            # notebook or an authoritative base notebook participating in this ask.
+            start = db.execute(
+                f"SELECT ko.*, n.tier AS notebook_tier "
+                f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
+                f"WHERE ko.id=? AND ko.status IN ({status_ph}) "
+                f"AND (ko.notebook_id=? OR n.tier='base')",
+                (start_object_id, *USABLE_STATUSES, active_notebook_id),
+            ).fetchone()
+            if start is None:
+                return FollowChainResult()
+            owner_notebook_id = start["notebook_id"]
+            owner_tier = start["notebook_tier"] or "personal"
+
+            # Production databases can already contain tens of millions of KG
+            # rows.  follow_chain therefore adds no startup migration/index.  It
+            # forces the two existing endpoint indexes and reads at most this many
+            # raw rows per frontier endpoint; type/review filtering and priority
+            # sorting happen only inside that bounded sample.  Missing a valid edge
+            # is acceptable (fail closed); scanning an unbounded supernode is not.
+            raw_scan_limit = min(256, max(32, max_fan_out * 8))
+            raw_cache: Dict[tuple, tuple[List[dict], bool]] = {}
+            hydrated_relation_cache: Dict[str, dict] = {}
+
+            def raw_endpoint_rows(endpoint: str, oid: str) -> tuple[List[dict], bool]:
+                key = (endpoint, oid)
+                cached = raw_cache.get(key)
+                if cached is not None:
+                    return cached
+                index_name = (
+                    "idx_knowledge_relations_nb_source"
+                    if endpoint == "source_object_id"
+                    else "idx_knowledge_relations_nb_target"
+                )
+                rows = db.execute(
+                    f"SELECT r.id, r.notebook_id, r.source_id, "
+                    f"r.source_object_id, r.target_object_id, r.edge_type, "
+                    f"r.review_status "
+                    f"FROM knowledge_relations AS r INDEXED BY {index_name} "
+                    f"WHERE r.notebook_id=? AND r.{endpoint}=? LIMIT ?",
+                    (owner_notebook_id, oid, raw_scan_limit + 1),
+                ).fetchall()
+                truncated = len(rows) > raw_scan_limit
+                decoded = [
+                    {
+                        "id": row["id"], "notebook_id": row["notebook_id"],
+                        "tier": owner_tier, "source_id": row["source_id"] or "",
+                        "source_object_id": row["source_object_id"],
+                        "target_object_id": row["target_object_id"],
+                        "edge_type": row["edge_type"],
+                        "review_status": row["review_status"] or "pending",
+                    }
+                    for row in rows[:raw_scan_limit]
+                ]
+                raw_cache[key] = (decoded, truncated)
+                return decoded, truncated
+
+            def hydrate_relations(rows: List[dict]) -> List[dict]:
+                missing = [row["id"] for row in rows
+                           if row["id"] not in hydrated_relation_cache]
+                for batch in self._in_batches(missing):
+                    ph = ",".join("?" for _ in batch)
+                    for row in db.execute(
+                        f"SELECT r.id, r.evidence, s.title AS source_title "
+                        f"FROM knowledge_relations r "
+                        f"LEFT JOIN sources s ON s.id=r.source_id "
+                        f"WHERE r.id IN ({ph})",
+                        tuple(batch),
+                    ).fetchall():
+                        try:
+                            evidence = json.loads(row["evidence"] or "[]")
+                        except Exception:
+                            evidence = []
+                        hydrated_relation_cache[row["id"]] = {
+                            "evidence": evidence,
+                            "source_title": row["source_title"] or "",
+                        }
+                hydrated = []
+                for row in rows:
+                    detail = hydrated_relation_cache.get(row["id"])
+                    if detail is not None:
+                        hydrated.append({**row, **detail})
+                return hydrated
+
+            def edge_rows(endpoint: str, oid: str, et: str) -> List[dict]:
+                rows, _truncated = raw_endpoint_rows(endpoint, oid)
+                usable = [
+                    row for row in rows
+                    if row["edge_type"] == et
+                    and row["review_status"] in {"verified", "pending"}
+                ]
+                usable.sort(key=lambda row: (
+                    0 if row["review_status"] == "verified" else 1,
+                    row["id"],
+                ))
+                return hydrate_relations(usable[:max_fan_out])
+
+            relations_by_id: Dict[str, dict] = {}
+            directions = ("out", "in") if direction == "both" else (direction,)
+            for walk_dir in directions:
+                endpoint = "source_object_id" if walk_dir == "out" else "target_object_id"
+                for et in allowed_types:
+                    first = edge_rows(endpoint, start_object_id, et)
+                    for rel in first:
+                        relations_by_id[rel["id"]] = rel
+                    middle_ids = list(dict.fromkeys(
+                        rel["target_object_id"] if walk_dir == "out"
+                        else rel["source_object_id"] for rel in first
+                    ))
+                    for middle_id in middle_ids:
+                        for rel in edge_rows(endpoint, middle_id, et):
+                            relations_by_id[rel["id"]] = rel
+
+            relations = list(relations_by_id.values())
+            if not relations:
+                return FollowChainResult()
+            node_ids = list(dict.fromkeys(
+                [start_object_id, target_object_id]
+                + [oid for rel in relations for oid in
+                   (rel["source_object_id"], rel["target_object_id"])]
+            ))
+            node_ids = [oid for oid in node_ids if oid]
+            nodes: Dict[str, dict] = {}
+            for batch in self._in_batches(node_ids):
+                ph = ",".join("?" for _ in batch)
+                for row in db.execute(
+                    f"SELECT * FROM knowledge_objects WHERE notebook_id=? "
+                    f"AND id IN ({ph}) AND status IN ({status_ph})",
+                    (owner_notebook_id, *batch, *USABLE_STATUSES),
+                ).fetchall():
+                    try:
+                        payload = json.loads(row["payload"] or "{}")
+                    except Exception:
+                        payload = {}
+                    try:
+                        evidence = json.loads(row["evidence"] or "[]")
+                    except Exception:
+                        evidence = []
+                    nodes[row["id"]] = {
+                        "id": row["id"], "notebook_id": owner_notebook_id,
+                        "tier": owner_tier, "object_type": row["object_type"],
+                        "status": row["status"], "owner": row["owner"],
+                        "last_reviewed": row["last_reviewed"],
+                        "payload": payload, "evidence": evidence,
+                    }
+
+        # Exact direct-edge guard over the same bounded raw endpoint sample.  If
+        # that sample was truncated and a candidate's direct A→C edge was not
+        # observed, absence cannot be proved; add a conservative sentinel triple
+        # so compose_two_hop_paths suppresses that inference.  This intentionally
+        # trades recall for a hard production bound and never scans a supernode.
+        by_source: Dict[str, List[dict]] = {}
+        for rel in relations:
+            by_source.setdefault(rel["source_object_id"], []).append(rel)
+        out_candidates: Dict[str, set] = {}
+        in_candidates: Dict[str, set] = {}
+        for first in relations:
+            for second in by_source.get(first["target_object_id"], []):
+                if first["edge_type"] != second["edge_type"]:
+                    continue
+                if first["source_object_id"] == start_object_id:
+                    out_candidates.setdefault(first["edge_type"], set()).add(
+                        second["target_object_id"])
+                if second["target_object_id"] == start_object_id:
+                    in_candidates.setdefault(first["edge_type"], set()).add(
+                        first["source_object_id"])
+        direct_triples: set = set()
+        out_rows, out_truncated = raw_cache.get(
+            ("source_object_id", start_object_id), ([], True))
+        for et, target_ids in out_candidates.items():
+            found_targets = set()
+            for row in out_rows:
+                if (row["edge_type"] == et
+                        and row["review_status"] != "rejected"
+                        and row["target_object_id"] in target_ids):
+                    triple = (start_object_id, row["target_object_id"], et)
+                    direct_triples.add(triple)
+                    found_targets.add(row["target_object_id"])
+            if out_truncated:
+                direct_triples.update(
+                    (start_object_id, target_id, et)
+                    for target_id in target_ids - found_targets
+                )
+
+        in_rows, in_truncated = raw_cache.get(
+            ("target_object_id", start_object_id), ([], True))
+        for et, source_ids in in_candidates.items():
+            found_sources = set()
+            for row in in_rows:
+                if (row["edge_type"] == et
+                        and row["review_status"] != "rejected"
+                        and row["source_object_id"] in source_ids):
+                    triple = (row["source_object_id"], start_object_id, et)
+                    direct_triples.add(triple)
+                    found_sources.add(row["source_object_id"])
+            if in_truncated:
+                direct_triples.update(
+                    (source_id, start_object_id, et)
+                    for source_id in source_ids - found_sources
+                )
+        inferences = compose_two_hop_paths(
+            nodes, relations, start_object_id,
+            direction=direction, edge_type=edge_type,
+            target_object_id=target_object_id,
+            direct_triples=frozenset(direct_triples),
+            max_results=max_results,
+        )
+        used_ids = list(dict.fromkeys(
+            oid for chain in inferences
+            for oid in (chain.source_id, chain.via_id, chain.target_id)
+        ))
+        hydrated: List[RetrievedKnowledge] = []
+        for oid in used_ids:
+            node = nodes.get(oid)
+            if node is None:
+                continue
+            hydrated.append(RetrievedKnowledge(
+                object_id=oid, object_type=node["object_type"],
+                payload=node["payload"],
+                evidence=[Evidence(**e) for e in node["evidence"]],
+                score=0.0, relevance=0.0, status=node["status"],
+                owner=node["owner"], last_reviewed=node["last_reviewed"],
+                notebook_id=owner_notebook_id, tier=owner_tier,
+            ))
+        return FollowChainResult(inferences=inferences, nodes=hydrated)
+
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
@@ -12271,7 +12535,7 @@ class SQLiteRepository:
             grounded = evidence_level == "grounded"
 
             if answer:
-                conclusion = _MARKER_RE.sub("", answer).strip()
+                conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
                 llm_mode = "grounded" if grounded else "ungrounded"
             elif synth_failed:
                 # 诚实降级:LLM 跑了但没产出答案(空 content 或抛错)——不冒充成
@@ -12753,6 +13017,7 @@ class SQLiteRepository:
                     for r in db.execute(
                             f"SELECT source_object_id, target_object_id, edge_type "
                             f"FROM knowledge_relations WHERE notebook_id=? "
+                            f"AND review_status!='rejected' "
                             f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
                             [nb, *ids, *ids]).fetchall():
                         s = oid_to_key.get(r["source_object_id"])
@@ -12888,6 +13153,7 @@ class SQLiteRepository:
         history="",
         cancel_event: CancelEvent = None,
         chunks=None,
+        chains=None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -12896,6 +13162,7 @@ class SQLiteRepository:
         reference-only (no [k] id). Returns (answer, llm_grounded, anchors)."""
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
+        chains = chains or []
         if chunks:
             # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关;跨 PPR run
             # 的归一分仅大致可比,只影响预算边缘取舍,不破坏 [0,1]);chunk 段 k1..N + KG 段
@@ -12913,6 +13180,12 @@ class SQLiteRepository:
             id_map = {**chunk_id_map, **kg_id_map}
         else:
             context_block, id_map = self._answer_context(notebook_id, top_hits)
+        if chains:
+            from app.services.kg.follow_chain import render_follow_chain_context
+            chain_block, chain_id_map = render_follow_chain_context(chains, id_offset=2000)
+            if chain_block and chain_block != "(none)":
+                context_block = f"{context_block}\n\n{chain_block}"
+                id_map = {**id_map, **chain_id_map}
         if elements:
             extra = "\n".join(
                 f"(原文 {i+1}) {el.source_title} · {el.location_label}: {el.text[:200]}"
@@ -13004,12 +13277,13 @@ class SQLiteRepository:
             try:
                 result = ReasoningRetriever(self, self.settings, cancel_event).run(
                     notebook_id, question, history, on_step=checked_trace)
-                top_hits, elements, trace, chunks = (
-                    result.top_hits, result.elements, result.trace, result.chunks)
+                top_hits, elements, trace, chunks, chains = (
+                    result.top_hits, result.elements, result.trace, result.chunks,
+                    result.chains)
             except AskCancelled:
                 raise
             except Exception:
-                top_hits, elements, trace, chunks = [], [], [], []
+                top_hits, elements, trace, chunks, chains = [], [], [], [], []
 
             registry = self.effective_schemas()
             seen_ids: set = set()
@@ -13035,25 +13309,35 @@ class SQLiteRepository:
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             raise_if_cancelled(cancel_event)
-            if self.reasoning_llm_client.configured and (top_hits or elements or chunks):
+            if self.reasoning_llm_client.configured and (top_hits or elements or chunks or chains):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: self._answer_reasoning(
                         notebook_id, question, top_hits, elements, history,
-                        cancel_event=cancel_event, chunks=chunks),
+                        cancel_event=cancel_event, chunks=chunks, chains=chains),
                     self.settings.reasoning_llm_model or self.settings.openai_compat_model)
                 synth_failed = not _ok
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
-            evidence_pool = list(top_hits) + list(chunks)
+            # Relation anchors need classifier entries, but chain trust is NOT
+            # query relevance.  Each chain carries only the relevance of the
+            # candidate that authorized that action; unrelated high-scoring hits
+            # elsewhere in the answer cannot elevate its anchors over tau.
+            from types import SimpleNamespace
+            from app.services.kg.follow_chain import chain_anchor_relevances
+            relation_relevances = chain_anchor_relevances(chains)
+            chain_evidence = [SimpleNamespace(
+                object_id=relation_id, relevance=relevance,
+            ) for relation_id, relevance in relation_relevances.items()]
+            evidence_pool = list(top_hits) + list(chunks) + chain_evidence
             evidence_level, top_relevance = classify_evidence(
                 evidence_pool, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
             grounded = evidence_level == "grounded"
 
             if answer:
-                conclusion = _MARKER_RE.sub("", answer).strip()
+                conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
                 llm_mode = "grounded" if grounded else "ungrounded"
             elif synth_failed:
                 # 诚实降级:检索成功但答案合成未产出内容 —— 绝不冒充成 "Found N objects"
@@ -13205,7 +13489,7 @@ class SQLiteRepository:
                         self.settings.evidence_tau_low, self.settings.evidence_tau_high)
                     grounded = evidence_level == "grounded"
                     if answer:
-                        conclusion = _MARKER_RE.sub("", answer).strip()
+                        conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
                         llm_mode = "grounded" if grounded else "ungrounded"
                     elif synth_failed:
                         conclusion = (
@@ -13285,7 +13569,7 @@ class SQLiteRepository:
                 max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
             )
             # Render subgraph into (context_block, id_map) — same k{i} format as
-            # _answer_context so _parse_answer_anchors / _MARKER_RE work unchanged.
+            # _answer_context so grouped marker resolution works unchanged.
             context_block, id_map = render_subgraph_context(subgraph, id_offset=0)
             raise_if_cancelled(cancel_event)
 
@@ -13363,7 +13647,7 @@ class SQLiteRepository:
                     self.settings.evidence_tau_low, self.settings.evidence_tau_high)
                 grounded = evidence_level == "grounded"
                 if answer:
-                    conclusion = _MARKER_RE.sub("", answer).strip()
+                    conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
                     llm_mode = "grounded" if grounded else "ungrounded"
                 elif synth_failed:
                     conclusion = (
@@ -13414,8 +13698,8 @@ class SQLiteRepository:
                     # id_map entry (out-of-map ids like [k99], malformed [ k1]).
                     # Unlike the fast path — whose id_map IS top_hits, so the LLM
                     # rarely invents ids — graph mode shows a wider subgraph and
-                    # the answer LLM occasionally emits markers the strict
-                    # _MARKER_RE can't bind; left in place they read as fabricated
+                    # the answer LLM occasionally emits markers the strict anchor
+                    # parser can't bind; left in place they read as fabricated
                     # citations. Strip them so only resolved [k] markers ship.
                     return _strip_unbound_markers(_ans, {a.key for a in _anc}), _g, _anc
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
@@ -13455,7 +13739,7 @@ class SQLiteRepository:
             top_relevance = max((h.relevance for h in top_hits), default=top_relevance)
             grounded = evidence_level == "grounded"
             if answer:
-                conclusion = _MARKER_RE.sub("", answer).strip()
+                conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
                 llm_mode = "grounded" if grounded else "ungrounded"
             elif synth_failed:
                 conclusion = (
@@ -13501,19 +13785,25 @@ class SQLiteRepository:
         from app.models.schemas import AnswerAnchor
         cited = []
         seen = set()
-        for key in _MARKER_RE.findall(answer or ""):
-            if key in seen or key not in id_map:
+        for marker_group in _MARKER_GROUP_RE.findall(answer or ""):
+            keys = [part.strip() for part in marker_group.split(",")]
+            # A mixed known/unknown group is not partially trusted: binding only
+            # the known subset would misrepresent which premises the model cited.
+            if not keys or any(key not in id_map for key in keys):
                 continue
-            seen.add(key)
-            ctx = id_map[key]
-            name = str(ctx.get("name", ""))
-            cited.append(AnswerAnchor(
-                key=key, object_id=ctx["object_id"], object_type=ctx["object_type"],
-                label=(name[:40] or key), name=name,
-                definition=ctx.get("definition"), snippet=ctx.get("snippet"),
-                source_title=ctx.get("source_title", ""), location_label=ctx.get("location_label", ""),
-                tier=ctx.get("tier", "personal"),
-            ))
+            for key in keys:
+                if key in seen:
+                    continue
+                seen.add(key)
+                ctx = id_map[key]
+                name = str(ctx.get("name", ""))
+                cited.append(AnswerAnchor(
+                    key=key, object_id=ctx["object_id"], object_type=ctx["object_type"],
+                    label=(name[:40] or key), name=name,
+                    definition=ctx.get("definition"), snippet=ctx.get("snippet"),
+                    source_title=ctx.get("source_title", ""), location_label=ctx.get("location_label", ""),
+                    tier=ctx.get("tier", "personal"),
+                ))
         return cited
 
     def _needs_index(self, notebook_id: str) -> bool:
