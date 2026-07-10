@@ -1440,6 +1440,11 @@
         "type": "table"
       },
       {
+        "name": "kg_rebuild_checkpoint",
+        "sql_sha256": "0495aef2131e8270aff7c1f666433bb092aa0d44f8c3b91a68d3bade0dbbbd41",
+        "type": "table"
+      },
+      {
         "name": "knowledge_embeddings",
         "sql_sha256": "ec82054bf35efa642fe95d10f654f161a62c751c89777cfe4d422323b19a9e46",
         "type": "table"
@@ -1525,6 +1530,6 @@
         "type": "table"
       }
     ],
-    "user_version": 9
+    "user_version": 10
   }
 }
