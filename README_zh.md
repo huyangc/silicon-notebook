@@ -19,7 +19,7 @@
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
 - KG-native 接地问答：逐句 `[k_i]` 引用（渲染为紧凑编号引用；模型直接输出的数字复合引用如 `[1, 2, 3]` 在能映射到已知引用时也可点击）、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
 - **推理模式的类型化查询期推导：** agent 可调用 `follow_chain`，把有证据的两跳 `A→B→C` 临时组合成 `A→C`；首版只允许 `derived_from / kind_of / prerequisite_of / precedes / part_of`。两条直接关系各自保留可引用的关系证据；被拒绝、无 quote、类型或 `validity_scope` 冲突的路径 fail-closed；推论明确标作「推断」，且绝不写回 KG。生产 schema 保持 v9，不新增迁移、索引或历史回填；查询只对既有 source/target 索引做有界抽样，高度节点无法在预算内确认时直接放弃推论。
-- 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`base` 是权威参考 KG（如模拟设计教材），`personal` 是用户自己的笔记。`federated_retrieve` 跨 `base ∪ 当前 personal` 收集候选、给每条命中打 tier 标签，排序时施加 base 权威权重；当 base 与 personal 冲突时答案以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。notebook 操作菜单（「分析」）提供「设为基准库 / 取消基准库」以把某 notebook 标为基准 KG 并撤销（经 `POST /api/notebooks/{id}/tier`）
+- 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`base` 是权威参考 KG（如模拟设计教材），`personal` 是用户自己的笔记。`federated_retrieve` 跨 `base ∪ 当前 personal` 收集候选并给每条命中打 tier 标签，但排序不修改相关度分数：先按相关度排序，`base` 仅在相关度分数完全相同时作为第二排序键；分数更高的 personal 命中仍排在前面。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。notebook 操作菜单（「分析」）提供「设为基准库 / 取消基准库」以把某 notebook 标为基准 KG 并撤销（经 `POST /api/notebooks/{id}/tier`）
 - **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有，用户只能看到自己的 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改）；admin 持有原有 notebook 并是唯一可将 notebook 标为基准库的用户。基准库 notebook 对普通用户的列表隐藏，但问答时仍作为权威检索上下文使用。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
 - 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
 - 深度报告（两阶段后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。**阶段1（秒级）**:STORM 式多视角规划器——先做零 LLM 语料侦察（来源标题 + KG 命中 + chunk 出处,大纲不再盲规划）——预写出大纲,每节带**专家视角 / 跨视角张力 / 证据充分性判定**（充足/薄弱/缺失 + 缺口说明,来自零 LLM 检索探针 + rewrite 模型上的 Judge）;用户在**大纲编辑器**里审阅/修改后再确认。**阶段2（几分钟,确认后）**:每节独立跑一次完整 `reasoning` 深挖（节间并行,各自独立检索预算）,按三层证据纪律撰写（`[k]` 库内引用 /（推断）库内推断 /【通识】库外通识，行内标注且提示未经验证），最后汇总加执行摘要、参考文献，以及（仅当某节缺库内支撑时）结尾一行「局限」说明。研究深度控件为五个命名档「概览/标准/深入/详尽/穷尽」（默认「标准」，= 每节 reflect 步预算，在生成按钮旁弹出选择）用充分程度换时延；章节按 `KG_JOB_CONCURRENCY` 并行深挖，前端显示逐节实时进度（`section_status`）。以可取消的后台 job 运行；每份报告可下 `.md`，或多选批量下 `reports.zip`
@@ -186,7 +186,7 @@ bash scripts/check.sh                        # hermetic smoke + 全量 pytest + 
 
 - 顶栏：左上角只保留可编辑 notebook 标题；notebook 描述在没有对话时显示到问答欢迎态里，顶部工具栏在桌面宽度下保持各动作标签完整。
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
-- 主栏：两个 tab——**问答**（接地问答，逐句 `[k_i]` 引用渲染为可点击编号引用，并支持有效的数字复合引用如 `[1, 2, 3]`，三种检索模式见下方「检索模式（问答）」一节，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。中断会 abort `/ask/stream` 请求，并把取消信号传给后端，使正在执行的 Ask worker / LLM 路径停止，且不保存被中断的最终回答。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
+- 主栏：两个 tab——**问答**（接地问答，逐句 `[k_i]` 引用渲染为可点击编号引用，并支持有效的数字复合引用如 `[1, 2, 3]`，三种检索模式见下方「检索模式（问答）」一节，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。导航、刷新或 transport 断开连接只会停止当前客户端继续接收，脱离连接的 Ask job 仍在后台运行并可保存最终回答。用户点击中断则是另一条显式取消路径：客户端调用 `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`，由后端设置取消事件，使 worker / LLM 路径停止，且不保存被取消的最终回答。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
 - Studio 类文章研究、思维导图/信息图生成、派生规则审核、治理**晋升队列**（把个人 KG 节点申请晋升到基准语料，并批准/拒绝待审请求）、**基准库/个人层切换**，以及**边审查队列**（按「高中心性 × 低可信」排序确认/拒绝关系，被拒边从图推理中排除）仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
 
@@ -210,7 +210,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 
 ## 检索模式（问答）
 
-`POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。所有模式都跨 `tier=base` ∪ 当前 personal 笔记本联合检索，产出逐句 `[k_i]` 锚点，并用同一口径判接地：`classify_evidence` → `grounded` / `overview` / `inferred`，对比校准过的 `EVIDENCE_TAU_*` 阈值。**排序信号（rerank / RRF / tier 权重）只重排候选，绝不进接地阈值**（阈值读每项的「关键词+语义」融合相关度）。
+`POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。所有模式都跨 `tier=base` ∪ 当前 personal 笔记本联合检索，产出逐句 `[k_i]` 锚点，并用同一口径判接地：`classify_evidence` → `grounded` / `overview` / `inferred`，对比校准过的 `EVIDENCE_TAU_*` 阈值。**rerank / RRF 等排序信号只重排候选，绝不进接地阈值**（阈值读每项的「关键词+语义」融合相关度）。tier 不改变 score，`base` 只在 score 完全相同时作为第二排序键。
 
 | 模式 | 分组 | 需 KG | 一句话 |
 |------|------|-------|--------|
@@ -240,7 +240,9 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`，见上文「检索模式（问答）」；tier 感知，跨 base + 当前 personal 联合检索）
-- `POST /api/notebooks/{id}/ask/stream` — 推理模式问答进度的 NDJSON stream（先发 `progress` 轨迹事件并渲染为实时折叠摘要行，最后发完整 `AskResponse`）；客户端断开 / abort 会设置后端取消事件，使正在进行的 Ask 路径在写入最终答案前停止
+- `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（先发带 `job_id` 的 `started` 事件，再发进度/最终事件）；transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
+- `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的状态与结果
+- `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；设置取消事件并在保存被取消的最终回答前停止 worker
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - `GET|POST /api/notebooks/{id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`
@@ -390,8 +392,9 @@ REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通�
 
 **两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
 （`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法
-`mark_notebook_base()` 设置；一旦某 notebook 标为 `base`，tier 感知联合检索、base
-权威排序权重（base `1.20` vs personal `1.00`）、以及答案里的 base 优先冲突规则即始终生效。
+`mark_notebook_base()` 设置。tier 感知联合检索不改相关度分数：相关度是第一排序键，
+`base` 仅在相关度分数完全相同时作为第二排序键。答案里的 base 优先冲突规则是独立的合成策略，
+在 notebook 标为 `base` 后始终生效。
 可选的图推理 Ask 模式（`mode="graph"`）多跳遍历用固定默认 `max_depth=3`、`max_fan_out=8`
 （经 `getattr` 读取 settings，因此将来加 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env 覆盖无需改代码）。
 边可信打分、策展审核队列、个人→基准晋升同样是行为，不由 env 控制。

@@ -1,207 +1,189 @@
-# silicon-notebook 架构与算法逻辑
+# silicon-notebook 架构
 
-更新日期：2026-06-05
+更新日期：2026-07-10
 
-本文件梳理当前实现的**核心算法逻辑**与**功能清单**（API / 数据表 / 知识对象 / 前端 / 配置）。代码以 `backend/app` 与 `frontend/app/page.tsx` 为准。
+本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署、环境变量全集与产品操作说明以 `README.md`、`README_zh.md` 和 `.env.example` 为准；协作约束以 `AGENTS.md` 为准。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
-> 逐行核对源码的**算法 + 全量函数/接口/表清单**另见 [算法与功能清单.md](算法与功能清单.md)（含配置旋钮速查表）。
+## 1. 真实行为与验证
 
----
+历史说明与实现不一致时，按以下顺序判定真实行为：
 
-## 1. 系统总览
+1. 已通过的回归测试与 characterization test。
+2. 被这些测试覆盖的生产代码。
+3. `README.md`、`README_zh.md`、`AGENTS.md` 与本文。
 
-FastAPI + SQLite 后端，Next.js/TypeScript 前端。核心是一条对**任意用户上传内容**生效的闭环：
+第一阶段用 `backend/tests/test_architecture_documentation.py` 固定三个容易漂移的架构契约：
 
+- Ask stream 的 transport 断连与用户显式取消是两种事件；前者不取消 detached worker。
+- 两层检索不按 tier 改写相关度；`base` 只处理完全相同分数的次序。
+- notebook 内页是来源栏 + Ask/Knowledge 主区域的两列 workspace；Studio 动作位于顶部工具栏或对话框，不占固定右栏。
+
+本地 beta 保持 FastAPI + SQLite + Next.js 的双进程形态，不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding、rerank 与 MinerU 均通过可配置 URL 适配器访问；未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
+
+## 2. 运行时组件
+
+### 2.1 进程与持久化
+
+- `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由。
+- `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
+- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。生产 repository 尚未切换到 PostgreSQL；非 `sqlite:///` 的 `DATABASE_URL` 会被拒绝，不能静默回落到本地库。
+- SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`。模型向量以 JSON 持久化，并在查询时装配为有界的 float32 numpy 矩阵或显式维护的 scale index。
+
+### 2.2 Repository facade 与领域接缝
+
+`backend/app/services/sqlite_repository.py` 中的 `SQLiteRepository` 是现有消费者使用的公共 facade。它仍负责连接、迁移接入、摄取、检索、Ask、缓存与作业协调，因此不是最终的 persistence port。
+
+已有两个高内聚 mixin 是渐进拆分接缝：
+
+- `sqlite_identity.py`：账号、认证 session、用户模型配置与管理员用量查询。
+- `sqlite_notebook_sharing.py`：分享 token、只读成员、读权限归属、notebook 深拷贝与清理生命周期。
+
+facade 通过继承复用这两个实现，并保持既有 repository 方法、请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出。后续迁移必须先建立小型领域 Protocol，再移动实现；不能一次性替换 facade 或改变公开 API。
+
+### 2.3 API 与领域服务
+
+- `backend/app/api/routes.py` 目前仍是聚合 FastAPI router，承载 notebook、source、Ask、knowledge、report 与治理端点；`auth_routes.py` 和 `deps.py` 分别承载认证路由与访问控制依赖。
+- `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
+- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、mode 注册和 reasoning 迭代。
+- `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
+- `parsers.py`、`structural_markdown.py` 与 `mineru_client.py` 负责 PDF、Markdown、DOCX、PPTX、CSV、XLSX 等来源的结构化解析；FastAPI 进程不直接加载 torch 或 MinerU 模型。
+
+### 2.4 前端边界
+
+`frontend/app/page.tsx` 是 collection/workspace 编排器，不再是所有模型与面板实现的唯一所有者：
+
+- `workspace-model.ts` 保存共享 API/视图类型与常量。
+- `answer-panel.tsx` 保存答案、引用与 reasoning trace UI。
+- `kg-type-mark.tsx` 保存答案与图谱共用的知识类型标记。
+- `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
+
+notebook 内页采用来源栏 + Ask/Knowledge 主区域的两列 workspace。Knowledge Graph 以全屏 overlay 打开；文章研究、Mind Map、Infographic、治理队列和其他 Studio 类动作从顶部分析工具栏进入，并在对话框或独立视图显示。
+
+### 2.5 配置边界
+
+关键配置保持 URL 驱动并由 `.env.example` 作为字段真源：
+
+- 数据与认证：`DATABASE_URL`、`SILICON_NOTEBOOK_STORAGE_DIR`、`SILICON_NOTEBOOK_ADMIN_PASSWORD`、`SILICON_NOTEBOOK_AUTH_OPTIONAL`。
+- LLM：`OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_API_KEY`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_TIMEOUT_SECONDS`。
+- embedding：`EMBED_PROVIDER`、`EMBED_BASE_URL`、`EMBED_API_KEY`、`EMBED_MODEL`、`EMBED_DIM`。
+- PDF：`MINERU_MODE`、`MINERU_API_URL`、`MINERU_BACKEND`、`MINERU_PARSE_METHOD`、`MINERU_LANG`、`MINERU_TIMEOUT_SECONDS`。
+- KG / index 调度：`KG_AUTO_EXTRACT`、`KG_EXTRACT_WORKERS`、`KG_JOB_CONCURRENCY`、`SCALE_INDEX_AUTO_ENABLED`、`SCALE_INDEX_AUTO_WHEN`。
+
+新增可由环境覆盖的 pydantic v2 setting 必须使用 `validation_alias`；列表类值按现有 `NoDecode` 约定解析。
+
+## 3. 核心数据流
+
+### 3.1 创建与摄取
+
+```text
+创建 Untitled notebook 并立即打开
+  → multipart 或受约束的公开 URL 导入 source
+  → parse 为 SourceElement
+  → chunk / element embedding 后台写入
+  → 按 notebook 的 KG opt-in 状态执行或跳过 KG 抽取
+  → 抽取时写入 knowledge_objects / knowledge_relations 与证据
+  → 标记 unified KG / index 维护状态，由独立维护路径处理
 ```
-创建 notebook（直接进入，不弹窗）
- → 上传 source（PDF/MD/DOCX/PPTX/CSV/XLSX，multipart）
- → [process_source] 解析 parse → 元素向量化(后台 daemon) ‖ KG 抽取(前台)
- → extracted(绿) — 仅看 KG 抽取完成，不等向量化
- → 知识对象进 knowledge_objects + knowledge_relations
- → 混合检索（关键词 bi-gram + 语义矩阵 matmul）
- → KG-native 问答 ask()（逐句 [k_i] 引用 + 多轮会话）
- → 统一 KG / 跨文档概念聚类（concept_clusters）
- → 用户反馈 👍/👎
+
+source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。解析重跑和来源删除共享 stale-source 清理边界，移除旧知识、embedding、依赖的文章研究数据与本地文件。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
+
+### 3.2 Ask 与 detached job
+
+`POST /api/notebooks/{id}/ask` 保留非流式兼容路径。`POST /api/notebooks/{id}/ask/stream` 先创建持久化 Ask job 与 cancellation event，再启动脱离 transport 生命周期的 worker：
+
+```text
+stream start
+  → started {job_id}
+  → detached worker 执行 chunk / graph / reasoning
+  → progress / trace 事件尽力推送给当前客户端
+  → worker 正常完成并保存 answer，job=done
+
+transport disconnect / navigation / refresh
+  → 停止向该客户端继续推送
+  → 不设置 cancellation event
+  → detached worker 继续并可保存结果
+
+用户点击显式中断
+  → POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel
+  → 设置 cancellation event
+  → worker / LLM 路径停止，取消的最终回答不保存
 ```
 
-LLM / embedding / MinerU 任一未配置时，对应环节走 **deterministic 回退**，整条链路离线可跑。
+`GET /api/notebooks/{id}/ask/jobs/{job_id}` 提供重连后的状态/结果读取。前端 logout 仍会终止本地流并重置用户态，但 transport 生命周期本身不拥有后台 job。
 
-### 组件地图
+### 3.3 联合检索与回答合成
 
-| 关注点 | 文件 |
-|---|---|
-| 路由 | `backend/app/api/routes.py` |
-| 业务核心（摄取/问答/治理） | `backend/app/services/sqlite_repository.py` |
-| 结构化解析 | `backend/app/services/structural_markdown.py` |
-| 多格式解析适配器 | `backend/app/services/parsers.py` |
-| MinerU 适配 | `backend/app/services/mineru_client.py` |
-| KG 窗口化 | `backend/app/services/kg/windowing.py` |
-| KG 抽取（LLM） | `backend/app/services/kg/extract.py` |
-| KG 规范化/合并 | `backend/app/services/kg/canonicalize.py` |
-| KG 摄取管线 | `backend/app/services/kg_ingest.py` |
-| 检索打分 | `backend/app/services/retrieval.py` |
-| 向量矩阵 | `backend/app/services/vector_index.py` |
-| 向量缓存 | `backend/app/services/vector_cache.py` |
-| 嵌入（dashscope） | `backend/app/services/embedding_dashscope.py` |
-| 抽取 profile | `backend/app/services/kg/extraction_profiles.py` |
-| LLM 客户端 | `backend/app/core/llm.py` |
-| Schema | `backend/app/models/schemas.py` |
-| 配置 | `backend/app/core/config.py` |
-| 前端（单文件） | `frontend/app/page.tsx` |
+所有 Ask mode 都可在当前 personal notebook 与可参与的 base notebook 之间联合检索，并给 hit/anchor 标记 `tier`。`federated_retrieve` 的相关度 score 不乘 tier 常数，也不设置 tier 配额或地板；排序以 score 为第一键，只在 score 完全相同时让 base 先排。因此相关度更高的 personal 命中始终可以排在 base 命中之前。
 
----
+base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 证据矛盾，答案服从 base，并明确披露差异。这是 synthesis policy，不是 retrieval score policy，也不参与 grounding 阈值。
 
-## 2. 核心算法逻辑
+当前 Ask mode registry 的默认路径是 `chunk`；`graph` 为严格 KG 路径，`reasoning` 迭代执行计划、检索、反思并流式产出 trace。退役 mode id 只保留兼容映射，不能改回默认模式。
 
-### 2.1 文档解析（`structural_markdown.py` + `parsers.py` + `mineru_client.py`）
+### 3.4 KG 与索引维护
 
-**唯一结构化 Markdown 解析器**(`structural_markdown.py`)：`markdown-it-py`（commonmark 预设 + 启用 table，不启用 linkify）→ `Block{type, text, raw, level, lang, char_start/end, line_start/end, section_path面包屑, anchor_id}`。支持类型：`heading / paragraph / list_item / code_block / table / image`。
+- 新摄取数据使 unified KG 进入 dirty 状态，不在 Ask 请求路径同步整库重建。
+- 打开 Knowledge Graph overlay 时读取当前图和 `GET /api/notebooks/{id}/unified-kg/status`；只有用户触发刷新时才调用 rebuild。
+- KG 首次构建/整库重建使用显式 build/rebuild 端点；跨文档 merge review 只处理有界候选批次。
+- vector cache 按数据版本失效；大库 scale index 由维护任务构建/刷新，并通过状态与 manifest 观察。即使 `SCALE_INDEX_AUTO_ENABLED` 开启，调度也发生在后台维护路径，而不是把全库 backfill 塞进 Ask。
+- Ask 不同步补齐整库 embedding、不同步重建 unified KG，也不为 citation validation 扫描全部 source element。
 
-被两个适配器复用：
-- `parsers.parse_markdown` → `SourceElement`，供存储与嵌入。
-- `kg/parsing.parse_elements` → `SourceElementQ`，供 KG 窗口化。
+### 3.5 深度报告
 
-特殊规则：**代码块整块保留**但**不进 KG 抽取**（不出现在 `_PROSE_TYPES` 中）；`<a id>` 锚点被解析为 `anchor_id` 但在产出时丢弃。
+深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段一做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；阶段二在确认后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。
 
-其他格式：PDF 走 MinerU（`MINERU_MODE` off/http/cli）→ pypdf 兜底；DOCX / PPTX / CSV / XLSX 各有独立解析器。
+## 4. 关键行为契约
 
-MinerU 不可达/报错/产出空 → 静默回退 pypdf，上传永不阻塞。PDF 解析出 0 元素给"疑似扫描件"提示。
+- **断连不等于取消**：transport 断连只停止向该客户端继续推送；detached Ask worker 仍执行并可持久化。只有显式 cancel endpoint 能设置 cancellation event。
+- **显式中断端到端**：前端 interrupt 控件拿已返回的 `job_id` 调 cancel endpoint；worker 与流式 LLM 在保存最终回答前检查取消状态。
+- **tier 不改分**：base/personal 对 retrieval score 无幅度影响；完全平局时 base 作为第二排序键。base-wins 矛盾规则只属于回答合成。
+- **两列 workspace**：固定区域只有来源栏与 Ask/Knowledge 主区域；Studio 类功能不占固定右侧栏。
+- **维护工作显式可观测**：Ask 不承担整库 embedding、KG rebuild 或 scale-index build。图与索引状态必须可查询，重建/刷新由独立任务完成。
+- **证据与治理一致**：只有 usable knowledge status 进入检索；所有图消费者排除 `review_status='rejected'` 的关系，并保持存储的 `source_object_id → target_object_id` 方向。
+- **兼容 facade**：本阶段不改变 endpoint、SQLite schema、repository 公共方法、旧 import、前端交互或异步任务语义。
+- **本地 beta 约束**：无 Docker 默认流程、无强制外部服务、无 demo 数据；模型服务通过 URL，测试保持离线且不读取真实密钥。
 
-### 2.2 KG 窗口化（`kg/windowing.make_windows`）
+## 5. 当前模块边界
 
-`_PROSE_TYPES = (paragraph, list_item, formula, table, figure_caption)`（**不含 heading / code_block**）。
+| 区域 | 当前所有者 | 当前边界与约束 |
+|---|---|---|
+| FastAPI 应用 | `backend/app/main.py` | 应用装配、中间件与 router 挂载；同步 SQLite 授权工作不能阻塞 event loop。 |
+| API | `backend/app/api/routes.py`、`auth_routes.py`、`deps.py` | 总业务 router 仍偏大；拆分前后必须保持路径、依赖与 response schema。 |
+| SQLite facade | `backend/app/services/sqlite_repository.py` | 现有公共入口；identity/sharing mixin 是迁移接缝，不是完成的 port 分层。 |
+| Identity | `backend/app/services/sqlite_identity.py` | 用户、session、模型配置、管理员用量。 |
+| Sharing | `backend/app/services/sqlite_notebook_sharing.py` | share token、reader 权限、深拷贝与补偿/恢复。 |
+| KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；所有消费者共享 usable relation 规则。 |
+| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding 与 tier 次序保持分离；mode registry 是 mode 真源。 |
+| Reports | `backend/app/services/report_engine.py` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义。 |
+| Frontend workspace | `frontend/app/page.tsx` 加共享 model/panel/helper | `page.tsx` 负责编排；共享类型、答案面板和 KG 标记不能复制回巨型组件。 |
 
-按文档顺序**贪心打包** prose 块到目标窗口字符、相邻 overlap `kg_window_overlap_chars`（450）；吸收碎小节；超长单元素按 step = target - overlap 内切。窗口大小**自适应**：`plan_window_size` 取 `clamp(内容字符 / KG_EXTRACT_WORKERS, KG_WINDOW_MIN_CHARS=4000, KG_WINDOW_MAX_CHARS=8000)` 并等长切分（`KG_WINDOW_TARGET_CHARS>0` 时固定为该值）。窗口数超 `kg_window_warn_threshold`（1200）记 WARNING，不截断。
+当前主要耦合点是：`SQLiteRepository` 仍混合 persistence 与业务编排、`routes.py` 仍聚合多数业务端点、`page.tsx` 仍承担大量 workspace 异步状态。整改必须以现有 facade 和测试为保护层逐域迁移。
 
-### 2.3 KG 抽取（`kg_ingest.extract_graph`）
+## 6. 已知架构债务与整改顺序
 
-经**全局窗口池**（`kg/scheduler.py` 的 `submit_window`，容量 `KG_EXTRACT_WORKERS` 全局封顶、跨所有文档共享、FIFO）并发逐窗 LLM 抽取；文档级并发由**作业池** `KG_JOB_CONCURRENCY` 控制（上传分发经 `submit_job(process_source)`，替代顺序 BackgroundTask）：
+整改按已批准设计分六个独立阶段，每阶段单独提交/PR、同步最新 `master` 并运行完整门禁：
 
-- `NODE_TYPES = {Concept, Claim, Formula, Procedure}`
-- `EDGE_TYPES = {defines, part_of, composed_of, contrasts_with, kind_of, …}`
-- 抽取 profile：`academic_paper / textbook`（`kg/extraction_profiles.py`）
+1. **行为契约与文档对齐**：修正 Ask disconnect、tier 排序与 workspace 文档漂移，重写本文并加入文档契约测试；不改运行时代码。
+2. **Notebook 规模策略与 Repository ports**：引入中性 `NotebookScaleProfile`，让 copy 与 retrieval 分别消费自己的策略；把巨型 repository Protocol 拆成领域小 Protocol，同时保留兼容组合类型。
+3. **FastAPI routers 与前端 API client**：按 notebook/source/ask/knowledge/report/admin 拆 router；统一前端 JSON、NDJSON、Blob、认证和错误解析。
+4. **SQLite migrations 与模型边界**：把 migration registry、DDL 与 schema helper 迁到 `sqlite_migrations.py`；按领域拆 Pydantic 模型并从 `schemas.py` re-export 旧符号。
+5. **前端 workspace 状态拆分**：先增加可迁移的 helper/hook 行为测试，再抽 `useAskSession`、`useSourceLibrary`、`useKnowledgeGraphWorkspace` 与对应 panel；不引入新全局状态库，不改轮询节奏。
+6. **Runtime 生命周期与 Retrieval/Ask 实现**：引入 FastAPI lifespan 管理的 application runtime、job executor 与 cache coordinator，最后再把 retrieval/Ask 从 SQLite facade 迁出；保留取消、重连、缓存版本和大库守卫 characterization test。
 
-单窗失败隔离（`failed_windows` 计数），不影响其他窗口。`canonicalize` 做跨窗节点合并。`build_records` 把节点转知识对象，按以下顺序绑定 evidence：① 精确子串包含；② CJK token 重叠 ≥ 0.6 模糊回退。绑不上的节点整体丢弃。
+非目标包括一次性 clean-architecture 重写、在本轮引入 PostgreSQL/SQLAlchemy/容器/新模型服务，或借整改改变公开 API、数据库表、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
 
-### 2.4 嵌入（`embed_provider = dashscope`）
+## 7. 验证命令
 
-两类向量：
-- **元素向量** `_embed_source` → `element_embeddings`（文本前 `embed_truncate_chars=2000` 字符）。
-- **知识对象向量** `_embed_objects_batch` → `knowledge_embeddings`（payload 文本）。
+文档行为契约与对应运行时回归：
 
-**两者都用 `ThreadPoolExecutor` 并发**（线程前缀 `emb-el` / `emb-kg`，并发度 `embed_concurrency=50`，batch `embed_batch_size=10`）；**每批独立连接逐批落库**（WAL + busy_timeout），批失败隔离不中断整体。
+```bash
+cd backend
+python -m pytest tests/test_architecture_documentation.py tests/test_ask_stream_cancel.py tests/test_two_tier_federated.py -q
+```
 
-### 2.5 摄取管线（`process_source`）
+完整离线门禁与前端生产构建：
 
-状态机：`queued → parsing → parsed → extracting → extracted`（失败 `failed`）。
-
-解析后：**元素向量化在后台 daemon 线程**、与前台 KG 抽取并发；`extracted`（前端绿）**仅看 KG 抽取完成**，不等向量化；末尾 `embed_thread.join()` 收尾后台线程。
-
-**导入后不再自动生成/覆盖笔记本名字或描述**。
-
-### 2.6 存储（SQLite）
-
-`_connect` 开 **WAL + busy_timeout**（`db_busy_timeout_ms=30000`）。共 20 张表（关键：`knowledge_objects / knowledge_relations / knowledge_embeddings / element_embeddings / conversations / concept_clusters / extraction_runs / sources / source_elements`，详见 [算法与功能清单.md §E](算法与功能清单.md)）。
-
-### 2.7 混合检索（`retrieval.py` + `vector_index.py` + `vector_cache.py`）
-
-关键词（CJK 连续串切字符 bi-gram + 中英停用词，`W_KEYWORD=0.4`）+ 语义（`W_SEMANTIC=0.6`，`RELEVANCE_FLOOR=0.12`）。
-
-`ask()` 为每 notebook 构建 **L2 归一化 float32 矩阵**（`vector_index.build_matrix` 流式读、内存有界，约百 MB 级；旧版 Python list 达 1.3 G），用 `vector_cache`（版本键 = 表名/行数/max created_at）缓存；`query_sims` 单次 matmul。
-
-`_TYPE_WEIGHT = {claim: 1.0, formula: 1.0, procedure: 0.7, concept: 0.5}`（仅用于跨类型排序/分组，不污染同类相关度）。
-
-top-N `retrieval_top_n`（12）+ 沿 `knowledge_relations` **1-hop 扩展**邻居。
-
-### 2.8 问答 `ask()`
-
-KG-native 接地问答。
-
-`AskResponse{answer（含 [k_i] 标记）, grounded, anchors[{key, object_id, name, definition, snippet, …}], related_knowledge, citations, llm_mode∈grounded/ungrounded/deterministic, conversation_id}`。
-
-多轮：`conversations` 表 + `answers.conversation_id`。
-
-LLM 合成（`_answer_kg`，给每命中 `k{i}` id + 定义/首现 snippet / procedure steps；concept 按 unified 簇去重）或确定性兜底（离线关键词 + 模板）。
-
-### 2.9 统一 KG 与概念聚类
-
-跨文档概念聚类/合并（`concept_clusters`），暴露于 `/unified-kg`、`/concepts/{id}/detail`、`/objects/{id}/context`；支持 pending-merges confirm / reject。
-
-### 2.10 LLM 客户端（`llm.py`）
-
-OpenAI 兼容；`chat_json`（`response_format=json_object` + `strip_json_fences` 去围栏）、`embed`。每次调用写 `.local/logs/llm.jsonl`（状态/延迟/token/错误）。
-
----
-
-## 3. 功能清单
-
-### 3.1 API（`/api` 前缀，`routes.py`）
-
-**系统**：`GET /health`、`GET /me`、`GET /doc-types`、`GET /notebook-templates`
-
-**Notebook**：`GET/POST /notebooks`、`GET/PATCH/DELETE /notebooks/{id}`、`GET /notebooks/{id}/analytics`
-
-**Source**：`GET /notebooks/{id}/sources`、`POST /notebooks/{id}/sources`（上传 multipart）、`POST .../sources/import`、`GET/DELETE /sources/{id}`、`POST /sources/{id}/parse`、`GET /sources/{id}/elements`
-
-**知识类型 / 知识对象**：`GET /notebooks/{id}/knowledge-types`、`GET /notebooks/{id}/knowledge`（`?type=`）、`PATCH /knowledge/{id}`
-
-**Object Schema**：`GET/POST /object-schemas`、`PATCH/DELETE /object-schemas/{object_type}`、`POST /notebooks/{id}/schema-proposals`
-
-**知识图谱**：`GET /notebooks/{id}/graph`
-
-**检索 / 问答**：`GET /notebooks/{id}/search`、`POST /notebooks/{id}/ask`
-
-**会话**：`GET /notebooks/{id}/conversations`、`GET/PATCH/DELETE /conversations/{id}`
-
-**反馈**：`POST /answers/{answer_id}/feedback`
-
-**统一 KG**：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`、`POST .../unified-kg/merges/{candidate_id}/confirm|reject`
-
-**仍在但作用于当前对象**：duplicates、merge、articles(CRUD + research)、derived-rules(GET/approve/reject)
-
-### 3.2 SQLite 表（19）
-
-`users` · `user_profiles` · `notebooks` · `sources` · `source_elements` · `articles` · `extraction_runs` · `element_embeddings` · `knowledge_embeddings` · `knowledge_objects` · `knowledge_relations` · `answers` · `conversations` · `feedback` · `article_claims` · `derived_rule_candidates` · `object_schemas` · `concept_clusters` · `concept_merge_candidates`
-
-### 3.3 知识对象类型与状态
-
-- **对象类型**（4 种，统一存 `knowledge_objects`）：`concept / claim / formula / procedure`
-- **知识状态**：`approved / reviewed / deprecated / conflict / project_specific`；仅 `USABLE_STATUSES`（approved/reviewed/project_specific/conflict）进入检索/回答，`deprecated` 排除。
-
-### 3.4 `source.parse_status` 状态机
-
-`queued → parsing → parsed → extracting → extracted`（失败 `failed`）。前端对非终态 source 每 ~1.5 s 轮询 `GET /sources/{id}`。
-
-### 3.5 前端功能（`frontend/app/page.tsx`）
-
-- **集合页**：tab 过滤 / grid·compact·list 视图 / 排序 / debounce 搜索 / 新建（直接创建未命名笔记本并进入，无弹窗）·编辑·删除。
-- **工作区三栏**：左 Source Stack（上传 + 实时状态 + detail/删除）、中 tab（**问答 ask** ｜ **知识库 rules**，通用类型无关）、右 Studio（文章·派生规则·知识图谱）。
-- **状态点**：绿色仅给 `extracted`，其余处理中为橙色。
-- **知识图谱**：Concept / Claim / Formula / Procedure 同屏展示，节点/边/类型形状直接画在主视图。
-- 回答区：逐句 `[k_i]` 引用 + anchors 展开 + 👍/👎 反馈。
-
-### 3.6 配置开关（`.env` / `core/config.py`）
-
-- **模型服务**：`openai_compat_base_url/api_key/model/timeout=60/max_retries=2`（所有模型经 URL 端点接入，不启动本地服务）。
-- **嵌入**：`embed_provider`（""/dashscope）/`embed_model`/`embed_base_url`/`embed_api_key`/`embed_dim=1024`/`embed_truncate_chars=2000`/`embed_batch_size=10`/`embed_persist_chunk=200`/`embed_concurrency=50`。
-- **KG 抽取**：`kg_extract_workers=16`（全局窗口并发上限）/`kg_job_concurrency=8`（文档级并发）/`kg_ask_reserve=64`（Ask 连接预留）/`kg_window_target_chars=0`（0=自适应）/`kg_window_min_chars=4000`/`kg_window_max_chars=8000`/`kg_window_overlap_chars=450`/`kg_window_warn_threshold=1200`。
-- **DB**：`db_busy_timeout_ms=30000`。
-- **检索**：`retrieval_top_n=12`。
-- **MinerU**：`mineru_mode(off|http|cli)` · `mineru_api_url` · `mineru_backend` · `mineru_vlm_server_url` · `mineru_parse_method` · `mineru_lang` · `mineru_model_source` · `mineru_timeout_seconds` · `mineru_formula_enable` · `mineru_table_enable`。
-- **存储/CORS**：`database_url` · `storage_dir` · `cors_origins`。
-
-### 3.7 验证
-
-`scripts/check.sh`：`py_compile` + 离线 hermetic `smoke_backend.py`（钉死 `mineru_mode=off`、清空 LLM/embedding，不读真实密钥）+ 前端 `tsc --noEmit`。
-
----
-
-## 4. 关键设计取舍
-
-- **解析单一结构化实现**：`structural_markdown.py` 是唯一 Markdown 解析器；代码块/表格保真输出，代码块不入 KG 实体。
-- **KG 抽取并发 + 高效窗口化**：成本随文档线性（非爆炸）；单窗失败隔离不中断整体；窗口数超阈值告警不截断。
-- **检索 float32 矩阵 + 缓存**：低内存（旧版 Python list 1.3 G → 现在 ~百 MB）；SQLite + numpy 不引向量库（超大规模再上 sqlite-vec）。
-- **抽取优先、向量化后台并发**：绿色 = KG 就绪，用户不用等向量化完成。
-- **Evidence-first 逐句引用**：抽取与回答都绑定 element 级证据，[k_i] 可追溯，杜绝"无出处结论"。
-- **离线可跑**：无 LLM/embedder 时降级为关键词 + 确定性答案；测试不依赖外部服务与密钥。
-- **GPU 解耦**：后端绝不 import torch/MinerU；重活在子进程/远端，本机/CI 始终轻量离线。
+```bash
+bash scripts/check.sh
+cd frontend
+npm run build
+```
