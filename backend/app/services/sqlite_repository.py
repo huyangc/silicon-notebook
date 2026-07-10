@@ -198,6 +198,9 @@ def _pair_key(a: str, b: str) -> str:
     return f"{x}\x1f{y}"
 
 
+_DESC_CKPT_FLUSH = 16   # 概念描述每完成多少个 flush 一次 checkpoint(被杀最多丢这么多)
+
+
 def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
     keys that actually resolved to an anchor):
@@ -6374,6 +6377,8 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                     "FROM concept_clusters WHERE notebook_id=? AND object_type='concept'",
                     (notebook_id,)).fetchall():
                     old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
+            # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
+            desc_ckpt = self._rebuild_ckpt_load(notebook_id, _ver, "concept_desc")
             # Total members per canonical = Σ members_count over its seeds. Keep
             # only multi-member (cross-doc merged) canonicals — same cost bound as
             # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
@@ -6413,9 +6418,14 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                     continue
                 name = sd["canonical_names"].get(cid, "")
                 sig = _concept_desc_sig(name, quotes)
+                ck = desc_ckpt.get(cid)
+                if ck and ck.get("sig") == sig and ck.get("description"):
+                    desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
+                    desc_sig_by_cid[cid] = sig
+                    continue
                 prev = old_desc.get(cid)
                 if prev and prev[0] and prev[1] == sig:
-                    desc_by_cid[cid] = prev[0]          # cache hit: reuse, skip LLM
+                    desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
                     desc_sig_by_cid[cid] = sig
                     continue
                 work.append((cid, name, quotes, sig))
@@ -6442,17 +6452,24 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 workers = max(1, min(self.settings.kg_job_concurrency, len(work)))
                 done_n = 0
                 with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
+                    _ck_buf: List[Tuple[str, dict]] = []
                     for fut in _cf.as_completed([pool.submit(_gen, it) for it in work]):
                         cid, desc, sig = fut.result()
                         done_n += 1
                         if desc:
                             desc_by_cid[cid] = desc
                             desc_sig_by_cid[cid] = sig
+                            _ck_buf.append((cid, {"description": desc, "sig": sig}))
+                            if len(_ck_buf) >= _DESC_CKPT_FLUSH:
+                                self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                                _ck_buf = []
                         if progress is not None:
                             try:
                                 progress("concept_desc", done_n, len(work))
                             except Exception:
                                 pass
+                    if _ck_buf:
+                        self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
         if _desc_ran:
             _stage(f"concept: descriptions {len(desc_by_cid)} "
                    f"({_time.perf_counter() - _t_desc:.1f}s)")
