@@ -32,6 +32,28 @@ def test_migration_creates_checkpoint_table(repo):
     assert uv == SCHEMA_VERSION
 
 
+def test_deployed_v9_db_gets_checkpoint_table_backfilled(repo):
+    """已部署库(user_version=9,缺 kg_rebuild_checkpoint 表)重新打开时,
+    _migration_10 必须独立补建该表——镜像 test_mention_bridge.py 的
+    test_deployed_v8_db_gets_backfilled 写法(drop 表→回退版本戳→重开)。"""
+    from app.services.sqlite_repository import SCHEMA_VERSION
+
+    with repo._connect() as db:
+        db.execute("DROP TABLE kg_rebuild_checkpoint")
+        db.execute("PRAGMA user_version = 9")
+
+    r2 = SQLiteRepository(Settings())
+    with r2._connect() as db:
+        row = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='kg_rebuild_checkpoint'"
+        ).fetchone()
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(kg_rebuild_checkpoint)").fetchall()}
+        uv = int(db.execute("PRAGMA user_version").fetchone()[0])
+    assert row is not None
+    assert cols == {"notebook_id", "input_version", "stage", "item_key", "payload", "created_at"}
+    assert uv == SCHEMA_VERSION
+
+
 def test_ckpt_put_load_roundtrip(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo._rebuild_ckpt_put(nb.id, "v1", "merge_review",
