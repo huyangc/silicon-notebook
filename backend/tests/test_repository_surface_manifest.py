@@ -153,6 +153,12 @@ TASK14_ALLOWED_IMPORTS = {
 TASK15_ALLOWED_IMPORTS = {
     ("backend/tests/test_knowledge_lifecycle_delegation.py", 20, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+# Task 16: the new knowledge-governance delegation test file imports the
+# compatibility export at a fresh site (the facade's own frozen import lines
+# are untouched).
+TASK16_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowledge_governance_delegation.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -737,6 +743,15 @@ TASK15_ALLOWED_PATCHES = {
     ("backend/tests/test_viz_bounded.py", 118, "_unified_graph_full", "repo"),
 }
 
+# Task 16: the delegation suite's compound-flow proof patches the facade
+# set_conflict_status wrapper (production-compatible seat — confirm_conflict
+# routes the candidate-status transaction through it by contract, exactly
+# like the frozen test_repository_phase_contracts probe whose `repository`
+# fixture name this static scan cannot see).
+TASK16_ALLOWED_PATCHES = {
+    ("backend/tests/test_knowledge_governance_delegation.py", 131, "set_conflict_status", "repo"),
+}
+
 # Task 15: the KG lifecycle / unified-KG orchestration moves to
 # KnowledgeLifecycleService (+ the KnowledgeGovernanceService seed carrying
 # resolve_notebook_conflicts); the facade keeps frozen-signature delegates, so
@@ -787,6 +802,42 @@ TASK15_ALLOWED_MEMBER_FILES = {
         "relink_notebook_kg", "resolve_notebook_conflicts", "store_kg",
         "summarize_communities", "unified_graph", "unified_kg_status",
         "write_clusters",
+    }
+}
+
+# Task 16: the governance orchestration moves to KnowledgeGovernanceService
+# (extending the Task-15 seed instance); the facade keeps frozen-signature
+# delegates, so the moved bodies' internal self-call sites disappear from the
+# facade file (incl. the Task-15 temporary conflict-port lambdas and the
+# _REVIEW_STATUSES / static-helper references).  The new delegation test file
+# consumes the facade at fresh sites.
+TASK16_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_REVIEW_STATUSES", "_has_pending_merges", "_knowledge_ref",
+        "_knowledge_similarity", "_payload_join", "_pending_merges_batch",
+        "_promotion_row_to_dict", "apply_conflict_resolution",
+        "get_conflict_candidate", "review_pending_merges", "set_edge_review",
+        "set_merge_decision", "update_knowledge", "write_conflict_candidate",
+    }
+} | {
+    ("backend/tests/test_knowledge_governance_delegation.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_has_pending_merges",
+        "_pending_merges_batch", "_runtime", "_test_insert_object",
+        "apply_conflict_resolution", "approve_promotion",
+        "concept_whitelist_add", "concept_whitelist_list",
+        "concept_whitelist_remove", "concept_whitelist_terms",
+        "confirm_conflict", "confirm_merge", "create_notebook",
+        "decided_pairs", "decided_seed_pairs", "find_duplicates",
+        "get_conflict_candidate", "list_promotion_queue", "merge_knowledge",
+        "merge_review_job_status", "pending_conflicts", "pending_merges",
+        "propose_promotion", "reject_conflict", "reject_merge",
+        "reject_promotion", "resolve_notebook_conflicts",
+        "review_pending_merges", "review_queue", "run_merge_review_job",
+        "set_conflict_status", "set_edge_review", "set_merge_decision",
+        "update_knowledge", "write_conflict_candidate",
+        "write_merge_candidate",
     }
 }
 
@@ -1205,6 +1256,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK13_ALLOWED_IMPORTS
                     or site in TASK14_ALLOWED_IMPORTS
                     or site in TASK15_ALLOWED_IMPORTS
+                    or site in TASK16_ALLOWED_IMPORTS
                 )
 
 
@@ -1216,7 +1268,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -1245,14 +1297,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}

@@ -332,15 +332,18 @@ class RepositoryRuntime:
         maybe_auto_index: Callable[[str], None],
         unified_cache: Any,
         viz_building: Any,
-        write_conflict_candidate: Callable[..., str],
-        apply_conflict_resolution: Callable[..., dict],
+        edge_centrality_map: Callable[[str], dict],
+        embed_knowledge: Callable[..., None],
+        knowledge_objects: Callable[..., list],
+        as_retrieved: Callable[..., Any],
+        rule_card: Callable[..., Any],
         set_conflict_status: Callable[..., None],
     ) -> KnowledgeLifecycleService:
-        """Compose the knowledge governance + lifecycle services (Task 15) once
-        the facade-bound collaborators exist.  ``connect``/``write`` are the
-        facade's ``_connect``/``_write`` compatibility seats resolved per call
-        (frozen transaction traces / failure injections keep observing every
-        lifecycle commit boundary); ``invalidate_unified_cache`` /
+        """Compose the knowledge governance + lifecycle services (Task 15/16)
+        once the facade-bound collaborators exist.  ``connect``/``write`` are
+        the facade's ``_connect``/``_write`` compatibility seats resolved per
+        call (frozen transaction traces / failure injections keep observing
+        every lifecycle commit boundary); ``invalidate_unified_cache`` /
         ``mark_unified_kg_dirty`` / ``bump_cluster_mutation_seq`` are the
         facade's Task-14 wrapper seats (the coordinator stays the single dirty
         entry and repo-level patch seats stay effective); ``llm``/``kg_llm``
@@ -351,18 +354,34 @@ class RepositoryRuntime:
         cache objects are the facade's EXISTING dict/set passed BY IDENTITY;
         ``kg_building`` set identity comes from the catalog (get_notebook reads
         membership there) while the lifecycle owns the guard lock.  The
-        governance seed (resolve_notebook_conflicts) is constructed FIRST so
-        the lifecycle's full-notebook build calls it as a real service, not a
-        facade callback — Task 16 extends that same instance."""
+        governance service is constructed FIRST so the lifecycle's
+        full-notebook build calls it as a real service, not a facade callback.
+        Task 16 gives it the full governance surface: the Task-13 stores, the
+        retrieval-owned ports (edge-centrality cache / payload embed /
+        RetrievedKnowledge+RuleCard formatting / knowledge-objects reader,
+        facade-late until their domain moves) and ONE surviving compound port
+        — ``set_conflict_status`` resolves the FACADE wrapper per call because
+        the frozen confirm_conflict phase contract patches that method."""
         self.knowledge_governance = KnowledgeGovernanceService(
             settings=self.settings,
             event_log=self.event_log,
+            governance_store=self.governance,
+            knowledge=self.knowledge,
+            new_id=self.seams.new_id,
+            now=self.seams.now,
             connect=connect,
+            write=write,
+            get_notebook=get_notebook,
+            invalidate_unified_cache=invalidate_unified_cache,
+            mark_unified_kg_dirty=mark_unified_kg_dirty,
             llm=llm,
             kg_llm=kg_llm,
             relations_for_notebook=relations_for_notebook,
-            write_conflict_candidate=write_conflict_candidate,
-            apply_conflict_resolution=apply_conflict_resolution,
+            edge_centrality_map=edge_centrality_map,
+            embed_knowledge=embed_knowledge,
+            knowledge_objects=knowledge_objects,
+            as_retrieved=as_retrieved,
+            rule_card=rule_card,
             set_conflict_status=set_conflict_status,
         )
         self.knowledge_lifecycle = KnowledgeLifecycleService(

@@ -411,12 +411,17 @@ class SQLiteRepository:
             maybe_auto_index=lambda notebook_id: self.maybe_auto_index(notebook_id),
             unified_cache=self._unified_cache,
             viz_building=self._viz_building,
-            write_conflict_candidate=lambda notebook_id, **kw: (
-                self.write_conflict_candidate(notebook_id, **kw)
+            edge_centrality_map=lambda notebook_id: (
+                self._edge_centrality_map(notebook_id)
             ),
-            apply_conflict_resolution=lambda notebook_id, **kw: (
-                self.apply_conflict_resolution(notebook_id, **kw)
+            embed_knowledge=lambda object_id, notebook_id, payload: (
+                self._embed_knowledge(object_id, notebook_id, payload)
             ),
+            knowledge_objects=lambda db, notebook_id, object_type, **kw: (
+                self._knowledge_objects(db, notebook_id, object_type, **kw)
+            ),
+            as_retrieved=lambda obj, object_type: self._as_retrieved(obj, object_type),
+            rule_card=lambda item: self._rule_card(item),
             set_conflict_status=lambda notebook_id, candidate_id, status: (
                 self.set_conflict_status(notebook_id, candidate_id, status)
             ),
@@ -1927,117 +1932,19 @@ class SQLiteRepository:
         return self._vector_cache.get(f"{notebook_id}:edge_centrality", version, _load)
 
     def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
-        """Return edges ranked by review priority = edge_centrality * (1 - trust_score).
-
-        Only edges with review_status != 'rejected' are included (rejected edges are
-        excluded from reasoning and need no further review).
-        Centrality is computed over the FULL graph (including non-rejected edges),
-        version-cached via _edge_centrality_map — see that method's docstring for
-        the degree-top-K bounding behavior above edge_centrality_max_nodes.
-        trust_score combines evidence anchoring + cross-doc corroboration + type validity.
-        """
-        import json as _json
-        from app.services.kg.edge_trust import (
-            compute_trust_score, corroboration_counts,
-            corroboration_score_from_count,
-        )
-
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            rel_rows = db.execute(
-                "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
-                "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
-                "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
-                "FROM knowledge_relations kr "
-                "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
-                "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
-                "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
-                (notebook_id,),
-            ).fetchall()
-            # Build node types + names for trust signals
-            obj_rows = db.execute(
-                "SELECT id, object_type, payload FROM knowledge_objects "
-                "WHERE notebook_id = ?", (notebook_id,)
-            ).fetchall()
-
-        node_types: dict = {}
-        node_names: dict = {}
-        for r in obj_rows:
-            node_types[r["id"]] = r["object_type"]
-            p = _json.loads(r["payload"] or "{}")
-            node_names[r["id"]] = p.get("name", "")
-
-        rels = []
-        for r in rel_rows:
-            rels.append({
-                "id": r["id"],
-                "source_object_id": r["source_object_id"],
-                "target_object_id": r["target_object_id"],
-                "edge_type": r["edge_type"],
-                "evidence": _json.loads(r["evidence"] or "[]"),
-                "source_id": r["source_id"],
-                "review_status": r["review_status"],
-                "_src_type": r["src_type"] or "",
-                "_tgt_type": r["tgt_type"] or "",
-                "_src_name": node_names.get(r["source_object_id"], ""),
-                "_tgt_name": node_names.get(r["target_object_id"], ""),
-            })
-
-        # Corroboration counts (batched over all edges)
-        corr_counts = corroboration_counts(rels, node_names)
-
-        # Edge centrality — version-cached, see _edge_centrality_map docstring.
-        edge_centrality = self._edge_centrality_map(notebook_id)
-
-        items = []
-        for rel in rels:
-            rid = rel["id"]
-            corr_score = corroboration_score_from_count(corr_counts.get(rid, 1))
-            trust = compute_trust_score(rel, node_types, corr_score)
-            ec = edge_centrality.get(rid, 0.0)
-            # review_priority = high centrality × low trust
-            priority = ec * (1.0 - trust)
-            items.append({
-                "rel_id": rid,
-                "notebook_id": notebook_id,
-                "edge_type": rel["edge_type"],
-                "source_object_id": rel["source_object_id"],
-                "target_object_id": rel["target_object_id"],
-                "source_name": rel["_src_name"],
-                "target_name": rel["_tgt_name"],
-                "source_type": rel["_src_type"],
-                "target_type": rel["_tgt_type"],
-                "trust_score": trust,
-                "edge_centrality": ec,
-                "review_priority": priority,
-                "review_status": rel["review_status"],
-            })
-
-        items.sort(key=lambda x: x["review_priority"], reverse=True)
-        return items[:limit]
+        """Edge trust review queue — KnowledgeGovernanceService owns the
+        orchestration (Task 16; centrality stays version-cached through the
+        facade's _edge_centrality_map port). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.review_queue(notebook_id, limit)
 
     def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
-        """Persist review_status on a knowledge_relation.
-
-        Allowed statuses: 'pending', 'verified', 'rejected'.
-        Raises ValueError for unknown statuses.
-        Raises KeyError if the relation does not exist in this notebook.
-        Invalidates the federated reasoning graph cache so the next
-        graph-reasoning call sees the updated set of active edges.
-        """
-        if status not in self._REVIEW_STATUSES:
-            raise ValueError(
-                f"review_status must be one of {sorted(self._REVIEW_STATUSES)}, got {status!r}")
-        with self._write() as db:
-            self._runtime.governance.update_edge_review(db, notebook_id, rel_id, status)
-        # review_status flips in place (relation COUNT unchanged) — bump the
-        # monotonic seq so seq-keyed fast paths (_scale_index_version /
-        # _cluster_input_version) don't serve a stale version for this edit.
-        self._mark_unified_kg_dirty(notebook_id)
-        # Invalidate cached graph so _federated_rx_graph rebuilds on next access
-        # (belt-and-braces: its per-status-count version key would also catch
-        # the flip on its own).
-        self._invalidate_unified_cache(notebook_id)
+        """Persist review_status on a knowledge_relation —
+        KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
+        commit→dirty→invalidate phase order is unchanged). Frozen-signature
+        delegate."""
+        return self._runtime.knowledge_governance.set_edge_review(
+            notebook_id, rel_id, status
+        )
 
     def _delete_relations_for_source(self, db, source_id: str) -> None:
         self._runtime.knowledge.delete_relations_for_source(db, source_id)
@@ -2090,60 +1997,57 @@ class SQLiteRepository:
         return self._vector_cache.get(f"{notebook_id}:clustermap", version, _load)
 
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
-        now = _now()
-        with self._write() as db:
-            self._runtime.governance.write_merge_candidate(
-                db, notebook_id, a, b, score, now
-            )
+        """Merge-candidate insert — KnowledgeGovernanceService owns the body
+        (Task 16); frozen-signature delegate."""
+        return self._runtime.knowledge_governance.write_merge_candidate(
+            notebook_id, a, b, score
+        )
 
     def pending_merges(self, notebook_id: str) -> List[dict]:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            return self._runtime.governance.pending_merges(db, notebook_id)
+        return self._runtime.knowledge_governance.pending_merges(notebook_id)
 
     def _pending_merges_batch(self, notebook_id: str, limit: int) -> List[dict]:
-        """Bounded fetch of pending merge candidates, LIMITed in SQL instead of
-        materializing the whole pending set and Python-slicing it (perf-audit
-        P1-1)."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            return self._runtime.governance.pending_merges_batch(
-                db, notebook_id, limit
-            )
+        """Bounded SQL-LIMIT fetch of pending merge candidates —
+        KnowledgeGovernanceService owns the body (Task 16); frozen-signature
+        delegate."""
+        return self._runtime.knowledge_governance._pending_merges_batch(
+            notebook_id, limit
+        )
 
     def _has_pending_merges(self, notebook_id: str) -> bool:
-        """Cheap continuation test for the merge-review drain loop — EXISTS
-        instead of materializing all pending rows just to check non-emptiness
-        (perf-audit P1-1)."""
-        with self._connect() as db:
-            return self._runtime.governance.has_pending_merges(db, notebook_id)
+        """Cheap EXISTS continuation test for the merge-review drain loop —
+        KnowledgeGovernanceService owns the body (Task 16); frozen-signature
+        delegate."""
+        return self._runtime.knowledge_governance._has_pending_merges(notebook_id)
 
     def set_merge_decision(self, notebook_id: str, candidate_id: str, status: str) -> None:
-        if status not in ("confirmed", "rejected"):
-            raise ValueError(f"invalid merge status: {status!r}")
-        with self._write() as db:
-            self._runtime.governance.set_merge_decision(
-                db, notebook_id, candidate_id, status, _now()
-            )
+        return self._runtime.knowledge_governance.set_merge_decision(
+            notebook_id, candidate_id, status
+        )
 
     def confirm_merge(self, notebook_id: str, candidate_id: str) -> None:
-        self.get_notebook(notebook_id)
-        self.set_merge_decision(notebook_id, candidate_id, "confirmed")
-        self._invalidate_unified_cache(notebook_id)
-        self._mark_unified_kg_dirty(notebook_id)
+        """Confirm a merge candidate — KnowledgeGovernanceService owns the
+        orchestration (Task 16; the frozen commit→invalidate→dirty order is
+        unchanged). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.confirm_merge(
+            notebook_id, candidate_id
+        )
 
     def reject_merge(self, notebook_id: str, candidate_id: str) -> None:
-        self.get_notebook(notebook_id)
-        self.set_merge_decision(notebook_id, candidate_id, "rejected")
-        self._invalidate_unified_cache(notebook_id)
-        self._mark_unified_kg_dirty(notebook_id)
+        """Reject a merge candidate — KnowledgeGovernanceService owns the
+        orchestration (Task 16). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.reject_merge(
+            notebook_id, candidate_id
+        )
 
     # ------------------------------------------------------------------
-    # kg_conflict_candidates — storage primitives (T1)
-    # Mirrors the concept_merge_candidates pattern above.
-    # Detection lives in conflict_detect.py (T2); adjudication in
+    # kg_conflict_candidates — KnowledgeGovernanceService owns the domain
+    # (Task 16). Detection lives in conflict_detect.py (T2); adjudication in
     # conflict_review.py (T3); write-back in apply_conflict_resolution (T4);
-    # orchestration in resolve_notebook_conflicts (T5).
+    # orchestration in resolve_notebook_conflicts (T5). The facade keeps
+    # frozen-signature delegates; the compound flows keep routing the
+    # candidate-status transaction through THIS facade's set_conflict_status
+    # wrapper (the frozen phase contracts patch it).
     # ------------------------------------------------------------------
 
     def write_conflict_candidate(
@@ -2159,43 +2063,31 @@ class SQLiteRepository:
         confidence: Optional[float] = None,
         rationale: Optional[str] = None,
     ) -> str:
-        """Insert one conflict candidate into the queue and return its id.
-
-        resolution, winner_ref, resolved_payload, confidence, and rationale
-        are normally NULL at detection time and only populated after
-        adjudication (set_conflict_status in T1, write-back in apply_conflict_resolution T4).
-        """
-        now = _now()
-        with self._write() as db:
-            return self._runtime.governance.write_conflict_candidate(
-                db, notebook_id, kind, left_ref, right_ref,
-                conflict_type, resolution, winner_ref, resolved_payload,
-                confidence, rationale, now,
-            )
+        """Insert one conflict candidate — KnowledgeGovernanceService owns the
+        body (Task 16); frozen-signature delegate."""
+        return self._runtime.knowledge_governance.write_conflict_candidate(
+            notebook_id, kind, left_ref, right_ref,
+            conflict_type, resolution, winner_ref, resolved_payload,
+            confidence, rationale,
+        )
 
     def pending_conflicts(self, notebook_id: str) -> List[dict]:
         """Return all conflict candidates with status='pending' for a notebook."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            return self._runtime.governance.pending_conflicts(db, notebook_id)
+        return self._runtime.knowledge_governance.pending_conflicts(notebook_id)
 
     def set_conflict_status(self, notebook_id: str, candidate_id: str, status: str) -> None:
-        """Update status to 'applied' or 'rejected' (+ updated_at).
-
-        Both identifiers are required even though candidate ids are UUID-like:
-        authorization is notebook-scoped, so object lookup must use the same
-        scope rather than trusting a caller-controlled URL notebook id.
-        """
-        if status not in ("applied", "rejected"):
-            raise ValueError(f"invalid conflict status: {status!r}")
-        with self._write() as db:
-            self._runtime.governance.set_conflict_status(
-                db, notebook_id, candidate_id, status, _now()
-            )
+        """Update status to 'applied' or 'rejected' (+ updated_at) —
+        KnowledgeGovernanceService owns the body (Task 16). This wrapper stays
+        the compound flows' candidate-status seat (confirm/reject/resolve ride
+        it late-bound, so the frozen phase contracts keep intercepting here).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.set_conflict_status(
+            notebook_id, candidate_id, status
+        )
 
     def get_conflict_candidate(self, notebook_id: str, candidate_id: str) -> Optional[dict]:
         """Fetch one conflict candidate inside its notebook authorization scope."""
-        return self._runtime.governance.get_conflict_candidate(
+        return self._runtime.knowledge_governance.get_conflict_candidate(
             notebook_id, candidate_id
         )
 
@@ -2210,167 +2102,44 @@ class SQLiteRepository:
         winner_ref: Optional[str] = None,
         resolved_payload: Optional[dict] = None,
     ) -> dict:
-        """Execute ONE adjudicated conflict resolution against the KG.
-
-        Mechanics only — policy (which side wins) is decided by the caller and
-        passed in via ``winner_ref``.  This method just executes the decided
-        outcome and keeps caches consistent.
-
-        Parameters
-        ----------
-        notebook_id:
-            The notebook that owns the conflicting objects / relations.
-        kind:
-            ``"edge"`` (refs are relation ids) or ``"node"`` (refs are
-            knowledge_object ids).
-        left_ref / right_ref:
-            The two competing entity ids.
-        resolution:
-            ``"keep"`` | ``"discard"`` | ``"modify"``.
-        winner_ref:
-            For ``"discard"``: the ref that survives; the other is the loser.
-            For ``"modify"``/``"node"``: the target object to update (falls back
-            to ``left_ref`` when None or not in {left_ref, right_ref}).
-            Ignored for ``"keep"``.
-        resolved_payload:
-            For ``"modify"``/``"node"``: the new payload dict to write.
-        """
-        if kind not in ("edge", "node"):
-            raise ValueError(f"kind must be 'edge' or 'node', got {kind!r}")
-        if resolution not in ("keep", "discard", "modify"):
-            raise ValueError(
-                f"resolution must be 'keep', 'discard', or 'modify', got {resolution!r}")
-
-        # ── keep ────────────────────────────────────────────────────────────
-        if resolution == "keep":
-            return {"action": "keep"}
-
-        # ── discard ─────────────────────────────────────────────────────────
-        if resolution == "discard":
-            if winner_ref not in (left_ref, right_ref):
-                self.event_log.logger.warning(
-                    "apply_conflict_resolution: discard skipped — winner_ref %r is not one of "
-                    "(%r, %r) in notebook %s",
-                    winner_ref, left_ref, right_ref, notebook_id,
-                )
-                return {"action": "skipped", "reason": "no valid winner_ref for discard"}
-            loser_ref = right_ref if winner_ref == left_ref else left_ref
-            if kind == "edge":
-                self.set_edge_review(notebook_id, loser_ref, "rejected")
-                # set_edge_review already marks dirty + invalidates cache; this
-                # extra mark is a harmless belt-and-suspenders (seq is monotonic).
-                self._mark_unified_kg_dirty(notebook_id)
-            else:  # kind == "node"
-                self.update_knowledge(
-                    notebook_id, loser_ref, KnowledgeUpdate(status="conflict")
-                )
-                # update_knowledge already calls _invalidate_unified_cache; mark dirty too.
-                self._mark_unified_kg_dirty(notebook_id)
-            return {"action": "discard", "loser": loser_ref}
-
-        # ── modify ──────────────────────────────────────────────────────────
-        # resolution == "modify"
-        if kind == "edge":
-            self.event_log.logger.warning(
-                "apply_conflict_resolution: edge modify is unsupported in v1 "
-                "(notebook %s, left=%r, right=%r) — no-op",
-                notebook_id, left_ref, right_ref,
-            )
-            return {"action": "skipped", "reason": "edge modify unsupported in v1"}
-
-        # kind == "node"
-        if not isinstance(resolved_payload, dict):
-            self.event_log.logger.warning(
-                "apply_conflict_resolution: modify skipped — resolved_payload is not a dict "
-                "(got %r) in notebook %s",
-                type(resolved_payload).__name__, notebook_id,
-            )
-            return {"action": "skipped", "reason": "modify without payload"}
-
-        target = winner_ref if winner_ref in (left_ref, right_ref) else left_ref
-        # Fetch the current payload so we can merge rather than replace.
-        # update_knowledge replaces the entire payload column, so we must
-        # preserve fields (section_path, validity_scope, steps, …) not
-        # included in the adjudicator's resolved_payload.
-        _row = self._runtime.knowledge.get_object_row(notebook_id, target)
-        existing_payload: dict = json.loads(_row["payload"] or "{}") if _row else {}
-        merged_payload = {**existing_payload, **resolved_payload}
-        self.update_knowledge(
-            notebook_id, target, KnowledgeUpdate(payload=merged_payload)
-        )
-        # update_knowledge already calls _invalidate_unified_cache; mark dirty too.
-        self._mark_unified_kg_dirty(notebook_id)
-        return {"action": "modify", "target": target}
-
-    def confirm_conflict(self, notebook_id: str, candidate_id: str) -> dict:
-        """Apply a pending conflict candidate and mark it as 'applied'.
-
-        Composes existing T1/T4 primitives — no new detection or adjudication
-        logic.  Raises KeyError if the candidate does not exist; raises
-        ValueError if it is already decided (not 'pending').
-        """
-        row = self.get_conflict_candidate(notebook_id, candidate_id)
-        if row is None:
-            raise KeyError(f"conflict candidate {candidate_id!r} not found")
-        if row["status"] != "pending":
-            raise ValueError(
-                f"conflict candidate {candidate_id!r} is already decided "
-                f"(status={row['status']!r})"
-            )
-        if not row.get("resolution"):
-            # Detected but not yet adjudicated — nothing to apply. Clearer than
-            # letting apply_conflict_resolution raise a generic ValueError.
-            raise ValueError(
-                f"conflict candidate {candidate_id!r} has no resolution "
-                f"(not yet adjudicated)"
-            )
-        resolved_payload: Optional[dict] = None
-        if row.get("resolved_payload") is not None:
-            try:
-                resolved_payload = json.loads(row["resolved_payload"])
-            except (TypeError, ValueError):
-                resolved_payload = None
-
-        apply_result = self.apply_conflict_resolution(
+        """Execute ONE adjudicated conflict resolution against the KG —
+        KnowledgeGovernanceService owns the multi-step orchestration (Task 16;
+        the frozen conflict double dirty bumps are unchanged).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.apply_conflict_resolution(
             notebook_id,
-            kind=row["kind"],
-            left_ref=row["left_ref"],
-            right_ref=row["right_ref"],
-            resolution=row["resolution"],
-            winner_ref=row["winner_ref"],
+            kind=kind,
+            left_ref=left_ref,
+            right_ref=right_ref,
+            resolution=resolution,
+            winner_ref=winner_ref,
             resolved_payload=resolved_payload,
         )
-        self.set_conflict_status(notebook_id, candidate_id, "applied")
-        return {**apply_result, "status": "applied", "candidate_id": candidate_id}
+
+    def confirm_conflict(self, notebook_id: str, candidate_id: str) -> dict:
+        """Apply a pending conflict candidate and mark it as 'applied' —
+        KnowledgeGovernanceService owns the orchestration (Task 16; the
+        mutation-commits-before-candidate-status boundary is unchanged and the
+        status transaction still rides this facade's set_conflict_status).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.confirm_conflict(
+            notebook_id, candidate_id
+        )
 
     def reject_conflict(self, notebook_id: str, candidate_id: str) -> None:
-        """Reject a pending conflict candidate (no KG mutation).
-
-        Raises KeyError if the candidate does not exist; raises ValueError if
-        it is already decided.
-        """
-        row = self.get_conflict_candidate(notebook_id, candidate_id)
-        if row is None:
-            raise KeyError(f"conflict candidate {candidate_id!r} not found")
-        if row["status"] != "pending":
-            raise ValueError(
-                f"conflict candidate {candidate_id!r} is already decided "
-                f"(status={row['status']!r})"
-            )
-        self.set_conflict_status(notebook_id, candidate_id, "rejected")
-
-    # ------------------------------------------------------------------
-    # resolve_notebook_conflicts — Task T5: orchestration
-    # Ties detection (T2) → adjudication (T3) → write-back (T4) and
-    # records everything in the queue (T1).
-    # ------------------------------------------------------------------
+        """Reject a pending conflict candidate (no KG mutation) —
+        KnowledgeGovernanceService owns the orchestration (Task 16).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.reject_conflict(
+            notebook_id, candidate_id
+        )
 
     def resolve_notebook_conflicts(self, notebook_id: str) -> dict:
         """Detect → adjudicate → (optionally) auto-apply KG conflicts —
-        KnowledgeGovernanceService owns the orchestration (Task 15 seed; the
-        compound mutation entry points it composes stay facade-owned until
-        Task 16). Frozen-signature delegate."""
+        KnowledgeGovernanceService owns the orchestration (Task 15 seed,
+        Task 16 full surface). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.resolve_notebook_conflicts(notebook_id)
+
     def review_pending_merges(
         self,
         notebook_id: str,
@@ -2378,104 +2147,27 @@ class SQLiteRepository:
         confirm_threshold: Optional[float] = None,
         separate_threshold: Optional[float] = None,
     ) -> dict:
-        self.get_notebook(notebook_id)
-        # 非对称阈值:auto-merge 需更高置信(误并不可逆、污染图);auto-keep-separate
-        # 可低些(误判仅多留一对待审)。未显式传入则取 settings 默认(0.90 / 0.80)。
-        confirm = confirm_threshold if confirm_threshold is not None else self.settings.kg_merge_confirm_threshold
-        separate = separate_threshold if separate_threshold is not None else self.settings.kg_merge_separate_threshold
-        pending = self._pending_merges_batch(notebook_id, max(1, min(limit, 200)))
-        from app.services.concept_merge_review import review_merge_candidates
-        # review_merge_candidates is total (fail-open, chunked); the outer try is
-        # defense-in-depth so this endpoint can never 500 on an LLM deviation (the
-        # route only catches KeyError). Same batching/concurrency as the rebuild site.
-        try:
-            decisions = review_merge_candidates(
-                self.llm_client, pending,
-                batch_size=self.settings.kg_merge_review_batch_size,
-                max_workers=self.settings.kg_job_concurrency,
-            )
-        except Exception:
-            self.event_log.logger.exception(
-                "merge-review adjudication failed for %s; proceeding with no decisions",
-                notebook_id,
-            )
-            decisions = []
-        confirmed = rejected = unsure = 0
-        now = _now()
-        with self._write() as db:
-            for decision in decisions:
-                candidate_id = decision["candidate_id"]
-                confidence = decision["confidence"]
-                status = "pending"
-                if decision["decision"] == "merge" and confidence >= confirm:
-                    status = "confirmed"
-                    confirmed += 1
-                elif decision["decision"] == "keep_separate" and confidence >= separate:
-                    status = "rejected"
-                    rejected += 1
-                else:
-                    status = "deferred"
-                    unsure += 1
-                self._runtime.governance.record_merge_review(
-                    db, notebook_id, candidate_id, status, confidence,
-                    decision["rationale"], now,
-                )
-        if confirmed or rejected:
-            self._mark_unified_kg_dirty(notebook_id)
-            self._invalidate_unified_cache(notebook_id)
-        return {"reviewed": len(decisions), "confirmed": confirmed, "rejected": rejected, "unsure": unsure}
+        """LLM merge-candidate adjudication batch — KnowledgeGovernanceService
+        owns the orchestration (Task 16; asymmetric thresholds, deferred 终态,
+        fail-open adjudication and the dirty-then-invalidate order are
+        unchanged). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.review_pending_merges(
+            notebook_id, limit, confirm_threshold, separate_threshold
+        )
 
     def merge_review_job_status(self, notebook_id: str) -> dict:
-        with self._connect() as db:
-            row = self._runtime.governance.merge_review_job_row(db, notebook_id)
-        if row is None:
-            return {"status": "idle", "total": 0, "done": 0, "error": ""}
-        return {"status": row["status"], "total": int(row["total"]),
-                "done": int(row["done"]), "error": row["error"]}
+        return self._runtime.knowledge_governance.merge_review_job_status(notebook_id)
 
     def run_merge_review_job(self, notebook_id: str, *, batch: int = 100) -> dict:
-        """Drain the whole pending merge queue in batches (each batch = one
-        review_pending_merges call). Single-flight per notebook. Fail-open per
-        batch; a batch that reviews 0 (LLM down) counts as a stall — abort after
-        2 consecutive stalls so a persistent failure can't loop forever. Since
-        Task 4 makes unsure→deferred, every reviewed candidate leaves pending, so
-        a healthy run strictly shrinks the queue and terminates."""
-        self.get_notebook(notebook_id)
-        with self._write() as db:
-            total = self._runtime.governance.begin_merge_review_job(
-                db, notebook_id, _now()
-            )
-            if total is None:
-                return {"status": "running", "already": True}
-        done, stalls, error, final = 0, 0, "", "done"
-        max_batches = (total // max(1, batch)) + 3
-        try:
-            for _ in range(max_batches):
-                if not self._has_pending_merges(notebook_id):
-                    break
-                summary = self.review_pending_merges(notebook_id, limit=batch)
-                reviewed = int(summary.get("reviewed", 0))
-                done += reviewed
-                with self._write() as db:
-                    self._runtime.governance.set_merge_review_progress(
-                        db, notebook_id, done, _now())
-                if reviewed == 0:
-                    stalls += 1
-                    if stalls >= 2:
-                        error, final = "LLM 预审连续无进展,已中止", "failed"
-                        break
-                else:
-                    stalls = 0
-        except Exception as exc:  # noqa: BLE001
-            error, final = f"{type(exc).__name__}: {exc}", "failed"
-            self.event_log.logger.exception("merge review job failed for %s", notebook_id)
-        with self._write() as db:
-            self._runtime.governance.finish_merge_review_job(
-                db, notebook_id, final, error, _now())
-        return {"status": final, "total": total, "done": done, "error": error}
+        """Drain the pending merge queue in batches — KnowledgeGovernanceService
+        owns the job loop (Task 16; single-flight, stall abort and per-batch
+        fail-open are unchanged). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.run_merge_review_job(
+            notebook_id, batch=batch
+        )
 
     def decided_pairs(self, notebook_id: str) -> Dict[tuple, str]:
-        return self._runtime.governance.decided_pairs(notebook_id)
+        return self._runtime.knowledge_governance.decided_pairs(notebook_id)
 
     def decided_seed_pairs(self, notebook_id: str) -> Dict[frozenset, str]:
         """{frozenset({seed_a, seed_b}): status} for confirmed/rejected/deferred.
@@ -2484,31 +2176,19 @@ class SQLiteRepository:
         cluster's min-member changes; seed names don't). Legacy rows written
         before the seed_a/seed_b columns existed carry '' → fall back to
         strip-"K-"(canonical), matching the old decided_pairs key derivation."""
-        return self._runtime.governance.decided_seed_pairs(notebook_id)
+        return self._runtime.knowledge_governance.decided_seed_pairs(notebook_id)
 
     def concept_whitelist_terms(self) -> set:
-        with self._connect() as db:
-            return self._runtime.governance.concept_whitelist_terms(db)
+        return self._runtime.knowledge_governance.concept_whitelist_terms()
 
     def concept_whitelist_list(self) -> List[dict]:
-        with self._connect() as db:
-            rows = self._runtime.governance.concept_whitelist_rows(db)
-        return [{"term": r["term"], "note": r["note"], "created_at": r["created_at"]} for r in rows]
+        return self._runtime.knowledge_governance.concept_whitelist_list()
 
     def concept_whitelist_add(self, term: str, note: str = "") -> dict:
-        from app.services.kg.filters import _norm
-        t = _norm(term)
-        if not t:
-            raise ValueError("empty term")
-        now = _now()
-        with self._write() as db:
-            self._runtime.governance.add_whitelist_term(db, t, note, now)
-        return {"term": t, "note": note, "created_at": now}
+        return self._runtime.knowledge_governance.concept_whitelist_add(term, note)
 
     def concept_whitelist_remove(self, term: str) -> None:
-        from app.services.kg.filters import _norm
-        with self._write() as db:
-            self._runtime.governance.remove_whitelist_term(db, _norm(term))
+        return self._runtime.knowledge_governance.concept_whitelist_remove(term)
 
     def _invalidate_unified_cache(self, notebook_id: str) -> None:
         # Task 14: unified/vector cache eviction is coordinator-owned (the
@@ -2926,142 +2606,38 @@ class SQLiteRepository:
         return oid
 
     # --- Governance: promotion state machine (Track F) -------------------
+    # KnowledgeGovernanceService owns the domain (Task 16); the facade keeps
+    # frozen-signature delegates.
 
     @staticmethod
     def _promotion_row_to_dict(row: sqlite3.Row, *, payload=None, evidence=None) -> dict:
-        """Map a promotion_candidates row to the PromotionCandidate-shaped dict.
-        payload/evidence are denormalised from knowledge_objects when listing."""
-        return {
-            "id": row["id"],
-            "notebook_id": row["notebook_id"],
-            "object_id": row["object_id"],
-            "object_type": row["object_type"],
-            "status": row["status"],
-            "reason": row["reason"],
-            "reviewed_by": row["reviewed_by"],
-            "base_match_id": row["base_match_id"],
-            "created_at": row["created_at"],
-            "payload": payload if payload is not None else {},
-            "evidence": evidence if evidence is not None else [],
-        }
+        """Map a promotion_candidates row to the PromotionCandidate-shaped dict —
+        canonical body lives with the governance service (Task 16)."""
+        from app.services.knowledge_governance import promotion_row_to_dict
+        return promotion_row_to_dict(row, payload=payload, evidence=evidence)
 
     def propose_promotion(self, notebook_id: str, object_id: str) -> dict:
-        """Propose a personal-KG object for promotion into the base corpus.
-
-        Idempotent for an already-active proposal of the same object. Raises
-        KeyError if the notebook or object is missing; ValueError if the
-        notebook is itself a base notebook (use the review gate there instead).
-        """
-        self.get_notebook(notebook_id)  # KeyError if notebook missing
-        now = _now()
-        with self._write() as db:
-            obj = db.execute(
-                "SELECT object_type FROM knowledge_objects WHERE id=? AND notebook_id=?",
-                (object_id, notebook_id),
-            ).fetchone()
-            if obj is None:
-                raise KeyError(object_id)
-            nb_row = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
-            ).fetchone()
-            if nb_row and nb_row["tier"] == "base":
-                raise ValueError("cannot propose from a base notebook — use the review gate")
-            # Idempotency: return any active (non-approved, non-rejected) proposal.
-            existing = self._runtime.governance.active_promotion_for_object(db, object_id)
-            if existing is not None:
-                return self._promotion_row_to_dict(existing)
-            cand_id = _new_id("promo")
-            self._runtime.governance.insert_promotion_candidate(
-                db, cand_id, notebook_id, object_id, obj["object_type"], now
-            )
-            row = self._runtime.governance.promotion_candidate_row(db, cand_id)
-        return self._promotion_row_to_dict(row)
+        """Propose a personal-KG object for promotion into the base corpus —
+        KnowledgeGovernanceService owns the orchestration (Task 16; idempotent
+        active-proposal reuse and the base-notebook guard are unchanged).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.propose_promotion(
+            notebook_id, object_id
+        )
 
     def list_promotion_queue(self, status_filter: Optional[str] = None) -> List[dict]:
-        """List promotion candidates across all notebooks (the curator sees
-        everything). Defaults to the active queue (proposed + under_review);
-        pass status_filter to view a single status. Denormalises payload +
-        evidence from knowledge_objects for display.
-
-        Batched (house pattern, see _hydrate_search_hits): one `id IN (...)`
-        knowledge_objects lookup for the whole queue instead of a per-row
-        SELECT — was N+1 (one round-trip per candidate)."""
-        with self._connect() as db:
-            rows = self._runtime.governance.promotion_queue_rows(db, status_filter)
-            object_ids = list(dict.fromkeys(r["object_id"] for r in rows))
-            obj_by_id: Dict[str, sqlite3.Row] = {}
-            for i in range(0, len(object_ids), self._IN_CHUNK):
-                batch = object_ids[i:i + self._IN_CHUNK]
-                ph = ",".join("?" for _ in batch)
-                for r in db.execute(
-                    f"SELECT id, payload, evidence FROM knowledge_objects WHERE id IN ({ph})",
-                    batch,
-                ).fetchall():
-                    obj_by_id[r["id"]] = r
-            out: List[dict] = []
-            for row in rows:
-                obj = obj_by_id.get(row["object_id"])
-                payload = json.loads(obj["payload"] or "{}") if obj else {}
-                evidence = (
-                    [Evidence(**e) for e in json.loads(obj["evidence"] or "[]")]
-                    if obj
-                    else []
-                )
-                out.append(
-                    self._promotion_row_to_dict(row, payload=payload, evidence=evidence)
-                )
-        return out
+        """List promotion candidates across all notebooks —
+        KnowledgeGovernanceService owns the batched read (Task 16; the single
+        `id IN (...)` knowledge_objects lookup is unchanged). Frozen-signature
+        delegate."""
+        return self._runtime.knowledge_governance.list_promotion_queue(status_filter)
 
     def approve_promotion(self, candidate_id: str) -> dict:
-        """Approve a promotion: copy the personal object into the base corpus,
-        deduplicating against existing base objects of the same type via the
-        kg_merge seed clustering. Idempotent. Raises KeyError if the candidate
-        is missing; ValueError if it is rejected or there is no base notebook.
-        """
-        now = _now()
-        with self._write() as db:
-            cand = self._runtime.governance.promotion_candidate_row(db, candidate_id)
-            if cand is None:
-                raise KeyError(candidate_id)
-            if cand["status"] == "rejected":
-                raise ValueError("cannot approve a rejected promotion candidate")
-            was_approved = cand["status"] == "approved"
-            src_payload = (
-                json.loads(
-                    (db.execute(
-                        "SELECT payload FROM knowledge_objects WHERE id=?",
-                        (cand["object_id"],)).fetchone() or {"payload": None})["payload"]
-                    or "{}"
-                )
-                if not was_approved
-                else {}
-            )
-            approval = self._runtime.governance.approve_promotion_in_transaction(
-                db, candidate_id, now
-            )
-            # Idempotency: an already-approved candidate returns the existing
-            # base object with NO post-commit hooks — exactly the old
-            # early-return-inside-the-transaction behavior.
-            if was_approved:
-                return {
-                    "candidate_id": candidate_id,
-                    "base_object_id": approval.base_object_id,
-                    "merged_into": cand["base_match_id"] or "",
-                }
-
-        # Embed the new base object's payload (best-effort; outside the txn so a
-        # failing embedder never blocks approval). Only for freshly-inserted ones.
-        if approval.created_new_object:
-            self._embed_knowledge(
-                approval.base_object_id, approval.base_notebook_id, src_payload
-            )
-        self._invalidate_unified_cache(approval.base_notebook_id)
-        self._mark_unified_kg_dirty(approval.base_notebook_id)
-        return {
-            "candidate_id": candidate_id,
-            "base_object_id": approval.base_object_id,
-            "merged_into": "" if approval.created_new_object else approval.base_object_id,
-        }
+        """Approve a promotion into the base corpus —
+        KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
+        commit→embed→invalidate→dirty order and idempotent early return are
+        unchanged). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.approve_promotion(candidate_id)
 
     @staticmethod
     def _seed_fn_for(object_type: str):
@@ -3084,193 +2660,66 @@ class SQLiteRepository:
         return merge_evidence_lists(base_ev, src_ev)
 
     def reject_promotion(self, candidate_id: str, reason: str = "") -> dict:
-        """Reject a promotion candidate. The personal object is left untouched.
-        Raises KeyError if missing; ValueError if already approved."""
-        now = _now()
-        with self._write() as db:
-            cand = self._runtime.governance.promotion_candidate_row(db, candidate_id)
-            if cand is None:
-                raise KeyError(candidate_id)
-            if cand["status"] == "approved":
-                raise ValueError("cannot reject an approved promotion candidate")
-            self._runtime.governance.set_promotion_rejected(
-                db, candidate_id, reason, now
-            )
-            row = self._runtime.governance.promotion_candidate_row(db, candidate_id)
-        return self._promotion_row_to_dict(row)
+        """Reject a promotion candidate — KnowledgeGovernanceService owns the
+        orchestration (Task 16). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.reject_promotion(
+            candidate_id, reason
+        )
 
     def update_knowledge(
         self, notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate
     ) -> RuleCard:
-        now = _now()
-        with self._write() as db:
-            row = self._runtime.governance.update_object_in_transaction(
-                db, notebook_id, knowledge_id, payload, now
-            )
-        # WS4: re-embed payload-level vector when the payload was edited.
-        if payload.payload is not None:
-            try:
-                self._embed_knowledge(
-                    knowledge_id, row["notebook_id"], json.loads(row["payload"] or "{}")
-                )
-            except Exception:
-                pass
-        self._invalidate_unified_cache(row["notebook_id"])
-        # A node edit is a clustering input: a payload/name change moves its
-        # normalized-name seed (→ cross-doc cluster membership), a re-embed changes
-        # its ANN vector, and a status flip changes which objects are clustered.
-        # Mark dirty so kg_mutation_seq advances and rebuild_unified_kg's skip gate
-        # can't serve a stale clustering after an in-place rename/re-embed.
-        self._mark_unified_kg_dirty(row["notebook_id"])
-        obj = {
-            "id": row["id"],
-            "payload": json.loads(row["payload"] or "{}"),
-            "evidence": [Evidence(**item) for item in json.loads(row["evidence"] or "[]")],
-            "status": row["status"],
-            "owner": row["owner"],
-            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
-        }
-        item = self._as_retrieved(obj, row["object_type"])
-        return self._rule_card(item)
+        """Update a knowledge object — KnowledgeGovernanceService owns the
+        orchestration (Task 16; the frozen commit→best-effort-embed→invalidate
+        →dirty order is unchanged). Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.update_knowledge(
+            notebook_id, knowledge_id, payload
+        )
 
     @staticmethod
     def _knowledge_headline(object_type: str, payload: dict) -> str:
-        keys = {
-            "rule": ("title", "statement"),
-            "method": ("name", "use_when"),
-            "risk": ("title", "description"),
-            "glossary": ("term", "definition"),
-            "case": ("symptom", "context"),
-            "checklist": ("question",),
-            # KG node types: text lives in payload["name"]
-            "claim": ("name", "statement"),
-            "formula": ("name", "statement"),
-            "procedure": ("name", "title"),
-            "concept": ("name", "term", "definition"),
-            "finding": ("name", "statement", "metric"),
-            "principle": ("statement", "rationale"),
-            "example": ("title", "problem"),
-        }.get(object_type, ("name", "title", "statement", "term", "question"))
-        for key in keys:
-            value = str(payload.get(key, "")).strip()
-            if value:
-                return value[:120]
-        return object_type
+        """Headline extraction for a KG payload — canonical body lives with the
+        governance service (Task 16); shared with list_knowledge's record
+        projection."""
+        from app.services.knowledge_governance import knowledge_headline
+        return knowledge_headline(object_type, payload)
 
     def _knowledge_ref(self, obj: dict, object_type: str) -> KnowledgeRef:
-        return KnowledgeRef(
-            id=obj["id"],
-            object_type=object_type,
-            headline=self._knowledge_headline(object_type, obj["payload"]),
-            status=obj.get("status", "approved"),
-        )
+        """KnowledgeRef projection — KnowledgeGovernanceService owns the body
+        (Task 16); frozen-signature delegate."""
+        return self._runtime.knowledge_governance._knowledge_ref(obj, object_type)
 
     @staticmethod
     def _payload_join(payload: dict) -> str:
-        parts: List[str] = []
-        for key, value in payload.items():
-            if str(key).startswith("_"):
-                continue
-            if isinstance(value, str):
-                parts.append(value)
-            elif isinstance(value, (list, tuple)):
-                parts.extend(str(item) for item in value)
-        return " ".join(parts)
+        """Flatten payload text — canonical body lives with the governance
+        service (Task 16)."""
+        from app.services.knowledge_governance import payload_join
+        return payload_join(payload)
 
     def _knowledge_similarity(self, a: dict, b: dict, element_vectors: dict) -> float:
-        text_a = self._payload_join(a["payload"])
-        text_b = self._payload_join(b["payload"])
-        keyword = max(keyword_score(text_a, text_b), keyword_score(text_b, text_a))
-        semantic = 0.0
-        vecs_a = [element_vectors[e.element_id] for e in a["evidence"] if e.element_id in element_vectors]
-        vecs_b = [element_vectors[e.element_id] for e in b["evidence"] if e.element_id in element_vectors]
-        for va in vecs_a:
-            for vb in vecs_b:
-                semantic = max(semantic, cosine(va, vb))
-        return max(keyword, semantic * 0.95)
+        """Keyword ∨ evidence-vector similarity — KnowledgeGovernanceService
+        owns the body (Task 16); frozen-signature delegate."""
+        return self._runtime.knowledge_governance._knowledge_similarity(
+            a, b, element_vectors
+        )
 
     def find_duplicates(self, notebook_id: str, object_type: str) -> List[DuplicateGroup]:
-        """Near-duplicate detection by normalized-seed BLOCKING — the same seed the
-        KG clustering uses (name/statement/formula normalization + acronym alias).
-        Only objects that share a seed are compared, so this is O(N + Σ block²)
-        instead of the old O(N²) all-pairs — which also loaded EVERY element vector
-        of the notebook into memory and froze 查重 at 10^5+ objects. The ≥0.6 grouping
-        is preserved, just scoped to each (tiny) same-seed block; keyword overlap only
-        (no vectors are loaded — nothing scales with the notebook's embedding count).
-        Cross-seed *semantic* near-dups (different names, similar meaning) are out of
-        scope here; the clustering / emb_synonym pass merges those on KG rebuild."""
-        from app.services.kg_merge import (
-            build_acronym_alias_map, _seed_with_alias,
-            seed_concept, seed_claim, seed_formula, seed_procedure,
+        """Near-duplicate detection by normalized-seed blocking —
+        KnowledgeGovernanceService owns the orchestration (Task 16; the
+        O(N + Σ block²) seed blocking and ≥0.6 grouping are unchanged).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.find_duplicates(
+            notebook_id, object_type
         )
-        seed_fn = {
-            "concept": seed_concept, "claim": seed_claim,
-            "formula": seed_formula, "procedure": seed_procedure,
-        }.get(object_type, seed_concept)
-
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            objs = self._knowledge_objects(db, notebook_id, object_type, statuses=None)
-        objs = [o for o in objs if o.get("status") != "deprecated"]
-
-        # Block by seed: only same-normalized-name objects become candidates.
-        alias_map = build_acronym_alias_map(o["payload"].get("name", "") for o in objs)
-        by_seed: Dict[str, List[dict]] = {}
-        for o in objs:
-            seed = _seed_with_alias(
-                {"name": o["payload"].get("name", ""), "payload": o["payload"]},
-                seed_fn, alias_map)
-            if seed:
-                by_seed.setdefault(seed, []).append(o)
-
-        groups: List[DuplicateGroup] = []
-        for members in by_seed.values():
-            if len(members) < 2:
-                continue
-            # Same seed = same normalized name/statement = the duplicate signal
-            # (consistent with how the KG clustering merges variants, incl. case /
-            # whitespace / acronym). similarity is a display hint only: max pairwise
-            # keyword overlap within the block — capped so a pathologically large
-            # same-name block stays bounded, and with {} vectors so nothing loads
-            # the embedding table.
-            best = 1.0
-            if len(members) <= 25:
-                best = 0.0
-                for i in range(len(members)):
-                    for j in range(i + 1, len(members)):
-                        best = max(best, self._knowledge_similarity(members[i], members[j], {}))
-            groups.append(DuplicateGroup(
-                object_type=object_type,
-                similarity=round(best, 3),
-                members=[self._knowledge_ref(m, object_type) for m in members],
-            ))
-        groups.sort(key=lambda g: (-len(g.members), -g.similarity))
-        return groups
 
     def merge_knowledge(self, notebook_id: str, source_id: str, payload: MergeRequest) -> RuleCard:
-        into_id = payload.into_id
-        if into_id == source_id:
-            raise ValueError("cannot merge a knowledge object into itself")
-        now = _now()
-        with self._write() as db:
-            row = self._runtime.governance.merge_objects_in_transaction(
-                db, notebook_id, source_id, into_id, now
-            )
-        # merge deprecates one object in place (COUNT unchanged) — bump the
-        # monotonic seq so _scale_index_version / _cluster_input_version fast
-        # paths (keyed on kg_mutation_seq) don't miss this same-second edit.
-        self._mark_unified_kg_dirty(row["notebook_id"])
-        self._invalidate_unified_cache(row["notebook_id"])
-        obj = {
-            "id": row["id"],
-            "payload": json.loads(row["payload"] or "{}"),
-            "evidence": [Evidence(**item) for item in json.loads(row["evidence"] or "[]")],
-            "status": row["status"],
-            "owner": row["owner"],
-            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
-        }
-        item = self._as_retrieved(obj, row["object_type"])
-        return self._rule_card(item)
+        """Merge one knowledge object into another —
+        KnowledgeGovernanceService owns the orchestration (Task 16; the frozen
+        commit→dirty→invalidate mirror-image order is unchanged).
+        Frozen-signature delegate."""
+        return self._runtime.knowledge_governance.merge_knowledge(
+            notebook_id, source_id, payload
+        )
 
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:
         return self._runtime.catalog.search_notebook(notebook_id, query)
