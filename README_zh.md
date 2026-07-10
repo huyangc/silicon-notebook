@@ -10,17 +10,18 @@
 
 - Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
 - `frontend/` 下的 Next.js / React / TypeScript 前端
-- OpenAI-compatible LLM 端点，用于抽取、回答和文章研究；embedding 通过 `EMBED_*` 独立配置
+- OpenAI-compatible LLM 端点，用于 KG 抽取、接地回答和深度报告；embedding 通过 `EMBED_*` 独立配置
 - 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
 - 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
-- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（异步 BackgroundTasks）
+- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（经共享 KG job scheduler 异步执行）
 - **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
 - PDF 走 MinerU（公式/表格/版面）；本机或未配置时回退 pypdf
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
 - KG-native 接地问答：逐句 `[k_i]` 引用（渲染为紧凑编号引用；模型直接输出的数字复合引用如 `[1, 2, 3]` 在能映射到已知引用时也可点击）、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
 - **推理模式的类型化查询期推导：** agent 可调用 `follow_chain`，把有证据的两跳 `A→B→C` 临时组合成 `A→C`；首版只允许 `derived_from / kind_of / prerequisite_of / precedes / part_of`。两条直接关系各自保留可引用的关系证据；被拒绝、无 quote、类型或 `validity_scope` 冲突的路径 fail-closed；推论明确标作「推断」，且绝不写回 KG。生产 schema 保持 v9，不新增迁移、索引或历史回填；查询只对既有 source/target 索引做有界抽样，高度节点无法在预算内确认时直接放弃推论。
-- 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`base` 是权威参考 KG（如模拟设计教材），`personal` 是用户自己的笔记。`federated_retrieve` 跨 `base ∪ 当前 personal` 收集候选并给每条命中打 tier 标签，但排序不修改相关度分数：先按相关度排序，`base` 仅在相关度分数完全相同时作为第二排序键；分数更高的 personal 命中仍排在前面。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。notebook 操作菜单（「分析」）提供「设为基准库 / 取消基准库」以把某 notebook 标为基准 KG 并撤销（经 `POST /api/notebooks/{id}/tier`）
-- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有，用户只能看到自己的 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改）；admin 持有原有 notebook 并是唯一可将 notebook 标为基准库的用户。基准库 notebook 对普通用户的列表隐藏，但问答时仍作为权威检索上下文使用。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
+- 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`chunk` 基线只从当前 active notebook 读取 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 使用 federated KG 路径。exact-score 的 `base` 次序只适用于知识对象命中：`federated_retrieve()` 不改相关度分数，分数更高的 personal hit 仍排在前面；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。
+- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改）；admin 持有原有 notebook 并是唯一可将 notebook 标为基准库的用户。基准库 notebook 对普通用户的列表隐藏，但问答时仍作为权威检索上下文使用。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
+- **分享链接**：owner 可发布不透明 notebook 链接；小 notebook 复制到接收者账号，大 notebook 以只读成员方式加入。写权限仍归 owner；当前没有实时协同编辑或修改密码流程。
 - 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
 - 深度报告（两阶段后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。**阶段1（秒级）**:STORM 式多视角规划器——先做零 LLM 语料侦察（来源标题 + KG 命中 + chunk 出处,大纲不再盲规划）——预写出大纲,每节带**专家视角 / 跨视角张力 / 证据充分性判定**（充足/薄弱/缺失 + 缺口说明,来自零 LLM 检索探针 + rewrite 模型上的 Judge）;用户在**大纲编辑器**里审阅/修改后再确认。**阶段2（几分钟,确认后）**:每节独立跑一次完整 `reasoning` 深挖（节间并行,各自独立检索预算）,按三层证据纪律撰写（`[k]` 库内引用 /（推断）库内推断 /【通识】库外通识，行内标注且提示未经验证），最后汇总加执行摘要、参考文献，以及（仅当某节缺库内支撑时）结尾一行「局限」说明。研究深度控件为五个命名档「概览/标准/深入/详尽/穷尽」（默认「标准」，= 每节 reflect 步预算，在生成按钮旁弹出选择）用充分程度换时延；章节按 `KG_JOB_CONCURRENCY` 并行深挖，前端显示逐节实时进度（`section_status`）。以可取消的后台 job 运行；每份报告可下 `.md`，或多选批量下 `reports.zip`
 - 边可信与治理：每条边的可信信号（evidence / 同源佐证 / 类型合法性）+ 高风险边优先的审核队列；被审核拒绝的边从图推理中排除
@@ -79,7 +80,7 @@ cp .env.example .env
 服务在全空配置下即可启动——确定性离线模式(仅关键词检索,无 LLM 抽取/作答)。要启用完整
 能力,至少填:
 
-- **LLM**(抽取、作答、文章研究)—— `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` /
+- **LLM**(KG 抽取、作答、深度报告)—— `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` /
   `OPENAI_COMPAT_MODEL`;任意 OpenAI 兼容端点。
 - **嵌入**(语义检索;否则仅关键词)—— `EMBED_PROVIDER=dashscope` 加 `EMBED_MODEL` /
   `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM`(必须等于模型输出维度)。可选
@@ -187,9 +188,11 @@ bash scripts/check.sh                        # hermetic smoke + 全量 pytest + 
 
 - 顶栏：左上角只保留可编辑 notebook 标题；notebook 描述在没有对话时显示到问答欢迎态里，顶部工具栏在桌面宽度下保持各动作标签完整。
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
-- 主栏：两个 tab——**问答**（接地问答，逐句 `[k_i]` 引用渲染为可点击编号引用，并支持有效的数字复合引用如 `[1, 2, 3]`，三种检索模式见下方「检索模式（问答）」一节，多轮会话列表、默认折叠的实时推理轨迹与可展开详情、👍/👎 反馈）和**知识库**（从 `/knowledge-types` 动态获取类型，支持状态生命周期、重复检测与合并）。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。导航、刷新或 transport 断开连接只会停止当前客户端继续接收，脱离连接的 Ask job 仍在后台运行并可保存最终回答。用户点击中断则是另一条显式取消路径：客户端调用 `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`，由后端设置取消事件，使 worker / LLM 路径停止，且不保存被取消的最终回答。主工作区不再固定展示尚未成熟的 Studio 右栏，让问答面板使用释放出的宽度。
+- 主栏：三个 tab——**问答**、**知识库**、**深度报告**。问答提供逐句 `[k_i]` 引用、三种检索模式、多轮会话、实时推理轨迹与反馈；知识库负责动态类型浏览与治理；深度报告负责两阶段报告、大纲审阅、进度、导出、取消和删除。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。transport 断连只停止向当前客户端继续推送；导航、刷新或 transport 丢失后 detached Ask job 仍在后台运行并可保存最终回答。用户点击中断则调用 `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`，由后端设置取消事件，使 worker / LLM 路径停止，且不保存被取消的最终回答。主工作区保持两列且没有固定 Studio 右栏。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
-- Studio 类文章研究、思维导图/信息图生成、派生规则审核、治理**晋升队列**（把个人 KG 节点申请晋升到基准语料，并批准/拒绝待审请求）、**基准库/个人层切换**，以及**边审查队列**（按「高中心性 × 低可信」排序确认/拒绝关系，被拒边从图推理中排除）仍可从顶部分析工具栏进入，输出以弹窗形式展示，而不是占用固定右栏。
+- 「分析」菜单本身只包含晋升队列（admin）、基准库/个人层切换（admin）与边审查队列。看板、Schema、全屏知识图谱是其他顶栏动作；当前不再暴露已退役的内容生成或派生规则动作。
+
+重新解析保留 source 行与原始文件：替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。
 
 notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
 
@@ -211,7 +214,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 
 ## 检索模式（问答）
 
-`POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。所有模式都跨 `tier=base` ∪ 当前 personal 笔记本联合检索，产出逐句 `[k_i]` 锚点，并用同一口径判接地：`classify_evidence` → `grounded` / `overview` / `inferred`，对比校准过的 `EVIDENCE_TAU_*` 阈值。**rerank / RRF 等排序信号只重排候选，绝不进接地阈值**（阈值读每项的「关键词+语义」融合相关度）。tier 不改变 score，`base` 只在 score 完全相同时作为第二排序键。
+`POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。联合范围按路径区分：`chunk` 基线 active-only；可选 KG overlay / PPR 可加入 federated KG 与 base-backed chunk；`graph` / `reasoning` 走 federated KG。`federated_retrieve()` 的知识对象命中不改 score，只在完全平局时以 `base` 为第二排序键；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。这些排序信号不进入接地阈值。
 
 | 模式 | 分组 | 需 KG | 一句话 |
 |------|------|-------|--------|
@@ -240,22 +243,22 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - `GET /api/notebooks/{id}/search?q=`
-- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`，见上文「检索模式（问答）」；tier 感知，跨 base + 当前 personal 联合检索）
+- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；联合范围遵循上文各 mode 的边界）
 - `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（先发带 `job_id` 的 `started` 事件，再发进度/最终事件）；transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；设置取消事件并在保存被取消的最终回答前停止 worker
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
-- `GET|POST /api/notebooks/{id}/articles`、`DELETE /api/articles/{id}`、`POST /api/articles/{id}/research`
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
-- `GET /api/notebooks/{id}/derived-rules`、`POST /api/notebooks/{id}/derived-rules/{candidate_id}/approve|reject`
 - 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 权威参考 KG，personal = 默认用户笔记）。
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
 - 深度报告（两阶段）：`POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`;跑**阶段1 规划**后停在 `status=outline_ready`（`auto_generate=true` 则一路直出）。`GET .../reports/{rid}` 轮询状态 + 富 `outline`（每节 视角/张力/充分性）+ `content_md` + 实时 `section_status`。`PATCH .../reports/{rid}/outline` body `{sections}` 编辑草案大纲（仅 `outline_ready` 态,无有效节 422）。`POST .../reports/{rid}/generate` body `{depth?}` 启**阶段2 生成**（仅从 `outline_ready`,否则 409）。另 `GET /reports`（列表）、`POST .../cancel`、`DELETE`、`POST .../reports/export` `{report_ids}` → `reports.zip`。章节按 `KG_JOB_CONCURRENCY` 并行深挖。
+
+当前持久化/API 契约是 `reports` 表与 `/reports` API；已退役的内容工作室存储与路由不属于当前 runtime。
 
 ## 配置
 
@@ -626,7 +629,7 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；一旦某 notebook 标为 `base`，tier 感知联合检索与 base 优先冲突规则自动生效。
-- Article Studio 当前基于标题/摘要文本，并在存在关联 source 时使用其元素；一等文章全文上传与更丰富的关系打分是下一步（Tier 3）。
+- Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。在 PostgreSQL repository 实现前，非 `sqlite:///` 的 `DATABASE_URL` 会直接报错，不再静默落到本地数据库。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。

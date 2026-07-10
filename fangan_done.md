@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-03
+更新日期：2026-07-10
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -17,14 +17,15 @@
 -> 配置 LLM 时抽取 Concept / Claim / Formula / Procedure KG 对象（带 evidence 绑定与关系边）
 -> 通用知识库浏览 / 状态治理 / 合并 / 冲突检测（旧候选治理端点保留兼容）
 -> 混合检索（关键词 + 向量余弦，含 payload 级向量）
--> KG-native Ask / Scenario / Case / Checklist 回答（带 citation 校验）
--> Article Studio 从文章自身内容抽取 claims + 关联规则 + 派生规则候选
+-> KG-native Ask（chunk / graph / reasoning，带 citation 校验）
+-> Knowledge 浏览与治理
+-> Deep Report 两阶段规划 / 生成 / 导出
 -> 用户反馈 useful / not useful
 ```
 
 LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍完整执行，KG 抽取阶段记录 `error_message='no-llm'`，不再离线伪造启发式候选知识。离线 smoke 在需要验证检索/治理时会显式写入 KG/rule 对象。
 
-之前 fangan_done.md 中标记为“demo-backed / 未实现”的抽取、审核、检索、真实问答、文章研究、反馈等，**现已实现并接通真实代码路径**。
+本文是按时间累计的实现账本。标为「历史记录 / 已退役」的 Scenario、Case、Checklist、Article Studio 与派生规则材料只说明过去曾有实现，不代表当前 endpoint、表或 UI 仍存在；当前行为以本页顶部快照、代码和绿色测试为准。
 
 ## 1. 产品与项目基础
 
@@ -40,15 +41,16 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 前端为唯一主线：Next.js / React / TypeScript，目录 `frontend/`。**原静态 `web/` fallback 目录已删除**，`scripts/dev.sh` 与 `scripts/check.sh` 已移除相关引用。
 - 本机默认持久化为 SQLite：`sqlite:///.local/silicon_notebook.db`（标准库 `sqlite3`）。
 - 原始上传文件保存到 `.local/storage`。
-- repository 边界：当前实现 `SQLiteRepository`，对外通过 `NotebookRepository` Protocol，预留未来 PostgreSQL + pgvector 替换空间。
-- 向量检索本机实现：`element_embeddings` 表存 JSON 向量，检索时在 Python 内算余弦；PostgreSQL + pgvector 留作后续放量方向。
-- LLM 通过 OpenAI-compatible 配置接入：`OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_EMBEDDING_MODEL` / `OPENAI_COMPAT_TIMEOUT_SECONDS`。
+- repository 边界：当前 `SQLiteRepository` 是兼容 facade；identity 与 sharing 已拆为 mixin 接缝，领域小 Protocol 与 PostgreSQL port 属后续阶段。
+- 向量检索本机实现：embedding 本地持久化，查询时使用有界 float32 矩阵或 scale index；PostgreSQL + pgvector 留作后续放量方向。
+- LLM 通过 OpenAI-compatible 配置接入：`OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_TIMEOUT_SECONDS`；embedding 独立使用 `EMBED_*` 配置。
 - `Settings.llm_configured` 与 `Settings.embedding_configured` 分别控制问答/抽取 LLM 与 embedding 能力是否启用。
 
-## 3. 用户系统基础
+## 3. 用户系统与分享
 
-- 单用户模式；`UserProfile` schema 与 `users` / `user_profiles` 表已实现。
-- 默认本机 curator 用户；用户记忆模式字段保留为 `manual`（不做自动记忆）。
+- 当前为多账号 owner 隔离：自助注册/登录使用不透明 Bearer session，admin 管理全局 base tier。
+- 分享链接已实现：小 notebook 复制到接收者账号；大 notebook 以只读成员方式加入。当前没有实时协同编辑或修改密码流程。
+- 用户记忆模式字段保留为 `manual`（不做自动记忆）。
 
 ## 4. Notebook 创建与管理
 
@@ -56,35 +58,34 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - `notebooks` 表持久化，后端重启不丢失。
 - 新建默认名 `Untitled notebook`，创建后直接进入来源界面。
 - Notebook summary 包含 name / purpose / primary_domain / status / counts / created_label。
-- **counts 为真实统计**：rules / cases / checklist_items 来自正式知识表 `knowledge_objects` 的 approved 计数，article 数来自 `article_claims` 相关统计，不再写死。
+- **counts 为真实统计**：来源、当前知识对象类型、conversation 与 report 等统计来自当前数据库，不再依赖已退役内容表或写死 demo 数字。
 - 前端集合页：tab 过滤、新建、卡片菜单、编辑、删除、grid/compact/list 预览、最近/名称/来源排序、列表表格视图。
 
 ## 5. Notebook 工作区界面
 
-- 两列工作区：左 Source Stack / 右侧主 Ask + Knowledge 工作区；固定 Studio 右栏已移除，主问答面板使用释放出的宽度。
+- 两列工作区：左 Source Stack / 右侧主区域；主区域为问答 / 知识库 / 深度报告三个 tab，固定 Studio 右栏已移除。
 - 左上角 notebook 名称可编辑保存；左栏显示来源数量、仅显示用户导入文件；网络来源检索保留为 disabled affordance。
 - Notebook 顶栏保持紧凑：标题下不再渲染 description，description 在没有对话时进入问答欢迎态；顶部分析工具栏具备横向 overflow 保护，桌面宽度下动作标签不会被截断。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
-- **中栏 knowhow 工具 tab**：问答 / 场景查询 / 案例检索 / Checklist / 知识库。
+- **主栏当前 tab**：问答 / 知识库 / 深度报告；Scenario / Case / Checklist 已退役。
   - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题。
-  - 场景查询：9 字段结构化表单走 `/scenario-query`，复用统一 AnswerView。
-  - 案例检索 / Checklist：分别走 `/case-search`、`/checklist`，渲染 CaseCard / ChecklistItem。
+  - 深度报告：两阶段后台 job，先审阅大纲再生成各节；支持实时进度、取消、删除、Markdown 与批量 zip 导出。
   - **知识库（多类型浏览）**：前端从 `/knowledge-types` 动态获取对象类型，再用 `/knowledge?type=...` 浏览任意类型（Concept / Claim / Formula / Procedure 以及 legacy/custom 类型）；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
   - 回答含 citation 与 👍/👎 反馈；引用在前端以 `[1]`、`[2]` 顺序编号展示，点击引用会在答案面板内展开详情（避免浮窗越界）；模型直接输出的数字复合引用（如 `[1, 2, 3]`）在每个编号都能映射到已知引用时也会拆成可点击引用；答案正文支持 Markdown/code/formula/table 渲染，并提供复制按钮；chat 菜单可清空对话。
 - **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
-- **文章创建入口**：真实文章创建 modal，移除写死的 `ARTICLE_ID`、`DEMO_NOTEBOOK_ID` 常量。
 - **source detail 结构化渲染**：`formula` 元素用 KaTeX 排版（失败回退原始 LaTeX）、`table` 元素用 sanitized `table_html` 渲染、其余文本 + element_type 徽标。
-- Studio 类能力从顶部「分析」工具栏进入：可运行当前提问、思维导图、信息图、新建文章、打开派生规则候选；思维导图 / 信息图输出以弹窗 sections 展示，不再占用固定右栏。
+- 「分析」菜单当前只含晋升队列（admin）、tier 切换（admin）与边审查队列；看板、Schema、全屏知识图谱为其他顶栏动作。当前没有文章、思维导图、信息图或派生规则入口。
 
 ## 6. Source 上传与管理（异步闭环）
 
 - multipart 上传：`POST /api/notebooks/{notebook_id}/sources`，支持 PDF / Markdown / DOCX / PPTX。
-- **上传不阻塞**：上传请求先建记录并返回（parse_status=`queued`），解析 + embedding + 抽取通过 FastAPI `BackgroundTasks` 异步执行。
+- **上传不阻塞**：上传请求先建记录并返回（parse_status=`queued`），解析 + embedding + 抽取经共享 KG job scheduler 异步执行。
 - parse_status 状态机：`queued -> parsing -> parsed -> extracting -> extracted`（失败置 `failed`）。
-- repository 通过注入 `scheduler` 回调保持同步可测：HTTP 层传入 BackgroundTasks，冒烟/脚本不传则同步跑完整管线。
+- repository 通过注入 `scheduler` 回调保持同步可测：HTTP 层提交 `kg_scheduler.submit_job`，冒烟/脚本不传则同步跑完整管线。
 - 记录 metadata：file_name / file_size / file_hash / source_type / parse_status / summary。
-- 相关 API：list sources、get source detail、手动重跑 `POST /api/sources/{source_id}/parse`（委托 `process_source`）、`POST /api/sources/{source_id}/extract`、metadata-only import。
+- 相关 API：list sources、get source detail、手动重跑 `POST /api/sources/{source_id}/parse`（委托 `process_source`）、delete source 与受约束 URL import。
+- 重新解析保留 source 行与原始文件，替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用相同 cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。
 
 ## 7. 文档解析与元素级 Evidence
 
@@ -104,7 +105,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 9. 检索：关键词 + 向量混合
 
-- Notebook 内搜索 API：`GET /api/notebooks/{notebook_id}/search?q=`，覆盖 notebook/source/element/article 文本。
+- Notebook 内搜索 API：`GET /api/notebooks/{notebook_id}/search?q=`，覆盖 notebook metadata、source metadata、source element 与 knowledge object payload。
 - **新增 `backend/app/services/retrieval.py`**：
   - `element_embeddings(element_id, source_id, vector)` 存 JSON 向量；解析后对每个 element 调 `llm_client.embed()` 写入（未配置 embedding 则跳过）。
   - **CJK 感知分词**：`_tokens` 对中文连续串产出字符 bi-gram（单字→uni-gram），拉丁/数字保持词级，修复"整串中文变一个 token 导致中文关键词检索失效"的硬伤；该 tokenizer 被抽取的 evidence 绑定与场景 boost 复用。
@@ -114,6 +115,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   - **结构化场景匹配（WS3）**：`score_knowledge` 接收 scenario dict，与规则 `applies_to/condition/title` 做 token 重叠，`final = relevance·(1+α·boost)` 软加权（不硬过滤）；`scenario_query` 透传结构化字段。
 - 集合页搜索调用后端搜索，并加 250ms debounce，避免每键触发请求。
 - 当前为 SQLite 文本匹配 + Python 余弦；尚未引入 BM25 / FTS5 / pgvector。
+- Ask 的联合范围按 mode 区分：`chunk` 基线只读 active notebook 的 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 走 federated KG 路径。
+- exact-score 的 `base` 次序只适用于知识对象命中（`federated_retrieve()`）；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。base-wins 矛盾规则是独立的答案合成策略。
 
 ## 10. 自动抽取 Pipeline
 
@@ -140,7 +143,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   - **冲突检测**：`GET /api/notebooks/{id}/conflicts`（legacy rule 同范围、取向相反的对）。
 - notebook counts 改为对正式表做真实统计（rules/cases/checklist_items/methods/risks/glossary，统计 USABLE 状态）。
 
-## 12. 真实 Ask / Scenario / Case / Checklist
+## 12. Ask（当前）与 Scenario / Case / Checklist（历史记录，已退役）
 
 - **`ask()` 删除 demo 分叉**，全部数据驱动：
   1. 在 `claim/formula/procedure/concept` 四类 KG 对象上做混合检索，按类型权重做跨类型排序。
@@ -148,16 +151,16 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   3. 配置 LLM 时生成带 `[k]` 标记的自然语言答案；未配置时返回 deterministic conclusion 与 `related_knowledge`/citations。
   4. citation 必须能回查到有效 `element_id`。
   5. 保存 answer 并返回 `answer_id` 与 `conversation_id`，用于反馈和多 session 会话。
-- `scenario_query()`：`ScenarioQueryRequest` 扩展 signal_type / constraint / process_or_node / application 等字段，构造 scenario 后走 ask。
-- `case_search()`：对 cases 知识对象 + element 相似检索，删除写死案例。
-- `checklist()`：从匹配的 rules / risks 生成 checklist item，删除写死 3 条。
+- **历史记录（已退役）**：曾实现 `scenario_query()` / `case_search()` / `checklist()`；当前主线不再暴露这些 endpoint 或 tab。
 - **推理模式 agentic search 实时进度（§6.5 / §11）**：新增 `POST /api/notebooks/{id}/ask/stream` NDJSON 流；后端先发 `start`，再把 `ReasoningRetriever` 的 plan / retrieve / reflect / expand / fallback / answer trace step 逐行推给前端，最后发送完整 `AskResponse`。前端推理按钮开启时走 stream，在 pending answer 中实时显示一行 agent 轨迹摘要，按最新 progress 事件刷新，点击后展开完整步骤；最终回答中保留默认折叠的 `reasoning_trace` 供回看；普通 `/ask` 仍作为兼容非流式路径。Ask 生命周期已全栈接通：transport 断连、页面导航或刷新只停止当前客户端继续接收，detached Ask job 继续执行并持久化最终回答；只有用户显式点击中断、前端调用 `POST /notebooks/{id}/ask/jobs/{job_id}/cancel` 时，后端才设置 cancellation event，`ask_chunk` / `ask_reasoning` / `ask_graph` 与 LLM 流式读取路径在关键阶段停止，且不会保存被显式取消的最终回答。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
 - **`follow_chain` 类型化查询期推理（§5.9 query-time 子集 / §6.5 / §11）**：`reasoning` agent 新增两跳链路动作，通过已有 source/target 索引做有界局部抽样，仅组合 `derived_from/kind_of/prerequisite_of/precedes/part_of` 同类型关系。保持生产 schema v9，不新增迁移/索引/历史回填；高度节点被截断且无法确认不存在直接边时 fail-closed。三节点类型与 USABLE 状态、每跳 relation quote、edge review、候选起点、方向、环路/直接边重复、最低链可信度和 `validity_scope` 也全部 fail-closed；结果只进入本轮 Ask/深度报告上下文和实时 `推导` trace，不写回 KG。两条原始 hop 各自成为 relation evidence anchor；新抽取关系尽力绑定 `SourceElement`，旧 quote-only 关系降级为 source-level 展示且不影响原检索路径；临时 `A→C` 必须标作「推断」且不伪造引用。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
 
-## 13. 真实 Article Studio
+## 13. 历史记录：Article Studio（已退役）
+
+以下仅记录过去实现，当前 runtime 已移除对应 endpoint、表与 UI：
 
 - 文章 API：list / create / `POST /api/articles/{article_id}/research`。
-- **`research_article()` 删除硬编码 bondwire brief**：从文章自身 title/abstract（及 element）抽取 claims（LLM 或句子级 fallback），用 `keyword_score` 与已有 rules 关联，标注 supports/extends/refines/challenges，生成 implication、validation plan 与 derived rule candidate（默认 draft）。
+- **历史实现**：`research_article()` 曾从 title/abstract（及 element）抽取 claims，并生成 implication、validation plan 与 derived rule candidate。
 - 持久化 `article_claims` / `derived_rule_candidates` 表。
 - 回归保证：上传与 bondwire 无关的文章，research_article 输出 claims 来自该文章内容，不再出现写死文本（smoke 已断言）。
 
@@ -167,23 +170,23 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - `POST /api/answers/{answer_id}/feedback`（rating useful / not_useful + comment）。
 - 前端 AnswerView 提供轻量 👍 / 👎 / 复制操作；后端反馈接口仍支持可选 comment，但当前问答 UI 不再显示评论输入框。
 
-## 15. 数据模型
+## 15. 数据模型（当前 + 历史快照）
 
-- schema：Evidence / RuleCard（含 owner/last_reviewed）/ CaseCard / Citation / ChecklistItem / AskResponse / ScenarioQueryRequest（已扩展）/ ArticleSummary / ArticleResearchBrief / Candidate / CandidateUpdate / ExtractionCandidate / MethodCard / RiskItemCard / GlossaryTermCard / ArticleClaimCard / FeedbackRequest / FeedbackResponse / **KnowledgeUpdate / KnowledgeRef / DuplicateGroup / ConflictPair / MergeRequest**。
-- 表：users / user_profiles / notebooks / sources / source_elements / articles / extraction_runs / extraction_candidates / element_embeddings / knowledge_objects（含 status/owner/last_reviewed）/ answers / feedback / article_claims / derived_rule_candidates。
+- **当前**：核心 schema 覆盖 Notebook/Source、Concept/Claim/Formula/Procedure knowledge、Ask/conversation/feedback、Deep Report、sharing 与治理；当前表包括 users/auth、notebooks/sources/elements/chunks、embeddings、knowledge/relations、answers/conversations/feedback、ask jobs/trace、reports、sharing membership 及 KG 治理/索引状态。
+- **历史快照（已退役）**：旧版曾包含 RuleCard / CaseCard / ChecklistItem / ScenarioQueryRequest / ArticleSummary / ArticleResearchBrief 等 schema，以及 articles、article claims、derived-rule candidate 等表；这些不再是当前 runtime contract。
 
-## 16. Demo Dataset（走真实管线）
+## 16. 历史记录：Demo Dataset（已移除）
 
-- 保留 synthetic mixed 中英 semiconductor demo（默认 seed notebook `Analog Packaging Knowhow` 等），但**作为正常 seed 数据走同一条真实抽取/检索/问答路径**，不再有 `notebook_id == DEMO` 的硬编码分叉。
+- 早期曾保留 synthetic mixed 中英 demo；当前全新数据库不创建 demo notebook 或 synthetic source，只初始化内置账号。
 
 ## 17. 本机运行与验证
 
 - `scripts/dev.sh` 同时启动 FastAPI 后端与 Next.js 前端（要求 `frontend/node_modules`，否则提示先 `npm install`）。
 - 服务地址：前端 `http://localhost:3000`（占用时切 3001），后端 `http://127.0.0.1:8000`，CORS 默认放行 3000/3001。
 - `scripts/check.sh`：
-  - 后端 Python syntax（含 KG extraction / profiles / prompts.py / retrieval.py / mineru_client.py）
-  - `scripts/smoke_backend.py`（SQLite 持久化、上传解析、summary、搜索、**KG 抽取 no-LLM 边界**、显式 KG/rule 知识写入、ask→feedback→conversation→article 闭环、**异步 scheduler 路径**、PPTX 元素级 + speaker notes、research 误导性回归断言、**MinerU content_list→元素映射离线单测**、**检索打分（关键词/向量/None 三态）**、**知识状态机（deprecated 不召回 / reviewed 召回 / 非法状态报错）+ 通用 knowledge 浏览 + 重复合并**、重启后持久化、旧 source 重解析时清理 source-derived 知识）
-  - 前端 `tsc --noEmit`
+  - 后端 Python syntax、离线 hermetic smoke 与完整 pytest
+  - 递归前端 `*.test.mjs`、`tsc --noEmit` 与 production build
+  - 覆盖 KG no-LLM 边界、source cleanup、Ask/conversation/feedback、reports、sharing、检索与治理；不再声称验证已退役 endpoint
 - 全部检查通过；`npm run build` 通过。
 
 ## 18. 可观测性 / 日志系统（全链路）
@@ -191,7 +194,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 为解决"网页操作时卡住、不知道发生了什么"的痛点，建立统一结构化日志：JSONL 文件（`.local/logs/`，已 gitignore）+ Python `logging` 控制台简要行，对离线/未配置无副作用，写日志失败绝不影响主流程。
 
 - **通用底座 `backend/app/core/event_logging.py`**：`EventLogger(settings, channel)` 负责 JSONL 追加 + 控制台行 + 永不抛异常；自动补 `ts/channel`，按 `LLM_LOG_MAX_CHARS` 截断；`new_id(prefix)` 生成关联 id。
-- **LLM 交互日志（`llm.jsonl`）**：`LLMInteractionLogger` 基于 `EventLogger`，埋点在唯一钖点 `OpenAICompatibleClient`（`chat_json`/`embed`），覆盖抽取/问答/文章研究/summary 全部路径。chat 记录 prompt/响应/token/latency（截断）；embedding 记摘要（model/耗时/维度/成功失败，不存向量）；**失败记 `status=error` 后 re-raise**，让 deterministic fallback 容易掩盖的错误可见。
+- **LLM 交互日志（`llm.jsonl`）**：`LLMInteractionLogger` 基于 `EventLogger`，埋点在 `OpenAICompatibleClient`（`chat_json`/`embed`），覆盖 KG 抽取、问答、深度报告与 summary。chat 记录 prompt/响应/token/latency（截断）；embedding 只记摘要，不记录向量。
 - **HTTP 请求日志（`requests.jsonl`）**：`backend/app/main.py` 新增 middleware，记录每个请求 `method/path/status_code/latency_ms/client/request_id`；超过 `SLOW_REQUEST_MS`（默认 3000ms）标 `SLOW`；响应头带 `X-Request-Id` 供前后端关联。
 - **异步管线阶段日志（`events.jsonl`）**：`process_source` 对 parse/embed/extract/pipeline 各阶段两端计时打点（`kind=pipeline`，含 elements/parser_mode 等），`_set_source_status` 每次状态机跃迁 emit `kind=status`，失败记异常堆栈（`logger.exception`），可精确定位卡在哪一步、各步耗时与失败原因。
 - **修复真实 bug**：`_set_source_status` 原 `params.insert(2, summary)` 误写到 `error_message` 列，导致失败时真实错误从未落库；现已修正，前端 source detail 可显示具体错误（smoke 加回归断言守护）。
@@ -203,14 +206,14 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 ## 19. 历史新增（dev 分支，方案 §6/§7/§16，部分已被 KG-native 主线替代）
 
 - **规则解释旧方案（§6.10）**：早期实现过 rule card 的 explain 方向；当前主线不再暴露 `/rules/{rule_id}/explain` 旧路由，改由通用 knowledge 详情与全屏 KG 详情展示 `出处`、相关节点和关系。
-- **Derived Rule Candidate 审核队列（§7.5）**：`GET /notebooks/{id}/derived-rules` + `POST /derived-rules/{id}/approve|reject`；approve 携 evidence 落入正式 `knowledge_objects`(rule)；前端顶部「分析」菜单进入「派生规则候选」弹窗审核。
+- **历史记录（已退役）：Derived Rule Candidate 审核队列（§7.5）**：过去曾有 `/derived-rules` 审核 API 与「派生规则候选」弹窗；当前 runtime 已移除。
 - **创建富字段 + 模板（§6.1/§6.2）**：`NotebookCreate/Update/Summary` 增 `target_users/expected_questions/source_types/taxonomy/access_scope`（notebooks 表迁移）；6 套模板 `GET /notebook-templates`，创建按模板预填；前端集合页「从模板…」选择器 + 编辑弹窗富字段。
 - **CSV / Excel 解析（§6.3）**：`parse_csv`(stdlib) + `parse_xlsx`(openpyxl) → `table_row` 元素；上传校验/accept 扩 `.csv/.xlsx/.xlsm`。
 - **质量/分析看板（§16）**：`GET /notebooks/{id}/analytics`（有用率、低分提问=知识缺口、候选状态分布、知识覆盖、来源状态）；前端「看板」弹窗。
 - **测试硬化**：`smoke_backend.py` 三处 `Settings` 清空 `OPENAI_COMPAT_*` + `mineru_mode=off`，`scripts/check.sh` 不再调用真实 LLM/embedding（即便 `.env` 有 key），全程离线 1–2s。
 - **架构硬化（2026-07-10，权限 / 图谱 / 异步状态 / 发布门禁）**：公共 `NotebookUpdate` 不再接受内部 `status`；深拷异常只补偿自身副本，崩溃清理由 `NOTEBOOK_COPY_STALE_SECONDS` 限定为过期 `copying` 行；KG conflict candidate 的读取/状态更新按 `(notebook_id, candidate_id)` 双重作用域，阻断跨库确认/拒绝；rejected relation 在 federated graph、PPR、scale graph 全路径排除，给 LLM 的关系方向保持 `source→target`，大图守卫覆盖 active + 全部 base；多子查询检索为每个 worker 单独传播 Context；URL 来源逐跳拒绝私网/localhost/link-local；认证解析移出 async event loop 且 session 续期节流。前端用 Ask run/workspace epoch 阻断跨 notebook/会话回写，分享/待办统一走原子 notebook opener，退出登录 abort 本地流并 remount。`Settings` 全部迁移到 Pydantic v2 `validation_alias`，非 SQLite URL fail fast；`scripts/check.sh` 禁用仓库 `.env`、运行全量 pytest + 递归前端测试 + tsc + production build，缺前端依赖不再跳过。本次完整门禁通过：后端 `2271 passed, 1 skipped`、前端 `143 passed`、TypeScript 与 Next.js production build 均成功。
 - **架构模块化第二阶段（2026-07-10）**：保持 endpoint、SQLite schema 与 `SQLiteRepository` 公共 API 不变，把账号/用户模型配置/admin 用量/auth session 领域迁入 `sqlite_identity.py` mixin，并把笔记本分享令牌、深复制、成员关系与读取权限迁入 `sqlite_notebook_sharing.py` mixin；`sqlite_repository.py` 从 14,815 行降到 14,059 行，继续兼容 `_REQUEST_USER` / set/reset、`_COPY_CHUNK` 与 `_remap_json_ids` 导出。前端把 workspace API/视图模型迁入 `workspace-model.ts`，答案/引用/推理轨迹迁入 `answer-panel.tsx`，KG 类型标记迁入 `kg-type-mark.tsx`，`page.tsx` 从 6,060 行降到 5,438 行。新增后端继承/导出兼容守卫与前端源码边界测试，防止职责回流。本次完整门禁通过：后端 `2275 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。
-- **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和已通过的回归/characterization 测试为行为真相，同步修复 Ask transport 断连、two-tier 排序和 notebook 两列 workspace 三处过期契约：transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；检索相关度不乘 tier 权重，只在 score 完全相同时让 `base` 优先；workspace 保持来源栏 + Ask/Knowledge 主区域两列结构，Studio 不作为固定第三栏。`architecture.md` 已改为稳定的组件、数据流和边界说明，`backend/tests/test_architecture_documentation.py` 已纳入常规 pytest 套件防止文档回漂。本次完整门禁通过：后端 `2282 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 仍为后续规划，未计入已完成。
+- **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和绿色测试为行为真相，修复 Ask disconnect、mode-specific federation/tier 次序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移。transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；`chunk` 基线 active-only，KG overlay/PPR 可引入 federated KG/base-backed chunk，`graph`/`reasoning` 走 federated KG；exact-score 的 `base` 次序只适用于知识对象命中，relation hit 仍 score-only；workspace 是来源栏 + 问答/知识库/深度报告主栏两列结构。`architecture.md` 已改为稳定边界说明，文档契约测试进入常规 pytest。本次完整门禁通过：后端 `2281 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 仍为后续规划，未计入已完成。
 
 ## 21. 文档类型抽取 profile 注册表（方案 §5 对象模型 + §6.2 模板）
 
@@ -277,12 +280,12 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **检索内存/性能**：`ask()` 把向量流式读成每-notebook L2 归一化 **float32 numpy 矩阵**（`vector_index`）+ `vector_cache` 版本键缓存，`query_sims` 单次 matmul。峰值内存大幅下降（实测大 KG 1.3G→约 500M），重复查询亚秒，消除大 KG 下的 OOM/卡死。`_TYPE_WEIGHT`=claim/formula/procedure/concept=1.0/1.0/0.7/0.5。
 - **产品行为**：导入后不再自动生成/覆盖笔记本名字/描述；前端「＋新建」直接创建未命名笔记本并进入（去弹窗）；状态点绿色只给 `extracted`、中间态橙。
 - **配置旋钮**：新增 `kg_window_target_chars/overlap`、`kg_extract_workers`、`kg_window_warn_threshold`、`embed_concurrency/batch_size/truncate_chars/persist_chunk`、`db_busy_timeout_ms`、`retrieval_top_n`。
-- **死代码清理**：移除已休眠 legacy（`/case-search`·`/checklist`·`/sources/{id}/extract` 路由与方法、`structured_boost`/scenario 软加权、旧卡片模型 `MethodCard`/`RiskItemCard`/`GlossaryTermCard`/`CaseCard`/`ChecklistItem`/`RuleExplanation`/`ScenarioQueryRequest`/`ArticleClaimCard`）；保留前端在用的 articles/derived-rules/candidates/duplicates/merge/conflicts。
+- **死代码清理（历史记录修正）**：当时先移除了 `/case-search`、`/checklist`、`/sources/{id}/extract` 等 legacy；其后 articles / derived-rules 也已从当前 runtime 移除。当前保留的是通用 knowledge 治理、duplicates/merge/conflicts、reports 与图谱治理路径。
 - **验证**：`bash scripts/check.sh` 通过（py_compile + KG-native smoke + 前端 `tsc --noEmit`）。
 
 ## 20. 当前边界（后续阶段，未计入已完成）
 
-- **Article 深度可视化**：typed 关系下游动作（suggests_checklist/creates_risk）、Implication Map（§7.4）、Inference 分层（§7.3）+ Hypothesis（§5.9）、研究简报字段补齐（§7.1）。
+- **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。
 - **v0.4 Review Mode**：review session、场景 checklist sign-off、reviewer 评论、action items、导出 review 报告。
 - **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
 - 检索：BM25 / FTS5 / pgvector 放量、结构化硬过滤、Knowledge graph（已评估为低 ROI / 基础设施级，暂缓）。
@@ -296,6 +299,6 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 已完成（2026-07-10）：reasoning `follow_chain`——生产 schema v9 与历史数据保持不变，查询期复用既有端点索引，对有证据、审核可用、条件兼容的同类型两跳关系做有界类型化组合；关系前提可引用、推论不入库，Ask/深度报告与流式 `推导` 轨迹均已接通。已通过 `scripts/check.sh` 与前端 build。
 - 已完成（2026-06-25）：用户账号系统——
   - **后端**：`auth_sessions` 表存储不透明 Bearer session token；`app/services/auth_utils.py` 封装 PBKDF2-SHA256 密码哈希与 token 生成；`app/api/auth_routes.py` 实现 `POST /auth/register`、`POST /auth/login`、`POST /auth/logout`、`GET /auth/me`；`app/api/deps.py` 提供 `get_current_user` 依赖用于路由级鉴权；`notebooks.created_by` 列实现按 owner 隔离（用户只能看/操作自己的 notebook）；内置 `user-local` 账号原地升级为 `admin`（id 不变，登录用户名 `admin`，密码由 `SILICON_NOTEBOOK_ADMIN_PASSWORD` 控制，本地默认 `admin`，每次后端启动重置；production/对外监听必须改为强密码）；admin 拥有既有 notebook 并是唯一可标记基准库的用户；基准库从普通用户列表隐藏但仍参与问答上下文检索。新增环境变量：`SILICON_NOTEBOOK_ADMIN_PASSWORD`（admin 密码）和 `SILICON_NOTEBOOK_AUTH_OPTIONAL`（默认 false=强制登录；true=无 token 请求回退 admin，仅本地/测试）。
-  - **前端**：首次加载展示登录/注册界面；注册用户名规则为 1+ 字母 + `00` + 6 位数字（如 `zhang00123456`，存为小写）；Bearer token 写入 localStorage 并由 api() 自动注入请求头；顶栏展示当前登录用户名与退出按钮；"设为基准库"操作仅 admin 可见。
+  - **前端**：首次加载展示登录/注册界面；注册用户名规则为单个字母 + `00` + 6 位数字（如 `a00123456`，存为小写）；Bearer token 写入 localStorage 并由 api() 自动注入请求头；顶栏展示当前登录用户名与退出按钮；"设为基准库"操作仅 admin 可见。
   - **测试**：新增 `tests/test_auth.py`（注册/登录/会话/退出）、`tests/test_user_isolation.py`（notebook owner 隔离）以及集成场景覆盖；全部 ~990 测试通过，`scripts/check.sh` 与 `npm run build` 绿。
   - 本轮有意不包含：修改密码、共享、协作。
