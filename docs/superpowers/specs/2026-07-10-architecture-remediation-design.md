@@ -4,6 +4,11 @@
 **状态**：已批准；以 `master` 当前代码与绿色测试为真实行为
 **基线提交**：`aba02c4`
 
+> **后续决策（2026-07-10）**：Repository 相关的阶段 2、4、6 已由
+> `2026-07-10-repository-composition-refactor-design.md` 取代。它们合并为一个
+> 保持行为不变的 Repository composition refactor PR，并以 `3334626` 为新基线。
+> 本文的 router / 前端阶段仍保持独立，不纳入该 PR。
+
 ## 目标
 
 在不改变 endpoint、SQLite schema、Repository 公共 API、前端交互与异步任务语义的前提下，降低 `SQLiteRepository`、FastAPI 总路由和前端 `Home` 编排器的耦合，使每个后续改动都能由现有测试证明行为保持一致。
