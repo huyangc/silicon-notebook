@@ -61,7 +61,7 @@ from app.models.schemas import (
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.vector_cache import VectorCache, LRUProcessCache
+from app.services.vector_cache import LRUProcessCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -283,7 +283,10 @@ class SQLiteRepository:
         self.event_log = self._runtime.event_log
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self._unified_cache: Dict[Any, Any] = {}
+        # Task 17: the unified-graph dict and the version-keyed VectorCache
+        # are runtime-owned (RetrievalSnapshotCache constructs them eagerly);
+        # `_unified_cache` / `_vector_cache` below are write-through property
+        # descriptors over those SAME objects — no facade-only copies.
         self._user_model_cfg_cache = self._runtime.identity.model_config_cache
         # Bilingual-query hint: per-notebook detected corpus languages (subset of
         # ["zh","en"]), sampled cheaply and memoized. Staleness is harmless — a
@@ -320,7 +323,6 @@ class SQLiteRepository:
         self._scale_idx_load_locks: Dict[str, threading.Lock] = {}
         # C7: same bounded-LRU rework as _scale_idx_cache above.
         self._viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
-        self._vector_cache = VectorCache(max_entries=self.settings.vector_cache_max_entries)
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
@@ -330,17 +332,16 @@ class SQLiteRepository:
         # 算 notebook_copy_stats() 的 5 个 COUNT。_mark_unified_kg_dirty 在每次 KG
         # 写时 discard,使下一轮变更重新触发评估。
         self._auto_index_checked: set = set()
-        # Task 14: the KG mutation coordinator wraps the four facade-owned
-        # cache/state objects above BY IDENTITY (no replacement copies) plus
-        # the `_write` transaction seat (resolved per call, so per-instance
-        # transaction traces / failure injections keep observing the dirty
-        # bump's commit boundary). The `_invalidate_unified_cache` /
+        # Task 14→17: the KG mutation coordinator reads the unified/vector
+        # caches through the runtime-owned RetrievalSnapshotCache and wraps
+        # the two facade-owned state objects above BY IDENTITY (no replacement
+        # copies) plus the `_write` transaction seat (resolved per call, so
+        # per-instance transaction traces / failure injections keep observing
+        # the dirty bump's commit boundary). The `_invalidate_unified_cache` /
         # `_mark_unified_kg_dirty` / `_bump_cluster_mutation_seq` wrappers
         # below delegate to it — every mutation call site keeps funnelling
         # through those wrappers, so the frozen phase matrix is unchanged.
         self._runtime.wire_kg_mutations(
-            unified_cache=self._unified_cache,
-            vector_cache=self._vector_cache,
             auto_index_checked=self._auto_index_checked,
             notebook_languages=self._notebook_langs_cache,
             write=lambda: self._write(),
@@ -357,7 +358,8 @@ class SQLiteRepository:
         # Gate-6 scale/viz adapters (scale-index load / ANN open / viz index /
         # probe / build-viz / auto-index / copy-stats).  Every lambda resolves
         # at call time — post-construction monkeypatches stay observed.  The
-        # unified/viz cache objects are passed BY IDENTITY (no copies).
+        # unified-graph memo comes from the runtime-owned retrieval_snapshots
+        # (Task 17); the viz-building set is passed BY IDENTITY (no copies).
         self._runtime.wire_knowledge_lifecycle(
             connect=lambda: self._connect(),
             write=lambda: self._write(),
@@ -409,7 +411,6 @@ class SQLiteRepository:
             viz_index_probe=lambda notebook_id: self._viz_index_probe(notebook_id),
             build_viz_index=lambda notebook_id: self.build_viz_index(notebook_id),
             maybe_auto_index=lambda notebook_id: self.maybe_auto_index(notebook_id),
-            unified_cache=self._unified_cache,
             viz_building=self._viz_building,
             edge_centrality_map=lambda notebook_id: (
                 self._edge_centrality_map(notebook_id)
@@ -640,6 +641,30 @@ class SQLiteRepository:
     @_user_rerank_clients.setter
     def _user_rerank_clients(self, clients):
         self._runtime.models._user_rerank_clients = clients
+
+    # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
+    # (one owner). These handles are write-through descriptors over the SAME
+    # objects — never facade-only copies. A vector-cache swap propagates to
+    # every consumer because the KG mutation coordinator reads through the
+    # snapshot cache; a unified-cache swap also refreshes the lifecycle
+    # service's held reference (it keeps the dict by identity).
+    @property
+    def _vector_cache(self):
+        return self._runtime.retrieval_snapshots.vector_cache
+
+    @_vector_cache.setter
+    def _vector_cache(self, cache) -> None:
+        self._runtime.retrieval_snapshots.vector_cache = cache
+
+    @property
+    def _unified_cache(self):
+        return self._runtime.retrieval_snapshots.unified_cache
+
+    @_unified_cache.setter
+    def _unified_cache(self, cache) -> None:
+        self._runtime.retrieval_snapshots.unified_cache = cache
+        if self._runtime.knowledge_lifecycle is not None:
+            self._runtime.knowledge_lifecycle.unified_cache = cache
 
     def _resolve_path(self, value: str) -> Path:
         return self._runtime.database.resolve_path(value)

@@ -30,8 +30,13 @@ Red lines:
 - The dirty bump's write transaction rides the FACADE's ``_write``
   compatibility seat (injected ``write`` callable, resolved per call), so the
   frozen begin/commit phase traces and failure injections keep observing it.
-- All cache/state collaborators are the facade's EXISTING objects, held by
-  identity — never replacement copies (Task 17 transfers ownership later).
+- The unified/vector caches are the runtime-owned RetrievalSnapshotCache's
+  objects (Task 17), read through by identity — never replacement copies: the
+  ``unified_cache``/``vector_cache`` properties alias the SAME objects the
+  facade's write-through descriptors expose, so a facade-level cache swap is
+  seen here immediately. The remaining state collaborators (auto-index
+  once-set, corpus-language memo) stay the facade's EXISTING objects, held by
+  identity.
 """
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ import sqlite3
 from typing import Callable, ContextManager, List, MutableMapping, Set
 
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.vector_cache import VectorCache
 
 
@@ -46,8 +52,7 @@ class KgMutationCoordinator:
     def __init__(
         self,
         unified_store: UnifiedKgStore,
-        unified_cache: MutableMapping[tuple, object],
-        vector_cache: VectorCache,
+        snapshots: RetrievalSnapshotCache,
         auto_index_checked: Set[str],
         notebook_languages: MutableMapping[str, List[str]],
         *,
@@ -55,52 +60,25 @@ class KgMutationCoordinator:
         now: Callable[[], str],
     ) -> None:
         self.unified_store = unified_store
-        self.unified_cache = unified_cache
-        self.vector_cache = vector_cache
+        self.snapshots = snapshots
         self.auto_index_checked = auto_index_checked
         self.notebook_languages = notebook_languages
         self._write = write
         self._now = now
 
+    @property
+    def unified_cache(self) -> MutableMapping[tuple, object]:
+        return self.snapshots.unified_cache
+
+    @property
+    def vector_cache(self) -> VectorCache:
+        return self.snapshots.vector_cache
+
     def invalidate_unified_cache(self, notebook_id: str) -> None:
-        for key in [k for k in self.unified_cache if k[0] == notebook_id]:
-            self.unified_cache.pop(key, None)
-        # Matrices are stored under "{nb}:matrix:{table}" (see _vector_matrix). The old
-        # "{nb}:knowledge" key never matched (dead no-op). Invalidate BOTH embedding
-        # tables so an in-place re-embed (same row count + same-second created_at, i.e.
-        # an unchanged version tuple) cannot serve a stale vector.
-        for table in ("knowledge_embeddings", "element_embeddings"):
-            self.vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
-        self.vector_cache.invalidate(f"{notebook_id}:kwtok")
-        # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
-        # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
-        # (e.g. a base notebook) may affect any federated graph that includes it,
-        # so evict every fed_rxgraph entry; tracking participants per key is
-        # overkill for the POC. This explicit eviction also guards against
-        # same-second in-place edits that leave the version tuple unchanged.
-        for key in [k for k in self.vector_cache._store if k.endswith(":fed_rxgraph")]:
-            self.vector_cache.invalidate(key)
-        # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph) —
-        # evict so a same-second KG edit with an unchanged version tuple cannot serve stale.
-        self.vector_cache.invalidate(f"{notebook_id}:ppr_graph")
-        # entity->chunk / element->chunk reverse maps (P0-5) — evict so a same-second
-        # in-place evidence/element_ids edit with an unchanged version tuple cannot
-        # serve a stale membership map to the PPR-fallback / chunk-overlay paths.
-        self.vector_cache.invalidate(f"{notebook_id}:entchunk")
-        self.vector_cache.invalidate(f"{notebook_id}:elemchunk")
-        # review_queue's edge betweenness centrality map (P0-3) — evict so a
-        # same-second in-place edit (e.g. review_status flip) with an unchanged
-        # version tuple cannot serve a stale centrality map.
-        self.vector_cache.invalidate(f"{notebook_id}:edge_centrality")
-        # cluster_map (member_object_id -> canonical_id, P1-2) — evict so a
-        # same-second concept_clusters rewrite (rename / rebuild's DELETE+INSERT,
-        # which can land COUNT and MAX(created_at) on the same values as before)
-        # with an unchanged version tuple cannot serve a stale membership map.
-        self.vector_cache.invalidate(f"{notebook_id}:clustermap")
-        # notebook_copy_stats memo (perf-audit A3) — evict so a same-second
-        # in-place edit with an unchanged version tuple cannot serve a stale
-        # size/copyable verdict to the ask-path guards / share paths.
-        self.vector_cache.invalidate(f"{notebook_id}:copystats")
+        # Task 17: the key-family eviction body lives on the runtime-owned
+        # RetrievalSnapshotCache (one owner). This hook stays the mutation
+        # funnel the frozen phase matrix observes — same effects, same timing.
+        self.snapshots.invalidate_kg(notebook_id)
 
     def mark_unified_kg_dirty(self, notebook_id: str) -> None:
         # Bump the monotonic mutation counter on every KG write. This is the ONLY

@@ -1,0 +1,113 @@
+"""Task 17 — runtime-owned RetrievalSnapshotCache.
+
+The retrieval cache objects the facade constructor used to build inline move
+into the runtime's RetrievalSnapshotCache. The facade's `_vector_cache` /
+`_unified_cache` handles become write-through descriptors over the SAME
+objects (never facade-only copies), and every wired consumer — the
+KgMutationCoordinator, the KnowledgeLifecycleService's unified-graph memo,
+the NotebookScaleProfile copy-stats memo — keeps holding/reading them by
+identity. `invalidate_kg` is the KG key-family eviction every online mutation
+funnels through (moved from the coordinator, itself moved from the facade in
+Task 14): the frozen phase matrix in mutation_phases.json replays unchanged.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.core.config import Settings
+from app.services.sqlite_repository import SQLiteRepository
+from app.services.vector_cache import VectorCache
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'snap.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    return SQLiteRepository(Settings(_env_file=None))
+
+
+def test_cache_transfer_preserves_object_identity(repo):
+    """The snapshot cache owns THE cache objects — the facade handles and the
+    coordinator/lifecycle collaborators all alias them, no replacement copies."""
+    runtime = repo._runtime
+    assert repo._vector_cache is runtime.retrieval_snapshots.vector_cache
+    assert repo._unified_cache is runtime.retrieval_snapshots.unified_cache
+    assert runtime.kg_mutations.vector_cache is repo._vector_cache
+    assert runtime.kg_mutations.unified_cache is repo._unified_cache
+    assert runtime.knowledge_lifecycle.unified_cache is repo._unified_cache
+
+
+def test_facade_vector_cache_setter_updates_all_consumers(repo):
+    replacement = VectorCache(max_entries=3)
+    repo._vector_cache = replacement
+    assert repo._runtime.retrieval_snapshots.vector_cache is replacement
+    assert repo._runtime.kg_mutations.vector_cache is replacement
+
+
+def test_facade_unified_cache_setter_updates_all_consumers(repo):
+    replacement: dict = {}
+    repo._unified_cache = replacement
+    assert repo._runtime.retrieval_snapshots.unified_cache is replacement
+    assert repo._runtime.kg_mutations.unified_cache is replacement
+    assert repo._runtime.knowledge_lifecycle.unified_cache is replacement
+
+
+def test_snapshot_cache_get_peek_invalidate_delegate_to_vector_cache(repo):
+    snapshots = repo._runtime.retrieval_snapshots
+    key = "nb-d:matrix:knowledge_embeddings"
+    assert snapshots.get(key, ("v", 1), lambda: {"m": 1}) == {"m": 1}
+    assert snapshots.peek(key, ("v", 1)) is True
+    assert snapshots.peek(key, ("v", 2)) is False  # version mismatch
+    snapshots.invalidate(key)
+    assert snapshots.peek(key, ("v", 1)) is False
+
+
+def test_invalidate_kg_evicts_the_frozen_key_families(repo):
+    """invalidate_kg preserves the Task-14 eviction exactly: the embedding
+    matrices (both tables), kwtok, EVERY fed_rxgraph entry (keyed by the
+    ACTIVE notebook, so all participants sweep it), ppr_graph, entchunk,
+    elemchunk, edge_centrality, clustermap and copystats families plus this
+    notebook's unified-cache entries. `edge_support` stays out (versioned by
+    canonical_rel_seq) and other notebooks' per-nb entries survive."""
+    snapshots = repo._runtime.retrieval_snapshots
+    nb, other = "nb-a", "nb-b"
+    families = [
+        f"{nb}:matrix:knowledge_embeddings",
+        f"{nb}:matrix:element_embeddings",
+        f"{nb}:kwtok",
+        f"{nb}:ppr_graph",
+        f"{nb}:entchunk",
+        f"{nb}:elemchunk",
+        f"{nb}:edge_centrality",
+        f"{nb}:clustermap",
+        f"{nb}:copystats",
+    ]
+    for key in families:
+        snapshots.get(key, ("v", 1), lambda: {})
+    snapshots.get(f"{other}:fed_rxgraph", ("v", 1), lambda: {})
+    snapshots.get(f"{nb}:edge_support", ("edge_support", 1), lambda: {})
+    snapshots.get(f"{other}:kwtok", ("v", 1), lambda: {})
+    snapshots.unified_cache[(nb, "concept")] = {"g": 1}
+    snapshots.unified_cache[(other, "concept")] = {"g": 2}
+
+    snapshots.invalidate_kg(nb)
+
+    for key in families:
+        assert not snapshots.peek(key, ("v", 1)), key
+    assert not snapshots.peek(f"{other}:fed_rxgraph", ("v", 1))
+    assert snapshots.peek(f"{nb}:edge_support", ("edge_support", 1))
+    assert snapshots.peek(f"{other}:kwtok", ("v", 1))
+    assert (nb, "concept") not in snapshots.unified_cache
+    assert (other, "concept") in snapshots.unified_cache
+
+
+def test_facade_invalidation_wrapper_reaches_the_snapshot_cache(repo):
+    """The facade `_invalidate_unified_cache` wrapper keeps funnelling through
+    the coordinator, which now delegates to the snapshot cache — one eviction
+    path, same object."""
+    snapshots = repo._runtime.retrieval_snapshots
+    snapshots.get("nb-w:kwtok", ("kwtok", 0, ""), lambda: {})
+    repo._invalidate_unified_cache("nb-w")
+    assert snapshots.peek("nb-w:kwtok", ("kwtok", 0, "")) is False

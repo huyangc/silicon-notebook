@@ -159,6 +159,12 @@ TASK15_ALLOWED_IMPORTS = {
 TASK16_ALLOWED_IMPORTS = {
     ("backend/tests/test_knowledge_governance_delegation.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+# Task 17: the new retrieval-snapshot runtime test file imports the
+# compatibility export at a fresh site (the facade's own frozen import lines
+# are untouched).
+TASK17_ALLOWED_IMPORTS = {
+    ("backend/tests/test_retrieval_snapshot_cache_runtime.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -841,6 +847,26 @@ TASK16_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 17: the runtime owns the retrieval snapshot caches (RetrievalSnapshot-
+# Cache); the facade's `_vector_cache` / `_unified_cache` handles become
+# write-through descriptors over the SAME objects, so the constructor's
+# direct `self._unified_cache` sites (inline dict + the two wire kwargs)
+# disappear from the facade file — `self._vector_cache` keeps its read sites.
+# The new runtime suite and the extended invalidation suite consume the
+# facade at fresh sites.
+TASK17_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", "_unified_cache"),
+} | {
+    ("backend/tests/test_retrieval_snapshot_cache_runtime.py", name)
+    for name in {
+        "SQLiteRepository", "_invalidate_unified_cache", "_runtime",
+        "_unified_cache", "_vector_cache",
+    }
+} | {
+    ("backend/tests/test_vector_cache_invalidation.py", name)
+    for name in {"_invalidate_unified_cache", "_runtime", "_vector_cache"}
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -850,6 +876,14 @@ TASK7_COMPAT_PROPERTIES = {
     "_user_model_cfg_cache": True,
     "_user_llm_clients": True,
     "_user_rerank_clients": True,
+}
+
+# Task 17: the facade's retrieval-cache handles become mutable write-through
+# properties over the runtime-owned RetrievalSnapshotCache (the read-only
+# fixture keeps their frozen instance_attribute kind).
+TASK17_COMPAT_PROPERTIES = {
+    "_vector_cache": True,
+    "_unified_cache": True,
 }
 
 # Internal line numbers in this source file are intentionally not API surface:
@@ -1257,6 +1291,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK14_ALLOWED_IMPORTS
                     or site in TASK15_ALLOWED_IMPORTS
                     or site in TASK16_ALLOWED_IMPORTS
+                    or site in TASK17_ALLOWED_IMPORTS
                 )
 
 
@@ -1297,14 +1332,14 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites
-                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES)
+                    and not any(site.startswith(f"{file}:") and member == name for file, member in TASK4_ALLOWED_MEMBER_FILES | TASK5_ALLOWED_MEMBER_FILES | TASK6_ALLOWED_MEMBER_FILES | TASK7_ALLOWED_MEMBER_FILES | TASK8_ALLOWED_MEMBER_FILES | TASK9_ALLOWED_MEMBER_FILES | TASK10_ALLOWED_MEMBER_FILES | TASK11_ALLOWED_MEMBER_FILES | TASK12_ALLOWED_MEMBER_FILES | TASK13_ALLOWED_MEMBER_FILES | TASK14_ALLOWED_MEMBER_FILES | TASK15_ALLOWED_MEMBER_FILES | TASK16_ALLOWED_MEMBER_FILES | TASK17_ALLOWED_MEMBER_FILES)
                 and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
@@ -1362,6 +1397,11 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
             member = inspect.getattr_static(SQLiteRepository, name)
             assert isinstance(member, property), name
             assert (member.fset is not None) is TASK7_COMPAT_PROPERTIES[name], name
+            continue
+        if name in TASK17_COMPAT_PROPERTIES:
+            member = inspect.getattr_static(SQLiteRepository, name)
+            assert isinstance(member, property), name
+            assert (member.fset is not None) is TASK17_COMPAT_PROPERTIES[name], name
             continue
         if kind in {"instance_attribute", "mutable_property"} and not hasattr(
             SQLiteRepository, name

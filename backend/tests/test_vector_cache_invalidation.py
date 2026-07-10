@@ -22,3 +22,18 @@ def test_invalidate_clears_matrix_keys_for_both_tables(tmp_path, monkeypatch):
     assert f"{nb}:matrix:knowledge_embeddings" not in repo._vector_cache._store
     assert f"{nb}:matrix:element_embeddings" not in repo._vector_cache._store
     assert f"{nb}:kwtok" not in repo._vector_cache._store
+
+
+def test_invalidation_rides_the_runtime_snapshot_cache(tmp_path, monkeypatch):
+    """Task 17: the facade `_vector_cache` handle and the runtime's
+    RetrievalSnapshotCache alias the SAME VectorCache object, so the facade
+    `_invalidate_unified_cache` wrapper (coordinator → snapshot cache) evicts
+    entries populated through either handle — no facade-only copy exists."""
+    repo = _repo(tmp_path, monkeypatch)
+    snapshots = repo._runtime.retrieval_snapshots
+    assert repo._vector_cache is snapshots.vector_cache
+    nb = "nb-y"
+    repo._vector_cache.get(f"{nb}:kwtok", ("kwtok", 0, ""), lambda: {})
+    assert f"{nb}:kwtok" in snapshots.vector_cache._store
+    repo._invalidate_unified_cache(nb)
+    assert f"{nb}:kwtok" not in repo._vector_cache._store

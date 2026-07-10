@@ -25,10 +25,12 @@ from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
+from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
+from app.services.vector_cache import VectorCache
 
 
 @dataclass(frozen=True)
@@ -97,11 +99,21 @@ class RepositoryRuntime:
         # real services) are facade-bound seams that only exist once the facade
         # constructor reaches them.  Construction stays lazy — no seam calls.
         self.source_ingestion: "SourceIngestionService | None" = None
+        # Task 17: the retrieval snapshot caches are seam-free (a version-keyed
+        # VectorCache sized from settings plus the plain unified-graph dict),
+        # so the runtime owns and constructs them eagerly. The facade's
+        # `_vector_cache` / `_unified_cache` handles are write-through
+        # descriptors over THESE objects and the KG mutation coordinator reads
+        # them through this cache — one owner, no facade-only copies.
+        self.retrieval_snapshots = RetrievalSnapshotCache(
+            vector_cache=VectorCache(max_entries=settings.vector_cache_max_entries),
+            unified_cache={},
+        )
         # The KG mutation coordinator is finished by wire_kg_mutations(): its
-        # collaborators (the facade-owned unified/vector caches, the
-        # auto-index once-set, the corpus-language memo and the facade `_write`
-        # transaction seat) only exist once the facade constructor reaches
-        # them.  Construction stays lazy — no seam calls.
+        # remaining collaborators (the facade-owned auto-index once-set, the
+        # corpus-language memo and the facade `_write` transaction seat) only
+        # exist once the facade constructor reaches them.  Construction stays
+        # lazy — no seam calls.  The caches come from retrieval_snapshots.
         self.kg_mutations: "KgMutationCoordinator | None" = None
         # The knowledge lifecycle/governance services are finished by
         # wire_knowledge_lifecycle(): their collaborators (the facade `_write`/
@@ -277,23 +289,23 @@ class RepositoryRuntime:
     def wire_kg_mutations(
         self,
         *,
-        unified_cache: Any,
-        vector_cache: Any,
         auto_index_checked: Any,
         notebook_languages: Any,
         write: Callable[[], Any],
     ) -> KgMutationCoordinator:
         """Compose the KG mutation coordinator (Task 14) once the facade-bound
-        collaborators exist.  The caches/sets are the facade's EXISTING objects
-        passed BY IDENTITY (never replacement copies — Task 17 transfers their
-        ownership later); ``write`` is the facade's ``_write`` compatibility
-        seat resolved per call, so the frozen transaction-phase traces and
-        failure injections keep observing the dirty bump's commit boundary.
-        The unified store and the `_now` clock seam come from this runtime."""
+        collaborators exist.  The unified/vector caches come from the
+        runtime-owned ``retrieval_snapshots`` (Task 17 — the coordinator reads
+        them through it, so identities track a facade-level cache swap); the
+        once-set/memo are the facade's EXISTING objects passed BY IDENTITY
+        (never replacement copies); ``write`` is the facade's ``_write``
+        compatibility seat resolved per call, so the frozen transaction-phase
+        traces and failure injections keep observing the dirty bump's commit
+        boundary.  The unified store and the `_now` clock seam come from this
+        runtime."""
         self.kg_mutations = KgMutationCoordinator(
             self.unified_kg,
-            unified_cache,
-            vector_cache,
+            self.retrieval_snapshots,
             auto_index_checked,
             notebook_languages,
             write=write,
@@ -330,7 +342,6 @@ class RepositoryRuntime:
         viz_index_probe: Callable[[str], dict],
         build_viz_index: Callable[[str], Any],
         maybe_auto_index: Callable[[str], None],
-        unified_cache: Any,
         viz_building: Any,
         edge_centrality_map: Callable[[str], dict],
         embed_knowledge: Callable[..., None],
@@ -351,9 +362,11 @@ class RepositoryRuntime:
         property monkeypatches keep working); the scale/viz callables are
         TEMPORARY Gate-6 adapters (scale-index load / ANN open / viz index /
         probe / build-viz / auto-index / copy-stats), all facade-late; the
-        cache objects are the facade's EXISTING dict/set passed BY IDENTITY;
-        ``kg_building`` set identity comes from the catalog (get_notebook reads
-        membership there) while the lifecycle owns the guard lock.  The
+        unified-graph memo comes from the runtime-owned retrieval_snapshots
+        (Task 17) while ``viz_building`` stays the facade's EXISTING set
+        passed BY IDENTITY; ``kg_building`` set identity comes from the
+        catalog (get_notebook reads membership there) while the lifecycle
+        owns the guard lock.  The
         governance service is constructed FIRST so the lifecycle's
         full-notebook build calls it as a real service, not a facade callback.
         Task 16 gives it the full governance surface: the Task-13 stores, the
@@ -392,7 +405,7 @@ class RepositoryRuntime:
             unified_kg=self.unified_kg,
             governance=self.knowledge_governance,
             kg_building=self.catalog.kg_building,
-            unified_cache=unified_cache,
+            unified_cache=self.retrieval_snapshots.unified_cache,
             viz_building=viz_building,
             new_id=self.seams.new_id,
             now=self.seams.now,
