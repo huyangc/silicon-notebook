@@ -59,7 +59,6 @@ from app.models.schemas import (
     SourceElement,
     SourceImportRequest,
     SourceSummary,
-    UserProfile,
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
@@ -84,7 +83,13 @@ from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
-from app.services.model_config import resolve_effective_config, ResolvedModelConfig, ModelNotConfiguredError
+from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
+from app.services.sqlite_identity import (
+    SQLiteIdentityMixin,
+    _REQUEST_USER,
+    reset_request_user,
+    set_request_user,
+)
 from app.services.parsers import parse_source_file, mineru_content_list_to_elements
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -216,28 +221,6 @@ _ASK_MODEL_ERRORS: "contextvars.ContextVar[list | None]" = contextvars.ContextVa
 _ASK_EMBED_CACHE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
     "ask_embed_cache", default=None)
 
-# 请求级「当前用户」槽（单例仓库不能用实例态；由 get_current_user 依赖设/复位）。
-# None = 不在已认证请求上下文（离线脚本/直接测 repository）→ current_user() 回退 admin。
-_REQUEST_USER: "contextvars.ContextVar[UserProfile | None]" = contextvars.ContextVar(
-    "request_user", default=None)
-
-
-def set_request_user(user: "UserProfile | None"):
-    """设当前请求用户，返回 token 供 reset_request_user 复位。
-    同步设置 core 层 _log_owner，使 per-user 日志写入对应用户子目录。"""
-    from app.core.event_logging import set_log_owner
-    tok_user = _REQUEST_USER.set(user)
-    tok_owner = set_log_owner(user.id if user is not None else None)
-    return (tok_user, tok_owner)
-
-
-def reset_request_user(token) -> None:
-    from app.core.event_logging import reset_log_owner
-    tok_user, tok_owner = token
-    _REQUEST_USER.reset(tok_user)
-    reset_log_owner(tok_owner)
-
-
 class _UnconfiguredLLMClient:
     """policy=required 且用户未配置时的占位 client：configured=False 让调用点跳过；
     若硬调 chat_json 则抛 ModelNotConfiguredError。"""
@@ -286,7 +269,7 @@ class ChunkRetrievalPlan:
     fuse_k: int              # == chunk_mmr_k（复刻 multi 分支 quota_fuse 复用同一 knob）
 
 
-class SQLiteRepository:
+class SQLiteRepository(SQLiteIdentityMixin):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -1785,233 +1768,6 @@ class SQLiteRepository:
                 }
             )
         return objects
-
-    def current_user(self) -> UserProfile:
-        ctx_user = _REQUEST_USER.get()
-        if ctx_user is not None:
-            return ctx_user
-        with self._connect() as db:
-            user = db.execute("SELECT * FROM users WHERE id = ?", ("user-local",)).fetchone()
-            profile = db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?",
-                ("user-local",),
-            ).fetchone()
-        return self._user_profile(user, profile)
-
-    def _user_profile(self, user, profile) -> UserProfile:
-        """从 users + user_profiles 行构造 UserProfile（DRY，多处复用）。"""
-        return UserProfile(
-            id=user["id"],
-            email=user["email"],
-            display_name=user["display_name"],
-            role=user["role"],
-            username=user["username"] if "username" in user.keys() else "",
-            memory_mode=profile["memory_mode"] if profile else "manual",
-            domain_focus=json.loads(profile["domain_focus"]) if profile else [],
-        )
-
-    def get_user_model_settings(self, user_id: str) -> dict:
-        """读用户的模型服务配置 JSON(含明文 key;仅供服务端解析,绝不回前端)。进程内缓存。"""
-        cached = self._user_model_cfg_cache.get(user_id)
-        if cached is not None:
-            return cached
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
-        try:
-            parsed = json.loads(row["model_settings"]) if row and row["model_settings"] else {}
-        except (ValueError, TypeError):
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        self._user_model_cfg_cache[user_id] = parsed
-        return parsed
-
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
-        """覆盖写用户模型配置并失效缓存(下次解析重建 client)。"""
-        with self._write() as db:
-            db.execute(
-                "UPDATE user_profiles SET model_settings = ?, updated_at = ? WHERE user_id = ?",
-                (json.dumps(settings, ensure_ascii=False), _now(), user_id),
-            )
-        self._user_model_cfg_cache.pop(user_id, None)
-
-    def resolve_model_config(self, user, role: str) -> ResolvedModelConfig:
-        return resolve_effective_config(
-            self.get_user_model_settings(user.id), role, self.settings.user_model_config_policy)
-
-    def create_user(self, username: str, password: str) -> UserProfile:
-        """注册：归一化 username、唯一校验、pbkdf2 哈希、建 user + profile。
-        用户名非法/重复 → ValueError。role 固定 'user'。"""
-        from app.services.auth_utils import normalize_username, is_valid_username, hash_password
-        if not is_valid_username(username):
-            raise ValueError("invalid username")
-        norm = normalize_username(username)
-        user_id = _new_id("user")
-        now = _now()
-        pw_hash, pw_salt, pw_iters = hash_password(password)
-        email = f"{norm}@users.silicon-notebook.local"
-        with self._write() as db:
-            exists = db.execute(
-                "SELECT 1 FROM users WHERE username = ?", (norm,)).fetchone()
-            if exists:
-                raise ValueError("username already exists")
-            db.execute(
-                "INSERT INTO users (id, email, display_name, role, status, username, "
-                "password_hash, password_salt, password_iterations, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
-                (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
-            )
-            db.execute(
-                "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
-                "VALUES (?, ?, 'manual', '[]', ?, ?)",
-                (f"profile-{user_id}", user_id, now, now),
-            )
-            user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-            profile = db.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
-            return self._user_profile(user, profile)
-
-    def authenticate_user(self, username: str, password: str) -> "UserProfile | None":
-        from app.services.auth_utils import normalize_username, verify_password
-        norm = normalize_username(username)
-        with self._connect() as db:
-            user = db.execute("SELECT * FROM users WHERE username = ?", (norm,)).fetchone()
-            if user is None:
-                return None
-            if not verify_password(
-                password, user["password_hash"], user["password_salt"], user["password_iterations"]):
-                return None
-            profile = db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)).fetchone()
-            return self._user_profile(user, profile)
-
-    def list_user_usage(self) -> List[Dict[str, Any]]:
-        """All users + per-user usage counts for the admin overview.
-        Read-only: a fixed set of GROUP BY aggregations joined in Python by
-        user id (no per-user N+1). Missing counts default to 0; last_active is
-        the newest conversation updated_at (None if the user has none).
-        username 仅用于显示;下钻日志仍用内部 id 当 owner。"""
-        with self._connect() as db:
-            users = db.execute(
-                "SELECT id, username, display_name, role, created_at "
-                "FROM users ORDER BY created_at, id").fetchall()
-            nb = {r["k"]: r["c"] for r in db.execute(
-                "SELECT created_by AS k, COUNT(*) AS c FROM notebooks "
-                "WHERE status != 'copying' GROUP BY created_by").fetchall()}
-            src = {r["k"]: r["c"] for r in db.execute(
-                "SELECT nb.created_by AS k, COUNT(*) AS c FROM sources s "
-                "JOIN notebooks nb ON nb.id = s.notebook_id "
-                "GROUP BY nb.created_by").fetchall()}
-            conv = {r["k"]: r["c"] for r in db.execute(
-                "SELECT created_by AS k, COUNT(*) AS c FROM conversations "
-                "GROUP BY created_by").fetchall()}
-            rep = {r["k"]: r["c"] for r in db.execute(
-                "SELECT nb.created_by AS k, COUNT(*) AS c FROM reports r "
-                "JOIN notebooks nb ON nb.id = r.notebook_id "
-                "GROUP BY nb.created_by").fetchall()}
-            active = {r["k"]: r["m"] for r in db.execute(
-                "SELECT created_by AS k, MAX(updated_at) AS m FROM conversations "
-                "GROUP BY created_by").fetchall()}
-        out: List[Dict[str, Any]] = []
-        for u in users:
-            uid = u["id"]
-            out.append({
-                "id": uid,
-                "username": u["username"] or u["display_name"] or uid,
-                "role": u["role"],
-                "created_at": u["created_at"],
-                "notebooks": nb.get(uid, 0),
-                "sources": src.get(uid, 0),
-                "conversations": conv.get(uid, 0),
-                "reports": rep.get(uid, 0),
-                "last_active": active.get(uid),
-            })
-        return out
-
-    def list_user_notebooks(self, user_id: str) -> List[Dict[str, Any]]:
-        """某用户名下笔记本 + 每本 sources/conversations/reports 计数。只读、固定条数
-        GROUP BY，Python 按 notebook_id 合并，无 per-notebook N+1。排除 status='copying'。"""
-        with self._connect() as db:
-            nbs = db.execute(
-                "SELECT id, name, status, created_at, updated_at FROM notebooks "
-                "WHERE created_by = ? AND status != 'copying' ORDER BY created_at DESC",
-                (user_id,)).fetchall()
-            ids = [r["id"] for r in nbs]
-            src, conv, rep = {}, {}, {}
-            if ids:
-                ph = ",".join("?" * len(ids))
-                src = {r["k"]: r["c"] for r in db.execute(
-                    f"SELECT notebook_id AS k, COUNT(*) AS c FROM sources "
-                    f"WHERE notebook_id IN ({ph}) GROUP BY notebook_id", ids).fetchall()}
-                conv = {r["k"]: r["c"] for r in db.execute(
-                    f"SELECT notebook_id AS k, COUNT(*) AS c FROM conversations "
-                    f"WHERE notebook_id IN ({ph}) GROUP BY notebook_id", ids).fetchall()}
-                rep = {r["k"]: r["c"] for r in db.execute(
-                    f"SELECT notebook_id AS k, COUNT(*) AS c FROM reports "
-                    f"WHERE notebook_id IN ({ph}) GROUP BY notebook_id", ids).fetchall()}
-        return [{"id": r["id"], "name": r["name"], "status": r["status"],
-                 "created_at": r["created_at"], "updated_at": r["updated_at"],
-                 "sources": src.get(r["id"], 0), "conversations": conv.get(r["id"], 0),
-                 "reports": rep.get(r["id"], 0)} for r in nbs]
-
-    def create_session(self, user_id: str) -> str:
-        import secrets
-        token = secrets.token_urlsafe(32)
-        now = _now()
-        with self._write() as db:
-            db.execute(
-                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token, user_id, now, _session_expiry(), now),
-            )
-        return token
-
-    def resolve_session(self, token: str) -> "UserProfile | None":
-        """Resolve a session with a read-mostly, throttled sliding expiry.
-
-        Authentication is on every request; turning every read into a global
-        SQLite write serialized the whole API.  A valid session is now read on
-        the shared read connection and its expiry is touched at most once per
-        configured interval. Expired rows are still removed eagerly.
-        """
-        if not token:
-            return None
-        now = _now()
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT * FROM auth_sessions WHERE token = ?", (token,)).fetchone()
-            if row is None:
-                return None
-            expired = row["expires_at"] <= now
-            user = None if expired else db.execute(
-                "SELECT * FROM users WHERE id = ?", (row["user_id"],)
-            ).fetchone()
-            profile = None if user is None else db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)
-            ).fetchone()
-        if expired:
-            with self._write() as db:
-                db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
-            return None
-        if user is None:
-            return None
-        touch_before = (
-            datetime.now() - timedelta(
-                seconds=max(1, self.settings.auth_session_touch_interval_seconds)
-            )
-        ).replace(microsecond=0).isoformat()
-        if row["last_seen_at"] <= touch_before:
-            with self._write() as db:
-                db.execute(
-                    "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? "
-                    "WHERE token = ? AND last_seen_at = ? AND expires_at > ?",
-                    (now, _session_expiry(), token, row["last_seen_at"], now),
-                )
-        return self._user_profile(user, profile)
-
-    def delete_session(self, token: str) -> None:
-        with self._write() as db:
-            db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
 
     def list_notebooks(self) -> List[NotebookSummary]:
         """自有库(access=owner)∪ 经只读共享加入的库(access=reader)。
@@ -14764,10 +14520,6 @@ def _remap_json_ids(value, maps: dict):
     if isinstance(value, list):
         return [_remap_json_ids(x, maps) for x in value]
     return value
-
-
-def _session_expiry(days: int = 30) -> str:
-    return (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
 def _citation(label: str, evidence: Evidence, tier: str = "personal") -> Citation:

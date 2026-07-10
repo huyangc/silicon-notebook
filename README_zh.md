@@ -32,6 +32,12 @@
 
 PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发不需要。
 
+## 架构边界
+
+- `SQLiteRepository` 继续作为本机持久化的公共 facade，并按高内聚领域渐进拆分。账号、用户模型配置、管理员用量查询和 auth session 生命周期现位于 `backend/app/services/sqlite_identity.py`；facade 通过继承复用实现，现有 repository API 与请求 Context 导出保持兼容。
+- `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，图谱和答案共用的类型标记位于 `kg-type-mark.tsx`。
+- 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
+
 ## 部署
 
 silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
