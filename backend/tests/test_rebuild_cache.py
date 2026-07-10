@@ -60,13 +60,13 @@ def _make_kg(repo, names=("MOSFET", "cascode")):
 def _spy_stream(repo, monkeypatch):
     """Wrap _stream_seed_reps so we can assert whether the recompute ran."""
     calls = {"n": 0}
-    orig = repo._stream_seed_reps
+    orig = repo._runtime.knowledge_lifecycle._stream_seed_reps
 
     def _wrapped(*a, **k):
         calls["n"] += 1
         return orig(*a, **k)
 
-    monkeypatch.setattr(repo, "_stream_seed_reps", _wrapped)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_stream_seed_reps", _wrapped)
     return calls
 
 

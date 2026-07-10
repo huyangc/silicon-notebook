@@ -294,13 +294,13 @@ def test_build_notebook_kg_calls_resolve_when_enabled(repo, monkeypatch):
     nb_id, *_ = _seed_notebook_with_contradicting_claims(repo)
     calls: list[str] = []
 
-    original = repo.resolve_notebook_conflicts
+    original = repo._runtime.knowledge_governance.resolve_notebook_conflicts
 
     def spy(notebook_id):
         calls.append(notebook_id)
         return original(notebook_id)
 
-    monkeypatch.setattr(repo, "resolve_notebook_conflicts", spy)
+    monkeypatch.setattr(repo._runtime.knowledge_governance, "resolve_notebook_conflicts", spy)
     repo.llm_client = FakeLLM([])  # no-op verdicts
     repo.settings.kg_conflict_resolution_enabled = True
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
@@ -323,7 +323,7 @@ def test_build_notebook_kg_skips_resolve_when_disabled(repo, monkeypatch):
     def spy(notebook_id):
         calls.append(notebook_id)
 
-    monkeypatch.setattr(repo, "resolve_notebook_conflicts", spy)
+    monkeypatch.setattr(repo._runtime.knowledge_governance, "resolve_notebook_conflicts", spy)
     repo.llm_client = FakeLLM([])
     repo.llm_client.configured = True
     repo.settings.kg_conflict_resolution_enabled = False

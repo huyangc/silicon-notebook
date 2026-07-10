@@ -12,10 +12,11 @@ import pytest
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 REPO_PY = APP / "services" / "sqlite_repository.py"
-
-# 允许调用 decode_vector 的函数(sqlite_repository.py 内)。新增消费点必须:
-# ①在此白名单登记;②若做相似度,同函数须调 truncate_vec(见下条测试)。
-# 白名单外出现 decode_vector = 红 → 强制作者显式决策该位点的截断语义。
+# Task 15:四旁路正文迁到 lifecycle/governance 服务 —— 扫描面跟着代码走。
+_SCAN_FILES = (REPO_PY, APP / "services" / "knowledge_lifecycle.py",
+               APP / "services" / "knowledge_governance.py")
+# 允许调用 decode_vector 的函数(_SCAN_FILES 内)。新增消费点必须:①在此白名单登记;
+# ②若做相似度,同函数须调 truncate_vec(见下条测试)。白名单外 decode_vector = 红。
 _ALLOWED_DECODE_FUNCS = {
     # 四旁路(相似度,必接 truncate_vec):
     "incremental_fuse_source", "_tier2_bridge_candidates_ann",
@@ -57,9 +58,9 @@ def _funcs_calling(tree, callee_names):
 
 
 def test_no_unwhitelisted_decode_vector_in_repo():
-    """sqlite_repository.py 里所有 decode_vector 调用必须在白名单函数内。"""
-    tree = ast.parse(REPO_PY.read_text(encoding="utf-8"))
-    callers = _funcs_calling(tree, {"decode_vector"})
+    """_SCAN_FILES 里所有 decode_vector 调用必须在白名单函数内(合并三模块)。"""
+    callers = {k: v for f in _SCAN_FILES for k, v in _funcs_calling(
+        ast.parse(f.read_text(encoding="utf-8")), {"decode_vector"}).items()}
     offenders = set(callers) - _ALLOWED_DECODE_FUNCS
     assert not offenders, (
         f"新的 decode_vector 直读位点未登记: {sorted(offenders)} —— "
@@ -70,8 +71,8 @@ def test_no_unwhitelisted_decode_vector_in_repo():
 def test_similarity_bypasses_also_truncate():
     """四旁路(相似度)每个函数体必须同时调用 truncate_vec —— 只 decode 不截断
     = 查询/语料混空间。"""
-    tree = ast.parse(REPO_PY.read_text(encoding="utf-8"))
-    callers = _funcs_calling(tree, {"decode_vector", "truncate_vec"})
+    callers = {k: v for f in _SCAN_FILES for k, v in _funcs_calling(
+        ast.parse(f.read_text(encoding="utf-8")), {"decode_vector", "truncate_vec"}).items()}
     for fn in _MUST_TRUNCATE:
         called = callers.get(fn, set())
         assert "decode_vector" in called, f"{fn} 应调 decode_vector(测试前提失效?)"
@@ -94,7 +95,6 @@ def test_no_raw_frombuffer_similarity_outside_vector_index():
                     continue
                 hits.append(f"{p.relative_to(APP)}:{i}")
     assert not hits, f"vector_index 外的裸 frombuffer: {hits}(应走 decode_vector)"
-
 
 # ── 运行时不变量:写路径保持原生维 ──────────────────────────────────────────
 

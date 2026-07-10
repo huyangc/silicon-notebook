@@ -287,7 +287,7 @@ def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
-    monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "relink_notebook_kg", lambda nb: 0)
     seen = []
     out = repo.build_notebook_kg(nb_id, progress=lambda i, n, sid, ok: seen.append((i, n, sid, ok)))
     assert sorted(out["built"]) == sorted(sids) and out["failed"] == []
@@ -310,7 +310,7 @@ def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _extract)
     monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
-    monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "relink_notebook_kg", lambda nb: 0)
     out = repo.build_notebook_kg(nb_id)
     assert bad in out["failed"] and len(out["built"]) == 2
 

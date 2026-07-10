@@ -38,13 +38,13 @@ def _seed(repo):
 def test_rebuild_unified_kg_calls_rebuild_communities(repo, monkeypatch):
     nb = _seed(repo)
     called = {}
-    orig = repo.rebuild_communities
+    orig = repo._runtime.knowledge_lifecycle.rebuild_communities
 
     def spy(notebook_id, level=0, force=False):
         called["nb"] = notebook_id
         return orig(notebook_id, level, force=force)
 
-    monkeypatch.setattr(repo, "rebuild_communities", spy)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "rebuild_communities", spy)
     repo.rebuild_unified_kg(nb.id, force=True)
     assert called.get("nb") == nb.id
 
@@ -57,7 +57,7 @@ def test_rebuild_unified_kg_failopen_on_community_error(repo, monkeypatch):
     def boom(notebook_id, level=0, force=False):
         raise RuntimeError("community boom")
 
-    monkeypatch.setattr(repo, "rebuild_communities", boom)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "rebuild_communities", boom)
     events = []
     monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
     # Must not raise.

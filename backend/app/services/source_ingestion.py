@@ -27,6 +27,8 @@ from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
+from app.services.kg_mutation import KgMutationCoordinator
+from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.parsers import mineru_content_list_to_elements
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
@@ -59,9 +61,11 @@ class SourceIngestionService:
     direct ``_connect``/``_write`` — persistence goes through the injected
     stores, the ``write`` seat (the facade's ``_write`` compatibility seam,
     resolved at call time so transaction-counting/failure-injection
-    monkeypatches keep observing every commit boundary) and TEMPORARY
-    facade-owned KG/catalog callbacks that Task 13/15 replace with
-    KnowledgeStore / KnowledgeLifecycleService dependencies.
+    monkeypatches keep observing every commit boundary), the DIRECT
+    KnowledgeLifecycleService / KgMutationCoordinator dependencies (Task 15
+    replaced the Gate-4 store_kg / incremental_fuse_source /
+    invalidate_unified_cache callbacks) and the remaining TEMPORARY
+    facade-owned KG/catalog callbacks that Task 16+ move with their domains.
 
     Behavior invariants preserved verbatim from the facade:
     - status machine queued→parsing→parsed→extracting→extracted (failed on
@@ -109,10 +113,10 @@ class SourceIngestionService:
         notebook_tier: Callable[[str], str],
         concept_whitelist_terms: Callable[[], set],
         notebook_has_kg: Callable[[str], bool],
-        store_kg: Callable[..., tuple],
-        incremental_fuse_source: Callable[[str, str], None],
+        # --- direct service dependencies (Task 15: Gate-4 hooks replaced) ---
+        knowledge_lifecycle: KnowledgeLifecycleService,
+        kg_mutations: KgMutationCoordinator,
         maybe_auto_index: Callable[[str], None],
-        invalidate_unified_cache: Callable[[str], None],
         notebook_meta_row: Callable[[str], Optional[dict]],
         notebook_meta_sources: Callable[[str, str], List[dict]],
         apply_notebook_meta: Callable[..., None],
@@ -143,10 +147,9 @@ class SourceIngestionService:
         self.notebook_tier = notebook_tier
         self.concept_whitelist_terms = concept_whitelist_terms
         self.notebook_has_kg = notebook_has_kg
-        self.store_kg = store_kg
-        self.incremental_fuse_source = incremental_fuse_source
+        self.knowledge_lifecycle = knowledge_lifecycle
+        self.kg_mutations = kg_mutations
         self.maybe_auto_index = maybe_auto_index
-        self.invalidate_unified_cache = invalidate_unified_cache
         self.notebook_meta_row = notebook_meta_row
         self.notebook_meta_sources = notebook_meta_sources
         self.apply_notebook_meta = apply_notebook_meta
@@ -611,7 +614,7 @@ class SourceIngestionService:
             )
             self.sources.delete_source_row(db, source_id)
         self.source_files.delete(source.file_path)
-        self.invalidate_unified_cache(source.notebook_id)
+        self.kg_mutations.invalidate_unified_cache(source.notebook_id)
         hooks.mark_unified_dirty(source.notebook_id)
 
     # ----------------------------------------------------------- extraction
@@ -710,11 +713,13 @@ class SourceIngestionService:
                 relations = relations + self.relink_extra_relations(
                     objects, relations, source.id
                 )
-            n_obj, n_rel = self.store_kg(
+            n_obj, n_rel = self.knowledge_lifecycle.store_kg(
                 source.notebook_id, source.id, objects, relations
             )
             try:
-                self.incremental_fuse_source(source.notebook_id, source.id)
+                self.knowledge_lifecycle.incremental_fuse_source(
+                    source.notebook_id, source.id
+                )
             except Exception:
                 self.event_log.logger.exception(
                     "incremental_fuse_source failed for %s", source_id

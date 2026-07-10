@@ -214,14 +214,14 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
     ver_before = repo._cluster_input_version(nb.id)
 
     # 首跑:写簇前(object_type=='concept' 的第一次调用)人为炸掉。
-    orig_write = repo._write_cluster_map_streamed
+    orig_write = repo._runtime.knowledge_lifecycle._write_cluster_map_streamed
 
     def _boom(notebook_id, object_type, *a, **kw):
         if object_type == "concept":
             raise RuntimeError("simulated crash before concept cluster write")
         return orig_write(notebook_id, object_type, *a, **kw)
 
-    monkeypatch.setattr(repo, "_write_cluster_map_streamed", _boom)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_write_cluster_map_streamed", _boom)
     with pytest.raises(RuntimeError):
         repo.rebuild_unified_kg(nb.id, force=True)
     first = fake.calls
@@ -240,7 +240,7 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
                                              # 二跑能在同一 input_version 下找到 checkpoint
 
     # 二跑:恢复写簇函数,重新 rebuild —— 应命中 concept_desc checkpoint,零新增调用。
-    monkeypatch.setattr(repo, "_write_cluster_map_streamed", orig_write)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_write_cluster_map_streamed", orig_write)
     repo.rebuild_unified_kg(nb.id, force=True)
     assert fake.calls == first              # 二跑零新增(old_desc 此刻仍为空,
                                              # 唯一可能的命中源是 concept_desc checkpoint)
