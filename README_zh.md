@@ -41,8 +41,9 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 ## 部署
 
 silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
-**无需 GPU、无需数据库服务、无需本地模型服务**:所有模型(LLM / 嵌入 / rerank /
-MinerU)都经 URL 端点接入;在未配置任何模型时,整条管线以确定性回退离线运行。
+**无需 GPU、无需数据库服务、无需本地模型服务**。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
+远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf 回退
+（`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
 
 ### 前置条件
 
@@ -241,7 +242,7 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`，见上文「检索模式（问答）」；tier 感知，跨 base + 当前 personal 联合检索）
 - `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（先发带 `job_id` 的 `started` 事件，再发进度/最终事件）；transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
-- `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的状态与结果
+- `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；设置取消事件并在保存被取消的最终回答前停止 worker
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
