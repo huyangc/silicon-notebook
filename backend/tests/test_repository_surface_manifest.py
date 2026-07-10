@@ -253,6 +253,7 @@ TASK7_ALLOWED_MEMBER_FILES = {
     for name in {
         "SQLiteRepository", "llm_client", "rerank_client",
         "_note_model_error", "_runtime", "event_log",
+        "_user_model_cfg_cache", "_user_llm_clients", "_user_rerank_clients",
     }
 } | {
     ("backend/tests/test_sources_pagination.py", name)
@@ -267,8 +268,9 @@ TASK7_COMPAT_PROPERTIES = {
     "_rewrite_llm_client": True,
     "_kg_llm_client": True,
     "_system_rerank_client": True,
-    "_user_llm_clients": False,
-    "_user_rerank_clients": False,
+    "_user_model_cfg_cache": True,
+    "_user_llm_clients": True,
+    "_user_rerank_clients": True,
 }
 
 # Internal line numbers in this source file are intentionally not API surface:

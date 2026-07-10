@@ -193,14 +193,15 @@ def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(ge
     if not (base_url and model and api_key):
         return ModelTestResult(ok=False, error="缺少 base_url / model / api_key")
     started = time.perf_counter()
+    settings = get_settings()
     try:
         if payload.service == "rerank":
             from app.services.rerank_client import RerankClient
-            RerankClient(repo.settings, model=model, base_url=base_url, api_key=api_key)._rerank_batch(
+            RerankClient(settings, model=model, base_url=base_url, api_key=api_key)._rerank_batch(
                 "ping", ["a", "b"])
         else:
             from app.core.llm import OpenAICompatibleClient
-            OpenAICompatibleClient(repo.settings, base_url=base_url, api_key=api_key, model=model).chat_json(
+            OpenAICompatibleClient(settings, base_url=base_url, api_key=api_key, model=model).chat_json(
                 [{"role": "user", "content": "ping"}], "{}", timeout=10, max_retries=0)
         return ModelTestResult(ok=True, latency_ms=round((time.perf_counter() - started) * 1000))
     except Exception as exc:

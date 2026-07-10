@@ -463,12 +463,30 @@ class SQLiteRepository(SQLiteNotebookSharingMixin):
         self._runtime.models._system_rerank_client = client
 
     @property
+    def _user_model_cfg_cache(self):
+        return self._runtime.identity.model_config_cache
+
+    @_user_model_cfg_cache.setter
+    def _user_model_cfg_cache(self, cache):
+        self._runtime.model_config_cache = cache
+        self._runtime.identity.model_config_cache = cache
+        self._runtime.models.model_config_cache = cache
+
+    @property
     def _user_llm_clients(self):
         return self._runtime.models._user_llm_clients
+
+    @_user_llm_clients.setter
+    def _user_llm_clients(self, clients):
+        self._runtime.models._user_llm_clients = clients
 
     @property
     def _user_rerank_clients(self):
         return self._runtime.models._user_rerank_clients
+
+    @_user_rerank_clients.setter
+    def _user_rerank_clients(self, clients):
+        self._runtime.models._user_rerank_clients = clients
 
     def _resolve_path(self, value: str) -> Path:
         return self._runtime.database.resolve_path(value)

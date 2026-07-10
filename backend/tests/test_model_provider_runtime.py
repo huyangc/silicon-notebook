@@ -36,6 +36,33 @@ def test_facade_model_properties_delegate_and_preserve_mutable_setters(repo):
     assert repo._runtime.models.rerank_client is reranker
 
 
+def test_legacy_cache_replacement_updates_every_runtime_owner(repo):
+    model_settings = {"user-x": {"llm": {"model": "replacement"}}}
+    repo._user_model_cfg_cache = model_settings
+    assert repo._user_model_cfg_cache is model_settings
+    assert repo._runtime.model_config_cache is model_settings
+    assert repo._runtime.identity.model_config_cache is model_settings
+    assert repo._runtime.models.model_config_cache is model_settings
+
+    llm_clients = {"fingerprint": object()}
+    repo._user_llm_clients = llm_clients
+    assert repo._user_llm_clients is llm_clients
+    assert repo._runtime.models._user_llm_clients is llm_clients
+
+    rerank_clients = {"fingerprint": object()}
+    repo._user_rerank_clients = rerank_clients
+    assert repo._user_rerank_clients is rerank_clients
+    assert repo._runtime.models._user_rerank_clients is rerank_clients
+
+
+def test_identity_routes_do_not_require_settings_outside_identity_protocol():
+    import inspect
+
+    from app.api import routes
+
+    assert "repo.settings" not in inspect.getsource(routes.test_model_service)
+
+
 def test_ask_contextvars_keep_backwards_compatible_object_identity():
     from app.services import sqlite_repository
 
