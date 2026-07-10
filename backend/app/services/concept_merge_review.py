@@ -3,7 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
-from typing import Any, List
+from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def review_merge_candidates(
     candidates: List[dict],
     batch_size: int = 30,
     max_workers: int = 1,
-    on_chunk=None,
+    on_chunk: Optional[Callable[[List[dict]], None]] = None,
 ) -> List[dict]:
     """LLM-adjudicate concept-merge candidates in bounded chunks. NEVER raises.
 
@@ -130,8 +130,8 @@ def review_merge_candidates(
             return
         try:
             on_chunk(decs)
-        except Exception:  # noqa: BLE001 — 持久化失败绝不能打断 fail-open 的 review
-            logger.warning("merge-review: on_chunk 回调失败,已忽略")
+        except Exception as err:  # noqa: BLE001 — 持久化失败绝不能打断 fail-open 的 review
+            logger.warning("merge-review: on_chunk 回调失败,已忽略 (%s)", err)
 
     out: List[dict] = []
     if max_workers > 1 and len(chunks) > 1:
@@ -140,6 +140,8 @@ def review_merge_candidates(
         ) as pool:
             futures = [pool.submit(_review_chunk, llm_client, chunk) for chunk in chunks]
             for fut in concurrent.futures.as_completed(futures):
+                # _review_chunk is already total, but guard the future boundary too:
+                # a worker exception must never re-raise out of this function.
                 try:
                     decs = fut.result()
                 except Exception:  # noqa: BLE001 — belt-and-suspenders

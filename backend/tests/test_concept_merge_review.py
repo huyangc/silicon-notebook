@@ -1,4 +1,5 @@
 import json
+import threading
 
 from app.services.concept_merge_review import review_merge_candidates
 
@@ -304,3 +305,26 @@ def test_on_chunk_fires_per_chunk_and_covers_all_decisions():
     # on_chunk 收到的决策并集 == 函数返回的决策
     assert sorted(d["candidate_id"] for d in flat) == \
            sorted(d["candidate_id"] for d in decisions)
+
+
+def test_on_chunk_runs_on_main_thread_even_with_concurrent_workers():
+    """并发分支(max_workers>1)的 on_chunk 硬契约:回调永远在主线程执行。
+
+    6 候选 + batch_size=1 -> 6 块;max_workers=4 足以让线程池真正并发调度这些
+    块,但 on_chunk 必须每块调用一次、且每次都在主线程内 —— Task 3 要从这个
+    回调里直接做 SQLite 写入,写入方必须是发起 review 调用的主线程。
+    """
+    fire_count = 0
+    on_main_thread: list = []
+
+    def on_chunk(decs):
+        nonlocal fire_count
+        fire_count += 1
+        on_main_thread.append(threading.current_thread() is threading.main_thread())
+
+    review_merge_candidates(
+        _ReviewLLM(), _cands(6), batch_size=1, max_workers=4, on_chunk=on_chunk)
+
+    assert fire_count == 6              # 每块恰好一次
+    assert len(on_main_thread) == 6
+    assert all(on_main_thread)           # 每次回调都发生在主线程
