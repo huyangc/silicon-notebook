@@ -5592,7 +5592,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         # size/copyable verdict to the ask-path guards / share paths.
         self._vector_cache.invalidate(f"{notebook_id}:copystats")
 
-    def _cluster_input_version(self, notebook_id: str) -> str:
+    def _cluster_input_version(self, notebook_id: str, *, exclude_emb_count: bool = False) -> str:
         """O(1) content-hash gating rebuild_unified_kg's skip-when-unchanged path.
 
         PRIMARY change signal = the monotonic kg_mutation_seq, bumped by
@@ -5617,6 +5617,20 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         Stable across a rebuild: rebuild writes only concept_clusters + pending
         concept_merge_candidates and preserves kg_mutation_seq (its end-write omits
         the seq column), so this value is identical before and after a rebuild.
+
+        exclude_emb_count: when True, OMIT the embeddings COUNT term (emb_c) from
+        the hash — the result is intentionally DIFFERENT from the default (False)
+        call for the same notebook/state; it is NOT a drop-in replacement, it's a
+        separate "backfill-stable" version namespace. Used by rebuild_unified_kg's
+        LLM-stage checkpoints (merge_review, concept_desc): the node-vector
+        backfill commits INCREMENTALLY, so emb_c climbs mid-backfill while seq/
+        obj_c/dec_c stay put. Keying those checkpoints on the default (emb-
+        inclusive) version would make a crash-then-resume during node-vector
+        backfill look like a version change and GC away a possibly hours-long
+        adjudication that is still perfectly valid. item_key already provides
+        fine-grained correctness within a checkpoint, so dropping emb_c here is
+        safe. The skip-gate itself must keep using the DEFAULT (emb-inclusive)
+        version unchanged — a new/changed embedding is a real reason to recluster.
         """
         with self._connect() as db:
             st = db.execute(
@@ -5631,9 +5645,11 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 "SELECT COUNT(*) AS c FROM concept_merge_candidates "
                 "WHERE notebook_id=? AND status IN ('confirmed','rejected')",
                 (notebook_id,)).fetchone()["c"]
-            emb_c = db.execute(
-                "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
-                (notebook_id,)).fetchone()["c"]
+            emb_c = 0
+            if not exclude_emb_count:
+                emb_c = db.execute(
+                    "SELECT COUNT(*) AS c FROM knowledge_embeddings WHERE notebook_id=?",
+                    (notebook_id,)).fetchone()["c"]
         # runtime_dim 追加(非替换 embed_dim;T3/R4):聚类/融合空间统一到运行时
         # 空间,切 EMBED_RUNTIME_DIM 后版本闸不得跳过重聚(旧空间的簇不再有效)。
         from app.services.vector_index import resolve_runtime_dim
@@ -5646,7 +5662,12 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         parts = [
             "v2", notebook_id,
             int(seq),
-            int(obj_c), int(emb_c), int(dec_c),
+            int(obj_c),
+        ]
+        if not exclude_emb_count:
+            parts.append(int(emb_c))     # 默认路径:与旧版位次/取值一字不差,skip-gate 哈希不变
+        parts += [
+            int(dec_c),
             int(self.settings.embed_dim),
             resolve_runtime_dim(self.settings),
             int(CLUSTER_ALGO_VERSION),
@@ -6230,15 +6251,6 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
         # both for the skip gate below and for the END-write (so the stored version
         # reflects the inputs this rebuild actually consumed).
         _ver = self._cluster_input_version(notebook_id)
-        # 断点续跑:fresh 清全部 checkpoint(强制两个 LLM 阶段重跑);否则 GC 掉非当前
-        # input_version 的残留(数据/算法版本一变 → 旧决策自动失效)。fail-open。
-        try:
-            if fresh:
-                self._rebuild_ckpt_clear(notebook_id)
-            else:
-                self._rebuild_ckpt_gc(notebook_id, _ver)
-        except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
-            self.event_log.logger.warning("rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
         if not force:
             with self._connect() as db:
                 row = db.execute(
@@ -6278,6 +6290,23 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                     self.event_log.emit({"kind": "communities_rebuild_failed",
                                          "notebook_id": notebook_id, "error": str(exc)[:200]})
                 return cached
+        # 断点续跑:进到这里=已确定真正要重算(force=True,或 force=False 因版本
+        # 失配落空)——checkpoint GC/clear 移到这里(而非版本闸之前)才对:早前放在
+        # 闸前时,force=False 且判定跳过的路径也会顺带做一次 GC 写,破坏了「跳过=零
+        # 写入」的不变量。checkpoint 版本刻意排除 emb_c(节点向量增量 backfill 期间
+        # emb_c 单调爬升但 seq/obj_c/dec_c 不变):这样节点向量阶段中途崩溃后,下次
+        # --rebuild-only 续跑不会因 emb_c 变了就把 merge_review/concept_desc
+        # checkpoint 当作「输入变了」GC 掉、被迫重新走一遍可能数小时的 LLM 裁决;
+        # item_key 已经提供细粒度正确性。fresh 仍清全部 checkpoint(强制两个 LLM
+        # 阶段重跑)。fail-open。
+        _ck_ver = self._cluster_input_version(notebook_id, exclude_emb_count=True)
+        try:
+            if fresh:
+                self._rebuild_ckpt_clear(notebook_id)
+            else:
+                self._rebuild_ckpt_gc(notebook_id, _ck_ver)
+        except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
+            self.event_log.logger.warning("rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
         from uuid import uuid4 as _uuid4
         from app.services.kg_merge import (cluster_seeds, _norm, _discriminative_conflict,
                                            seed_claim, seed_formula, seed_procedure)
@@ -6333,7 +6362,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                 # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
                 id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
                 # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
-                cached = self._rebuild_ckpt_load(notebook_id, _ver, "merge_review")
+                cached = self._rebuild_ckpt_load(notebook_id, _ck_ver, "merge_review")
                 todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
 
                 def _persist(chunk_decisions):
@@ -6342,7 +6371,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                               "canonical_name": d.get("canonical_name", "")})
                             for d in chunk_decisions if d.get("candidate_id") in id_to_key]
                     if rows:
-                        self._rebuild_ckpt_put(notebook_id, _ver, "merge_review", rows)
+                        self._rebuild_ckpt_put(notebook_id, _ck_ver, "merge_review", rows)
 
                 new = review_merge_candidates(
                     self.kg_llm_client, todo,
@@ -6401,7 +6430,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                     old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
             # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
             try:
-                desc_ckpt = self._rebuild_ckpt_load(notebook_id, _ver, "concept_desc")
+                desc_ckpt = self._rebuild_ckpt_load(notebook_id, _ck_ver, "concept_desc")
             except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
                 self.event_log.logger.warning(
                     "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
@@ -6489,7 +6518,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                             _ck_buf.append((cid, {"description": desc, "sig": sig}))
                             if len(_ck_buf) >= _DESC_CKPT_FLUSH:
                                 try:
-                                    self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                                    self._rebuild_ckpt_put(notebook_id, _ck_ver, "concept_desc", _ck_buf)
                                 except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
                                     self.event_log.logger.warning(
                                         "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
@@ -6501,7 +6530,7 @@ class SQLiteRepository(SQLiteIdentityMixin, SQLiteNotebookSharingMixin):
                                 pass
                     if _ck_buf:
                         try:
-                            self._rebuild_ckpt_put(notebook_id, _ver, "concept_desc", _ck_buf)
+                            self._rebuild_ckpt_put(notebook_id, _ck_ver, "concept_desc", _ck_buf)
                         except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
                             self.event_log.logger.warning(
                                 "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
