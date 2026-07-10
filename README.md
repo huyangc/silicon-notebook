@@ -42,8 +42,10 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 
 silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend — over
 a local SQLite database. It requires **no GPU, no database server, and no local model
-server**: every model (LLM, embeddings, rerank, MinerU) is reached over a URL endpoint,
-and the pipeline runs offline with deterministic fallbacks when none are configured.
+server**. LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
+HTTP (`MINERU_MODE=http`), an isolated same-host subprocess (`MINERU_MODE=cli`), or the
+pypdf fallback (`MINERU_MODE=off`). The pipeline runs offline with deterministic fallbacks
+when no model service or MinerU parser is configured.
 
 ### Prerequisites
 
@@ -256,7 +258,7 @@ Key local beta APIs:
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — grounded Q&A with `[k_i]` citations (`mode`: `chunk` default | `graph` | `reasoning`, see [Retrieval modes](#retrieval-modes-ask); tier-aware, federates across base + active personal)
 - `POST /api/notebooks/{id}/ask/stream` — NDJSON Ask progress stream (first a `started` event with `job_id`, then progress/final events). A transport disconnect stops delivery to that client only; the detached job keeps running and can persist its answer
-- `GET /api/notebooks/{id}/ask/jobs/{job_id}` — read detached Ask job state/result for reconnect or resume flows
+- `GET /api/notebooks/{id}/ask/jobs/{job_id}` — read detached Ask job `status`, `trace`, and `answer_id`; on `done`, the frontend reloads the conversation to obtain the final `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — explicit interrupt endpoint; sets the cancellation event and stops the worker before a cancelled final answer is saved
 - `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`

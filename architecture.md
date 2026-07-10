@@ -18,7 +18,7 @@
 - 两层检索不按 tier 改写相关度；`base` 只处理完全相同分数的次序。
 - notebook 内页是来源栏 + Ask/Knowledge 主区域的两列 workspace；Studio 动作位于顶部工具栏或对话框，不占固定右栏。
 
-本地 beta 保持 FastAPI + SQLite + Next.js 的双进程形态，不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding、rerank 与 MinerU 均通过可配置 URL 适配器访问；未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
+本地 beta 保持 FastAPI + SQLite + Next.js 的双进程形态，不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 pypdf 回退。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
 ## 2. 运行时组件
 
@@ -61,7 +61,7 @@ notebook 内页采用来源栏 + Ask/Knowledge 主区域的两列 workspace。Kn
 
 ### 2.5 配置边界
 
-关键配置保持 URL 驱动并由 `.env.example` 作为字段真源：
+关键配置由 `.env.example` 作为字段真源；LLM、embedding 与 reranker 保持 URL 驱动，MinerU 单独按解析模式选择远端服务、隔离子进程或 pypdf 回退：
 
 - 数据与认证：`DATABASE_URL`、`SILICON_NOTEBOOK_STORAGE_DIR`、`SILICON_NOTEBOOK_ADMIN_PASSWORD`、`SILICON_NOTEBOOK_AUTH_OPTIONAL`。
 - LLM：`OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_API_KEY`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_TIMEOUT_SECONDS`。
@@ -85,11 +85,11 @@ notebook 内页采用来源栏 + Ask/Knowledge 主区域的两列 workspace。Kn
   → 标记 unified KG / index 维护状态，由独立维护路径处理
 ```
 
-source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。解析重跑和来源删除共享 stale-source 清理边界，移除旧知识、embedding、依赖的文章研究数据与本地文件。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
+source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析会清理旧的抽取与数据库派生状态，但保留原始文件；它会重建 source element、chunk、embedding 和后续抽取结果。删除 source 还会移除存储的本地文件和依赖该 source 的文章研究产物。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
 
 ### 3.2 Ask 与 detached job
 
-`POST /api/notebooks/{id}/ask` 保留非流式兼容路径。`POST /api/notebooks/{id}/ask/stream` 先创建持久化 Ask job 与 cancellation event，再启动脱离 transport 生命周期的 worker：
+`POST /api/notebooks/{id}/ask` 保留非流式兼容路径。`POST /api/notebooks/{id}/ask/stream` 先让 `ask_jobs` 行持久化 job 元数据与状态、让 `ask_trace_steps` 持久化后续 trace；cancellation event 注册在进程内，然后启动脱离 transport 生命周期的 worker：
 
 ```text
 stream start
@@ -109,7 +109,7 @@ transport disconnect / navigation / refresh
   → worker / LLM 路径停止，取消的最终回答不保存
 ```
 
-`GET /api/notebooks/{id}/ask/jobs/{job_id}` 提供重连后的状态/结果读取。前端 logout 仍会终止本地流并重置用户态，但 transport 生命周期本身不拥有后台 job。
+服务重启后仍为 `running` 的 job 会转为 `interrupted`；进程内 cancellation event 不会跨重启恢复。`GET /api/notebooks/{id}/ask/jobs/{job_id}` 返回 `status`、`trace`、`answer_id` 等 job metadata，不直接返回 `AskResponse`；job 完成后，前端重新加载 conversation 取得已持久化的最终回答。前端 logout 仍会终止本地流并重置用户态，但 transport 生命周期本身不拥有后台 job。
 
 ### 3.3 联合检索与回答合成
 
