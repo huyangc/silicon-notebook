@@ -4,6 +4,9 @@ import json
 import sqlite3
 from typing import Any
 
+from app.core.config import Settings
+from app.repositories.sqlite.database import SqliteDatabase
+
 from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_TYPE_LABELS
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
@@ -16,7 +19,7 @@ def _now() -> str:
 
 class SqliteMigrator:
     """Owns schema migration, startup recovery, and deterministic seed data."""
-    def __init__(self, database: Any, settings: Any) -> None:
+    def __init__(self, database: SqliteDatabase, settings: Settings) -> None:
         self.database = database
         self.settings = settings
 
@@ -56,7 +59,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS auth_sessions (
                   token TEXT PRIMARY KEY,
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -65,7 +68,7 @@ class SqliteMigrator:
                   last_seen_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
-    
+
                 CREATE TABLE IF NOT EXISTS user_profiles (
                   id TEXT PRIMARY KEY,
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -74,7 +77,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS notebooks (
                   id TEXT PRIMARY KEY,
                   name TEXT NOT NULL,
@@ -85,7 +88,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS sources (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -103,7 +106,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS source_elements (
                   id TEXT PRIMARY KEY,
                   source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -113,7 +116,7 @@ class SqliteMigrator:
                   metadata TEXT NOT NULL DEFAULT '{}',
                   created_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS chunks (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -144,7 +147,7 @@ class SqliteMigrator:
                 -- cache.py's "NOT ... a contract" comments), so it does not need an
                 -- ORDER BY pin here either.
                 CREATE INDEX IF NOT EXISTS idx_chunks_nb_created ON chunks(notebook_id, created_at);
-    
+
                 CREATE TABLE IF NOT EXISTS chunk_embeddings (
                   chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
                   notebook_id TEXT NOT NULL,
@@ -152,7 +155,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_nb ON chunk_embeddings(notebook_id);
-    
+
                 CREATE TABLE IF NOT EXISTS extraction_runs (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -181,8 +184,8 @@ class SqliteMigrator:
                 -- makes that ordering cheap to satisfy — it does not change what
                 -- row wins.
                 CREATE INDEX IF NOT EXISTS idx_extraction_runs_source_created ON extraction_runs(source_id, created_at);
-    
-    
+
+
                 CREATE TABLE IF NOT EXISTS element_embeddings (
                   element_id TEXT PRIMARY KEY REFERENCES source_elements(id) ON DELETE CASCADE,
                   source_id TEXT NOT NULL,
@@ -190,14 +193,14 @@ class SqliteMigrator:
                   vector TEXT NOT NULL,
                   created_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS knowledge_embeddings (
                   object_id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL,
                   vector TEXT NOT NULL,
                   created_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS relation_embeddings (
                   relation_id TEXT PRIMARY KEY REFERENCES knowledge_relations(id) ON DELETE CASCADE,
                   notebook_id TEXT NOT NULL,
@@ -205,7 +208,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_relation_embeddings_nb ON relation_embeddings(notebook_id);
-    
+
                 CREATE TABLE IF NOT EXISTS knowledge_objects (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -219,7 +222,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS knowledge_relations (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -230,7 +233,7 @@ class SqliteMigrator:
                   evidence TEXT NOT NULL DEFAULT '[]',
                   created_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS answers (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -250,7 +253,7 @@ class SqliteMigrator:
                 -- physical scan order, so this index changes no result ordering,
                 -- only how fast the COUNT is computed.
                 CREATE INDEX IF NOT EXISTS idx_answers_nb ON answers(notebook_id);
-    
+
                 CREATE TABLE IF NOT EXISTS conversations (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL,
@@ -259,7 +262,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 -- 深度报告(report_engine):后台生成的多节技术报告落库。
                 -- outline/sections/gaps 为 JSON 列;content_md 为汇总后的完整 markdown。
                 CREATE TABLE IF NOT EXISTS reports (
@@ -281,7 +284,7 @@ class SqliteMigrator:
                   updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_reports_nb_created ON reports(notebook_id, created_at DESC);
-    
+
                 CREATE TABLE IF NOT EXISTS feedback (
                   id TEXT PRIMARY KEY,
                   answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
@@ -313,7 +316,7 @@ class SqliteMigrator:
                 -- one for that particular query shape (both are valid access paths
                 -- — this index's role is the FK-cascade scan, not that join).
                 CREATE INDEX IF NOT EXISTS idx_feedback_answer ON feedback(answer_id);
-    
+
                 CREATE TABLE IF NOT EXISTS object_schemas (
                   object_type TEXT PRIMARY KEY,
                   plural TEXT NOT NULL DEFAULT '',
@@ -329,7 +332,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS concept_clusters (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -350,7 +353,7 @@ class SqliteMigrator:
                 -- it a covering index scan (no row lookups) for both the COUNT and
                 -- the MAX.
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb_created ON concept_clusters(notebook_id, created_at);
-    
+
                 CREATE TABLE IF NOT EXISTS concept_merge_candidates (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -359,7 +362,7 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
-    
+
                 CREATE TABLE IF NOT EXISTS merge_review_jobs (
                   notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
                   status TEXT NOT NULL DEFAULT 'idle',
@@ -369,7 +372,7 @@ class SqliteMigrator:
                   updated_at TEXT NOT NULL DEFAULT '',
                   error TEXT NOT NULL DEFAULT ''
                 );
-    
+
                 CREATE TABLE IF NOT EXISTS kg_conflict_candidates (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -387,7 +390,7 @@ class SqliteMigrator:
                   updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_conflict_candidates_nb_status ON kg_conflict_candidates(notebook_id, status);
-    
+
                 CREATE TABLE IF NOT EXISTS promotion_candidates (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -406,7 +409,7 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_promotion_nb ON promotion_candidates(notebook_id, status);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_promotion_object ON promotion_candidates(object_id)
                   WHERE status NOT IN ('approved', 'rejected');
-    
+
                 CREATE TABLE IF NOT EXISTS unified_kg_state (
                   notebook_id TEXT PRIMARY KEY REFERENCES notebooks(id) ON DELETE CASCADE,
                   dirty INTEGER NOT NULL DEFAULT 0,
@@ -440,7 +443,7 @@ class SqliteMigrator:
                   note TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
                 );
-    
+
                 -- Transient scratch for memory-bounded rebuild_unified_kg: maps
                 -- object_id -> seed for the type currently being clustered. NOT a
                 -- TEMP TABLE on purpose (the rebuild spans multiple connections +
@@ -455,7 +458,7 @@ class SqliteMigrator:
                   seed TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_kg_cluster_scratch_nb_run ON kg_cluster_scratch(notebook_id, run_id);
-    
+
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_source_elements_source ON source_elements(source_id);
@@ -527,7 +530,7 @@ class SqliteMigrator:
                 -- (ids, matrix) pair consumed by id-keyed lookups, not position.
                 CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_nb_created ON knowledge_embeddings(notebook_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_element_embeddings_nb ON element_embeddings(notebook_id);
-    
+
                 -- P0-4 反查表: knowledge_objects.evidence 是 JSON (每条 evidence item
                 -- 携带自己的 source_id — 一个合并后的 object 可引用多个来源), 所以
                 -- "找出引用某 source 的所有 object" 原来要整本 notebook 逐行
@@ -543,7 +546,7 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_kos_source ON knowledge_object_sources(source_id);
                 CREATE INDEX IF NOT EXISTS idx_kos_object ON knowledge_object_sources(object_id);
                 CREATE INDEX IF NOT EXISTS idx_kos_notebook ON knowledge_object_sources(notebook_id);
-    
+
                 CREATE TABLE IF NOT EXISTS communities (
                   id TEXT PRIMARY KEY,
                   notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
@@ -557,7 +560,7 @@ class SqliteMigrator:
                 );
                 CREATE INDEX IF NOT EXISTS idx_communities_nb_level ON communities(notebook_id, level);
                 DROP INDEX IF EXISTS idx_communities_nb;
-    
+
                 -- 社区反向索引:canonical_id → 所在社区(O(1) 定位焦点社区,避免扫
                 -- communities.member_ids JSON)。存 canonical_name/centrality 供
                 -- community_peers 直接重排,不再回查 concept_clusters。
@@ -571,11 +574,11 @@ class SqliteMigrator:
                 );
                 CREATE INDEX IF NOT EXISTS idx_commmem_nb_can ON community_members(notebook_id, canonical_id);
                 CREATE INDEX IF NOT EXISTS idx_commmem_nb_comm ON community_members(notebook_id, community_id);
-    
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS kg_objects_fts
                   USING fts5(object_id UNINDEXED, notebook_id UNINDEXED, name,
                              tokenize='trigram');
-    
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
                   USING fts5(chunk_id UNINDEXED, notebook_id UNINDEXED, text,
                              tokenize='trigram');
@@ -790,7 +793,7 @@ class SqliteMigrator:
 
     def _migration_3(self) -> None:
         """已部署库补建 community_members 反向索引表(canonical→社区)。
-    
+
         该表原本在 _migration_1 的 baseline executescript 里(全新库随之建),但 community
         层把它作为后加表塞进 _migration_1 却未 bump SCHEMA_VERSION —— 已达 user_version<=2
         的旧库因 `_migrate` 的 `if current >= SCHEMA_VERSION: return []` 版本闸短路、不重跑
@@ -817,7 +820,7 @@ class SqliteMigrator:
     def _migration_4(self) -> None:
         """已部署库补建 unified_kg_state.community_seq 版本闸列(社区上次重建时的
         kg_mutation_seq;DEFAULT -1=从未建过)。
-    
+
         与 community_members 表(_migration_3)同源:community 层把 community_seq 列塞进
         _migration_1 的守卫 ALTER 却未 bump SCHEMA_VERSION —— 已部署库版本闸短路不重跑
         _migration_1 → 缺列 → rebuild_communities 查它 `no such column: community_seq`
@@ -870,7 +873,7 @@ class SqliteMigrator:
         子表 ask_trace_steps(每 trace step 一行)。旧写法是 O(N^2) 累积序列化 +
         每次都占用全站唯一的 _write() 全局写锁；子表把它变成 O(1) 单行 INSERT，
         锁持有时间恒定、不再随轨迹变长而增长。
-    
+
         PK (job_id, seq) 本身即索引，覆盖 `WHERE job_id=? ORDER BY seq` 读取路径与
         FK 级联删除的 `WHERE job_id=?` 匹配，故不必再补一张同列索引。
         ON DELETE CASCADE 依赖 `_connect()` 常开的 `PRAGMA foreign_keys = ON`
@@ -890,7 +893,7 @@ class SqliteMigrator:
 
     def _migration_8(self) -> None:
         """canonical 关系层(P1):canonical_relations 表 + unified_kg_state.canonical_rel_seq。
-    
+
         已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
         _migration_3/_migration_4 同款两层写法(baseline 双写 + 独立迁移)。"""
         with self._connect() as db:
@@ -913,7 +916,7 @@ class SqliteMigrator:
 
     def _migration_9(self) -> None:
         """共提桥接层(P2):mention_edges/concept_comentions 表 + unified_kg_state.mention_seq。
-    
+
         已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
         _migration_3/_migration_4/_migration_8 同款两层写法(baseline 双写 + 独立迁移)。"""
         with self._connect() as db:
