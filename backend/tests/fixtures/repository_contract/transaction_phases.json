@@ -1,29 +1,28 @@
 {
   "approve_promotion": {
     "commit_boundaries": [
-      "promotion mutation is transactional",
-      "embedding and dirty hooks are post-commit"
+      "base mutation and candidate approved state commit together",
+      "embedding, invalidation and dirty hooks are post-commit"
     ],
-    "failure_boundary": "post-commit embedding is fail-open; state-machine errors still raise",
+    "failure_boundary": "transaction failure rolls back base mutation and candidate state together; post-commit hook failure cannot revert approval",
     "sequence": [
       "validate candidate",
-      "insert or merge base object transaction",
-      "embed best effort",
-      "mark base dirty",
-      "finish promotion state"
+      "commit base object/provenance and candidate approval in one transaction",
+      "embed fresh base object best effort",
+      "invalidate unified cache",
+      "mark base dirty"
     ]
   },
   "confirm_conflict": {
     "commit_boundaries": [
-      "conflict row/object changes commit together",
-      "embedding and dirty are later"
+      "resolution mutation commits before candidate status transaction",
+      "candidate status is a later independent commit"
     ],
-    "failure_boundary": "post-mutation embedding failure does not revert confirmed conflict",
+    "failure_boundary": "candidate-status failure leaves the already committed resolution mutation applied",
     "sequence": [
       "load conflict candidate",
-      "apply status/object mutation transaction",
-      "embed best effort",
-      "mark dirty"
+      "apply resolution through its independently committed mutation primitive",
+      "set candidate applied in a separate transaction"
     ]
   },
   "copy_notebook": {
@@ -111,14 +110,14 @@
   },
   "set_edge_review": {
     "commit_boundaries": [
-      "review row commits before cache/version side effects"
+      "review row commits before dirty and cache side effects"
     ],
     "failure_boundary": "missing relation raises; post-commit side-effect failure does not revert review",
     "sequence": [
       "validate review status",
       "update relation review in one write",
-      "invalidate cache",
-      "mark dirty"
+      "mark dirty",
+      "invalidate cache"
     ]
   },
   "store_kg": {

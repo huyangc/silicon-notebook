@@ -1,4 +1,62 @@
 {
+  "KNOWLEDGE_STATUSES": {
+    "consumers": [
+      "compatibility:app.services.sqlite_repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "KnowledgeGovernanceService",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "tuple"
+  },
+  "KnowledgeGraphTooLargeError": {
+    "consumers": [
+      "backend/app/api/routes.py:19",
+      "backend/tests/test_legacy_graph_guard.py:11",
+      "compatibility:app.services.sqlite_repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "type"
+  },
+  "NotebookRepository": {
+    "consumers": [
+      "backend/app/api/deps.py:10",
+      "backend/app/api/routes.py:91",
+      "backend/tests/test_trackA_eval_connect.py:25",
+      "compatibility:app.services.repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.repository"
+    ],
+    "owner": "RepositoryPorts",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "_ProtocolMeta"
+  },
+  "RetrievedKnowledge": {
+    "consumers": [
+      "backend/tests/test_graph_k_binding.py:121",
+      "compatibility:app.services.sqlite_repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "RetrievalService",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "type"
+  },
   "SCHEMA_VERSION": {
     "consumers": [
       "backend/tests/test_admin_users.py:3",
@@ -8,44 +66,303 @@
       "backend/tests/test_legacy_db_compat.py:82",
       "backend/tests/test_mention_bridge.py:7",
       "backend/tests/test_schema_version_migration.py:25",
-      "backend/tests/test_schema_version_migration.py:46"
+      "backend/tests/test_schema_version_migration.py:46",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
     "owner": "SqliteDatabase",
     "patch_targets": [],
     "scope": "module",
     "signature": "int"
+  },
+  "SQLiteRepository": {
+    "consumers": [
+      "backend/app/api/deps.py:11",
+      "backend/app/eval/inference.py:67",
+      "backend/app/eval/run_all.py:68",
+      "backend/app/eval/sa_calibration.py:180",
+      "backend/app/eval/speed.py:93",
+      "backend/app/scripts/backfill_relation_embeddings.py:5",
+      "backend/app/scripts/build_kg.py:5",
+      "backend/app/scripts/gen_recall_gold.py:8",
+      "backend/app/scripts/recluster_kg.py:5",
+      "backend/app/scripts/reembed_kg.py:7",
+      "backend/app/services/batch_ingest.py:27",
+      "backend/tests/test_admin_seed.py:2",
+      "backend/tests/test_admin_user_notebooks.py:3",
+      "backend/tests/test_admin_users.py:3",
+      "backend/tests/test_answer_context_budget.py:6",
+      "backend/tests/test_apply_conflict_resolution.py:12",
+      "backend/tests/test_architecture_hardening.py:13",
+      "backend/tests/test_architecture_module_boundaries.py:4",
+      "backend/tests/test_ask_embed_cache.py:4",
+      "backend/tests/test_ask_jobs.py:8",
+      "backend/tests/test_ask_mode_persist.py:2",
+      "backend/tests/test_ask_modes.py:10",
+      "backend/tests/test_ask_reconnect.py:8",
+      "backend/tests/test_ask_redesign.py:3",
+      "backend/tests/test_ask_requires_model_config.py:2",
+      "backend/tests/test_ask_stage_events.py:11",
+      "backend/tests/test_ask_vector_matrix.py:12",
+      "backend/tests/test_auth_migration.py:3",
+      "backend/tests/test_auto_scale_index.py:13",
+      "backend/tests/test_autotune_wiring.py:7",
+      "backend/tests/test_batch_ingest.py:7",
+      "backend/tests/test_bm25_rrf.py:41",
+      "backend/tests/test_canonical_relations.py:7",
+      "backend/tests/test_chunk_bruteforce_guard.py:18",
+      "backend/tests/test_chunk_concept_walk.py:4",
+      "backend/tests/test_chunk_embed.py:4",
+      "backend/tests/test_chunk_retrieval.py:6",
+      "backend/tests/test_chunk_retrieval_characterization.py:20",
+      "backend/tests/test_chunk_retrieval_plan.py:11",
+      "backend/tests/test_cluster_id_collision.py:19",
+      "backend/tests/test_communities.py:6",
+      "backend/tests/test_community_members_schema.py:11",
+      "backend/tests/test_community_reports.py:6",
+      "backend/tests/test_concept_desc.py:6",
+      "backend/tests/test_conflict_e2e.py:22",
+      "backend/tests/test_conflict_endpoints.py:15",
+      "backend/tests/test_conversations.py:3",
+      "backend/tests/test_cross_doc_merge.py:8",
+      "backend/tests/test_cross_tier_reasoning.py:456",
+      "backend/tests/test_cross_tier_reasoning.py:90",
+      "backend/tests/test_db_concurrency.py:3",
+      "backend/tests/test_dedup_scale.py:6",
+      "backend/tests/test_dim_invariants.py:113",
+      "backend/tests/test_edge_review_queue.py:8",
+      "backend/tests/test_embed_concurrency.py:9",
+      "backend/tests/test_empty_synth_guard.py:15",
+      "backend/tests/test_event_logging.py:101",
+      "backend/tests/test_event_logging.py:148",
+      "backend/tests/test_event_logging.py:161",
+      "backend/tests/test_event_logging.py:67",
+      "backend/tests/test_follow_chain_repository.py:8",
+      "backend/tests/test_followup_retrieval_grounding.py:112",
+      "backend/tests/test_global_search.py:6",
+      "backend/tests/test_graph_k_binding.py:24",
+      "backend/tests/test_graph_seed_fusion.py:3",
+      "backend/tests/test_graph_src_chunks.py:5",
+      "backend/tests/test_in_batching.py:7",
+      "backend/tests/test_in_network_relations.py:7",
+      "backend/tests/test_incremental_fuse_deferred.py:4",
+      "backend/tests/test_incremental_fuse_perf.py:56",
+      "backend/tests/test_incremental_fusion.py:4",
+      "backend/tests/test_index_build_consolidation.py:8",
+      "backend/tests/test_indexed_only_principle.py:10",
+      "backend/tests/test_kb_list_scale.py:7",
+      "backend/tests/test_kg_building_flag.py:7",
+      "backend/tests/test_kg_conflict_candidates.py:10",
+      "backend/tests/test_kg_llm_client.py:3",
+      "backend/tests/test_kg_object_embed_concurrency.py:8",
+      "backend/tests/test_kg_quality.py:4",
+      "backend/tests/test_kg_ready.py:2",
+      "backend/tests/test_kg_rebuild_relink_api.py:122",
+      "backend/tests/test_kg_relink_repository.py:19",
+      "backend/tests/test_kg_repository.py:4",
+      "backend/tests/test_kg_search_api.py:10",
+      "backend/tests/test_kg_source_status.py:15",
+      "backend/tests/test_kg_viz_index.py:7",
+      "backend/tests/test_knowledge_governance_boundaries.py:9",
+      "backend/tests/test_knowledge_pagination.py:3",
+      "backend/tests/test_language_policy.py:131",
+      "backend/tests/test_large_lib_index_required.py:6",
+      "backend/tests/test_legacy_db_compat.py:17",
+      "backend/tests/test_legacy_graph_guard.py:11",
+      "backend/tests/test_max_tokens.py:12",
+      "backend/tests/test_mention_bridge.py:7",
+      "backend/tests/test_merge_rebuild_exclude.py:5",
+      "backend/tests/test_merge_review_deferred.py:4",
+      "backend/tests/test_merge_review_job.py:112",
+      "backend/tests/test_merge_review_job.py:4",
+      "backend/tests/test_merge_seed_pairs.py:4",
+      "backend/tests/test_mix_answer.py:4",
+      "backend/tests/test_mix_overlay.py:3",
+      "backend/tests/test_model_errors.py:15",
+      "backend/tests/test_node_context.py:3",
+      "backend/tests/test_node_context_steps.py:3",
+      "backend/tests/test_notebook_copy_stats_memo.py:21",
+      "backend/tests/test_notebook_counts_batched.py:12",
+      "backend/tests/test_notebook_meta.py:10",
+      "backend/tests/test_notebook_owner_scope.py:2",
+      "backend/tests/test_notebook_share_copy.py:8",
+      "backend/tests/test_notebook_share_readonly.py:6",
+      "backend/tests/test_overlay_guard_order.py:16",
+      "backend/tests/test_p4_kg_shrink.py:3",
+      "backend/tests/test_pending_actions.py:3",
+      "backend/tests/test_pipeline_concurrency.py:10",
+      "backend/tests/test_ppr_fallback_guard.py:17",
+      "backend/tests/test_ppr_retrieve.py:324",
+      "backend/tests/test_ppr_retrieve.py:4",
+      "backend/tests/test_query_hotpath_cache.py:27",
+      "backend/tests/test_query_refine.py:7",
+      "backend/tests/test_reasoning_ask.py:4",
+      "backend/tests/test_reasoning_empty_answer.py:19",
+      "backend/tests/test_reasoning_llm_config.py:6",
+      "backend/tests/test_reasoning_ppr.py:4",
+      "backend/tests/test_reasoning_retrieval.py:144",
+      "backend/tests/test_reasoning_stream.py:27",
+      "backend/tests/test_rebuild_cache.py:20",
+      "backend/tests/test_rebuild_communities.py:13",
+      "backend/tests/test_rebuild_desc_cache.py:16",
+      "backend/tests/test_rebuild_instrumentation.py:19",
+      "backend/tests/test_rebuild_streaming.py:5",
+      "backend/tests/test_rebuild_wires_communities.py:8",
+      "backend/tests/test_recall_relations.py:3",
+      "backend/tests/test_relation_ann.py:17",
+      "backend/tests/test_relation_embed.py:3",
+      "backend/tests/test_relation_retrieval.py:5",
+      "backend/tests/test_relation_scoring_cold_matrix_guard.py:19",
+      "backend/tests/test_report_engine.py:46",
+      "backend/tests/test_repository_api_contract.py:16",
+      "backend/tests/test_repository_phase_contracts.py:12",
+      "backend/tests/test_repository_surface_manifest.py:13",
+      "backend/tests/test_request_user_ctx.py:2",
+      "backend/tests/test_resolve_notebook_conflicts.py:21",
+      "backend/tests/test_retrieval.py:8",
+      "backend/tests/test_retrieval_service.py:10",
+      "backend/tests/test_runtime_dim_bypasses.py:27",
+      "backend/tests/test_runtime_dim_cache_keys.py:36",
+      "backend/tests/test_runtime_dim_scale_index.py:18",
+      "backend/tests/test_runtime_dim_truncation.py:150",
+      "backend/tests/test_rx_graph_cluster_hubs.py:37",
+      "backend/tests/test_scale_delta_policy.py:13",
+      "backend/tests/test_scale_idx_cache_lru.py:10",
+      "backend/tests/test_scale_idx_disk_cache.py:10",
+      "backend/tests/test_scale_index_repo.py:5",
+      "backend/tests/test_scale_index_version_probe.py:28",
+      "backend/tests/test_scale_index_version_singleflight.py:25",
+      "backend/tests/test_scale_version_probe.py:7",
+      "backend/tests/test_scale_xlayer_bridge_delta.py:22",
+      "backend/tests/test_schema_version_migration.py:8",
+      "backend/tests/test_source_reverse_index.py:18",
+      "backend/tests/test_source_url_persist.py:4",
+      "backend/tests/test_sources_page_batched.py:12",
+      "backend/tests/test_sources_pagination.py:3",
+      "backend/tests/test_sqlite_indexes.py:6",
+      "backend/tests/test_sqlite_write_optimization.py:5",
+      "backend/tests/test_trackA_cleanup_complete.py:16",
+      "backend/tests/test_trackA_eval_connect.py:19",
+      "backend/tests/test_trackA_rrf_relevance.py:10",
+      "backend/tests/test_trackF_governance_promotion.py:15",
+      "backend/tests/test_two_tier_federated.py:10",
+      "backend/tests/test_unified_kg_repository.py:4",
+      "backend/tests/test_url_sources.py:7",
+      "backend/tests/test_url_sources_api.py:6",
+      "backend/tests/test_user_llm_client_resolve.py:3",
+      "backend/tests/test_user_model_settings_store.py:3",
+      "backend/tests/test_user_rerank_resolve.py:2",
+      "backend/tests/test_user_session_repo.py:3",
+      "backend/tests/test_vector_cache_invalidation.py:2",
+      "backend/tests/test_viz_bounded.py:9",
+      "backend/tests/test_viz_index_build.py:4",
+      "backend/tests/test_viz_index_status.py:5",
+      "backend/tests/test_viz_index_wire.py:5",
+      "compatibility:app.services.sqlite_repository",
+      "scripts/backfill_kg_embeddings.py:22",
+      "scripts/bench_sqlite_writes.py:20",
+      "scripts/build_chunks.py:5",
+      "scripts/denoise_reextract_nb.py:18",
+      "scripts/diag_base_report.py:26",
+      "scripts/kg_product_smoke.py:17",
+      "scripts/reextract_notebook.py:10",
+      "scripts/replay_retrieval.py:39",
+      "scripts/smoke_backend.py:25"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "RepositoryFacade",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "type"
   },
   "USABLE_STATUSES": {
     "consumers": [
       "backend/tests/test_cross_tier_reasoning.py:523",
       "backend/tests/test_graph_k_binding.py:77",
       "backend/tests/test_notebook_counts_batched.py:12",
-      "backend/tests/test_trackF_governance_promotion.py:15"
+      "backend/tests/test_trackF_governance_promotion.py:15",
+      "compatibility:app.services.sqlite_repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "KnowledgeGovernanceService",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "tuple"
+  },
+  "UploadedSourceFile": {
+    "consumers": [
+      "backend/app/api/routes.py:91",
+      "backend/app/services/batch_ingest.py:26",
+      "backend/app/services/sqlite_repository.py:109",
+      "backend/tests/test_repository_api_contract.py:15",
+      "compatibility:app.services.repository",
+      "scripts/smoke_backend.py:23"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.repository"
+    ],
+    "owner": "RepositoryPorts",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "type"
+  },
+  "_ASK_MODEL_ERRORS": {
+    "consumers": [
+      "backend/tests/test_empty_synth_guard.py:15",
+      "compatibility:app.services.sqlite_repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "ModelProvider",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "ContextVar"
+  },
+  "_CJK_RE": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:2438"
     ],
     "kind": "constant",
     "owner": "QueryStore",
     "patch_targets": [],
-    "scope": "module",
-    "signature": "tuple"
+    "scope": "facade",
+    "signature": "Pattern"
   },
   "_COPY_CHUNK": {
     "consumers": [
       "backend/app/services/sqlite_notebook_sharing.py:30",
       "backend/tests/test_architecture_module_boundaries.py:76",
       "backend/tests/test_notebook_share_copy.py:275",
-      "backend/tests/test_notebook_share_copy.py:336"
+      "backend/tests/test_notebook_share_copy.py:336",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "constant",
-    "owner": "QueryStore",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "NotebookSharingService",
     "patch_targets": [
       {
+        "base": "sr",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_notebook_share_copy.py",
         "line": 275,
         "target": "_COPY_CHUNK"
       },
       {
+        "base": "sr",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_notebook_share_copy.py",
         "line": 336,
@@ -55,26 +372,170 @@
     "scope": "module",
     "signature": "int"
   },
-  "__init__": {
+  "_IN_CHUNK": {
     "consumers": [
-      "backend/app/services/ask_modes.py:19",
-      "backend/tests/test_reasoning_ppr_prefetch.py:103",
-      "backend/tests/test_reasoning_ppr_prefetch.py:136",
-      "backend/tests/test_scale_index_repo.py:1088",
-      "backend/tests/test_scale_index_repo.py:1094"
+      "backend/app/services/sqlite_repository.py:10483",
+      "backend/app/services/sqlite_repository.py:10484",
+      "backend/app/services/sqlite_repository.py:10510",
+      "backend/app/services/sqlite_repository.py:10511",
+      "backend/app/services/sqlite_repository.py:13890",
+      "backend/app/services/sqlite_repository.py:13891",
+      "backend/app/services/sqlite_repository.py:7211",
+      "backend/app/services/sqlite_repository.py:7212",
+      "backend/app/services/sqlite_repository.py:9874",
+      "backend/app/services/sqlite_repository.py:9875",
+      "backend/tests/test_in_batching.py:60",
+      "backend/tests/test_indexed_only_principle.py:325",
+      "backend/tests/test_relation_retrieval.py:291"
     ],
-    "kind": "private_wrapper",
+    "kind": "constant",
     "owner": "QueryStore",
     "patch_targets": [
       {
-        "compatibility": "test-only",
-        "file": "backend/tests/test_scale_index_repo.py",
-        "line": 1094,
-        "target": "__init__"
+        "base": "SQLiteRepository",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_in_batching.py",
+        "line": 60,
+        "target": "_IN_CHUNK"
+      },
+      {
+        "base": "SQLiteRepository",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_indexed_only_principle.py",
+        "line": 325,
+        "target": "_IN_CHUNK"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "file": "backend/tests/test_relation_retrieval.py",
+        "line": 291,
+        "target": "_IN_CHUNK"
       }
     ],
     "scope": "facade",
-    "signature": "(self, settings: 'Settings')"
+    "signature": "int"
+  },
+  "_LATIN_RE": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:2440"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "Pattern"
+  },
+  "_MIX_FANOUT": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:12096"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "int"
+  },
+  "_MIX_KG_KEY_BASE": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:11646",
+      "backend/app/services/sqlite_repository.py:12255",
+      "backend/app/services/sqlite_repository.py:12515",
+      "backend/app/services/sqlite_repository.py:12945",
+      "backend/tests/test_mix_answer.py:133",
+      "backend/tests/test_reasoning_ppr.py:190",
+      "backend/tests/test_reasoning_ppr.py:191"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "int"
+  },
+  "_MIX_NODE_SEEDS": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:12084"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "int"
+  },
+  "_MIX_PROMPT_BUFFER_TOKENS": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:11792",
+      "backend/app/services/sqlite_repository.py:12950"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "int"
+  },
+  "_MIX_REL_SEEDS": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:12085"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "int"
+  },
+  "_NOTEBOOK_COUNT_TYPES": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:13801"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "dict"
+  },
+  "_PPR_RERANK_SCHEMA": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:10390"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "str"
+  },
+  "_REQUEST_USER": {
+    "consumers": [
+      "backend/app/services/background_jobs.py:31",
+      "backend/tests/test_architecture_module_boundaries.py:58",
+      "backend/tests/test_background_jobs.py:101",
+      "backend/tests/test_background_jobs.py:87",
+      "backend/tests/test_background_jobs.py:93",
+      "backend/tests/test_kg_job_user_context.py:2",
+      "backend/tests/test_scale_index_repo.py:1129",
+      "backend/tests/test_scale_index_repo.py:1134",
+      "backend/tests/test_scale_index_repo.py:1147",
+      "backend/tests/test_scale_index_repo.py:1155",
+      "compatibility:app.services.sqlite_repository"
+    ],
+    "kind": "constant",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "RequestContext",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "ContextVar"
+  },
+  "_REVIEW_STATUSES": {
+    "consumers": [
+      "backend/app/services/sqlite_repository.py:4282",
+      "backend/app/services/sqlite_repository.py:4284"
+    ],
+    "kind": "constant",
+    "owner": "QueryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "frozenset"
   },
   "_active_kg_delta": {
     "consumers": [
@@ -210,9 +671,7 @@
       "backend/tests/test_query_refine.py:75",
       "backend/tests/test_query_refine.py:88",
       "backend/tests/test_reasoning_ppr.py:211",
-      "backend/tests/test_reasoning_ppr.py:227",
-      "backend/tests/test_reasoning_retrieval.py:289",
-      "backend/tests/test_reasoning_retrieval.py:580"
+      "backend/tests/test_reasoning_ppr.py:227"
     ],
     "kind": "private_wrapper",
     "owner": "AskService",
@@ -253,12 +712,14 @@
     "owner": "NotebookCatalogService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_plan.py",
         "line": 62,
         "target": "_any_base_notebook_has_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_plan.py",
         "line": 72,
@@ -352,6 +813,7 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ask_vector_matrix.py",
         "line": 125,
@@ -569,12 +1031,14 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_answer_context_budget.py",
         "line": 29,
         "target": "_concept_cluster_id"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_answer_context_budget.py",
         "line": 44,
@@ -586,19 +1050,20 @@
   },
   "_concept_desc_sig": {
     "consumers": [
-      "backend/tests/test_rebuild_desc_cache.py:16"
+      "backend/tests/test_rebuild_desc_cache.py:16",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "private_wrapper",
-    "owner": "QueryStore",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "KnowledgeLifecycleService",
     "patch_targets": [],
     "scope": "module",
     "signature": "(name: 'str', quotes: 'List[str]') -> 'str'"
   },
   "_connect": {
     "consumers": [
-      "backend/app/eval/db.py:28",
-      "backend/app/eval/db.py:52",
-      "backend/app/eval/db.py:63",
       "backend/app/scripts/gen_recall_gold.py:39",
       "backend/app/scripts/reembed_kg.py:21",
       "backend/app/services/batch_ingest.py:164",
@@ -912,10 +1377,6 @@
       "backend/tests/test_cross_tier_reasoning.py:177",
       "backend/tests/test_cross_tier_reasoning.py:522",
       "backend/tests/test_cross_tier_reasoning.py:571",
-      "backend/tests/test_db_concurrency.py:14",
-      "backend/tests/test_db_concurrency.py:21",
-      "backend/tests/test_db_concurrency.py:27",
-      "backend/tests/test_db_concurrency.py:39",
       "backend/tests/test_dim_invariants.py:129",
       "backend/tests/test_dim_invariants.py:135",
       "backend/tests/test_edge_review_queue.py:131",
@@ -1035,8 +1496,6 @@
       "backend/tests/test_query_hotpath_cache.py:892",
       "backend/tests/test_query_refine.py:56",
       "backend/tests/test_reasoning_retrieval.py:439",
-      "backend/tests/test_reasoning_retrieval.py:503",
-      "backend/tests/test_reasoning_retrieval.py:521",
       "backend/tests/test_rebuild_cache.py:195",
       "backend/tests/test_rebuild_cache.py:226",
       "backend/tests/test_rebuild_cache.py:296",
@@ -1076,6 +1535,8 @@
       "backend/tests/test_relation_retrieval.py:278",
       "backend/tests/test_relation_retrieval.py:292",
       "backend/tests/test_relation_scoring_cold_matrix_guard.py:102",
+      "backend/tests/test_repository_api_contract.py:253",
+      "backend/tests/test_repository_phase_contracts.py:144",
       "backend/tests/test_resolve_notebook_conflicts.py:122",
       "backend/tests/test_resolve_notebook_conflicts.py:207",
       "backend/tests/test_resolve_notebook_conflicts.py:219",
@@ -1176,7 +1637,6 @@
       "backend/tests/test_user_session_repo.py:43",
       "scripts/backfill_kg_embeddings.py:31",
       "scripts/backfill_kg_embeddings.py:57",
-      "scripts/bench_sqlite_writes.py:85",
       "scripts/build_chunks.py:13",
       "scripts/build_chunks.py:23",
       "scripts/denoise_reextract_nb.py:24",
@@ -1196,102 +1656,119 @@
     "owner": "SqliteDatabase",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_incremental_fuse_perf.py",
         "line": 134,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_language_policy.py",
         "line": 192,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_node_context.py",
         "line": 83,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_notebook_copy_stats_memo.py",
         "line": 111,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_notebook_counts_batched.py",
         "line": 115,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_query_hotpath_cache.py",
         "line": 168,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_query_hotpath_cache.py",
         "line": 860,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_retrieval.py",
         "line": 188,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_retrieval.py",
         "line": 206,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_version_probe.py",
         "line": 288,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_version_singleflight.py",
         "line": 96,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_version_singleflight.py",
         "line": 141,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_version_singleflight.py",
         "line": 189,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_version_singleflight.py",
         "line": 246,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_version_probe.py",
         "line": 79,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_sources_page_batched.py",
         "line": 183,
         "target": "_connect"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_trackF_governance_promotion.py",
         "line": 171,
@@ -1397,6 +1874,7 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_xlayer_bridge_delta.py",
         "line": 222,
@@ -1584,12 +2062,14 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_bruteforce_guard.py",
         "line": 134,
         "target": "_embed_query"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 200,
@@ -1659,18 +2139,21 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_delta_policy.py",
         "line": 104,
         "target": "_ensure_scale_scheduler"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_delta_policy.py",
         "line": 115,
         "target": "_ensure_scale_scheduler"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_delta_policy.py",
         "line": 127,
@@ -1717,9 +2200,13 @@
   },
   "_fast_loads": {
     "consumers": [
-      "backend/tests/test_fast_loads.py:7"
+      "backend/tests/test_fast_loads.py:7",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "private_wrapper",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
     "owner": "QueryStore",
     "patch_targets": [],
     "scope": "module",
@@ -1771,6 +2258,7 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 277,
@@ -1817,7 +2305,6 @@
   },
   "_follow_chain": {
     "consumers": [
-      "backend/app/services/retrieval_service.py:37",
       "backend/tests/test_follow_chain_repository.py:103",
       "backend/tests/test_follow_chain_repository.py:115",
       "backend/tests/test_follow_chain_repository.py:124",
@@ -1831,8 +2318,7 @@
       "backend/tests/test_follow_chain_repository.py:243",
       "backend/tests/test_follow_chain_repository.py:264",
       "backend/tests/test_follow_chain_repository.py:86",
-      "backend/tests/test_follow_chain_repository.py:98",
-      "backend/tests/test_reasoning_retrieval.py:556"
+      "backend/tests/test_follow_chain_repository.py:98"
     ],
     "kind": "private_wrapper",
     "owner": "RetrievalService",
@@ -1855,24 +2341,28 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_bruteforce_guard.py",
         "line": 73,
         "target": "_gather_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 346,
         "target": "_gather_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 390,
         "target": "_gather_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_large_lib_index_required.py",
         "line": 46,
@@ -1894,6 +2384,7 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_dedup_scale.py",
         "line": 32,
@@ -2038,6 +2529,7 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_idx_disk_cache.py",
         "line": 190,
@@ -2060,12 +2552,14 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_notebook_share_copy.py",
         "line": 291,
         "target": "_insert_row"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_notebook_share_copy.py",
         "line": 347,
@@ -2103,6 +2597,7 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_edge_review_queue.py",
         "line": 288,
@@ -2125,6 +2620,7 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_language_policy.py",
         "line": 289,
@@ -2393,18 +2889,21 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 287,
         "target": "_mark_unified_kg_dirty"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 310,
         "target": "_mark_unified_kg_dirty"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_building_flag.py",
         "line": 42,
@@ -2484,24 +2983,28 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 124,
         "target": "_mix_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 451,
         "target": "_mix_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 501,
         "target": "_mix_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 575,
@@ -2523,12 +3026,14 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 224,
         "target": "_mmr_select_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 527,
@@ -2554,9 +3059,13 @@
   "_new_id": {
     "consumers": [
       "backend/app/services/sqlite_notebook_sharing.py:21",
-      "backend/tests/test_cluster_id_collision.py:19"
+      "backend/tests/test_cluster_id_collision.py:19",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "private_wrapper",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
     "owner": "QueryStore",
     "patch_targets": [],
     "scope": "module",
@@ -2623,12 +3132,14 @@
     "owner": "NotebookCatalogService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_plan.py",
         "line": 61,
         "target": "_notebook_has_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_plan.py",
         "line": 71,
@@ -2696,9 +3207,6 @@
   },
   "_now": {
     "consumers": [
-      "backend/app/services/pending_bus.py:102",
-      "backend/app/services/pending_bus.py:106",
-      "backend/app/services/pending_bus.py:23",
       "backend/tests/test_chunk_retrieval.py:6",
       "backend/tests/test_chunk_retrieval_characterization.py:20",
       "backend/tests/test_conflict_e2e.py:22",
@@ -2734,13 +3242,18 @@
       "backend/tests/test_sqlite_write_optimization.py:5",
       "backend/tests/test_unified_kg_repository.py:177",
       "backend/tests/test_unified_kg_repository.py:316",
+      "compatibility:app.services.sqlite_repository",
       "scripts/kg_product_smoke.py:17",
       "scripts/smoke_backend.py:25"
     ],
     "kind": "private_wrapper",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo_mod",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_rebuild_cache.py",
         "line": 222,
@@ -2794,6 +3307,7 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 235,
@@ -2810,8 +3324,6 @@
       "backend/app/services/sqlite_repository.py:12551",
       "backend/app/services/sqlite_repository.py:13036",
       "backend/tests/test_ask_redesign.py:66",
-      "backend/tests/test_reasoning_retrieval.py:604",
-      "backend/tests/test_reasoning_retrieval.py:606",
       "backend/tests/test_two_tier_federated.py:224",
       "backend/tests/test_two_tier_federated.py:271"
     ],
@@ -2902,18 +3414,21 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 118,
         "target": "_ppr_graph"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 145,
         "target": "_ppr_graph"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 165,
@@ -2940,7 +3455,6 @@
   "_ppr_retrieve": {
     "consumers": [
       "backend/app/services/report_engine.py:113",
-      "backend/app/services/retrieval_service.py:33",
       "backend/app/services/sqlite_repository.py:12259",
       "backend/app/services/sqlite_repository.py:12792",
       "backend/tests/test_ppr_fallback_guard.py:121",
@@ -2958,6 +3472,7 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 477,
@@ -3080,8 +3595,7 @@
       "backend/app/services/sqlite_repository.py:13016",
       "backend/tests/test_query_refine.py:109",
       "backend/tests/test_query_refine.py:114",
-      "backend/tests/test_query_refine.py:99",
-      "backend/tests/test_reasoning_retrieval.py:304"
+      "backend/tests/test_query_refine.py:99"
     ],
     "kind": "private_wrapper",
     "owner": "RetrievalService",
@@ -3120,6 +3634,7 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_retrieval.py",
         "line": 267,
@@ -3144,10 +3659,14 @@
   "_remap_json_ids": {
     "consumers": [
       "backend/tests/test_architecture_module_boundaries.py:75",
-      "backend/tests/test_notebook_share_copy.py:81"
+      "backend/tests/test_notebook_share_copy.py:81",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "private_wrapper",
-    "owner": "QueryStore",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "NotebookSharingService",
     "patch_targets": [],
     "scope": "module",
     "signature": "(value, maps: 'dict')"
@@ -3238,36 +3757,42 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_architecture_hardening.py",
         "line": 55,
         "target": "_retrieve_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 126,
         "target": "_retrieve_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 307,
         "target": "_retrieve_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 525,
         "target": "_retrieve_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 201,
         "target": "_retrieve_chunks"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 234,
@@ -3292,6 +3817,7 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 381,
@@ -3311,6 +3837,7 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 337,
@@ -3333,12 +3860,14 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 125,
         "target": "_retrieve_chunks_multi"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 194,
@@ -3350,10 +3879,8 @@
   },
   "_retrieve_elements": {
     "consumers": [
-      "backend/app/services/retrieval_service.py:29",
       "backend/tests/test_indexed_only_principle.py:272",
       "backend/tests/test_indexed_only_principle.py:280",
-      "backend/tests/test_reasoning_retrieval.py:216",
       "backend/tests/test_retrieval_service.py:43"
     ],
     "kind": "private_wrapper",
@@ -3364,9 +3891,6 @@
   },
   "_retrieve_neighbors": {
     "consumers": [
-      "backend/app/services/retrieval_service.py:25",
-      "backend/tests/test_reasoning_retrieval.py:200",
-      "backend/tests/test_reasoning_retrieval.py:210",
       "backend/tests/test_report_engine.py:322",
       "backend/tests/test_retrieval_service.py:41"
     ],
@@ -3374,6 +3898,7 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "eng.repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 322,
@@ -3412,7 +3937,6 @@
   "_retrieve_scored": {
     "consumers": [
       "backend/app/eval/retrieval_metrics.py:55",
-      "backend/app/services/retrieval_service.py:21",
       "backend/app/services/sqlite_repository.py:10937",
       "backend/tests/test_ask_redesign.py:76",
       "backend/tests/test_ask_stage_events.py:60",
@@ -3433,17 +3957,9 @@
       "backend/tests/test_kg_quality.py:63",
       "backend/tests/test_kg_repository.py:312",
       "backend/tests/test_kg_repository.py:337",
-      "backend/tests/test_reasoning_ask.py:98",
       "backend/tests/test_reasoning_ppr.py:188",
       "backend/tests/test_reasoning_ppr.py:201",
       "backend/tests/test_reasoning_ppr.py:219",
-      "backend/tests/test_reasoning_retrieval.py:1044",
-      "backend/tests/test_reasoning_retrieval.py:185",
-      "backend/tests/test_reasoning_retrieval.py:192",
-      "backend/tests/test_reasoning_retrieval.py:198",
-      "backend/tests/test_reasoning_retrieval.py:208",
-      "backend/tests/test_reasoning_retrieval.py:476",
-      "backend/tests/test_reasoning_retrieval.py:612",
       "backend/tests/test_retrieval.py:81",
       "backend/tests/test_retrieval_service.py:32",
       "backend/tests/test_retrieval_service.py:39",
@@ -3456,6 +3972,7 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_graph_k_binding.py",
         "line": 130,
@@ -3478,8 +3995,7 @@
   "_rewrite_llm_client": {
     "consumers": [
       "backend/app/services/sqlite_repository.py:297",
-      "backend/app/services/sqlite_repository.py:405",
-      "backend/tests/test_followup_retrieval_grounding.py:197"
+      "backend/app/services/sqlite_repository.py:405"
     ],
     "kind": "instance_attribute",
     "owner": "QueryStore",
@@ -3502,12 +4018,14 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_bm25_rrf.py",
         "line": 135,
         "target": "_rrf_scored"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_bm25_rrf.py",
         "line": 150,
@@ -3562,78 +4080,91 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "SQLiteRepository",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 219,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 246,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 285,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 308,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 460,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 487,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_embed.py",
         "line": 99,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_relink_repository.py",
         "line": 188,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_repository.py",
         "line": 380,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_p4_kg_shrink.py",
         "line": 82,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_p4_kg_shrink.py",
         "line": 96,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_resolve_notebook_conflicts.py",
         "line": 309,
         "target": "_run_extraction"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_resolve_notebook_conflicts.py",
         "line": 331,
@@ -3929,12 +4460,14 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_communities.py",
         "line": 195,
         "target": "_scale_index"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_communities.py",
         "line": 206,
@@ -4080,6 +4613,7 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_xlayer_bridge_delta.py",
         "line": 248,
@@ -4142,18 +4676,21 @@
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 247,
         "target": "_set_source_status"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 286,
         "target": "_set_source_status"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 309,
@@ -4213,6 +4750,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "SQLiteRepository",
         "compatibility": "test-only",
         "file": "backend/tests/test_source_reverse_index.py",
         "line": 167,
@@ -4251,6 +4789,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_llm_client.py",
         "line": 53,
@@ -4293,6 +4832,7 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_index_build_consolidation.py",
         "line": 30,
@@ -4317,6 +4857,7 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_cache.py",
         "line": 69,
@@ -4335,6 +4876,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_embed.py",
         "line": 100,
@@ -4433,8 +4975,6 @@
       "backend/tests/test_notebook_counts_batched.py:76",
       "backend/tests/test_trackF_governance_promotion.py:266",
       "backend/tests/test_trackF_governance_promotion.py:40",
-      "backend/tests/test_trackF_governance_promotion.py:403",
-      "backend/tests/test_trackF_governance_promotion.py:463",
       "backend/tests/test_trackF_governance_promotion.py:91",
       "backend/tests/test_unified_kg_repository.py:179",
       "backend/tests/test_unified_kg_repository.py:180"
@@ -4546,6 +5086,7 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_viz_bounded.py",
         "line": 118,
@@ -4736,36 +5277,42 @@
     "owner": "QueryStore",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_indexed_only_principle.py",
         "line": 235,
         "target": "_vector_matrix"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 239,
         "target": "_vector_matrix"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 372,
         "target": "_vector_matrix"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_scoring_cold_matrix_guard.py",
         "line": 69,
         "target": "_vector_matrix"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_xlayer_bridge_delta.py",
         "line": 188,
         "target": "_vector_matrix"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_xlayer_bridge_delta.py",
         "line": 221,
@@ -5208,6 +5755,8 @@
       "backend/tests/test_relation_ann.py:459",
       "backend/tests/test_relation_embed.py:83",
       "backend/tests/test_report_engine.py:465",
+      "backend/tests/test_repository_phase_contracts.py:104",
+      "backend/tests/test_repository_phase_contracts.py:113",
       "backend/tests/test_retrieval.py:31",
       "backend/tests/test_retrieval.py:66",
       "backend/tests/test_runtime_dim_bypasses.py:56",
@@ -5278,6 +5827,14 @@
     "owner": "SqliteDatabase",
     "patch_targets": [
       {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_repository_phase_contracts.py",
+        "line": 113,
+        "target": "_write"
+      },
+      {
+        "base": "embed_repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_sqlite_write_optimization.py",
         "line": 121,
@@ -5370,7 +5927,8 @@
       "backend/tests/test_ask_reconnect.py:47",
       "backend/tests/test_ask_reconnect.py:48",
       "backend/tests/test_ask_reconnect.py:64",
-      "backend/tests/test_ask_reconnect.py:79"
+      "backend/tests/test_ask_reconnect.py:79",
+      "backend/tests/test_repository_api_contract.py:180"
     ],
     "kind": "method",
     "owner": "AskService",
@@ -5438,7 +5996,7 @@
       "backend/tests/test_trackF_governance_promotion.py:568"
     ],
     "kind": "method",
-    "owner": "RetrievalService",
+    "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, candidate_id: 'str') -> 'dict'"
@@ -5476,26 +6034,8 @@
       "backend/tests/test_cross_tier_reasoning.py:502",
       "backend/tests/test_cross_tier_reasoning.py:513",
       "backend/tests/test_cross_tier_reasoning.py:541",
-      "backend/tests/test_followup_retrieval_grounding.py:159",
-      "backend/tests/test_followup_retrieval_grounding.py:167",
-      "backend/tests/test_followup_retrieval_grounding.py:168",
-      "backend/tests/test_followup_retrieval_grounding.py:171",
-      "backend/tests/test_followup_retrieval_grounding.py:178",
-      "backend/tests/test_followup_retrieval_grounding.py:186",
-      "backend/tests/test_followup_retrieval_grounding.py:188",
-      "backend/tests/test_followup_retrieval_grounding.py:199",
-      "backend/tests/test_followup_retrieval_grounding.py:200",
       "backend/tests/test_global_search.py:60",
       "backend/tests/test_graph_k_binding.py:137",
-      "backend/tests/test_reasoning_ask.py:107",
-      "backend/tests/test_reasoning_ask.py:123",
-      "backend/tests/test_reasoning_ask.py:137",
-      "backend/tests/test_reasoning_ask.py:52",
-      "backend/tests/test_reasoning_ask.py:62",
-      "backend/tests/test_reasoning_ask.py:75",
-      "backend/tests/test_reasoning_empty_answer.py:75",
-      "backend/tests/test_reasoning_empty_answer.py:86",
-      "backend/tests/test_reasoning_empty_answer.py:98",
       "backend/tests/test_reasoning_llm_config.py:108",
       "backend/tests/test_reasoning_ppr.py:237",
       "backend/tests/test_reasoning_ppr.py:249",
@@ -5515,6 +6055,7 @@
   "ask_chunk": {
     "consumers": [
       "ASK_MODES[*].handler",
+      "backend/tests/test_ask_modes.py:24",
       "backend/tests/test_chunk_concept_walk.py:116",
       "backend/tests/test_chunk_concept_walk.py:129",
       "backend/tests/test_chunk_retrieval.py:222",
@@ -5549,6 +6090,14 @@
     "owner": "AskService",
     "patch_targets": [
       {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_ask_modes.py",
+        "line": 24,
+        "target": "ask_chunk"
+      },
+      {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval.py",
         "line": 240,
@@ -5561,6 +6110,7 @@
   "ask_graph": {
     "consumers": [
       "ASK_MODES[*].handler",
+      "backend/tests/test_ask_modes.py:24",
       "backend/tests/test_graph_src_chunks.py:60",
       "backend/tests/test_graph_src_chunks.py:81",
       "backend/tests/test_ppr_fallback_guard.py:302",
@@ -5573,7 +6123,15 @@
     ],
     "kind": "method",
     "owner": "AskService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_ask_modes.py",
+        "line": 24,
+        "target": "ask_graph"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: \"'AskRequest'\", seed_ids: 'Optional[List[str]]' = None, cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
   },
@@ -5605,13 +6163,22 @@
   "ask_reasoning": {
     "consumers": [
       "ASK_MODES[*].handler",
+      "backend/tests/test_ask_modes.py:24",
       "backend/tests/test_p4_kg_shrink.py:177",
       "backend/tests/test_p4_kg_shrink.py:189",
       "backend/tests/test_ppr_retrieve.py:327"
     ],
     "kind": "method",
     "owner": "AskService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_ask_modes.py",
+        "line": 24,
+        "target": "ask_reasoning"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', on_trace=None, cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
   },
@@ -5667,7 +6234,8 @@
       "backend/tests/test_ask_jobs.py:86",
       "backend/tests/test_ask_jobs.py:94",
       "backend/tests/test_ask_reconnect.py:123",
-      "backend/tests/test_ask_reconnect.py:29"
+      "backend/tests/test_ask_reconnect.py:29",
+      "backend/tests/test_repository_api_contract.py:177"
     ],
     "kind": "method",
     "owner": "AskService",
@@ -5702,12 +6270,14 @@
     "owner": "NotebookCatalogService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 183,
         "target": "build_notebook_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 251,
@@ -5744,7 +6314,6 @@
       "backend/tests/test_indexed_only_principle.py:178",
       "backend/tests/test_indexed_only_principle.py:297",
       "backend/tests/test_indexed_only_principle.py:54",
-      "backend/tests/test_kg_search_api.py:238",
       "backend/tests/test_large_lib_index_required.py:68",
       "backend/tests/test_ppr_fallback_guard.py:196",
       "backend/tests/test_ppr_fallback_guard.py:230",
@@ -5808,12 +6377,14 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 586,
         "target": "build_scale_index"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_repo.py",
         "line": 872,
@@ -5924,7 +6495,6 @@
       "backend/tests/test_incremental_fusion.py:62",
       "backend/tests/test_incremental_fusion.py:81",
       "backend/tests/test_kg_quality.py:59",
-      "backend/tests/test_kg_search_api.py:241",
       "backend/tests/test_node_context.py:98",
       "backend/tests/test_rebuild_streaming.py:103",
       "backend/tests/test_rebuild_streaming.py:36",
@@ -5944,6 +6514,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_quality.py",
         "line": 59,
@@ -6256,7 +6827,6 @@
       "backend/tests/test_kg_repository.py:55",
       "backend/tests/test_kg_repository.py:77",
       "backend/tests/test_kg_search_api.py:111",
-      "backend/tests/test_kg_search_api.py:219",
       "backend/tests/test_kg_search_api.py:49",
       "backend/tests/test_kg_search_api.py:63",
       "backend/tests/test_kg_search_api.py:79",
@@ -6433,6 +7003,7 @@
       "backend/tests/test_relation_scoring_cold_matrix_guard.py:138",
       "backend/tests/test_relation_scoring_cold_matrix_guard.py:39",
       "backend/tests/test_report_engine.py:52",
+      "backend/tests/test_repository_phase_contracts.py:117",
       "backend/tests/test_resolve_notebook_conflicts.py:142",
       "backend/tests/test_resolve_notebook_conflicts.py:368",
       "backend/tests/test_resolve_notebook_conflicts.py:403",
@@ -6636,7 +7207,8 @@
       "backend/tests/test_report_engine.py:546",
       "backend/tests/test_report_engine.py:564",
       "backend/tests/test_report_engine.py:57",
-      "backend/tests/test_report_engine.py:578"
+      "backend/tests/test_report_engine.py:578",
+      "backend/tests/test_repository_api_contract.py:191"
     ],
     "kind": "method",
     "owner": "ReportEngine",
@@ -6731,8 +7303,6 @@
   },
   "db_path": {
     "consumers": [
-      "backend/app/eval/db.py:20",
-      "backend/app/eval/db.py:23",
       "backend/app/services/sqlite_repository.py:279",
       "backend/app/services/sqlite_repository.py:335",
       "backend/app/services/sqlite_repository.py:475",
@@ -6803,6 +7373,7 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_building_flag.py",
         "line": 67,
@@ -7009,6 +7580,7 @@
       "backend/tests/test_relation_retrieval.py:21",
       "backend/tests/test_relation_retrieval.py:35",
       "backend/tests/test_relation_scoring_cold_matrix_guard.py:34",
+      "backend/tests/test_repository_phase_contracts.py:99",
       "backend/tests/test_resolve_notebook_conflicts.py:78",
       "backend/tests/test_retrieval.py:17",
       "backend/tests/test_retrieval.py:38",
@@ -7167,7 +7739,6 @@
       "backend/tests/test_community_peers.py:207",
       "backend/tests/test_community_peers.py:213",
       "backend/tests/test_community_peers.py:227",
-      "backend/tests/test_community_peers.py:41",
       "backend/tests/test_event_logging.py:111",
       "backend/tests/test_incremental_fusion.py:416",
       "backend/tests/test_incremental_fusion.py:417",
@@ -7226,6 +7797,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 537,
@@ -7237,15 +7809,13 @@
   },
   "federated_retrieve": {
     "consumers": [
-      "backend/app/services/reasoning_retrieval.py:129",
       "backend/app/services/report_engine.py:105",
       "backend/app/services/report_engine.py:128",
-      "backend/app/services/retrieval_service.py:45",
       "backend/app/services/sqlite_repository.py:10349",
       "backend/app/services/sqlite_repository.py:12045",
       "backend/app/services/sqlite_repository.py:12084",
       "backend/app/services/sqlite_repository.py:12770",
-      "backend/tests/test_p4_kg_shrink.py:238",
+      "backend/tests/test_overlay_guard_order.py:63",
       "backend/tests/test_ppr_retrieve.py:261",
       "backend/tests/test_report_engine.py:155",
       "backend/tests/test_report_engine.py:182",
@@ -7253,7 +7823,6 @@
       "backend/tests/test_report_engine.py:511",
       "backend/tests/test_report_engine.py:544",
       "backend/tests/test_report_engine.py:562",
-      "backend/tests/test_retrieval_service.py:49",
       "backend/tests/test_retrieval_service.py:50",
       "backend/tests/test_trackF_governance_promotion.py:522",
       "backend/tests/test_trackF_governance_promotion.py:569",
@@ -7264,43 +7833,55 @@
       "backend/tests/test_two_tier_federated.py:258",
       "backend/tests/test_two_tier_federated.py:98",
       "scripts/diag_base_report.py:130",
-      "scripts/diag_base_report.py:157",
-      "scripts/replay_retrieval.py:68"
+      "scripts/diag_base_report.py:157"
     ],
     "kind": "method",
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_overlay_guard_order.py",
+        "line": 63,
+        "target": "federated_retrieve"
+      },
+      {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 155,
         "target": "federated_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 182,
         "target": "federated_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 476,
         "target": "federated_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 511,
         "target": "federated_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 544,
         "target": "federated_retrieve"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 562,
@@ -7314,12 +7895,21 @@
     "consumers": [
       "backend/app/services/sqlite_repository.py:12039",
       "backend/app/services/sqlite_repository.py:12085",
+      "backend/tests/test_overlay_guard_order.py:63",
       "backend/tests/test_relation_retrieval.py:318",
       "backend/tests/test_relation_retrieval.py:98"
     ],
     "kind": "method",
     "owner": "RetrievalService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "file": "backend/tests/test_overlay_guard_order.py",
+        "line": 63,
+        "target": "federated_retrieve_relations"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, active_notebook_id: 'str', query: 'str') -> \"List['RetrievedRelation']\""
   },
@@ -7362,7 +7952,8 @@
       "backend/tests/test_ask_jobs.py:83",
       "backend/tests/test_ask_jobs.py:87",
       "backend/tests/test_ask_reconnect.py:113",
-      "backend/tests/test_ask_reconnect.py:136"
+      "backend/tests/test_ask_reconnect.py:136",
+      "backend/tests/test_repository_api_contract.py:189"
     ],
     "kind": "method",
     "owner": "AskService",
@@ -7383,6 +7974,7 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_repo.py",
         "line": 871,
@@ -7443,7 +8035,6 @@
       "backend/tests/test_conversations.py:222",
       "backend/tests/test_conversations.py:55",
       "backend/tests/test_conversations.py:98",
-      "backend/tests/test_reasoning_ask.py:138",
       "scripts/smoke_backend.py:499",
       "scripts/smoke_backend.py:502",
       "scripts/smoke_backend.py:512"
@@ -7599,6 +8190,7 @@
     "owner": "ReportEngine",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_report_engine.py",
         "line": 598,
@@ -7762,7 +8354,6 @@
       "backend/app/api/routes.py:1174",
       "backend/tests/test_canonical_relations.py:149",
       "backend/tests/test_canonical_relations.py:158",
-      "backend/tests/test_kg_search_api.py:260",
       "backend/tests/test_viz_bounded.py:88",
       "backend/tests/test_viz_index_wire.py:63"
     ],
@@ -7779,7 +8370,6 @@
       "backend/tests/test_kg_search_api.py:107",
       "backend/tests/test_kg_search_api.py:119",
       "backend/tests/test_kg_search_api.py:123",
-      "backend/tests/test_kg_search_api.py:249",
       "backend/tests/test_kg_search_api.py:56",
       "backend/tests/test_kg_search_api.py:68",
       "backend/tests/test_kg_search_api.py:84",
@@ -8112,12 +8702,6 @@
       "backend/tests/test_empty_synth_guard.py:109",
       "backend/tests/test_empty_synth_guard.py:119",
       "backend/tests/test_followup_retrieval_grounding.py:144",
-      "backend/tests/test_followup_retrieval_grounding.py:160",
-      "backend/tests/test_followup_retrieval_grounding.py:170",
-      "backend/tests/test_followup_retrieval_grounding.py:187",
-      "backend/tests/test_followup_retrieval_grounding.py:190",
-      "backend/tests/test_followup_retrieval_grounding.py:191",
-      "backend/tests/test_followup_retrieval_grounding.py:203",
       "backend/tests/test_global_search.py:46",
       "backend/tests/test_global_search.py:58",
       "backend/tests/test_graph_k_binding.py:131",
@@ -8161,15 +8745,6 @@
       "backend/tests/test_query_refine.py:85",
       "backend/tests/test_query_refine.py:89",
       "backend/tests/test_query_refine.py:90",
-      "backend/tests/test_reasoning_ask.py:101",
-      "backend/tests/test_reasoning_ask.py:117",
-      "backend/tests/test_reasoning_ask.py:133",
-      "backend/tests/test_reasoning_ask.py:48",
-      "backend/tests/test_reasoning_ask.py:60",
-      "backend/tests/test_reasoning_ask.py:72",
-      "backend/tests/test_reasoning_empty_answer.py:74",
-      "backend/tests/test_reasoning_empty_answer.py:85",
-      "backend/tests/test_reasoning_empty_answer.py:97",
       "backend/tests/test_reasoning_llm_config.py:106",
       "backend/tests/test_reasoning_llm_config.py:136",
       "backend/tests/test_reasoning_llm_config.py:46",
@@ -8177,35 +8752,7 @@
       "backend/tests/test_reasoning_llm_config.py:66",
       "backend/tests/test_reasoning_ppr.py:235",
       "backend/tests/test_reasoning_ppr.py:247",
-      "backend/tests/test_reasoning_retrieval.py:1006",
-      "backend/tests/test_reasoning_retrieval.py:1021",
-      "backend/tests/test_reasoning_retrieval.py:1046",
-      "backend/tests/test_reasoning_retrieval.py:1086",
-      "backend/tests/test_reasoning_retrieval.py:1136",
-      "backend/tests/test_reasoning_retrieval.py:1199",
-      "backend/tests/test_reasoning_retrieval.py:1221",
-      "backend/tests/test_reasoning_retrieval.py:1233",
-      "backend/tests/test_reasoning_retrieval.py:1256",
       "backend/tests/test_reasoning_retrieval.py:248",
-      "backend/tests/test_reasoning_retrieval.py:288",
-      "backend/tests/test_reasoning_retrieval.py:315",
-      "backend/tests/test_reasoning_retrieval.py:329",
-      "backend/tests/test_reasoning_retrieval.py:462",
-      "backend/tests/test_reasoning_retrieval.py:478",
-      "backend/tests/test_reasoning_retrieval.py:494",
-      "backend/tests/test_reasoning_retrieval.py:532",
-      "backend/tests/test_reasoning_retrieval.py:578",
-      "backend/tests/test_reasoning_retrieval.py:616",
-      "backend/tests/test_reasoning_retrieval.py:630",
-      "backend/tests/test_reasoning_retrieval.py:672",
-      "backend/tests/test_reasoning_retrieval.py:702",
-      "backend/tests/test_reasoning_retrieval.py:739",
-      "backend/tests/test_reasoning_retrieval.py:765",
-      "backend/tests/test_reasoning_retrieval.py:802",
-      "backend/tests/test_reasoning_retrieval.py:829",
-      "backend/tests/test_reasoning_retrieval.py:858",
-      "backend/tests/test_reasoning_retrieval.py:889",
-      "backend/tests/test_reasoning_retrieval.py:989",
       "backend/tests/test_rebuild_desc_cache.py:118",
       "backend/tests/test_rebuild_desc_cache.py:145",
       "backend/tests/test_rebuild_desc_cache.py:167",
@@ -8247,42 +8794,49 @@
     "owner": "ModelProvider",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 282,
         "target": "llm_client"
       },
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 300,
         "target": "llm_client"
       },
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 456,
         "target": "llm_client"
       },
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 484,
         "target": "llm_client"
       },
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 514,
         "target": "llm_client"
       },
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_kg_relink_repository.py",
         "line": 187,
         "target": "llm_client"
       },
       {
+        "base": "repo",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_runtime_dim_bypasses.py",
         "line": 237,
@@ -8321,7 +8875,6 @@
       "backend/tests/test_scale_index_repo.py:98",
       "backend/tests/test_scale_xlayer_bridge_delta.py:61",
       "backend/tests/test_trackF_governance_promotion.py:34",
-      "backend/tests/test_trackF_governance_promotion.py:409",
       "backend/tests/test_two_tier_federated.py:171",
       "backend/tests/test_two_tier_federated.py:32",
       "backend/tests/test_two_tier_federated.py:40",
@@ -8429,8 +8982,6 @@
   "node_context": {
     "consumers": [
       "backend/app/api/routes.py:1161",
-      "backend/app/services/reasoning_retrieval.py:152",
-      "backend/app/services/retrieval_service.py:41",
       "backend/app/services/sqlite_repository.py:12311",
       "backend/tests/test_answer_context_budget.py:30",
       "backend/tests/test_answer_context_budget.py:45",
@@ -8447,12 +8998,14 @@
     "owner": "RetrievalService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_answer_context_budget.py",
         "line": 30,
         "target": "node_context"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_answer_context_budget.py",
         "line": 45,
@@ -8521,102 +9074,119 @@
     "owner": "NotebookSharingService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_architecture_hardening.py",
         "line": 102,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 242,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_retrieval_characterization.py",
         "line": 326,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_overlay_guard_order.py",
         "line": 71,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_overlay_guard_order.py",
         "line": 93,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 109,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 136,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 296,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 334,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_communities.py",
         "line": 194,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_communities.py",
         "line": 205,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_ann.py",
         "line": 382,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_ann.py",
         "line": 412,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_scoring_cold_matrix_guard.py",
         "line": 78,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_scoring_cold_matrix_guard.py",
         "line": 98,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_scoring_cold_matrix_guard.py",
         "line": 122,
         "target": "notebook_copy_stats"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_relation_scoring_cold_matrix_guard.py",
         "line": 139,
@@ -8640,12 +9210,17 @@
   },
   "parse_source_file": {
     "consumers": [
-      "backend/tests/test_chunk_embed.py:94"
+      "backend/tests/test_chunk_embed.py:94",
+      "compatibility:app.services.sqlite_repository"
     ],
     "kind": "method",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "mod",
         "compatibility": "test-only",
         "file": "backend/tests/test_chunk_embed.py",
         "line": 94,
@@ -8720,6 +9295,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [
       {
+        "base": "repo.__class__",
         "compatibility": "test-only",
         "file": "backend/tests/test_merge_review_job.py",
         "line": 95,
@@ -8739,6 +9315,7 @@
       "backend/app/services/sqlite_repository.py:2792",
       "backend/tests/test_chunk_embed.py:107",
       "backend/tests/test_pipeline_concurrency.py:76",
+      "backend/tests/test_repository_api_contract.py:120",
       "backend/tests/test_url_sources.py:128",
       "backend/tests/test_url_sources.py:143",
       "backend/tests/test_url_sources.py:93",
@@ -8818,17 +9395,13 @@
       "backend/app/services/sqlite_repository.py:12652",
       "backend/app/services/sqlite_repository.py:12922",
       "backend/app/services/sqlite_repository.py:12925",
-      "backend/tests/test_quota_reuse.py:125",
-      "backend/tests/test_quota_reuse.py:58",
       "backend/tests/test_reasoning_llm_config.py:136",
       "backend/tests/test_reasoning_llm_config.py:46",
       "backend/tests/test_reasoning_llm_config.py:54",
       "backend/tests/test_reasoning_llm_config.py:66",
       "backend/tests/test_reasoning_llm_config.py:67",
       "backend/tests/test_reasoning_llm_config.py:68",
-      "backend/tests/test_reasoning_llm_config.py:69",
-      "backend/tests/test_reasoning_ppr.py:97",
-      "backend/tests/test_reasoning_ppr_prefetch.py:50"
+      "backend/tests/test_reasoning_llm_config.py:69"
     ],
     "kind": "property",
     "owner": "ModelProvider",
@@ -8883,12 +9456,14 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_wires_communities.py",
         "line": 47,
         "target": "rebuild_communities"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_rebuild_wires_communities.py",
         "line": 60,
@@ -8969,7 +9544,6 @@
       "backend/tests/test_indexed_only_principle.py:177",
       "backend/tests/test_indexed_only_principle.py:296",
       "backend/tests/test_indexed_only_principle.py:53",
-      "backend/tests/test_kg_search_api.py:237",
       "backend/tests/test_kg_viz_index.py:37",
       "backend/tests/test_large_lib_index_required.py:67",
       "backend/tests/test_mention_bridge.py:79",
@@ -9097,48 +9671,56 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 184,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "SQLiteRepository",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 220,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 252,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 462,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 488,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 500,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 539,
         "target": "rebuild_unified_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_scale_index_repo.py",
         "line": 231,
@@ -9231,12 +9813,14 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 288,
         "target": "relink_notebook_kg"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_batch_ingest.py",
         "line": 311,
@@ -9293,6 +9877,31 @@
     "scope": "facade",
     "signature": "(self)"
   },
+  "reset_request_user": {
+    "consumers": [
+      "backend/app/api/deps.py:11",
+      "backend/app/services/batch_ingest.py:27",
+      "backend/tests/test_architecture_module_boundaries.py:60",
+      "backend/tests/test_ask_requires_model_config.py:2",
+      "backend/tests/test_event_logging.py:101",
+      "backend/tests/test_event_logging.py:67",
+      "backend/tests/test_notebook_owner_scope.py:2",
+      "backend/tests/test_notebook_share_readonly.py:206",
+      "backend/tests/test_request_user_ctx.py:2",
+      "backend/tests/test_user_llm_client_resolve.py:3",
+      "backend/tests/test_user_rerank_resolve.py:2",
+      "compatibility:app.services.sqlite_repository",
+      "scripts/replay_retrieval.py:39"
+    ],
+    "kind": "method",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "RequestContext",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "(token) -> 'None'"
+  },
   "resolve_model_config": {
     "consumers": [
       "backend/app/api/routes.py:152",
@@ -9330,12 +9939,14 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_resolve_notebook_conflicts.py",
         "line": 303,
         "target": "resolve_notebook_conflicts"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_resolve_notebook_conflicts.py",
         "line": 326,
@@ -9370,11 +9981,8 @@
       "backend/app/services/reasoning_retrieval.py:753",
       "backend/tests/test_follow_chain_repository.py:66",
       "backend/tests/test_p4_kg_shrink.py:238",
-      "backend/tests/test_quota_reuse.py:124",
-      "backend/tests/test_quota_reuse.py:57",
       "backend/tests/test_quota_reuse.py:69",
       "backend/tests/test_reasoning_ppr_prefetch.py:143",
-      "backend/tests/test_reasoning_ppr_prefetch.py:49",
       "backend/tests/test_reasoning_ppr_prefetch.py:79",
       "backend/tests/test_reasoning_ppr_prefetch.py:80",
       "backend/tests/test_reasoning_ppr_prefetch.py:89",
@@ -9522,12 +10130,14 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_pending_actions.py",
         "line": 104,
         "target": "scale_index_status"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_pending_actions.py",
         "line": 116,
@@ -9566,18 +10176,21 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 108,
         "target": "scale_ppr"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 135,
         "target": "scale_ppr"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_ppr_fallback_guard.py",
         "line": 162,
@@ -9667,6 +10280,31 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'None'"
   },
+  "set_request_user": {
+    "consumers": [
+      "backend/app/api/deps.py:11",
+      "backend/app/services/batch_ingest.py:27",
+      "backend/tests/test_architecture_module_boundaries.py:59",
+      "backend/tests/test_ask_requires_model_config.py:2",
+      "backend/tests/test_event_logging.py:101",
+      "backend/tests/test_event_logging.py:67",
+      "backend/tests/test_notebook_owner_scope.py:2",
+      "backend/tests/test_notebook_share_readonly.py:206",
+      "backend/tests/test_request_user_ctx.py:2",
+      "backend/tests/test_user_llm_client_resolve.py:3",
+      "backend/tests/test_user_rerank_resolve.py:2",
+      "compatibility:app.services.sqlite_repository",
+      "scripts/replay_retrieval.py:39"
+    ],
+    "kind": "method",
+    "modules": [
+      "app.services.sqlite_repository"
+    ],
+    "owner": "RequestContext",
+    "patch_targets": [],
+    "scope": "module",
+    "signature": "(user: \"'UserProfile | None'\")"
+  },
   "set_user_model_settings": {
     "consumers": [
       "backend/app/api/routes.py:178",
@@ -9715,86 +10353,6 @@
       "backend/app/services/batch_ingest.py:972",
       "backend/app/services/batch_ingest.py:978",
       "backend/app/services/communities.py:89",
-      "backend/app/services/embedding_dashscope.py:13",
-      "backend/app/services/embedding_dashscope.py:21",
-      "backend/app/services/embedding_dashscope.py:22",
-      "backend/app/services/embedding_dashscope.py:23",
-      "backend/app/services/embedding_dashscope.py:29",
-      "backend/app/services/embedding_dashscope.py:30",
-      "backend/app/services/embedding_dashscope.py:44",
-      "backend/app/services/embedding_dashscope.py:45",
-      "backend/app/services/mineru_client.py:100",
-      "backend/app/services/mineru_client.py:101",
-      "backend/app/services/mineru_client.py:111",
-      "backend/app/services/mineru_client.py:119",
-      "backend/app/services/mineru_client.py:137",
-      "backend/app/services/mineru_client.py:138",
-      "backend/app/services/mineru_client.py:146",
-      "backend/app/services/mineru_client.py:147",
-      "backend/app/services/mineru_client.py:148",
-      "backend/app/services/mineru_client.py:149",
-      "backend/app/services/mineru_client.py:150",
-      "backend/app/services/mineru_client.py:151",
-      "backend/app/services/mineru_client.py:152",
-      "backend/app/services/mineru_client.py:36",
-      "backend/app/services/mineru_client.py:41",
-      "backend/app/services/mineru_client.py:45",
-      "backend/app/services/mineru_client.py:63",
-      "backend/app/services/mineru_client.py:65",
-      "backend/app/services/mineru_client.py:66",
-      "backend/app/services/mineru_client.py:73",
-      "backend/app/services/mineru_client.py:74",
-      "backend/app/services/mineru_client.py:76",
-      "backend/app/services/mineru_client.py:77",
-      "backend/app/services/mineru_client.py:79",
-      "backend/app/services/mineru_client.py:80",
-      "backend/app/services/mineru_client.py:86",
-      "backend/app/services/mineru_cloud_client.py:115",
-      "backend/app/services/mineru_cloud_client.py:124",
-      "backend/app/services/mineru_cloud_client.py:132",
-      "backend/app/services/mineru_cloud_client.py:27",
-      "backend/app/services/mineru_cloud_client.py:32",
-      "backend/app/services/mineru_cloud_client.py:60",
-      "backend/app/services/mineru_cloud_client.py:62",
-      "backend/app/services/mineru_cloud_client.py:63",
-      "backend/app/services/mineru_cloud_client.py:64",
-      "backend/app/services/mineru_cloud_client.py:77",
-      "backend/app/services/mineru_cloud_client.py:78",
-      "backend/app/services/reasoning_retrieval.py:120",
-      "backend/app/services/reasoning_retrieval.py:140",
-      "backend/app/services/reasoning_retrieval.py:141",
-      "backend/app/services/reasoning_retrieval.py:174",
-      "backend/app/services/reasoning_retrieval.py:175",
-      "backend/app/services/reasoning_retrieval.py:176",
-      "backend/app/services/reasoning_retrieval.py:192",
-      "backend/app/services/reasoning_retrieval.py:193",
-      "backend/app/services/reasoning_retrieval.py:248",
-      "backend/app/services/reasoning_retrieval.py:249",
-      "backend/app/services/reasoning_retrieval.py:313",
-      "backend/app/services/reasoning_retrieval.py:349",
-      "backend/app/services/reasoning_retrieval.py:350",
-      "backend/app/services/reasoning_retrieval.py:410",
-      "backend/app/services/reasoning_retrieval.py:541",
-      "backend/app/services/reasoning_retrieval.py:544",
-      "backend/app/services/reasoning_retrieval.py:558",
-      "backend/app/services/reasoning_retrieval.py:692",
-      "backend/app/services/reasoning_retrieval.py:693",
-      "backend/app/services/reasoning_retrieval.py:733",
-      "backend/app/services/reasoning_retrieval.py:741",
-      "backend/app/services/reasoning_retrieval.py:745",
-      "backend/app/services/report_engine.py:162",
-      "backend/app/services/report_engine.py:167",
-      "backend/app/services/report_engine.py:217",
-      "backend/app/services/report_engine.py:224",
-      "backend/app/services/report_engine.py:255",
-      "backend/app/services/report_engine.py:275",
-      "backend/app/services/report_engine.py:342",
-      "backend/app/services/report_engine.py:52",
-      "backend/app/services/report_engine.py:62",
-      "backend/app/services/report_engine.py:67",
-      "backend/app/services/rerank_client.py:18",
-      "backend/app/services/rerank_client.py:51",
-      "backend/app/services/rerank_client.py:77",
       "backend/app/services/sqlite_identity.py:119",
       "backend/app/services/sqlite_identity.py:321",
       "backend/app/services/sqlite_notebook_sharing.py:104",
@@ -10178,11 +10736,8 @@
       "backend/tests/test_legacy_graph_guard.py:61",
       "backend/tests/test_legacy_graph_guard.py:69",
       "backend/tests/test_legacy_graph_guard.py:86",
-      "backend/tests/test_llm_cache.py:72",
-      "backend/tests/test_max_tokens.py:132",
       "backend/tests/test_max_tokens.py:140",
       "backend/tests/test_max_tokens.py:141",
-      "backend/tests/test_max_tokens.py:159",
       "backend/tests/test_mention_bridge.py:108",
       "backend/tests/test_mention_bridge.py:109",
       "backend/tests/test_mention_bridge.py:117",
@@ -10244,69 +10799,7 @@
       "backend/tests/test_reasoning_ppr.py:246",
       "backend/tests/test_reasoning_ppr.py:258",
       "backend/tests/test_reasoning_ppr.py:68",
-      "backend/tests/test_reasoning_retrieval.py:1003",
-      "backend/tests/test_reasoning_retrieval.py:1009",
-      "backend/tests/test_reasoning_retrieval.py:1018",
-      "backend/tests/test_reasoning_retrieval.py:1024",
-      "backend/tests/test_reasoning_retrieval.py:1035",
-      "backend/tests/test_reasoning_retrieval.py:1050",
-      "backend/tests/test_reasoning_retrieval.py:1087",
-      "backend/tests/test_reasoning_retrieval.py:1137",
-      "backend/tests/test_reasoning_retrieval.py:1166",
-      "backend/tests/test_reasoning_retrieval.py:1200",
-      "backend/tests/test_reasoning_retrieval.py:1222",
-      "backend/tests/test_reasoning_retrieval.py:1239",
-      "backend/tests/test_reasoning_retrieval.py:1261",
-      "backend/tests/test_reasoning_retrieval.py:222",
       "backend/tests/test_reasoning_retrieval.py:249",
-      "backend/tests/test_reasoning_retrieval.py:285",
-      "backend/tests/test_reasoning_retrieval.py:286",
-      "backend/tests/test_reasoning_retrieval.py:299",
-      "backend/tests/test_reasoning_retrieval.py:300",
-      "backend/tests/test_reasoning_retrieval.py:301",
-      "backend/tests/test_reasoning_retrieval.py:312",
-      "backend/tests/test_reasoning_retrieval.py:313",
-      "backend/tests/test_reasoning_retrieval.py:316",
-      "backend/tests/test_reasoning_retrieval.py:319",
-      "backend/tests/test_reasoning_retrieval.py:320",
-      "backend/tests/test_reasoning_retrieval.py:325",
-      "backend/tests/test_reasoning_retrieval.py:326",
-      "backend/tests/test_reasoning_retrieval.py:330",
-      "backend/tests/test_reasoning_retrieval.py:349",
-      "backend/tests/test_reasoning_retrieval.py:465",
-      "backend/tests/test_reasoning_retrieval.py:484",
-      "backend/tests/test_reasoning_retrieval.py:492",
-      "backend/tests/test_reasoning_retrieval.py:507",
-      "backend/tests/test_reasoning_retrieval.py:531",
-      "backend/tests/test_reasoning_retrieval.py:541",
-      "backend/tests/test_reasoning_retrieval.py:579",
-      "backend/tests/test_reasoning_retrieval.py:614",
-      "backend/tests/test_reasoning_retrieval.py:620",
-      "backend/tests/test_reasoning_retrieval.py:634",
-      "backend/tests/test_reasoning_retrieval.py:673",
-      "backend/tests/test_reasoning_retrieval.py:715",
-      "backend/tests/test_reasoning_retrieval.py:752",
-      "backend/tests/test_reasoning_retrieval.py:775",
-      "backend/tests/test_reasoning_retrieval.py:796",
-      "backend/tests/test_reasoning_retrieval.py:797",
-      "backend/tests/test_reasoning_retrieval.py:805",
-      "backend/tests/test_reasoning_retrieval.py:817",
-      "backend/tests/test_reasoning_retrieval.py:818",
-      "backend/tests/test_reasoning_retrieval.py:819",
-      "backend/tests/test_reasoning_retrieval.py:832",
-      "backend/tests/test_reasoning_retrieval.py:844",
-      "backend/tests/test_reasoning_retrieval.py:845",
-      "backend/tests/test_reasoning_retrieval.py:859",
-      "backend/tests/test_reasoning_retrieval.py:869",
-      "backend/tests/test_reasoning_retrieval.py:890",
-      "backend/tests/test_reasoning_retrieval.py:914",
-      "backend/tests/test_reasoning_retrieval.py:932",
-      "backend/tests/test_reasoning_retrieval.py:949",
-      "backend/tests/test_reasoning_retrieval.py:963",
-      "backend/tests/test_reasoning_retrieval.py:977",
-      "backend/tests/test_reasoning_retrieval.py:978",
-      "backend/tests/test_reasoning_retrieval.py:981",
-      "backend/tests/test_reasoning_retrieval.py:992",
       "backend/tests/test_rebuild_communities.py:161",
       "backend/tests/test_rebuild_communities.py:170",
       "backend/tests/test_relation_ann.py:166",
@@ -10426,6 +10919,7 @@
       "backend/app/services/sqlite_repository.py:2951",
       "backend/app/services/sqlite_repository.py:3055",
       "backend/tests/test_kg_llm_client.py:52",
+      "backend/tests/test_repository_api_contract.py:121",
       "backend/tests/test_url_sources.py:132",
       "backend/tests/test_url_sources.py:96",
       "scripts/smoke_backend.py:1056",
@@ -10441,6 +10935,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_kg_llm_client.py",
         "line": 52,
@@ -10463,47 +10958,12 @@
   },
   "storage_dir": {
     "consumers": [
-      "backend/app/main.py:58",
       "backend/app/services/batch_ingest.py:988",
       "backend/app/services/sqlite_notebook_sharing.py:260",
       "backend/app/services/sqlite_notebook_sharing.py:261",
-      "backend/app/services/sqlite_repository.py:10022",
       "backend/app/services/sqlite_repository.py:2332",
       "backend/app/services/sqlite_repository.py:280",
-      "backend/app/services/sqlite_repository.py:336",
-      "backend/app/services/sqlite_repository.py:8373",
-      "backend/app/services/sqlite_repository.py:9049",
-      "backend/app/services/sqlite_repository.py:9188",
-      "backend/app/services/sqlite_repository.py:9312",
-      "backend/app/services/sqlite_repository.py:9350",
-      "backend/app/services/sqlite_repository.py:9368",
-      "backend/app/services/sqlite_repository.py:9800",
-      "backend/app/services/sqlite_repository.py:9841",
-      "backend/tests/test_architecture_hardening.py:29",
-      "backend/tests/test_env_aliases.py:18",
-      "backend/tests/test_index_build_consolidation.py:119",
-      "backend/tests/test_index_build_consolidation.py:129",
-      "backend/tests/test_relation_ann.py:166",
-      "backend/tests/test_relation_ann.py:189",
-      "backend/tests/test_runtime_dim_scale_index.py:130",
-      "backend/tests/test_runtime_dim_scale_index.py:67",
-      "backend/tests/test_runtime_dim_scale_index.py:84",
-      "backend/tests/test_scale_idx_disk_cache.py:227",
-      "backend/tests/test_scale_index_repo.py:31",
-      "backend/tests/test_scale_index_repo.py:462",
-      "backend/tests/test_scale_index_repo.py:521",
-      "backend/tests/test_scale_index_repo.py:55",
-      "backend/tests/test_scale_index_repo.py:580",
-      "backend/tests/test_scale_index_repo.py:639",
-      "backend/tests/test_scale_index_repo.py:885",
-      "backend/tests/test_settings_path_anchor.py:30",
-      "backend/tests/test_settings_path_anchor.py:31",
-      "backend/tests/test_settings_path_anchor.py:52",
-      "backend/tests/test_settings_path_anchor.py:54",
-      "backend/tests/test_settings_path_anchor.py:55",
-      "backend/tests/test_settings_path_anchor.py:66",
-      "backend/tests/test_settings_path_anchor.py:94",
-      "backend/tests/test_viz_index_build.py:59"
+      "backend/app/services/sqlite_repository.py:336"
     ],
     "kind": "instance_attribute",
     "owner": "QueryStore",
@@ -10579,8 +11039,6 @@
       "backend/tests/test_kg_repository.py:69",
       "backend/tests/test_kg_search_api.py:112",
       "backend/tests/test_kg_search_api.py:171",
-      "backend/tests/test_kg_search_api.py:222",
-      "backend/tests/test_kg_search_api.py:231",
       "backend/tests/test_kg_search_api.py:50",
       "backend/tests/test_kg_search_api.py:64",
       "backend/tests/test_kg_search_api.py:80",
@@ -10651,6 +11109,8 @@
       "backend/tests/test_relation_retrieval.py:84",
       "backend/tests/test_relation_retrieval.py:93",
       "backend/tests/test_relation_scoring_cold_matrix_guard.py:40",
+      "backend/tests/test_repository_api_contract.py:133",
+      "backend/tests/test_repository_phase_contracts.py:118",
       "backend/tests/test_resolve_notebook_conflicts.py:404",
       "backend/tests/test_resolve_notebook_conflicts.py:642",
       "backend/tests/test_resolve_notebook_conflicts.py:94",
@@ -10774,60 +11234,70 @@
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 55,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 67,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 81,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 86,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 99,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 118,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 132,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 144,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 162,
         "target": "trigger_scale_index_rebuild"
       },
       {
+        "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_auto_scale_index.py",
         "line": 193,
@@ -10967,7 +11437,8 @@
       "backend/tests/test_report_api.py:92",
       "backend/tests/test_report_engine.py:579",
       "backend/tests/test_report_engine.py:61",
-      "backend/tests/test_report_engine.py:62"
+      "backend/tests/test_report_engine.py:62",
+      "backend/tests/test_repository_api_contract.py:192"
     ],
     "kind": "method",
     "owner": "ReportEngine",
@@ -10980,6 +11451,7 @@
       "backend/app/api/routes.py:356",
       "backend/app/services/batch_ingest.py:229",
       "backend/app/services/batch_ingest.py:461",
+      "backend/tests/test_repository_api_contract.py:109",
       "scripts/smoke_backend.py:1008",
       "scripts/smoke_backend.py:1020",
       "scripts/smoke_backend.py:1180",

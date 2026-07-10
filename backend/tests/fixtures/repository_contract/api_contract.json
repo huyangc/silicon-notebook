@@ -7938,12 +7938,12 @@
     "ask_job_detail": {
       "answer_id": "ans-api",
       "conversation_id": "conv-api",
-      "created_by": "user-api",
+      "created_by": "user-local",
       "error": "",
       "job_id": "askjob-api",
       "mode": "reasoning",
       "notebook_id": "nb-api",
-      "question": "fixture gain",
+      "question": "trace fixture gain",
       "status": "done",
       "trace": [
         {
@@ -7955,6 +7955,34 @@
           "summary": "Retrieved one item"
         }
       ]
+    },
+    "ask_response": {
+      "anchors": [],
+      "answer": "",
+      "answer_id": "ans-api",
+      "citations": [
+        {
+          "element_id": "el-src-api-0002",
+          "label": "fixture.md · Gain",
+          "location_label": "Gain",
+          "quoted_span": "[Gain] Source degeneration stabilizes fixture gain.",
+          "source_id": "src-api",
+          "tier": "personal"
+        }
+      ],
+      "conclusion": "Retrieved 1 relevant passage(s) for this question.",
+      "conversation_id": "conv-api",
+      "evidence_level": "inferred",
+      "grounded": false,
+      "index_required": false,
+      "kg_required": false,
+      "llm_mode": "deterministic",
+      "mode": "chunk",
+      "model_errors": [],
+      "reasoning_trace": null,
+      "related_knowledge": [],
+      "retrieval_query": "fixture gain",
+      "top_relevance": 1.0
     },
     "conversation_detail": {
       "active_job": null,
@@ -7969,65 +7997,65 @@
           "question": "fixture gain",
           "response": {
             "anchors": [],
-            "answer": "Fixture conclusion [k1].",
+            "answer": "",
             "answer_id": "ans-api",
             "citations": [
               {
-                "element_id": "el-api",
-                "label": "Fixture amplifier notes · §1 Gain",
-                "location_label": "§1 Gain",
-                "quoted_span": "Fixture evidence.",
+                "element_id": "el-src-api-0002",
+                "label": "fixture.md · Gain",
+                "location_label": "Gain",
+                "quoted_span": "[Gain] Source degeneration stabilizes fixture gain.",
                 "source_id": "src-api",
                 "tier": "personal"
               }
             ],
-            "conclusion": "Fixture conclusion.",
+            "conclusion": "Retrieved 1 relevant passage(s) for this question.",
             "conversation_id": "conv-api",
-            "evidence_level": "grounded",
-            "grounded": true,
+            "evidence_level": "inferred",
+            "grounded": false,
             "index_required": false,
             "kg_required": false,
-            "llm_mode": "grounded",
-            "mode": "reasoning",
+            "llm_mode": "deterministic",
+            "mode": "chunk",
             "model_errors": [],
-            "reasoning_trace": [
-              {
-                "detail": {
-                  "found": 1
-                },
-                "duration_ms": 2,
-                "step_type": "retrieve",
-                "summary": "Retrieved one item"
-              }
-            ],
+            "reasoning_trace": null,
             "related_knowledge": [],
             "retrieval_query": "fixture gain",
-            "top_relevance": 0.9
+            "top_relevance": 1.0
           }
         }
       ],
       "updated_at": "2024-01-02T03:04:05",
-      "used_reasoning": true
+      "used_reasoning": false
     },
     "errors": {
       "graph_too_large_413": {
-        "detail": "Knowledge graph too large; use /unified-kg"
+        "body": {
+          "detail": "notebook nb-api has 2 objects (> 1); the legacy /graph endpoint has no bounded fallback for large notebooks — use /notebooks/{id}/unified-kg instead (bounded/paginated)."
+        },
+        "status_code": 413
       },
       "http_404": {
-        "detail": "Notebook not found"
+        "body": {
+          "detail": "Notebook not found"
+        },
+        "status_code": 404
       },
       "validation_422": {
-        "detail": [
-          {
-            "input": {},
-            "loc": [
-              "body",
-              "question"
-            ],
-            "msg": "Field required",
-            "type": "missing"
-          }
-        ]
+        "body": {
+          "detail": [
+            {
+              "input": {},
+              "loc": [
+                "body",
+                "question"
+              ],
+              "msg": "Field required",
+              "type": "missing"
+            }
+          ]
+        },
+        "status_code": 422
       }
     },
     "knowledge_page": {
@@ -8036,24 +8064,24 @@
           "evidence": [
             {
               "confidence": 0.98,
-              "element_id": "el-fixture-0001",
-              "element_type": "paragraph",
-              "location_label": "§1 Gain",
-              "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
-              "source_id": "src-fixture",
-              "source_title": "Fixture amplifier notes"
+              "element_id": "el-api",
+              "element_type": "heading",
+              "location_label": "Markdown heading 1",
+              "quoted_span": "Gain",
+              "source_id": "src-api",
+              "source_title": "fixture.md"
             }
           ],
           "fields": [
             {
-              "key": "definition",
-              "value": "Local feedback"
+              "key": "name",
+              "value": "Source degeneration stabilizes gain"
             }
           ],
-          "headline": "source degeneration",
-          "id": "ko-api",
+          "headline": "Source degeneration stabilizes gain",
+          "id": "ko-api-1",
           "last_reviewed": "",
-          "object_type": "concept",
+          "object_type": "claim",
           "owner": "",
           "status": "approved"
         }
@@ -8068,22 +8096,26 @@
       "base_kg_available": false,
       "base_notebook_name": "",
       "counts": {
-        "claims": 1,
-        "concepts": 1,
+        "cases": 0,
+        "checklist_items": 0,
+        "glossary": 0,
+        "methods": 0,
+        "risks": 0,
+        "rules": 0,
         "sources": 1
       },
-      "created_label": "",
+      "created_label": "fixture-date",
       "expected_questions": [],
       "id": "nb-api",
       "kg_building": false,
       "kg_pending_sources": 0,
-      "kg_ready": false,
+      "kg_ready": true,
       "name": "API fixture",
-      "primary_domain": "Analog IC",
+      "primary_domain": "Semiconductor",
       "purpose": "Freeze serialization",
       "shared_from": "",
       "source_types": [],
-      "status": "active",
+      "status": "draft",
       "target_users": "",
       "taxonomy": [],
       "tier": "personal"
@@ -8091,7 +8123,7 @@
     "report": {
       "content_md": "",
       "created_at": "2024-01-02T03:04:05",
-      "created_by": "user-api",
+      "created_by": "user-local",
       "depth": 2,
       "error": "",
       "gaps": [],
@@ -8107,7 +8139,7 @@
       "references": [
         {
           "source_id": "src-api",
-          "title": "Fixture source"
+          "title": "fixture.md"
         }
       ],
       "section_count": 1,
@@ -8127,9 +8159,9 @@
         "mode": "copy",
         "name": "API fixture",
         "node_count": 2,
-        "owner_display": "a00123456",
+        "owner_display": "admin",
         "size": {
-          "bytes": 64,
+          "bytes": 52,
           "chunks": 1,
           "edges": 1,
           "nodes": 2,
@@ -8137,14 +8169,14 @@
         },
         "source_count": 1,
         "source_titles": [
-          "Fixture source"
+          "fixture.md"
         ]
       },
       "share": {
         "copyable": true,
         "share_token": "shr-api",
         "size": {
-          "bytes": 64,
+          "bytes": 52,
           "chunks": 1,
           "edges": 1,
           "nodes": 2,
@@ -8158,7 +8190,7 @@
         "name": "API fixture",
         "share_token": "shr-api",
         "size": {
-          "bytes": 64,
+          "bytes": 52,
           "chunks": 1,
           "edges": 1,
           "nodes": 2,
@@ -8167,23 +8199,23 @@
       }
     },
     "source_detail": {
-      "created_label": "",
+      "created_label": "fixture-date",
       "doc_type": "",
-      "element_count": 1,
+      "element_count": 2,
       "error_message": "",
       "extraction_warning": null,
-      "file_hash": "abc123",
+      "file_hash": "78327191a16b70354437a241959e4c54a6a096c36800c012ad6342f6befc7eac",
       "file_name": "fixture.md",
-      "file_path": "/fixture/storage/fixture.md",
-      "file_size": 64,
+      "file_path": "<fixture-root>/storage/notebooks/nb-api/src-api_fixture.md",
+      "file_size": 52,
       "id": "src-api",
-      "kg_extracted": false,
+      "kg_extracted": true,
       "notebook_id": "nb-api",
-      "parse_status": "parsed",
+      "parse_status": "extracted",
       "source_url": "",
       "status": "extracted",
-      "summary": "Fixture summary",
-      "title": "Fixture source",
+      "summary": "2 parsed text element(s). Gain Source degeneration stabilizes fixture gain.",
+      "title": "fixture.md",
       "type": "markdown"
     }
   },

@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from collections import defaultdict
@@ -52,6 +53,37 @@ CONSUMER_ROOTS = (
     REPO_ROOT / "scripts",
     REPO_ROOT / "backend" / "tests",
 )
+
+# These exports are intentionally explicit: later refactor gates must preserve
+# both compatibility modules even when the implementation owners move.
+COMPATIBILITY_EXPORTS = {
+    "KnowledgeGraphTooLargeError": ("app.services.sqlite_repository", "KnowledgeLifecycleService"),
+    "NotebookRepository": ("app.services.repository", "RepositoryPorts"),
+    "RetrievedKnowledge": ("app.services.sqlite_repository", "RetrievalService"),
+    "SCHEMA_VERSION": ("app.services.sqlite_repository", "SqliteDatabase"),
+    "SQLiteRepository": ("app.services.sqlite_repository", "RepositoryFacade"),
+    "USABLE_STATUSES": ("app.services.sqlite_repository", "KnowledgeGovernanceService"),
+    "UploadedSourceFile": ("app.services.repository", "RepositoryPorts"),
+    "_ASK_MODEL_ERRORS": ("app.services.sqlite_repository", "ModelProvider"),
+    "_COPY_CHUNK": ("app.services.sqlite_repository", "NotebookSharingService"),
+    "_REQUEST_USER": ("app.services.sqlite_repository", "RequestContext"),
+    "_concept_desc_sig": ("app.services.sqlite_repository", "KnowledgeLifecycleService"),
+    "_fast_loads": ("app.services.sqlite_repository", "QueryStore"),
+    "_new_id": ("app.services.sqlite_repository", "QueryStore"),
+    "_now": ("app.services.sqlite_repository", "QueryStore"),
+    "_remap_json_ids": ("app.services.sqlite_repository", "NotebookSharingService"),
+    "KNOWLEDGE_STATUSES": ("app.services.sqlite_repository", "KnowledgeGovernanceService"),
+    "parse_source_file": ("app.services.sqlite_repository", "SourceIngestionService"),
+    "reset_request_user": ("app.services.sqlite_repository", "RequestContext"),
+    "set_request_user": ("app.services.sqlite_repository", "RequestContext"),
+}
+
+AMBIGUOUS_MEMBER_OWNERS = {
+    "approve_promotion": "KnowledgeGovernanceService",
+    "list_promotion_queue": "KnowledgeGovernanceService",
+    "propose_promotion": "KnowledgeGovernanceService",
+    "reject_promotion": "KnowledgeGovernanceService",
+}
 
 
 def _assert_baseline_sources(repo_root: Path) -> None:
@@ -142,6 +174,11 @@ def _literal_target(node: ast.AST) -> str:
 
 
 def _owner_for(name: str) -> str:
+    explicit_export = COMPATIBILITY_EXPORTS.get(name)
+    if explicit_export is not None:
+        return explicit_export[1]
+    if name in AMBIGUOUS_MEMBER_OWNERS:
+        return AMBIGUOUS_MEMBER_OWNERS[name]
     identity = {
         "current_user", "create_user", "authenticate_user", "create_session",
         "resolve_session", "delete_session", "get_user_model_settings",
@@ -225,6 +262,7 @@ def _patch_compatibility(name: str, kind: str) -> str:
 
 def collect_facade_surface() -> dict[str, dict[str, object]]:
     """Collect the consumer-visible facade and compatibility patch surface."""
+    from app.services import repository as repository_module
     from app.services import sqlite_repository as module
     from app.services.ask_modes import ASK_MODES
     from app.services.sqlite_repository import SQLiteRepository
@@ -232,7 +270,11 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
     class_members: dict[str, object] = {}
     for cls in reversed(SQLiteRepository.__mro__[:-1]):
         for name, value in cls.__dict__.items():
-            if isinstance(value, (property, staticmethod, classmethod)) or inspect.isfunction(value):
+            if (
+                isinstance(value, (property, staticmethod, classmethod))
+                or inspect.isfunction(value)
+                or not name.startswith("__")
+            ):
                 class_members[name] = value
 
     source_tree = ast.parse(
@@ -258,12 +300,11 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
         and node.target.value.id == "self"
     }
 
-    module_candidates = {
-        name
-        for name, value in vars(module).items()
-        if name in {"SCHEMA_VERSION", "USABLE_STATUSES", "KNOWLEDGE_STATUSES", "_COPY_CHUNK"}
-        or (name.startswith("_") and (inspect.isfunction(value) or inspect.isclass(value)))
+    compatibility_modules = {
+        "app.services.repository": repository_module,
+        "app.services.sqlite_repository": module,
     }
+    module_candidates = set(COMPATIBILITY_EXPORTS)
     candidate_names = set(class_members) | instance_attributes | module_candidates
     consumers: dict[str, set[str]] = defaultdict(set)
     patches: dict[str, list[dict[str, object]]] = defaultdict(list)
@@ -275,6 +316,7 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
         except (SyntaxError, UnicodeDecodeError):
             continue
         module_aliases = {"sqlite_repository"}
+        class_aliases = {"SQLiteRepository"}
         for import_node in ast.walk(tree):
             if isinstance(import_node, ast.Import):
                 for alias in import_node.names:
@@ -287,68 +329,213 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                 for alias in import_node.names:
                     if alias.name == "sqlite_repository":
                         module_aliases.add(alias.asname or alias.name)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in candidate_names:
-                consumers[node.attr].add(f"{relative}:{node.lineno}")
-            elif isinstance(node, (ast.ImportFrom,)) and (
-                node.module or ""
-            ).endswith("sqlite_repository"):
-                for alias in node.names:
-                    if alias.name in candidate_names:
-                        consumers[alias.name].add(f"{relative}:{node.lineno}")
-
-            if not isinstance(node, ast.Call):
-                continue
-            call_name = _dotted_name(node.func)
-            target_name = ""
-            target_base = ""
-            if call_name.endswith("monkeypatch.setattr") and len(node.args) >= 2:
-                target_name = _literal_target(node.args[1]) or _literal_target(node.args[0])
-                target_base = _dotted_name(node.args[0])
-            elif call_name.endswith("patch.object") and len(node.args) >= 2:
-                target_name = _literal_target(node.args[1])
-                target_base = _dotted_name(node.args[0])
-            if not target_name:
-                continue
-            module_target = target_base.split(".", 1)[0] in module_aliases
-            module_only = (
-                target_name in module_candidates
-                and target_name not in class_members
-                and target_name not in instance_attributes
-            )
-            if module_only and not module_target:
-                continue
-            if (
-                target_name not in candidate_names
-                and module_target
-                and hasattr(module, target_name)
+            elif (
+                isinstance(import_node, ast.ImportFrom)
+                and import_node.module == "app.services.sqlite_repository"
             ):
-                candidate_names.add(target_name)
-                module_candidates.add(target_name)
-            if target_name not in candidate_names:
+                for alias in import_node.names:
+                    if alias.name == "SQLiteRepository":
+                        class_aliases.add(alias.asname or alias.name)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module not in {
+                "app.services.repository",
+                "app.services.sqlite_repository",
+            }:
                 continue
-            consumers[target_name].add(f"{relative}:{node.lineno}")
-            value = class_members.get(target_name, getattr(module, target_name, None))
+            for alias in node.names:
+                export = COMPATIBILITY_EXPORTS.get(alias.name)
+                if export is not None and export[0] == node.module:
+                    consumers[alias.name].add(f"{relative}:{node.lineno}")
+
+        repo_base_pattern = re.compile(
+            r"(?:[A-Za-z_]\w*\.)?(?:repo|[A-Za-z_]\w*_repo)"
+        )
+        repo_variables = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+            if isinstance(target, ast.Name)
+            and isinstance(node.value, ast.Call)
+            and (
+                _dotted_name(node.value.func) in class_aliases
+                or _dotted_name(node.value.func).rsplit(".", 1)[-1]
+                == "repository"
+            )
+        }
+        facade_classes = {
+            "SQLiteRepository",
+            "SQLiteIdentityMixin",
+            "SQLiteNotebookSharingMixin",
+        }
+
+        class ConsumerVisitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.class_stack: list[str] = []
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.class_stack.append(node.name)
+                self.generic_visit(node)
+                self.class_stack.pop()
+
+            def visit_Attribute(self, node: ast.Attribute) -> None:
+                if node.attr not in candidate_names:
+                    self.generic_visit(node)
+                    return
+                base = _dotted_name(node.value)
+                module_target = base in module_aliases
+                facade_target = (
+                    bool(repo_base_pattern.fullmatch(base))
+                    or base in class_aliases
+                    or base in repo_variables
+                    or base.endswith("repo.__class__")
+                    or (
+                        isinstance(node.value, ast.Call)
+                        and _dotted_name(node.value.func).rsplit(".", 1)[-1]
+                        == "repository"
+                    )
+                    or (
+                        isinstance(node.value, ast.Name)
+                        and node.value.id == "self"
+                        and bool(self.class_stack)
+                        and self.class_stack[-1] in facade_classes
+                    )
+                )
+                if module_target and node.attr in module_candidates:
+                    consumers[node.attr].add(f"{relative}:{node.lineno}")
+                elif facade_target and (
+                    node.attr in class_members or node.attr in instance_attributes
+                ):
+                    consumers[node.attr].add(f"{relative}:{node.lineno}")
+                self.generic_visit(node)
+
+        ConsumerVisitor().visit(tree)
+
+        def add_patch(target_name: str, target_base: str, line: int) -> None:
+            module_target = target_base in module_aliases
+            facade_target = (
+                bool(repo_base_pattern.fullmatch(target_base))
+                or target_base in class_aliases
+                or target_base.endswith("repo.__class__")
+            )
+            if module_target:
+                if target_name not in module_candidates:
+                    return
+            elif not facade_target or (
+                target_name not in class_members
+                and target_name not in instance_attributes
+            ):
+                return
+            consumers[target_name].add(f"{relative}:{line}")
+            export = COMPATIBILITY_EXPORTS.get(target_name)
+            exported_value = (
+                getattr(compatibility_modules[export[0]], target_name)
+                if export is not None
+                else None
+            )
+            value = class_members.get(target_name, exported_value)
+            raw_value = (
+                value.__func__
+                if isinstance(value, (staticmethod, classmethod))
+                else value
+            )
             patch_kind = (
                 "mutable_property"
                 if isinstance(value, property) and value.fset is not None
                 else "constant"
-                if not callable(value)
+                if not callable(raw_value)
                 else "private_wrapper"
                 if target_name.startswith("_")
                 else "method"
             )
             patches[target_name].append(
                 {
+                    "base": target_base,
                     "file": relative,
-                    "line": node.lineno,
+                    "line": line,
                     "target": target_name,
                     "compatibility": _patch_compatibility(target_name, patch_kind),
                 }
             )
 
+        helper_targets: dict[str, tuple[int, int, str]] = {}
+        for function in (
+            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        ):
+            params = [arg.arg for arg in function.args.args]
+            for call in (
+                node for node in ast.walk(function) if isinstance(node, ast.Call)
+            ):
+                if not _dotted_name(call.func).endswith(
+                    ("monkeypatch.setattr", "patch.object")
+                ):
+                    continue
+                if len(call.args) < 2 or not isinstance(call.args[1], ast.Name):
+                    continue
+                if call.args[1].id not in params:
+                    continue
+                target_base = _dotted_name(call.args[0])
+                if not repo_base_pattern.fullmatch(target_base):
+                    continue
+                helper_targets[function.name] = (
+                    params.index(call.args[1].id),
+                    call.lineno,
+                    target_base,
+                )
+
+        helper_values: dict[str, set[str]] = {
+            name: set() for name in helper_targets
+        }
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            helper = helper_targets.get(_dotted_name(call.func))
+            if helper is None:
+                continue
+            target_index, _line, _base = helper
+            if target_index >= len(call.args):
+                continue
+            target = _literal_target(call.args[target_index])
+            if target:
+                helper_values[_dotted_name(call.func)].add(target)
+        for helper_name, values in helper_values.items():
+            _index, line, target_base = helper_targets[helper_name]
+            for target in values:
+                add_patch(target, target_base, line)
+
+        def visit(node: ast.AST, loop_values: dict[str, tuple[str, ...]]) -> None:
+            local_values = loop_values
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+                values = tuple(
+                    item.value
+                    for item in getattr(node.iter, "elts", ())
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                )
+                if values:
+                    local_values = {**loop_values, node.target.id: values}
+            if isinstance(node, ast.Call) and len(node.args) >= 2:
+                call_name = _dotted_name(node.func)
+                if call_name.endswith(("monkeypatch.setattr", "patch.object")):
+                    target_base = _dotted_name(node.args[0])
+                    targets: tuple[str, ...] = ()
+                    target = _literal_target(node.args[1])
+                    if target:
+                        targets = (target,)
+                    elif isinstance(node.args[1], ast.Name):
+                        targets = local_values.get(node.args[1].id, ())
+                    for target_name in targets:
+                        add_patch(target_name, target_base, node.lineno)
+            for child in ast.iter_child_nodes(node):
+                visit(child, local_values)
+
+        visit(tree, {})
+
     for spec in ASK_MODES.values():
         consumers[spec.handler].add("ASK_MODES[*].handler")
+
+    for name, (module_name, _owner) in COMPATIBILITY_EXPORTS.items():
+        consumers[name].add(f"compatibility:{module_name}")
 
     surface: dict[str, dict[str, object]] = {}
     for name in sorted(candidate_names):
@@ -361,16 +548,28 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
             kind = "mutable_property" if value.fset is not None else "property"
             signature = str(inspect.signature(value.fget))
         elif value is not None:
-            raw = value.__func__ if isinstance(value, (staticmethod, classmethod)) else value
-            kind = "private_wrapper" if name.startswith("_") else "method"
-            signature = str(inspect.signature(raw))
+            if isinstance(value, (staticmethod, classmethod)) or callable(value):
+                raw = (
+                    value.__func__
+                    if isinstance(value, (staticmethod, classmethod))
+                    else value
+                )
+                kind = "private_wrapper" if name.startswith("_") else "method"
+                signature = str(inspect.signature(raw))
+            else:
+                kind = "constant"
+                signature = type(value).__name__
         elif name in instance_attributes and not hasattr(module, name):
             kind = "instance_attribute"
             signature = "<instance attribute>"
-        else:
+        elif name in module_candidates:
             scope = "module"
-            value = getattr(module, name)
-            if callable(value):
+            module_name = COMPATIBILITY_EXPORTS[name][0]
+            value = getattr(compatibility_modules[module_name], name)
+            if inspect.isclass(value):
+                kind = "constant"
+                signature = type(value).__name__
+            elif callable(value):
                 kind = "private_wrapper" if name.startswith("_") else "method"
                 try:
                     signature = str(inspect.signature(value))
@@ -379,6 +578,8 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
             else:
                 kind = "constant"
                 signature = type(value).__name__
+        else:
+            continue
         surface[name] = {
             "kind": kind,
             "scope": scope,
@@ -389,6 +590,8 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                 patches.get(name, []), key=lambda item: (item["file"], item["line"])
             ),
         }
+        if scope == "module":
+            surface[name]["modules"] = [COMPATIBILITY_EXPORTS[name][0]]
     return surface
 
 
@@ -1531,179 +1734,270 @@ def generate_ask_goldens(output_path: Path) -> None:
     _write_json(output_path, collect_ask_goldens())
 
 
-def _serialization_contract() -> dict[str, object]:
-    from app.models.schemas import (
-        AskResponse,
-        Citation,
-        ConversationDetail,
-        ConversationTurn,
-        Evidence,
-        KnowledgeFieldValue,
-        KnowledgeRecord,
-        NotebookSummary,
-        PaginatedKnowledge,
-        ReportDetail,
-        ShareResponse,
-        SharedByMeItem,
-        SharedPreview,
-        SourceDetail,
-        TraceStep,
-    )
+def _normalize_api_serialization(
+    value: object,
+    replacements: dict[str, str],
+    temporary_root: Path,
+    key: str = "",
+) -> object:
+    if key in {"created_at", "updated_at"} and isinstance(value, str):
+        return FIXED_TIME
+    if key == "created_label" and isinstance(value, str):
+        return "fixture-date"
+    if isinstance(value, dict):
+        return {
+            item_key: _normalize_api_serialization(
+                item_value, replacements, temporary_root, item_key
+            )
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _normalize_api_serialization(item, replacements, temporary_root, key)
+            for item in value
+        ]
+    if isinstance(value, str):
+        normalized = value.replace(str(temporary_root), "<fixture-root>")
+        for actual, stable in sorted(
+            replacements.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            normalized = normalized.replace(actual, stable)
+        return normalized
+    return value
 
-    evidence = Evidence(**_evidence())
-    response = AskResponse(
-        answer_id="ans-api",
-        conclusion="Fixture conclusion.",
-        answer="Fixture conclusion [k1].",
-        grounded=True,
-        evidence_level="grounded",
-        citations=[
-            Citation(
-                label="Fixture amplifier notes · §1 Gain",
-                source_id="src-api",
-                element_id="el-api",
-                location_label="§1 Gain",
-                quoted_span="Fixture evidence.",
+
+def _serialization_contract() -> dict[str, object]:
+    """Capture representative payloads from the real repository and routes."""
+    from fastapi.testclient import TestClient
+
+    from app import main as app_main
+    from app.api import deps, routes
+    from app.core import event_logging
+    from app.models.schemas import AskRequest
+    from app.services.repository import UploadedSourceFile
+
+    with tempfile.TemporaryDirectory(prefix="repository-api-contract-") as temporary:
+        root = Path(temporary)
+        repo = _new_offline_repo(root / "api.db", root / "storage")
+        repo.settings.viz_sync_build_max_objects = 1
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(app_main, "get_settings", lambda: repo.settings))
+            stack.enter_context(mock.patch.object(app_main, "repository", lambda: repo))
+            stack.enter_context(mock.patch.object(deps, "get_settings", lambda: repo.settings))
+            stack.enter_context(mock.patch.object(deps, "repository", lambda: repo))
+            stack.enter_context(mock.patch.object(routes, "repository", lambda: repo))
+            stack.enter_context(
+                mock.patch.object(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
             )
-        ],
-        llm_mode="grounded",
-        mode="reasoning",
-        conversation_id="conv-api",
-        retrieval_query="fixture gain",
-        top_relevance=0.9,
-        reasoning_trace=[
-            TraceStep(
-                step_type="retrieve",
-                summary="Retrieved one item",
-                detail={"found": 1},
-                duration_ms=2,
-            )
-        ],
-    )
-    return {
-        "notebook_summary": NotebookSummary(
-            id="nb-api",
-            name="API fixture",
-            purpose="Freeze serialization",
-            primary_domain="Analog IC",
-            status="active",
-            counts={"sources": 1, "concepts": 1, "claims": 1},
-        ).model_dump(mode="json"),
-        "source_detail": SourceDetail(
-            id="src-api",
-            notebook_id="nb-api",
-            title="Fixture source",
-            type="markdown",
-            status="extracted",
-            summary="Fixture summary",
-            element_count=1,
-            file_name="fixture.md",
-            file_size=64,
-            file_hash="abc123",
-            parse_status="parsed",
-            file_path="/fixture/storage/fixture.md",
-        ).model_dump(mode="json"),
-        "knowledge_page": PaginatedKnowledge(
-            items=[
-                KnowledgeRecord(
-                    id="ko-api",
-                    object_type="concept",
-                    headline="source degeneration",
-                    fields=[
-                        KnowledgeFieldValue(key="definition", value="Local feedback")
+            api_app = app_main.create_app()
+
+            with TestClient(api_app) as client:
+                created = client.post(
+                    "/api/notebooks",
+                    json={
+                        "name": "API fixture",
+                        "purpose": "Freeze serialization",
+                        "primary_domain": "Analog IC",
+                    },
+                )
+                created.raise_for_status()
+                notebook_id = created.json()["id"]
+
+                source = repo.upload_sources(
+                    notebook_id,
+                    [
+                        UploadedSourceFile(
+                            file_name="fixture.md",
+                            content_type="text/markdown",
+                            content=(
+                                b"# Gain\n\nSource degeneration stabilizes fixture gain."
+                            ),
+                        )
                     ],
-                    status="approved",
-                    evidence=[evidence],
-                )
-            ],
-            total_count=1,
-            offset=0,
-            limit=50,
-        ).model_dump(mode="json"),
-        "ask_job_detail": {
-            "job_id": "askjob-api",
-            "notebook_id": "nb-api",
-            "conversation_id": "conv-api",
-            "created_by": "user-api",
-            "mode": "reasoning",
-            "question": "fixture gain",
-            "status": "done",
-            "trace": [
-                {
-                    "step_type": "retrieve",
-                    "summary": "Retrieved one item",
-                    "detail": {"found": 1},
-                    "duration_ms": 2,
-                }
-            ],
-            "answer_id": "ans-api",
-            "error": "",
-        },
-        "conversation_detail": ConversationDetail(
-            id="conv-api",
-            notebook_id="nb-api",
-            title="fixture gain",
-            updated_at=FIXED_TIME,
-            turn_count=1,
-            used_reasoning=True,
-            turns=[
-                ConversationTurn(
-                    answer_id="ans-api",
-                    question="fixture gain",
-                    response=response,
-                    created_at=FIXED_TIME,
-                )
-            ],
-        ).model_dump(mode="json"),
-        "report": ReportDetail(
-            id="rep-api",
-            question="Explain fixture gain",
-            status="outline_ready",
-            progress="outline ready",
-            section_count=1,
-            created_at=FIXED_TIME,
-            created_by="user-api",
-            outline=[{"title": "Evidence", "goal": "Explain feedback"}],
-            sections=[],
-            gaps=[],
-            references=[{"source_id": "src-api", "title": "Fixture source"}],
-            depth=2,
-            section_status=[{"title": "Evidence", "phase": "排队", "step": 0}],
-        ).model_dump(mode="json"),
-        "sharing": {
-            "share": ShareResponse(
-                share_token="shr-api", copyable=True,
-                size={"bytes": 64, "sources": 1, "chunks": 1, "nodes": 2, "edges": 1},
-            ).model_dump(mode="json"),
-            "preview": SharedPreview(
-                name="API fixture", owner_display="a00123456", source_count=1,
-                node_count=2, edge_count=1, source_titles=["Fixture source"],
-                mode="copy",
-                size={"bytes": 64, "sources": 1, "chunks": 1, "nodes": 2, "edges": 1},
-            ).model_dump(mode="json"),
-            "shared_by_me": SharedByMeItem(
-                id="nb-api", name="API fixture", share_token="shr-api", mode="copy",
-                size={"bytes": 64, "sources": 1, "chunks": 1, "nodes": 2, "edges": 1},
-                members=[],
-            ).model_dump(mode="json"),
-        },
-        "errors": {
-            "http_404": {"detail": "Notebook not found"},
-            "validation_422": {
-                "detail": [
+                    scheduler=lambda _source_id: None,
+                )[0]
+                repo.process_source(source.id)
+                element = repo.source_elements(source.id)[0]
+                evidence = [
                     {
-                        "type": "missing",
-                        "loc": ["body", "question"],
-                        "msg": "Field required",
-                        "input": {},
+                        "source_id": source.id,
+                        "source_title": source.title,
+                        "element_id": element.id,
+                        "element_type": element.element_type,
+                        "location_label": element.location_label,
+                        "quoted_span": element.text,
+                        "confidence": 0.98,
                     }
                 ]
+                repo.store_kg(
+                    notebook_id,
+                    source.id,
+                    [
+                        {
+                            "local_id": "concept",
+                            "object_type": "concept",
+                            "payload": {
+                                "name": "source degeneration",
+                                "definition": "Local feedback",
+                            },
+                            "evidence": evidence,
+                        },
+                        {
+                            "local_id": "claim",
+                            "object_type": "claim",
+                            "payload": {
+                                "name": "Source degeneration stabilizes gain",
+                                "statement": "Source degeneration stabilizes gain",
+                            },
+                            "evidence": evidence,
+                        },
+                    ],
+                    [
+                        {
+                            "source_local_id": "claim",
+                            "target_local_id": "concept",
+                            "edge_type": "about",
+                            "evidence": evidence,
+                        }
+                    ],
+                )
+
+                ask_response = client.post(
+                    f"/api/notebooks/{notebook_id}/ask",
+                    json={"question": "fixture gain", "mode": "chunk"},
+                )
+                ask_response.raise_for_status()
+                ask_payload = ask_response.json()
+                job_payload = AskRequest(
+                    question="trace fixture gain",
+                    mode="reasoning",
+                    conversation_id=ask_payload["conversation_id"],
+                )
+                job_id, conversation_id = repo.begin_ask_job(
+                    notebook_id, job_payload, "reasoning", threading.Event()
+                )
+                repo.append_ask_trace(
+                    job_id,
+                    {
+                        "step_type": "retrieve",
+                        "summary": "Retrieved one item",
+                        "detail": {"found": 1},
+                        "duration_ms": 2,
+                    },
+                )
+                repo.finish_ask_job(
+                    job_id, "done", answer_id=ask_payload["answer_id"]
+                )
+
+                report_id = repo.create_report(
+                    notebook_id, "Explain fixture gain", depth=2
+                )
+                repo.update_report(
+                    notebook_id,
+                    report_id,
+                    status="outline_ready",
+                    progress="outline ready",
+                    outline=[{"title": "Evidence", "goal": "Explain feedback"}],
+                    references=[{"source_id": source.id, "title": source.title}],
+                    section_status=[
+                        {"title": "Evidence", "phase": "排队", "step": 0}
+                    ],
+                )
+
+                share_response = client.post(
+                    f"/api/notebooks/{notebook_id}/share"
+                )
+                share_response.raise_for_status()
+                share = share_response.json()
+
+                def json_response(method: str, path: str) -> object:
+                    response = client.request(method, path)
+                    response.raise_for_status()
+                    return response.json()
+
+                serialization: dict[str, object] = {
+                    "notebook_summary": json_response(
+                        "GET", f"/api/notebooks/{notebook_id}"
+                    ),
+                    "source_detail": json_response(
+                        "GET", f"/api/sources/{source.id}"
+                    ),
+                    "knowledge_page": json_response(
+                        "GET",
+                        f"/api/notebooks/{notebook_id}/knowledge?type=claim",
+                    ),
+                    "ask_response": ask_payload,
+                    "ask_job_detail": json_response(
+                        "GET",
+                        f"/api/notebooks/{notebook_id}/ask/jobs/{job_id}",
+                    ),
+                    "conversation_detail": json_response(
+                        "GET", f"/api/conversations/{conversation_id}"
+                    ),
+                    "report": json_response(
+                        "GET",
+                        f"/api/notebooks/{notebook_id}/reports/{report_id}",
+                    ),
+                    "sharing": {
+                        "share": share,
+                        "preview": json_response(
+                            "GET", f"/api/shared/{share['share_token']}"
+                        ),
+                        "shared_by_me": next(
+                            item
+                            for item in json_response(
+                                "GET", "/api/notebooks/shared-by-me"
+                            )
+                            if item["id"] == notebook_id
+                        ),
+                    },
+                }
+                error_responses = {
+                    "http_404": client.get(
+                        "/api/notebooks/nb-does-not-exist"
+                    ),
+                    "validation_422": client.post(
+                        f"/api/notebooks/{notebook_id}/ask", json={}
+                    ),
+                    "graph_too_large_413": client.get(
+                        f"/api/notebooks/{notebook_id}/graph"
+                    ),
+                }
+                serialization["errors"] = {
+                    name: {
+                        "status_code": response.status_code,
+                        "body": response.json(),
+                    }
+                    for name, response in error_responses.items()
+                }
+
+        with repo._connect() as db:
+            object_ids = [
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM knowledge_objects WHERE notebook_id=? "
+                    "ORDER BY object_type,id",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+        replacements = {
+            notebook_id: "nb-api",
+            source.id: "src-api",
+            element.id: "el-api",
+            ask_payload["answer_id"]: "ans-api",
+            conversation_id: "conv-api",
+            job_id: "askjob-api",
+            report_id: "rep-api",
+            share["share_token"]: "shr-api",
+            **{
+                object_id: f"ko-api-{index}"
+                for index, object_id in enumerate(object_ids, 1)
             },
-            "graph_too_large_413": {
-                "detail": "Knowledge graph too large; use /unified-kg"
-            },
-        },
-    }
+        }
+        return _normalize_api_serialization(
+            serialization, replacements, root
+        )
 
 
 def generate_api_contract(output_path: Path) -> None:
@@ -1785,18 +2079,46 @@ TRANSACTION_PHASES: dict[str, dict[str, object]] = {
         "failure_boundary": "post-commit dirty/cache failure cannot roll back merge",
     },
     "approve_promotion": {
-        "sequence": ["validate candidate", "insert or merge base object transaction", "embed best effort", "mark base dirty", "finish promotion state"],
-        "commit_boundaries": ["promotion mutation is transactional", "embedding and dirty hooks are post-commit"],
-        "failure_boundary": "post-commit embedding is fail-open; state-machine errors still raise",
+        "sequence": [
+            "validate candidate",
+            "commit base object/provenance and candidate approval in one transaction",
+            "embed fresh base object best effort",
+            "invalidate unified cache",
+            "mark base dirty",
+        ],
+        "commit_boundaries": [
+            "base mutation and candidate approved state commit together",
+            "embedding, invalidation and dirty hooks are post-commit",
+        ],
+        "failure_boundary": (
+            "transaction failure rolls back base mutation and candidate state together; "
+            "post-commit hook failure cannot revert approval"
+        ),
     },
     "confirm_conflict": {
-        "sequence": ["load conflict candidate", "apply status/object mutation transaction", "embed best effort", "mark dirty"],
-        "commit_boundaries": ["conflict row/object changes commit together", "embedding and dirty are later"],
-        "failure_boundary": "post-mutation embedding failure does not revert confirmed conflict",
+        "sequence": [
+            "load conflict candidate",
+            "apply resolution through its independently committed mutation primitive",
+            "set candidate applied in a separate transaction",
+        ],
+        "commit_boundaries": [
+            "resolution mutation commits before candidate status transaction",
+            "candidate status is a later independent commit",
+        ],
+        "failure_boundary": (
+            "candidate-status failure leaves the already committed resolution mutation applied"
+        ),
     },
     "set_edge_review": {
-        "sequence": ["validate review status", "update relation review in one write", "invalidate cache", "mark dirty"],
-        "commit_boundaries": ["review row commits before cache/version side effects"],
+        "sequence": [
+            "validate review status",
+            "update relation review in one write",
+            "mark dirty",
+            "invalidate cache",
+        ],
+        "commit_boundaries": [
+            "review row commits before dirty and cache side effects"
+        ],
         "failure_boundary": "missing relation raises; post-commit side-effect failure does not revert review",
     },
     "copy_notebook": {
