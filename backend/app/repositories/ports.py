@@ -5,6 +5,7 @@ protocols intentionally contain no business logic and are structural seams for
 the later store/service extraction.
 """
 from __future__ import annotations
+import threading
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,7 +167,7 @@ class IndexLifecycleRepository(Protocol):
 
 
 class AskStateRepository(Protocol):
-    def begin_ask_job(self, notebook_id: str, payload: AskRequest, mode: str, cancel_event: Any) -> tuple[str, str]: ...
+    def begin_ask_job(self, notebook_id: str, payload: AskRequest, mode: str, cancel_event: threading.Event) -> tuple[str, str]: ...
     def finish_ask_job(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None: ...
     def cancel_ask_job(self, job_id: str, user_id: str) -> dict: ...
     def ask_job_status(self, job_id: str) -> dict: ...

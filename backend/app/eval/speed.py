@@ -76,8 +76,11 @@ def _truncate_on_paragraph(text: str, limit: int) -> str:
 
 def _insert_source(repo, nb_id, name, text, tmpdir):
     from app.repositories.ports import UploadedSourceFile
-    created = repo.upload_sources(nb_id, [UploadedSourceFile(name, "text/markdown", text.encode())])
-    return created[0].id
+    scheduled = []
+    created = repo.upload_sources(nb_id, [UploadedSourceFile(name, "text/markdown", text.encode())], scheduler=scheduled.append)
+    sid = created[0].id
+    repo.parse_source(sid)
+    return sid
 
 
 def _cleanup(repo, nb_id):
@@ -108,7 +111,7 @@ def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,
                 sid = _insert_source(repo, nb.id, f"seg{limit}", text, tmpdir)
                 since = datetime.now().isoformat()
                 t0 = time.perf_counter()
-                repo._run_extraction(sid)
+                repo.extract_source(sid)
                 wall = time.perf_counter() - t0
                 size, n = plan_windows(len(text), settings.kg_extract_workers,
                                        settings.kg_window_min_chars, settings.kg_window_max_chars)

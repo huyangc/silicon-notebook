@@ -75,6 +75,46 @@ EXPLICIT_OWNERS = {
     "reject_promotion": "KnowledgeGovernanceService",
 }
 
+# Task 2 moves these imports to the typed ports while retaining the old
+# compatibility modules elsewhere.  Only these exact import sites are allowed
+# to differ from the frozen master consumer manifest.
+TASK2_ALLOWED_IMPORTS = {
+    ("backend/app/api/deps.py", 11, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/app/api/deps.py", 11, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/app/api/deps.py", 11, "app.services.sqlite_repository", "reset_request_user"),
+    ("backend/app/eval/speed.py", 98, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_trackA_eval_connect.py", 19, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_trackA_eval_connect.py", 25, "app.services.repository", "NotebookRepository"),
+    ("backend/tests/test_repository_ports.py", 5, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
+TASK2_ALLOWED_CONSUMERS = {
+    ("upload_sources", "backend/app/eval/speed.py:80"),
+    ("parse_source", "backend/app/eval/speed.py:82"),
+    ("delete_notebook", "backend/app/eval/speed.py:85"),
+    ("delete_notebook", "backend/app/eval/speed.py:90"),
+    ("extract_source", "backend/app/eval/speed.py:114"),
+    ("user_can_access_notebook", "backend/app/api/deps.py:58"),
+    ("user_can_access_notebook", "backend/app/api/deps.py:70"),
+    ("user_can_read_notebook", "backend/app/api/deps.py:70"),
+    ("user_can_read_notebook", "backend/app/api/deps.py:82"),
+    ("NotebookRepository", "backend/app/api/deps.py:10"),
+    ("_run_extraction", "backend/app/eval/speed.py:109"),
+}
+TASK2_ALLOWED_MEMBER_FILES = {
+    ("backend/app/api/deps.py", name)
+    for name in {
+        "resolve_session", "current_user", "set_request_user", "reset_request_user",
+        "user_can_access_notebook", "user_can_read_notebook", "llm_client", "SQLiteRepository",
+    }
+} | {
+    ("backend/app/eval/speed.py", name)
+    for name in {"upload_sources", "parse_source", "extract_source", "delete_notebook", "_run_extraction", "create_notebook", "llm_client", "SQLiteRepository"}
+} | {
+    ("backend/app/services/repository.py", name)
+    for name in {"UploadedSourceFile", "NotebookRepository"}
+}
+
 CONSUMER_ROOTS = (
     ROOT / "backend" / "app" / "api",
     ROOT / "backend" / "app" / "main.py",
@@ -428,16 +468,8 @@ def test_compatibility_exports_and_import_consumers_are_complete():
     }
     assert expected_module_names == set(COMPATIBILITY_EXPORTS)
 
-    task2_files = {
-        "backend/tests/test_repository_ports.py",
-        "backend/tests/test_repository_ownership.py",
-        "backend/tests/test_eval_speed_public_path.py",
-        "backend/tests/test_trackA_eval_connect.py",
-    }
     for path in _consumer_files():
         relative = str(path.relative_to(ROOT))
-        if relative in task2_files | {"backend/app/eval/speed.py", "backend/app/api/deps.py", "backend/app/services/repository.py"}:
-            continue  # Task 2 intentional consumer migration
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or node.module not in {
@@ -452,7 +484,11 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     node.module,
                     alias.name,
                 )
-                assert f"{relative}:{node.lineno}" in surface[alias.name]["consumers"]
+                site = (relative, node.lineno, node.module, alias.name)
+                assert (
+                    f"{relative}:{node.lineno}" in surface[alias.name]["consumers"]
+                    or site in TASK2_ALLOWED_IMPORTS
+                )
 
 
 def test_static_repository_patch_scan_matches_manifest_exactly():
@@ -481,25 +517,22 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     recorded.pop("eval_insert_source_for_test", None)
 
     actual = _static_repository_consumers()
-    task2_prefixes = (
-        "backend/tests/test_repository_ports.py:",
-        "backend/tests/test_repository_ownership.py:",
-        "backend/tests/test_eval_speed_public_path.py:",
-        "backend/tests/test_trackA_eval_connect.py:",
-    )
-    for name in actual:
-        actual[name] = {s for s in actual[name] if not s.startswith(task2_prefixes)}
-    for name in recorded:
-        recorded[name] = {s for s in recorded[name] if not s.startswith(task2_prefixes)}
-    for name in list(recorded):
-        actual[name] -= {s for s in actual[name] if s.startswith(("backend/app/eval/speed.py:", "backend/app/api/deps.py:", "backend/app/services/repository.py:"))}
-        recorded[name] -= {s for s in recorded[name] if s.startswith(("backend/app/eval/speed.py:", "backend/app/api/deps.py", "backend/app/services/repository.py:"))}
-    for name in set(actual) - set(recorded):
+    allowed_sites = {
+        (member, f"{file}:{line}")
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS
+    }
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS
+    for name, sites in list(actual.items()):
         actual[name] = {
-            s for s in actual[name]
-            if not any(s.startswith(prefix) for prefix in (
-                *task2_prefixes,
-            ))
+            site for site in sites
+            if (name, site) not in allowed_sites
+            and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
+        }
+    for name, sites in list(recorded.items()):
+        recorded[name] = {
+            site for site in sites
+            if (name, site) not in allowed_sites
+            and not any(site.startswith(f"{file}:") and member == name for file, member in TASK2_ALLOWED_MEMBER_FILES)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
     assert recorded == actual

@@ -423,4 +423,18 @@ SURFACE_MEMBERS = (
  SurfaceMember('write_conflict_candidate', 'KnowledgeGovernanceService', 'method', ('backend/app/services/sqlite_repository.py:5225', 'backend/tests/test_conflict_endpoints.py:102', 'backend/tests/test_kg_conflict_candidates.py:103', 'backend/tests/test_kg_conflict_candidates.py:115', 'backend/tests/test_kg_conflict_candidates.py:144', 'backend/tests/test_kg_conflict_candidates.py:166', 'backend/tests/test_kg_conflict_candidates.py:167', 'backend/tests/test_kg_conflict_candidates.py:36', 'backend/tests/test_kg_conflict_candidates.py:57', 'backend/tests/test_kg_conflict_candidates.py:58', 'backend/tests/test_kg_conflict_candidates.py:77', 'backend/tests/test_kg_conflict_candidates.py:86', 'backend/tests/test_kg_conflict_candidates.py:95')),
  SurfaceMember('write_merge_candidate', 'KnowledgeGovernanceService', 'method', ('backend/tests/test_unified_kg_repository.py:139', 'backend/tests/test_unified_kg_repository.py:242', 'backend/tests/test_unified_kg_repository.py:252', 'backend/tests/test_unified_kg_repository.py:262', 'backend/tests/test_unified_kg_repository.py:272', 'backend/tests/test_unified_kg_repository.py:287', 'backend/tests/test_unified_kg_repository.py:47', 'backend/tests/test_unified_kg_repository.py:56')),
 )
-OWNER_BY_MEMBER = {m.name: m.owner for m in SURFACE_MEMBERS}
+def validate_ownership_manifest(
+    members: tuple[SurfaceMember, ...] = SURFACE_MEMBERS,
+) -> dict[str, str]:
+    """Return the canonical owner map and reject duplicate surface entries."""
+    owners: dict[str, str] = {}
+    for member in members:
+        if not member.name or not member.owner:
+            raise ValueError("surface members require a non-empty name and owner")
+        if member.name in owners:
+            raise ValueError(f"duplicate ownership entry for {member.name!r}")
+        owners[member.name] = member.owner
+    return owners
+
+
+OWNER_BY_MEMBER = validate_ownership_manifest()

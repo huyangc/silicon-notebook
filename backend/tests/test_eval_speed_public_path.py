@@ -6,6 +6,8 @@ class Repo:
         files = list(files)
         assert isinstance(files[0], UploadedSourceFile)
         return [type('S', (), {'id':'src'})()]
+    def parse_source(self, source_id):
+        return None
 
 def test_speed_uses_public_upload_path():
     assert _insert_source(Repo(), 'nb', 'x.md', 'text', '/tmp') == 'src'
