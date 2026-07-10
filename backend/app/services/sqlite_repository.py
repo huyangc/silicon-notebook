@@ -352,6 +352,37 @@ class SQLiteRepository:
         )
         self._scale_building: set = set()
         self._scale_building_lock = threading.Lock()
+        # Task 19: full/fold/viz orchestration is runtime-owned. Every
+        # remaining facade collaborator is resolved late so existing
+        # monkeypatch/transaction/cache identity seams remain observable.
+        self._runtime.wire_scale_builder(
+            get_notebook=lambda notebook_id: self.get_notebook(notebook_id),
+            version=lambda notebook_id: self._scale_index_version(notebook_id),
+            load_scale=lambda notebook_id: self._scale_index(
+                notebook_id, allow_stale=True
+            ),
+            full_viz_graph=lambda notebook_id: self._unified_graph_full(
+                notebook_id, "object"
+            ),
+            relations_for_notebook=lambda notebook_id: self.relations_for_notebook(
+                notebook_id
+            ),
+            cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
+            incremental_fuse_source=lambda notebook_id, source_id: (
+                self.incremental_fuse_source(notebook_id, source_id)
+            ),
+            invalidate_scale_cache=lambda notebook_id: self._scale_idx_cache.pop(
+                notebook_id, None
+            ),
+            cache_viz=lambda notebook_id, index: self._viz_idx_cache.__setitem__(
+                notebook_id, index
+            ),
+            building=self._scale_building,
+            building_lock=self._scale_building_lock,
+            notify_index_done=lambda notebook_id: self._notify_index_done(
+                notebook_id
+            ),
+        )
         self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
         self._scale_scheduler_started = False
         # 大库自动建索引(maybe_auto_index)的 O(1) once-set:notebook_id 一旦被评估
@@ -3475,524 +3506,33 @@ class SQLiteRepository:
 
     def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None,
                           as_arrays: bool = False):
-        """Gather all KG nodes/relations/chunks/cluster_groups for a notebook
-        and build the undirected edge set used by both build_scale_index and
-        _active_kg_delta.  Single source of truth — no duplicated _add_undirected.
+        """Compatibility delegate to the runtime-owned scale builder."""
+        return self._runtime.scale_builder.gather_graph(
+            notebook_id,
+            source_ids=source_ids,
+            synonym_edges=synonym_edges,
+            as_arrays=as_arrays,
+        )
 
-        Task 18: the gathered graph snapshot (scoping/synonym/as_arrays 语义、
-        edge 编码与 dedup 顺序、返回元组形状 全部逐位不变) 移入
-        IndexProjectionStore.graph_rows —— 见该方法 docstring 的完整契约。
-        source_ids=[] 仍返回 ([], [], [], [], {})(as_arrays=True 时 edges 为空数组三元组)。
-        """
-        rows = self._runtime.index_projections.graph_rows(
-            notebook_id, source_ids, synonym_edges=synonym_edges, as_arrays=as_arrays)
-        return (rows.node_ids, rows.edges, rows.chunk_ids,
-                rows.kg_node_ids, rows.membership_counts)
+    def build_scale_index(
+        self,
+        notebook_id: str,
+        on_stage: Optional[Callable[[str, int], None]] = None,
+    ) -> dict:
+        """Compatibility delegate to the runtime-owned full builder."""
+        return self._runtime.scale_builder.build(notebook_id, on_stage=on_stage)
 
-    def build_scale_index(self, notebook_id: str, on_stage: Optional[Callable[[str, int], None]] = None) -> dict:
-        """Offline: read KG from SQLite for ONE notebook, build CSR transition +
-        ANN index, write 7 files under {storage_dir}/kg_index/{notebook_id}/.
-        Returns the manifest dict.
-
-        Graph nodes: all USABLE kg-object IDs + all chunk IDs.
-        Edges (undirected → both directions added):
-          - relations (source↔target, weight 1.0)
-          - entity↔chunk memberships (weight 1.0)
-          - variant pairs (ppr_variant_edge_weight)
-          - synonym pairs from embeddings (cosine weight, if emb_synonym_enabled)
-        IDF[i] = 1 / membership_count for KG nodes (1.0 when 0), 1.0 for chunks.
-        ANN index = only kg nodes that have a row in knowledge_embeddings.
-
-        Perf (Task 1, 2026-07-02): the KG-embedding hnsw index used to be built
-        TWICE — once inside emb_synonym_edges (for the KNN synonym-edge pass,
-        discarded after) and once more here for the persisted ann.bin — hnsw
-        construction is the single most expensive step in this pipeline at
-        490k-object scale. Now built ONCE: load the kg matrix first, build one
-        hnsw index (ef_construction configurable), derive synonym edges from it
-        via emb_synonym_edges(prebuilt_index=...), feed those into
-        _gather_kg_graph(synonym_edges=...) (skips its own matrix load + KNN),
-        and finally hand the SAME index to save_scale_index(prebuilt_ann=...)
-        which just save_index()s it (no rebuild).
-
-        Perf (Task 2, 2026-07-02 — memory diet, real-world 490k-object build
-        OOM-killed a 64GB box): four more changes here, all output-preserving:
-          - Both embedding matrices (kg + chunk) load DIRECTLY via
-            vector_index.build_matrix(rows, n_hint=COUNT(*)) instead of through
-            _vector_matrix()/_vector_cache — a build's ~2-4GB matrices never
-            enter the LRU cache (they'd just evict/outlive useful query-time
-            entries and add another live copy); n_hint preallocates instead of
-            the 490k-small-ndarrays-then-vstack pattern (was a 2x peak itself).
-          - _gather_kg_graph(..., as_arrays=True): edges come back as int32/
-            float32 numpy arrays instead of a Python (str,str,float) tuple
-            list + tuple `seen_undir` set (~5GB of Python-object overhead at
-            10M+ edges) — see that method's docstring for the equivalence
-            argument.
-          - build_transition_arrays(): CSR construction directly off those
-            int arrays (no index.get() Python dict lookups per edge).
-          - `del` of edge arrays / relations / memberships / ent_chunk_map as
-            soon as each is consumed, plus gc.collect() between the heavy
-            stages (kg matrix+ann → gather+transition → chunk matrix → viz)
-            so freed numpy/hnsw memory is actually returned to the allocator
-            before the next stage's peak, not just unreferenced.
-          - IMPORTANT — what must stay alive: `ann_vectors` is kept alive all
-            the way through save_scale_index(), because its prebuilt_ann
-            fallback (misaligned/broken prebuilt hnsw handle) rebuilds the
-            index from ann_vectors — dropping it early would silently corrupt
-            that safety net. Everything else (edges, relations, memberships,
-            ent_chunk_map, id_to_idx) is build-scoped and freed once the CSR/
-            manifest fields derived from it are computed.
-
-        `on_stage`: optional callback invoked as `(stage_name, latency_ms)`
-        once per stage (the same 10 stages as the `scale_index_build` events:
-        kg_matrix/ann_build/synonym/gather/transition/chunk_matrix/
-        relation_matrix/viz_arrays/persist, plus a final total), right when
-        that stage's timing is recorded. Lets a CLI caller (batch_ingest)
-        print real-time per-stage progress on long builds without depending
-        on the events logger, which
-        doesn't print to the terminal. A raising callback is swallowed
-        (logging-only) so it can never break the build — mirrors how
-        event_log.emit isolates its own failures. Default None preserves prior
-        behavior byte-for-byte (aside from the stage-name/-order changes above,
-        which are observability-only and documented here).
-        """
-        from app.services.kg import scale_index as si
-
-        import gc
-        import numpy as np
-
-        # Validate notebook exists
-        self.get_notebook(notebook_id)
-
-        # Per-stage timing (observability only, no behavior change to the
-        # produced artifacts): times the main internal stages and emits a
-        # `scale_index_build` event per stage so a slow build on a large (e.g.
-        # 490k-object) deployment can be traced to the exact bottleneck.
-        # Mirrors the pipeline-stage event pattern in process_source
-        # (kind/stage/status/latency_ms).
-        build_started = time.perf_counter()
-        timings: dict = {}
-
-        def _notify_stage(stage_name, ms):
-            if on_stage is None:
-                return
-            try:
-                on_stage(stage_name, ms)
-            except Exception:  # noqa: BLE001 — caller's callback must never break the build
-                self.event_log.logger.warning(
-                    "build_scale_index on_stage callback failed for stage %s", stage_name, exc_info=False)
-
-        def _timed(stage_name, fn):
-            t0 = time.perf_counter()
-            out = fn()
-            ms = round((time.perf_counter() - t0) * 1000)
-            timings[stage_name] = ms
-            self.event_log.emit({
-                "kind": "scale_index_build",
-                "notebook_id": notebook_id,
-                "stage": stage_name,
-                "status": "done",
-                "latency_ms": ms,
-            })
-            _notify_stage(stage_name, ms)
-            return out
-
-        # ── KG embedding matrix + ONE shared hnsw build ─────────────────────
-        # Loaded/built first (before gather) so the same in-memory hnswlib.Index
-        # can be reused for both the synonym-edge KNN pass and the persisted
-        # ann.bin — see perf note in the docstring above.
-        #
-        # Direct load (Task 2 → Task 18: IndexProjectionStore.embedding_matrix):
-        # bypasses _vector_matrix()/_vector_cache on purpose — a build's
-        # kg/chunk matrices are multi-GB, single-use, and would otherwise sit
-        # in the LRU cache outliving the build (or evict useful query-time
-        # entries). n_hint=COUNT(*) preallocation + runtime_dim truncation
-        # live in the store, unchanged.
-        projections = self._runtime.index_projections
-        ann_ids_raw, ann_matrix_raw = _timed(
-            "kg_matrix", lambda: projections.embedding_matrix(
-                notebook_id, "knowledge_embeddings", "object_id"))
-        ann_ids: list = list(ann_ids_raw) if ann_ids_raw else []
-        ann_matrix = ann_matrix_raw
-        if ann_ids and ann_matrix is not None:
-            ann_labels = ann_ids
-            ann_vectors = np.asarray(ann_matrix, dtype=np.float32)
-        else:
-            ann_labels = []
-            ann_vectors = np.empty((0, max(1, self.settings.embed_dim)), dtype=np.float32)
-
-        def _build_kg_ann():
-            # CRITICAL alignment: ann_labels IS ann_ids from the kg_matrix
-            # load above (single source of truth — embedding_matrix returns
-            # (ids, matrix) row-aligned), so labels 0..n-1 assigned here match
-            # ann_labels' row order exactly, which save_scale_index later
-            # verifies via get_current_count() == len(ann_labels).
-            if ann_vectors.shape[0] == 0:
-                return None
-            import hnswlib
-            idx = hnswlib.Index(space="cosine", dim=int(ann_vectors.shape[1]))
-            idx.init_index(max_elements=ann_vectors.shape[0],
-                           ef_construction=self.settings.hnsw_ef_construction,
-                           M=16, random_seed=42)
-            idx.add_items(ann_vectors, np.arange(ann_vectors.shape[0]))
-            return idx
-
-        kg_ann_index = _timed("ann_build", _build_kg_ann)
-        gc.collect()  # hnsw's internal add_items copy (if any) + build scratch, before synonym/gather
-
-        def _synonym():
-            if kg_ann_index is None or not self.settings.ppr_emb_synonym_enabled:
-                return []
-            from app.services.kg.ppr import emb_synonym_edges
-            return emb_synonym_edges(
-                ann_labels, ann_vectors,
-                self.settings.ppr_emb_synonym_threshold,
-                self.settings.ppr_emb_synonym_topk,
-                self.settings.ppr_emb_synonym_max_entities,
-                prebuilt_index=kg_ann_index,
-                ef_construction=self.settings.hnsw_ef_construction,
-            )
-
-        synonym_edges = _timed("synonym", _synonym)
-
-        # as_arrays=True (Task 2): edges come back as int32/float32 numpy
-        # arrays instead of a (str,str,float) tuple list — see
-        # _gather_kg_graph's docstring for the equivalence argument. Only
-        # build_scale_index uses this path; every other caller keeps the
-        # default string-tuple path unchanged.
-        node_ids, (edge_src, edge_tgt, edge_w), chunk_ids, kg_node_ids, membership_counts = \
-            _timed("gather", lambda: self._gather_kg_graph(
-                notebook_id, synonym_edges=synonym_edges, as_arrays=True))
-        del synonym_edges
-
-        kg_id_set = set(kg_node_ids)
-
-        # chunk_index: indices of chunk nodes in node_ids (stable; cluster hubs
-        # already appended at the end of node_ids by _gather_kg_graph)
-        id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
-        chunk_index = [id_to_idx[cid] for cid in chunk_ids if cid in id_to_idx]
-
-        # IDF: 1 / membership_count (1.0 when 0); chunks and hub nodes get 1.0
-        idf: list = []
-        for nid in node_ids:
-            if nid in kg_id_set:
-                cnt = membership_counts.get(nid, 0)
-                idf.append(1.0 / cnt if cnt > 0 else 1.0)
-            else:
-                idf.append(1.0)
-        del kg_id_set, membership_counts
-
-        # Build CSR transition matrix — array fast-path (Task 2): CSR built
-        # directly off the int-indexed edge arrays (no per-edge index.get()
-        # Python dict round trips). id_to_idx here is recomputed inside
-        # build_transition_arrays from node_ids (cheap dict comprehension);
-        # not reused from the one above to keep the two call sites independent.
-        transition, _ = _timed(
-            "transition", lambda: si.build_transition_arrays(node_ids, edge_src, edge_tgt, edge_w))
-        del edge_src, edge_tgt, edge_w
-        gc.collect()  # edge arrays + CSR construction scratch, before chunk matrix load
-
-        # Chunk-level ANN vectors/labels (Task 1): chunks that have a row in
-        # chunk_embeddings. Persisted as chunk_ann.bin so query-time chunk
-        # retrieval can ANN-narrow candidates on large persisted-index notebooks.
-        # Direct load (Task 2): same rationale as the kg matrix above — bypasses
-        # _vector_matrix()/_vector_cache so this multi-GB matrix never becomes
-        # a cache entry, and loads as late as possible (right before the ANN
-        # build that consumes it) rather than living for the whole build.
-        c_ids_raw, c_mat_raw = _timed(
-            "chunk_matrix", lambda: projections.embedding_matrix(
-                notebook_id, "chunk_embeddings", "chunk_id"))
-        chunk_ann_labels = list(c_ids_raw) if c_ids_raw else []
-        chunk_ann_vectors = (np.asarray(c_mat_raw, dtype=np.float32)
-                             if chunk_ann_labels and c_mat_raw is not None else None)
-        del c_ids_raw, c_mat_raw
-        gc.collect()  # chunk matrix load scratch, before relation matrix stage
-
-        # Relation-level ANN vectors/labels (relation-ann task): relations that
-        # have a row in relation_embeddings. Persisted as relation_ann.bin so
-        # _retrieve_relations_scored can ANN-narrow candidates on large
-        # persisted-index notebooks instead of the full-matrix top_k_sims path
-        # (which is the thing the #171-style cold-matrix guard exists to avoid
-        # on multi-GB relation matrices). Direct load: same rationale as the
-        # kg/chunk matrices above — bypasses _vector_matrix()/_vector_cache so
-        # this matrix never becomes a cache entry.
-        rel_ids_raw, rel_mat_raw = _timed(
-            "relation_matrix", lambda: projections.embedding_matrix(
-                notebook_id, "relation_embeddings", "relation_id"))
-        relation_ann_labels = list(rel_ids_raw) if rel_ids_raw else []
-        relation_ann_vectors = (np.asarray(rel_mat_raw, dtype=np.float32)
-                                if relation_ann_labels and rel_mat_raw is not None else None)
-        del rel_ids_raw, rel_mat_raw
-        gc.collect()  # relation matrix load scratch, before viz-graph arrays stage
-
-        # Folded concept-level viz graph (Task 4 / SP1): derive the EXACT same
-        # graph _unified_graph_full(nb, "object") returns (concepts folded to
-        # canonical ids via cluster_map, edges deduped) and persist it as compact
-        # arrays so unified_graph(limit=N)/neighbors can serve a bounded core
-        # without re-folding the full graph at request time.
-        (viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload) = \
-            _timed("viz_arrays", lambda: self._build_viz_graph_arrays(notebook_id))
-        gc.collect()  # viz-graph build scratch, before persist (writes transition/ann/viz to disk)
-
-        n_kg = len(kg_node_ids)
-        watermark_sources = sorted(projections.source_ids(notebook_id))
-        # manifest dim = 工件实际维(截断后的 ann_vectors 列数),不信配置 —— 运行时
-        # 截断开启时三 ANN 均建在同一 runtime_dim 空间,manifest 记录真相以便 load/
-        # 查询侧的 dim 守卫据实比较(T5;空矩阵回退到运行时生效维)。
-        from app.services.vector_index import resolve_runtime_dim as _rrd
-        built_dim = (int(ann_vectors.shape[1]) if getattr(ann_vectors, "size", 0)
-                     else (_rrd(self.settings) or self.settings.embed_dim))
-        manifest = {
-            "version": self._scale_index_version(notebook_id),
-            "dim": built_dim,
-            "n_nodes": len(node_ids),
-            "n_kg_nodes": n_kg,
-            "n_chunks": len(chunk_ids),
-            "n_hubs": len(node_ids) - n_kg - len(chunk_ids),
-            "n_ann": len(ann_labels),
-            "n_viz_nodes": len(viz_ids),
-            "n_viz_edges": len(viz_payload.get("edges", [])),
-            "watermark_sources": watermark_sources,
-            "built_at": _now(),
-            # Pre-persist stage timings only (persist/total aren't known until
-            # after this dict is serialized to manifest.json by save_scale_index
-            # below). The RETURNED manifest gets persist+total appended after
-            # save_scale_index returns — see below. Full picture either way is
-            # in the `scale_index_build` events (9 stages incl. persist/total).
-            "build_ms": dict(timings),
-        }
-        persist_started = time.perf_counter()
-        # Task 18: 7-file persist goes through the filesystem store (same
-        # kg.scale_index.save_scale_index writer, same layout/manifest bytes).
-        saved_manifest = self._runtime.scale_artifact_store.save_full(notebook_id, dict(
-            node_ids=node_ids,
-            transition=transition,
-            idf=idf,
-            chunk_index=chunk_index,
-            ann_vectors=ann_vectors,
-            ann_labels=ann_labels,
-            manifest=manifest,
-            viz_ids=viz_ids,
-            viz_adj=viz_adj,
-            viz_deg=viz_deg,
-            viz_types=viz_types,
-            viz_names=viz_names,
-            viz_payload=viz_payload,
-            chunk_ann_vectors=chunk_ann_vectors,
-            chunk_ann_labels=chunk_ann_labels,
-            relation_ann_vectors=relation_ann_vectors,
-            relation_ann_labels=relation_ann_labels,
-            prebuilt_ann=kg_ann_index,
-            ef_construction=self.settings.hnsw_ef_construction,
-        ))
-        persist_ms = round((time.perf_counter() - persist_started) * 1000)
-        timings["persist"] = persist_ms
-        self.event_log.emit({
-            "kind": "scale_index_build",
-            "notebook_id": notebook_id,
-            "stage": "persist",
-            "status": "done",
-            "latency_ms": persist_ms,
-        })
-        _notify_stage("persist", persist_ms)
-        total_ms = round((time.perf_counter() - build_started) * 1000)
-        timings["total"] = total_ms
-        self.event_log.emit({
-            "kind": "scale_index_build",
-            "notebook_id": notebook_id,
-            "stage": "total",
-            "status": "done",
-            "latency_ms": total_ms,
-        })
-        _notify_stage("total", total_ms)
-        # full rebuild 原地覆盖磁盘工件,但热进程的 _scale_idx_cache 仍持旧实例
-        # (旧维/旧水位)——不失效则「重建后同进程看不见新索引」(fold 在 :8808
-        # 已 pop,build 此前漏了,已核实缺陷)。pop → 下次 _scale_index 冷 reload 新工件。
-        self._scale_idx_cache.pop(notebook_id, None)
-        # Return a manifest dict enriched with persist+total (in-memory only;
-        # the on-disk manifest.json written above intentionally only has the 7
-        # pre-persist stages, since persist's own duration can't be known
-        # before the file itself is written).
-        return {**saved_manifest, "build_ms": dict(timings)}
-
-    def fold_scale_index_delta(self, notebook_id: str, _assume_locked: bool = False) -> dict:
-        """O(delta) 增量 fold:delta splice 进现有索引(ANN add_items、CSR splice),
-        写 tmp 目录后锁内原子交换。无现有索引→全量 build;无 delta→no-op(返回旧 manifest)。
-        fold 中途抛错→tmp 丢弃、旧索引不动(finally 只清 building 标记,未交换即无损)。
-        _assume_locked=True 时(由 _run_scale_op 调用):调用方已持 _scale_building guard,
-        本方法跳过自身 add/discard,避免嵌套去重导致空跑返回 already_building。"""
-        import os
-        import shutil
-
-        import numpy as np
-        import scipy.sparse as sp
-        from app.services.kg import scale_index as si
-
-        idx = self._scale_index(notebook_id, allow_stale=True)
-        if idx is None:
-            return self.build_scale_index(notebook_id)
-        # 运行时维守卫:旧索引建在 manifest.dim 空间,fold 的 delta 向量经 build_matrix
-        # 已截断到运行时维 —— 两者不符则 add_items 会 hnswlib 硬错(被 _run_scale_op
-        # 吞成一行日志,delta 积成山复现假死事故)。拒 fold + 发事件 + 升 full 重建。
-        from app.services.vector_index import resolve_runtime_dim as _rrd
-        _eff_dim = _rrd(self.settings) or self.settings.embed_dim
-        if int(idx.manifest.get("dim", _eff_dim)) != int(_eff_dim):
-            self.event_log.emit({
-                "kind": "scale_fold_refused", "notebook_id": notebook_id,
-                "reason": "dim_mismatch", "manifest_dim": int(idx.manifest.get("dim", 0)),
-                "runtime_dim": int(_eff_dim)})
-            return self.build_scale_index(notebook_id)
-        delta = self._index_delta(notebook_id)
-        if not delta["delta_sources"]:
-            return idx.manifest
-        if not _assume_locked:
-            with self._scale_building_lock:
-                if notebook_id in self._scale_building:
-                    return {"status": "already_building"}
-                self._scale_building.add(notebook_id)
-        ok = False
-        try:
-            # 先把 delta 融进 concept_clusters(spec §4「incremental_fuse 簇」),
-            # 否则 _gather_kg_graph(delta) 查不到 delta 对象的 cluster 成员 → 缺跨文档 hub 桥,
-            # delta 对象在 scale_ppr 里跳不到兄弟概念(重现孤岛/对比检索坍缩)。
-            # incremental_fuse_source 是 LLM-free(Tier1 名种子 append+Tier2 向量桥),daemon 线程安全、可重入。
-            for _sid in delta["delta_sources"]:
-                try:
-                    self.incremental_fuse_source(notebook_id, _sid)
-                except Exception:  # noqa: BLE001 — 融合失败不阻断 fold(退化为无 hub,仍可 ANN 召回)
-                    self.event_log.logger.exception("fold incremental_fuse failed for %s", _sid)
-            d_nodes, d_edges, d_chunks, d_kg_ids, d_membership = \
-                self._gather_kg_graph(notebook_id, source_ids=delta["delta_sources"])
-            kg_set = set(d_kg_ids)
-            d_idf_map = {oid: (1.0 / c if c > 0 else 1.0)
-                         for oid, c in d_membership.items()}
-            node_ids, transition, idf, chunk_index = si.fold_arrays(
-                list(idx.node_ids), idx.transition, idx.idf, idx.chunk_index,
-                d_nodes, d_edges, d_chunks, d_idf_map)
-
-            # Task 18: tmp 目录的重置/交换序列归 ScaleArtifactStore(live→.old、
-            # tmp→live、rm .old 逐步不变);fold 的工件装配仍写 tmp(Task 19 移交)。
-            artifact_store = self._runtime.scale_artifact_store
-            out_dir = str(artifact_store.scale_dir(notebook_id))
-            tmp_dir = str(artifact_store.prepare_fold_directory(notebook_id))
-
-            # 非 ANN 工件:node_ids/idf/chunk_index/graph
-            sp.save_npz(os.path.join(tmp_dir, "graph.npz"), transition)
-            np.save(os.path.join(tmp_dir, "node_ids.npy"), np.asarray(node_ids, dtype=object))
-            np.save(os.path.join(tmp_dir, "idf.npy"), np.asarray(idf, dtype=np.float32))
-            np.save(os.path.join(tmp_dir, "chunk_index.npy"), np.asarray(chunk_index, dtype=np.int32))
-
-            # dim 失配已在方法入口拒 fold(转 build);到此 manifest.dim == 生效维,
-            # fallback 用运行时生效维(旧 manifest 无 dim 键 + 运行时开的边角)。
-            dim = int(idx.manifest.get("dim", self._runtime_dim() or self.settings.embed_dim))
-
-            # delta 向量装载(Task 18):IndexProjectionStore.embedding_matrix 的
-            # object_ids 分支 —— 分批 IN、连接跨生成器保持、runtime_dim 截断不变。
-            projections = self._runtime.index_projections
-
-            def _delta_vecs(table, col, ids):
-                return projections.embedding_matrix(notebook_id, table, col, object_ids=ids)
-
-            # ANN(KG 对象):增量 add delta 对象向量
-            kg_vids, kg_mat = _delta_vecs("knowledge_embeddings", "object_id", list(kg_set))
-            ann = si.add_items_to_ann(
-                idx.ann_path, dim, kg_mat if len(kg_mat) else [], len(idx.ann_labels))
-            ann.save_index(os.path.join(tmp_dir, "ann.bin"))
-            ann_labels = list(idx.ann_labels) + list(kg_vids)
-            np.save(os.path.join(tmp_dir, "ann_labels.npy"), np.asarray(ann_labels, dtype=object))
-
-            # chunk ANN:增量 add delta chunk 向量(若原有 chunk_ann)
-            manifest = dict(idx.manifest)
-            manifest["built_at"] = _now()
-            if idx.chunk_ann_path and idx.chunk_ann_labels is not None:
-                ch_vids, ch_mat = _delta_vecs("chunk_embeddings", "chunk_id", list(d_chunks))
-                cann = si.add_items_to_ann(
-                    idx.chunk_ann_path, dim, ch_mat if len(ch_mat) else [],
-                    len(idx.chunk_ann_labels))
-                cann.save_index(os.path.join(tmp_dir, "chunk_ann.bin"))
-                ch_labels = list(idx.chunk_ann_labels) + list(ch_vids)
-                np.save(os.path.join(tmp_dir, "chunk_ann_labels.npy"),
-                        np.asarray(ch_labels, dtype=object))
-                manifest["has_chunk_ann"] = True
-                manifest["n_chunk_ann"] = len(ch_labels)
-
-            # relation ANN:增量 add delta relation 向量(若原有 relation_ann)——
-            # 镜像上面 chunk ANN 的 fold 处理,delta relation id 取自水位后
-            # source(与 _relation_ann_candidates 的 delta 暴力分支同一 IN 条件)。
-            if idx.relation_ann_path and idx.relation_ann_labels is not None:
-                d_relation_ids = []
-                with self._connect() as db:
-                    for batch in self._in_batches(delta["delta_sources"]):
-                        ph_s = ",".join("?" for _ in batch)
-                        d_relation_ids.extend(r["id"] for r in db.execute(
-                            f"SELECT id FROM knowledge_relations "
-                            f"WHERE notebook_id=? AND source_id IN ({ph_s})",
-                            (notebook_id, *batch)).fetchall())
-                rel_vids, rel_mat = _delta_vecs("relation_embeddings", "relation_id", d_relation_ids)
-                rann = si.add_items_to_ann(
-                    idx.relation_ann_path, dim, rel_mat if len(rel_mat) else [],
-                    len(idx.relation_ann_labels))
-                rann.save_index(os.path.join(tmp_dir, "relation_ann.bin"))
-                rel_labels = list(idx.relation_ann_labels) + list(rel_vids)
-                np.save(os.path.join(tmp_dir, "relation_ann_labels.npy"),
-                        np.asarray(rel_labels, dtype=object))
-                manifest["has_relation_ann"] = True
-                manifest["n_relation_ann"] = len(rel_labels)
-
-            # viz:保持旧(UI-only,可 stale)——从旧目录拷 viz 文件到 tmp(若有)
-            for f in ("viz.npz", "viz_adj.npz"):
-                src = os.path.join(out_dir, f)
-                if os.path.exists(src):
-                    shutil.copy2(src, os.path.join(tmp_dir, f))
-
-            # manifest:水位=当前全部 source、version bump、counts
-            watermark = sorted(projections.source_ids(notebook_id))
-            total_chunks = projections.total_chunk_count(notebook_id)
-            manifest.update({
-                "version": self._scale_index_version(notebook_id),
-                "watermark_sources": watermark,
-                "n_nodes": len(node_ids),
-                "n_chunks": int(total_chunks),
-                "n_ann": len(ann_labels),
-            })
-            with open(os.path.join(tmp_dir, "manifest.json"), "w") as fh:
-                json.dump(manifest, fh)
-
-            # 原子交换(锁内):out_dir → .old,tmp → out_dir,rm .old
-            with self._scale_building_lock:
-                artifact_store.swap_fold_directory(notebook_id, tmp_dir)
-                self._scale_idx_cache.pop(notebook_id, None)  # 失效进程缓存 → 下次 reload
-            ok = True
-            return manifest
-        finally:
-            if not _assume_locked:
-                with self._scale_building_lock:
-                    self._scale_building.discard(notebook_id)
-                # _assume_locked=True 时(由 _run_scale_op 调用)通知已在那边的最外层
-                # 统一发一次;这里只在「独立调用 fold」(_assume_locked=False,如手动/
-                # idle 调度器直调 fold)时通知,避免经 _run_scale_op 调用时重复 emit。
-                if ok:
-                    self._notify_index_done(notebook_id)
+    def fold_scale_index_delta(
+        self, notebook_id: str, _assume_locked: bool = False
+    ) -> dict:
+        """Compatibility delegate to the runtime-owned delta folder."""
+        return self._runtime.scale_builder.fold(
+            notebook_id, assume_locked=_assume_locked
+        )
 
     def _index_delta(self, notebook_id: str) -> dict:
-        """按 manifest 水位算 delta:水位后新增的 source 及其 chunk 数。
-        无 manifest(未索引)→ 全部 source/chunk 视为 delta(语义:纯暴力)。
-        Task 18:manifest 水位读归 ScaleArtifactStore、source/chunk 计数读归
-        IndexProjectionStore(分批 IN 经 _in_batches 席位,_IN_CHUNK patch 照常生效)。"""
-        projections = self._runtime.index_projections
-        artifact_store = self._runtime.scale_artifact_store
-        cur_sources = projections.source_ids(notebook_id)
-        manifest = artifact_store.read_manifest(artifact_store.scale_dir(notebook_id))
-        if manifest is None:
-            return {"delta_sources": sorted(cur_sources),
-                    "delta_chunks": projections.total_chunk_count(notebook_id),
-                    "indexed": False}
-        watermark = set(manifest.get("watermark_sources", []))
-        delta_sources = sorted(s for s in cur_sources if s not in watermark)
-        if not delta_sources:
-            return {"delta_sources": [], "delta_chunks": 0, "indexed": True}
-        return {"delta_sources": delta_sources,
-                "delta_chunks": projections.delta_chunk_count(notebook_id, delta_sources),
-                "indexed": True}
+        """Compatibility delegate to the runtime-owned scale builder."""
+        return self._runtime.scale_builder._index_delta(notebook_id)
 
     def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
                               exists: "bool | None" = None, total_chunks: "int | None" = None) -> bool:
@@ -4385,101 +3925,27 @@ class SQLiteRepository:
             self._auto_index_checked.add(notebook_id)
 
     def _build_viz_graph_arrays(self, notebook_id: str):
-        """Full-payload derivation (used by build_scale_index). Delegates the
-        array math to _viz_arrays_from_graph so build_viz_index can reuse it with
-        a lighter (json_extract) derivation."""
-        return self._viz_arrays_from_graph(self._unified_graph_full(notebook_id, "object"))
+        """Compatibility helper over the runtime builder's pure viz math."""
+        from app.services.kg.viz_index import arrays_from_graph
+
+        return arrays_from_graph(self._unified_graph_full(notebook_id, "object"))
 
     def _viz_arrays_from_graph(self, full: dict):
-        """(viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload) from a
-        folded object-level graph dict {nodes, edges}. Node order = input order
-        (matters for degree-tie vs limit_graph_by_degree). Only reads id /
-        object_type / payload.name — payload may be full or name-only."""
-        import numpy as np
-        import scipy.sparse as sp
+        """Compatibility delegate for callers that already derived a graph."""
+        from app.services.kg.viz_index import arrays_from_graph
 
-        nodes = full["nodes"]
-        edges = full["edges"]
-        viz_ids = [n["id"] for n in nodes]
-        viz_types = [n["object_type"] for n in nodes]
-        viz_names = [(n.get("payload") or {}).get("name", "") for n in nodes]
-        index = {nid: i for i, nid in enumerate(viz_ids)}
-        n = len(viz_ids)
-
-        deg = np.zeros(n, dtype=np.int64)
-        und_rows, und_cols, und_seen = [], [], set()
-        edge_list: List[list] = []
-        for e in edges:
-            s, t = e["source_object_id"], e["target_object_id"]
-            si_, ti = index.get(s), index.get(t)
-            if si_ is None or ti is None:
-                continue
-            edge_list.append([s, t, e["edge_type"]])
-            deg[si_] += 1
-            deg[ti] += 1
-            if si_ != ti:
-                pair = (si_, ti) if si_ < ti else (ti, si_)
-                if pair not in und_seen:
-                    und_seen.add(pair)
-                    und_rows += [pair[0], pair[1]]
-                    und_cols += [pair[1], pair[0]]
-
-        if und_rows:
-            data = np.ones(len(und_rows), dtype=np.int8)
-            viz_adj = sp.csr_matrix((data, (und_rows, und_cols)), shape=(n, n))
-        else:
-            viz_adj = sp.csr_matrix((n, n), dtype=np.int8)
-        viz_deg = deg.astype(np.int32)
-        viz_payload = {"edges": edge_list}
-        return viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload
+        return arrays_from_graph(full)
 
     def _derive_object_graph_lite(self, notebook_id: str) -> dict:
-        """Object-level folded graph EQUIVALENT to _unified_graph_full(nb,'object')
-        but WITHOUT full-payload json.loads: node names come from SQL
-        json_extract(payload,'$.name'). Same table + same WHERE (no ORDER BY) →
-        same scan order → same fold order → identical viz arrays."""
-        self.get_notebook(notebook_id)
-        from app.services.kg_merge import derive_unified_graph
-        with self._connect() as db:
-            nrows = db.execute(
-                "SELECT id, object_type, json_extract(payload,'$.name') AS name "
-                "FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,),
-            ).fetchall()
-        nodes = [{"id": r["id"], "object_type": r["object_type"],
-                  "payload": {"name": r["name"] or ""}} for r in nrows]
-        edges = [{"source_object_id": r["source_object_id"],
-                  "target_object_id": r["target_object_id"], "edge_type": r["edge_type"]}
-                 for r in self.relations_for_notebook(notebook_id)]
-        return derive_unified_graph(nodes, edges, self.cluster_map(notebook_id))
+        """Compatibility delegate to the builder's lite DB projection."""
+        return self._runtime.scale_builder._derive_object_graph_lite(notebook_id)
 
     def _viz_index_dir(self, notebook_id: str) -> str:
         return str(self._runtime.scale_artifact_store.viz_dir(notebook_id))
 
     def build_viz_index(self, notebook_id: str) -> Optional[dict]:
-        """Build + persist a viz-only index under {storage_dir}/kg_viz/{nb}/ so the
-        KG-view fast paths light up for notebooks without a full scale index.
-        json_extract names avoid the 300k-row json.loads. Returns manifest, or
-        None for an empty graph (no non-deprecated objects). Caches on success.
-        Task 18: 落盘/回读经 ScaleArtifactStore(同一 kg.viz_index 写读器,字节不变)。"""
-        self.get_notebook(notebook_id)
-        full = self._derive_object_graph_lite(notebook_id)
-        if not full["nodes"]:
-            return None
-        viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = \
-            self._viz_arrays_from_graph(full)
-        manifest = {
-            "version": self._scale_index_version(notebook_id),
-            "n_viz_nodes": len(viz_ids),
-            "n_viz_edges": len(viz_payload.get("edges", [])),
-        }
-        artifact_store = self._runtime.scale_artifact_store
-        artifact_store.save_viz(notebook_id, dict(
-            viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
-            viz_types=viz_types, viz_names=viz_names,
-            viz_payload=viz_payload, manifest=manifest))
-        self._viz_idx_cache[notebook_id] = artifact_store.load_viz(notebook_id)
-        return manifest
+        """Compatibility delegate to the runtime-owned viz builder."""
+        return self._runtime.scale_builder.build_viz(notebook_id)
 
     def _active_kg_delta(self, notebook_id: str):
         """Gather the ACTIVE/self notebook's KG delta for splicing onto a base or

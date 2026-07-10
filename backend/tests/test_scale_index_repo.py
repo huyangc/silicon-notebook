@@ -27,7 +27,7 @@ def test_build_scale_index_writes_artifacts(repo):
         {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
     ], [{"source_local_id": "b", "target_local_id": "a", "edge_type": "depends_on", "evidence": []}])
     repo.rebuild_unified_kg(nb.id)
-    manifest = repo.build_scale_index(nb.id)
+    manifest = repo._runtime.scale_builder.build(nb.id)
     d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
     for f in ("graph.npz", "node_ids.npy", "idf.npy", "chunk_index.npy", "ann.bin", "ann_labels.npy", "manifest.json"):
         assert os.path.exists(os.path.join(d, f)), f
@@ -458,7 +458,7 @@ def test_build_scale_index_writes_chunk_ann(repo):
                 db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                            (cid, nb.id, json.dumps(v), now))
     repo.rebuild_unified_kg(nb.id)
-    manifest = repo.build_scale_index(nb.id)
+    manifest = repo._runtime.scale_builder.build(nb.id)
     d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
     assert os.path.exists(os.path.join(d, "chunk_ann.bin"))
     assert os.path.exists(os.path.join(d, "chunk_ann_labels.npy"))
@@ -1092,7 +1092,7 @@ def test_build_scale_index_builds_hnsw_once_for_kg_synonym_and_ann(repo, monkeyp
         return real_init(self, *a, **kw)
 
     monkeypatch.setattr(hnswlib.Index, "__init__", spy_init)
-    manifest = repo.build_scale_index(nb.id)
+    manifest = repo._runtime.scale_builder.build(nb.id)
 
     # KG-embedding hnsw built once (shared: synonym KNN + persisted ann.bin).
     # No chunks were stored in this fixture → chunk_ann build is skipped

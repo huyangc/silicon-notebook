@@ -29,6 +29,7 @@ from app.services.notebook_catalog import NotebookCatalogService, NotebookSummar
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.scale_artifact_catalog import ScaleArtifactCatalog
+from app.services.scale_index_builder import ScaleIndexBuilder
 from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
@@ -98,6 +99,7 @@ class RepositoryRuntime:
         self.scale_artifact_store = ScaleArtifactStore(settings)
         self.index_projections: "IndexProjectionStore | None" = None
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
+        self.scale_builder: "ScaleIndexBuilder | None" = None
         # Vector persistence is finished by wire_persistence(): its write seat
         # is the facade's `_write` compatibility seam, which only exists once
         # the facade constructor reaches it. Construction stays lazy.
@@ -377,6 +379,53 @@ class RepositoryRuntime:
             note_model_error=note_model_error,
         )
         return self.scale_catalog
+
+    def wire_scale_builder(
+        self,
+        *,
+        get_notebook: Callable[[str], Any],
+        version: Callable[[str], list],
+        load_scale: Callable[[str], Any],
+        full_viz_graph: Callable[[str], dict],
+        relations_for_notebook: Callable[[str], list],
+        cluster_map: Callable[[str], dict],
+        incremental_fuse_source: Callable[[str, str], None],
+        invalidate_scale_cache: Callable[[str], None],
+        cache_viz: Callable[[str, Any], None],
+        building: set,
+        building_lock: Any,
+        notify_index_done: Callable[[str], None],
+    ) -> ScaleIndexBuilder:
+        """Compose Task 19's builder over the exact Task 18 runtime objects.
+
+        Facade compatibility seams stay late-bound callables. The builder owns
+        orchestration only and holds no facade reference; Task 20 moves the
+        supplied cache/build-state objects into the final scale runtime.
+        """
+        if self.index_projections is None or self.scale_catalog is None:
+            raise RuntimeError(
+                "wire_scale_builder requires wire_scale_artifacts() first"
+            )
+        self.scale_builder = ScaleIndexBuilder(
+            settings=self.settings,
+            projections=self.index_projections,
+            artifacts=self.scale_artifact_store,
+            event_log=self.event_log,
+            get_notebook=get_notebook,
+            version=version,
+            load_scale=load_scale,
+            full_viz_graph=full_viz_graph,
+            relations_for_notebook=relations_for_notebook,
+            cluster_map=cluster_map,
+            incremental_fuse_source=incremental_fuse_source,
+            invalidate_scale_cache=invalidate_scale_cache,
+            cache_viz=cache_viz,
+            building=building,
+            building_lock=building_lock,
+            notify_index_done=notify_index_done,
+            now=self.seams.now,
+        )
+        return self.scale_builder
 
     def wire_knowledge_lifecycle(
         self,

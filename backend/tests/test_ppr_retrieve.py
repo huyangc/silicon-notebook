@@ -539,7 +539,7 @@ def test_gather_kg_graph_as_arrays_source_scoped_empty(repo):
     assert src.size == 0 and tgt.size == 0 and w.size == 0
 
 
-def test_build_scale_index_does_not_populate_vector_cache(repo):
+def test_build_scale_index_does_not_populate_vector_cache(repo, monkeypatch):
     """Task 2 (memory diet): build_scale_index must load its kg/chunk
     embedding matrices DIRECTLY (COUNT-hinted build_matrix), never through
     _vector_matrix()/_vector_cache — a build's multi-GB matrices are
@@ -551,8 +551,15 @@ def test_build_scale_index_does_not_populate_vector_cache(repo):
     caches — covered by other tests; this test only guards the build path."""
     nb = _seed_two_doc_moe(repo)
     repo.rebuild_unified_kg(nb.id)
+    monkeypatch.setattr(
+        repo._runtime.retrieval_snapshots,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("full build must not read through RetrievalSnapshotCache")
+        ),
+    )
     before_keys = {k for k in repo._vector_cache._store if ":matrix:" in k}
-    repo.build_scale_index(nb.id)
+    repo._runtime.scale_builder.build(nb.id)
     after_keys = {k for k in repo._vector_cache._store if ":matrix:" in k}
     new_keys = after_keys - before_keys
     assert not new_keys, f"build_scale_index must not populate VectorCache matrix entries: {new_keys}"

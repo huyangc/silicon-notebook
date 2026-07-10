@@ -171,6 +171,11 @@ TASK17_ALLOWED_IMPORTS = {
 TASK18_ALLOWED_IMPORTS = {
     ("backend/tests/test_scale_artifact_catalog.py", 22, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+# Task 19: the new scale-builder failure-boundary suite imports the frozen
+# compatibility facade to assemble an end-to-end runtime fixture.
+TASK19_ALLOWED_IMPORTS = {
+    ("backend/tests/test_scale_builder_failure_boundaries.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -891,6 +896,38 @@ TASK18_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 19: direct runtime-builder coverage intentionally crosses the facade
+# only to seed fixtures and assert the pre-Task-20 cache/build-state identity.
+TASK19_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_build_viz_graph_arrays", "_derive_object_graph_lite", "_runtime_dim",
+        "_viz_arrays_from_graph",
+    }
+} | {
+    ("backend/tests/test_scale_builder_failure_boundaries.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_scale_building", "_scale_idx_cache",
+        "_scale_index", "_write", "build_scale_index", "create_notebook",
+        "embedder", "rebuild_unified_kg",
+    }
+} | {
+    ("backend/tests/test_ppr_retrieve.py", name)
+    for name in {
+        "_runtime", "_vector_cache", "_write", "build_scale_index",
+        "rebuild_unified_kg", "scale_ppr", "settings",
+    }
+} | {
+    ("backend/tests/test_runtime_dim_scale_index.py", name)
+    for name in {
+        "_retrieve_chunks_ann", "_runtime", "_scale_index", "build_scale_index",
+        "event_log", "fold_scale_index_delta", "rebuild_unified_kg", "settings",
+    }
+} | {
+    ("backend/tests/test_scale_index_repo.py", name)
+    for name in {"_runtime", "build_scale_index"}
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -943,6 +980,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK16_ALLOWED_MEMBER_FILES
     | TASK17_ALLOWED_MEMBER_FILES
     | TASK18_ALLOWED_MEMBER_FILES
+    | TASK19_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -1387,6 +1425,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK16_ALLOWED_IMPORTS
                     or site in TASK17_ALLOWED_IMPORTS
                     or site in TASK18_ALLOWED_IMPORTS
+                    or site in TASK19_ALLOWED_IMPORTS
                 )
 
 
