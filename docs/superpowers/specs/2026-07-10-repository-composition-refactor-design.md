@@ -5,6 +5,14 @@
 **基线提交**：3334626（origin/master）
 **交付方式**：一个 PR，九个顺序 review gate；复杂 gate 可含多个 rollback commit
 
+> **实施更正（2026-07-11，rebase 消化）**：实现期间分支 rebase 消化了 master
+> 自身新增的 `_migration_10`（`kg_rebuild_checkpoint` 断点续跑表），
+> `SCHEMA_VERSION` 现为 10——这是 master 的独立特性，不是本重构新增的迁移；
+> 本文各处「SCHEMA_VERSION 保持 9 / 版本收敛到 9」应读作「保持基线版本、
+> 不因重构而变」。冻结的 v9 fixture 由当前代码打开后合法升级到 v10
+> （见 `backend/tests/test_repository_v9_fixture.py`），真实旧库的 backup-only
+> 保护性验证由 `scripts/verify_repository_snapshot.py` 落地。
+
 ## 1. 决策与适用范围
 
 本设计取代“架构渐进整改设计”中 Repository 相关的阶段 2、4、6。原方案把

@@ -35,7 +35,8 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 
 ## Architecture Boundaries
 
-- `SQLiteRepository` remains the public local-persistence facade, while cohesive SQLite domains are extracted incrementally. Identity, per-user model settings, admin usage queries, and auth-session lifecycle live in `backend/app/services/sqlite_identity.py`; share tokens, deep-copy lifecycle, reader membership, and read-access ownership live in `backend/app/services/sqlite_notebook_sharing.py`. The facade inherits both implementations and keeps the existing APIs plus request/copy helper exports compatible.
+- `SQLiteRepository` is the compatibility facade over a composed `RepositoryRuntime`. SQL for the main business database lives only in the domain stores under `backend/app/repositories/sqlite/` (identity, notebook, sharing, source, chunk, embedding, knowledge, governance, unified-KG, ask-state, report, query), which share one `SqliteDatabase` connection factory/write lock and one version-gated `SqliteMigrator`; file artifacts live under `backend/app/repositories/source_files.py` and `backend/app/repositories/filesystem/`; orchestration lives in application services wired by `backend/app/services/repository_runtime.py`. Consumers depend on the consumer-specific Protocols in `backend/app/repositories/ports.py`, and dependencies point one way — facade → runtime → services → stores → SQLite — so a future PostgreSQL adapter replaces the store layer behind the same ports without touching callers. `sqlite_identity.py` and `sqlite_notebook_sharing.py` remain as compatibility re-export shims (the facade delegates explicitly instead of inheriting mixins), and the legacy request-context, `_COPY_CHUNK`, and `_remap_json_ids` exports stay importable.
+- Databases created before the refactor keep loading unchanged: migrations stay version-gated (the frozen schema-v9 fixture under `backend/tests/fixtures/repository_v9/` replays through the current code and upgrades in place), and `python scripts/verify_repository_snapshot.py --database PATH --storage-dir PATH` proves a real pre-refactor database opens backup-only — the original is read via `mode=ro` only long enough for `Connection.backup()`, the repository is constructed exclusively on the temporary backup, and no row changes beyond the documented startup normalizations (interrupted-job recovery, seed rows, the admin in-place upgrade) are tolerated.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
@@ -395,14 +396,14 @@ KG_REFINE_ENABLED            # extraction self-verify: drop hallucinated nodes (
 KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (default true)
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
 KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
-KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports; required for Global QA (default false)
+KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports during rebuild (community layer; default false)
 ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000)
 ANSWER_CONTEXT_MIN_ITEMS     # keep >= N items regardless of budget (default 3)
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
 KG_QUERY_REFINE_ENABLED      # question-aware evidence refinement before answering (default true)
 QUERY_REFINE_MAX_CHARS       # max chars of evidence fed to refinement (default 4000)
-GLOBAL_MAX_COMMUNITIES       # max community reports for Global QA, ask mode="global" (default 20)
+GLOBAL_MAX_COMMUNITIES       # accepted for compatibility; the retired `global` mode is a `chunk` alias, so this is currently unused (default 20)
 RELATION_RETRIEVAL_ENABLED   # relation-vector retrieval for graph/reasoning seeds (default false, opt-in pending eval)
 RELATION_SEED_TOP_N          # top relation/node hits fed as graph seeds when enabled (default 8)
 KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrieval (default false)

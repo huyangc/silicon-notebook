@@ -1378,6 +1378,34 @@ TASK27_ALLOWED_CONSUMERS = {
     ("retrieval", "scripts/diag_base_report.py:172"),
 }
 
+# Task 28: the backup-only snapshot verifier is a new read-only composition
+# root under scripts/. It consumes the facade compatibility exports plus the
+# public read surface (representative reads on the temporary backup) at exact
+# ledger sites; it never touches private facade seams.
+TASK28_ALLOWED_IMPORTS = {
+    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "SCHEMA_VERSION"),
+    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "reset_request_user"),
+    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "set_request_user"),
+}
+TASK28_ALLOWED_CONSUMERS = {
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:601"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:594"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:579"),
+    ("get_report", "scripts/verify_repository_snapshot.py:606"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:582"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:591"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:585"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:603"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:580"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:542"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:546"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:548"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:573"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:615"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:589"),
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -2181,6 +2209,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK25_ALLOWED_IMPORTS
                     or site in TASK26_ALLOWED_IMPORTS
                     or site in TASK27_ALLOWED_IMPORTS
+                    or site in TASK28_ALLOWED_IMPORTS
                 )
 
 
@@ -2214,9 +2243,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites

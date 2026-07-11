@@ -4593,7 +4593,7 @@ Settings(
 )
 ~~~
 
-- [ ] **Step 1: Write RED backup-only/privacy/digest tests**
+- [x] **Step 1: Write RED backup-only/privacy/digest tests**
 
 Add:
 
@@ -4608,7 +4608,7 @@ original storage path list/size/mtime remain unchanged
 hostile configured model/embed/rerank/MinerU environment still creates no client/network call
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ~~~bash
 cd backend
@@ -4617,7 +4617,7 @@ python -m pytest tests/test_repository_snapshot_verifier.py -q
 
 Expected: verifier module absent.
 
-- [ ] **Step 3: Implement normalization and representative reads**
+- [x] **Step 3: Implement normalization and representative reads**
 
 Normalize only:
 
@@ -4636,7 +4636,7 @@ Success line:
 repository-snapshot: PASS schema=v9 changed_tables=0
 ~~~
 
-- [ ] **Step 4: Run fixture and real pre-refactor DB verification**
+- [x] **Step 4: Run fixture and real pre-refactor DB verification**
 
 ~~~bash
 python scripts/verify_repository_snapshot.py \
@@ -4655,11 +4655,11 @@ python scripts/verify_repository_snapshot.py \
 
 Expected: both print PASS; the second command must target the main checkout rather than the isolated worktree, and original DB/storage metadata remain unchanged. Missing original DB/storage is a hard failure, never a skipped compatibility check.
 
-- [ ] **Step 5: Synchronize architecture documentation**
+- [x] **Step 5: Synchronize architecture documentation**
 
 Document the final dependency direction, stores/services/runtime ownership, future PostgreSQL extension boundary, v9 compatibility and backup verifier in all synchronized docs. Because current code is the behavior oracle, also correct stale Ask-mode documentation to `chunk` (default), `reasoning`, `graph`, with persisted `fast`/`global` accepted only as aliases to `chunk`; do not preserve the older fast/global product description. Update `fangan_done.md` phase status factually; add documentation tests asserting the earlier spec is superseded only for Repository work and Pydantic/lifespan work remains deferred.
 
-- [ ] **Step 6: Run all static, compatibility and full gates**
+- [x] **Step 6: Run all static, compatibility and full gates**
 
 ~~~bash
 git diff --check
@@ -4681,7 +4681,7 @@ npm run build
 
 Expected: complete green suite; SCHEMA_VERSION remains 9 and schema golden is unchanged.
 
-- [ ] **Step 7: Commit final verification/docs**
+- [x] **Step 7: Commit final verification/docs**
 
 ~~~bash
 git add scripts/verify_repository_snapshot.py \

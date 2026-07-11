@@ -35,7 +35,8 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 
 ## 架构边界
 
-- `SQLiteRepository` 继续作为本机持久化的公共 facade，并按高内聚领域渐进拆分。账号、用户模型配置、管理员用量查询和 auth session 生命周期位于 `backend/app/services/sqlite_identity.py`；分享 token、深拷贝生命周期、只读成员与读权归属位于 `backend/app/services/sqlite_notebook_sharing.py`。facade 通过继承复用两者，现有 repository API、请求 Context 和复制辅助导出保持兼容。
+- `SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade。主业务库的 SQL 只存在于 `backend/app/repositories/sqlite/` 下的领域 store（identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / query），它们共享同一个 `SqliteDatabase` 连接工厂、写锁与版本闸 `SqliteMigrator`；文件工件位于 `backend/app/repositories/source_files.py` 与 `backend/app/repositories/filesystem/`；业务编排位于 `backend/app/services/repository_runtime.py` 组装的 application services。消费者依赖 `backend/app/repositories/ports.py` 中按消费者划分的小型 Protocol，依赖方向单向——facade → runtime → services → stores → SQLite——未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层，调用方不动。`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim（facade 改为显式委托、不再靠 mixin 继承），请求 Context、`_COPY_CHUNK`、`_remap_json_ids` 等旧导出继续可 import。
+- 重构前创建的数据库可原样加载：迁移仍按版本闸执行（冻结的 schema-v9 fixture `backend/tests/fixtures/repository_v9/` 用当前代码重放并原地升级），`python scripts/verify_repository_snapshot.py --database PATH --storage-dir PATH` 以 backup-only 方式验证真实旧库——原库只以 `mode=ro` 打开到 `Connection.backup()` 完成为止，repository 只在临时备份上构造，除记录在案的启动规整（中断任务恢复、种子补行、admin 原地升级）外不容忍任何行变更。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，图谱和答案共用的类型标记位于 `kg-type-mark.tsx`。
 - 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
 
@@ -366,14 +367,14 @@ KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 tru
 KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 true）
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
 KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
-KG_COMMUNITY_SUMMARY_ENABLED # LLM 社区报告；Global 问答必需（默认 false）
+KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
 ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
 ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
 KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
 QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
-GLOBAL_MAX_COMMUNITIES       # Global 问答(ask mode="global")考虑的社区报告上限（默认 20）
+GLOBAL_MAX_COMMUNITIES       # 兼容保留；退役的 `global` mode 已是 `chunk` 别名，此值当前不被消费（默认 20）
 RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
 RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
 KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）

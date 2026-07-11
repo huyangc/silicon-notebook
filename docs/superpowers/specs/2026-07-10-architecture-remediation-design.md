@@ -8,6 +8,12 @@
 > `2026-07-10-repository-composition-refactor-design.md` 取代。它们合并为一个
 > 保持行为不变的 Repository composition refactor PR，并以 `3334626` 为新基线。
 > 本文的 router / 前端阶段仍保持独立，不纳入该 PR。
+>
+> **交付与范围界定（2026-07-11）**：该 Repository composition refactor 已实现，
+> 并通过冻结 v9 fixture 重放与真实旧库 backup-only 验证
+> （`scripts/verify_repository_snapshot.py`）。取代范围仅限 Repository 工作；
+> 旧阶段 4 的 Pydantic 模型分文件与旧阶段 6 的 FastAPI lifespan / 统一应用
+> 生命周期仍延后为独立工作，阶段 3、5（router / 前端）仍为计划项。
 
 ## 目标
 

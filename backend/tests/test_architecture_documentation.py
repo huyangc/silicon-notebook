@@ -193,7 +193,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-10" in fangan_done
+    assert "更新日期：2026-07-11" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 
@@ -209,3 +209,83 @@ def test_architecture_document_keeps_other_current_runtime_boundaries():
     assert "服务重启后仍为 `running` 的 job 会转为 `interrupted`" in architecture
     assert "`status`、`trace`、`answer_id`" in architecture
     assert "不直接返回 `AskResponse`" in architecture
+
+
+def test_repository_documentation_matches_composed_runtime_and_v9_compatibility():
+    """Task 28: docs describe the composed repository (runtime + stores +
+    consumer ports), the one-way dependency direction, the PostgreSQL
+    extension boundary, v9 compatibility and the backup-only verifier —
+    and stop presenting the retired mixin-inheritance stage as current."""
+    _assert_phrases(
+        {
+            "README.md":
+                "`SQLiteRepository` is the compatibility facade over a composed `RepositoryRuntime`",
+            "README_zh.md": "`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade",
+            "AGENTS.md": "`SQLiteRepository` is the compatibility facade over `RepositoryRuntime`",
+            "architecture.md": "不再通过 mixin 继承复用实现",
+            "fangan_done.md": "组合式 `RepositoryRuntime` 之上的兼容 facade",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "a future PostgreSQL adapter replaces the store layer behind the same ports",
+            "README_zh.md": "未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层",
+            "AGENTS.md": "a future PostgreSQL repository swaps the store layer behind the same ports",
+            "architecture.md": "facade → runtime → application services → stores → `SqliteDatabase`",
+        }
+    )
+    for name in LIVE_REFERENCE_DOCS + ("fangan_done.md",):
+        text = _read(name)
+        assert "verify_repository_snapshot.py" in text, (
+            f"{name} must document the backup-only real-database verifier"
+        )
+        assert "repository_v9" in text or "v9 fixture" in text, (
+            f"{name} must document the frozen schema-v9 compatibility guard"
+        )
+        # Retired descriptions of the mixin-inheritance stage must not read
+        # as current architecture anywhere in the live reference docs.
+        assert "The facade inherits both implementations" not in text
+        assert "facade 通过继承复用两者" not in text
+        assert "cohesive SQLite domains should be extracted incrementally" not in text
+        assert "identity/sharing mixin 是迁移接缝" not in text
+        assert "仍混合 persistence 与业务编排" not in text
+        assert "已拆为 mixin 接缝" not in text
+
+
+def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
+    """`chunk` (default) / `reasoning` / `graph` are the modes; persisted
+    `fast`/`global` ids survive only as aliases to `chunk`.  The older
+    fast/global product description must not resurface."""
+    _assert_phrases(
+        {
+            "README.md": "Retired ids `fast` and `global` are transparently remapped to `chunk`",
+            "README_zh.md": "退役 id `fast`、`global` 透明映射到 `chunk`",
+            "AGENTS.md": "retired `fast`/`global` ids map to `chunk` only for persisted-session compatibility",
+            "architecture.md": "退役 mode id 只保留兼容映射",
+            "fangan_done.md": "KG-native Ask（chunk / graph / reasoning",
+        }
+    )
+    for name in LIVE_REFERENCE_DOCS + ("fangan_done.md",):
+        text = _read(name)
+        assert "Global QA" not in text
+        assert 'mode="global"' not in text
+        assert 'mode="fast"' not in text
+
+
+def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferred():
+    remediation = _read(
+        "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md"
+    )
+    assert "取代范围仅限 Repository 工作" in remediation
+    assert "Pydantic 模型分文件" in remediation
+    assert "仍延后为独立工作" in remediation
+    composition = _read(
+        "docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md"
+    )
+    assert "`SCHEMA_VERSION` 现为 10" in composition
+    assert "不是本重构新增的迁移" in composition
+    for name in ("architecture.md", "fangan_done.md"):
+        text = _read(name)
+        assert "延后为独立工作" in text, (
+            f"{name} must keep the Pydantic/lifespan deferral factual"
+        )

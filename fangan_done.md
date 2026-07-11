@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-10
+更新日期：2026-07-11
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -41,7 +41,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 前端为唯一主线：Next.js / React / TypeScript，目录 `frontend/`。**原静态 `web/` fallback 目录已删除**，`scripts/dev.sh` 与 `scripts/check.sh` 已移除相关引用。
 - 本机默认持久化为 SQLite：`sqlite:///.local/silicon_notebook.db`（标准库 `sqlite3`）。
 - 原始上传文件保存到 `.local/storage`。
-- repository 边界：当前 `SQLiteRepository` 是兼容 facade；identity 与 sharing 已拆为 mixin 接缝，领域小 Protocol 与 PostgreSQL port 属后续阶段。
+- repository 边界：`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade——主业务库 SQL 只在 `backend/app/repositories/sqlite/` 领域 store，编排在 application services，消费者依赖 `backend/app/repositories/ports.py` 小型 Protocol；PostgreSQL adapter 留待将来在同一 ports 后实现。旧库兼容由冻结 v9 fixture、schema golden 与 `scripts/verify_repository_snapshot.py` backup-only 真库验证共同守护。
 - 向量检索本机实现：embedding 本地持久化，查询时使用有界 float32 矩阵或 scale index；PostgreSQL + pgvector 留作后续放量方向。
 - LLM 通过 OpenAI-compatible 配置接入：`OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_TIMEOUT_SECONDS`；embedding 独立使用 `EMBED_*` 配置。
 - `Settings.llm_configured` 与 `Settings.embedding_configured` 分别控制问答/抽取 LLM 与 embedding 能力是否启用。
@@ -213,7 +213,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **测试硬化**：`smoke_backend.py` 三处 `Settings` 清空 `OPENAI_COMPAT_*` + `mineru_mode=off`，`scripts/check.sh` 不再调用真实 LLM/embedding（即便 `.env` 有 key），全程离线 1–2s。
 - **架构硬化（2026-07-10，权限 / 图谱 / 异步状态 / 发布门禁）**：公共 `NotebookUpdate` 不再接受内部 `status`；深拷异常只补偿自身副本，崩溃清理由 `NOTEBOOK_COPY_STALE_SECONDS` 限定为过期 `copying` 行；KG conflict candidate 的读取/状态更新按 `(notebook_id, candidate_id)` 双重作用域，阻断跨库确认/拒绝；rejected relation 在 federated graph、PPR、scale graph 全路径排除，给 LLM 的关系方向保持 `source→target`，大图守卫覆盖 active + 全部 base；多子查询检索为每个 worker 单独传播 Context；URL 来源逐跳拒绝私网/localhost/link-local；认证解析移出 async event loop 且 session 续期节流。前端用 Ask run/workspace epoch 阻断跨 notebook/会话回写，分享/待办统一走原子 notebook opener，退出登录 abort 本地流并 remount。`Settings` 全部迁移到 Pydantic v2 `validation_alias`，非 SQLite URL fail fast；`scripts/check.sh` 禁用仓库 `.env`、运行全量 pytest + 递归前端测试 + tsc + production build，缺前端依赖不再跳过。本次完整门禁通过：后端 `2271 passed, 1 skipped`、前端 `143 passed`、TypeScript 与 Next.js production build 均成功。
 - **架构模块化第二阶段（2026-07-10）**：保持 endpoint、SQLite schema 与 `SQLiteRepository` 公共 API 不变，把账号/用户模型配置/admin 用量/auth session 领域迁入 `sqlite_identity.py` mixin，并把笔记本分享令牌、深复制、成员关系与读取权限迁入 `sqlite_notebook_sharing.py` mixin；`sqlite_repository.py` 从 14,815 行降到 14,059 行，继续兼容 `_REQUEST_USER` / set/reset、`_COPY_CHUNK` 与 `_remap_json_ids` 导出。前端把 workspace API/视图模型迁入 `workspace-model.ts`，答案/引用/推理轨迹迁入 `answer-panel.tsx`，KG 类型标记迁入 `kg-type-mark.tsx`，`page.tsx` 从 6,060 行降到 5,438 行。新增后端继承/导出兼容守卫与前端源码边界测试，防止职责回流。本次完整门禁通过：后端 `2275 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。
-- **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和绿色测试为行为真相，修复 Ask disconnect、mode-specific federation/tier 次序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移。transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；`chunk` 基线 active-only，KG overlay/PPR 可引入 federated KG/base-backed chunk，`graph`/`reasoning` 走 federated KG；exact-score 的 `base` 次序只适用于知识对象命中，relation hit 仍 score-only；workspace 是来源栏 + 问答/知识库/深度报告主栏两列结构。`architecture.md` 已改为稳定边界说明，文档契约测试进入常规 pytest。本次完整门禁通过：后端 `2281 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 仍为后续规划，未计入已完成。
+- **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和绿色测试为行为真相，修复 Ask disconnect、mode-specific federation/tier 次序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移。transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；`chunk` 基线 active-only，KG overlay/PPR 可引入 federated KG/base-backed chunk，`graph`/`reasoning` 走 federated KG；exact-score 的 `base` 次序只适用于知识对象命中，relation hit 仍 score-only；workspace 是来源栏 + 问答/知识库/深度报告主栏两列结构。`architecture.md` 已改为稳定边界说明，文档契约测试进入常规 pytest。本次完整门禁通过：后端 `2281 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 当时仍为后续规划。
+- **Repository composition refactor（2026-07-11，原阶段 2、4、6 的 Repository 部分）**：把约 1.38 万行同时承担 persistence/编排/缓存/runtime 状态的 `SQLiteRepository` 重构为组合根形态——SQL 迁入 `backend/app/repositories/sqlite/` 领域 store（共享唯一 `SqliteDatabase` 连接工厂与写锁、`SqliteMigrator` 版本闸 + 每启动恢复/种子/admin 原地升级），文件工件迁入 `backend/app/repositories/source_files.py` 与 `filesystem/`，编排迁入 runtime 组装的 application services（ingestion / retrieval / evidence-context / ask / report / lifecycle / governance / sharing / scale），消费者改依赖 `backend/app/repositories/ports.py` 小型 Protocol；`SQLiteRepository` 保留为显式委托的兼容 facade（零行为变更：endpoint、SQLite schema、检索排序、Ask 持久化、断连/取消语义均不变），`sqlite_identity.py` / `sqlite_notebook_sharing.py` 降为兼容 re-export shim。旧库兼容三层守护：冻结 v9 fixture 重放（`backend/tests/fixtures/repository_v9/`）、`test_legacy_db_compat.py` schema golden、`scripts/verify_repository_snapshot.py` backup-only 真库验证——真实 4.7GB 生产库（53 表、user_version=10）验证 `PASS schema=v10 changed_tables=0`：88,343 知识对象 / 109,539 关系 / 20,268 chunk / 149 个 storage 文件全部原样，唯一规整为 admin 每启动改密（`admin_upgraded=1`），冻结 v9 fixture 同样 `PASS schema=v9 changed_tables=0`（迁移补建 `kg_rebuild_checkpoint` 空表）。旧阶段 4 的 Pydantic 模型分文件与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期延后为独立工作。本次完整门禁通过：后端 `2708 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。
 
 ## 21. 文档类型抽取 profile 注册表（方案 §5 对象模型 + §6.2 模板）
 
@@ -290,7 +291,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
 - 检索：BM25 / FTS5 / pgvector 放量、结构化硬过滤、Knowledge graph（已评估为低 ROI / 基础设施级，暂缓）。
 - 扫描件 OCR、DOCX/PPTX 公式（OMML）解析；MinerU 已覆盖 PDF 的公式/表格/版面（本机 MLX 或 GPU 主机）。
-- **架构渐进整改后续阶段**：阶段 2–6（Notebook 规模策略与 Repository ports、FastAPI routers 与前端 API client、SQLite migrations 与模型边界、前端 workspace 状态拆分、Runtime 生命周期与 Retrieval/Ask 实现）仍为计划项；当前只完成阶段 1 的行为契约与文档对齐。
+- **架构渐进整改后续阶段**：阶段 3（FastAPI routers 与前端 API client）与阶段 5（前端 workspace 状态拆分）仍为计划项。阶段 2、4、6 的 Repository 部分已由 Repository composition refactor 交付（见第 19 节账本 2026-07-11 条目）；其中旧阶段 4 的 Pydantic 模型分文件与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期延后为独立工作。
 
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
 

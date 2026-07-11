@@ -1,6 +1,6 @@
 # silicon-notebook 架构
 
-更新日期：2026-07-10
+更新日期：2026-07-11
 
 本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署、环境变量全集与产品操作说明以 `README.md`、`README_zh.md` 和 `.env.example` 为准；协作约束以 `AGENTS.md` 为准。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
@@ -27,18 +27,19 @@
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
 - SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。生产 repository 尚未切换到 PostgreSQL；非 `sqlite:///` 的 `DATABASE_URL` 会被拒绝，不能静默回落到本地库。
-- SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`。模型向量以 JSON 持久化，并在查询时装配为有界的 float32 numpy 矩阵或显式维护的 scale index。
+- SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`。模型向量以 float32 BLOB 持久化（历史 JSON 文本向量保持可读、可批量转换），并在查询时装配为有界的 float32 numpy 矩阵或显式维护的 scale index。
 
-### 2.2 Repository facade 与领域接缝
+### 2.2 Repository 组合与兼容 facade
 
-`backend/app/services/sqlite_repository.py` 中的 `SQLiteRepository` 是现有消费者使用的公共 facade。它仍负责连接、迁移接入、摄取、检索、Ask、缓存与作业协调，因此不是最终的 persistence port。
+`backend/app/services/sqlite_repository.py` 中的 `SQLiteRepository` 是现有消费者使用的兼容 facade：它构造并持有内部组合根 `RepositoryRuntime`（`backend/app/services/repository_runtime.py`），公共方法以显式委托转发到 runtime 拥有的 store 与 service，不再通过 mixin 继承复用实现。依赖方向单向：facade → runtime → application services → stores → `SqliteDatabase`；被抽出的 service/store 不得反向 import facade。
 
-已有两个高内聚 mixin 是渐进拆分接缝：
+- **SQLite 持久化**：`backend/app/repositories/sqlite/` 下的领域 store（identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / query / index-projection），共享唯一的 `SqliteDatabase`（connection factory、WAL/busy_timeout PRAGMA、实例级写锁）。`SqliteMigrator` 持有 `SCHEMA_VERSION` 与版本化迁移注册表；启动顺序固定为 migrate → 恢复中断的 merge-review/Ask job → seed 与 admin 原地升级，后两步不进版本闸、每次启动照跑。
+- **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）与 `backend/app/repositories/filesystem/`（scale/viz 索引工件）。
+- **业务编排**：application services（摄取、检索、evidence context、Ask、报告、KG lifecycle/governance、分享/深拷贝、scale runtime）由 runtime 组装；service 不直接拼 SQL。SQLite 专用的运维能力（批量 backfill、raw build/fold、诊断投影）归 maintenance adapter，不进入可移植 ports。
+- **消费者契约**：`backend/app/repositories/ports.py` 按消费者划分小型 Protocol；`app/services/repository.py` 保留为兼容 import 入口。未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层（本地 beta 不实现）。
+- **旧库兼容**：迁移版本闸 + 冻结 v9 fixture（`backend/tests/fixtures/repository_v9/`、`test_repository_v9_fixture.py`）+ `test_legacy_db_compat.py` schema golden 共同守护「重构前创建的数据库直接打开、迁移、读取」。`scripts/verify_repository_snapshot.py` 以 backup-only 方式验证真实旧库：原库只以 `mode=ro` 读到 `Connection.backup()` 完成，repository 只在临时备份与临时 storage 上构造，除中断任务恢复、种子补行与 admin 原地升级外不容忍任何行变更，stdout 只输出表名/行数/摘要。
 
-- `sqlite_identity.py`：账号、认证 session、用户模型配置与管理员用量查询。
-- `sqlite_notebook_sharing.py`：分享 token、只读成员、读权限归属、notebook 深拷贝与清理生命周期。
-
-facade 通过继承复用这两个实现，并保持既有 repository 方法、请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出。后续迁移必须先建立小型领域 Protocol，再移动实现；不能一次性替换 facade 或改变公开 API。
+`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
 
 ### 2.3 API 与领域服务
 
@@ -152,26 +153,27 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 |---|---|---|
 | FastAPI 应用 | `backend/app/main.py` | 应用装配、中间件与 router 挂载；同步 SQLite 授权工作不能阻塞 event loop。 |
 | API | `backend/app/api/routes.py`、`auth_routes.py`、`deps.py` | 总业务 router 仍偏大；拆分前后必须保持路径、依赖与 response schema。 |
-| SQLite facade | `backend/app/services/sqlite_repository.py` | 现有公共入口；identity/sharing mixin 是迁移接缝，不是完成的 port 分层。 |
-| Identity | `backend/app/services/sqlite_identity.py` | 用户、session、模型配置、管理员用量。 |
-| Sharing | `backend/app/services/sqlite_notebook_sharing.py` | share token、reader 权限、深拷贝与补偿/恢复。 |
+| SQLite facade | `backend/app/services/sqlite_repository.py` | 兼容 facade：显式委托到 `RepositoryRuntime` 组合的 store/service，不再承载领域 SQL；旧 import 与测试接缝保持。 |
+| Repository stores | `backend/app/repositories/`（`sqlite/`、`source_files.py`、`filesystem/`、`ports.py`） | 主业务库 SQL 唯一所在；共享一个 `SqliteDatabase` 与版本闸 `SqliteMigrator`；ports 是消费者契约。 |
+| Identity | `backend/app/repositories/sqlite/identity_store.py` | 用户、session、模型配置、管理员用量；`sqlite_identity.py` 为兼容 shim。 |
+| Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。 |
 | KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；所有消费者共享 usable relation 规则。 |
 | Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding 与 tier 次序保持分离；mode registry 是 mode 真源。 |
 | Reports | `backend/app/services/report_engine.py` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义。 |
 | Frontend workspace | `frontend/app/page.tsx` 加共享 model/panel/helper | `page.tsx` 负责编排；共享类型、答案面板和 KG 标记不能复制回巨型组件。 |
 
-当前主要耦合点是：`SQLiteRepository` 仍混合 persistence 与业务编排、`routes.py` 仍聚合多数业务端点、`page.tsx` 仍承担大量 workspace 异步状态。整改必须以现有 facade 和测试为保护层逐域迁移。
+Repository 侧的 persistence 与业务编排已按上表分层完成；当前主要耦合点是：`routes.py` 仍聚合多数业务端点、`page.tsx` 仍承担大量 workspace 异步状态。后续整改继续以现有 facade 和测试为保护层逐域迁移。
 
 ## 6. 已知架构债务与整改顺序
 
-整改按已批准设计分六个独立阶段，每阶段单独提交/PR、同步最新 `master` 并运行完整门禁：
+整改按已批准设计分六个阶段；Repository 相关的阶段 2、4、6 已合并为一个保持行为不变的 Repository composition refactor 交付（设计见 `docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md`），每阶段仍单独提交/PR、同步最新 `master` 并运行完整门禁：
 
-1. **行为契约与文档对齐**：修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。
-2. **Notebook 规模策略与 Repository ports**：引入中性 `NotebookScaleProfile`，让 copy 与 retrieval 分别消费自己的策略；把巨型 repository Protocol 拆成领域小 Protocol，同时保留兼容组合类型。
-3. **FastAPI routers 与前端 API client**：按 notebook/source/ask/knowledge/report/admin 拆 router；统一前端 JSON、NDJSON、Blob、认证和错误解析。
-4. **SQLite migrations 与模型边界**：把 migration registry、DDL 与 schema helper 迁到 `sqlite_migrations.py`；按领域拆 Pydantic 模型并从 `schemas.py` re-export 旧符号。
-5. **前端 workspace 状态拆分**：先增加可迁移的 helper/hook 行为测试，再抽 `useAskSession`、`useSourceLibrary`、`useKnowledgeGraphWorkspace` 与对应 panel；不引入新全局状态库，不改轮询节奏。
-6. **Runtime 生命周期与 Retrieval/Ask 实现**：引入 FastAPI lifespan 管理的 application runtime、job executor 与 cache coordinator，最后再把 retrieval/Ask 从 SQLite facade 迁出；保留取消、重连、缓存版本和大库守卫 characterization test。
+1. **行为契约与文档对齐**（已完成）：修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。
+2. **Notebook 规模策略与 Repository ports**（已随 composition refactor 交付）：中性 `NotebookScaleProfile` 让 copy 与 retrieval 分别消费自己的策略；巨型 repository Protocol 拆成 `app/repositories/ports.py` 的领域小 Protocol，保留兼容组合类型。
+3. **FastAPI routers 与前端 API client**（计划项）：按 notebook/source/ask/knowledge/report/admin 拆 router；统一前端 JSON、NDJSON、Blob、认证和错误解析。
+4. **SQLite migrations 与模型边界**（migration 部分已随 composition refactor 交付）：migration registry、DDL 与 schema helper 已迁入 `app/repositories/sqlite/migrations.py`，schema snapshot/旧库兼容测试已就位；按领域拆 Pydantic 模型并从 `schemas.py` re-export 旧符号仍延后为独立工作。
+5. **前端 workspace 状态拆分**（计划项）：先增加可迁移的 helper/hook 行为测试，再抽 `useAskSession`、`useSourceLibrary`、`useKnowledgeGraphWorkspace` 与对应 panel；不引入新全局状态库，不改轮询节奏。
+6. **Runtime 生命周期与 Retrieval/Ask 实现**（repository 内部组合已随 composition refactor 交付）：retrieval/Ask/report 实现已迁入 runtime 组合的 service，取消、重连、缓存版本和大库守卫 characterization test 保留；FastAPI lifespan 管理的 application runtime、executor shutdown 与统一应用生命周期仍延后为独立工作。
 
 非目标包括一次性 clean-architecture 重写、在本轮引入 PostgreSQL/SQLAlchemy/容器/新模型服务，或借整改改变公开 API、数据库表、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
 
@@ -182,6 +184,17 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 ```bash
 cd backend
 python -m pytest tests/test_architecture_documentation.py tests/test_ask_stream_cancel.py tests/test_two_tier_federated.py -q
+```
+
+Repository 组合与旧库兼容（fixture 重放 + backup-only 真库验证）：
+
+```bash
+cd backend
+python -m pytest tests/test_repository_v9_fixture.py tests/test_legacy_db_compat.py tests/test_repository_snapshot_verifier.py -q
+cd ..
+python scripts/verify_repository_snapshot.py \
+  --database backend/tests/fixtures/repository_v9/baseline.db \
+  --storage-dir backend/tests/fixtures/repository_v9/storage
 ```
 
 完整离线门禁与前端生产构建：
