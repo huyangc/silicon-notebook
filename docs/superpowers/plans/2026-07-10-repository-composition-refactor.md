@@ -2,17 +2,27 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在一个 PR 内把 SQLiteRepository 重构为显式组合 facade，并将 SQLite persistence、业务服务、检索、Ask、报告、缓存与索引 runtime 拆到明确边界，同时保证 API、schema v9、旧数据库、排序、事务 checkpoint 和异步行为完全一致。
+**Goal:** 在一个 PR 内把 SQLiteRepository 重构为显式组合 facade，并将 SQLite persistence、业务服务、检索、Ask、报告、缓存与索引 runtime 拆到明确边界，同时保证 API、master 基线 schema、冻结 v9 旧数据库、排序、事务 checkpoint 和异步行为完全一致。
 
 **Architecture:** 采用 contract-first strangler：先冻结基线 facade、旧库和行为 goldens，再逐域把实现移动到共享 SqliteDatabase、SQLite stores、application services 和 runtime coordinators，原 facade 在每一步都显式委托且保持可用。RepositoryRuntime 是 cached SQLiteRepository 内部的 composition root；本 PR 不引入 FastAPI lifespan 或新的 shutdown 语义。
 
 **Tech Stack:** Python 3.11+、FastAPI、标准库 sqlite3、numpy、pytest、Next.js 15 / TypeScript（仅做兼容验证）。
 
+> **完成态同步（2026-07-12）**：本计划的 Repository 范围已经落地。主业务库
+> SQL/row projection 只在 SQLite stores，application services 保留编排；facade
+> 只含显式 adapter/单跳委托且 ownership 由源码验证；消费者窄 Protocol 可独立执行。
+> `RepositoryRuntime` 唯一持有可变运行态，Ask/report 同步 submit 失败会持久化
+> failed 并注销 cancellation entry。backup-only verifier 使用精确 migration/seed
+> manifest、URI 编码与 retained-backup 失败报告，并校验 DB/WAL 与 SHM existence/size，
+> live WAL 只豁免 SHM mtime。以上均为保持行为的架构整改，不新增产品功能或 migration。
+>
+> 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
+
 ## Global Constraints
 
 - 实现基线是 origin/master 3334626；已通过的 characterization tests 和生产代码是行为真相。
 - 所有实现位于分支 `codex/repository-composition-refactor` 的隔离 worktree；最终只创建一个 PR。
-- endpoint、请求/响应 model、HTTP 映射、前端行为、SQLite 表/列/index/foreign key 和 SCHEMA_VERSION=9 均不得改变。
+- endpoint、请求/响应 model、HTTP 映射、前端行为、SQLite 表/列/index/foreign key 和 master 基线的 `SCHEMA_VERSION = 10` 均不得因重构改变。
 - 不新增 migration，不更新 schema golden，不做自动 table rebuild、全库 JSON/BLOB 转码、ID 重映射或数据清洗。
 - 必须继续读取 JSON TEXT 与 little-endian float32 BLOB 混合向量，以及已有 source/scale/viz artifacts。
 - 每个 RepositoryRuntime 只有一个 SqliteDatabase 和一个实例级 RLock；同一 runtime 的 stores 共享它，不把多个 repository 实例改成跨实例全局锁。
@@ -49,7 +59,7 @@
 
 - Create `backend/app/repositories/sqlite/__init__.py`: SQLite adapter exports.
 - Create `backend/app/repositories/sqlite/database.py`: path resolution, connection PRAGMAs, one runtime-local RLock and write context.
-- Create `backend/app/repositories/sqlite/migrations.py`: SCHEMA_VERSION=9、migration registry、recovery 与 seed。
+- Create `backend/app/repositories/sqlite/migrations.py`: `SCHEMA_VERSION = 10`、migration registry、recovery 与 seed。
 - Create `backend/app/repositories/sqlite/identity_store.py`: users、profiles、sessions、model settings。
 - Create `backend/app/repositories/sqlite/notebook_store.py`: notebook rows、tier、access lookups and summary/analytics queries.
 - Create `backend/app/repositories/sqlite/sharing_store.py`: share/member rows and copy persistence primitives.
@@ -1350,7 +1360,7 @@ git add backend/app/repositories/sqlite \
 git commit -m "refactor(repository): extract sqlite database boundary"
 ~~~
 
-### Task 6: Move schema v9 migrations, recovery and seed as one unit
+### Task 6: Move versioned migrations, recovery and seed as one unit
 
 **Files:**
 - Create: `backend/app/repositories/sqlite/migrations.py`
@@ -1368,7 +1378,7 @@ git commit -m "refactor(repository): extract sqlite database boundary"
 **Interfaces:**
 
 ~~~python
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class SqliteMigrator:
@@ -1397,7 +1407,7 @@ class SqliteMigrator:
     ) -> None: ...
 ~~~
 
-Keep internal `_migration_1` through `_migration_9` names so the version loop remains:
+Keep internal `_migration_1` through `_migration_10` names so the version loop remains:
 
 ~~~python
 for version in range(current + 1, SCHEMA_VERSION + 1):
@@ -1421,7 +1431,7 @@ def test_initialize_orders_migrate_recover_seed(migrator, monkeypatch):
     assert calls == ["migrate", "recover", "seed"]
 ~~~
 
-Add tests that a copied frozen v9 DB has no schema rewrite, an unversioned legacy DB reaches v9, and a missing-column fixture is stamped below the migration that introduces that column.
+Add tests that a copied frozen v9 DB upgrades through the existing v10 migration and remains readable, an unversioned legacy DB reaches v10, and a missing-column fixture is stamped below the migration that introduces that column.
 
 - [ ] **Step 2: Run tests and confirm RED**
 
@@ -1437,7 +1447,7 @@ Expected: missing `app.repositories.sqlite.migrations`.
 
 - [ ] **Step 3: Move all DDL and startup code verbatim**
 
-Move `_migration_1`–`_migration_9`, `_add_column_if_missing`, recovery and seed without editing SQL strings/order. Re-export `SCHEMA_VERSION` and keep facade wrappers for all existing tests/scripts. Runtime calls `migrator.initialize()` exactly once after stores needed by startup exist and before serving requests.
+Move `_migration_1`–`_migration_10`, `_add_column_if_missing`, recovery and seed without editing SQL strings/order. Re-export `SCHEMA_VERSION` and keep facade wrappers for all existing tests/scripts. Runtime calls `migrator.initialize()` exactly once after stores needed by startup exist and before serving requests.
 
 - [ ] **Step 4: Run schema/startup tests and confirm GREEN**
 
@@ -4679,7 +4689,7 @@ cd frontend
 npm run build
 ~~~
 
-Expected: complete green suite; SCHEMA_VERSION remains 9 and schema golden is unchanged.
+Expected: complete green suite; `SCHEMA_VERSION` remains 10 and schema golden is unchanged except for the already-existing v10 migration applied to older fixtures.
 
 - [x] **Step 7: Commit final verification/docs**
 
@@ -4725,7 +4735,7 @@ The PR body must include:
 zero-behavior-change motivation
 component/state ownership
 review gates and rollback order
-schema v9 and frozen-master fixture results
+schema-baseline and frozen-v9 fixture results
 real old-database backup-only result
 retrieval/performance results
 Ask stream/cancel/disconnect results

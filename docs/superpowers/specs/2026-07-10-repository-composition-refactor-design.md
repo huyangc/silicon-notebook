@@ -1,17 +1,27 @@
 # Repository 组合式重构设计
 
 **日期**：2026-07-10
-**状态**：设计已逐段批准；等待书面规范复核
+**状态**：已实现并由可执行架构与旧库兼容守卫验证
 **基线提交**：3334626（origin/master）
 **交付方式**：一个 PR，九个顺序 review gate；复杂 gate 可含多个 rollback commit
 
 > **实施更正（2026-07-11，rebase 消化）**：实现期间分支 rebase 消化了 master
 > 自身新增的 `_migration_10`（`kg_rebuild_checkpoint` 断点续跑表），
 > `SCHEMA_VERSION` 现为 10——这是 master 的独立特性，不是本重构新增的迁移；
-> 本文各处「SCHEMA_VERSION 保持 9 / 版本收敛到 9」应读作「保持基线版本、
-> 不因重构而变」。冻结的 v9 fixture 由当前代码打开后合法升级到 v10
+> 本文中的历史 v9 规划已统一改为「保持 master 基线版本、不因重构而变」。
+> 冻结的 v9 fixture 由当前代码打开后合法升级到 v10
 > （见 `backend/tests/test_repository_v9_fixture.py`），真实旧库的 backup-only
 > 保护性验证由 `scripts/verify_repository_snapshot.py` 落地。
+>
+> **完成态同步（2026-07-12）**：主业务库 SQL/row projection 只在 SQLite
+> stores，application services 保留编排；facade 只含显式 adapter/单跳委托，
+> 实际 delegate target 与 ownership manifest 由 AST guard 对照；消费者窄 Protocol
+> 可脱离 facade/private runtime 执行。`RepositoryRuntime` 唯一持有可变运行态，
+> Ask/report 同步 submit 失败会持久化 failed 并注销 cancellation entry。backup-only
+> verifier 使用精确 migration/seed manifest、URI 编码与 retained-backup 失败报告，
+> 并校验 DB/WAL 与 SHM existence/size，live WAL 只豁免 SHM mtime。
+>
+> 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
 ## 1. 决策与适用范围
 
@@ -376,7 +386,7 @@ bump 和 index scheduling 顺序，以及 update/merge/promotion/review 各自�
 
 ### 10.1 不变项
 
-- SCHEMA_VERSION 保持 9。
+- `SCHEMA_VERSION` 保持 master 基线已有的 10；冻结 v9 fixture 经既有 v10 migration 升级。
 - 不新增 migration，不更新 schema golden，不自动 rebuild table。
 - DDL、migration 顺序、守卫式 ALTER 和幂等行为只搬位置，不改变语义。
 - 当前 sqlite:/// URL 解析、相对路径锚点与非 SQLite URL fail-fast 保持不变。
@@ -589,7 +599,7 @@ PR 发布前必须：
 
 - 所有 endpoint、schema、序列化结果、异常和异步语义与基线一致。
 - 基线 master fixture、历史 unversioned fixture 和真实旧库快照均能被新代码读取。
-- SCHEMA_VERSION 仍为 9，schema golden 无变化，未发生自动数据重写。
+- `SCHEMA_VERSION` 仍为 master 基线已有的 10；冻结 v9 fixture 只应用既有 v10 migration，未因本重构新增 migration 或数据重写。
 - SQLiteRepository 是显式 compatibility facade；无 __getattr__、无业务 SQL、无
   Protocol runtime inheritance。
 - 新 service/store 的职责、依赖和 state ownership 能从接口直接理解并单测。
