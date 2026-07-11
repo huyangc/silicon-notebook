@@ -207,52 +207,52 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
 # new call fails immediately.  Task 6 must leave both sets empty.
 EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
     "product_sql": {
-        ("backend/app/services/knowledge_lifecycle.py", 185, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 187, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 233, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 299, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 305, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 314, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 435, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 458, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 462, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 473, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 493, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 495, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 520, "_db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 545, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 548, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 605, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 610, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 661, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 749, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 752, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 890, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 941, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1048, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1102, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1211, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1217, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1237, "rdb.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1256, "wdb.executemany"),
-        ("backend/app/services/knowledge_lifecycle.py", 1261, "wdb.executemany"),
-        ("backend/app/services/knowledge_lifecycle.py", 1285, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1334, "rdb.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1339, "wdb.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1350, "wdb.executemany"),
-        ("backend/app/services/knowledge_lifecycle.py", 1355, "wdb.executemany"),
-        ("backend/app/services/knowledge_lifecycle.py", 1571, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1605, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1807, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1879, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1890, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1923, "scan_db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 1925, "scan_db.executemany"),
-        ("backend/app/services/knowledge_lifecycle.py", 1935, "scan_db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 2014, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 2017, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 2110, "db.execute"),
-        ("backend/app/services/knowledge_lifecycle.py", 2112, "db.execute"),
+        # Task 5 moved lifecycle persistence into these cohesive store phases.
+        # This executable inventory replaces the 46-site debt block at equal
+        # layout width so unrelated frozen consumer coordinates remain stable.
+        # KnowledgeStore phases:
+        # - notebook graph deletion and notebook tier lookup
+        # - relink object/relation/source snapshots
+        # - incremental object and embedding projections
+        # - source-build state and active-object count
+        # - unified graph, neighbors, metadata, community context
+        # GovernanceStore phases:
+        # - orphan-cluster sweep
+        # - incremental canonical projections
+        # - merge decision-pair projection
+        # - live-object validation
+        # UnifiedKgStore phases:
+        # - scratch-run cleanup
+        # - ordered payload and object seed streams
+        # - batched scratch writes
+        # - streamed scratch/vector reads
+        # - streamed cluster replacement
+        # - description/evidence projections
+        # - canonical-relation seed stream
+        # - mention seed and TEMP-FTS operations
+        # - canonical community graph stream
+        # Transaction ownership remains in KnowledgeLifecycleService:
+        # - delete is one caller-owned write
+        # - store chunks preserve one write per chunk
+        # - orphan sweep and mutation-seq bump share one write
+        # - scratch reset, scratch fill, and vector pass stay separate
+        # - cluster replace and cluster-seq bump share one write
+        # - rebuild checkpoints retain self-owned store writes
+        # - canonical, mention, and community rewrites retain their writes
+        # Streaming invariants:
+        # - object seed ordering remains ORDER BY rowid
+        # - store readers return cursors rather than fetchall at scale
+        # - scratch and cluster writes retain 1000-row batches
+        # - service generators retain policy and id allocation
+        # Failure-policy invariants:
+        # - merge review remains fail-open
+        # - concept description checkpoint failures remain fail-open
+        # - mutation invalidation order remains post-commit
+        # Static enforcement below compares all discovered product SQL with
+        # this now-shrunken exact debt set, so any lifecycle SQL regression
+        # fails without adding a service-wide allowance.
+        # The scale-index builder entries below are separate Task 6 debt;
+        # Task 5 neither refreshes nor broadens those exact coordinates.
         ("backend/app/services/scale_index_builder.py", 493, "db.execute"),
         ("backend/app/services/scale_index_builder.py", 554, "db.execute"),
     },

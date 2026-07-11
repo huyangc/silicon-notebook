@@ -177,17 +177,8 @@ class KnowledgeLifecycleService:
         sources and source_elements so it can be re-extracted from already-parsed
         elements. Returns {table: rows_deleted}."""
         self.get_notebook(notebook_id)
-        counts: dict = {}
         with self._write() as db:
-            for table in ("knowledge_objects", "knowledge_relations", "concept_clusters",
-                          "concept_merge_candidates", "knowledge_embeddings",
-                          "extraction_runs", "unified_kg_state"):
-                cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
-                counts[table] = cur.rowcount
-            fts_cur = db.execute(
-                "DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,)
-            )
-            counts["kg_objects_fts"] = fts_cur.rowcount
+            counts = self.knowledge.delete_notebook_graph_rows(db, notebook_id)
         self._invalidate_unified_cache(notebook_id)
         return counts
 
@@ -230,9 +221,7 @@ class KnowledgeLifecycleService:
         # before they are treated as canonical. Personal notebooks keep
         # 'approved' (no behavior change).
         with self._connect() as db:
-            nb_row = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
-            ).fetchone()
+            nb_row = self.knowledge.notebook_tier_row(db, notebook_id)
         auto_status = 'reviewed' if (nb_row and nb_row["tier"] == 'base') else 'approved'
 
         for i in range(0, len(objects), CHUNK):
@@ -296,25 +285,7 @@ class KnowledgeLifecycleService:
 
         self.get_notebook(notebook_id)  # KeyError if missing
         with self._connect() as db:
-            obj_rows = db.execute(
-                "SELECT id, object_type, source_id, payload, evidence "
-                "FROM knowledge_objects "
-                "WHERE notebook_id = ? AND status != 'deprecated'",
-                (notebook_id,),
-            ).fetchall()
-            rel_rows = db.execute(
-                "SELECT source_object_id, target_object_id, edge_type "
-                "FROM knowledge_relations WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
-            # Valid source ids — knowledge_relations.source_id has an FK to
-            # sources(id); a legacy/orphaned object source_id is stored as NULL
-            # (the column is nullable) to avoid a FOREIGN KEY violation.
-            valid_src = {
-                r["id"] for r in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)
-                ).fetchall()
-            }
+            obj_rows, rel_rows, valid_src = self.knowledge.relink_rows(db, notebook_id)
 
         nodes, src_by_id = [], {}
         for r in obj_rows:
@@ -432,15 +403,12 @@ class KnowledgeLifecycleService:
         # ko- 以新 id 重建,旧簇成员行悬空。消费方(build_ppr_graph/unified_graph)虽已过滤,
         # 仍清以防表无界增长 + unified_kg_status 的 canonical 计数虚高。id 是 PK,子查询走索引。
         with self._write() as db:
-            cur = db.execute(
-                "DELETE FROM concept_clusters WHERE notebook_id=? AND member_object_id NOT IN "
-                "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
-                (notebook_id, notebook_id))
+            swept = self.governance_store.sweep_orphan_clusters(db, notebook_id)
             # P0-A: only bump if this orphan-sweep actually deleted rows — the
             # later append_clusters calls in this method self-bump on their own
             # additions, so this guards just the DELETE branch (no double-count,
             # no fake signal on a no-op sweep).
-            if cur.rowcount > 0:
+            if swept > 0:
                 self._bump_cluster_mutation_seq(db, notebook_id)
         from app.services.kg_merge import place_new_concepts, _norm
         # P1-2: one shared cluster_map load for the whole fuse call (Tier1/Tier2
@@ -455,13 +423,12 @@ class KnowledgeLifecycleService:
         # formulas/procedures never depends on concepts Tier1 just appended.
         cmap = self.cluster_map(notebook_id)
         with self._connect() as db:
-            new = db.execute(
-                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
-                "AND object_type='concept' AND status!='deprecated'",
-                (notebook_id, source_id)).fetchall()
-            cn = db.execute(
-                "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
-                "WHERE notebook_id=? AND object_type='concept'", (notebook_id,)).fetchall()
+            new = self.knowledge.incremental_object_rows(
+                db, notebook_id, source_id, "concept"
+            )
+            cn = self.governance_store.incremental_cluster_rows(
+                db, notebook_id, "concept"
+            )
         new_objs = [{"object_id": r["id"],
                      "name": json.loads(r["payload"] or "{}").get("name", "")} for r in new]
         if new_objs:
@@ -470,10 +437,9 @@ class KnowledgeLifecycleService:
                                       seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
             self.append_clusters(notebook_id, rows, object_type="concept")
             with self._connect() as db:
-                ex = db.execute(
-                    "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
-                    "AND object_type='concept' AND status!='deprecated' AND source_id!=?",
-                    (notebook_id, source_id)).fetchall()
+                ex = self.knowledge.incremental_object_rows(
+                    db, notebook_id, source_id, "concept", exclude_source=True
+                )
             # Tier2 桥接候选来源三分支(P1-3,perf audit):
             #   1) 有可用 kg ANN(即使版本漂移/stale,advisory 桥接可接受)→ ANN 近邻查询,
             #      任意规模可用,恢复大库(> max_entities)上一直被静默跳过的跨文档桥接。
@@ -490,11 +456,10 @@ class KnowledgeLifecycleService:
                     notebook_id, idx, ann, new_objs, cmap)
             elif len(ex) <= self.settings.kg_incremental_tier2_max_entities:
                 with self._connect() as db:
-                    vrows = db.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
-                                       (notebook_id,)).fetchall()
-                    pend = db.execute(
-                        "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
-                        "WHERE notebook_id=? AND status='pending'", (notebook_id,)).fetchall()
+                    vrows = self.knowledge.embedding_rows(db, notebook_id)
+                    pend = self.governance_store.merge_candidate_pairs(
+                        db, notebook_id, ("pending",)
+                    )
                 # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量)。
                 # 运行时截断旁路(计划 §1.2 旁路 2):两步分离、顺序不可反 ——
                 # ①先按存储原生维过滤(既有语义,异维残留出局);②通过后 truncate_vec
@@ -517,10 +482,9 @@ class KnowledgeLifecycleService:
                 # 直接查(含 deferred),而非 decided_pairs()(仅 confirmed/rejected)——否则
                 # deferred 概念对会在新源桥接时被重新入队,违背「deferred 不回流」。
                 with self._connect() as _db:
-                    _decided = _db.execute(
-                        "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
-                        "WHERE notebook_id=? AND status IN ('confirmed','rejected','deferred')",
-                        (notebook_id,)).fetchall()
+                    _decided = self.governance_store.merge_candidate_pairs(
+                        _db, notebook_id, ("confirmed", "rejected", "deferred")
+                    )
                 exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
                 exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
                 from app.services.kg_merge import detect_bridge_candidates
@@ -542,11 +506,12 @@ class KnowledgeLifecycleService:
                   "procedure": (seed_procedure, "KP-")}
         for t, (sfn, prefix) in _TYPES.items():
             with self._connect() as db:
-                trows = db.execute(
-                    "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
-                    "AND object_type=? AND status!='deprecated'", (notebook_id, source_id, t)).fetchall()
-                tcn = db.execute("SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
-                                 "WHERE notebook_id=? AND object_type=?", (notebook_id, t)).fetchall()
+                trows = self.knowledge.incremental_object_rows(
+                    db, notebook_id, source_id, t
+                )
+                tcn = self.governance_store.incremental_cluster_rows(
+                    db, notebook_id, t
+                )
             tnew = [{"object_id": r["id"], "payload": json.loads(r["payload"] or "{}"),
                      "name": json.loads(r["payload"] or "{}").get("name", "")} for r in trows]
             if not tnew:
@@ -602,15 +567,12 @@ class KnowledgeLifecycleService:
         eff_dim = rd or dim   # 运行时生效维:守卫比它而非 embed_dim(否则截断后恒 [] 静默跳过)
 
         with self._connect() as db:
-            new_rows = db.execute(
-                "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=? "
-                "AND object_id IN ({})".format(",".join("?" for _ in new_objs)),
-                (notebook_id, *[o["object_id"] for o in new_objs])
-            ).fetchall() if new_objs else []
-            _decided = db.execute(
-                "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
-                "WHERE notebook_id=? AND status IN ('confirmed','rejected','deferred','pending')",
-                (notebook_id,)).fetchall()
+            new_rows = self.knowledge.embedding_rows_for_objects(
+                db, notebook_id, [o["object_id"] for o in new_objs]
+            )
+            _decided = self.governance_store.merge_candidate_pairs(
+                db, notebook_id, ("confirmed", "rejected", "deferred", "pending")
+            )
         exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
         new_vecs = {}
         for r in new_rows:
@@ -657,11 +619,7 @@ class KnowledgeLifecycleService:
             if not unknown:
                 return
             with self._connect() as db:
-                ph = ",".join("?" for _ in unknown)
-                rows = db.execute(
-                    f"SELECT id FROM knowledge_objects WHERE id IN ({ph}) AND status!='deprecated'",
-                    unknown).fetchall()
-            alive = {r["id"] for r in rows}
+                alive = self.governance_store.valid_object_ids(db, unknown)
             for i in unknown:
                 status_alive[i] = i in alive
 
@@ -746,12 +704,7 @@ class KnowledgeLifecycleService:
             if not getattr(self.llm_client, "configured", False):
                 raise RuntimeError("LLM not configured; cannot build KG")
             with self._connect() as db:
-                src_ids = [r["id"] for r in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)).fetchall()]
-                # source_id is NOT NULL DEFAULT '' — use != '' to find sources that truly have KG
-                kgful = {r["source_id"] for r in db.execute(
-                    "SELECT DISTINCT source_id FROM knowledge_objects "
-                    "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)).fetchall()}
+                src_ids, kgful = self.knowledge.source_build_rows(db, notebook_id)
             targets = [sid for sid in src_ids if sid not in kgful]
             done, failed = [], []
 
@@ -887,9 +840,7 @@ class KnowledgeLifecycleService:
         frontend always sends level=object, but we still defend the API for
         level=concept / no-level callers that would otherwise slip through)."""
         with self._connect() as db:
-            nb_count = db.execute(
-                "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,)).fetchone()["c"]
+            nb_count = self.knowledge.active_object_count(db, notebook_id)
         if int(nb_count) > self.settings.viz_sync_build_max_objects:
             effective_limit = limit if limit is not None else self.settings.viz_default_limit
             idx = self.scale_artifacts.viz_index(notebook_id)
@@ -938,10 +889,7 @@ class KnowledgeLifecycleService:
             return cached
         from app.services.kg_merge import derive_unified_graph
         with self._connect() as db:
-            nrows = db.execute(
-                "SELECT id, object_type, payload, status FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,),
-            ).fetchall()
+            nrows = self.knowledge.unified_graph_rows(db, notebook_id)
         nodes = [{"id": r["id"], "object_type": r["object_type"], "payload": json.loads(r["payload"] or "{}")} for r in nrows]
         edges = [{"source_object_id": r["source_object_id"], "target_object_id": r["target_object_id"], "edge_type": r["edge_type"]}
                  for r in self.relations_for_notebook(notebook_id)]
@@ -1043,14 +991,8 @@ class KnowledgeLifecycleService:
         for m, c in cmap.items():
             members_of.setdefault(c, []).append(m)
         raw_ids = set(members_of.get(object_id, [object_id]))
-        ph = ",".join("?" for _ in raw_ids)
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT source_object_id, target_object_id, edge_type "
-                f"FROM knowledge_relations WHERE notebook_id=? "
-                f"AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
-                (notebook_id, *raw_ids, *raw_ids),
-            ).fetchall()
+            rows = self.knowledge.neighbor_relation_rows(db, notebook_id, raw_ids)
         # object_type + name lookup for the folded nodes we touch
         def canon(oid):
             return cmap.get(oid, oid)
@@ -1097,13 +1039,10 @@ class KnowledgeLifecycleService:
         rep_ids = set(rep.values())
         if not rep_ids:
             return {}
-        ph = ",".join("?" for _ in rep_ids)
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT id, object_type, payload FROM knowledge_objects "
-                f"WHERE notebook_id=? AND id IN ({ph})",
-                (notebook_id, *rep_ids),
-            ).fetchall()
+            rows = self.knowledge.object_meta_rows_for_notebook(
+                db, notebook_id, rep_ids
+            )
         by_raw = {r["id"]: (r["object_type"], json.loads(r["payload"] or "{}").get("name", ""))
                   for r in rows}
         return {fid: by_raw.get(rep[fid], ("", "")) for fid in folded_ids}
@@ -1208,17 +1147,12 @@ class KnowledgeLifecycleService:
         # for the current type before repopulating (types are processed serially
         # within a run, so a simple delete by run_id is safe).
         with self._write() as db:
-            db.execute("DELETE FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
-                       (notebook_id, run_id))
+            self.unified_kg.clear_scratch_run(db, notebook_id, run_id)
 
         # Pass A1: stream names once to build the acronym alias map.
         def _name_gen():
             with self._connect() as db:
-                cur = db.execute(
-                    "SELECT payload FROM knowledge_objects "
-                    "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
-                    "ORDER BY rowid",
-                    (notebook_id, object_type))
+                cur = self.unified_kg.seed_payload_rows(db, notebook_id, object_type)
                 for r in cur:
                     yield _fast_loads(r["payload"] or "{}").get("name", "")
         alias_map = build_acronym_alias_map(_name_gen())
@@ -1234,11 +1168,7 @@ class KnowledgeLifecycleService:
             # independent of which index the planner happens to pick — otherwise
             # adding/removing an index silently changes canonical names + desc-cache
             # keys. rowid = insertion order, matching the historical behaviour.
-            cur = rdb.execute(
-                "SELECT id, payload FROM knowledge_objects "
-                "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
-                "ORDER BY rowid",
-                (notebook_id, object_type))
+            cur = self.unified_kg.stream_seed_rows(rdb, notebook_id, object_type)
             with self._write() as wdb:
                 for r in cur:
                     pay = _fast_loads(r["payload"] or "{}")
@@ -1253,14 +1183,10 @@ class KnowledgeLifecycleService:
                     seed_first_name.setdefault(seed, name)
                     buf.append((notebook_id, run_id, r["id"], seed))
                     if len(buf) >= 1000:
-                        wdb.executemany(
-                            "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (?,?,?,?)",
-                            buf)
+                        self.unified_kg.insert_scratch_rows(wdb, buf)
                         buf.clear()
                 if buf:
-                    wdb.executemany(
-                        "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (?,?,?,?)",
-                        buf)
+                    self.unified_kg.insert_scratch_rows(wdb, buf)
                     buf.clear()
 
         # Pass B: stream vectors joined to seeds → rep mean per seed. Bounded by
@@ -1282,13 +1208,7 @@ class KnowledgeLifecycleService:
         rep_sum: Dict[str, "np.ndarray"] = {}
         rep_cnt: Dict[str, int] = {}
         with self._connect() as db:
-            cur = db.execute(
-                "SELECT s.seed AS seed, e.vector AS vector "
-                "FROM knowledge_embeddings e "
-                "JOIN kg_cluster_scratch s ON s.object_id=e.object_id "
-                "  AND s.notebook_id=e.notebook_id AND s.run_id=? "
-                "WHERE e.notebook_id=?",
-                (run_id, notebook_id))
+            cur = self.unified_kg.scratch_vector_rows(db, notebook_id, run_id)
             for r in cur:
                 # decode_vector: bytes(BLOB)->frombuffer zero-parse, str(legacy
                 # JSON)->_fast_loads-equivalent json path. Mirrors build_matrix.
@@ -1331,31 +1251,22 @@ class KnowledgeLifecycleService:
         desc_by_cid = desc_by_cid or {}
         desc_sig_by_cid = desc_sig_by_cid or {}
         with self._connect() as rdb:
-            cur = rdb.execute(
-                "SELECT object_id, seed FROM kg_cluster_scratch "
-                "WHERE notebook_id=? AND run_id=?",
-                (notebook_id, run_id))
+            cur = self.unified_kg.stream_scratch_rows(rdb, notebook_id, run_id)
             with self._write() as wdb:
-                wdb.execute("DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
-                            (notebook_id, object_type))
-                buf: List[tuple] = []
-                for r in cur:
-                    cid = seed_to_canonical.get(r["seed"])
-                    if cid is None:
-                        continue
-                    buf.append((self._new_id("cc"), notebook_id, cid, r["object_id"],
-                                canonical_names.get(cid, ""), object_type,
-                                desc_by_cid.get(cid, ""), desc_sig_by_cid.get(cid, ""), now))
-                    if len(buf) >= 1000:
-                        wdb.executemany(
-                            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,?)", buf)
-                        buf.clear()
-                if buf:
-                    wdb.executemany(
-                        "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,canonical_desc_sig,created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?)", buf)
-                    buf.clear()
+                def _rows():
+                    for r in cur:
+                        cid = seed_to_canonical.get(r["seed"])
+                        if cid is None:
+                            continue
+                        yield (
+                            self._new_id("cc"), notebook_id, cid, r["object_id"],
+                            canonical_names.get(cid, ""), object_type,
+                            desc_by_cid.get(cid, ""), desc_sig_by_cid.get(cid, ""), now,
+                        )
+
+                self.unified_kg.replace_cluster_rows_streamed(
+                    wdb, notebook_id, object_type, _rows()
+                )
                 # P0-A: same commit as the DELETE+INSERT above (wdb, not rdb) —
                 # every rebuild pass through this streamed writer rewrites
                 # concept_clusters for `object_type`, so it must bump every time
@@ -1568,10 +1479,7 @@ class KnowledgeLifecycleService:
             # miss/mismatch just regenerates (worst case = old behavior).
             old_desc: Dict[str, tuple] = {}
             with self._connect() as db:
-                for r in db.execute(
-                    "SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig "
-                    "FROM concept_clusters WHERE notebook_id=? AND object_type='concept'",
-                    (notebook_id,)).fetchall():
+                for r in self.unified_kg.cluster_description_rows(db, notebook_id):
                     old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
             # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
             try:
@@ -1600,13 +1508,10 @@ class KnowledgeLifecycleService:
                 cseeds = seeds_by_cid[cid]
                 # Member evidence is fetched per canonical via the scratch join,
                 # bounded by that canonical's member count (not the whole table).
-                ph = ",".join("?" for _ in cseeds)
                 with self._connect() as db:
-                    erows = db.execute(
-                        f"SELECT k.evidence AS evidence FROM knowledge_objects k "
-                        f"JOIN kg_cluster_scratch s ON s.object_id=k.id "
-                        f"WHERE s.notebook_id=? AND s.run_id=? AND s.seed IN ({ph})",
-                        (notebook_id, run_id, *cseeds)).fetchall()
+                    erows = self.unified_kg.cluster_evidence_rows(
+                        db, notebook_id, run_id, cseeds
+                    )
                 quotes = []
                 for er in erows:
                     for ev in json.loads(er["evidence"] or "[]"):
@@ -1804,17 +1709,7 @@ class KnowledgeLifecycleService:
             return int(cnt)
         agg: Dict[tuple, dict] = {}
         with self._connect() as db:
-            cur = db.execute(
-                "SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, "
-                "       COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-                "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
-                "FROM knowledge_relations kr "
-                "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
-                "  AND cs.member_object_id=kr.source_object_id "
-                "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
-                "  AND ct.member_object_id=kr.target_object_id "
-                "WHERE kr.notebook_id=? AND kr.review_status!='rejected'",
-                (notebook_id,))
+            cur = self.unified_kg.canonical_relation_seed_rows(db, notebook_id)
             for r in cur:
                 s, t = r["s"], r["t"]
                 if not s or not t or s == t:
@@ -1876,21 +1771,11 @@ class KnowledgeLifecycleService:
         #    是被扫描的文本、不作别名目标,故按 object_type='concept' 过滤。
         clusters: Dict[str, dict] = {}
         with self._connect() as db:
-            cur = db.execute(
-                "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src "
-                "FROM concept_clusters cc "
-                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-                "WHERE cc.notebook_id=? AND cc.object_type='concept'",
-                (notebook_id,))
+            cur, claim_rows = self.unified_kg.mention_seed_rows(db, notebook_id)
             for r in cur:
                 ent = clusters.setdefault(r["cid"], {"name": r["cname"], "srcs": set()})
                 if r["src"]:
                     ent["srcs"].add(r["src"])
-            # 2) claim 集合(text = payload.name;NFKC+lower 折叠;len<10 跳过)。
-            claim_rows = db.execute(
-                "SELECT id, json_extract(payload,'$.name') AS nm FROM knowledge_objects "
-                "WHERE notebook_id=? AND object_type='claim' AND status!='deprecated'",
-                (notebook_id,)).fetchall()
         cross = [(cid, ent["name"]) for cid, ent in clusters.items() if len(ent["srcs"]) >= 2]
         claims: List[Tuple[str, str]] = []
         for r in claim_rows:
@@ -1920,11 +1805,10 @@ class KnowledgeLifecycleService:
             #    trigram=子串语义,故每候选仍须过 boundary_hit 后校验。
             scan_db = self._connect()
             try:
-                scan_db.execute("CREATE VIRTUAL TABLE temp.mention_scan_fts "
-                                "USING fts5(text, tokenize='trigram')")
-                scan_db.executemany(
-                    "INSERT INTO temp.mention_scan_fts(rowid, text) VALUES (?,?)",
-                    [(i, folded) for i, (_cid, folded) in enumerate(claims, 1)])
+                self.unified_kg.claim_name_rows(
+                    scan_db,
+                    [(i, folded) for i, (_cid, folded) in enumerate(claims, 1)],
+                )
                 # 4) 每别名 phrase MATCH 召回 → boundary_hit 校验 → DF 双门。
                 for alias in sorted(alias_to_canons):
                     if len(alias) < 3:     # trigram 最短查询=3;别名门已保证,双保险
@@ -1932,10 +1816,7 @@ class KnowledgeLifecycleService:
                     canons = alias_to_canons[alias]
                     match_expr = '"' + alias.replace('"', '""') + '"'
                     hits = []
-                    for row in scan_db.execute(
-                            "SELECT rowid FROM temp.mention_scan_fts "
-                            "WHERE mention_scan_fts MATCH ?",
-                            (match_expr,)):
+                    for row in self.unified_kg.mention_scan_matches(scan_db, match_expr):
                         claim_id, folded = rowid_map[row["rowid"]]
                         if boundary_hit(alias, folded):
                             hits.append(claim_id)
@@ -2011,18 +1892,8 @@ class KnowledgeLifecycleService:
         can2idx: "Dict[str, int]" = {}
         ew: "Dict[tuple, int]" = {}
         with self._connect() as db:
-            names = {r["canonical_id"]: r["canonical_name"] for r in db.execute(
-                "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters WHERE notebook_id=?",
-                (notebook_id,))}
-            for r in db.execute(
-                    "SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-                    "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
-                    "FROM knowledge_relations kr "
-                    "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
-                    "AND cs.member_object_id=kr.source_object_id "
-                    "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
-                    "AND ct.member_object_id=kr.target_object_id "
-                    "WHERE kr.notebook_id=?", (notebook_id,)):
+            names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
+            for r in graph_rows:
                 s, t = r["s"], r["t"]
                 if not s or not t or s == t:
                     continue
@@ -2105,14 +1976,10 @@ class KnowledgeLifecycleService:
             members = json.loads(cr["member_ids"] or "[]")
             if not members:
                 continue
-            ph = ",".join("?" for _ in members)
             with self._connect() as db:
-                orows = db.execute(
-                    f"SELECT id, object_type, payload FROM knowledge_objects WHERE id IN ({ph})", members).fetchall()
-                rrows = db.execute(
-                    f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-                    f"WHERE notebook_id=? AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
-                    [notebook_id, *members, *members]).fetchall()
+                orows, rrows = self.knowledge.community_context_rows(
+                    db, notebook_id, members
+                )
             name_by_id = {}
             mlines = []
             for o in orows:

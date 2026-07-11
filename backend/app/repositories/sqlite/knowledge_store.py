@@ -30,6 +30,167 @@ class KnowledgeStore:
     def _connect(self):
         return self.database.connect()
 
+    # ------------------------------------------------ lifecycle projections
+    @staticmethod
+    def delete_notebook_graph_rows(db: sqlite3.Connection, notebook_id: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for table in (
+            "knowledge_objects", "knowledge_relations", "concept_clusters",
+            "concept_merge_candidates", "knowledge_embeddings",
+            "extraction_runs", "unified_kg_state",
+        ):
+            cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
+            counts[table] = cur.rowcount
+        cur = db.execute("DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,))
+        counts["kg_objects_fts"] = cur.rowcount
+        return counts
+
+    @staticmethod
+    def notebook_tier_row(db: sqlite3.Connection, notebook_id: str):
+        return db.execute("SELECT tier FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+
+    @staticmethod
+    def relink_rows(db: sqlite3.Connection, notebook_id: str):
+        objects = db.execute(
+            "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
+            "WHERE notebook_id = ? AND status != 'deprecated'", (notebook_id,),
+        ).fetchall()
+        relations = db.execute(
+            "SELECT source_object_id, target_object_id, edge_type "
+            "FROM knowledge_relations WHERE notebook_id = ?", (notebook_id,),
+        ).fetchall()
+        valid_sources = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)
+            ).fetchall()
+        }
+        return objects, relations, valid_sources
+
+    @staticmethod
+    def incremental_object_rows(
+        db: sqlite3.Connection, notebook_id: str, source_id: str, object_type: str,
+        *, exclude_source: bool = False,
+    ):
+        if object_type == "concept" and exclude_source:
+            return db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? "
+                "AND object_type='concept' AND status!='deprecated' AND source_id!=?",
+                (notebook_id, source_id),
+            ).fetchall()
+        if object_type == "concept":
+            return db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
+                "AND object_type='concept' AND status!='deprecated'",
+                (notebook_id, source_id),
+            ).fetchall()
+        return db.execute(
+            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND source_id=? "
+            "AND object_type=? AND status!='deprecated'",
+            (notebook_id, source_id, object_type),
+        ).fetchall()
+
+    @staticmethod
+    def embedding_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def embedding_rows_for_objects(db: sqlite3.Connection, notebook_id: str, object_ids):
+        ids = list(object_ids)
+        if not ids:
+            return []
+        return db.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=? "
+            "AND object_id IN ({})".format(",".join("?" for _ in ids)),
+            (notebook_id, *ids),
+        ).fetchall()
+
+    @staticmethod
+    def valid_object_ids(db: sqlite3.Connection, object_ids):
+        ids = list(object_ids)
+        if not ids:
+            return set()
+        ph = ",".join("?" for _ in ids)
+        return {
+            row["id"] for row in db.execute(
+                f"SELECT id FROM knowledge_objects WHERE id IN ({ph}) AND status!='deprecated'",
+                ids,
+            ).fetchall()
+        }
+
+    @staticmethod
+    def source_build_rows(db: sqlite3.Connection, notebook_id: str):
+        source_ids = [
+            row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)
+            ).fetchall()
+        ]
+        kg_source_ids = {
+            row["source_id"] for row in db.execute(
+                "SELECT DISTINCT source_id FROM knowledge_objects "
+                "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)
+            ).fetchall()
+        }
+        return source_ids, kg_source_ids
+
+    @staticmethod
+    def active_object_count(db: sqlite3.Connection, notebook_id: str) -> int:
+        return int(db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects "
+            "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,),
+        ).fetchone()["c"])
+
+    @staticmethod
+    def unified_graph_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT id, object_type, payload, status FROM knowledge_objects "
+            "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def neighbor_relation_rows(db: sqlite3.Connection, notebook_id: str, object_ids):
+        ids = list(object_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
+            f"WHERE notebook_id=? "
+            f"AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
+            (notebook_id, *ids, *ids),
+        ).fetchall()
+
+    @staticmethod
+    def object_meta_rows_for_notebook(
+        db: sqlite3.Connection, notebook_id: str, object_ids,
+    ):
+        ids = list(object_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT id, object_type, payload FROM knowledge_objects "
+            f"WHERE notebook_id=? AND id IN ({ph})", (notebook_id, *ids),
+        ).fetchall()
+
+    @staticmethod
+    def community_context_rows(db: sqlite3.Connection, notebook_id: str, members):
+        ids = list(members)
+        if not ids:
+            return [], []
+        ph = ",".join("?" for _ in ids)
+        objects = db.execute(
+            f"SELECT id, object_type, payload FROM knowledge_objects WHERE id IN ({ph})", ids,
+        ).fetchall()
+        relations = db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
+            f"WHERE notebook_id=? AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+            [notebook_id, *ids, *ids],
+        ).fetchall()
+        return objects, relations
+
     def get_notebook(self, notebook_id: str) -> None:
         with self.database.connect() as db:
             if db.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:

@@ -32,6 +32,163 @@ class UnifiedKgStore:
     def __init__(self, database: SqliteDatabase) -> None:
         self.database = database
 
+    # --------------------------------------------- lifecycle rebuild streams
+    @staticmethod
+    def seed_payload_rows(
+        db: sqlite3.Connection, notebook_id: str, object_type: str,
+    ):
+        return db.execute(
+            "SELECT payload FROM knowledge_objects "
+            "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
+            "ORDER BY rowid", (notebook_id, object_type),
+        )
+
+    @staticmethod
+    def stream_seed_rows(
+        db: sqlite3.Connection, notebook_id: str, object_type: str,
+    ):
+        return db.execute(
+            "SELECT id, payload FROM knowledge_objects "
+            "WHERE notebook_id=? AND object_type=? AND status!='deprecated' "
+            "ORDER BY rowid", (notebook_id, object_type),
+        )
+
+    @staticmethod
+    def scratch_vector_rows(db: sqlite3.Connection, notebook_id: str, run_id: str):
+        return db.execute(
+            "SELECT s.seed AS seed, e.vector AS vector "
+            "FROM knowledge_embeddings e "
+            "JOIN kg_cluster_scratch s ON s.object_id=e.object_id "
+            "  AND s.notebook_id=e.notebook_id AND s.run_id=? "
+            "WHERE e.notebook_id=?", (run_id, notebook_id),
+        )
+
+    @staticmethod
+    def stream_scratch_rows(db: sqlite3.Connection, notebook_id: str, run_id: str):
+        return db.execute(
+            "SELECT object_id, seed FROM kg_cluster_scratch "
+            "WHERE notebook_id=? AND run_id=?", (notebook_id, run_id),
+        )
+
+    @staticmethod
+    def replace_cluster_rows_streamed(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        rows,
+    ) -> None:
+        db.execute(
+            "DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
+            (notebook_id, object_type),
+        )
+        buf: list[tuple] = []
+        for row in rows:
+            buf.append(row)
+            if len(buf) >= 1000:
+                db.executemany(
+                    "INSERT INTO concept_clusters "
+                    "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+                    "canonical_description,canonical_desc_sig,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", buf,
+                )
+                buf.clear()
+        if buf:
+            db.executemany(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+                "canonical_description,canonical_desc_sig,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", buf,
+            )
+
+    @staticmethod
+    def cluster_description_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig "
+            "FROM concept_clusters WHERE notebook_id=? AND object_type='concept'",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def cluster_evidence_rows(
+        db: sqlite3.Connection, notebook_id: str, run_id: str, seeds,
+    ):
+        values = list(seeds)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT k.evidence AS evidence FROM knowledge_objects k "
+            f"JOIN kg_cluster_scratch s ON s.object_id=k.id "
+            f"WHERE s.notebook_id=? AND s.run_id=? AND s.seed IN ({ph})",
+            (notebook_id, run_id, *values),
+        ).fetchall()
+
+    @staticmethod
+    def canonical_relation_seed_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, "
+            "       COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
+            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+            "FROM knowledge_relations kr "
+            "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            "  AND cs.member_object_id=kr.source_object_id "
+            "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            "  AND ct.member_object_id=kr.target_object_id "
+            "WHERE kr.notebook_id=? AND kr.review_status!='rejected'", (notebook_id,),
+        )
+
+    @staticmethod
+    def mention_seed_rows(db: sqlite3.Connection, notebook_id: str):
+        clusters = db.execute(
+            "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src "
+            "FROM concept_clusters cc JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+            "WHERE cc.notebook_id=? AND cc.object_type='concept'", (notebook_id,),
+        ).fetchall()
+        claims = db.execute(
+            "SELECT id, json_extract(payload,'$.name') AS nm FROM knowledge_objects "
+            "WHERE notebook_id=? AND object_type='claim' AND status!='deprecated'",
+            (notebook_id,),
+        ).fetchall()
+        return clusters, claims
+
+    @staticmethod
+    def claim_name_rows(db: sqlite3.Connection, rows) -> None:
+        db.execute(
+            "CREATE VIRTUAL TABLE temp.mention_scan_fts "
+            "USING fts5(text, tokenize='trigram')"
+        )
+        db.executemany(
+            "INSERT INTO temp.mention_scan_fts(rowid, text) VALUES (?,?)", rows,
+        )
+
+    @staticmethod
+    def mention_scan_matches(db: sqlite3.Connection, match_expr: str):
+        return db.execute(
+            "SELECT rowid FROM temp.mention_scan_fts WHERE mention_scan_fts MATCH ?",
+            (match_expr,),
+        )
+
+    @staticmethod
+    def community_graph_rows(db: sqlite3.Connection, notebook_id: str):
+        names = {
+            row["canonical_id"]: row["canonical_name"]
+            for row in db.execute(
+                "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
+                "WHERE notebook_id=?", (notebook_id,),
+            )
+        }
+        relations = db.execute(
+            "SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
+            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+            "FROM knowledge_relations kr "
+            "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            "AND cs.member_object_id=kr.source_object_id "
+            "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            "AND ct.member_object_id=kr.target_object_id "
+            "WHERE kr.notebook_id=?", (notebook_id,),
+        )
+        return names, relations
+
     @staticmethod
     def cluster_version_row(db: sqlite3.Connection, notebook_id: str):
         return db.execute(

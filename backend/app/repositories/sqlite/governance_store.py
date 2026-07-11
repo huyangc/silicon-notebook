@@ -76,6 +76,49 @@ class GovernanceStore:
         self.database = database
         self.seams = seams
 
+    # ------------------------------------------------ lifecycle projections
+    @staticmethod
+    def sweep_orphan_clusters(db: sqlite3.Connection, notebook_id: str) -> int:
+        cur = db.execute(
+            "DELETE FROM concept_clusters WHERE notebook_id=? AND member_object_id NOT IN "
+            "(SELECT id FROM knowledge_objects WHERE notebook_id=?)",
+            (notebook_id, notebook_id),
+        )
+        return int(cur.rowcount)
+
+    @staticmethod
+    def incremental_cluster_rows(db: sqlite3.Connection, notebook_id: str, object_type: str):
+        return db.execute(
+            "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
+            "WHERE notebook_id=? AND object_type=?", (notebook_id, object_type),
+        ).fetchall()
+
+    @staticmethod
+    def merge_candidate_pairs(db: sqlite3.Connection, notebook_id: str, statuses):
+        values = tuple(statuses)
+        if values == ("pending",):
+            return db.execute(
+                "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+                "WHERE notebook_id=? AND status='pending'", (notebook_id,),
+            ).fetchall()
+        if values == ("confirmed", "rejected", "deferred"):
+            return db.execute(
+                "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+                "WHERE notebook_id=? AND status IN ('confirmed','rejected','deferred')",
+                (notebook_id,),
+            ).fetchall()
+        if values == ("confirmed", "rejected", "deferred", "pending"):
+            return db.execute(
+                "SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+                "WHERE notebook_id=? AND status IN ('confirmed','rejected','deferred','pending')",
+                (notebook_id,),
+            ).fetchall()
+        raise ValueError(f"unsupported lifecycle merge statuses: {values!r}")
+
+    @staticmethod
+    def valid_object_ids(db: sqlite3.Connection, object_ids):
+        return KnowledgeStore.valid_object_ids(db, object_ids)
+
     # ------------------------------------------------------------- review
     @staticmethod
     def review_queue_rows(
