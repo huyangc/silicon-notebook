@@ -942,6 +942,22 @@ TASK22_ALLOWED_IMPORTS = {
     ),
 }
 
+# Task 23: dropping the three imports the extracted ask execution made dead in
+# routes.py (contextvars / threading / AskCancelled) shifts the frozen
+# NotebookRepository/UploadedSourceFile compatibility import site up to line
+# 90; the new coordinator contract suite imports the compatibility facade at a
+# fresh site.
+TASK23_ALLOWED_IMPORTS = {
+    ("backend/app/api/routes.py", 90, "app.services.repository", "NotebookRepository"),
+    ("backend/app/api/routes.py", 90, "app.services.repository", "UploadedSourceFile"),
+    (
+        "backend/tests/test_ask_execution_coordinator.py",
+        40,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+}
+
 # Task 20: ScaleArtifactRuntime becomes the one owner of the Task-18/19
 # caches, locks, build markers and scheduling state.  Compatibility facade
 # attributes become write-through properties and the focused probes patch the
@@ -1295,6 +1311,37 @@ TASK22_ALLOWED_MEMBER_FILES = {
     for name in {"_connect", "_runtime", "_write", "current_user"}
 }
 
+# Task 23: the cancel-event registry moves to the runtime-owned
+# AskCancellationRegistry — the facade's frozen _ask_cancel_events/
+# _ask_cancel_lock attributes become read-only compatibility properties over
+# the SAME objects, so their facade-internal orchestration sites disappear
+# from the facade file; the streaming execution orchestration moves to
+# AskExecutionCoordinator, so routes.py stops consuming begin_ask_job/
+# append_ask_trace/finish_ask_job (frozen fixture sites vanish from the
+# scan — the cancel endpoint keeps cancel_ask_job/ask_job_detail).  The new
+# coordinator contract suite and the appended reconnect proof consume the
+# facade at fresh sites.
+TASK23_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {"_ask_cancel_events", "_ask_cancel_lock"}
+} | {
+    ("backend/app/api/routes.py", name)
+    for name in {"append_ask_trace", "begin_ask_job", "finish_ask_job"}
+} | {
+    ("backend/tests/test_ask_execution_coordinator.py", name)
+    for name in {
+        "SQLiteRepository", "_ask_cancel_events", "_ask_cancel_lock",
+        "_runtime", "begin_ask_job", "cancel_ask_job", "create_notebook",
+        "current_user", "finish_ask_job",
+    }
+} | {
+    ("backend/tests/test_ask_reconnect.py", name)
+    for name in {
+        "_runtime", "ask_job_status", "create_notebook", "current_user",
+        "get_conversation",
+    }
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -1323,6 +1370,15 @@ TASK20_COMPAT_PROPERTIES = {
         "_scale_ver_lock", "_scale_ver_locks", "_viz_building",
         "_viz_building_lock", "_viz_idx_cache",
     }
+}
+
+# Task 23: the WS2a cancel-event registry has one owner (the runtime-held
+# AskCancellationRegistry); the facade's frozen instance attributes become
+# read-only compatibility handles over the registry's dict/lock objects (the
+# frozen tests only ever read them, so no setter).
+TASK23_COMPAT_PROPERTIES = {
+    "_ask_cancel_events": False,
+    "_ask_cancel_lock": False,
 }
 
 # Internal line numbers in this source file are intentionally not API surface:
@@ -1363,6 +1419,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK20_ALLOWED_MEMBER_FILES
     | TASK21_ALLOWED_MEMBER_FILES
     | TASK22_ALLOWED_MEMBER_FILES
+    | TASK23_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -1413,6 +1470,9 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     ("_runtime", "backend/app/services/reasoning_retrieval.py:135"),
     ("_runtime", "backend/app/services/reasoning_retrieval.py:136"),
     ("event_log", "backend/app/services/reasoning_retrieval.py:137"),
+    # Task 23: _stream_ask_events reaches the runtime-owned
+    # AskExecutionCoordinator through the repo it is handed (frozen signature).
+    ("_runtime", "backend/app/api/routes.py:605"),
 }
 REVIEW_FIX_ALLOWED_CONSUMERS = {
     ("_runtime", "backend/tests/test_notebook_share_copy.py:431"),
@@ -1834,6 +1894,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK19_ALLOWED_IMPORTS
                     or site in TASK20_ALLOWED_IMPORTS
                     or site in TASK22_ALLOWED_IMPORTS
+                    or site in TASK23_ALLOWED_IMPORTS
                 )
 
 
@@ -1867,7 +1928,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
@@ -1956,6 +2017,11 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
             member = inspect.getattr_static(SQLiteRepository, name)
             assert isinstance(member, property), name
             assert (member.fset is not None) is TASK20_COMPAT_PROPERTIES[name], name
+            continue
+        if name in TASK23_COMPAT_PROPERTIES:
+            member = inspect.getattr_static(SQLiteRepository, name)
+            assert isinstance(member, property), name
+            assert (member.fset is not None) is TASK23_COMPAT_PROPERTIES[name], name
             continue
         if kind in {"instance_attribute", "mutable_property"} and not hasattr(
             SQLiteRepository, name

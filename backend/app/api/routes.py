@@ -1,9 +1,7 @@
 import asyncio
-import contextvars
 import io
 import json
 import queue
-import threading
 import zipfile
 from pathlib import Path
 from typing import Any, List, Optional
@@ -86,7 +84,6 @@ from app.models.schemas import (
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
-from app.services.cancellation import AskCancelled
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.pending_bus import pending_bus
@@ -600,44 +597,18 @@ async def _stream_ask_events(
     spec,
     request: Request,
 ):
-    events: queue.Queue[dict[str, Any] | None] = queue.Queue()
-    cancel_event = threading.Event()
-    # 建/接续会话 + 建 ask_jobs 行 + 注册 cancel_event;job_id 先发给客户端(供「停止」调用)。
-    job_id, _conv_id = repo.begin_ask_job(notebook_id, payload, spec.id, cancel_event)
-    events.put({"event": "started", "job_id": job_id})
-    events.put({"event": "progress", "step": {
-        "step_type": "start", "summary": "启动检索", "detail": {"mode": spec.id}}})
-
-    def on_trace(step) -> None:
-        if not cancel_event.is_set():
-            payload_step = step.model_dump()
-            repo.append_ask_trace(job_id, payload_step)   # WS2b: 持久化供重开会话回放
-            events.put({"event": "progress", "step": payload_step})
-
-    def worker() -> None:
-        try:
-            handler = getattr(repo, spec.handler)
-            response = handler(
-                notebook_id, payload, on_trace=on_trace, cancel_event=cancel_event,
-            ) if spec.streaming else handler(
-                notebook_id, payload, cancel_event=cancel_event,
-            )
-            repo.finish_ask_job(job_id, "done", answer_id=response.answer_id)
-            events.put({"event": "final", "response": response.model_dump()})
-        except AskCancelled:
-            repo.finish_ask_job(job_id, "cancelled")
-            events.put({"event": "cancelled"})
-        except Exception as exc:  # noqa: BLE001
-            repo.finish_ask_job(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
-            events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
-        finally:
-            events.put(None)
-
-    ctx = contextvars.copy_context()
-    threading.Thread(target=lambda: ctx.run(worker), daemon=True).start()
-    # 关键改动:客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
-    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。也不再有
-    # finally: cancel_event.set()。
+    # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
+    # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
+    # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
+    # 交付队列消费与断连轮询。runner 逐调用晚绑 getattr(repo, spec.handler)
+    # (Task 24 换成 AskService)。
+    events = repo._runtime.ask_execution.start(  # type: ignore[attr-defined]
+        notebook_id, payload, spec,
+        user_id=repo.current_user().id,
+        runner=lambda *args, **kwargs: getattr(repo, spec.handler)(*args, **kwargs),
+    )
+    # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
+    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
     while True:
         try:
             event = events.get_nowait()

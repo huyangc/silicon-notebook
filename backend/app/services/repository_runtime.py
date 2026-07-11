@@ -42,6 +42,10 @@ from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
 from app.services.vector_cache import VectorCache
+# Task 23: Ask detached-execution composition (appended block — parallel
+# Gate-8 tracks keep the shared import list above untouched).
+from app.services import background_jobs
+from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 
 
 @dataclass(frozen=True)
@@ -191,6 +195,22 @@ class RepositoryRuntime:
             self.source_store,
             self.models,
             settings,
+        )
+        # Task 23: Ask cancellation + detached streaming execution.  Both are
+        # seam-free (the Task-22 ask_state store, the module-level
+        # copied-context job helper and the runtime event log), so the runtime
+        # owns and constructs them eagerly.  The facade's frozen
+        # _ask_cancel_events/_ask_cancel_lock attributes become compatibility
+        # handles over THIS registry (one owner — the explicit cancel endpoint
+        # and the coordinator's register/unregister meet in the same map); the
+        # runner stays a late-bound facade callback per start until Task 24
+        # lands AskService.
+        self.ask_cancellations = AskCancellationRegistry()
+        self.ask_execution = AskExecutionCoordinator(
+            ask_state=self.ask_state,
+            cancellations=self.ask_cancellations,
+            job_submitter=background_jobs,
+            event_log=self.event_log,
         )
 
     def wire_retrieval(self, *, embedder) -> RetrievalService:

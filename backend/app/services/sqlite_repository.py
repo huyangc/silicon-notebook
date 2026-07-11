@@ -584,10 +584,11 @@ class SQLiteRepository:
                 )
             ),
         )
-        # WS2a: 在途 ask 的 {job_id: cancel_event} 进程内注册表——cancel 端点据此
-        # set 对应 worker 的 cancel_event（唯一真取消入口；断连不再取消）。
-        self._ask_cancel_events: dict = {}
-        self._ask_cancel_lock = threading.Lock()
+        # WS2a: 在途 ask 的 {job_id: cancel_event} 进程内注册表本体在 runtime-owned
+        # AskCancellationRegistry(Task 23;流式执行编排在 AskExecutionCoordinator,
+        # 经同一注册表)。_ask_cancel_events/_ask_cancel_lock 以下方兼容属性透出
+        # 同一对象——cancel 端点据此 set 对应 worker 的 cancel_event(唯一真取消
+        # 入口;断连不再取消)。
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize()
 
@@ -4403,22 +4404,22 @@ class SQLiteRepository:
         """建/接续会话 + 插入 running 的 ask_jobs 行 + 注册 cancel_event。
         就地把解析出的 conversation_id 写回 payload,使随后的 handler(_ensure_conversation)
         接续同一会话、不另建。返回 (job_id, conversation_id)。
-        持久化(单写事务原子建会话+job 行)在 AskStateStore;notebook 存在性守卫
-        与 cancel-event 注册表编排留在 facade(Task 23 再迁执行编排)。"""
+        持久化(单写事务原子建会话+job 行)在 AskStateStore;cancel-event 注册表在
+        runtime-owned AskCancellationRegistry(Task 23——流式执行编排在
+        AskExecutionCoordinator,经同一注册表);notebook 存在性守卫留在 facade。"""
         self.get_notebook(notebook_id)
         job_id, conversation_id = self._runtime.ask_state.begin_durable_job(
             notebook_id, payload, mode, self.current_user().id)
-        with self._ask_cancel_lock:
-            self._ask_cancel_events[job_id] = cancel_event
+        self._runtime.ask_cancellations.register(job_id, cancel_event)
         return job_id, conversation_id
 
     def finish_ask_job(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:
         """终态化 ask_job + 注销 cancel_event；cancelled/failed 时清理空会话(0 答案)。
-        终态 job 行是 store 里的一个事务;空会话清理保持为之后的另一个事务。"""
+        冻结次序:终态 job 行(store 里的一个事务)→ 注销 → 空会话清理保持为
+        之后的另一个事务。"""
         conversation_id = self._runtime.ask_state.finish_job(
             job_id, status, answer_id=answer_id, error=error)
-        with self._ask_cancel_lock:
-            self._ask_cancel_events.pop(job_id, None)
+        self._runtime.ask_cancellations.unregister(job_id)
         if status in ("cancelled", "failed") and conversation_id:
             self._cleanup_empty_conversation(conversation_id)
 
@@ -4427,11 +4428,21 @@ class SQLiteRepository:
         st = self.ask_job_status(job_id)   # KeyError if missing
         if st["created_by"] != user_id:
             raise KeyError(job_id)
-        with self._ask_cancel_lock:
-            ev = self._ask_cancel_events.get(job_id)
-        if ev is not None:
-            ev.set()
-        return {"status": "cancelling" if ev is not None else st["status"], "job_id": job_id}
+        cancelled = self._runtime.ask_cancellations.cancel(job_id)
+        return {"status": "cancelling" if cancelled else st["status"], "job_id": job_id}
+
+    @property
+    def _ask_cancel_events(self) -> dict:
+        """WS2a 兼容座:在途 ask 的 {job_id: cancel_event} 注册表 dict 本体
+        (真身在 runtime-owned AskCancellationRegistry,Task 23)。冻结的测试
+        断言(`repo._ask_cancel_events.get(job_id) is ev`)继续观察同一对象;
+        显式 cancel 端点是唯一真取消入口,断连绝不 set。"""
+        return self._runtime.ask_cancellations.events
+
+    @property
+    def _ask_cancel_lock(self) -> threading.Lock:
+        """WS2a 兼容座:注册表守卫锁(真身随注册表在 runtime,一个所有者)。"""
+        return self._runtime.ask_cancellations.lock
 
     def ask_job_status(self, job_id: str) -> dict:
         return self._runtime.ask_state.ask_job_status(job_id)
