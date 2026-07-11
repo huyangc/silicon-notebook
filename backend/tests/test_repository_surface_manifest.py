@@ -17,6 +17,14 @@ from app.repositories.ownership_manifest import (
     OWNER_BY_MEMBER,
     validate_ownership_manifest,
 )
+from tests.test_repository_facade_contract import (
+    MODULE_SURFACE_OWNER_EXCEPTIONS,
+    NON_CALLABLE_INSTANCE_SURFACE,
+    OWNER_CONTRACT_EXCEPTIONS,
+    facade_contract_subject_names,
+    facade_delegate_evidence,
+    manifest_delegate_mismatches,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -2468,7 +2476,32 @@ def test_ambiguous_surface_members_have_explicit_owners():
 
 
 def test_ownership_manifest_validates_delegate_evidence():
-    assert validate_ownership_manifest(delegates=OWNER_BY_MEMBER) == OWNER_BY_MEMBER
+    assert MODULE_SURFACE_OWNER_EXCEPTIONS == {
+        name for name, record in _surface().items() if record.get("scope") == "module"
+    }
+    delegates = facade_delegate_evidence(SQLiteRepository, OWNER_BY_MEMBER)
+    mismatch_sites = manifest_delegate_mismatches(SQLiteRepository, OWNER_BY_MEMBER)
+    mismatch_names = {site[2].split(":", 1)[0] for site in mismatch_sites}
+    subjects = facade_contract_subject_names(
+        SQLiteRepository, OWNER_BY_MEMBER
+    )
+    assert subjects == (
+        set(OWNER_BY_MEMBER)
+        - MODULE_SURFACE_OWNER_EXCEPTIONS
+        - NON_CALLABLE_INSTANCE_SURFACE
+        - OWNER_CONTRACT_EXCEPTIONS
+    )
+    assert set(delegates) | mismatch_names == subjects
+
+    matching_delegates = {
+        name: owner
+        for name, owner in delegates.items()
+        if OWNER_BY_MEMBER[name] == owner
+    }
+    assert validate_ownership_manifest(delegates=matching_delegates) == OWNER_BY_MEMBER
+    if delegates != matching_delegates:
+        with pytest.raises(ValueError, match="ownership/delegate mismatch"):
+            validate_ownership_manifest(delegates=delegates)
     with pytest.raises(ValueError, match="ownership/delegate mismatch"):
         validate_ownership_manifest(delegates={"ask": "WrongOwner"})
 
