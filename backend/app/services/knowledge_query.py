@@ -33,8 +33,8 @@ class KnowledgeQueryService:
         scale_runtime,
         retrieval: Callable[[], Any],
         schemas,
-        vector_cache,
-        notebook_languages: dict,
+        snapshots,
+        notebook_languages: Callable[[], dict],
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -46,7 +46,7 @@ class KnowledgeQueryService:
         self.scale_runtime = scale_runtime
         self.retrieval = retrieval
         self.schemas = schemas
-        self.vector_cache = vector_cache
+        self.snapshots = snapshots
         self.notebook_languages = notebook_languages
 
     def backfill_kg_fts(self, notebook_id: str) -> int:
@@ -57,7 +57,7 @@ class KnowledgeQueryService:
     def backfill_chunk_fts(self, notebook_id: str) -> int:
         with self.database.write() as db:
             count = self.chunk_store.backfill_fts(db, notebook_id)
-        self.notebook_languages.pop(notebook_id, None)
+        self.notebook_languages().pop(notebook_id, None)
         return count
 
     def semantic_search(self, notebook_id: str, query: str, limit: int) -> list:
@@ -271,7 +271,7 @@ class KnowledgeQueryService:
             graph, _idx_to_oid, _oid_to_idx = build_rx_graph(nodes, relations)
             return compute_edge_centrality(graph)
 
-        return self.vector_cache.get(
+        return self.snapshots.vector_cache.get(
             f"{notebook_id}:edge_centrality", version, load
         )
 

@@ -1,8 +1,8 @@
 """SQLite reports-table row persistence (Task 25).
 
-Row-level only — the notebook existence guard stays in the facade delegate
-(``create_report`` raises KeyError there), engine orchestration lives in
-``report_engine`` and detached execution in ``report_execution``.  Bodies are
+Row-level only — the notebook existence guard lives in the report application
+service, engine orchestration lives in ``report_engine`` and detached execution
+in ``report_execution``. Bodies are
 moved verbatim from the frozen facade methods: zero-row UPDATE/DELETE stay
 silent no-ops, ``get_report`` raises KeyError, list order is
 ``created_at DESC, id`` and export keeps the done-only/input-order/
@@ -25,20 +25,11 @@ class ReportStore:
     def __init__(self, database: SqliteDatabase, *,
                  new_id: Callable[[str], str],
                  now: Callable[[], str],
-                 current_user_id: Callable[[], str],
-                 get_notebook: Callable[[str], object] | None = None) -> None:
+                 current_user_id: Callable[[], str]) -> None:
         self.database = database
         self.new_id = new_id
         self.now = now
         self.current_user_id = current_user_id
-        self.get_notebook = get_notebook
-
-    def create_report_guarded(
-        self, notebook_id: str, question: str, depth: int = 2
-    ) -> str:
-        if self.get_notebook is not None:
-            self.get_notebook(notebook_id)
-        return self.create_report(notebook_id, question, depth)
 
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
         report_id = self.new_id("rep")

@@ -693,7 +693,7 @@ DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
     'copy_notebook': 'NotebookSharingService',
     'create_notebook': 'NotebookCatalogService',
     'create_object_schema': 'SchemaRegistryService',
-    'create_report': 'ReportStore',
+    'create_report': 'ReportApplicationService',
     'create_session': 'IdentityStore',
     'create_user': 'IdentityStore',
     'current_user': 'IdentityStore',
@@ -882,12 +882,11 @@ LATE_BOUND_COMPATIBILITY_SEAMS: Mapping[str, LateBoundSeam] = {
         LateBoundSeam("_connect", "facade", "_connect"),
         LateBoundSeam("_write", "facade", "_write"),
         LateBoundSeam("_insert_row", "facade", "_insert_row"),
-        LateBoundSeam("_flush_object_vectors", "facade", "_flush_object_vectors"),
         LateBoundSeam("_mark_unified_kg_dirty", "facade", "_mark_unified_kg_dirty"),
         LateBoundSeam("_invalidate_unified_cache", "facade", "_invalidate_unified_cache"),
         LateBoundSeam("_source_ids_from_evidence", "facade", "_source_ids_from_evidence"),
         LateBoundSeam("_summarize_source", "facade", "_summarize_source"),
         LateBoundSeam("_run_extraction", "facade", "_run_extraction"),
-        LateBoundSeam("_IN_CHUNK", "facade", "_in_batches"),
+        LateBoundSeam("_IN_CHUNK", "facade", "_IN_CHUNK"),
     )
 }

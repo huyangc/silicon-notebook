@@ -25,7 +25,10 @@ def test_runtime_construction_does_not_evaluate_seams():
     from app.services.repository_runtime import RepositoryCompatibilitySeams, RepositoryRuntime
 
     calls = []
-    seams = RepositoryCompatibilitySeams(*(lambda *args, _name=name: calls.append(_name) for name in ("id", "now", "chunk", "remap")))
+    seams = RepositoryCompatibilitySeams(*(
+        lambda *args, _name=name: calls.append(_name)
+        for name in ("id", "now", "copy-chunk", "remap", "in-chunk")
+    ))
     settings = Settings(
         _env_file=None,
         database_url="sqlite:///:memory:",

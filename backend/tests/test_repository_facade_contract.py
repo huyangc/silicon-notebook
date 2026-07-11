@@ -62,6 +62,7 @@ RUNTIME_COMPONENT_OWNERS = {
     "notebook_summaries": "NotebookSummaryQuery",
     "pending_actions_service": "PendingActionsService",
     "queries": "QueryStore",
+    "report_application": "ReportApplicationService",
     "report_execution": "ReportEngine",
     "report_store": "ReportStore",
     "retrieval": "RetrievalService",

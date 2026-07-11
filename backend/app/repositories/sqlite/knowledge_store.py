@@ -229,7 +229,12 @@ class KnowledgeStore:
         if id_filter is not None:
             id_filter = list(dict.fromkeys(id_filter))
         return self.retrieval_objects(
-            db, notebook_id, object_type, statuses, id_filter, batch_size=900
+            db,
+            notebook_id,
+            object_type,
+            statuses,
+            id_filter,
+            batch_size=self.seams.in_chunk_size(),
         )
 
     def begin_extraction(

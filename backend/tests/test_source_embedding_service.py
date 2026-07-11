@@ -8,7 +8,7 @@ Invariants under test:
 - the embedder's HTTP-client warm-up (``_ensure``) runs once, single-threaded,
   before the worker pool — and a warm-up failure never aborts embedding;
 - element texts are truncated to ``embed_truncate_chars`` before compute;
-- object-vector flushes ride the facade's ``_flush_object_vectors`` seat
+- object-vector flushes are owned by ``SourceEmbeddingService``
   (per-instance monkeypatches keep observing them; flush errors PROPAGATE —
   the incremental-commit/resume contract of test_node_embed_incremental);
 - a failed embed batch is isolated (other batches persist / reach the store);

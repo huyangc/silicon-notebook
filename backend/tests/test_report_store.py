@@ -45,8 +45,11 @@ def _golden_store(repo, ids, now):
 
 def test_runtime_owns_report_store_and_facade_delegates(repo):
     from app.repositories.sqlite.report_store import ReportStore
+    from app.services.report_application import ReportApplicationService
     store = repo._runtime.report_store
     assert isinstance(store, ReportStore)
+    assert isinstance(repo._runtime.report_application, ReportApplicationService)
+    assert repo._runtime.report_application.reports is store
     nb = _mk_nb(repo)
     rid = repo.create_report(nb.id, "为什么?", depth=3)
     assert store.get_report(nb.id, rid)["depth"] == 3          # facade 写 → store 读同一行

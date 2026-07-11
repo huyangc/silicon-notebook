@@ -229,6 +229,7 @@ class SQLiteRepository:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
+        repository_ref = weakref.ref(self)
         self._runtime = RepositoryRuntime(
             settings=self.settings,
             root_dir=self.root_dir,
@@ -237,6 +238,9 @@ class SQLiteRepository:
                 now=lambda: _now(),
                 copy_chunk_size=lambda: _COPY_CHUNK,
                 remap_json_ids=lambda value, maps: _remap_json_ids(value, maps),
+                in_chunk_size=lambda: _repository_from_weakref(
+                    repository_ref
+                )._IN_CHUNK,
             ),
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
@@ -256,16 +260,11 @@ class SQLiteRepository:
         # per call) so transaction-counting/failure-injection monkeypatches
         # keep observing them; the seat itself is the shared database lock.
         self._runtime.wire_persistence(write=lambda: self._write())
-        # Task 11: the embed/chunk pipeline rides three facade-bound late
-        # seams — the mutable embedder attribute (tests swap fakes in
-        # post-construction), the _flush_object_vectors MASTER_V10 seat
-        # (incremental object-vector commits stay per-instance patchable) and
-        # the _mark_unified_kg_dirty KG seat (stays facade-owned until Gate 5).
+        # Task 11: the embed/chunk pipeline keeps the mutable embedder and the
+        # KG-dirty callback late-bound. Object-vector flushes are owned by the
+        # source embedding service itself.
         self._runtime.wire_source_pipeline(
             embedder=lambda: self._runtime.embedder,
-            flush_object_vectors=lambda notebook_id, rows: self._flush_object_vectors(
-                notebook_id, rows
-            ),
             mark_unified_dirty=lambda notebook_id: self._mark_unified_kg_dirty(
                 notebook_id
             ),
@@ -327,7 +326,6 @@ class SQLiteRepository:
         # model-error note. Every callback resolves at call time through a
         # weak reference — post-construction monkeypatches stay observed
         # without creating facade→runtime→adapter→facade retention cycles.
-        repository_ref = weakref.ref(self)
         self._runtime.wire_scale_artifacts(
             connect=lambda: _repository_from_weakref(repository_ref)._connect(),
             in_batches=lambda ids: _repository_from_weakref(
@@ -2894,7 +2892,7 @@ class SQLiteRepository:
     # 冻结签名委托(notebook 存在性守卫留在 create_report 委托里)。脱离连接
     # 执行编排见 report_execution 属性(ReportExecutionCoordinator)。
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
-        return self._runtime.report_store.create_report_guarded(
+        return self._runtime.report_application.create_report(
             notebook_id, question, depth
         )
 

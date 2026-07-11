@@ -346,11 +346,8 @@ TASK5_ALLOWED_PATCHES = {
 # fixture 冻结成员集不扩)。Gate 5(Task 13)兑现了"搬迁时 patch 座随成员迁到组件
 # seam"的约定:test_rebuild_checkpoint 的两个 _rebuild_ckpt_put 座已迁到
 # repo._runtime.unified_kg.checkpoint_put(store seam,静态扫描不再计为 facade
-# patch),故此处只剩 _flush_object_vectors(Task 11 保留的 facade 座)。
-MASTER_V10_ALLOWED_PATCHES = {
-    ("backend/tests/test_node_embed_incremental.py", 56, "_flush_object_vectors", "repo"),
-    ("backend/tests/test_node_embed_incremental.py", 63, "_flush_object_vectors", "repo"),
-}
+# patch); object-vector flush probes likewise target SourceEmbeddingService.
+MASTER_V10_ALLOWED_PATCHES = set()
 # Task 13: the schema-registry characterization suite swaps the llm client
 # through the frozen mutable llm_client property (production-compatible seam —
 # the setter writes the runtime model provider the SchemaRegistryService
@@ -385,16 +382,12 @@ TASK10_ALLOWED_PATCHES = {
     ("backend/tests/test_embedding_store_component.py", 59, "_write", "repo"),
     ("backend/tests/test_embedding_store_component.py", 135, "_write", "repo"),
 }
-# Task 11 late-binding proofs: the embed/chunk services must observe
-# post-construction patches of the facade _flush_object_vectors seat (spy +
-# propagating failure injection — the incremental-commit/resume contract),
-# the facade _mark_unified_kg_dirty seat, and the module _new_id seam that
-# mints ck-* chunk ids.
+# Task 11 late-binding proofs: chunking observes the facade
+# _mark_unified_kg_dirty seat and module _new_id seam that mints ck-* ids.
+# Object-vector persistence probes target SourceEmbeddingService directly.
 TASK11_ALLOWED_PATCHES = {
     ("backend/tests/test_source_chunking_service.py", 103, "_new_id", "sqlite_repository"),
     ("backend/tests/test_source_chunking_service.py", 119, "_mark_unified_kg_dirty", "repo"),
-    ("backend/tests/test_source_embedding_service.py", 181, "_flush_object_vectors", "repo"),
-    ("backend/tests/test_source_embedding_service.py", 202, "_flush_object_vectors", "repo"),
 }
 # Task 12 migrates every _run_extraction / _set_source_status /
 # _source_raw_text facade patch seat onto the canonical
@@ -1821,6 +1814,30 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
     ("_connect", "backend/tests/test_incremental_fuse_perf.py:134"),
     ("_runtime", "backend/tests/test_incremental_fuse_perf.py:110"),
     ("_runtime", "backend/tests/test_incremental_fuse_perf.py:134"),
+    # Task 6 independent-review regressions. These are exact new test
+    # consumers; the frozen production surface and its coordinates stay intact.
+    ("create_notebook", "backend/tests/test_in_batching.py:74"),
+    ("_connect", "backend/tests/test_in_batching.py:80"),
+    ("_knowledge_objects", "backend/tests/test_in_batching.py:81"),
+    ("_IN_CHUNK", "backend/tests/test_in_batching.py:85"),
+    ("_connect", "backend/tests/test_in_batching.py:87"),
+    ("_knowledge_objects", "backend/tests/test_in_batching.py:89"),
+    (
+        "_edge_centrality_map",
+        "backend/tests/test_retrieval_snapshot_cache_runtime.py:66",
+    ),
+    (
+        "_notebook_langs_cache",
+        "backend/tests/test_retrieval_snapshot_cache_runtime.py:73",
+    ),
+    (
+        "_notebook_langs_cache",
+        "backend/tests/test_retrieval_snapshot_cache_runtime.py:77",
+    ),
+    (
+        "backfill_chunk_fts",
+        "backend/tests/test_retrieval_snapshot_cache_runtime.py:78",
+    ),
 }
 
 FROZEN_ONLY_MOVED_CONSUMERS = {
@@ -2408,6 +2425,7 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_viz_bounded.py', 118, '_unified_graph_full', 'repo'),
     },
     'actual_only': {
+        ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),

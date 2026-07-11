@@ -92,4 +92,11 @@ def test_module_seams_mirror_the_runtime_compatibility_dataclass():
         "now",
         "copy_chunk_size",
         "remap_json_ids",
+        "in_chunk_size",
     }
+
+
+def test_removed_object_flush_callback_is_not_a_late_bound_facade_seam():
+    from app.repositories.ownership_manifest import LATE_BOUND_COMPATIBILITY_SEAMS
+
+    assert "_flush_object_vectors" not in LATE_BOUND_COMPATIBILITY_SEAMS

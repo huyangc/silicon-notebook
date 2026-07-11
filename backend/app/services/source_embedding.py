@@ -19,17 +19,11 @@ class SourceEmbeddingService:
     HTTP-client warm-up. Persistence stays in EmbeddingStore (one write
     transaction per flush).
 
-    Two collaborators are LATE-BOUND facade seams resolved at call time:
-
-    - ``embedder`` — the facade's mutable ``self.embedder`` attribute (tests
-      swap in fakes after construction);
-    - ``flush_object_vectors`` — the facade's ``_flush_object_vectors``
-      MASTER_V10 seat (kept on the facade until Gate 5): per-instance
-      monkeypatches must observe every incremental object-vector commit, and
-      flush errors must PROPAGATE so an interrupted backfill keeps its
-      already-committed groups (test_node_embed_incremental's resume
-      contract). Batch COMPUTE failures, by contrast, are isolated per batch
-      and never abort the whole run."""
+    The ``embedder`` collaborator is late-bound so tests and runtime settings
+    may replace the provider after construction. Object-vector flushes are
+    owned directly by this service; flush errors propagate so an interrupted
+    backfill keeps its already-committed groups. Batch compute failures remain
+    isolated per batch and never abort the whole run."""
 
     def __init__(
         self,
@@ -40,7 +34,6 @@ class SourceEmbeddingService:
         vectors: EmbeddingStore,
         embedder: Callable[[], Any],
         event_log: EventLogger,
-        flush_object_vectors: Callable[[str, list], None],
         now: Callable[[], str],
     ) -> None:
         self.settings = settings

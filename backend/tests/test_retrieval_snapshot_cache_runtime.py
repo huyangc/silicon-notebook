@@ -46,6 +46,41 @@ def test_facade_vector_cache_setter_updates_all_consumers(repo):
     assert repo._runtime.kg_mutations.vector_cache is replacement
 
 
+def test_knowledge_query_reads_replaced_vector_cache(repo, monkeypatch):
+    """Query projections must not retain the cache object captured at wiring."""
+    old_cache = repo._vector_cache
+    replacement = VectorCache(max_entries=3)
+    notebook_id = "nb-cache-swap"
+    version = ("replacement",)
+    replacement.get(
+        f"{notebook_id}:edge_centrality", version, lambda: {"new-cache": 1.0}
+    )
+    monkeypatch.setattr(
+        repo._runtime.knowledge_query.scale_runtime,
+        "version",
+        lambda _notebook_id: list(version),
+    )
+
+    repo._vector_cache = replacement
+
+    assert repo._edge_centrality_map(notebook_id) == {"new-cache": 1.0}
+    assert old_cache.peek(f"{notebook_id}:edge_centrality", version) is False
+
+
+def test_knowledge_query_invalidates_replaced_notebook_language_map(repo):
+    """FTS backfill invalidates the authoritative runtime map after a swap."""
+    notebook_id = "nb-language-swap"
+    old_map = repo._notebook_langs_cache
+    old_map[notebook_id] = ["old"]
+    replacement = {notebook_id: ["new"]}
+
+    repo._notebook_langs_cache = replacement
+    repo.backfill_chunk_fts(notebook_id)
+
+    assert old_map[notebook_id] == ["old"]
+    assert notebook_id not in replacement
+
+
 def test_facade_unified_cache_setter_updates_all_consumers(repo):
     replacement: dict = {}
     repo._unified_cache = replacement

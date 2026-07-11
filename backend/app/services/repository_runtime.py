@@ -37,6 +37,7 @@ from app.services.report_execution import (
     REPORT_CANCELLATIONS,
     ReportExecutionCoordinator,
 )
+from app.services.report_application import ReportApplicationService
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.retrieval_candidates import CandidateRetrievalService
 from app.services.retrieval_service import RetrievalService
@@ -64,6 +65,7 @@ class RepositoryCompatibilitySeams:
     now: Callable[[], str]
     copy_chunk_size: Callable[[], int]
     remap_json_ids: Callable[[Any, dict], Any]
+    in_chunk_size: Callable[[], int]
 
 
 class RepositoryRuntime:
@@ -106,7 +108,9 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
             current_user_id=lambda: self.identity.current_user().id,
-            get_notebook=self.catalog.get_notebook,
+        )
+        self.report_application = ReportApplicationService(
+            self.catalog, self.report_store
         )
         self.report_cancellations = REPORT_CANCELLATIONS
         self.report_execution: "ReportExecutionCoordinator | None" = None
@@ -152,10 +156,9 @@ class RepositoryRuntime:
         # the facade constructor reaches it. Construction stays lazy.
         self.embedding_store: "EmbeddingStore | None" = None
         # The source embed/chunk pipeline is finished by wire_source_pipeline():
-        # its collaborators (facade embedder attribute, _flush_object_vectors
-        # seat, _mark_unified_kg_dirty seat, the wired EmbeddingStore) are
-        # facade-bound seams that only exist once the facade constructor
-        # reaches them.  Construction stays lazy — no seam calls.
+        # its mutable embedder and _mark_unified_kg_dirty collaborators plus
+        # the wired EmbeddingStore only exist once the facade constructor
+        # reaches them. Construction stays lazy — no seam calls.
         self.source_embedding: "SourceEmbeddingService | None" = None
         self.source_chunking: "SourceChunkingService | None" = None
         # Source ingestion orchestration is finished by wire_source_ingestion():
@@ -381,15 +384,12 @@ class RepositoryRuntime:
         self,
         *,
         embedder: Callable[[], Any],
-        flush_object_vectors: Callable[[str, list], None],
         mark_unified_dirty: Callable[[str], None],
     ) -> tuple[SourceEmbeddingService, SourceChunkingService]:
         """Compose the source embed/chunk pipeline (Task 11) once the
         facade-bound seams exist: ``embedder`` resolves the facade's mutable
         ``self.embedder`` at call time (tests swap in fakes post-construction),
-        ``flush_object_vectors`` is the facade's ``_flush_object_vectors``
-        MASTER_V10 seat (incremental object-vector commits stay observable and
-        interruptible), ``mark_unified_dirty`` the facade's
+        while ``mark_unified_dirty`` is the facade's
         ``_mark_unified_kg_dirty`` KG seat. Requires wire_persistence() first —
         vector flushes land on the already-wired EmbeddingStore."""
         if self.embedding_store is None:
@@ -401,7 +401,6 @@ class RepositoryRuntime:
             vectors=self.embedding_store,
             embedder=embedder,
             event_log=self.event_log,
-            flush_object_vectors=flush_object_vectors,
             now=self.seams.now,
         )
         self.source_chunking = SourceChunkingService(
@@ -695,8 +694,8 @@ class RepositoryRuntime:
             scale_runtime=self.scale_artifacts,
             retrieval=retrieval,
             schemas=self.schema_registry,
-            vector_cache=self.retrieval_snapshots.vector_cache,
-            notebook_languages=self.notebook_languages,
+            snapshots=self.retrieval_snapshots,
+            notebook_languages=lambda: self.notebook_languages,
         )
         self.pending_actions_service = PendingActionsService(
             self.queries,
