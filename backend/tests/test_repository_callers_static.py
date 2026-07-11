@@ -669,3 +669,34 @@ def test_facade_exposes_the_maintenance_adapter():
         __import__("inspect").getattr_static(SQLiteRepository, "maintenance"),
         property,
     )
+
+
+def test_closed_remediation_constants_are_executed_by_this_suite():
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    consumers = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name != "test_closed_remediation_constants_are_executed_by_this_suite"
+        and {
+            child.id for child in ast.walk(node) if isinstance(child, ast.Name)
+        } >= {"CLOSED_REMEDIATION_MODULES", "CLOSED_REMEDIATION_ATTRIBUTES"}
+    }
+    assert consumers == {"test_closed_remediation_modules_stay_closed"}
+
+
+def test_closed_remediation_modules_stay_closed():
+    offenders = []
+    for debt_kind, modules in CLOSED_REMEDIATION_MODULES.items():
+        forbidden = CLOSED_REMEDIATION_ATTRIBUTES[debt_kind]
+        for relative in modules:
+            tree = ast.parse(
+                (ROOT / relative).read_text(encoding="utf-8"),
+                filename=relative,
+            )
+            offenders.extend(
+                (debt_kind, relative, node.lineno, node.attr)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute) and node.attr in forbidden
+            )
+    assert offenders == []

@@ -10,8 +10,10 @@ class RetrievalService:
         self.graph = graph
         self._community_queries = community_queries
 
-    def community_queries(self):
-        return self._community_queries()
+    def community_queries(self, settings=None):
+        if settings is None:
+            return self._community_queries()
+        return self._community_queries(settings)
 
     def replace_embedder(self, embedder: Any) -> None:
         self.candidates.embedder = embedder

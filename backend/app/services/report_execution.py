@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 
 class BackgroundJobSubmitter(Protocol):
@@ -32,7 +35,8 @@ class ReportEngineFactory(Protocol):
     """按发起用户/取消事件构造一台端口化 ReportEngine(runtime 注入)。"""
 
     def __call__(self, *, user_id: str,
-                 cancel_event: threading.Event | None) -> Any: ...
+                 cancel_event: threading.Event | None,
+                 settings: "Settings | None" = None) -> Any: ...
 
 
 class ReportCancellationRegistry:

@@ -81,6 +81,7 @@ class ReportEngine:
         engine = repository.report_execution.engine_factory(
             user_id=repository.current_user().id,
             cancel_event=cancel_event,
+            settings=settings,
         )
         if cls is ReportEngine:
             return engine

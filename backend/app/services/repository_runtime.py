@@ -361,11 +361,13 @@ class RepositoryRuntime:
             retrieval = RetrievalService(
                 candidates=candidates,
                 graph=graph,
-                community_queries=lambda: CommunityQueryService(
+                community_queries=lambda settings=None: CommunityQueryService(
                     notebooks=self.notebook_store,
                     unified_kg=self.unified_kg,
                     event_log=self.event_log,
-                    sibling_min_bridge=self.settings.sibling_min_bridge,
+                    sibling_min_bridge=(
+                        settings or self.settings
+                    ).sibling_min_bridge,
                 ),
             )
             candidates.bind(peer=graph, retrieval=retrieval)
@@ -887,8 +889,11 @@ class RepositoryRuntime:
         at its last persisted status."""
         from app.services.report_engine import ReportEngine, ReportEngineDependencies
 
-        def engine_factory(*, user_id: str, cancel_event=None) -> ReportEngine:
+        def engine_factory(
+            *, user_id: str, cancel_event=None, settings=None
+        ) -> ReportEngine:
             retrieval_port = retrieval()
+            engine_settings = settings or self.settings
             if self.evidence_context is None:
                 raise RuntimeError(
                     "wire_report_execution engine factory requires wired retrieval"
@@ -900,8 +905,8 @@ class RepositoryRuntime:
                 model_clients=self.models,
                 model_errors=self.models,
                 source_query=self.source_store,
-                communities=retrieval_port.community_queries(),
-                settings=self.settings,
+                communities=retrieval_port.community_queries(engine_settings),
+                settings=engine_settings,
                 event_log=self.event_log,
             )
             return ReportEngine(

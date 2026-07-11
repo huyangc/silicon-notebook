@@ -648,3 +648,17 @@ def test_deep_dive_uses_configured_sibling_threshold(repo, monkeypatch):
     )
 
     assert captured["sibling_min_bridge"] == 5
+
+
+def test_from_repository_honors_explicit_settings_override(repo):
+    from app.services.report_engine import ReportEngine
+
+    custom = repo.settings.model_copy(
+        update={"sibling_min_bridge": repo.settings.sibling_min_bridge + 7}
+    )
+
+    engine = ReportEngine.from_repository(repo, custom)
+
+    assert engine.settings is custom
+    assert engine.dependencies.settings is custom
+    assert engine.dependencies.communities.sibling_min_bridge == custom.sibling_min_bridge
