@@ -484,3 +484,9 @@ class SourceStore:
             {"title": r["title"], "doc_type": r["doc_type"], "summary": r["summary"]}
             for r in rows
         ]
+
+    def meta_sources(
+        self, notebook_id: str, pending_source_id: str = ""
+    ) -> List[dict]:
+        with self.database.connect() as db:
+            return self.meta_source_rows(db, notebook_id, pending_source_id)

@@ -109,6 +109,32 @@ class ScaleArtifactRuntime:
             self.snapshots.vector_cache,
         ).copy_stats(notebook_id)
 
+    def set_building(self, value) -> None:
+        self.building = value
+        self.builder.building = value
+
+    def set_building_lock(self, value) -> None:
+        self.building_lock = value
+        self.builder.building_lock = value
+
+    def set_scheduler_started(self, value) -> None:
+        self.scheduler_started = bool(value)
+
+    def dequeue_idle(self, notebook_id: str) -> bool:
+        with self.building_lock:
+            return self.idle_queue.pop(notebook_id, None) is not None
+
+    def build_viz_graph_arrays(self, notebook_id: str):
+        from app.services.kg.viz_index import arrays_from_graph
+
+        return arrays_from_graph(self.lifecycle._unified_graph_full(notebook_id, "object"))
+
+    @staticmethod
+    def viz_arrays_from_graph(full: dict):
+        from app.services.kg.viz_index import arrays_from_graph
+
+        return arrays_from_graph(full)
+
     def eligible(
         self,
         notebook_id: str,

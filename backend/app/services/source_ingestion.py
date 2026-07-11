@@ -120,6 +120,7 @@ class SourceIngestionService:
         notebook_meta_row: Callable[[str], Optional[dict]],
         notebook_meta_sources: Callable[[str, str], List[dict]],
         apply_notebook_meta: Callable[..., None],
+        maybe_enqueue_scale_fold: Callable[[str], None],
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -153,6 +154,90 @@ class SourceIngestionService:
         self.notebook_meta_row = notebook_meta_row
         self.notebook_meta_sources = notebook_meta_sources
         self.apply_notebook_meta = apply_notebook_meta
+        self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
+
+    def pipeline_hooks(self) -> SourcePipelineHooks:
+        return SourcePipelineHooks(
+            should_extract_kg=self.should_extract_kg,
+            extract_source=self.run_extraction,
+            mark_unified_dirty=self.kg_mutations.mark_unified_kg_dirty,
+            augment_notebook_metadata=self.augment_notebook_metadata,
+            maybe_enqueue_scale_fold=self.maybe_enqueue_scale_fold,
+        )
+
+    def import_sources_compat(
+        self, notebook_id: str, payload: SourceImportRequest
+    ) -> List[SourceSummary]:
+        return self.import_sources(notebook_id, payload, self.pipeline_hooks())
+
+    def add_url_sources_compat(
+        self, notebook_id: str, urls: Iterable[str], scheduler=None
+    ) -> AddUrlSourcesResult:
+        return self.add_url_sources(
+            notebook_id, urls, scheduler, self.pipeline_hooks()
+        )
+
+    def upload_sources_compat(
+        self, notebook_id: str, files: Iterable[UploadedSourceFile], scheduler=None
+    ) -> List[SourceSummary]:
+        return self.upload_sources(
+            notebook_id, files, scheduler, self.pipeline_hooks()
+        )
+
+    def process_source_compat(self, source_id: str) -> SourceSummary:
+        return self.process_source(source_id, self.pipeline_hooks())
+
+    def parse_source_compat(self, source_id: str) -> SourceSummary:
+        return self.parse_source(source_id, self.pipeline_hooks())
+
+    def delete_source_compat(self, source_id: str) -> None:
+        return self.delete_source(source_id, self.pipeline_hooks())
+
+    def list_sources(self, notebook_id: str) -> List[SourceSummary]:
+        self.notebooks.get_row(notebook_id)
+        return self.sources.list_sources(notebook_id)
+
+    def list_sources_page(
+        self, notebook_id: str, offset: int = 0, limit: int = 50, q: str = ""
+    ):
+        self.notebooks.get_row(notebook_id)
+        return self.sources.list_sources_page(
+            notebook_id, offset=offset, limit=limit, q=q
+        )
+
+    @staticmethod
+    def source_type(file_name: str) -> str:
+        lower_name = file_name.lower()
+        if lower_name.endswith(".pdf"):
+            return "pdf"
+        if lower_name.endswith(".md") or lower_name.endswith(".markdown"):
+            return "markdown"
+        if lower_name.endswith(".docx"):
+            return "docx"
+        if lower_name.endswith(".pptx"):
+            return "pptx"
+        return "other"
+
+    def summarize(self, title: str, elements: List[SourceElement]) -> str:
+        text = "\n".join(element.text for element in elements[:12])
+        llm = self.llm()
+        if llm.configured and text.strip():
+            try:
+                raw = llm.chat_json(
+                    [{"role": "user", "content": (
+                        "Summarize this semiconductor notebook source in one concise sentence.\n"
+                        f"Title: {title}\n\n{text[:6000]}"
+                    )}],
+                    '{"summary": "one concise sentence"}',
+                )
+                summary = str(json.loads(raw).get("summary", "")).strip()
+                if summary:
+                    return summary
+            except Exception:
+                pass
+        if not text.strip():
+            return "Parsed source contains no extractable text elements."
+        return f"{len(elements)} parsed text element(s). {' '.join(text.split())[:260]}"
 
     # ------------------------------------------------------------- intake
     def import_sources(

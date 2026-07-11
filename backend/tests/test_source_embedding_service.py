@@ -172,13 +172,13 @@ def test_embed_objects_batch_flush_rides_facade_seat(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.embedder = _RecordingEmbedder(dim=8)
     flushes = []
-    real_flush = repo._flush_object_vectors
+    real_flush = repo._runtime.source_embedding.flush_object_vectors
 
     def spy_flush(notebook_id, rows):
         flushes.append(len(rows))
         return real_flush(notebook_id, rows)
 
-    monkeypatch.setattr(repo, "_flush_object_vectors", spy_flush)
+    monkeypatch.setattr(repo._runtime.source_embedding, "flush_object_vectors", spy_flush)
     items = [{"_oid": f"ko-{i}", "payload": {"name": f"concept number {i}"}}
              for i in range(35)]
 
@@ -199,7 +199,7 @@ def test_embed_objects_batch_flush_errors_propagate(repo, monkeypatch):
     def broken_flush(notebook_id, rows):
         raise RuntimeError("simulated flush interrupt")
 
-    monkeypatch.setattr(repo, "_flush_object_vectors", broken_flush)
+    monkeypatch.setattr(repo._runtime.source_embedding, "flush_object_vectors", broken_flush)
     items = [{"_oid": f"ko-{i}", "payload": {"name": f"widget {i}"}} for i in range(5)]
 
     with pytest.raises(RuntimeError, match="simulated flush interrupt"):

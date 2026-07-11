@@ -49,8 +49,29 @@ class SourceEmbeddingService:
         self.vectors = vectors
         self.embedder = embedder
         self.event_log = event_log
-        self.flush_object_vectors = flush_object_vectors
         self.now = now
+
+    def embed_knowledge(
+        self, object_id: str, notebook_id: str, payload: dict
+    ) -> None:
+        if not self.settings.embedder_configured:
+            return
+        text = _payload_text(payload).strip()
+        if not text:
+            return
+        try:
+            vector = self.embedder().embed_query(text[:2000])
+        except Exception:
+            return
+        self.vectors.replace_knowledge_vectors(
+            notebook_id, [(object_id, vector)], created_at=self.now()
+        )
+
+    def flush_object_vectors(self, notebook_id: str, rows: list) -> None:
+        if rows:
+            self.vectors.replace_knowledge_vectors(
+                notebook_id, rows, created_at=self.now()
+            )
 
     @staticmethod
     def _warm_up(embedder: Any) -> None:

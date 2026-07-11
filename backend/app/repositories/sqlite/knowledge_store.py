@@ -217,6 +217,41 @@ class KnowledgeStore:
             "ON nb.id=ko.notebook_id WHERE nb.tier='base')"
         ).fetchone()[0])
 
+    def any_base_has_kg_compat(
+        self, db: "sqlite3.Connection | None" = None
+    ) -> bool:
+        return self.any_base_has_kg_on(db) if db is not None else self.any_base_has_kg()
+
+    def retrieval_objects_compat(
+        self, db: sqlite3.Connection, notebook_id: str, object_type: str,
+        statuses, id_filter,
+    ) -> list[dict]:
+        if id_filter is not None:
+            id_filter = list(dict.fromkeys(id_filter))
+        return self.retrieval_objects(
+            db, notebook_id, object_type, statuses, id_filter, batch_size=900
+        )
+
+    def begin_extraction(
+        self, source_id: str, notebook_id: str, run_id: str, created_at: str
+    ) -> None:
+        with self.database.write() as db:
+            self.begin_extraction_run(db, source_id, notebook_id, run_id, created_at)
+
+    def finish_extraction(self, run_id: str, status: str, message: str) -> None:
+        with self.database.write() as db:
+            self.finish_extraction_run(
+                db, run_id, status, message, self.seams.now()
+            )
+
+    def add_relations_current(
+        self, notebook_id: str, source_id: str, relations: List[dict]
+    ) -> int:
+        with self.database.write() as db:
+            return self.add_relations(
+                db, notebook_id, source_id, relations, self.seams.now()
+            )
+
     @staticmethod
     def object_version_row(db: sqlite3.Connection, notebook_id: str):
         return db.execute(

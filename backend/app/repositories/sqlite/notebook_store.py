@@ -254,3 +254,23 @@ class NotebookStore:
             "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
         ).fetchone()
         return str(row["tier"]) if row is not None and row["tier"] else ""
+
+    def meta_for_notebook(self, notebook_id: str) -> "dict | None":
+        with self.database.connect() as db:
+            return self.meta_row(db, notebook_id)
+
+    def apply_meta_for_notebook(
+        self, notebook_id: str, *, guard_name: str, name: str, purpose: str
+    ) -> None:
+        with self.database.write() as db:
+            self.apply_meta(
+                db, notebook_id, guard_name=guard_name, name=name, purpose=purpose
+            )
+
+    def tier(self, notebook_id: str) -> str:
+        with self.database.connect() as db:
+            return self.tier_on(db, notebook_id)
+
+    def participant_notebook_ids(self, notebook_id: str) -> List[str]:
+        with self.database.connect() as db:
+            return self.participant_ids(db, notebook_id)

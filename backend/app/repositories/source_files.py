@@ -72,3 +72,8 @@ class SourceFileStore:
             except OSError:
                 pass
         return "\n\n".join(e.text for e in fallback_elements)
+
+    def read_source(self, source, fallback_elements: Iterable) -> str:
+        return self.read_source_text(
+            getattr(source, "file_path", "") or "", fallback_elements
+        )

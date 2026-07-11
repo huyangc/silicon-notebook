@@ -1826,6 +1826,28 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
 FROZEN_ONLY_MOVED_CONSUMERS = {
     # Task 1 adds ownership imports above this test module's own facade import.
     ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
+    ("_augment_notebook_meta", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_cleanup_empty_conversation", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_edge_support_map", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_embed_query", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_enrich_evidence", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_fold_hits_to_canonical", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_has_kg", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_hydrate_search_hits", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_kg_headline", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_knowledge_record", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_semantic_search", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_should_extract_kg", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_unified_graph_full", "backend/app/services/sqlite_repository.py:<line>"),
+    ("_vector_cache", "backend/app/services/sqlite_repository.py:<line>"),
+    ("ask_job_status", "backend/app/services/sqlite_repository.py:<line>"),
+    ("effective_schemas", "backend/app/services/sqlite_repository.py:<line>"),
+    ("scale_index_status", "backend/tests/test_pending_actions.py:104"),
+    ("scale_index_status", "backend/tests/test_pending_actions.py:116"),
+    ("ask_chunk", "backend/tests/test_ask_modes.py:24"),
+    ("ask_graph", "backend/tests/test_ask_modes.py:24"),
+    ("ask_reasoning", "backend/tests/test_ask_modes.py:24"),
+    ("ask_chunk", "backend/tests/test_chunk_retrieval.py:240"),
 }
 
 
@@ -2243,6 +2265,12 @@ def test_compatibility_exports_and_import_consumers_are_complete():
 
 EXPECTED_PATCH_DELTAS = {
     'recorded_only': {
+        ('backend/tests/test_ask_modes.py', 24, 'ask_chunk', 'repo'),
+        ('backend/tests/test_ask_modes.py', 24, 'ask_graph', 'repo'),
+        ('backend/tests/test_ask_modes.py', 24, 'ask_reasoning', 'repo'),
+        ('backend/tests/test_chunk_retrieval.py', 240, 'ask_chunk', 'repo'),
+        ('backend/tests/test_pending_actions.py', 104, 'scale_index_status', 'repo'),
+        ('backend/tests/test_pending_actions.py', 116, 'scale_index_status', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 29, '_concept_cluster_id', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 30, 'node_context', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 44, '_concept_cluster_id', 'repo'),
@@ -2383,8 +2411,6 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
-        ('backend/tests/test_node_embed_incremental.py', 56, '_flush_object_vectors', 'repo'),
-        ('backend/tests/test_node_embed_incremental.py', 63, '_flush_object_vectors', 'repo'),
         ('backend/tests/test_notebook_copy_service.py', 115, '_new_id', 'sqlite_repository'),
         ('backend/tests/test_notebook_copy_service.py', 140, '_COPY_CHUNK', 'sqlite_repository'),
         ('backend/tests/test_notebook_copy_service.py', 168, '_insert_row', 'repo'),
@@ -2397,12 +2423,9 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_schema_registry_service.py', 187, 'llm_client', 'repo'),
         ('backend/tests/test_source_chunking_service.py', 103, '_new_id', 'sqlite_repository'),
         ('backend/tests/test_source_chunking_service.py', 119, '_mark_unified_kg_dirty', 'repo'),
-        ('backend/tests/test_source_embedding_service.py', 181, '_flush_object_vectors', 'repo'),
-        ('backend/tests/test_source_embedding_service.py', 202, '_flush_object_vectors', 'repo'),
         ('backend/tests/test_source_ingestion_failure_boundaries.py', 80, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_source_ingestion_service.py', 155, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_source_ingestion_service.py', 253, 'parse_source_file', 'facade_mod'),
-        ('backend/tests/test_source_ingestion_service.py', 260, '_run_extraction', 'repo'),
         ('backend/tests/test_source_ingestion_service.py', 332, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_sqlite_write_optimization.py', 136, '_write', 'embed_repo'),
     },
@@ -2452,6 +2475,8 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         recorded[name] = {
             site for site in sites
                 if (name, site) not in allowed_sites | FROZEN_ONLY_MOVED_CONSUMERS
+                    and (name, _normalize_consumer_site(site))
+                        not in FROZEN_ONLY_MOVED_CONSUMERS
                     and not _member_file_site_allowed(name, site, frozen=True)
         }
     actual = {name: sites for name, sites in actual.items() if sites}

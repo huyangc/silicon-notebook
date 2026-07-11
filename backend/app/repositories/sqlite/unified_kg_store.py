@@ -29,8 +29,9 @@ from app.repositories.sqlite.database import SqliteDatabase
 
 
 class UnifiedKgStore:
-    def __init__(self, database: SqliteDatabase) -> None:
+    def __init__(self, database: SqliteDatabase, now=None) -> None:
         self.database = database
+        self.now = now
 
     # --------------------------------------------- lifecycle rebuild streams
     @staticmethod
@@ -401,6 +402,16 @@ class UnifiedKgStore:
                 "(notebook_id, input_version, stage, item_key, payload, created_at) "
                 "VALUES (?,?,?,?,?,?)",
                 [(notebook_id, input_version, stage, k, json.dumps(v), now) for k, v in rows])
+
+    def checkpoint_put_current(
+        self, notebook_id: str, input_version: str, stage: str,
+        rows: List[Tuple[str, dict]],
+    ) -> None:
+        if self.now is None:
+            raise RuntimeError("checkpoint clock is not configured")
+        return self.checkpoint_put(
+            notebook_id, input_version, stage, rows, self.now()
+        )
 
     # ---------------------------------------------------- rebuild end-state
     @staticmethod

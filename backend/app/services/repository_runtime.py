@@ -27,6 +27,7 @@ from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
+from app.services.knowledge_query import KnowledgeQueryService
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
@@ -54,6 +55,7 @@ from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoor
 # Task 24: Ask mode engines + synthesis (appended — same convention).
 from app.services.ask_service import AskService
 from app.services.notebook_scale import NotebookScaleProfile
+from app.services.pending_actions_service import PendingActionsService
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
             current_user_id=lambda: self.identity.current_user().id,
+            get_notebook=self.catalog.get_notebook,
         )
         self.report_cancellations = REPORT_CANCELLATIONS
         self.report_execution: "ReportExecutionCoordinator | None" = None
@@ -114,7 +117,7 @@ class RepositoryRuntime:
         # so construction is eager and seam-free.
         self.knowledge = KnowledgeStore(self.database, seams)
         self.governance = GovernanceStore(self.database, seams)
-        self.unified_kg = UnifiedKgStore(self.database)
+        self.unified_kg = UnifiedKgStore(self.database, seams.now)
         # Task 22: Ask/answer/conversation/job/trace persistence shares the ONE
         # database boundary.  Identity is explicit (user_id per call — the
         # store never reads request ContextVars) and the seams dataclass is
@@ -186,6 +189,8 @@ class RepositoryRuntime:
         # stays lazy — no seam calls.
         self.knowledge_governance: "KnowledgeGovernanceService | None" = None
         self.knowledge_lifecycle: "KnowledgeLifecycleService | None" = None
+        self.knowledge_query: "KnowledgeQueryService | None" = None
+        self.pending_actions_service: "PendingActionsService | None" = None
         # Sharing/deep-copy composition is finished by wire_sharing(): its
         # collaborators (facade _insert_row seat, notebook_copy_stats memo,
         # storage_dir) are facade-bound seams that only exist once the facade
@@ -288,6 +293,36 @@ class RepositoryRuntime:
             self.kg_mutations.notebook_languages = value
         if self.retrieval is not None:
             self.retrieval.replace_notebook_languages(value)
+
+    def set_model_config_cache(self, value: dict[str, dict[str, Any]]) -> None:
+        self.model_config_cache = value
+        self.identity.model_config_cache = value
+        self.models.model_config_cache = value
+
+    def set_unified_cache(self, value: dict) -> None:
+        self.retrieval_snapshots.unified_cache = value
+        if self.knowledge_lifecycle is not None:
+            self.knowledge_lifecycle.unified_cache = value
+
+    def set_auto_index_checked(self, value: set) -> None:
+        if self.scale_artifacts is None:
+            raise RuntimeError("scale runtime is not wired")
+        self.scale_artifacts.auto_index_checked = value
+        if self.kg_mutations is not None:
+            self.kg_mutations.auto_index_checked = value
+
+    @property
+    def retrieval_component(self) -> RetrievalService:
+        return self.wire_retrieval(embedder=self.embedder)
+
+    @property
+    def evidence_context_component(self) -> EvidenceContextService:
+        # Resolving retrieval is the one lazy composition trigger that also
+        # constructs the evidence-context service.
+        _ = self.retrieval_component
+        if self.evidence_context is None:  # pragma: no cover - defensive
+            raise RuntimeError("retrieval did not compose evidence context")
+        return self.evidence_context
 
     def wire_retrieval(self, *, embedder) -> RetrievalService:
         if self.retrieval is not None:
@@ -460,6 +495,7 @@ class RepositoryRuntime:
             notebook_meta_row=notebook_meta_row,
             notebook_meta_sources=notebook_meta_sources,
             apply_notebook_meta=apply_notebook_meta,
+            maybe_enqueue_scale_fold=self.scale_artifacts.maybe_enqueue_fold,
         )
         return self.source_ingestion
 
@@ -644,6 +680,28 @@ class RepositoryRuntime:
             snapshots=self.retrieval_snapshots,
         )
         return self.scale_artifacts
+
+    def wire_query_services(self, *, retrieval: Callable[[], Any]) -> None:
+        if self.scale_artifacts is None:
+            raise RuntimeError("query services require scale runtime")
+        self.knowledge_query = KnowledgeQueryService(
+            settings=self.settings,
+            event_log=self.event_log,
+            database=self.database,
+            catalog=self.catalog,
+            knowledge=self.knowledge,
+            chunk_store=self.chunk_store,
+            unified_kg=self.unified_kg,
+            scale_runtime=self.scale_artifacts,
+            retrieval=retrieval,
+            schemas=self.schema_registry,
+            vector_cache=self.retrieval_snapshots.vector_cache,
+            notebook_languages=self.notebook_languages,
+        )
+        self.pending_actions_service = PendingActionsService(
+            self.queries,
+            scale_runtime=self.scale_artifacts,
+        )
 
     def wire_knowledge_lifecycle(
         self,
@@ -922,5 +980,24 @@ class RepositoryRuntime:
                     lambda nb: self.knowledge_lifecycle.get_community_reports(nb)
                 ),
                 source_titles=self.source_store.source_titles,
+                current_user_id=lambda: self.identity.current_user().id,
+                cancellations=self.ask_cancellations,
             )
         return self.ask
+
+    @property
+    def ask_component(self) -> AskService:
+        return self.ask_service()
+
+    def wire_maintenance(self, *, retrieval: Callable[[], Any]) -> Any:
+        if self.maintenance is None:
+            from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+
+            self.maintenance = SQLiteMaintenanceAdapter(self, retrieval=retrieval)
+        return self.maintenance
+
+    @property
+    def maintenance_component(self) -> Any:
+        if self.maintenance is None:
+            return self.wire_maintenance(retrieval=lambda: self.retrieval_component)
+        return self.maintenance

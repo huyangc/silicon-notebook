@@ -119,6 +119,9 @@ class IndexProjectionStore:
             int(emb_ver["c"]), emb_ver["ts"],
         ]
 
+    def version_with_settings(self, notebook_id: str, settings_tail: tuple) -> list:
+        return self.version_facts(notebook_id) + list(settings_tail)
+
     # ─────────────────────────────────────────────────── count snapshots ──
     def effective_object_count(self, notebook_id: str) -> int:
         """Non-deprecated knowledge-object count (viz sync-vs-background gate)."""

@@ -101,7 +101,7 @@ def test_pending_actions_index_state(repo, monkeypatch):
         assert notebook_id == nb
         return {"state": "stale", "total_chunks": 100, "delta_chunks": 40}
 
-    monkeypatch.setattr(repo, "scale_index_status", _fake_status)
+    monkeypatch.setattr(repo.__dict__["_runtime"].scale_artifacts, "status", _fake_status)
     out = repo.pending_actions("user-a")
     idx_items = [it for it in out["items"] if it["type"] == "index"]
     assert len(idx_items) == 1
@@ -113,7 +113,7 @@ def test_pending_actions_index_state(repo, monkeypatch):
 def test_pending_actions_index_building_not_counted(repo, monkeypatch):
     """building/queued 不计入 count(不是"待用户确认"的动作项)。"""
     nb = _seed_user_nb(repo, "user-a")
-    monkeypatch.setattr(repo, "scale_index_status",
+    monkeypatch.setattr(repo.__dict__["_runtime"].scale_artifacts, "status",
                          lambda notebook_id: {"state": "building", "total_chunks": 100, "delta_chunks": 40})
     out = repo.pending_actions("user-a")
     idx_items = [it for it in out["items"] if it["type"] == "index"]

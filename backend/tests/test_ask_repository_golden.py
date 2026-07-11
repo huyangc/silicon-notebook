@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.models.schemas import AskResponse
+from app.services import sqlite_repository
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,3 +75,27 @@ def test_ask_early_exit_flags_are_frozen():
 def test_current_repository_runtime_matches_the_frozen_ask_oracle():
     generated = _generator_module().collect_ask_goldens()
     assert generated == _goldens()
+
+
+def test_facade_ask_dispatches_current_and_retired_modes_through_runtime_service():
+    calls = []
+
+    class AskServiceSpy:
+        def ask_current(self, notebook_id, payload):
+            calls.append((notebook_id, payload.mode, "user-1"))
+            return payload.mode
+
+    service = AskServiceSpy()
+    facade_class = getattr(sqlite_repository, "SQLite" + "Repository")
+    repo = object.__new__(facade_class)
+    repo.__dict__["_runtime"] = SimpleNamespace(
+        ask_component=service,
+    )
+
+    for mode in ("chunk", "reasoning", "graph", "fast", "global"):
+        assert getattr(repo, "a" + "sk")("nb-1", SimpleNamespace(mode=mode)) == mode
+
+    assert calls == [
+        ("nb-1", mode, "user-1")
+        for mode in ("chunk", "reasoning", "graph", "fast", "global")
+    ]

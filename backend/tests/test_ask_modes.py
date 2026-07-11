@@ -17,11 +17,11 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
     repo = SQLiteRepository(Settings())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
-    calls = {}
+    calls = {}; ask_service = repo.__dict__["_runtime"].ask_component
     for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
         def make(mid):
-            return lambda notebook_id, payload: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
-        monkeypatch.setattr(repo, mid, make(mid))
+            return lambda notebook_id, payload, **kwargs: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
+        monkeypatch.setattr(ask_service, mid, make(mid))
 
     assert repo.ask(nb.id, AskRequest(question="q")).conclusion == "ask_chunk"       # 缺省
     assert repo.ask(nb.id, AskRequest(question="q", mode="graph")).conclusion == "ask_graph"

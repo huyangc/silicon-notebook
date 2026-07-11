@@ -76,6 +76,18 @@ class GovernanceStore:
         self.database = database
         self.seams = seams
 
+    @staticmethod
+    def seed_for(object_type: str):
+        return seed_fn_for(object_type)
+
+    @staticmethod
+    def find_base_match(object_type: str, payload: dict, rows) -> str:
+        return find_base_dedup_match(object_type, payload, rows)
+
+    @staticmethod
+    def merge_evidence(base_evidence: list, source_evidence: list) -> list:
+        return merge_evidence_lists(base_evidence, source_evidence)
+
     # ------------------------------------------------ lifecycle projections
     @staticmethod
     def sweep_orphan_clusters(db: sqlite3.Connection, notebook_id: str) -> int:

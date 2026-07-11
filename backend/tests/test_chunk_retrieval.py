@@ -237,7 +237,7 @@ def test_ask_chunk_binds_anchor_to_chunk_with_llm(repo, monkeypatch):
 
 def test_ask_routes_default_mode_to_chunk(repo, monkeypatch):
     sentinel = object()
-    monkeypatch.setattr(repo, "ask_chunk", lambda nb, p: sentinel)
+    monkeypatch.setattr(repo.__dict__["_runtime"].ask_component, "ask_chunk", lambda nb, p, **kwargs: sentinel)
     # AskRequest() 默认 mode 应为 "chunk" → ask() 分发到 ask_chunk
     assert AskRequest(question="x").mode == "chunk"
     assert repo.ask("nb-irrelevant", AskRequest(question="x")) is sentinel

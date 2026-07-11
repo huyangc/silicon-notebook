@@ -56,6 +56,51 @@ class SQLiteMaintenanceAdapter:
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         return self._runtime.knowledge_lifecycle.delete_notebook_kg(notebook_id)
 
+    def eval_insert_source_for_test(
+        self, notebook_id: str, name: str, text: str, tmpdir: str
+    ) -> str:
+        from pathlib import Path
+        from app.repositories.sqlite.source_store import SourceElementWrite
+        from app.services.kg.parsing import parse_elements
+
+        path = Path(tmpdir) / f"{name}.md"
+        path.write_text(text, encoding="utf-8")
+        source_id = self._runtime.seams.new_id("src")
+        now = self._runtime.seams.now()
+        elements = parse_elements(text, source_file=str(path))
+        with self._runtime.database.write() as db:
+            self._runtime.source_store.insert_source(
+                source_id=source_id,
+                notebook_id=notebook_id,
+                title=name,
+                source_type="markdown",
+                status="extracted",
+                parse_status="parsed",
+                file_name=f"{name}.md",
+                file_path=str(path),
+                file_size=0,
+                file_hash="",
+                summary="",
+                doc_type="textbook",
+                connection=db,
+            )
+            self._runtime.source_store.replace_elements(
+                db,
+                source_id,
+                [
+                    SourceElementWrite(
+                        id=self._runtime.seams.new_id("el"),
+                        element_type=element.type,
+                        location_label=f"L{element.line_start}-{element.line_end}",
+                        text=element.text,
+                        metadata={},
+                    )
+                    for element in elements
+                ],
+                created_at=now,
+            )
+        return source_id
+
     def backfill_kg_fts(self, notebook_id: str) -> int:
         self._runtime.catalog.get_notebook(notebook_id)  # KeyError when missing
         with self._runtime.database.write() as db:

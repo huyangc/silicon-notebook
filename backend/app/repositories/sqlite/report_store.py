@@ -25,11 +25,20 @@ class ReportStore:
     def __init__(self, database: SqliteDatabase, *,
                  new_id: Callable[[str], str],
                  now: Callable[[], str],
-                 current_user_id: Callable[[], str]) -> None:
+                 current_user_id: Callable[[], str],
+                 get_notebook: Callable[[str], object] | None = None) -> None:
         self.database = database
         self.new_id = new_id
         self.now = now
         self.current_user_id = current_user_id
+        self.get_notebook = get_notebook
+
+    def create_report_guarded(
+        self, notebook_id: str, question: str, depth: int = 2
+    ) -> str:
+        if self.get_notebook is not None:
+            self.get_notebook(notebook_id)
+        return self.create_report(notebook_id, question, depth)
 
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
         report_id = self.new_id("rep")

@@ -246,7 +246,7 @@ def test_background_embedding_overlaps_extraction_and_extracted_gates_on_extract
     assert n >= 1, "element embeddings must persist once the pipeline completes"
 
 
-def test_fresh_hooks_preserve_post_construction_run_extraction_monkeypatch(
+def test_fresh_hooks_preserve_post_construction_component_monkeypatch(
     repo, monkeypatch
 ):
     import app.services.sqlite_repository as facade_mod
@@ -257,9 +257,9 @@ def test_fresh_hooks_preserve_post_construction_run_extraction_monkeypatch(
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id)
     calls = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
     repo.process_source(sid)
-    assert calls == [sid], "hooks must re-resolve the facade seat on every call"
+    assert calls == [sid], "hooks must re-resolve the component seam on every call"
     assert repo.get_source(sid).parse_status == "extracted"
 
 

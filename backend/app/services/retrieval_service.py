@@ -104,6 +104,43 @@ class RetrievalService:
     def source_chunks(self, notebook_id, object_ids):
         return self.graph._kg_source_chunks(notebook_id, object_ids)
 
+    def embed_query(self, query):
+        return self.candidates._embed_query(query)
+
+    def edge_support_map(self, notebook_id):
+        return self.graph._edge_support_map(notebook_id)
+
+    def cluster_map(self, notebook_id):
+        return self.graph.cluster_map(notebook_id)
+
+    def concept_cluster_id(self, notebook_id, object_id):
+        return self.cluster_map(notebook_id).get(object_id, object_id)
+
+    def runtime_dim(self):
+        from app.services.vector_index import resolve_runtime_dim
+
+        return resolve_runtime_dim(self.candidates.settings)
+
+    @staticmethod
+    def element_vectors(elements):
+        from app.services.retrieval_candidates import CandidateRetrievalService
+
+        return CandidateRetrievalService._element_vectors(elements)
+
+    @staticmethod
+    def merge_chunk_candidates(base, extra):
+        from app.services.retrieval_candidates import CandidateRetrievalService
+
+        return CandidateRetrievalService._union_chunk_candidates(base, extra)
+
+    @staticmethod
+    def in_batches(ids, batch_size: int = 900):
+        values = list(dict.fromkeys(ids))
+        return (
+            values[index:index + batch_size]
+            for index in range(0, len(values), batch_size)
+        )
+
     def federated_retrieve(self, *args, **kwargs):
         """跨 tier（base ∪ active）联邦检索 → List[RetrievedKnowledge]。"""
         return self.candidates.federated_retrieve(*args, **kwargs)

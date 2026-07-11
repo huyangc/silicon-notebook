@@ -145,6 +145,8 @@ class AskService:
         schemas,
         community_reports: Callable[[str], list],
         source_titles: Callable[[List[str]], Dict[str, str]],
+        current_user_id: Callable[[], str] = lambda: "",
+        cancellations=None,
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
@@ -162,6 +164,8 @@ class AskService:
         self.schemas = schemas
         self.community_reports = community_reports
         self.source_titles = source_titles
+        self.current_user_id = current_user_id
+        self.cancellations = cancellations
 
     # ------------------------------------------------------------------
     # dispatch
@@ -189,6 +193,111 @@ class AskService:
                            on_trace=on_trace, cancel_event=cancel_event)
         return handler(notebook_id, payload, user_id=user_id,
                        cancel_event=cancel_event)
+
+    def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
+        return self.ask(notebook_id, payload, user_id=self.current_user_id())
+
+    def ask_chunk_current(
+        self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None
+    ) -> AskResponse:
+        return self.ask_chunk(
+            notebook_id, payload, user_id=self.current_user_id(),
+            cancel_event=cancel_event,
+        )
+
+    def ask_reasoning_current(
+        self, notebook_id: str, payload: AskRequest, on_trace=None,
+        cancel_event: CancelEvent = None,
+    ) -> AskResponse:
+        return self.ask_reasoning(
+            notebook_id, payload, user_id=self.current_user_id(),
+            on_trace=on_trace, cancel_event=cancel_event,
+        )
+
+    def ask_graph_current(
+        self, notebook_id: str, payload: AskRequest,
+        seed_ids: Optional[List[str]] = None, cancel_event: CancelEvent = None,
+    ) -> AskResponse:
+        return self.ask_graph(
+            notebook_id, payload, user_id=self.current_user_id(),
+            seed_ids=seed_ids, cancel_event=cancel_event,
+        )
+
+    def unconfigured_model_response_current(
+        self, notebook_id: str, question: str, conversation_id: str, mode: str,
+    ) -> AskResponse:
+        return self._unconfigured_model_response(
+            notebook_id, question, conversation_id, mode,
+            user_id=self.current_user_id(),
+        )
+
+    def save_answer_current(
+        self, notebook_id: str, question: str, response: AskResponse,
+        conversation_id: Optional[str] = None,
+    ) -> str:
+        return self._save_answer(
+            notebook_id, question, response, conversation_id,
+            user_id=self.current_user_id(),
+        )
+
+    def ensure_conversation_current(
+        self, db, notebook_id: str, conversation_id: Optional[str], question: str
+    ) -> str:
+        return self.ask_state.ensure_conversation(
+            db, notebook_id, conversation_id, question, self.current_user_id()
+        )
+
+    def begin_job_current(
+        self, notebook_id: str, payload, mode: str, cancel_event
+    ) -> tuple[str, str]:
+        self.notebooks.get_notebook(notebook_id)
+        job_id, conversation_id = self.ask_state.begin_durable_job(
+            notebook_id, payload, mode, self.current_user_id()
+        )
+        self.cancellations.register(job_id, cancel_event)
+        return job_id, conversation_id
+
+    def finish_job(
+        self, job_id: str, status: str, *, answer_id: str = "", error: str = ""
+    ) -> None:
+        conversation_id = self.ask_state.finish_job(
+            job_id, status, answer_id=answer_id, error=error
+        )
+        self.cancellations.unregister(job_id)
+        if status in ("cancelled", "failed") and conversation_id:
+            self.ask_state.cleanup_empty_conversation(conversation_id)
+
+    def cancel_job(self, job_id: str, user_id: str) -> dict:
+        state = self.ask_state.ask_job_status(job_id)
+        if state["created_by"] != user_id:
+            raise KeyError(job_id)
+        cancelled = self.cancellations.cancel(job_id)
+        return {
+            "status": "cancelling" if cancelled else state["status"],
+            "job_id": job_id,
+        }
+
+    def append_trace_fail_open(self, job_id: str, step: dict) -> None:
+        try:
+            self.ask_state.append_trace("", job_id, step, "")
+        except Exception:  # noqa: BLE001
+            self.event_log.logger.exception("append_ask_trace failed for %s", job_id)
+
+    def list_conversations_current(self, notebook_id: str):
+        self.notebooks.get_notebook(notebook_id)
+        return self.ask_state.list_conversations(
+            notebook_id, self.current_user_id()
+        )
+
+    def bulk_delete_conversations_current(
+        self, notebook_id: str, older_than_days: int
+    ) -> int:
+        if older_than_days < 1:
+            raise ValueError("older_than_days must be >= 1")
+        self.notebooks.get_notebook(notebook_id)
+        return self.ask_state.bulk_delete_conversations(
+            notebook_id, older_than_days, self.current_user_id()
+        )
 
     # ------------------------------------------------------------------
     # shared seams (verbatim facade bodies over the narrow ports)

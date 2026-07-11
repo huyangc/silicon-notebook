@@ -159,6 +159,18 @@ class KnowledgeGovernanceService:
         self._rule_card = rule_card
         self._set_conflict_status = set_conflict_status
 
+    @staticmethod
+    def promotion_dict(row, *, payload=None, evidence=None) -> dict:
+        return promotion_row_to_dict(row, payload=payload, evidence=evidence)
+
+    @staticmethod
+    def headline(object_type: str, payload: dict) -> str:
+        return knowledge_headline(object_type, payload)
+
+    @staticmethod
+    def joined_payload(payload: dict) -> str:
+        return payload_join(payload)
+
     # Late-bound model client: resolved per call through the facade's frozen
     # property, so class-property monkeypatches and the mutable llm_client
     # setter keep being observed — and the per-user ContextVar resolution

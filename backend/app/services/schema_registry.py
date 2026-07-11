@@ -56,6 +56,10 @@ class SchemaRegistryService:
         self.settings = settings
         self.database = knowledge_store.database
 
+    @staticmethod
+    def from_row(row) -> ObjectSchemaModel:
+        return object_schema_from_row(row)
+
     def effective_schemas(self) -> Dict[str, ObjectSchema]:
         """Active object schemas as an ObjectSchema registry for extraction —
         DB rows overlaid on the code defaults."""

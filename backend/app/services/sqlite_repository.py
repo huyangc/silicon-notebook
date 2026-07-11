@@ -114,6 +114,14 @@ from app.services.prompts import (
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
+from app.services.knowledge_query import KnowledgeQueryService
+from app.services.knowledge_governance import KnowledgeGovernanceService
+from app.services.schema_registry import SchemaRegistryService
+from app.services.retrieval_candidates import CandidateRetrievalService
+from app.services.retrieval_service import RetrievalService
+from app.repositories.sqlite.ask_state_store import AskStateStore
+from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.services.retrieval import (
     RetrievedKnowledge,
@@ -433,6 +441,7 @@ class SQLiteRepository:
             viz_building=viz_building,
             viz_building_lock=viz_building_lock,
         )
+        self._runtime.wire_query_services(retrieval=lambda: self.retrieval)
         # Task 15: the knowledge governance + lifecycle services ride
         # facade-bound late seams — the `_connect`/`_write` transaction seats,
         # the Task-14 coordinator wrappers (single dirty entry preserved), the
@@ -706,9 +715,7 @@ class SQLiteRepository:
 
     @_user_model_cfg_cache.setter
     def _user_model_cfg_cache(self, cache):
-        self._runtime.model_config_cache = cache
-        self._runtime.identity.model_config_cache = cache
-        self._runtime.models.model_config_cache = cache
+        return self._runtime.set_model_config_cache(cache)
 
     @property
     def _user_llm_clients(self):
@@ -746,9 +753,7 @@ class SQLiteRepository:
 
     @_unified_cache.setter
     def _unified_cache(self, cache) -> None:
-        self._runtime.retrieval_snapshots.unified_cache = cache
-        if self._runtime.knowledge_lifecycle is not None:
-            self._runtime.knowledge_lifecycle.unified_cache = cache
+        return self._runtime.set_unified_cache(cache)
 
     # Task 20: every scale/viz mutable object has one owner.  These descriptors
     # preserve the frozen facade attributes and test swap seams while writing
@@ -815,8 +820,7 @@ class SQLiteRepository:
 
     @_scale_building.setter
     def _scale_building(self, value) -> None:
-        self._runtime.scale_artifacts.building = value
-        self._runtime.scale_builder.building = value
+        return self._runtime.scale_artifacts.set_building(value)
 
     @property
     def _scale_building_lock(self):
@@ -824,8 +828,7 @@ class SQLiteRepository:
 
     @_scale_building_lock.setter
     def _scale_building_lock(self, value) -> None:
-        self._runtime.scale_artifacts.building_lock = value
-        self._runtime.scale_builder.building_lock = value
+        return self._runtime.scale_artifacts.set_building_lock(value)
 
     @property
     def _scale_idle_queue(self):
@@ -841,7 +844,7 @@ class SQLiteRepository:
 
     @_scale_scheduler_started.setter
     def _scale_scheduler_started(self, value) -> None:
-        self._runtime.scale_artifacts.scheduler_started = bool(value)
+        return self._runtime.scale_artifacts.set_scheduler_started(value)
 
     @property
     def _auto_index_checked(self):
@@ -849,9 +852,7 @@ class SQLiteRepository:
 
     @_auto_index_checked.setter
     def _auto_index_checked(self, value) -> None:
-        self._runtime.scale_artifacts.auto_index_checked = value
-        if self._runtime.kg_mutations is not None:
-            self._runtime.kg_mutations.auto_index_checked = value
+        return self._runtime.set_auto_index_checked(value)
 
     @property
     def _viz_building(self):
@@ -945,8 +946,8 @@ class SQLiteRepository:
 
     def _rebuild_ckpt_put(self, notebook_id: str, input_version: str, stage: str,
                           rows: List[Tuple[str, dict]]) -> None:
-        self._runtime.unified_kg.checkpoint_put(
-            notebook_id, input_version, stage, rows, _now()
+        return self._runtime.unified_kg.checkpoint_put_current(
+            notebook_id, input_version, stage, rows
         )
 
     def _recover_interrupted_jobs(self) -> None:
@@ -980,10 +981,7 @@ class SQLiteRepository:
 
     def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
         """True iff some tier='base' notebook has any knowledge_objects."""
-        if db is not None:
-            return self._runtime.knowledge.any_base_has_kg_on(db)
-        with self._connect() as conn:
-            return self._runtime.knowledge.any_base_has_kg_on(conn)
+        return self._runtime.knowledge.any_base_has_kg_compat(db)
 
     def _base_notebook_info(self, db: "sqlite3.Connection | None" = None) -> "tuple[str, bool]":
         return self._runtime.notebook_summaries.base_notebook_info(db)
@@ -992,7 +990,6 @@ class SQLiteRepository:
     def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
         """PURE parse of an evidence JSON TEXT value into its distinct
         source_ids — canonical body lives on KnowledgeStore (Task 13)."""
-        from app.repositories.sqlite.knowledge_store import KnowledgeStore
         return KnowledgeStore.source_ids_from_evidence(evidence_json)
 
     def _upsert_knowledge_object_sources(
@@ -1004,8 +1001,7 @@ class SQLiteRepository:
 
     @staticmethod
     def _delete_knowledge_object_sources(db: sqlite3.Connection, object_ids: List[str]) -> None:
-        from app.repositories.sqlite.knowledge_store import KnowledgeStore
-        KnowledgeStore.delete_object_sources(db, object_ids)
+        return KnowledgeStore.delete_object_sources(db, object_ids)
 
     def _source_index_backfilled(self, db: sqlite3.Connection, notebook_id: str) -> bool:
         return self._runtime.knowledge.source_index_backfilled(db, notebook_id)
@@ -1044,11 +1040,8 @@ class SQLiteRepository:
         # _IN_CHUNK(delta 开且候选量大)——去重保序后按 _IN_CHUNK 分批查询,批间
         # 用 (created_at,id) 重排合并,保持与单条 IN + ORDER BY 完全一致的输出序
         # (KnowledgeStore.retrieval_objects,Task 26 delegate)。
-        if id_filter is not None:
-            id_filter = list(dict.fromkeys(id_filter))
-        return self._runtime.knowledge.retrieval_objects(
-            db, notebook_id, object_type, statuses, id_filter,
-            batch_size=self._IN_CHUNK,
+        return self._runtime.knowledge.retrieval_objects_compat(
+            db, notebook_id, object_type, statuses, id_filter
         )
 
     def list_notebooks(self) -> List[NotebookSummary]:
@@ -1091,7 +1084,7 @@ class SQLiteRepository:
         return self._runtime.sharing.find_notebook_by_share_token(token)
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
-        return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).copy_stats(notebook_id)
+        return self._runtime.scale_artifacts.notebook_copy_stats(notebook_id)
 
     def shared_preview(self, notebook_id: str) -> dict:
         return self._runtime.sharing.shared_preview(notebook_id)
@@ -1101,7 +1094,7 @@ class SQLiteRepository:
 
     @staticmethod
     def _insert_row(db, table: str, data: dict) -> None:
-        SharingStore.insert_row_values(db, table, data)
+        return SharingStore.insert_row_values(db, table, data)
 
     def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
         return self._runtime.sharing.sweep_stuck_copies(created_by)
@@ -1175,9 +1168,7 @@ class SQLiteRepository:
         knowledge_objects (non-deprecated, non-empty name).  Returns the
         number of rows inserted.
         """
-        self.get_notebook(notebook_id)
-        with self._write() as db:
-            return self._runtime.knowledge.backfill_fts(db, notebook_id)
+        return self._runtime.knowledge_query.backfill_kg_fts(notebook_id)
 
     def backfill_chunk_fts(self, notebook_id: str) -> int:
         """从 chunks 重建 chunks_fts(DELETE+re-INSERT)。返回写入行数。
@@ -1185,12 +1176,7 @@ class SQLiteRepository:
         幂等,best-effort 派生索引:先删本 notebook 的 FTS 行,再从 chunks 全量重插。
         供 copy_notebook / 刷新图谱等重建派生索引的路径调用。
         """
-        with self._write() as db:
-            count = self._runtime.chunk_store.backfill_fts(db, notebook_id)
-        # Chunk set was just (re)indexed — drop the corpus-language hint so it
-        # re-samples (copy_notebook / refresh-graph can bring new-language content).
-        self._notebook_langs_cache.pop(notebook_id, None)
-        return count
+        return self._runtime.knowledge_query.backfill_chunk_fts(notebook_id)
 
     def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
         """ANN semantic search over the notebook's scale index.
@@ -1198,41 +1184,7 @@ class SQLiteRepository:
         Returns [{object_id, name:'', score, match:'semantic'}] or []
         on any failure / missing index.
         """
-        try:
-            if not self.settings.embedder_configured:
-                return []
-            idx = self._scale_index(notebook_id)
-            if idx is None or not idx.ann_labels:
-                return []
-            qvec = self._embed_query(q)
-            if qvec is None:
-                return []
-            import numpy as np
-            dim = int(idx.manifest.get("dim", len(qvec)))
-            if dim != len(qvec):
-                self.event_log.emit({
-                    "kind": "dim_mismatch", "notebook_id": notebook_id, "site": "kg_semantic_search",
-                    "manifest_dim": dim, "query_dim": len(qvec)})
-                return []
-            ann = self._open_scale_ann(idx, "kg")
-            if ann is None:
-                return []
-            ann.set_ef(max(k + 1, 50))
-            actual_k = min(k, len(idx.ann_labels))
-            labels, distances = ann.knn_query(np.asarray(qvec, dtype=np.float32), k=actual_k)
-            hits = []
-            for lab, dist in zip(labels[0], distances[0]):
-                node_id = idx.ann_labels[int(lab)]
-                # Skip chunk nodes and cluster hub nodes (not KG objects)
-                if node_id.startswith("cluster:") or not node_id.startswith("ko-"):
-                    continue
-                score = max(0.0, 1.0 - float(dist))
-                if score > 0:
-                    hits.append({"object_id": node_id, "name": "", "score": score,
-                                 "match": "semantic"})
-            return hits
-        except Exception:  # noqa: BLE001 — fail-open
-            return []
+        return self._runtime.knowledge_query.semantic_search(notebook_id, q, k)
 
     def _hydrate_search_hits(self, notebook_id: str, hits: list) -> list:
         """Enrich merged hits with object_type and fill missing names.
@@ -1241,33 +1193,7 @@ class SQLiteRepository:
         Always uses the fresh payload name when available (Fix 2: overrides
         the possibly-stale FTS-provided name so renames are reflected).
         """
-        if not hits:
-            return []
-        ids = [h["object_id"] for h in hits]
-        with self._connect() as db:
-            rows = self._runtime.knowledge.object_meta_rows(db, ids)
-        meta: dict = {}
-        for r in rows:
-            if r["status"] == "deprecated":
-                continue
-            try:
-                payload = json.loads(r["payload"] or "{}")
-            except Exception:
-                payload = {}
-            meta[r["id"]] = {"object_type": r["object_type"], "name": payload.get("name", "")}
-        result = []
-        for h in hits:
-            m = meta.get(h["object_id"])
-            if m is None:
-                continue  # object gone or deprecated
-            enriched = dict(h)
-            enriched["object_type"] = m["object_type"]
-            # Fix 2: always use fresh payload name; fall back to FTS-provided
-            # name only when payload has none (e.g. newly inserted without name).
-            fresh_name = m["name"]
-            enriched["name"] = fresh_name if fresh_name else enriched.get("name", "")
-            result.append(enriched)
-        return result
+        return self._runtime.knowledge_query.hydrate_search_hits(notebook_id, hits)
 
     def _fold_hits_to_canonical(self, notebook_id: str, hits: list, k: int) -> list:
         """Fix 1: fold raw ko-<obj> ids in hits to K-<canonical> ids.
@@ -1280,29 +1206,7 @@ class SQLiteRepository:
         kept as-is. After folding, dedup by object_id keeping MAX score, re-sort
         by score desc, truncate to k.
         """
-        if not hits:
-            return hits
-        ids = [h["object_id"] for h in hits]
-        with self._connect() as db:
-            rows = self._runtime.unified_kg.cluster_fold_rows(db, notebook_id, ids)
-        fold: dict[str, tuple[str, str]] = {
-            r["member_object_id"]: (r["canonical_id"], r["canonical_name"])
-            for r in rows
-        }
-        # Apply fold and dedup by canonical id (keep MAX score)
-        best: dict[str, dict] = {}
-        for h in hits:
-            mapping = fold.get(h["object_id"])
-            folded = dict(h)
-            if mapping is not None:
-                canon_id, canon_name = mapping
-                folded["object_id"] = canon_id
-                folded["name"] = canon_name  # canonical_name overrides payload name
-            key = folded["object_id"]
-            if key not in best or folded["score"] > best[key]["score"]:
-                best[key] = folded
-        result = sorted(best.values(), key=lambda x: x["score"], reverse=True)
-        return result[:k]
+        return self._runtime.knowledge_query.fold_hits_to_canonical(notebook_id, hits, k)
 
     def kg_search(self, notebook_id: str, q: str, k: int = 30) -> list:
         """Search KG objects by name (FTS5 lexical) union ANN semantic.
@@ -1314,72 +1218,26 @@ class SQLiteRepository:
         ids via a bounded concept_clusters lookup so search results share the same
         id space as the viz graph — enabling click-to-expand on search hits.
         """
-        from app.services.kg.search import merge_search_hits
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            lex = self._runtime.knowledge.fts_search(db, notebook_id, q, k)
-        sem = self._semantic_search(notebook_id, q, k)
-        merged = merge_search_hits(lex, sem, k)
-        hydrated = self._hydrate_search_hits(notebook_id, merged)
-        return self._fold_hits_to_canonical(notebook_id, hydrated, k)
+        return self._runtime.knowledge_query.search(notebook_id, q, k)
 
     def eval_insert_source_for_test(
         self, nb_id: str, name: str, text: str, tmpdir: str
     ) -> str:
         """Insert a parsed source directly for eval speed tests.
         Uses the repo's write path; avoids raw _connect access in eval scripts."""
-        import pathlib
-        import uuid
-        from app.services.kg.parsing import parse_elements
-        f = pathlib.Path(tmpdir) / f"{name}.md"
-        f.write_text(text, encoding="utf-8")
-        sid = _new_id("src")
-        now = _now()
-        els = parse_elements(text, source_file=str(f))
-        with self._write() as db:
-            self._runtime.source_store.insert_source(
-                source_id=sid,
-                notebook_id=nb_id,
-                title=name,
-                source_type="markdown",
-                status="extracted",
-                parse_status="parsed",
-                file_name=f"{name}.md",
-                file_path=str(f),
-                file_size=0,
-                file_hash="",
-                summary="",
-                doc_type="textbook",
-                connection=db,
-            )
-            self._runtime.source_store.replace_elements(
-                db,
-                sid,
-                [
-                    SourceElementWrite(
-                        id=_new_id("el"),
-                        element_type=el.type,
-                        location_label=f"L{el.line_start}-{el.line_end}",
-                        text=el.text,
-                        metadata={},
-                    )
-                    for el in els
-                ],
-                created_at=now,
-            )
-        return sid
+        return self.maintenance.eval_insert_source_for_test(
+            nb_id, name, text, tmpdir
+        )
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
-        self.get_notebook(notebook_id)
-        return self._runtime.source_store.list_sources(notebook_id)
+        return self._runtime.source_ingestion.list_sources(notebook_id)
 
     def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
                           q: str = "") -> PaginatedSources:
         """分页 + 可选 q(按 title/file_name 服务端过滤)。万级 source 安全:只取一页 +
         一次 COUNT,不全量进内存。"""
-        self.get_notebook(notebook_id)
-        return self._runtime.source_store.list_sources_page(
-            notebook_id, offset=offset, limit=limit, q=q
+        return self._runtime.source_ingestion.list_sources_page(
+            notebook_id, offset, limit, q
         )
 
     def get_source(self, source_id: str) -> SourceDetail:
@@ -1391,22 +1249,10 @@ class SQLiteRepository:
         (_run_extraction, _mark_unified_kg_dirty, ...) keep being observed.
         Gate 5 replaces these temporary callbacks with real services.  Never
         store the hooks (not on the runtime, not on the facade)."""
-        return SourcePipelineHooks(
-            should_extract_kg=self._should_extract_kg,
-            extract_source=self._run_extraction,
-            mark_unified_dirty=self._mark_unified_kg_dirty,
-            augment_notebook_metadata=lambda notebook_id, source_id: (
-                self._augment_notebook_meta(
-                    notebook_id, pending_source_id=source_id
-                )
-            ),
-            maybe_enqueue_scale_fold=self._maybe_enqueue_scale_fold,
-        )
+        return self._runtime.source_ingestion.pipeline_hooks()
 
     def import_sources(self, notebook_id: str, payload: SourceImportRequest) -> List[SourceSummary]:
-        return self._runtime.source_ingestion.import_sources(
-            notebook_id, payload, self._source_pipeline_hooks()
-        )
+        return self._runtime.source_ingestion.import_sources_compat(notebook_id, payload)
 
     def add_url_sources(
         self,
@@ -1414,8 +1260,8 @@ class SQLiteRepository:
         urls: Iterable[str],
         scheduler: Optional[Callable[[str], None]] = None,
     ) -> AddUrlSourcesResult:
-        return self._runtime.source_ingestion.add_url_sources(
-            notebook_id, urls, scheduler, self._source_pipeline_hooks()
+        return self._runtime.source_ingestion.add_url_sources_compat(
+            notebook_id, urls, scheduler
         )
 
     def upload_sources(
@@ -1424,8 +1270,8 @@ class SQLiteRepository:
         files: Iterable[UploadedSourceFile],
         scheduler: Optional[Callable[[str], None]] = None,
     ) -> List[SourceSummary]:
-        return self._runtime.source_ingestion.upload_sources(
-            notebook_id, files, scheduler, self._source_pipeline_hooks()
+        return self._runtime.source_ingestion.upload_sources_compat(
+            notebook_id, files, scheduler
         )
 
     def _set_source_status(
@@ -1442,12 +1288,11 @@ class SQLiteRepository:
 
     def _notebook_has_kg(self, notebook_id: str) -> bool:
         """True iff this notebook has any knowledge_objects row."""
-        with self._connect() as db:
-            return self._has_kg(db, notebook_id)
+        return self._runtime.knowledge.has_kg(notebook_id)
 
     # CJK unified-ideograph block: presence ⇒ Chinese content.
-    _CJK_RE = re.compile(r"[一-鿿]")
-    _LATIN_RE = re.compile(r"[A-Za-z]")
+    _CJK_RE = CandidateRetrievalService._CJK_RE
+    _LATIN_RE = CandidateRetrievalService._LATIN_RE
 
     def _notebook_langs(self, notebook_id: str) -> List[str]:
         return self.retrieval.candidates._notebook_langs(notebook_id)
@@ -1475,14 +1320,10 @@ class SQLiteRepository:
         )
 
     def process_source(self, source_id: str) -> SourceSummary:
-        return self._runtime.source_ingestion.process_source(
-            source_id, self._source_pipeline_hooks()
-        )
+        return self._runtime.source_ingestion.process_source_compat(source_id)
 
     def parse_source(self, source_id: str) -> SourceSummary:
-        return self._runtime.source_ingestion.parse_source(
-            source_id, self._source_pipeline_hooks()
-        )
+        return self._runtime.source_ingestion.parse_source_compat(source_id)
 
     def _augment_notebook_meta(self, notebook_id: str, pending_source_id: str = "") -> None:
         return self._runtime.source_ingestion.augment_notebook_metadata(
@@ -1494,39 +1335,32 @@ class SQLiteRepository:
     # --- augmentation BUSINESS body and calls back through the constructor-
     # --- injected seams below (the facade keeps its connection boundaries).
     def _notebook_meta_row(self, notebook_id: str) -> Optional[dict]:
-        with self._connect() as db:
-            return self._runtime.notebook_store.meta_row(db, notebook_id)
+        return self._runtime.notebook_store.meta_for_notebook(notebook_id)
 
     def _notebook_meta_sources(
         self, notebook_id: str, pending_source_id: str = ""
     ) -> List[dict]:
-        with self._connect() as db:
-            return self._runtime.source_store.meta_source_rows(
-                db, notebook_id, pending_source_id
-            )
+        return self._runtime.source_store.meta_sources(notebook_id, pending_source_id)
 
     def _apply_notebook_meta(
         self, notebook_id: str, *, guard_name, name: str, purpose: str
     ) -> None:
-        with self._write() as db:
-            self._runtime.notebook_store.apply_meta(
-                db, notebook_id, guard_name=guard_name, name=name, purpose=purpose
-            )
+        return self._runtime.notebook_store.apply_meta_for_notebook(
+            notebook_id, guard_name=guard_name, name=name, purpose=purpose
+        )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
         return self._runtime.source_store.source_elements(source_id)
 
     def delete_source(self, source_id: str) -> None:
-        self._runtime.source_ingestion.delete_source(
-            source_id, self._source_pipeline_hooks()
-        )
+        return self._runtime.source_ingestion.delete_source_compat(source_id)
 
     def extract_source(self, source_id: str) -> None:
         """Public entry to (re-)extract a single source's KG in place. Delegates to
         _run_extraction, which deletes the source's prior KG objects/relations/
         embeddings and re-runs extraction (idempotent per source). Used by
         reextract_notebook and maintenance scripts."""
-        self._run_extraction(source_id)
+        return self._runtime.source_ingestion.run_extraction(source_id)
 
     def _relink_extra_relations(
         self, objects: List[dict], relations: List[dict], source_id: str
@@ -1548,25 +1382,18 @@ class SQLiteRepository:
         """Reset one source's prior KG artefacts and open its extraction_runs
         row in ONE write transaction — the exact commit boundary the inline
         _run_extraction body always had."""
-        with self._write() as db:
-            self._runtime.knowledge.begin_extraction_run(
-                db, source_id, notebook_id, run_id, created_at
-            )
+        return self._runtime.knowledge.begin_extraction(
+            source_id, notebook_id, run_id, created_at
+        )
 
     def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:
-        with self._write() as db:
-            self._runtime.knowledge.finish_extraction_run(
-                db, run_id, status, message, _now()
-            )
+        return self._runtime.knowledge.finish_extraction(run_id, status, message)
 
     def _notebook_tier(self, notebook_id: str) -> str:
-        with self._connect() as db:
-            return self._runtime.notebook_store.tier_on(db, notebook_id)
+        return self._runtime.notebook_store.tier(notebook_id)
 
     def _source_raw_text(self, source, elements) -> str:
-        return self._runtime.source_files.read_source_text(
-            getattr(source, "file_path", "") or "", elements
-        )
+        return self._runtime.source_files.read_source(source, elements)
 
     def _embed_source(self, source_id: str) -> None:
         return self._runtime.source_embedding.embed_source(source_id)
@@ -1579,26 +1406,13 @@ class SQLiteRepository:
     ) -> None:
         """Embed a knowledge object's own payload text (WS4: payload-level
         vectors, not just evidence-element vectors). No-op without embeddings."""
-        if not self.settings.embedder_configured:
-            return
-        text = _payload_text(payload).strip()
-        if not text:
-            return
-        try:
-            vector = self.embedder.embed_query(text[:2000])
-        except Exception:
-            return
-        self._runtime.embedding_store.replace_knowledge_vectors(
-            notebook_id, [(object_id, vector)], created_at=_now()
+        return self._runtime.source_embedding.embed_knowledge(
+            object_id, notebook_id, payload
         )
 
     def _flush_object_vectors(self, notebook_id: str, rows: list) -> None:
         """把一批 (oid, vector) 落 knowledge_embeddings(一个写事务,幂等 REPLACE)。"""
-        if not rows:
-            return
-        self._runtime.embedding_store.replace_knowledge_vectors(
-            notebook_id, rows, created_at=_now()
-        )
+        return self._runtime.source_embedding.flush_object_vectors(notebook_id, rows)
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict],
                              progress=None, commit_every: Optional[int] = None) -> None:
@@ -1645,19 +1459,7 @@ class SQLiteRepository:
         """All object types present in this notebook with non-deprecated counts,
         so the UI can render a tab per type — including academic/textbook types
         that have no bespoke card."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            counts, labels = self._runtime.knowledge.type_counts(db, notebook_id)
-        ordered = [t for t in OBJECT_SCHEMAS if t in counts]
-        ordered += [t for t in counts if t not in OBJECT_SCHEMAS]
-        return [
-            KnowledgeTypeCount(
-                object_type=t,
-                label=labels.get(t, OBJECT_TYPE_LABELS.get(t, t)),
-                count=counts[t],
-            )
-            for t in ordered
-        ]
+        return self._runtime.knowledge_query.knowledge_types(notebook_id)
 
     def _knowledge_record(
         self, object_type: str, obj: dict, schema: Optional[ObjectSchema]
@@ -1665,8 +1467,7 @@ class SQLiteRepository:
         """KG 对象 → KnowledgeRecord 展示投影 — canonical body 随 ask_reasoning
         的 related_knowledge 消费点移入 ask_service (Task 24);list_knowledge
         继续经本冻结签名 delegate 使用同一投影。"""
-        from app.services.ask_service import knowledge_record
-        return knowledge_record(object_type, obj, schema)
+        return self._runtime.knowledge_query.knowledge_record(object_type, obj, schema)
 
     def list_knowledge(
         self,
@@ -1683,30 +1484,15 @@ class SQLiteRepository:
         ``_knowledge_objects``.  Pass a non-empty string to filter to that
         one status.
         """
-        self.get_notebook(notebook_id)
-        offset = max(0, int(offset))
-        limit = max(1, min(int(limit), 200))
-        schema = self.effective_schemas().get(object_type)
-
-        with self._connect() as db:
-            total, objects = self._runtime.knowledge.list_knowledge_page(
-                db, notebook_id, object_type, status, offset, limit
-            )
-
-        items = [self._knowledge_record(object_type, obj, schema) for obj in objects]
-        return PaginatedKnowledge(
-            items=items,
-            total_count=total,
-            offset=offset,
-            limit=limit,
+        return self._runtime.knowledge_query.list_knowledge(
+            notebook_id, object_type, status, offset, limit
         )
 
     # --- Editable extraction-schema registry (Task 13: SchemaRegistryService
     # --- owns validation/sampling/LLM induction; KnowledgeStore owns rows) ---
     @staticmethod
     def _object_schema_from_row(row) -> ObjectSchemaModel:
-        from app.services.schema_registry import object_schema_from_row
-        return object_schema_from_row(row)
+        return SchemaRegistryService.from_row(row)
 
     def effective_schemas(self) -> Dict[str, ObjectSchema]:
         """Active object schemas as an ObjectSchema registry for extraction —
@@ -1751,42 +1537,16 @@ class SQLiteRepository:
         rejecting large notebooks with a clear pointer to the real endpoint,
         rather than silently truncating a "complete" graph response into a
         misleadingly-partial one."""
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            nb_count = self._runtime.knowledge.count_active_objects(db, notebook_id)
-        if int(nb_count) > self.settings.viz_sync_build_max_objects:
-            raise KnowledgeGraphTooLargeError(
-                f"notebook {notebook_id} has {nb_count} objects "
-                f"(> {self.settings.viz_sync_build_max_objects}); the legacy "
-                "/graph endpoint has no bounded fallback for large notebooks — "
-                "use /notebooks/{id}/unified-kg instead (bounded/paginated)."
-            )
-        with self._connect() as db:
-            rows = self._runtime.knowledge.graph_node_rows(db, notebook_id)
-        nodes = [
-            KnowledgeNode(id=r["id"], object_type=r["object_type"],
-                          headline=self._kg_headline(json.loads(r["payload"] or "{}")),
-                          status=r["status"])
-            for r in rows]
-        valid = {n.id for n in nodes}
-        edges = [
-            KnowledgeEdge(from_id=rel["source_object_id"], to_id=rel["target_object_id"],
-                          relation=rel["edge_type"], label=rel["edge_type"])
-            for rel in self.relations_for_notebook(notebook_id)
-            if rel["source_object_id"] in valid and rel["target_object_id"] in valid]
-        return KnowledgeGraph(nodes=nodes, edges=edges)
+        return self._runtime.knowledge_query.graph(notebook_id)
 
     def _kg_headline(self, payload: dict) -> str:
-        name = (payload.get("name") or "").strip()
-        return name[:120] if len(name) > 120 else name
+        return self._runtime.knowledge_query.kg_headline(payload)
 
     def add_relations(self, notebook_id: str, source_id: str,
                       relations: List[dict]) -> int:
-        now = _now()
-        with self._write() as db:
-            return self._runtime.knowledge.add_relations(
-                db, notebook_id, source_id, relations, now
-            )
+        return self._runtime.knowledge.add_relations_current(
+            notebook_id, source_id, relations
+        )
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
@@ -1803,11 +1563,10 @@ class SQLiteRepository:
         return self._runtime.knowledge_lifecycle.relink_notebook_kg(notebook_id)
 
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
-        with self._connect() as db:
-            return self._runtime.knowledge.relations_for_notebook(db, notebook_id)
+        return self._runtime.knowledge_query.relations_for_notebook(notebook_id)
 
     # --- Track E: edge trust review queue + curation feedback loop ----------
-    _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
+    _REVIEW_STATUSES = KnowledgeGovernanceService._REVIEW_STATUSES
 
     def _edge_centrality_map(self, notebook_id: str) -> Dict[str, float]:
         """Cached {rel_id: edge_betweenness_centrality} over the live (non-rejected)
@@ -1856,28 +1615,7 @@ class SQLiteRepository:
         cut contribute 0 either way since they're not edge endpoints for any
         edge that survives, or the graph is under K and no cut happens at all).
         """
-        from app.services.kg.graph_reason import build_rx_graph, compute_edge_centrality
-
-        version = tuple(self._scale_index_version(notebook_id))
-
-        def _load() -> Dict[str, float]:
-            # 1./2. Degree-bounded node ids + live relation dicts — SQL moved
-            #    verbatim to KnowledgeStore.edge_centrality_source_rows
-            #    (Task 26); the facade keeps its `_connect` read boundary.
-            with self._connect() as db:
-                node_ids, rels = self._runtime.knowledge.edge_centrality_source_rows(
-                    db, notebook_id, self.settings.edge_centrality_max_nodes
-                )
-
-            # 3. Node dict for build_rx_graph — type/name are unused by
-            #    compute_edge_centrality (only `rel_id` is read back), so a
-            #    minimal empty-string payload keeps graph SHAPE (node count,
-            #    indices) identical without a knowledge_objects payload load.
-            nodes = {oid: {"type": "", "name": ""} for oid in node_ids}
-            G, idx_to_oid, oid_to_idx = build_rx_graph(nodes, rels)
-            return compute_edge_centrality(G)
-
-        return self._vector_cache.get(f"{notebook_id}:edge_centrality", version, _load)
+        return self._runtime.knowledge_query.edge_centrality_map(notebook_id)
 
     def review_queue(self, notebook_id: str, limit: int = 200) -> List[dict]:
         """Edge trust review queue — KnowledgeGovernanceService owns the
@@ -2171,28 +1909,7 @@ class SQLiteRepository:
         concept 端点,claim/formula/procedure 保原始 id,而 canonical_relations 按全
         类型折叠;concept 端点已是 canonical id、不在 cluster_map 键中,get(s,s) 恒等
         通过。未命中不加字段(表空/滞后 → 前端优雅缺省)。"""
-        sup = self._edge_support_map(notebook_id)
-        if not sup:
-            return edges
-        cmap = self.cluster_map(notebook_id)
-        out: List[dict] = []
-        for e in edges:
-            key = (cmap.get(e["source_object_id"], e["source_object_id"]),
-                   e["edge_type"],
-                   cmap.get(e["target_object_id"], e["target_object_id"]))
-            hit = sup.get(key)
-            if hit is None:
-                # kg_neighbors 把边统一画成「查询节点→邻居」(既有展示行为),
-                # 入边的真实方向在表里是反的——对称回退让同一条底层关系无论
-                # 展示朝向都能拿到支持度;正向命中优先,A→B 与 B→A 同时存在时不串。
-                hit = sup.get((key[2], key[1], key[0]))
-            if hit:
-                # 拷贝而非就地改:全量路径的边 dict 与 _unified_cache 共享引用,
-                # 就地写字段会把注解粘进缓存(缓存须保持不含注解,避免粘住旧计数)。
-                out.append({**e, "support_count": hit[0], "source_count": hit[1]})
-            else:
-                out.append(e)
-        return out
+        return self._runtime.knowledge_query.annotate_edge_support(notebook_id, edges)
 
     def unified_graph(self, notebook_id: str, level: str = "concept",
                       limit: Optional[int] = None) -> dict:
@@ -2298,53 +2015,7 @@ class SQLiteRepository:
         """Persisted community reports — lifecycle-owned (Task 15)."""
         return self._runtime.knowledge_lifecycle.get_community_reports(notebook_id, level)
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            # Cluster members + canonical name in one store call (Task 26)
-            cluster_rows, name = self._runtime.knowledge.concept_cluster_detail_rows(
-                db, notebook_id, canonical_id
-            )
-
-        members = []
-        member_ids = []
-        for r in cluster_rows:
-            obj = {
-                "id": r["member_object_id"],
-                "object_type": r["object_type"],
-                "payload": json.loads(r["payload"] or "{}"),
-                "evidence": json.loads(r["evidence"] or "[]"),
-            }
-            members.append(obj)
-            member_ids.append(r["member_object_id"])
-
-        if not member_ids:
-            # No members found; still return valid shape
-            return {"canonical_id": canonical_id, "canonical_name": name,
-                    "members": [], "attached": [], "evidence": []}
-
-        with self._connect() as db:
-            # Relations touching the member set + batch-read non-member
-            # endpoint objects (Task 26 store primitive)
-            rel_edges, by_other = self._runtime.knowledge.concept_neighbor_rows(
-                db, notebook_id, member_ids
-            )
-
-        attached = []
-        seen_attached: set[str] = set()
-        for edge in rel_edges:
-            other = edge["other"]
-            if other in by_other and by_other[other]["object_type"] != "concept" and other not in seen_attached:
-                seen_attached.add(other)
-                attached.append({**by_other[other], "edge_type": edge["edge_type"]})
-
-        member_by_id = {m["id"]: m for m in members}
-        evidence = [ev for oid in member_ids for ev in member_by_id.get(oid, {}).get("evidence", [])]
-        with self._connect() as db:
-            evidence = self._enrich_evidence(db, evidence)
-
-        return {"canonical_id": canonical_id, "canonical_name": name,
-                "members": [member_by_id[o] for o in member_ids if o in member_by_id],
-                "attached": attached, "evidence": evidence}
+        return self._runtime.knowledge_query.concept_detail(notebook_id, canonical_id)
 
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
         return self._runtime.knowledge._element_texts(db, element_ids, with_ordinal=with_ordinal)
@@ -2357,10 +2028,9 @@ class SQLiteRepository:
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
-        with self._write() as db:
-            return self._runtime.knowledge.insert_test_object(
-                db, notebook_id, object_type, payload, source_id
-            )
+        return self._runtime.knowledge_query.insert_test_object(
+            notebook_id, object_type, payload, source_id
+        )
 
     # --- Governance: promotion state machine (Track F) -------------------
     # KnowledgeGovernanceService owns the domain (Task 16); the facade keeps
@@ -2370,8 +2040,9 @@ class SQLiteRepository:
     def _promotion_row_to_dict(row: sqlite3.Row, *, payload=None, evidence=None) -> dict:
         """Map a promotion_candidates row to the PromotionCandidate-shaped dict —
         canonical body lives with the governance service (Task 16)."""
-        from app.services.knowledge_governance import promotion_row_to_dict
-        return promotion_row_to_dict(row, payload=payload, evidence=evidence)
+        return KnowledgeGovernanceService.promotion_dict(
+            row, payload=payload, evidence=evidence
+        )
 
     def propose_promotion(self, notebook_id: str, object_id: str) -> dict:
         """Propose a personal-KG object for promotion into the base corpus —
@@ -2399,22 +2070,21 @@ class SQLiteRepository:
     @staticmethod
     def _seed_fn_for(object_type: str):
         """Return the kg_merge seed function for a KG object type."""
-        from app.repositories.sqlite.governance_store import seed_fn_for
-        return seed_fn_for(object_type)
+        return GovernanceStore.seed_for(object_type)
 
     def _find_base_dedup_match(
         self, object_type: str, src_payload: dict, base_objs: List[sqlite3.Row]
     ) -> str:
         """Exact-seed dedup (v1) — canonical body lives with the governance
         store's promotion primitive (Task 13)."""
-        from app.repositories.sqlite.governance_store import find_base_dedup_match
-        return find_base_dedup_match(object_type, src_payload, base_objs)
+        return self._runtime.governance.find_base_match(
+            object_type, src_payload, base_objs
+        )
 
     @staticmethod
     def _merge_evidence_lists(base_ev: list, src_ev: list) -> list:
         """Union two evidence lists, deduping on (source_id, element_id, quoted_span)."""
-        from app.repositories.sqlite.governance_store import merge_evidence_lists
-        return merge_evidence_lists(base_ev, src_ev)
+        return GovernanceStore.merge_evidence(base_ev, src_ev)
 
     def reject_promotion(self, candidate_id: str, reason: str = "") -> dict:
         """Reject a promotion candidate — KnowledgeGovernanceService owns the
@@ -2438,8 +2108,7 @@ class SQLiteRepository:
         """Headline extraction for a KG payload — canonical body lives with the
         governance service (Task 16); shared with list_knowledge's record
         projection."""
-        from app.services.knowledge_governance import knowledge_headline
-        return knowledge_headline(object_type, payload)
+        return KnowledgeGovernanceService.headline(object_type, payload)
 
     def _knowledge_ref(self, obj: dict, object_type: str) -> KnowledgeRef:
         """KnowledgeRef projection — KnowledgeGovernanceService owns the body
@@ -2450,8 +2119,7 @@ class SQLiteRepository:
     def _payload_join(payload: dict) -> str:
         """Flatten payload text — canonical body lives with the governance
         service (Task 16)."""
-        from app.services.knowledge_governance import payload_join
-        return payload_join(payload)
+        return KnowledgeGovernanceService.joined_payload(payload)
 
     def _knowledge_similarity(self, a: dict, b: dict, element_vectors: dict) -> float:
         """Keyword ∨ evidence-vector similarity — KnowledgeGovernanceService
@@ -2492,8 +2160,7 @@ class SQLiteRepository:
         build_matrix 内部裸调 resolve_runtime_dim() 读全局单例,生产两者同一对象,
         但测试/多实例下 self.settings 才是真相 —— 建 ANN/矩阵的 build_matrix 调用
         应显式传本值,使工件维度由本 repo 配置决定(见 T5 manifest 真相化)。"""
-        from app.services.vector_index import resolve_runtime_dim
-        return resolve_runtime_dim(self.settings)
+        return self.retrieval.runtime_dim()
 
     def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
                          with_vectors: bool = True) -> List[dict]:
@@ -2504,7 +2171,6 @@ class SQLiteRepository:
 
     @staticmethod
     def _element_vectors(elements: List[dict]) -> dict:
-        from app.services.retrieval_candidates import CandidateRetrievalService
         return CandidateRetrievalService._element_vectors(elements)
 
     def _gather_chunks(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
@@ -2570,7 +2236,9 @@ class SQLiteRepository:
         单飞锁内部调用,不直接对外暴露。Task 18:五表聚合读移入
         IndexProjectionStore.version_facts(经 _connect 席位);settings_tail
         仍由本方法追加 —— 与 memo 键取自同一次探针,list 格式逐位不变。"""
-        return self._runtime.index_projections.version_facts(notebook_id) + list(settings_tail)
+        return self._runtime.index_projections.version_with_settings(
+            notebook_id, settings_tail
+        )
 
     def _scale_index_version(self, notebook_id: str) -> list:
         """Compatibility delegate to the runtime-owned version memo."""
@@ -2694,11 +2362,7 @@ class SQLiteRepository:
 
     def _dequeue_scale_idle(self, notebook_id: str) -> bool:
         """Compatibility helper for the runtime-owned idle queue."""
-        with self._runtime.scale_artifacts.building_lock:
-            return (
-                self._runtime.scale_artifacts.idle_queue.pop(notebook_id, None)
-                is not None
-            )
+        return self._runtime.scale_artifacts.dequeue_idle(notebook_id)
 
     def cancel_scale_index(self, notebook_id: str) -> dict:
         """Compatibility delegate to runtime cancellation."""
@@ -2714,15 +2378,11 @@ class SQLiteRepository:
 
     def _build_viz_graph_arrays(self, notebook_id: str):
         """Compatibility helper over the runtime builder's pure viz math."""
-        from app.services.kg.viz_index import arrays_from_graph
-
-        return arrays_from_graph(self._unified_graph_full(notebook_id, "object"))
+        return self._runtime.scale_artifacts.build_viz_graph_arrays(notebook_id)
 
     def _viz_arrays_from_graph(self, full: dict):
         """Compatibility delegate for callers that already derived a graph."""
-        from app.services.kg.viz_index import arrays_from_graph
-
-        return arrays_from_graph(full)
+        return self._runtime.scale_artifacts.viz_arrays_from_graph(full)
 
     def _derive_object_graph_lite(self, notebook_id: str) -> dict:
         """Compatibility delegate to the builder's lite DB projection."""
@@ -2765,39 +2425,11 @@ class SQLiteRepository:
         return self.retrieval.graph._ppr_fact_rerank(question, kg_hits)
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
-        payload = item.payload
-        applies_to = payload.get("applies_to")
-        if isinstance(applies_to, list):
-            applies_list = [str(value) for value in applies_to if str(value).strip()]
-        elif applies_to:
-            applies_list = [str(applies_to)]
-        else:
-            applies_list = []
-        return RuleCard(
-            id=item.object_id,
-            title=str(payload.get("title", "")),
-            statement=str(payload.get("statement", "")),
-            applies_to=applies_list,
-            recommendation=str(payload.get("recommendation", "")),
-            risk_if_ignored=str(payload.get("risk_if_ignored", "")),
-            severity=str(payload.get("severity", "medium")),
-            status=item.status or "approved",
-            owner=item.owner,
-            last_reviewed=item.last_reviewed,
-            evidence=item.evidence,
-        )
+        return self._runtime.knowledge_query.rule_card(item)
 
     @staticmethod
     def _as_retrieved(obj: dict, object_type: str) -> RetrievedKnowledge:
-        return RetrievedKnowledge(
-            object_id=obj["id"],
-            object_type=object_type,
-            payload=obj["payload"],
-            evidence=obj["evidence"],
-            status=obj.get("status", "approved"),
-            owner=obj.get("owner", ""),
-            last_reviewed=obj.get("last_reviewed", ""),
-        )
+        return KnowledgeQueryService.as_retrieved(obj, object_type)
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         """Batch-resolve {notebook_id: tier} in one query (mirrors
@@ -2806,8 +2438,7 @@ class SQLiteRepository:
         base ⊕ active) so tier lookup is O(distinct notebooks), not O(citations).
         Missing/unknown ids default to "personal" (safe: matches Citation.tier's
         own default, never silently mislabels a source as authoritative base)."""
-        _ = self.retrieval
-        return self._runtime.evidence_context.tier_map(list(notebook_ids))
+        return self._runtime.evidence_context_component.tier_map(notebook_ids)
 
     def _citations_from(
         self,
@@ -2815,8 +2446,7 @@ class SQLiteRepository:
         valid_element_ids: set,
         label: str,
     ) -> List[Citation]:
-        _ = self.retrieval
-        return self._runtime.evidence_context.citations_from(
+        return self._runtime.evidence_context_component.citations_from(
             items, valid_element_ids, label
         )
 
@@ -2828,9 +2458,7 @@ class SQLiteRepository:
         """把 id 列表切成 ≤_IN_CHUNK 的批(去重保序)。所有把 id 列表内联成
         SQL IN 占位符的 delta 位点必须经它——SQLite 3.32+ 变量上限 32,766,
         生产 48,739 delta source 已真实打爆(too many SQL variables)。"""
-        ids = list(dict.fromkeys(ids))
-        for i in range(0, len(ids), self._IN_CHUNK):
-            yield ids[i:i + self._IN_CHUNK]
+        return self.retrieval.in_batches(ids, self._IN_CHUNK)
 
     def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str,
                               relation_ids: Optional[List[str]] = None) -> List[dict]:
@@ -2848,9 +2476,7 @@ class SQLiteRepository:
     @property
     def retrieval(self):
         """Explicit candidate + graph retrieval port with no facade backreference."""
-        if self._runtime.retrieval is None:
-            self._runtime.wire_retrieval(embedder=self._runtime.embedder)
-        return self._runtime.retrieval
+        return self._runtime.retrieval_component
 
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
@@ -2915,8 +2541,7 @@ class SQLiteRepository:
 
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
-        from app.services.retrieval_candidates import CandidateRetrievalService
-        return CandidateRetrievalService._union_chunk_candidates(base, extra)
+        return RetrievalService.merge_chunk_candidates(base, extra)
 
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
         return self.retrieval.candidates._mmr_select_chunks(scored, ids, mat, k, lambda_)
@@ -2930,8 +2555,7 @@ class SQLiteRepository:
         (PPR/概念漫游可掺 base 库 chunk,c.notebook_id 已标;单库路径留空回退调用方
         传入的 notebook_id)。批量一次查询(O(distinct notebook) 非 O(chunk)),
         循环内只查表。"""
-        _ = self.retrieval
-        return self._runtime.evidence_context.chunk_context(
+        return self._runtime.evidence_context_component.chunk_context(
             chunks, notebook_id=notebook_id, budget_chars=budget_chars
         )
 
@@ -2944,7 +2568,7 @@ class SQLiteRepository:
         notebook_id: str = "",
     ) -> tuple:
         """长上下文综合 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_service()._answer_chunks(
+        return self._runtime.ask_component._answer_chunks(
             question, chunks, history, cancel_event=cancel_event,
             notebook_id=notebook_id)
 
@@ -2959,7 +2583,7 @@ class SQLiteRepository:
         notebook_id: str = "",
     ) -> tuple:
         """mix 长上下文综合 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_service()._answer_mix(
+        return self._runtime.ask_component._answer_mix(
             question, chunks, kg_block, kg_id_map, history,
             cancel_event=cancel_event, notebook_id=notebook_id)
 
@@ -2974,17 +2598,14 @@ class SQLiteRepository:
     ) -> AskResponse:
         """chunk-native 通用问答 — 冻结签名 delegate:engine body 在
         AskService.ask_chunk (Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_service().ask_chunk(
-            notebook_id, payload,
-            user_id=self.current_user().id, cancel_event=cancel_event)
+        return self._runtime.ask_component.ask_chunk_current(
+            notebook_id, payload, cancel_event)
 
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """Dispatch to the retrieval handler named by payload.mode, resolved
         through the ask_modes registry. Unknown modes raise UnknownAskMode (the
         API layer returns 422) — never a silent fall-through to the legacy path."""
-        from app.services.ask_modes import resolve_mode
-        spec = resolve_mode(getattr(payload, "mode", None))
-        return getattr(self, spec.handler)(notebook_id, payload)
+        return self._runtime.ask_component.ask_current(notebook_id, payload)
 
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
@@ -3000,7 +2621,7 @@ class SQLiteRepository:
         (`cluster_map` -> {member_object_id: canonical_id}). When clustering is
         not populated for the notebook (no cluster row for this object), fall
         back to `object_id` so dedup degrades gracefully (no merge, no crash)."""
-        return self.cluster_map(notebook_id).get(object_id, object_id)
+        return self.retrieval.concept_cluster_id(notebook_id, object_id)
 
     def _rrf_scored(
         self,
@@ -3044,8 +2665,9 @@ class SQLiteRepository:
     def _truncate_kg_block(self, block: str, max_tokens: int) -> str:
         """按行截断 KG block 至 token 预算(整行保留)。被截掉的行其 [k] 仍留在 id_map,
         _parse_answer_anchors 解析无害(只损失上下文,不破坏引用)。镜像 truncate_by_tokens。"""
-        _ = self.retrieval
-        return self._runtime.evidence_context.truncate_kg_block(block, max_tokens)
+        return self._runtime.evidence_context_component.truncate_kg_block(
+            block, max_tokens
+        )
 
     def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
         return self.retrieval.candidates._gather_vector_chunks(notebook_id, sub_queries)
@@ -3056,13 +2678,13 @@ class SQLiteRepository:
     def _participant_notebook_ids(self, notebook_id: str) -> List[str]:
         """联邦参与库:active 在首位 + 全部 base tier(与 _ppr_graph/federated_retrieve
         的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。"""
-        with self._connect() as db:
-            return self._runtime.notebook_store.participant_ids(db, notebook_id)
+        return self._runtime.notebook_store.participant_notebook_ids(notebook_id)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0) -> tuple:
-        _ = self.retrieval
-        return self._runtime.evidence_context.knowledge_context(notebook_id, top_hits, id_offset=id_offset)
+        return self._runtime.evidence_context_component.knowledge_context(
+            notebook_id, top_hits, id_offset=id_offset
+        )
 
     def _rewrite_followup_query(
         self,
@@ -3071,7 +2693,7 @@ class SQLiteRepository:
         cancel_event: CancelEvent = None,
     ) -> str:
         """Follow-up 检索改写 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_service()._rewrite_followup_query(
+        return self._runtime.ask_component._rewrite_followup_query(
             history, question, cancel_event)
 
     def _refine_context(
@@ -3082,13 +2704,13 @@ class SQLiteRepository:
         cancel_event: CancelEvent = None,
     ) -> str:
         """问题感知证据精炼 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_service()._refine_context(
+        return self._runtime.ask_component._refine_context(
             question, context_block, client, cancel_event)
 
     def _answer_with_retry(self, synth, model_label):
         """答案合成有界重试 — 冻结签名 delegate(engine body 在 AskService,Task 24;
         空 content 重试一次 + 诚实降级 + 补 model_error,见服务端 docstring)。"""
-        return self._runtime.ask_service()._answer_with_retry(synth, model_label)
+        return self._runtime.ask_component._answer_with_retry(synth, model_label)
 
     def _answer_reasoning(
         self,
@@ -3102,7 +2724,7 @@ class SQLiteRepository:
         chains=None,
     ):
         """reasoning 答案合成 — 冻结签名 delegate(engine body 在 AskService,Task 24)。"""
-        return self._runtime.ask_service()._answer_reasoning(
+        return self._runtime.ask_component._answer_reasoning(
             notebook_id, question, top_hits, elements, history,
             cancel_event=cancel_event, chunks=chunks, chains=chains)
 
@@ -3110,9 +2732,8 @@ class SQLiteRepository:
                                      conversation_id: str, mode: str) -> AskResponse:
         """未配主 LLM 的统一短路响应 — 冻结签名 delegate(engine body 在
         AskService,Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_service()._unconfigured_model_response(
-            notebook_id, question, conversation_id, mode,
-            user_id=self.current_user().id)
+        return self._runtime.ask_component.unconfigured_model_response_current(
+            notebook_id, question, conversation_id, mode)
 
     def ask_reasoning(
         self,
@@ -3123,10 +2744,8 @@ class SQLiteRepository:
     ) -> AskResponse:
         """Reasoning-mode ask — 冻结签名 delegate:engine body 在
         AskService.ask_reasoning (Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_service().ask_reasoning(
-            notebook_id, payload,
-            user_id=self.current_user().id,
-            on_trace=on_trace, cancel_event=cancel_event)
+        return self._runtime.ask_component.ask_reasoning_current(
+            notebook_id, payload, on_trace, cancel_event)
 
     def ask_graph(
         self,
@@ -3137,22 +2756,19 @@ class SQLiteRepository:
     ) -> AskResponse:
         """Multi-hop graph reasoning mode — 冻结签名 delegate:engine body 在
         AskService.ask_graph (Task 24),身份适配 current_user().id。"""
-        return self._runtime.ask_service().ask_graph(
-            notebook_id, payload,
-            user_id=self.current_user().id,
-            seed_ids=seed_ids, cancel_event=cancel_event)
+        return self._runtime.ask_component.ask_graph_current(
+            notebook_id, payload, seed_ids, cancel_event)
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
         objects (deduped, in first-seen order). Markers not in `id_map` and
         items never cited are dropped."""
-        _ = self.retrieval
-        return self._runtime.evidence_context.parse_anchors(answer, id_map)
+        return self._runtime.evidence_context_component.parse_anchors(answer, id_map)
 
     def _needs_index(self, notebook_id: str) -> bool:
         """大库无索引提示位判定 — 冻结签名 delegate(index-required 计算随
         _save_answer 收口移入 AskService,Task 24;判定失败退化 False 不拖垮 ask)。"""
-        return self._runtime.ask_service()._needs_index(notebook_id)
+        return self._runtime.ask_component._needs_index(notebook_id)
 
     def _save_answer(
         self,
@@ -3164,9 +2780,8 @@ class SQLiteRepository:
         """所有 ask handler 的答案落存收口 — 冻结签名 delegate(index_required
         装饰 + 行持久化在 AskService._save_answer → AskStateStore,Task 24),
         身份适配 current_user().id。"""
-        return self._runtime.ask_service()._save_answer(
-            notebook_id, question, response, conversation_id,
-            user_id=self.current_user().id)
+        return self._runtime.ask_component.save_answer_current(
+            notebook_id, question, response, conversation_id)
 
     def _ensure_conversation(
         self, db, notebook_id: str, conversation_id: Optional[str], question: str
@@ -3176,8 +2791,9 @@ class SQLiteRepository:
         one (id `conv-<hex>`, title from the first question).  Rides the
         CALLER's connection; identity resolves here — the store takes the
         explicit user_id and preserves the created_by scoping verbatim."""
-        return self._runtime.ask_state.ensure_conversation(
-            db, notebook_id, conversation_id, question, self.current_user().id)
+        return self._runtime.ask_component.ensure_conversation_current(
+            db, notebook_id, conversation_id, question
+        )
 
     def begin_ask_job(self, notebook_id: str, payload, mode: str, cancel_event) -> tuple[str, str]:
         """建/接续会话 + 插入 running 的 ask_jobs 行 + 注册 cancel_event。
@@ -3186,29 +2802,21 @@ class SQLiteRepository:
         持久化(单写事务原子建会话+job 行)在 AskStateStore;cancel-event 注册表在
         runtime-owned AskCancellationRegistry(Task 23——流式执行编排在
         AskExecutionCoordinator,经同一注册表);notebook 存在性守卫留在 facade。"""
-        self.get_notebook(notebook_id)
-        job_id, conversation_id = self._runtime.ask_state.begin_durable_job(
-            notebook_id, payload, mode, self.current_user().id)
-        self._runtime.ask_cancellations.register(job_id, cancel_event)
-        return job_id, conversation_id
+        return self._runtime.ask_component.begin_job_current(
+            notebook_id, payload, mode, cancel_event
+        )
 
     def finish_ask_job(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:
         """终态化 ask_job + 注销 cancel_event；cancelled/failed 时清理空会话(0 答案)。
         冻结次序:终态 job 行(store 里的一个事务)→ 注销 → 空会话清理保持为
         之后的另一个事务。"""
-        conversation_id = self._runtime.ask_state.finish_job(
-            job_id, status, answer_id=answer_id, error=error)
-        self._runtime.ask_cancellations.unregister(job_id)
-        if status in ("cancelled", "failed") and conversation_id:
-            self._cleanup_empty_conversation(conversation_id)
+        return self._runtime.ask_component.finish_job(
+            job_id, status, answer_id=answer_id, error=error
+        )
 
     def cancel_ask_job(self, job_id: str, user_id: str) -> dict:
         """显式取消(属主校验)。set 在途 worker 的 cancel_event;非属主/不存在 → KeyError。"""
-        st = self.ask_job_status(job_id)   # KeyError if missing
-        if st["created_by"] != user_id:
-            raise KeyError(job_id)
-        cancelled = self._runtime.ask_cancellations.cancel(job_id)
-        return {"status": "cancelling" if cancelled else st["status"], "job_id": job_id}
+        return self._runtime.ask_component.cancel_job(job_id, user_id)
 
     @property
     def _ask_cancel_events(self) -> dict:
@@ -3235,16 +2843,12 @@ class SQLiteRepository:
         append_ask_trace)。notebook_id/user_id 是 port 签名参数,store SQL 只按
         job_id 落行;基线本就不解析用户,这里传占位保持零额外开销(Task 24 的
         引擎调用会带真实值)。"""
-        try:
-            self._runtime.ask_state.append_trace("", job_id, step, "")
-        except Exception:  # noqa: BLE001
-            self.event_log.logger.exception("append_ask_trace failed for %s", job_id)
+        return self._runtime.ask_component.append_trace_fail_open(job_id, step)
 
     @staticmethod
     def _read_ask_trace(db, job_id: str) -> list:
         """从 ask_trace_steps 子表按 seq 顺序读回一个 job 的完整轨迹(容错细节
         在 AskStateStore.read_trace;冻结签名 delegate,骑调用者连接)。"""
-        from app.repositories.sqlite.ask_state_store import AskStateStore
         return AskStateStore.read_trace(db, job_id)
 
     def ask_job_detail(self, job_id: str) -> dict:
@@ -3268,9 +2872,7 @@ class SQLiteRepository:
     def list_conversations(self, notebook_id: str) -> "List[ConversationSummary]":
         """List conversations for a notebook (most-recently-updated first) with
         a per-conversation turn count. Raises KeyError if the notebook is gone."""
-        self.get_notebook(notebook_id)
-        return self._runtime.ask_state.list_conversations(
-            notebook_id, self.current_user().id)
+        return self._runtime.ask_component.list_conversations_current(notebook_id)
 
     def rename_conversation(self, conversation_id: str, title: str) -> None:
         return self._runtime.ask_state.rename_conversation(conversation_id, title)
@@ -3283,20 +2885,18 @@ class SQLiteRepository:
         activity (`updated_at`) is strictly older than `older_than_days` days,
         cascading to their answers. Returns the number deleted. Raises KeyError
         if the notebook does not exist."""
-        if older_than_days < 1:
-            raise ValueError("older_than_days must be >= 1")
-        self.get_notebook(notebook_id)
-        return self._runtime.ask_state.bulk_delete_conversations(
-            notebook_id, older_than_days, self.current_user().id)
+        return self._runtime.ask_component.bulk_delete_conversations_current(
+            notebook_id, older_than_days
+        )
 
     # --- 深度报告 ---
     # Task 25: reports 表行级持久化移入 runtime 所有的 ReportStore;此处保持
     # 冻结签名委托(notebook 存在性守卫留在 create_report 委托里)。脱离连接
     # 执行编排见 report_execution 属性(ReportExecutionCoordinator)。
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
-        self.get_notebook(notebook_id)          # 不存在则 KeyError
-        return self._runtime.report_store.create_report(
-            notebook_id, question, depth=depth)
+        return self._runtime.report_store.create_report_guarded(
+            notebook_id, question, depth
+        )
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
@@ -3334,13 +2934,7 @@ class SQLiteRepository:
         """SQLite maintenance face (Task 27): CLI/batch composition roots
         instantiate SQLiteRepository and request this adapter — portable
         application ports never include these operations."""
-        if self._runtime.maintenance is None:
-            from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
-
-            self._runtime.maintenance = SQLiteMaintenanceAdapter(
-                self._runtime, retrieval=lambda: self.retrieval
-            )
-        return self._runtime.maintenance
+        return self._runtime.maintenance_component
 
     def pending_actions(self, user_id: str) -> dict:
         """聚合当前用户「我创建的」notebook 的三类待办(深度报告待确认/治理队列/
@@ -3356,37 +2950,7 @@ class SQLiteRepository:
         (propose_promotion 只受 require_notebook_access 守卫),但深链目标
         /promotion-queue 是 admin-only(403),故对非 admin 隐藏该项以免铃铛
         指向一个必 403 的动作。"""
-        projection = self.pending_actions_projection_rows(user_id)
-        items = projection["items"]
-        nb_ids = projection["notebook_ids"]
-        name_of = projection["notebook_names"]
-
-        # ③ 索引状态(scale_index_status 自管连接,故在上面的 with 块外调用)
-        for nb_id in nb_ids:
-            try:
-                st = self.scale_index_status(nb_id)
-            except Exception:  # noqa: BLE001 — 单库状态异常不拖垮整个中心
-                continue
-            state = st.get("state")
-            if state in ("stale", "suggested", "building", "queued"):
-                item = {
-                    "type": "index",
-                    "state": "building" if state == "queued" else state,
-                    "notebook_id": nb_id,
-                    "notebook_name": name_of.get(nb_id, ""),
-                }
-                total = st.get("total_chunks") or 0
-                delta = st.get("delta_chunks") or 0
-                if state in ("building", "queued") and total:
-                    item["progress"] = round(100.0 * max(0, total - delta) / total)
-                items.append(item)
-
-        actionable = sum(
-            1 for it in items
-            if it["type"] in ("report_outline", "governance")
-            or (it["type"] == "index" and it["state"] in ("stale", "suggested"))
-        )
-        return {"count": actionable, "items": items}
+        return self._runtime.pending_actions_service.list_for_user(user_id)
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
         return self._runtime.ask_state.submit_feedback(answer_id, payload)
@@ -3415,43 +2979,10 @@ class SQLiteRepository:
         return self._runtime.source_store.extraction_warning(db, source_id)
 
     def _source_type_from_name(self, file_name: str) -> str:
-        lower_name = file_name.lower()
-        if lower_name.endswith(".pdf"):
-            return "pdf"
-        if lower_name.endswith(".md") or lower_name.endswith(".markdown"):
-            return "markdown"
-        if lower_name.endswith(".docx"):
-            return "docx"
-        if lower_name.endswith(".pptx"):
-            return "pptx"
-        return "other"
+        return self._runtime.source_ingestion.source_type(file_name)
 
     def _summarize_source(self, title: str, elements: List[SourceElement]) -> str:
-        text = "\n".join(element.text for element in elements[:12])
-        if self.llm_client.configured and text.strip():
-            try:
-                raw = self.llm_client.chat_json(
-                    [
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Summarize this semiconductor notebook source in one concise sentence.\n"
-                                f"Title: {title}\n\n{text[:6000]}"
-                            ),
-                        }
-                    ],
-                    '{"summary": "one concise sentence"}',
-                )
-                parsed = json.loads(raw)
-                summary = str(parsed.get("summary", "")).strip()
-                if summary:
-                    return summary
-            except Exception:
-                pass
-        if not text.strip():
-            return "Parsed source contains no extractable text elements."
-        first = " ".join(text.split())[:260]
-        return f"{len(elements)} parsed text element(s). {first}"
+        return self._runtime.source_ingestion.summarize(title, elements)
 
     def _delete_file(self, file_path: str) -> None:
         return self._runtime.source_files.delete(file_path)
