@@ -204,6 +204,28 @@ def _body_without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
     return body
 
 
+def _contains_nested_call(node: ast.AST, *, root_call: ast.Call | None = None) -> bool:
+    return any(
+        isinstance(child, ast.Call) and child is not root_call
+        for child in ast.walk(node)
+    )
+
+
+def _is_call_free_value(node: ast.AST | None) -> bool:
+    if isinstance(node, (ast.Name, ast.Constant)):
+        return True
+    if isinstance(node, ast.Attribute):
+        return _is_call_free_value(node.value)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_is_call_free_value(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(
+            (key is None or _is_call_free_value(key)) and _is_call_free_value(value)
+            for key, value in zip(node.keys, node.values)
+        )
+    return False
+
+
 def _direct_expression_owner(node: ast.AST | None) -> str | None:
     if isinstance(node, ast.Call):
         if (
@@ -212,8 +234,18 @@ def _direct_expression_owner(node: ast.AST | None) -> str | None:
             and not node.keywords
         ):
             return _direct_expression_owner(node.args[0])
-        return _component_owner(node.func)
+        owner = _component_owner(node.func)
+        if (
+            owner is None
+            or _contains_nested_call(node, root_call=node)
+            or not all(_is_call_free_value(arg) for arg in node.args)
+            or not all(_is_call_free_value(keyword.value) for keyword in node.keywords)
+        ):
+            return None
+        return owner
     if isinstance(node, ast.Attribute):
+        if _contains_nested_call(node):
+            return None
         return _component_owner(node)
     return None
 
@@ -251,10 +283,68 @@ def _property_delegate_owner(node: ast.FunctionDef) -> str | None:
     if isinstance(statement, ast.Return):
         return _direct_expression_owner(statement.value)
     if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        if not _is_call_free_value(statement.value):
+            return None
         return _component_owner(statement.targets[0])
     if isinstance(statement, ast.AnnAssign):
+        if not _is_call_free_value(statement.value):
+            return None
         return _component_owner(statement.target)
     return None
+
+
+def _connect_wrapper_is_exact(node: ast.FunctionDef) -> bool:
+    if _decorator_names(node):
+        return False
+    body = _body_without_docstring(node)
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    call = body[0].value
+    return (
+        isinstance(call, ast.Call)
+        and _dotted(call.func) == "self._runtime.database.connect"
+        and not call.args
+        and not call.keywords
+        and not _contains_nested_call(call, root_call=call)
+    )
+
+
+def _write_wrapper_is_exact(node: ast.FunctionDef) -> bool:
+    if _decorator_names(node) != {"contextmanager"}:
+        return False
+    body = _body_without_docstring(node)
+    if len(body) != 1 or not isinstance(body[0], ast.With):
+        return False
+    statement = body[0]
+    if len(statement.items) != 1:
+        return False
+    item = statement.items[0]
+    call = item.context_expr
+    if (
+        not isinstance(call, ast.Call)
+        or _dotted(call.func) != "self._runtime.database.write"
+        or call.args
+        or call.keywords
+        or _contains_nested_call(call, root_call=call)
+        or not isinstance(item.optional_vars, ast.Name)
+    ):
+        return False
+    variable = item.optional_vars.id
+    if not statement.body:
+        return False
+    yield_count = 0
+    for child in statement.body:
+        if isinstance(child, ast.Return) and child.value is None:
+            continue
+        if not (
+            isinstance(child, ast.Expr)
+            and isinstance(child.value, ast.Yield)
+            and isinstance(child.value.value, ast.Name)
+            and child.value.value.id == variable
+        ):
+            return False
+        yield_count += 1
+    return yield_count == 1
 
 
 def _function_contract_owner(node: ast.FunctionDef) -> str | None:
@@ -302,11 +392,9 @@ def facade_body_violations(cls) -> list[tuple[str, int, str]]:
     for node in functions:
         if node.name == "__init__":
             continue  # the facade constructor is the compatibility composition root
-        is_context_wrapper = node.name in {"_connect", "_write"}
         valid_context_wrapper = (
-            is_context_wrapper
-            and _function_component_owners(node) <= {"SqliteDatabase"}
-        )
+            node.name == "_connect" and _connect_wrapper_is_exact(node)
+        ) or (node.name == "_write" and _write_wrapper_is_exact(node))
         if not valid_context_wrapper and _function_contract_owner(node) is None:
             violations.append((FACADE_FILE, offset + node.lineno, node.name))
     return sorted(violations)
@@ -398,6 +486,10 @@ def _global_response_helper(value):
     return {"value": value}
 
 
+def contextmanager(function):
+    return function
+
+
 class _LocalAssemblyEscape:
     def returns_dict(self):
         component = self._runtime.catalog
@@ -424,6 +516,64 @@ class _GlobalHelperEscape:
 class _ScalarIdentityAdapter:
     def casts_component_value(self):
         return str(self._runtime.scale_artifact_store.viz_index_dir("nb"))
+
+
+class _ConnectGlobalHelperEscape:
+    def _connect(self):
+        _global_response_helper("side effect")
+        return self._runtime.database.connect()
+
+
+class _ConnectBranchEscape:
+    def _connect(self, enabled=True):
+        if enabled:
+            return self._runtime.database.connect()
+        return self._runtime.database.connect()
+
+
+class _ConnectAssemblyEscape:
+    def _connect(self):
+        return {"connection": self._runtime.database.connect()}
+
+
+class _WriteGlobalHelperEscape:
+    @contextmanager
+    def _write(self):
+        _global_response_helper("side effect")
+        with self._runtime.database.write() as db:
+            yield db
+
+
+class _WriteBranchEscape:
+    @contextmanager
+    def _write(self, enabled=True):
+        with self._runtime.database.write() as db:
+            if enabled:
+                yield db
+
+
+class _WriteAssemblyEscape:
+    @contextmanager
+    def _write(self):
+        with self._runtime.database.write() as db:
+            yield {"connection": db}
+
+
+class _NestedDelegateArgumentEscape:
+    def calls_nested_global(self, value):
+        return self._runtime.catalog.create_notebook(
+            _global_response_helper(value)
+        )
+
+
+class _NestedSetterRhsEscape:
+    @property
+    def llm_client(self):
+        return self._runtime.models.llm_client
+
+    @llm_client.setter
+    def llm_client(self, value):
+        self._runtime.models.llm_client = _global_response_helper(value)
 
 
 class _ZeroOwnerSurface:
@@ -530,6 +680,16 @@ EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
         ('backend/app/services/sqlite_repository.py', 3345, 'pending_actions'),
         ('backend/app/services/sqlite_repository.py', 3417, '_source_type_from_name'),
         ('backend/app/services/sqlite_repository.py', 3429, '_summarize_source'),
+        ('backend/app/services/sqlite_repository.py', 843, '_scale_scheduler_started'),
+        ('backend/app/services/sqlite_repository.py', 946, '_rebuild_ckpt_put'),
+        ('backend/app/services/sqlite_repository.py', 1566, '_source_raw_text'),
+        ('backend/app/services/sqlite_repository.py', 2938, '_answer_chunks'),
+        ('backend/app/services/sqlite_repository.py', 2951, '_answer_mix'),
+        ('backend/app/services/sqlite_repository.py', 3067, '_rewrite_followup_query'),
+        ('backend/app/services/sqlite_repository.py', 3077, '_refine_context'),
+        ('backend/app/services/sqlite_repository.py', 3088, '_answer_with_retry'),
+        ('backend/app/services/sqlite_repository.py', 3093, '_answer_reasoning'),
+        ('backend/app/services/sqlite_repository.py', 3152, '_needs_index'),
     },
     'ownership': {
         ('backend/app/services/sqlite_repository.py', 614, 'list_user_usage:IdentityStore->QueryStore'),
@@ -610,7 +770,7 @@ EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
         ('backend/app/services/sqlite_repository.py', 1524, 'extract_source:SourceIngestionService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 1531, '_relink_extra_relations:KnowledgeLifecycleService->SourceIngestionService'),
         ('backend/app/services/sqlite_repository.py', 1538, '_run_extraction:QueryStore->SourceIngestionService'),
-        ('backend/app/services/sqlite_repository.py', 1566, '_source_raw_text:SourceIngestionService->SourceFileStore'),
+        ('backend/app/services/sqlite_repository.py', 1566, '_source_raw_text:SourceIngestionService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 1571, '_embed_source:SourceIngestionService->SourceEmbeddingService'),
         ('backend/app/services/sqlite_repository.py', 1574, '_embed_knowledge:QueryStore-><missing>'),
         ('backend/app/services/sqlite_repository.py', 1603, '_embed_objects_batch:QueryStore->SourceEmbeddingService'),
@@ -729,13 +889,15 @@ EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
         ('backend/app/services/sqlite_repository.py', 3050, '_gather_vector_chunks:QueryStore->RetrievalService'),
         ('backend/app/services/sqlite_repository.py', 3056, '_participant_notebook_ids:NotebookCatalogService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3062, '_answer_context:AskService-><missing>'),
-        ('backend/app/services/sqlite_repository.py', 3067, '_rewrite_followup_query:QueryStore->AskService'),
-        ('backend/app/services/sqlite_repository.py', 3077, '_refine_context:RetrievalService->AskService'),
+        ('backend/app/services/sqlite_repository.py', 3067, '_rewrite_followup_query:QueryStore-><missing>'),
+        ('backend/app/services/sqlite_repository.py', 3077, '_refine_context:RetrievalService-><missing>'),
+        ('backend/app/services/sqlite_repository.py', 3088, '_answer_with_retry:AskService-><missing>'),
+        ('backend/app/services/sqlite_repository.py', 3093, '_answer_reasoning:AskService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3109, '_unconfigured_model_response:QueryStore-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3117, 'ask_reasoning:AskService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3131, 'ask_graph:AskService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3145, '_parse_answer_anchors:AskService-><missing>'),
-        ('backend/app/services/sqlite_repository.py', 3152, '_needs_index:ScaleArtifactRuntime->AskService'),
+        ('backend/app/services/sqlite_repository.py', 3152, '_needs_index:ScaleArtifactRuntime-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3157, '_save_answer:AskService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3171, '_ensure_conversation:AskService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3182, 'begin_ask_job:AskService-><missing>'),
@@ -772,6 +934,9 @@ EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
         ('backend/app/services/sqlite_repository.py', 3417, '_source_type_from_name:SourceIngestionService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3429, '_summarize_source:SourceIngestionService-><missing>'),
         ('backend/app/services/sqlite_repository.py', 3456, '_delete_file:SourceIngestionService->SourceFileStore'),
+        ('backend/app/services/sqlite_repository.py', 843, '_scale_scheduler_started:ScaleArtifactRuntime-><missing>'),
+        ('backend/app/services/sqlite_repository.py', 2938, '_answer_chunks:AskService-><missing>'),
+        ('backend/app/services/sqlite_repository.py', 2951, '_answer_mix:AskService-><missing>'),
     },
 }
 
@@ -842,6 +1007,32 @@ def test_facade_checker_rejects_global_helper_after_component_touch():
 
 def test_facade_checker_allows_explicit_scalar_identity_adaptation():
     assert facade_body_violations(_ScalarIdentityAdapter) == []
+
+
+@pytest.mark.parametrize(
+    "facade, member",
+    [
+        (_ConnectGlobalHelperEscape, "_connect"),
+        (_ConnectBranchEscape, "_connect"),
+        (_ConnectAssemblyEscape, "_connect"),
+        (_WriteGlobalHelperEscape, "_write"),
+        (_WriteBranchEscape, "_write"),
+        (_WriteAssemblyEscape, "_write"),
+    ],
+)
+def test_connect_and_write_names_do_not_bypass_exact_wrapper_shapes(facade, member):
+    assert {site[2] for site in facade_body_violations(facade)} == {member}
+
+
+def test_facade_checker_rejects_nested_global_delegate_arguments():
+    assert {
+        site[2] for site in facade_body_violations(_NestedDelegateArgumentEscape)
+    } == {"calls_nested_global"}
+
+
+def test_facade_checker_rejects_nested_global_property_setter_rhs():
+    violations = facade_body_violations(_NestedSetterRhsEscape)
+    assert [site[2] for site in violations] == ["llm_client"]
 
 
 def test_facade_checker_rejects_zero_owner_properties_and_constants():
