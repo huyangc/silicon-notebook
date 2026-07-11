@@ -860,16 +860,16 @@ def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
 
     # 监视 fold 被调用
     calls = {"fold": 0, "build": 0}
-    orig_fold = repo.fold_scale_index_delta
-    orig_build = repo.build_scale_index
+    orig_fold = repo._runtime.scale_artifacts.fold
+    orig_build = repo._runtime.scale_artifacts.build
     def spy_fold(nbid, *a, **kw):
         calls["fold"] += 1
         return orig_fold(nbid, *a, **kw)
     def spy_build(nbid, *a, **kw):
         calls["build"] += 1
         return orig_build(nbid, *a, **kw)
-    monkeypatch.setattr(repo, "fold_scale_index_delta", spy_fold)
-    monkeypatch.setattr(repo, "build_scale_index", spy_build)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "fold", spy_fold)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "build", spy_build)
 
     r = repo.trigger_scale_index_rebuild(nb.id, when="idle", mode="auto")
     assert r["status"] == "queued"

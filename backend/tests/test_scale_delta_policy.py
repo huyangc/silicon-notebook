@@ -101,7 +101,7 @@ def test_optin_delta_included(repo, monkeypatch):
 
 def test_auto_fold_enqueues_when_indexed(repo, monkeypatch):
     # never actually run the off-peak scheduler / spawn threads in tests
-    monkeypatch.setattr(repo, "_ensure_scale_scheduler", lambda: None)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "_ensure_scheduler", lambda: None)
     monkeypatch.setattr(repo.settings, "scale_auto_fold_on_add", True)
     nb = _build_indexed_nb_with_delta(repo)  # already has a scale index
     assert repo._scale_index(nb.id, allow_stale=True) is not None
@@ -112,7 +112,7 @@ def test_auto_fold_enqueues_when_indexed(repo, monkeypatch):
 
 
 def test_auto_fold_no_index_does_not_enqueue(repo, monkeypatch):
-    monkeypatch.setattr(repo, "_ensure_scale_scheduler", lambda: None)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "_ensure_scheduler", lambda: None)
     monkeypatch.setattr(repo.settings, "scale_auto_fold_on_add", True)
     nb = repo.create_notebook(NotebookCreate(name="base"))
     _insert_source_chunk(repo, nb.id, "sA", "cA", "alpha", "alpha", 1)
@@ -124,7 +124,7 @@ def test_auto_fold_no_index_does_not_enqueue(repo, monkeypatch):
 
 
 def test_auto_fold_disabled_does_not_enqueue(repo, monkeypatch):
-    monkeypatch.setattr(repo, "_ensure_scale_scheduler", lambda: None)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "_ensure_scheduler", lambda: None)
     monkeypatch.setattr(repo.settings, "scale_auto_fold_on_add", False)
     nb = _build_indexed_nb_with_delta(repo)  # has index + delta
     assert repo._scale_index(nb.id, allow_stale=True) is not None

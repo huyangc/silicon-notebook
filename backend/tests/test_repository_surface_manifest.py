@@ -929,6 +929,81 @@ TASK19_ALLOWED_MEMBER_FILES = {
     for name in {"_runtime", "build_scale_index"}
 }
 
+# Task 20: ScaleArtifactRuntime becomes the one owner of the Task-18/19
+# caches, locks, build markers and scheduling state.  Compatibility facade
+# attributes become write-through properties and the focused probes patch the
+# canonical runtime/builder owners.  Keep these allowances exact by member +
+# file; production consumers are not hidden behind a directory allowlist.
+TASK20_ALLOWED_IMPORTS = {
+    (
+        "backend/tests/test_scale_artifact_runtime.py",
+        13,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+}
+
+TASK20_ALLOWED_PATCHES = {
+    ("backend/tests/test_auto_scale_index.py", line, "trigger_scale_index_rebuild", "repo")
+    for line in {55, 67, 81, 86, 99, 118, 132, 144, 162, 193}
+} | {
+    ("backend/tests/test_scale_index_repo.py", 871, "fold_scale_index_delta", "repo"),
+    ("backend/tests/test_scale_index_repo.py", 872, "build_scale_index", "repo"),
+    ("backend/tests/test_scale_delta_policy.py", 104, "_ensure_scale_scheduler", "repo"),
+    ("backend/tests/test_scale_delta_policy.py", 115, "_ensure_scale_scheduler", "repo"),
+    ("backend/tests/test_scale_delta_policy.py", 127, "_ensure_scale_scheduler", "repo"),
+    ("backend/tests/test_index_build_consolidation.py", 30, "_spawn_viz_build", "repo"),
+    ("backend/tests/test_rebuild_communities.py", 195, "_scale_index", "repo"),
+    ("backend/tests/test_rebuild_communities.py", 206, "_scale_index", "repo"),
+    ("backend/tests/test_auto_scale_index.py", 242, "notebook_copy_stats", "repo"),
+}
+
+TASK20_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_auto_index_checked", "_dequeue_scale_idle", "_ensure_scale_scheduler",
+        "_compute_scale_version_cold", "_maybe_enqueue_scale_fold",
+        "_notify_index_done", "_open_scale_ann", "_probe_scale_version_signal",
+        "_process_idle_queue",
+        "_notebook_name", "_resolve_index_owner", "_resolve_scale_mode",
+        "_run_scale_op", "_scale_building",
+        "_scale_building_lock", "_scale_idle_queue", "_scale_idx_cache",
+        "_scale_idx_load_lock", "_scale_idx_load_locks", "_scale_index",
+        "_scale_index_version", "_scale_scheduler_started", "_scale_ver_cache",
+        "_scale_ver_lock", "_scale_ver_locks", "_spawn_viz_build",
+        "_viz_building", "_viz_building_lock", "_viz_idx_cache", "_viz_index",
+        "_viz_index_probe", "build_scale_index", "build_viz_index",
+        "cancel_scale_index", "fold_scale_index_delta", "index_status",
+        "_scale_index_eligible", "maybe_auto_index", "scale_index_status",
+        "trigger_scale_index_rebuild", "unified_kg_status",
+    }
+} | {
+    ("backend/tests/test_scale_artifact_runtime.py", name)
+    for name in {
+        "SQLiteRepository", "_auto_index_checked", "_runtime", "_scale_building",
+        "_scale_building_lock", "_scale_idle_queue", "_scale_idx_cache",
+        "_scale_idx_load_lock", "_scale_idx_load_locks", "_scale_ver_cache",
+        "_scale_ver_lock", "_scale_ver_locks", "_viz_building",
+        "_viz_building_lock", "_viz_idx_cache", "build_scale_index",
+        "create_notebook", "embedder", "settings", "store_kg",
+    }
+} | {
+    ("backend/tests/test_auto_scale_index.py", name)
+    for name in {"_runtime", "notebook_copy_stats", "trigger_scale_index_rebuild"}
+} | {
+    ("backend/tests/test_scale_index_repo.py", name)
+    for name in {"_runtime", "build_scale_index", "fold_scale_index_delta"}
+} | {
+    ("backend/tests/test_scale_delta_policy.py", name)
+    for name in {"_runtime", "_ensure_scale_scheduler"}
+} | {
+    ("backend/tests/test_index_build_consolidation.py", name)
+    for name in {"_runtime", "_spawn_viz_build"}
+} | {
+    ("backend/tests/test_rebuild_communities.py", name)
+    for name in {"_runtime", "_scale_index"}
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -946,6 +1021,17 @@ TASK7_COMPAT_PROPERTIES = {
 TASK17_COMPAT_PROPERTIES = {
     "_vector_cache": True,
     "_unified_cache": True,
+}
+
+TASK20_COMPAT_PROPERTIES = {
+    name: True
+    for name in {
+        "_auto_index_checked", "_scale_building", "_scale_building_lock",
+        "_scale_idle_queue", "_scale_idx_cache", "_scale_idx_load_lock",
+        "_scale_idx_load_locks", "_scale_scheduler_started", "_scale_ver_cache",
+        "_scale_ver_lock", "_scale_ver_locks", "_viz_building",
+        "_viz_building_lock", "_viz_idx_cache",
+    }
 }
 
 # Internal line numbers in this source file are intentionally not API surface:
@@ -982,6 +1068,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK17_ALLOWED_MEMBER_FILES
     | TASK18_ALLOWED_MEMBER_FILES
     | TASK19_ALLOWED_MEMBER_FILES
+    | TASK20_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -1427,6 +1514,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK17_ALLOWED_IMPORTS
                     or site in TASK18_ALLOWED_IMPORTS
                     or site in TASK19_ALLOWED_IMPORTS
+                    or site in TASK20_ALLOWED_IMPORTS
                 )
 
 
@@ -1438,7 +1526,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -1544,6 +1632,11 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
             member = inspect.getattr_static(SQLiteRepository, name)
             assert isinstance(member, property), name
             assert (member.fset is not None) is TASK17_COMPAT_PROPERTIES[name], name
+            continue
+        if name in TASK20_COMPAT_PROPERTIES:
+            member = inspect.getattr_static(SQLiteRepository, name)
+            assert isinstance(member, property), name
+            assert (member.fset is not None) is TASK20_COMPAT_PROPERTIES[name], name
             continue
         if kind in {"instance_attribute", "mutable_property"} and not hasattr(
             SQLiteRepository, name

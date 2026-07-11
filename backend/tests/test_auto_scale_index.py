@@ -52,7 +52,7 @@ def test_large_nb_upload_triggers_idle_enqueue(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "index_suggest_chunk_threshold", 0)
     nb = _seed_nb_with_chunk(repo)
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)
     assert len(calls) == 1
@@ -64,7 +64,7 @@ def test_small_nb_no_trigger(repo, monkeypatch):
     """默认阈值下的小库 → 不触发。"""
     nb = _seed_nb_with_chunk(repo)
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)
     assert calls == []
@@ -78,12 +78,12 @@ def test_indexed_fresh_no_trigger(repo, monkeypatch):
     # rebuild_unified_kg's own auto-index tail would otherwise queue a build here
     # (state=suggested pre-index) — stub it out so this test can build the index
     # manually and observe a clean "indexed" state before exercising maybe_auto_index.
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger", lambda *a, **k: None)
     repo.rebuild_unified_kg(nb.id)
     repo.build_scale_index(nb.id)
     assert repo.scale_index_status(nb.id)["state"] == "indexed"
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo._auto_index_checked.discard(nb.id)  # force re-evaluation past once-set
     repo.maybe_auto_index(nb.id)
@@ -96,7 +96,7 @@ def test_auto_disabled_no_trigger(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "scale_index_auto_enabled", False)
     nb = _seed_nb_with_chunk(repo)
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)
     assert calls == []
@@ -115,7 +115,7 @@ def test_retrieval_fallback_triggers_once(repo, monkeypatch):
                    ("o1", nb.id, "concept", "approved", "", json.dumps({"name": "MOSFET"}),
                     "[]", f"s-{nb.id}", now, now))
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     out1 = repo._retrieve_scored(nb.id, "MOSFET")
     out2 = repo._retrieve_scored(nb.id, "MOSFET")
@@ -129,7 +129,7 @@ def test_when_now_spawns_build(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "scale_index_auto_when", "now")
     nb = _seed_nb_with_chunk(repo)
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)
     assert len(calls) == 1
@@ -141,7 +141,7 @@ def test_once_set_blocks_repeat_then_dirty_rearms(repo, monkeypatch):
     重新评估(即便上一轮判定「不需要」已入 once-set)。"""
     nb = _seed_nb_with_chunk(repo)
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)  # small nb -> no trigger, but added to once-set
     assert nb.id in repo._auto_index_checked
@@ -159,7 +159,7 @@ def test_ineligible_or_in_progress_trigger_exception_swallowed(repo, monkeypatch
     def _boom(nbid, when="now", mode="auto"):
         raise ValueError("notebook too small and not base-tier; scale index not applicable")
 
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild", _boom)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger", _boom)
     repo.maybe_auto_index(nb.id)  # must not raise
     assert nb.id in repo._auto_index_checked
 
@@ -190,7 +190,7 @@ def test_large_chunk_light_unindexed_triggers(repo, monkeypatch):
     nb = _seed_nb_with_chunk(repo)
     assert repo.scale_index_status(nb.id)["state"] == "unindexed"
     calls = []
-    monkeypatch.setattr(repo, "trigger_scale_index_rebuild",
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "trigger",
                          lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)))
     repo.maybe_auto_index(nb.id)
     assert len(calls) == 1
@@ -238,8 +238,8 @@ def test_batch_burst_o1_early_exit_skips_copy_stats(repo, monkeypatch):
     repo._auto_index_checked.discard(nb.id)
 
     calls = []
-    orig = repo.notebook_copy_stats
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    orig = repo._runtime.scale_artifacts.notebook_copy_stats
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "notebook_copy_stats",
                          lambda *a, **k: calls.append(a) or orig(*a, **k))
     repo.maybe_auto_index(nb.id)
     assert calls == []

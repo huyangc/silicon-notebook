@@ -94,7 +94,7 @@ class KnowledgeLifecycleService:
         governance: KnowledgeGovernanceService,
         kg_building: set,
         unified_cache: Dict[Any, Any],
-        viz_building: set,
+        scale_artifacts: Any,
         new_id: Callable[[str], str],
         now: Callable[[], str],
         connect: Callable[[], sqlite3.Connection],
@@ -116,13 +116,6 @@ class KnowledgeLifecycleService:
         relations_for_notebook: Callable[[str], List[dict]],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
-        maybe_enqueue_scale_fold: Callable[[str], None],
-        scale_index: Callable[..., Any],
-        open_scale_ann: Callable[[Any, str], Any],
-        viz_index: Callable[[str], Any],
-        viz_index_probe: Callable[[str], dict],
-        build_viz_index: Callable[[str], Optional[dict]],
-        maybe_auto_index: Callable[[str], None],
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -139,7 +132,7 @@ class KnowledgeLifecycleService:
         # The facade's EXISTING cache objects, held BY IDENTITY (never
         # replacement copies) — the Task-14 coordinator evicts the same dict.
         self.unified_cache = unified_cache
-        self.viz_building = viz_building
+        self.scale_artifacts = scale_artifacts
         self._new_id = new_id
         self._now = now
         self._connect = connect
@@ -161,13 +154,6 @@ class KnowledgeLifecycleService:
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
-        self._maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
-        self._scale_index = scale_index
-        self._open_scale_ann = open_scale_ann
-        self._viz_index = viz_index
-        self._viz_index_probe = viz_index_probe
-        self.build_viz_index = build_viz_index
-        self.maybe_auto_index = maybe_auto_index
 
     # Late-bound model clients: resolved per call through the facade's frozen
     # properties, so class-property monkeypatches (type(repo).kg_llm_client)
@@ -496,8 +482,8 @@ class KnowledgeLifecycleService:
             #   2) 无索引且已有 concept 数 ≤ max_entities → 原暴力 O(new×existing) 余弦(不动)。
             #   3) 无索引且已有 concept 数 > max_entities → 跳过,但显式发 tier2_skipped 事件
             #      (P1-3 修复点:旧代码这里静默跳过,大库上 Tier2 从未真正跑过)。
-            idx = self._scale_index(notebook_id, allow_stale=True)
-            ann = self._open_scale_ann(idx, "kg") if (idx is not None and idx.ann_labels) else None
+            idx = self.scale_artifacts.load(notebook_id, allow_stale=True)
+            ann = self.scale_artifacts.open_ann(idx, "kg") if (idx is not None and idx.ann_labels) else None
             cands: list = []
             if ann is not None:
                 cands = self._tier2_bridge_candidates_ann(
@@ -823,7 +809,7 @@ class KnowledgeLifecycleService:
             # notebook already has a scale index, so the newly-extracted sources
             # become semantically searchable (fold only, never a fresh build).
             # Fail-safe: helper never raises.
-            self._maybe_enqueue_scale_fold(notebook_id)
+            self.scale_artifacts.maybe_enqueue_fold(notebook_id)
             return result
         finally:
             with self.kg_building_lock:
@@ -865,8 +851,8 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             row = self.unified_kg.state_row(db, notebook_id)
             clusters = self.unified_kg.distinct_cluster_count(db, notebook_id)
-        viz = self._viz_index_probe(notebook_id)
-        viz_building = notebook_id in self.viz_building
+        viz = self.scale_artifacts.viz_probe(notebook_id)
+        viz_building = notebook_id in self.scale_artifacts.viz_building
         if row is None:
             return {"dirty": False, "last_rebuild_at": "", "objects": 0, "relations": 0,
                     "clusters": int(clusters), **viz, "viz_building": viz_building}
@@ -906,7 +892,7 @@ class KnowledgeLifecycleService:
                 (notebook_id,)).fetchone()["c"]
         if int(nb_count) > self.settings.viz_sync_build_max_objects:
             effective_limit = limit if limit is not None else self.settings.viz_default_limit
-            idx = self._viz_index(notebook_id)
+            idx = self.scale_artifacts.viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
                 return self._unified_graph_bounded(notebook_id, idx, effective_limit)
             # No index available yet: either a background build was just
@@ -923,10 +909,10 @@ class KnowledgeLifecycleService:
         # below (same node-id set / totals / shape). Small notebooks with no
         # index fall through unchanged.
         if limit is not None and level != "concept":
-            idx = self._viz_index(notebook_id)
+            idx = self.scale_artifacts.viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
                 return self._unified_graph_bounded(notebook_id, idx, limit)
-            if idx is None and notebook_id in self.viz_building:
+            if idx is None and notebook_id in self.scale_artifacts.viz_building:
                 # A background build was spawned inside _viz_index instead of
                 # blocking this request on a minutes-long full-graph fold.
                 # Surface a placeholder the frontend can poll on instead of
@@ -1024,7 +1010,7 @@ class KnowledgeLifecycleService:
         1-hop query over knowledge_relations, folding endpoints via cluster_map so
         the shape matches the unified graph the frontend already renders."""
         self.get_notebook(notebook_id)
-        idx = self._viz_index(notebook_id)
+        idx = self.scale_artifacts.viz_index(notebook_id)
         if idx is not None and getattr(idx, "viz_ids", None) is not None:
             from app.services.kg.scale_index import viz_neighbors
             nb = viz_neighbors(self._viz_dict(idx), object_id, cap)
@@ -1777,14 +1763,14 @@ class KnowledgeLifecycleService:
         # pay a lazy build (and to cover same-second in-place edits the version
         # tuple can miss). Fail-open: a viz build error must never break rebuild.
         try:
-            self.build_viz_index(notebook_id)
+            self.scale_artifacts.build_viz(notebook_id)
         except Exception:
             self.event_log.logger.warning(
                 "build_viz_index failed after rebuild for %s", notebook_id, exc_info=True)
         # rebuild 后检索索引必然 stale(clusters/objects 已变)—— 大库自动重建/入队。
         # maybe_auto_index 自身 fail-open,这里再包一层只是双保险。
         try:
-            self.maybe_auto_index(notebook_id)
+            self.scale_artifacts.maybe_auto_index(notebook_id)
         except Exception:
             self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
         # 社区层:聚类刚重算 → force=True 强制重建社区(clustering 未必 bump
@@ -2015,7 +2001,7 @@ class KnowledgeLifecycleService:
         # igraph 路径整数边表 + C 核,10^7 边安全,无需 CSR、不拒。
         if (_ig is None
                 and not self.notebook_copy_stats(notebook_id)["copyable"]
-                and self._scale_index(notebook_id, allow_stale=True) is None):
+                and self.scale_artifacts.load(notebook_id, allow_stale=True) is None):
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
             return 0

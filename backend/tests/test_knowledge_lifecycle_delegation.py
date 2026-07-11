@@ -94,7 +94,8 @@ def test_kg_building_set_and_lock_are_lifecycle_owned_shared_objects(repo):
 def test_lifecycle_holds_the_facade_cache_objects_by_identity(repo):
     lifecycle = repo._runtime.knowledge_lifecycle
     assert lifecycle.unified_cache is repo._unified_cache
-    assert lifecycle.viz_building is repo._viz_building
+    assert lifecycle.scale_artifacts is repo._runtime.scale_artifacts
+    assert lifecycle.scale_artifacts.viz_building is repo._viz_building
 
 
 def test_source_ingestion_uses_direct_service_dependencies(repo):

@@ -29,6 +29,7 @@ from app.services.notebook_catalog import NotebookCatalogService, NotebookSummar
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.scale_artifact_catalog import ScaleArtifactCatalog
+from app.services.scale_artifact_runtime import ScaleArtifactRuntime
 from app.services.scale_index_builder import ScaleIndexBuilder
 from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
@@ -100,6 +101,7 @@ class RepositoryRuntime:
         self.index_projections: "IndexProjectionStore | None" = None
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
         self.scale_builder: "ScaleIndexBuilder | None" = None
+        self.scale_artifacts: "ScaleArtifactRuntime | None" = None
         # Vector persistence is finished by wire_persistence(): its write seat
         # is the facade's `_write` compatibility seam, which only exists once
         # the facade constructor reaches it. Construction stays lazy.
@@ -128,7 +130,7 @@ class RepositoryRuntime:
             unified_cache={},
         )
         # The KG mutation coordinator is finished by wire_kg_mutations(): its
-        # remaining collaborators (the facade-owned auto-index once-set, the
+        # remaining collaborators (the scale-runtime auto-index once-set, the
         # corpus-language memo and the facade `_write` transaction seat) only
         # exist once the facade constructor reaches them.  Construction stays
         # lazy — no seam calls.  The caches come from retrieval_snapshots.
@@ -357,10 +359,9 @@ class RepositoryRuntime:
         the eager ScaleArtifactStore; it holds NO builder — reading can never
         schedule a rebuild.  ``version`` resolves the facade's memoized
         ``_scale_index_version`` and ``scale_cache``/``load_lock``/
-        ``load_locks`` resolve the facade's LRU + single-flight state per
-        call (tests reassign them; Task 20 transfers that state into
-        ScaleArtifactRuntime by identity and composes THESE same objects as
-        ``scale_artifacts`` without recreating them)."""
+        ``load_locks`` initially resolve the exact LRU + single-flight state
+        objects that ``wire_scale_runtime`` transfers by identity.  The final
+        runtime then retargets the catalog to its canonical state."""
         self.index_projections = IndexProjectionStore(
             self.settings,
             connect=connect,
@@ -399,8 +400,8 @@ class RepositoryRuntime:
         """Compose Task 19's builder over the exact Task 18 runtime objects.
 
         Facade compatibility seams stay late-bound callables. The builder owns
-        orchestration only and holds no facade reference; Task 20 moves the
-        supplied cache/build-state objects into the final scale runtime.
+        orchestration only and holds no facade reference; ``wire_scale_runtime``
+        transfers the supplied cache/build-state objects by identity.
         """
         if self.index_projections is None or self.scale_catalog is None:
             raise RuntimeError(
@@ -427,6 +428,65 @@ class RepositoryRuntime:
         )
         return self.scale_builder
 
+    def wire_scale_runtime(
+        self,
+        *,
+        scale_cache: Any,
+        viz_cache: Any,
+        version_memo: dict,
+        version_lock: Any,
+        version_locks: dict,
+        load_lock: Any,
+        load_locks: dict,
+        building: set,
+        building_lock: Any,
+        idle_queue: dict,
+        scheduler_started: bool,
+        auto_index_checked: set,
+        viz_building: set,
+        viz_building_lock: Any,
+    ) -> ScaleArtifactRuntime:
+        """Compose Task 20 over the exact Task 18/19 objects and state.
+
+        All mutable state arguments are transferred by identity.  The runtime
+        retargets the catalog and builder to these canonical objects; neither
+        is recreated and no repository facade reference is retained.
+        """
+        if (
+            self.index_projections is None
+            or self.scale_catalog is None
+            or self.scale_builder is None
+        ):
+            raise RuntimeError(
+                "wire_scale_runtime requires scale artifacts and builder first"
+            )
+        self.scale_artifacts = ScaleArtifactRuntime(
+            settings=self.settings,
+            event_log=self.event_log,
+            projections=self.index_projections,
+            artifacts=self.scale_artifact_store,
+            catalog=self.scale_catalog,
+            builder=self.scale_builder,
+            scale_cache=scale_cache,
+            viz_cache=viz_cache,
+            version_memo=version_memo,
+            version_lock=version_lock,
+            version_locks=version_locks,
+            load_lock=load_lock,
+            load_locks=load_locks,
+            building=building,
+            building_lock=building_lock,
+            idle_queue=idle_queue,
+            scheduler_started=scheduler_started,
+            auto_index_checked=auto_index_checked,
+            viz_building=viz_building,
+            viz_building_lock=viz_building_lock,
+            notebooks=self.catalog,
+            facts_repo=self.queries,
+            snapshots=self.retrieval_snapshots,
+        )
+        return self.scale_artifacts
+
     def wire_knowledge_lifecycle(
         self,
         *,
@@ -449,14 +509,6 @@ class RepositoryRuntime:
         relations_for_notebook: Callable[[str], list],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
-        maybe_enqueue_scale_fold: Callable[[str], None],
-        scale_index: Callable[..., Any],
-        open_scale_ann: Callable[..., Any],
-        viz_index: Callable[[str], Any],
-        viz_index_probe: Callable[[str], dict],
-        build_viz_index: Callable[[str], Any],
-        maybe_auto_index: Callable[[str], None],
-        viz_building: Any,
         edge_centrality_map: Callable[[str], dict],
         embed_knowledge: Callable[..., None],
         knowledge_objects: Callable[..., list],
@@ -511,6 +563,10 @@ class RepositoryRuntime:
             rule_card=rule_card,
             set_conflict_status=set_conflict_status,
         )
+        if self.scale_artifacts is None:
+            raise RuntimeError(
+                "wire_knowledge_lifecycle requires wire_scale_runtime() first"
+            )
         self.knowledge_lifecycle = KnowledgeLifecycleService(
             settings=self.settings,
             event_log=self.event_log,
@@ -520,7 +576,7 @@ class RepositoryRuntime:
             governance=self.knowledge_governance,
             kg_building=self.catalog.kg_building,
             unified_cache=self.retrieval_snapshots.unified_cache,
-            viz_building=viz_building,
+            scale_artifacts=self.scale_artifacts,
             new_id=self.seams.new_id,
             now=self.seams.now,
             connect=connect,
@@ -542,14 +598,8 @@ class RepositoryRuntime:
             relations_for_notebook=relations_for_notebook,
             notebook_copy_stats=notebook_copy_stats,
             note_model_error=note_model_error,
-            maybe_enqueue_scale_fold=maybe_enqueue_scale_fold,
-            scale_index=scale_index,
-            open_scale_ann=open_scale_ann,
-            viz_index=viz_index,
-            viz_index_probe=viz_index_probe,
-            build_viz_index=build_viz_index,
-            maybe_auto_index=maybe_auto_index,
         )
+        self.scale_artifacts.lifecycle = self.knowledge_lifecycle
         return self.knowledge_lifecycle
 
     def wire_sharing(

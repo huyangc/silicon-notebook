@@ -192,7 +192,7 @@ def test_large_no_index_refuses_without_igraph(repo, monkeypatch):
     monkeypatch.setitem(sys.modules, "igraph", None)   # `import igraph` → ImportError → _ig=None
     nb = _seed_two_docs_shared_canonical(repo)
     monkeypatch.setattr(repo, "notebook_copy_stats", lambda _nb: {"copyable": False})
-    monkeypatch.setattr(repo, "_scale_index", lambda _nb, allow_stale=False: None)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "load", lambda _nb, allow_stale=False: None)
     events = []
     monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
     assert repo.rebuild_communities(nb.id, level=0) == 0
@@ -203,7 +203,7 @@ def test_large_no_index_builds_with_igraph(repo, monkeypatch):
     """igraph 可用时,scale-tier 无 CSR 不再拒——整数边表 + C 核安全 → 直接建成。"""
     nb = _seed_two_docs_shared_canonical(repo)
     monkeypatch.setattr(repo, "notebook_copy_stats", lambda _nb: {"copyable": False})
-    monkeypatch.setattr(repo, "_scale_index", lambda _nb, allow_stale=False: None)
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "load", lambda _nb, allow_stale=False: None)
     events = []
     monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
     assert repo.rebuild_communities(nb.id, level=0) >= 1

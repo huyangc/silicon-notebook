@@ -306,12 +306,12 @@ class SQLiteRepository:
         # numpy arrays + a memoized hnsw handle, tens-of-MB to GB). Eviction
         # just drops the reference — GC frees the arrays, and hnswlib.Index
         # has no explicit close() to call (see LRUProcessCache docstring).
-        self._scale_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
+        scale_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
         # P1-8: memoize _scale_index_version keyed on kg_mutation_seq. Maps
         # notebook_id -> (last_seq, version_list). When seq is unchanged we skip
         # the 5 COUNT/MAX aggregates and return the cached list (same format —
         # no on-disk manifest.version invalidation).
-        self._scale_ver_cache: Dict[str, Any] = {}
+        scale_ver_cache: Dict[str, Any] = {}
         # Single-flight for _scale_index_version's cold path (memo miss / seq
         # changed): N concurrent callers for the SAME notebook must compute the
         # four non-cluster COUNT/MAX aggregates exactly once, not N times in
@@ -323,15 +323,15 @@ class SQLiteRepository:
         # aggregate computation runs under the per-nb lock WITHOUT holding
         # _scale_ver_lock, so a thread never holds the global lock while
         # waiting on a per-nb lock (no lock-ordering cycle).
-        self._scale_ver_lock = threading.Lock()
-        self._scale_ver_locks: Dict[str, threading.Lock] = {}
+        scale_ver_lock = threading.Lock()
+        scale_ver_locks: Dict[str, threading.Lock] = {}
         # per-nb 单飞:allow_stale 检索路径 cold-load ScaleIndex 时,防 N 个并发查询
         # 各自 load_scale_index + hnswlib.load_index(8GB)造成 N× 内存尖峰。锁次序同
         # _scale_ver_lock:全局锁只护锁表结构,绝不在全局锁内跑 load。
-        self._scale_idx_load_lock = threading.Lock()
-        self._scale_idx_load_locks: Dict[str, threading.Lock] = {}
+        scale_idx_load_lock = threading.Lock()
+        scale_idx_load_locks: Dict[str, threading.Lock] = {}
         # C7: same bounded-LRU rework as _scale_idx_cache above.
-        self._viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
+        viz_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
         # Task 18: the scale/viz artifact READ adapters (IndexProjectionStore /
         # ScaleArtifactCatalog over the runtime-eager ScaleArtifactStore) ride
         # facade-bound late seams — the `_connect` read seat, the `_in_batches`
@@ -364,23 +364,17 @@ class SQLiteRepository:
             version=lambda notebook_id: _repository_from_weakref(
                 repository_ref
             )._scale_index_version(notebook_id),
-            scale_cache=lambda: _repository_from_weakref(
-                repository_ref
-            )._scale_idx_cache,
-            load_lock=lambda: _repository_from_weakref(
-                repository_ref
-            )._scale_idx_load_lock,
-            load_locks=lambda: _repository_from_weakref(
-                repository_ref
-            )._scale_idx_load_locks,
+            scale_cache=lambda: scale_idx_cache,
+            load_lock=lambda: scale_idx_load_lock,
+            load_locks=lambda: scale_idx_load_locks,
             note_model_error=lambda stage, model, exc: (
                 _repository_from_weakref(repository_ref)._note_model_error(
                     stage, model, exc
                 )
             ),
         )
-        self._scale_building: set = set()
-        self._scale_building_lock = threading.Lock()
+        scale_building: set = set()
+        scale_building_lock = threading.Lock()
         # Task 19: full/fold/viz orchestration is runtime-owned. Every
         # remaining facade collaborator is resolved late through the same
         # weak reference so monkeypatch/transaction/cache identity seams stay
@@ -409,25 +403,25 @@ class SQLiteRepository:
                     notebook_id, source_id
                 )
             ),
-            invalidate_scale_cache=lambda notebook_id: _repository_from_weakref(
-                repository_ref
-            )._scale_idx_cache.pop(notebook_id, None),
-            cache_viz=lambda notebook_id, index: _repository_from_weakref(
-                repository_ref
-            )._viz_idx_cache.__setitem__(notebook_id, index),
-            building=self._scale_building,
-            building_lock=self._scale_building_lock,
+            invalidate_scale_cache=lambda notebook_id: scale_idx_cache.pop(
+                notebook_id, None
+            ),
+            cache_viz=lambda notebook_id, index: viz_idx_cache.__setitem__(
+                notebook_id, index
+            ),
+            building=scale_building,
+            building_lock=scale_building_lock,
             notify_index_done=lambda notebook_id: _repository_from_weakref(
                 repository_ref
             )._notify_index_done(notebook_id),
         )
-        self._scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
-        self._scale_scheduler_started = False
+        scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
+        scale_scheduler_started = False
         # 大库自动建索引(maybe_auto_index)的 O(1) once-set:notebook_id 一旦被评估
         # (无论「已入队/建成」还是「判定不需要」)即加入,读路径兜底靠它避免每查询都
         # 算 notebook_copy_stats() 的 5 个 COUNT。_mark_unified_kg_dirty 在每次 KG
         # 写时 discard,使下一轮变更重新触发评估。
-        self._auto_index_checked: set = set()
+        auto_index_checked: set = set()
         # Task 14→17: the KG mutation coordinator reads the unified/vector
         # caches through the runtime-owned RetrievalSnapshotCache and wraps
         # the two facade-owned state objects above BY IDENTITY (no replacement
@@ -438,14 +432,30 @@ class SQLiteRepository:
         # below delegate to it — every mutation call site keeps funnelling
         # through those wrappers, so the frozen phase matrix is unchanged.
         self._runtime.wire_kg_mutations(
-            auto_index_checked=self._auto_index_checked,
+            auto_index_checked=auto_index_checked,
             notebook_languages=self._notebook_langs_cache,
             write=lambda: self._write(),
         )
         # KG-view viz index background build (mirrors _scale_building exactly):
         # guarded set of notebook_ids currently being folded by _spawn_viz_build.
-        self._viz_building: set = set()
-        self._viz_building_lock = threading.Lock()
+        viz_building: set = set()
+        viz_building_lock = threading.Lock()
+        self._runtime.wire_scale_runtime(
+            scale_cache=scale_idx_cache,
+            viz_cache=viz_idx_cache,
+            version_memo=scale_ver_cache,
+            version_lock=scale_ver_lock,
+            version_locks=scale_ver_locks,
+            load_lock=scale_idx_load_lock,
+            load_locks=scale_idx_load_locks,
+            building=scale_building,
+            building_lock=scale_building_lock,
+            idle_queue=scale_idle_queue,
+            scheduler_started=scale_scheduler_started,
+            auto_index_checked=auto_index_checked,
+            viz_building=viz_building,
+            viz_building_lock=viz_building_lock,
+        )
         # Task 15: the knowledge governance + lifecycle services ride
         # facade-bound late seams — the `_connect`/`_write` transaction seats,
         # the Task-14 coordinator wrappers (single dirty entry preserved), the
@@ -496,18 +506,6 @@ class SQLiteRepository:
             note_model_error=lambda stage, model, exc: (
                 self._note_model_error(stage, model, exc)
             ),
-            maybe_enqueue_scale_fold=lambda notebook_id: (
-                self._maybe_enqueue_scale_fold(notebook_id)
-            ),
-            scale_index=lambda notebook_id, allow_stale=False: (
-                self._scale_index(notebook_id, allow_stale=allow_stale)
-            ),
-            open_scale_ann=lambda idx, kind: self._open_scale_ann(idx, kind),
-            viz_index=lambda notebook_id: self._viz_index(notebook_id),
-            viz_index_probe=lambda notebook_id: self._viz_index_probe(notebook_id),
-            build_viz_index=lambda notebook_id: self.build_viz_index(notebook_id),
-            maybe_auto_index=lambda notebook_id: self.maybe_auto_index(notebook_id),
-            viz_building=self._viz_building,
             edge_centrality_map=lambda notebook_id: (
                 self._edge_centrality_map(notebook_id)
             ),
@@ -761,6 +759,125 @@ class SQLiteRepository:
         self._runtime.retrieval_snapshots.unified_cache = cache
         if self._runtime.knowledge_lifecycle is not None:
             self._runtime.knowledge_lifecycle.unified_cache = cache
+
+    # Task 20: every scale/viz mutable object has one owner.  These descriptors
+    # preserve the frozen facade attributes and test swap seams while writing
+    # through to ScaleArtifactRuntime and its Task-18/19 consumers.
+    @property
+    def _scale_idx_cache(self):
+        return self._runtime.scale_artifacts.scale_cache
+
+    @_scale_idx_cache.setter
+    def _scale_idx_cache(self, value) -> None:
+        self._runtime.scale_artifacts.scale_cache = value
+
+    @property
+    def _viz_idx_cache(self):
+        return self._runtime.scale_artifacts.viz_cache
+
+    @_viz_idx_cache.setter
+    def _viz_idx_cache(self, value) -> None:
+        self._runtime.scale_artifacts.viz_cache = value
+
+    @property
+    def _scale_ver_cache(self):
+        return self._runtime.scale_artifacts.version_memo
+
+    @_scale_ver_cache.setter
+    def _scale_ver_cache(self, value) -> None:
+        self._runtime.scale_artifacts.version_memo = value
+
+    @property
+    def _scale_ver_lock(self):
+        return self._runtime.scale_artifacts.version_lock
+
+    @_scale_ver_lock.setter
+    def _scale_ver_lock(self, value) -> None:
+        self._runtime.scale_artifacts.version_lock = value
+
+    @property
+    def _scale_ver_locks(self):
+        return self._runtime.scale_artifacts.version_locks
+
+    @_scale_ver_locks.setter
+    def _scale_ver_locks(self, value) -> None:
+        self._runtime.scale_artifacts.version_locks = value
+
+    @property
+    def _scale_idx_load_lock(self):
+        return self._runtime.scale_artifacts.load_lock
+
+    @_scale_idx_load_lock.setter
+    def _scale_idx_load_lock(self, value) -> None:
+        self._runtime.scale_artifacts.load_lock = value
+
+    @property
+    def _scale_idx_load_locks(self):
+        return self._runtime.scale_artifacts.load_locks
+
+    @_scale_idx_load_locks.setter
+    def _scale_idx_load_locks(self, value) -> None:
+        self._runtime.scale_artifacts.load_locks = value
+
+    @property
+    def _scale_building(self):
+        return self._runtime.scale_artifacts.building
+
+    @_scale_building.setter
+    def _scale_building(self, value) -> None:
+        self._runtime.scale_artifacts.building = value
+        self._runtime.scale_builder.building = value
+
+    @property
+    def _scale_building_lock(self):
+        return self._runtime.scale_artifacts.building_lock
+
+    @_scale_building_lock.setter
+    def _scale_building_lock(self, value) -> None:
+        self._runtime.scale_artifacts.building_lock = value
+        self._runtime.scale_builder.building_lock = value
+
+    @property
+    def _scale_idle_queue(self):
+        return self._runtime.scale_artifacts.idle_queue
+
+    @_scale_idle_queue.setter
+    def _scale_idle_queue(self, value) -> None:
+        self._runtime.scale_artifacts.idle_queue = value
+
+    @property
+    def _scale_scheduler_started(self):
+        return self._runtime.scale_artifacts.scheduler_started
+
+    @_scale_scheduler_started.setter
+    def _scale_scheduler_started(self, value) -> None:
+        self._runtime.scale_artifacts.scheduler_started = bool(value)
+
+    @property
+    def _auto_index_checked(self):
+        return self._runtime.scale_artifacts.auto_index_checked
+
+    @_auto_index_checked.setter
+    def _auto_index_checked(self, value) -> None:
+        self._runtime.scale_artifacts.auto_index_checked = value
+        if self._runtime.kg_mutations is not None:
+            self._runtime.kg_mutations.auto_index_checked = value
+
+    @property
+    def _viz_building(self):
+        return self._runtime.scale_artifacts.viz_building
+
+    @_viz_building.setter
+    def _viz_building(self, value) -> None:
+        self._runtime.scale_artifacts.viz_building = value
+
+    @property
+    def _viz_building_lock(self):
+        return self._runtime.scale_artifacts.viz_building_lock
+
+    @_viz_building_lock.setter
+    def _viz_building_lock(self, value) -> None:
+        self._runtime.scale_artifacts.viz_building_lock = value
 
     def _resolve_path(self, value: str) -> Path:
         return self._runtime.database.resolve_path(value)
@@ -3336,110 +3453,8 @@ class SQLiteRepository:
         return self._runtime.index_projections.version_facts(notebook_id) + list(settings_tail)
 
     def _scale_index_version(self, notebook_id: str) -> list:
-        """JSON-serializable version key for the scale index of one notebook.
-
-        Mirrors _ppr_graph's version_parts pattern: COUNT+MAX(created_at/updated_at)
-        for objects, relations, chunks, concept_clusters — all for this single notebook.
-
-        P1-8 fast path (format-preserving memoization). This is called several
-        times per query (retrieval / PPR / status) and each call used to run 5
-        COUNT/MAX aggregates (10 aggregate columns). The version key FORMAT is
-        unchanged, so on-disk manifest.version keeps matching — no index
-        invalidation.
-
-        P0-A change signal = TWO O(1) monotonic counters, both single-row reads
-        of unified_kg_state, zero table aggregates on the hot path:
-          - kg_mutation_seq (bumped by _mark_unified_kg_dirty — the single choke
-            point for objects / relations / chunks / embeddings; the
-            merge-knowledge and edge-review in-place edits were wired in to
-            close their gaps).
-          - cluster_mutation_seq (bumped by _bump_cluster_mutation_seq — the
-            single choke point for concept_clusters writes: write_clusters /
-            append_clusters / incremental_fuse_source's orphan sweep / the
-            rebuild streamed writer _write_cluster_map_streamed).
-
-        Why clusters needed their OWN counter instead of riding kg_mutation_seq:
-        rebuild_unified_kg DELIBERATELY preserves kg_mutation_seq across a
-        rebuild (its end-write omits the seq column, so _cluster_input_version
-        is stable and re-running rebuild is idempotent — see that method's
-        docstring). But rebuild REWRITES concept_clusters, which this version key
-        must reflect (the scale index is downstream of clusters). Before P0-A
-        this was covered by re-reading the real COUNT/MAX(created_at) every
-        single call (2 aggregate columns, but over a concept_clusters table that
-        can be millions of rows at scale); now cluster_mutation_seq carries that
-        signal at O(1) instead, and the real COUNT/MAX only run in
-        _compute_scale_version_cold on a memo miss. Net fast path = 1 single-row
-        unified_kg_state SELECT (both seq columns) instead of 1 seq read + 2
-        cluster aggregates.
-
-        Single-flight cold path: on a memo miss (cold cache or seq/cseq/settings
-        changed) this runs the FIVE-table COUNT/MAX aggregates (ten aggregate
-        columns, including the cluster pair moved here from the old hot path)
-        directly, so N concurrent callers for the same notebook each ran their
-        own full table scan in parallel — measured 96-147s overlapping on a
-        490k-object deployment when the KG page fires 3-5 concurrent requests,
-        and PR#157 makes every chunk write bump kg_mutation_seq (so every upload
-        re-triggers this for every concurrent viewer). Now a cold miss takes a
-        per-notebook lock (VectorCache's lock-table pattern, simplified: no
-        refcount eviction — the key space is #notebooks, not per-request keys)
-        and double-checks the memo inside the lock, so N concurrent cold callers
-        for the SAME notebook compute the five aggregates exactly once; the rest
-        observe the winner's result. Loader exceptions propagate to every caller
-        that raced into the cold path (the Python exception itself isn't shared
-        across threads — each waiter that loses the double-check re-runs
-        _compute_scale_version_cold itself after acquiring the lock, so a
-        failure is retried per-caller, never cross-contaminates the memo, and a
-        fixed-up retry succeeds).
-
-        Lock ordering: _scale_ver_lock only guards structural access to the
-        _scale_ver_locks table (get-or-create the per-nb Lock; entries are never
-        evicted — the key space is bounded by #notebooks, unlike VectorCache's
-        per-request cache keys, so an unbounded-but-notebook-scoped dict is
-        acceptable); it is NEVER held while the per-nb lock is held or while the
-        aggregate computation runs — so a thread can never hold the global lock
-        while blocked waiting on a per-nb lock (no cycle). Audited: no existing
-        caller of _scale_index_version (directly, or via _scale_index /
-        _viz_index / _viz_index_probe / scale_index_status) holds _write_lock,
-        _scale_building_lock, or a _vector_cache per-key lock while calling in —
-        every call site is a plain read with no lock held around it (see
-        callers' grep in the PR description). A loader that re-enters
-        _scale_index_version for a DIFFERENT notebook while this notebook's
-        per-nb lock is held is safe (different lock objects, no shared state
-        touched outside the lock table); this is defensive — no current
-        production path actually nests like this.
-        """
-        seq, cseq, settings_tail = self._probe_scale_version_signal(notebook_id)
-        cached = self._scale_ver_cache.get(notebook_id)
-        if (cached is not None and cached[0] == seq
-                and cached[1] == cseq and cached[2] == settings_tail):
-            # seq + cseq + settings unchanged → skip the five-table ten
-            # aggregate-column cold path entirely (no lock, no table scans).
-            return list(cached[3])
-
-        # Cold path: get-or-create this notebook's lock (global lock held only
-        # for this dict lookup/insert, never across the computation below).
-        with self._scale_ver_lock:
-            nb_lock = self._scale_ver_locks.get(notebook_id)
-            if nb_lock is None:
-                nb_lock = threading.Lock()
-                self._scale_ver_locks[notebook_id] = nb_lock
-
-        with nb_lock:
-            # Double-check: another thread may have finished computing while we
-            # waited for the lock. Re-probe (seq/cseq may also have moved).
-            seq, cseq, settings_tail = self._probe_scale_version_signal(notebook_id)
-            cached = self._scale_ver_cache.get(notebook_id)
-            if (cached is not None and cached[0] == seq
-                    and cached[1] == cseq and cached[2] == settings_tail):
-                return list(cached[3])
-            # Exceptions from here propagate uncaught (nothing cached on
-            # failure); the lock releases via `with`, so a retry by this or
-            # another thread re-attempts the computation cleanly.
-            version = self._compute_scale_version_cold(notebook_id, seq, settings_tail)
-            # Memoize keyed on (seq, cseq, settings). Store a copy so a caller
-            # mutating the returned list can't corrupt the cache.
-            self._scale_ver_cache[notebook_id] = (seq, cseq, settings_tail, list(version))
-            return version
+        """Compatibility delegate to the runtime-owned version memo."""
+        return self._runtime.scale_artifacts.version(notebook_id)
 
     def _read_manifest_version(self, out_dir: str):
         """廉价读 out_dir/manifest.json 的 version 字段(几 KB,sub-ms)。
@@ -3452,95 +3467,27 @@ class SQLiteRepository:
         (磁盘身份缓存复用 + per-nb 单飞 cold-load)整体移入
         ScaleArtifactCatalog.load —— catalog 只读、不含 builder,读取永不触发
         重建(base 离线 ANN / active 暴力的成本分离不变量)。"""
-        return self._runtime.scale_catalog.load(notebook_id, allow_stale=allow_stale)
+        return self._runtime.scale_artifacts.load(
+            notebook_id, allow_stale=allow_stale
+        )
 
     def _open_scale_ann(self, idx, kind: str):
         """惰性 open + memoize hnswlib handle 到 ScaleIndex 实例。失败/无工件→None。
         Task 18:移入 ScaleArtifactCatalog.open_ann(manifest dim 探针 + fail-open
         回退语义不变)。"""
-        return self._runtime.scale_catalog.open_ann(idx, kind)
+        return self._runtime.scale_artifacts.open_ann(idx, kind)
 
     def _spawn_viz_build(self, notebook_id: str) -> None:
-        """Kick off a background (de-duplicated) viz-index build. Mirrors
-        _run_scale_op exactly: guard-add inside the lock, discard in finally,
-        exceptions only logged. build_viz_index is read-only DB + no model
-        calls, so a plain daemon thread is safe (no GIL-holding native call,
-        no shared mutable state beyond the cache dict it writes on success)."""
-        with self._viz_building_lock:
-            if notebook_id in self._viz_building:
-                return
-            self._viz_building.add(notebook_id)
-
-        def _run():
-            try:
-                self.build_viz_index(notebook_id)
-            except Exception:  # noqa: BLE001 — background task, failure only logged
-                try:
-                    self.event_log.logger.exception("viz index build failed for %s", notebook_id)
-                except Exception:
-                    pass
-            finally:
-                with self._viz_building_lock:
-                    self._viz_building.discard(notebook_id)
-        threading.Thread(target=_run, name=f"vizidx-{notebook_id}", daemon=True).start()
+        """Compatibility delegate to the runtime-owned viz scheduler."""
+        return self._runtime.scale_artifacts._spawn_viz_build(notebook_id)
 
     def _viz_index(self, notebook_id: str):
-        """Index exposing folded viz arrays for the KG-view fast paths, or None.
-
-        Priority: (1) a valid full scale index (base library — already carries the
-        viz arrays); (2) a persisted viz-only index whose version matches; (3)
-        disk has a STALE viz index — serve it immediately (display staleness is
-        benign) and spawn a background refresh; (4) nothing at all — small
-        notebooks (≤ viz_sync_build_max_objects effective objects) still build
-        synchronously (legacy behavior); large notebooks spawn a background build
-        and return None (caller surfaces a "building" placeholder instead of
-        blocking the request thread on a minutes-long full-graph fold)."""
-        scale = self._scale_index(notebook_id)
-        if scale is not None and getattr(scale, "viz_ids", None) is not None:
-            return scale
-        cur = self._scale_index_version(notebook_id)
-        cached = self._viz_idx_cache.get(notebook_id)
-        if cached is not None and cached.manifest.get("version") == cur:
-            return cached
-        idx = self._runtime.scale_artifact_store.load_viz(notebook_id)
-        if idx is not None:
-            if idx.manifest.get("version") == cur:
-                self._viz_idx_cache[notebook_id] = idx
-                return idx
-            # Stale on disk: benign to serve immediately, refresh in the
-            # background. Do NOT cache the stale instance as if it were fresh —
-            # leaving _viz_idx_cache untouched means the version check above
-            # keeps failing and we keep re-probing disk (simplest correct
-            # option; mirrors _scale_index's allow_stale non-caching).
-            self._spawn_viz_build(notebook_id)
-            return idx
-        count = self._runtime.index_projections.effective_object_count(notebook_id)
-        if int(count) <= self.settings.viz_sync_build_max_objects:
-            self.build_viz_index(notebook_id)   # sync lazy build; sets cache on success
-            return self._viz_idx_cache.get(notebook_id)
-        self._spawn_viz_build(notebook_id)
-        return None
+        """Compatibility delegate to runtime viz artifact selection."""
+        return self._runtime.scale_artifacts.viz_index(notebook_id)
 
     def _viz_index_probe(self, notebook_id: str) -> dict:
-        """Read-only viz-index status — NEVER builds. Returns
-        {viz_indexed, viz_nodes, viz_edges, viz_stale}."""
-        cur = self._scale_index_version(notebook_id)
-        scale = self._scale_index(notebook_id)
-        if scale is not None and getattr(scale, "viz_ids", None) is not None:
-            m = scale.manifest
-            return {"viz_indexed": True,
-                    "viz_nodes": int(m.get("n_viz_nodes", len(scale.viz_ids))),
-                    "viz_edges": int(m.get("n_viz_edges", len(scale.viz_edges or []))),
-                    "viz_stale": False}
-        idx = self._runtime.scale_artifact_store.load_viz(notebook_id)
-        if idx is None:
-            return {"viz_indexed": False, "viz_nodes": 0, "viz_edges": 0, "viz_stale": False}
-        m = idx.manifest
-        fresh = m.get("version") == cur
-        return {"viz_indexed": fresh,
-                "viz_nodes": int(m.get("n_viz_nodes", 0)),
-                "viz_edges": int(m.get("n_viz_edges", 0)),
-                "viz_stale": not fresh}
+        """Compatibility delegate to the read-only runtime viz probe."""
+        return self._runtime.scale_artifacts.viz_probe(notebook_id)
 
     def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None,
                           as_arrays: bool = False):
@@ -3558,13 +3505,15 @@ class SQLiteRepository:
         on_stage: Optional[Callable[[str, int], None]] = None,
     ) -> dict:
         """Compatibility delegate to the runtime-owned full builder."""
-        return self._runtime.scale_builder.build(notebook_id, on_stage=on_stage)
+        return self._runtime.scale_artifacts.build(
+            notebook_id, on_stage=on_stage
+        )
 
     def fold_scale_index_delta(
         self, notebook_id: str, _assume_locked: bool = False
     ) -> dict:
         """Compatibility delegate to the runtime-owned delta folder."""
-        return self._runtime.scale_builder.fold(
+        return self._runtime.scale_artifacts.fold(
             notebook_id, assume_locked=_assume_locked
         )
 
@@ -3573,394 +3522,75 @@ class SQLiteRepository:
         return self._runtime.scale_builder._index_delta(notebook_id)
 
     def _scale_index_eligible(self, notebook_id: str, *, tier: "str | None" = None,
-                              exists: "bool | None" = None, total_chunks: "int | None" = None) -> bool:
-        """能否构建/重建 scale 检索索引 —— **与 tier 解耦**:base-tier / 已建过 / 规模够大
-        (总 chunk > index_suggest_chunk_threshold)/ 分享「大」定义(copyable=False,
-        即字节或 chunks+nodes 超拷贝阈值)任一即可。检索侧已按『索引是否存在』使用
-        (chunk_ann 默认开,indexed notebooks use ANN),不看 tier,故大个人库也应能建。
-        可传入已算好的 tier/exists/total_chunks 复用,避免重复查询。
-        短路顺序刻意把 notebook_copy_stats(5 个聚合查询)放在最后:常态路径
-        (base/已建过/chunk 多)零新增开销,只有全部前置条件都不满足(非 base、未建、
-        chunk-light)才付这一笔 —— 保证「大 → 可建/自动建」与 maybe_auto_index 的
-        大库判定一致,chunk 少但字节/节点多的库不再被 eligibility 挡死。"""
-        if tier is None:
-            tier = self.get_notebook(notebook_id).tier
-        if exists is None:
-            exists = (self._runtime.scale_artifact_store.scale_dir(notebook_id)
-                      / "manifest.json").exists()
-        if tier == "base" or exists:
-            return True
-        if total_chunks is None:
-            total_chunks = self._runtime.index_projections.total_chunk_count(notebook_id)
-        if total_chunks > self.settings.index_suggest_chunk_threshold:
-            return True
-        return __import__("app.services.notebook_scale", fromlist=["NotebookScaleProfile"]).NotebookScaleProfile(self.settings, self, lambda nb: tuple(self._scale_index_version(nb)), self._vector_cache).index_eligible(notebook_id, tier=tier, has_disk_index=bool(exists), total_chunks=int(total_chunks))
+                              exists: "bool | None" = None,
+                              total_chunks: "int | None" = None) -> bool:
+        """Compatibility delegate to runtime scale eligibility."""
+        return self._runtime.scale_artifacts.eligible(
+            notebook_id, tier=tier, exists=exists, total_chunks=total_chunks
+        )
 
     def scale_index_status(self, notebook_id: str) -> dict:
-        """scale 索引状态(供在线重建入口 UX)。exists=磁盘有 manifest;
-        stale=manifest 版本失配 或 delta chunk 超阈值;building=后台重建中;
-        eligible=base-tier / 已建过 / 规模够大(与 tier 解耦,见 _scale_index_eligible)。计数取自 manifest。
-        state 状态机(unindexed|suggested|building|indexed|stale):building 优先,
-        未索引按总 chunk 阈值分 unindexed/suggested,已索引按版本失配/delta 阈值分 indexed/stale。"""
-        nb = self.get_notebook(notebook_id)  # KeyError → 404
-        artifact_store = self._runtime.scale_artifact_store
-        out_dir = artifact_store.scale_dir(notebook_id)
-        building = notebook_id in self._scale_building
-        exists = (out_dir / "manifest.json").exists()
-        delta = self._index_delta(notebook_id)
-        total_chunks = self._runtime.index_projections.total_chunk_count(notebook_id)
-        eligible = self._scale_index_eligible(notebook_id, tier=nb.tier, exists=exists, total_chunks=total_chunks)
-        base = {"exists": exists, "building": building, "eligible": eligible,
-                "delta_chunks": int(delta["delta_chunks"]), "total_chunks": int(total_chunks),
-                # N sources added since the index (post-watermark); their semantic
-                # vectors are searchable only if delta_searchable, else pending the
-                # next fold (scale_auto_fold_on_add). Present on ALL return paths.
-                "unindexed_sources": len(delta["delta_sources"]),
-                "delta_searchable": bool(self.settings.scale_search_include_delta)}
-        queued = notebook_id in self._scale_idle_queue
-        if building:
-            base["state"] = "building"
-        elif queued:
-            base["state"] = "queued"
-        elif not exists:
-            base["state"] = "suggested" if total_chunks > self.settings.index_suggest_chunk_threshold else "unindexed"
-        else:
-            manifest = artifact_store.read_manifest(out_dir)
-            version_stale = manifest.get("version") != self._scale_index_version(notebook_id)
-            delta_over = delta["delta_chunks"] > self.settings.index_stale_delta_threshold
-            # 运行时维切换后旧索引(manifest.dim ≠ 生效维)必须重建:ANN 建在旧空间,
-            # 截断后的查询向量与之维度不符 → knn_query 硬错被吞成 fail-open 降级。
-            # 判 stale 并带 reason,前端徽章据此提示重建(T6)。
-            from app.services.vector_index import resolve_runtime_dim as _rrd
-            eff_dim = _rrd(self.settings) or self.settings.embed_dim
-            dim_stale = int(manifest.get("dim", eff_dim)) != int(eff_dim)
-            base["state"] = "stale" if (version_stale or delta_over or dim_stale) else "indexed"
-            if dim_stale:
-                base["stale_reason"] = "dim_mismatch"
-            base.update({
-                "stale": bool(version_stale or delta_over or dim_stale),
-                "last_built_at": str(manifest.get("built_at", "")),
-                "manifest_dim": int(manifest.get("dim", 0)),
-                "runtime_dim": int(eff_dim),
-                "n_nodes": int(manifest.get("n_nodes", 0)),
-                "n_chunks": int(manifest.get("n_chunks", 0)),
-                "n_ann": int(manifest.get("n_ann", 0)),
-                "n_chunk_ann": int(manifest.get("n_chunk_ann", 0)),
-                "has_chunk_ann": bool(manifest.get("has_chunk_ann", False))})
-            return base
-        # 未建/构建中:补齐既有字段的默认值(保持 schema 稳定)
-        base.update({"stale": False, "last_built_at": "", "n_nodes": 0, "n_chunks": 0,
-                     "n_ann": 0, "n_chunk_ann": 0, "has_chunk_ann": False})
-        return base
+        """Compatibility delegate to runtime scale status."""
+        return self._runtime.scale_artifacts.status(notebook_id)
 
     def index_status(self, notebook_id: str) -> dict:
-        """三系统构建状态聚合(纯只读,不触发任何 build)——供前端「索引与构建」面板
-        一次拉齐,替代 4 条独立轮询。kg=抽取,unified_kg=概念合并,scale_index=检索索引。
-        scale_index 原样复用 scale_index_status();unified_kg 取 dirty/building/last_rebuild_at
-        子集(building 取 viz_building——unified_kg_status 内部经 _viz_index_probe 只读探测,
-        从不 build)。kg 三字段直接复用 get_notebook() 算出的 NotebookSummary.kg_ready /
-        kg_building / kg_pending_sources —— 与 NotebookSummary 是同一段代码(_notebook_from_row
-        的 _has_kg/_count_pending_kg_sources + get_notebook 里的 _kg_building 回填,行 14086/
-        14089/2064),而非另抄一份 SQL,structurally 杜绝口径与概要卡片漂移。"""
-        nb = self.get_notebook(notebook_id)  # KeyError → 404
-        scale = self.scale_index_status(notebook_id)
-        uk = self.unified_kg_status(notebook_id)
-        return {
-            "kg": {
-                "ready": bool(nb.kg_ready),
-                "building": bool(nb.kg_building),
-                "pending_sources": int(nb.kg_pending_sources),
-            },
-            "unified_kg": {
-                "dirty": bool(uk.get("dirty", False)),
-                "building": bool(uk.get("viz_building", False)),
-                "last_rebuild_at": uk.get("last_rebuild_at", ""),
-            },
-            "scale_index": scale,
-        }
+        """Compatibility delegate to the runtime's read-only combined status."""
+        return self._runtime.scale_artifacts.index_status(notebook_id)
 
     def _resolve_scale_mode(self, notebook_id: str, mode: str) -> str:
-        """把 mode 解析为具体操作:fold|full。
-        auto = 有(含 stale)索引 → fold,否则 → full。
-        fold(显式或 auto 解析出)在 delta 源数超 scale_fold_max_delta_sources 时
-        升级 full:fold 的逐源 incremental_fuse + 增量 splice 常数大(生产 48k 源
-        delta 实测十几小时不可行),大 delta 全量重建反而有界(~1h)。"""
-        if mode not in ("fold", "full"):
-            mode = "fold" if self._scale_index(notebook_id, allow_stale=True) is not None else "full"
-        if mode == "fold":
-            # 运行时维切换:旧索引 manifest.dim ≠ 生效维 → fold 会把截断后的 delta
-            # 向量 add 进旧空间(硬错/污染)→ 强制 full 在新空间整体重建。
-            idx = self._scale_index(notebook_id, allow_stale=True)
-            if idx is not None:
-                from app.services.vector_index import resolve_runtime_dim as _rrd
-                eff_dim = _rrd(self.settings) or self.settings.embed_dim
-                if int(idx.manifest.get("dim", eff_dim)) != int(eff_dim):
-                    return "full"
-                # 非源结构变更守卫:索引建成后若发生过「刷新图谱」(全量重聚类,推进
-                # unified_kg_state.last_rebuild_at),fold 只把 delta 新源拼接进旧索引、
-                # 不重读全量图(_gather_kg_graph 只取 delta 源)——旧节点的重聚类不会进
-                # 索引,fold 却在末尾把 manifest.version 盖成当前(索引标最新、实则陈旧)。
-                # 故索引 built_at 早于最近一次全量重建时升级 full,让重聚类真正收敛进索引。
-                # (last_rebuild_at 仅由 rebuild 路径写,加新源的 incremental_fuse 不碰它,
-                # 故不会把「纯新增来源」误判为需要 full。)
-                built_at = str(idx.manifest.get("built_at", ""))
-                if built_at:
-                    with self._connect() as db:
-                        row = db.execute(
-                            "SELECT last_rebuild_at FROM unified_kg_state WHERE notebook_id=?",
-                            (notebook_id,)).fetchone()
-                    last_rebuild = str(row["last_rebuild_at"]) if (row and row["last_rebuild_at"]) else ""
-                    if last_rebuild and last_rebuild > built_at:
-                        return "full"
-            try:
-                delta = self._index_delta(notebook_id)
-                if len(delta["delta_sources"]) > self.settings.scale_fold_max_delta_sources:
-                    return "full"
-            except Exception:  # noqa: BLE001 — 探测失败不挡操作,维持 fold
-                pass
-        return mode
+        """Compatibility delegate to runtime fold/full selection."""
+        return self._runtime.scale_artifacts._resolve_mode(notebook_id, mode)
 
     def _resolve_index_owner(self, notebook_id: str) -> "str | None":
-        """索引完成通知该发给谁:优先发起请求线程的 `_REQUEST_USER`(copy_context 已
-        传播,常规「刷新图谱」按钮走这条),回退查 `notebooks.created_by`(覆盖无请求
-        上下文的场景,如 idle 调度器/摄取后自动 fold),都无则 None(调用方应静默跳过
-        通知,而非报错)。"""
-        try:
-            u = _REQUEST_USER.get()
-            if u is not None:
-                return u.id
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            with self._connect() as db:
-                row = db.execute(
-                    "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)
-                ).fetchone()
-                return row["created_by"] if row else None
-        except Exception:  # noqa: BLE001
-            return None
+        """Compatibility delegate to runtime notification ownership."""
+        return self._runtime.scale_artifacts._resolve_index_owner(notebook_id)
 
     def _notebook_name(self, notebook_id: str) -> str:
-        """索引完成 toast 用的 notebook 展示名;查不到就空字符串(前端已按空名兜底)。"""
-        try:
-            with self._connect() as db:
-                row = db.execute(
-                    "SELECT name FROM notebooks WHERE id = ?", (notebook_id,)
-                ).fetchone()
-                return row["name"] if row else ""
-        except Exception:  # noqa: BLE001
-            return ""
+        """Compatibility delegate to runtime notification naming."""
+        return self._runtime.scale_artifacts._notebook_name(notebook_id)
 
     def _notify_index_done(self, notebook_id: str) -> None:
-        """索引成功收尾的统一通知钩子(fold/build 共用):刷新该 owner 的待确认中心
-        snapshot(索引状态变化,如 building→indexed)+ 发一次瞬时 index_done 事件供
-        前端弹 toast。只在**成功**路径调用——调用方负责判断成功与否;通知本身失败
-        (无事件循环/DB 查询异常等)绝不能影响已经完成的索引写入,故整段 try/except
-        吞掉,仅记日志。延迟 import pending_bus 避免模块加载期循环依赖。"""
-        try:
-            from app.services.pending_bus import pending_bus
-            uid = self._resolve_index_owner(notebook_id)
-            if not uid:
-                return
-            name = self._notebook_name(notebook_id)
-            pending_bus.mark_dirty(uid)
-            pending_bus.emit(uid, {
-                "event": "index_done",
-                "notebook_id": notebook_id,
-                "notebook_name": name,
-            })
-        except Exception:  # noqa: BLE001 — 通知失败绝不影响已完成的索引 op
-            try:
-                self.event_log.logger.exception(
-                    "index_done notify failed for %s", notebook_id)
-            except Exception:
-                pass
+        """Compatibility delegate to runtime index-completion notification."""
+        return self._runtime.scale_artifacts.notify_index_done(notebook_id)
 
     def _run_scale_op(self, notebook_id: str, mode: str) -> None:
-        """后台执行(guarded):按 mode 跑 fold_scale_index_delta 或 build_scale_index。
-        本方法持 _scale_building guard;fold 用 _assume_locked=True 调用,避免嵌套去重空跑
-        (fold 自身若再 add 会因已在集合返回 already_building)。build_scale_index 无自身
-        guard,不受影响。只读 DB 向量建 ANN、不发模型调用,普通 daemon 线程即可。"""
-        with self._scale_building_lock:
-            if notebook_id in self._scale_building:
-                return
-            self._scale_building.add(notebook_id)
-
-        def _run():
-            ok = False
-            try:
-                op = self._resolve_scale_mode(notebook_id, mode)
-                if op == "fold":
-                    self.fold_scale_index_delta(notebook_id, _assume_locked=True)
-                else:
-                    self.build_scale_index(notebook_id)
-                ok = True
-            except Exception:  # noqa: BLE001 — 后台任务,失败仅记录
-                try:
-                    self.event_log.logger.exception("scale op failed for %s", notebook_id)
-                except Exception:
-                    pass
-            finally:
-                with self._scale_building_lock:
-                    self._scale_building.discard(notebook_id)
-                # 本方法是 _assume_locked=True 调用 fold 时的最外层持锁者(镜像上面
-                # discard 的判定):无论走 fold 还是 full build,通知都从这里统一发一次,
-                # 避免 fold 自身在 _assume_locked=True 时重复 emit(见 fold 内 not
-                # _assume_locked 守卫)。仅成功(ok=True)才通知。
-                if ok:
-                    self._notify_index_done(notebook_id)
-        threading.Thread(target=_run, name=f"scaleidx-{notebook_id}", daemon=True).start()
+        """Compatibility delegate to the runtime daemon launcher."""
+        return self._runtime.scale_artifacts._run_scale_op(notebook_id, mode)
 
     def _process_idle_queue(self, force: bool = False) -> None:
-        """低峰窗口(或 force)内 drain idle 队列,逐个后台重建。
-        force=True 绕过时间窗(供测试/手动)。窗口按本地 datetime.now().hour 判定,
-        start>end 视为跨零点。"""
-        import datetime
-        if not force:
-            hour = datetime.datetime.now().hour
-            lo = self.settings.scale_index_offpeak_start_hour
-            hi = self.settings.scale_index_offpeak_end_hour
-            in_window = (lo <= hour < hi) if lo <= hi else (hour >= lo or hour < hi)
-            if not in_window:
-                return
-        with self._scale_building_lock:
-            queued = dict(self._scale_idle_queue)
-            self._scale_idle_queue.clear()
-        for nb, mode in queued.items():
-            self._run_scale_op(nb, mode)
+        """Compatibility delegate to runtime idle-queue draining."""
+        return self._runtime.scale_artifacts._process_idle_queue(force=force)
 
     def _ensure_scale_scheduler(self) -> None:
-        """懒启动低峰调度器 daemon(一次性):首次 idle 入队才启,避免 app-startup 接线。"""
-        import time
-        with self._scale_building_lock:
-            if self._scale_scheduler_started:
-                return
-            self._scale_scheduler_started = True
-
-        def _loop():
-            while True:
-                time.sleep(max(30, self.settings.scale_index_scheduler_poll_seconds))
-                try:
-                    self._process_idle_queue(force=False)
-                except Exception:  # noqa: BLE001
-                    try:
-                        self.event_log.logger.exception("scale scheduler tick failed")
-                    except Exception:
-                        pass
-        threading.Thread(target=_loop, name="scaleidx-scheduler", daemon=True).start()
+        """Compatibility delegate to the runtime scheduler."""
+        return self._runtime.scale_artifacts._ensure_scheduler()
 
     def trigger_scale_index_rebuild(self, notebook_id: str, when: str = "now",
                                     mode: str = "auto") -> dict:
-        """base-tier(或已建过)才允许;不合格 → ValueError(路由转 409)。
-        when="now" 立即后台重建(in-flight 去重);when="idle" 入 _scale_idle_queue、
-        懒启动低峰调度器,返回 queued。mode="auto" 时由 _resolve_scale_mode 挑 fold/full。
-        默认 when="now"/mode="auto" 保持既有无参调用行为不变。"""
-        self.get_notebook(notebook_id)  # KeyError → 404
-        if not self._scale_index_eligible(notebook_id):
-            raise ValueError("notebook too small and not base-tier; scale index not applicable")
-        if when == "idle":
-            with self._scale_building_lock:
-                self._scale_idle_queue[notebook_id] = mode
-            self._ensure_scale_scheduler()
-            return {"status": "queued", "notebook_id": notebook_id}
-        if notebook_id in self._scale_building:
-            return {"status": "already_building", "notebook_id": notebook_id}
-        self._run_scale_op(notebook_id, mode)
-        return {"status": "building", "notebook_id": notebook_id}
+        """Compatibility delegate to runtime rebuild scheduling."""
+        return self._runtime.scale_artifacts.trigger(
+            notebook_id, when=when, mode=mode
+        )
 
     def _dequeue_scale_idle(self, notebook_id: str) -> bool:
-        """从空闲重建队列移除 notebook(加锁,幂等)。返回是否移除了一项。"""
-        with self._scale_building_lock:
-            return self._scale_idle_queue.pop(notebook_id, None) is not None
+        """Compatibility helper for the runtime-owned idle queue."""
+        with self._runtime.scale_artifacts.building_lock:
+            return (
+                self._runtime.scale_artifacts.idle_queue.pop(notebook_id, None)
+                is not None
+            )
 
     def cancel_scale_index(self, notebook_id: str) -> dict:
-        """取消检索索引构建:
-        - state=queued(在空闲队列)→ 出队,cancelled=True。
-        - state=building(后台守护线程在建)→ 无句柄不可协作打断,cancelled=False,
-          reason=building_not_interruptible(前端提示「正在构建,完成后自动更新」)。
-        - 其它 → 幂等 no-op,cancelled=False。
-        返回 {cancelled, state(取消后的新 state), reason}。"""
-        self.get_notebook(notebook_id)  # KeyError → 404
-        if notebook_id in self._scale_building:
-            return {"cancelled": False,
-                    "state": self.scale_index_status(notebook_id)["state"],
-                    "reason": "building_not_interruptible"}
-        removed = self._dequeue_scale_idle(notebook_id)
-        return {"cancelled": bool(removed),
-                "state": self.scale_index_status(notebook_id)["state"],
-                "reason": "" if removed else "not_queued"}
+        """Compatibility delegate to runtime cancellation."""
+        return self._runtime.scale_artifacts.cancel(notebook_id)
 
     def _maybe_enqueue_scale_fold(self, notebook_id: str) -> None:
-        """After content is added, if the notebook ALREADY has a scale index and
-        auto-fold is enabled, enqueue an idle incremental fold so the new
-        (post-watermark) sources get indexed and become semantically searchable
-        without a manual rebuild. Idle queue coalesces multiple adds into one
-        fold. NEVER builds a fresh index (that stays a user decision above the
-        suggest threshold). Fail-safe: never raises."""
-        if not self.settings.scale_auto_fold_on_add:
-            return
-        try:
-            if self._scale_index(notebook_id, allow_stale=True) is None:
-                return   # not indexed yet → don't auto-build; leave to user/suggest
-            self.trigger_scale_index_rebuild(notebook_id, when="idle", mode="fold")
-        except Exception:
-            self.event_log.logger.exception("auto scale-fold enqueue failed for %s", notebook_id)
+        """Compatibility delegate to runtime auto-fold policy."""
+        return self._runtime.scale_artifacts.maybe_enqueue_fold(notebook_id)
 
     def maybe_auto_index(self, notebook_id: str) -> None:
-        """大库自动建/重建检索索引 —— fail-open,绝不向调用方抛异常。
-
-        「大」复用分享/拷贝的定义:notebook_copy_stats()["copyable"] is False
-        (字节 > NOTEBOOK_COPY_MAX_BYTES 或 chunks+nodes > NOTEBOOK_COPY_MAX_ROWS)。
-
-        Called from two kinds of call sites:
-          - 写路径(_run_extraction 收尾、rebuild_unified_kg 收尾):每次都可能被
-            调用,但仍先过 once-set,避免同一 nb 连续写入反复入队。
-          - 读路径兜底(检索遇到无 ANN 回退时):必须 O(1) —— once-set 命中就直接
-            return,不做任何 DB 查询。
-
-        once-set 语义:一旦被"评估过"(无论结论是"已入队/建成"还是"不需要"),就
-        加入 self._auto_index_checked,后续调用直接短路。让集合过期重新评估的唯一
-        入口是 _mark_unified_kg_dirty(每次 KG 写都会 discard 该 nb) —— 这样索引
-        后续因新内容变 stale 时,下一轮写入/检索会重新评估而不是被旧判定永久挡住。
-        """
-        if not self.settings.scale_index_auto_enabled:
-            return
-        if notebook_id in self._auto_index_checked:
-            return
-        # 批量摄取早退:多源摄取时 _mark_unified_kg_dirty 逐源 discard 该 nb 的
-        # once-set 命中,导致同一批次每个源都重跑下面的 notebook_copy_stats(5 COUNT)+
-        # scale_index_status(多查询+manifest 读)。已在 building/idle 排队中的 nb
-        # 无需重新评估 —— O(1) 直接短路。锁语义:_scale_building 别处在
-        # _scale_building_lock 下读写,这里为性能故意不加锁做成员检查;是启发式早退,
-        # 漏判/误判的窗口极窄且后果轻(至多多跑一次评估),判定安全(review #4)。
-        if notebook_id in self._scale_building or notebook_id in self._scale_idle_queue:
-            self._auto_index_checked.add(notebook_id)
-            return
-        try:
-            stats = self.notebook_copy_stats(notebook_id)
-            if stats["copyable"]:
-                return  # 小库:行为不变,不自动建索引
-            status = self.scale_index_status(notebook_id)
-            if status["state"] not in ("unindexed", "suggested", "stale"):
-                return  # 已索引且新鲜 / 正在构建 / 已排队 —— 无需触发
-            # unindexed 也触发:该分支只在 copyable=False(已判定「大」)之后才到达,
-            # 「大」的定义(字节/chunks+nodes)与 index_suggest_chunk_threshold(仅看
-            # total_chunks)是两把不同的尺子 —— chunk 少但字节/节点多的库会停在
-            # unindexed 永不建议。产品意图是「大 → 自动建」,故此处三态一视同仁,
-            # 交给 trigger_scale_index_rebuild → _scale_index_eligible 做最终把关
-            # (仍不 eligible 会 ValueError,被下面 except 静默吞掉)。
-            try:
-                self.trigger_scale_index_rebuild(
-                    notebook_id, when=self.settings.scale_index_auto_when, mode="auto")
-            except Exception:  # noqa: BLE001 — 不 eligible/并发冲突等,auto 路径静默跳过
-                pass
-        except Exception:  # noqa: BLE001 — 读路径兜底绝不能因此拖垮请求
-            try:
-                self.event_log.logger.exception("maybe_auto_index failed for %s", notebook_id)
-            except Exception:
-                pass
-        finally:
-            self._auto_index_checked.add(notebook_id)
+        """Compatibility delegate to runtime automatic indexing."""
+        return self._runtime.scale_artifacts.maybe_auto_index(notebook_id)
 
     def _build_viz_graph_arrays(self, notebook_id: str):
         """Compatibility helper over the runtime builder's pure viz math."""
@@ -3983,7 +3613,7 @@ class SQLiteRepository:
 
     def build_viz_index(self, notebook_id: str) -> Optional[dict]:
         """Compatibility delegate to the runtime-owned viz builder."""
-        return self._runtime.scale_builder.build_viz(notebook_id)
+        return self._runtime.scale_artifacts.build_viz(notebook_id)
 
     def _active_kg_delta(self, notebook_id: str):
         """Gather the ACTIVE/self notebook's KG delta for splicing onto a base or
