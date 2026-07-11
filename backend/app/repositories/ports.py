@@ -414,3 +414,66 @@ class SQLiteMaintenancePort(Protocol):
     def backfill_chunk_fts(self, notebook_id: str) -> int: ...
     def build_scale_index(self, notebook_id: str, on_stage: Callable[[str, int], None] | None = None) -> dict: ...
     def fold_scale_index_delta(self, notebook_id: str, _assume_locked: bool = False) -> dict: ...
+
+
+# --- Task 22: Ask/answer/conversation/job/trace persistence -----------------
+# The frozen value type lives at its implementation home (the store module),
+# exactly like FollowChainResult above; this appended import keeps the shared
+# import block untouched for parallel Gate-8 tracks.
+from app.repositories.sqlite.ask_state_store import PreparedAskTurn  # noqa: E402
+
+
+class AskStateStorePort(Protocol):
+    """The raw Ask durable-state store contract (Task 22).
+
+    Identity is explicit — ``user_id`` comes from the caller and the store
+    never reads the request ContextVar.  ``begin_durable_job`` opens ONE write
+    transaction that creates/touches the conversation, mutates
+    ``payload.conversation_id`` at the same point as baseline and inserts the
+    running job row; ``finish_job`` performs only the terminal job-row
+    transaction and returns its conversation id — the failed/cancelled empty-
+    conversation cleanup stays a LATER ``cleanup_empty_conversation``
+    transaction, orchestrated by the caller.  The raw ``append_trace`` raises
+    on persistence failure; the fail-open log-and-continue policy stays with
+    the facade coordinator (error_policies.json: append_ask_trace).
+    """
+
+    def prepare_turn(
+        self,
+        notebook_id: str,
+        requested_conversation_id: str | None,
+        question: str,
+        user_id: str,
+    ) -> PreparedAskTurn: ...
+    def begin_durable_job(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        mode: str,
+        user_id: str,
+    ) -> tuple[str, str]: ...
+    def append_trace(
+        self,
+        notebook_id: str,
+        job_id: str,
+        step: dict,
+        user_id: str,
+    ) -> None: ...
+    def save_answer(
+        self,
+        notebook_id: str,
+        conversation_id: str,
+        question: str,
+        response: AskResponse,
+        user_id: str,
+    ) -> str: ...
+    def finish_job(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        answer_id: str = "",
+        error: str = "",
+    ) -> str | None: ...
+    def cleanup_empty_conversation(self, conversation_id: str) -> None: ...
+    def ask_job_status(self, job_id: str) -> dict: ...

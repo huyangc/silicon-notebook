@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 from app.repositories.source_files import SourceFileStore
+from app.repositories.sqlite.ask_state_store import AskStateStore
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.governance_store import GovernanceStore
@@ -86,6 +87,12 @@ class RepositoryRuntime:
         self.knowledge = KnowledgeStore(self.database, seams)
         self.governance = GovernanceStore(self.database, seams)
         self.unified_kg = UnifiedKgStore(self.database)
+        # Task 22: Ask/answer/conversation/job/trace persistence shares the ONE
+        # database boundary.  Identity is explicit (user_id per call — the
+        # store never reads request ContextVars) and the seams dataclass is
+        # stored, never evaluated, so construction is eager and seam-free.
+        # Cancel-event registry + fail-open trace logging stay facade-side.
+        self.ask_state = AskStateStore(self.database, seams)
         # Source file persistence resolves storage_dir through the database
         # boundary's resolve_path — no facade seams, so construction is eager.
         self.source_files = SourceFileStore(

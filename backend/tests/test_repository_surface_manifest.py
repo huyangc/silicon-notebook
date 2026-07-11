@@ -929,6 +929,19 @@ TASK19_ALLOWED_MEMBER_FILES = {
     for name in {"_runtime", "build_scale_index"}
 }
 
+# Task 22: the new ask-state store contract suite imports the compatibility
+# facade at a fresh site (the facade's own frozen import lines are untouched —
+# the facade reaches the store through the runtime and one function-local
+# import inside _read_ask_trace).
+TASK22_ALLOWED_IMPORTS = {
+    (
+        "backend/tests/test_ask_state_store.py",
+        23,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+}
+
 # Task 20: ScaleArtifactRuntime becomes the one owner of the Task-18/19
 # caches, locks, build markers and scheduling state.  Compatibility facade
 # attributes become write-through properties and the focused probes patch the
@@ -1252,6 +1265,33 @@ TASK21_ALLOWED_MEMBER_FILES |= {
     ('backend/tests/test_scale_xlayer_bridge_delta.py', 'retrieval'),
 }
 
+# Task 22: the ask/answer/conversation/job/trace persistence moves to the
+# runtime-owned AskStateStore; the facade keeps frozen-signature delegates, so
+# only the trace-list helper loses BOTH of its facade-internal call sites
+# (ask_job_detail and get_conversation now read the trace inside the store) —
+# every other ask member keeps at least one facade site (mode engines, the
+# cancel registry orchestration and the fail-open trace coordinator stay until
+# Tasks 23/24).  The new store contract suite and the two appended
+# delegation/scoping proofs consume the facade at fresh sites.
+TASK22_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", "_read_ask_trace"),
+} | {
+    ("backend/tests/test_ask_state_store.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "append_ask_trace",
+        "create_notebook", "current_user",
+    }
+} | {
+    ("backend/tests/test_ask_jobs.py", name)
+    for name in {
+        "_ask_cancel_events", "_runtime", "begin_ask_job", "current_user",
+        "finish_ask_job", "get_conversation",
+    }
+} | {
+    ("backend/tests/test_conversations.py", name)
+    for name in {"_connect", "_runtime", "_write", "current_user"}
+}
+
 TASK7_COMPAT_PROPERTIES = {
     "_system_llm_client": True,
     "_reasoning_llm_client": True,
@@ -1319,6 +1359,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK19_ALLOWED_MEMBER_FILES
     | TASK20_ALLOWED_MEMBER_FILES
     | TASK21_ALLOWED_MEMBER_FILES
+    | TASK22_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -1782,6 +1823,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK18_ALLOWED_IMPORTS
                     or site in TASK19_ALLOWED_IMPORTS
                     or site in TASK20_ALLOWED_IMPORTS
+                    or site in TASK22_ALLOWED_IMPORTS
                 )
 
 

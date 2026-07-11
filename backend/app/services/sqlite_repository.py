@@ -4382,87 +4382,45 @@ class SQLiteRepository:
         # 所有 ask handler 的唯一收口:在持久化/返回前给 response 打大库无索引提示位。
         # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
         # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
+        # 该装饰属 scale-index 域,留在 facade;行持久化在 AskStateStore(Task 22)。
         response.index_required = self._needs_index(notebook_id)
-        answer_id = _new_id("ans")
-        now = _now()
-        payload = response.model_dump()
-        payload["answer_id"] = answer_id
-        with self._write() as db:
-            db.execute(
-                "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    answer_id,
-                    notebook_id,
-                    question,
-                    json.dumps(payload, ensure_ascii=False),
-                    now,
-                    conversation_id,
-                ),
-            )
-        return answer_id
+        return self._runtime.ask_state.save_answer(
+            notebook_id, conversation_id, question, response,
+            self.current_user().id)
 
     def _ensure_conversation(
         self, db, notebook_id: str, conversation_id: Optional[str], question: str
     ) -> str:
         """Return the conversation id for this turn: append to an existing
         conversation in this notebook (touching `updated_at`), or create a new
-        one (id `conv-<hex>`, title from the first question)."""
-        now = _now()
-        if conversation_id:
-            # 只接续**调用者自己**的对话:共享库里成员传入 owner/他人的 conv-id 不命中,
-            # 落到下面新建一条归自己的对话,杜绝跨用户注入回合(read-only 成员经 ask 触达)。
-            row = db.execute(
-                "SELECT id FROM conversations WHERE id = ? AND notebook_id = ? AND created_by = ?",
-                (conversation_id, notebook_id, self.current_user().id),
-            ).fetchone()
-            if row is not None:
-                db.execute(
-                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                    (now, conversation_id),
-                )
-                return conversation_id
-        new_id = _new_id("conv")
-        db.execute(
-            "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (new_id, notebook_id, question[:60], self.current_user().id, now, now),
-        )
-        return new_id
+        one (id `conv-<hex>`, title from the first question).  Rides the
+        CALLER's connection; identity resolves here — the store takes the
+        explicit user_id and preserves the created_by scoping verbatim."""
+        return self._runtime.ask_state.ensure_conversation(
+            db, notebook_id, conversation_id, question, self.current_user().id)
 
     def begin_ask_job(self, notebook_id: str, payload, mode: str, cancel_event) -> tuple[str, str]:
         """建/接续会话 + 插入 running 的 ask_jobs 行 + 注册 cancel_event。
         就地把解析出的 conversation_id 写回 payload,使随后的 handler(_ensure_conversation)
-        接续同一会话、不另建。返回 (job_id, conversation_id)。"""
+        接续同一会话、不另建。返回 (job_id, conversation_id)。
+        持久化(单写事务原子建会话+job 行)在 AskStateStore;notebook 存在性守卫
+        与 cancel-event 注册表编排留在 facade(Task 23 再迁执行编排)。"""
         self.get_notebook(notebook_id)
-        question = payload.question.strip()
-        now = _now()
-        job_id = _new_id("askjob")
-        with self._write() as db:
-            conversation_id = self._ensure_conversation(
-                db, notebook_id, payload.conversation_id, question)
-            payload.conversation_id = conversation_id
-            db.execute(
-                "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
-                "status,trace_json,answer_id,error,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?, 'running','','','',?,?)",
-                (job_id, notebook_id, conversation_id, self.current_user().id, mode,
-                 question[:200], now, now))
+        job_id, conversation_id = self._runtime.ask_state.begin_durable_job(
+            notebook_id, payload, mode, self.current_user().id)
         with self._ask_cancel_lock:
             self._ask_cancel_events[job_id] = cancel_event
         return job_id, conversation_id
 
     def finish_ask_job(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:
-        """终态化 ask_job + 注销 cancel_event；cancelled/failed 时清理空会话(0 答案)。"""
-        with self._write() as db:
-            row = db.execute("SELECT conversation_id FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-            db.execute(
-                "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? WHERE id=?",
-                (status, answer_id, error, _now(), job_id))
+        """终态化 ask_job + 注销 cancel_event；cancelled/failed 时清理空会话(0 答案)。
+        终态 job 行是 store 里的一个事务;空会话清理保持为之后的另一个事务。"""
+        conversation_id = self._runtime.ask_state.finish_job(
+            job_id, status, answer_id=answer_id, error=error)
         with self._ask_cancel_lock:
             self._ask_cancel_events.pop(job_id, None)
-        if status in ("cancelled", "failed") and row is not None and row["conversation_id"]:
-            self._cleanup_empty_conversation(row["conversation_id"])
+        if status in ("cancelled", "failed") and conversation_id:
+            self._cleanup_empty_conversation(conversation_id)
 
     def cancel_ask_job(self, job_id: str, user_id: str) -> dict:
         """显式取消(属主校验)。set 在途 worker 的 cancel_event;非属主/不存在 → KeyError。"""
@@ -4476,203 +4434,59 @@ class SQLiteRepository:
         return {"status": "cancelling" if ev is not None else st["status"], "job_id": job_id}
 
     def ask_job_status(self, job_id: str) -> dict:
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT id,notebook_id,conversation_id,created_by,mode,status,answer_id,error "
-                "FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            raise KeyError(job_id)
-        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
-                "conversation_id": row["conversation_id"], "created_by": row["created_by"],
-                "mode": row["mode"], "status": row["status"], "answer_id": row["answer_id"],
-                "error": row["error"]}
+        return self._runtime.ask_state.ask_job_status(job_id)
 
     def append_ask_trace(self, job_id: str, step: dict) -> None:
         """把一个 trace step 追加进 ask_trace_steps 子表(append-only,O(1) 单行
-        INSERT)。seq 用 `SELECT COALESCE(MAX(seq),-1)+1 WHERE job_id=?` 在同一个
-        _write() 事务里取号+插入,避免与自己的下一次 append 竞态(虽单 worker 写
-        单个 job、无写写竞态,取号+插同事务仍是稳妥做法)。
+        INSERT;取号+插入同事务,细节在 AskStateStore.append_trace)。
 
-        perf fast-follow:取代旧版对 ask_jobs.trace_json 单列的「读整个 JSON 数组→
-        append→写回」——那是 O(N^2) 累积序列化,且每次都要占用全站唯一的 _write()
-        全局写锁,轨迹越长锁持有时间越长。子表把锁持有时间摊平成常数。
-
-        仍 **fail-open**:轨迹持久化失败绝不拖垮 ask。"""
+        本 facade 协调层保有既有契约:**fail-open**——raw store 上抛的任何持久化
+        失败在此记日志吞掉,轨迹持久化失败绝不拖垮 ask(error_policies.json:
+        append_ask_trace)。notebook_id/user_id 是 port 签名参数,store SQL 只按
+        job_id 落行;基线本就不解析用户,这里传占位保持零额外开销(Task 24 的
+        引擎调用会带真实值)。"""
         try:
-            with self._write() as db:
-                exists = db.execute("SELECT 1 FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-                if exists is None:
-                    return
-                next_seq = db.execute(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM ask_trace_steps WHERE job_id=?",
-                    (job_id,),
-                ).fetchone()["n"]
-                db.execute(
-                    "INSERT INTO ask_trace_steps (job_id, seq, step_json, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (job_id, next_seq, json.dumps(step, ensure_ascii=False), _now()),
-                )
+            self._runtime.ask_state.append_trace("", job_id, step, "")
         except Exception:  # noqa: BLE001
             self.event_log.logger.exception("append_ask_trace failed for %s", job_id)
 
     @staticmethod
     def _read_ask_trace(db, job_id: str) -> list:
-        """从 ask_trace_steps 子表按 seq 顺序读回一个 job 的完整轨迹,拼成 list。
-        单行解析失败(损坏的 step_json)容错跳过而非整体失败——与旧版
-        trace_json 列「解析失败即空列表」的粗粒度容错相比更细,但不改变
-        「解析失败不抛」这条既有契约。取代直读 ask_jobs.trace_json 列
-        (该列已停止写入,只为兼容旧行保留,见 append_ask_trace)。"""
-        rows = db.execute(
-            "SELECT step_json FROM ask_trace_steps WHERE job_id=? ORDER BY seq ASC",
-            (job_id,),
-        ).fetchall()
-        trace = []
-        for r in rows:
-            try:
-                trace.append(json.loads(r["step_json"]))
-            except (TypeError, ValueError):
-                continue
-        return trace
+        """从 ask_trace_steps 子表按 seq 顺序读回一个 job 的完整轨迹(容错细节
+        在 AskStateStore.read_trace;冻结签名 delegate,骑调用者连接)。"""
+        from app.repositories.sqlite.ask_state_store import AskStateStore
+        return AskStateStore.read_trace(db, job_id)
 
     def ask_job_detail(self, job_id: str) -> dict:
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            trace = self._read_ask_trace(db, job_id)
-        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
-                "conversation_id": row["conversation_id"], "created_by": row["created_by"],
-                "mode": row["mode"], "question": row["question"], "status": row["status"],
-                "trace": trace, "answer_id": row["answer_id"], "error": row["error"]}
+        return self._runtime.ask_state.ask_job_detail(job_id)
 
     def _cleanup_empty_conversation(self, conversation_id: str) -> None:
         """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
-        with self._write() as db:
-            db.execute(
-                "DELETE FROM conversations WHERE id=? AND NOT EXISTS "
-                "(SELECT 1 FROM answers WHERE conversation_id=?)",
-                (conversation_id, conversation_id))
+        return self._runtime.ask_state.cleanup_empty_conversation(conversation_id)
 
     def _conversation_history(self, db, conversation_id: str, limit: int = 5) -> str:
         """Build the prior-turns history block (oldest->newest, last `limit`
-        turns) from stored answer payloads. Uses each turn's `conclusion`
-        (provenance markers already stripped). Returns "" when no prior turns."""
-        rows = db.execute(
-            "SELECT question, payload FROM answers WHERE conversation_id = ? "
-            "ORDER BY created_at ASC",
-            (conversation_id,),
-        ).fetchall()
-        rows = rows[-limit:]
-        lines = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"] or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            conclusion = str(payload.get("conclusion", "")).strip()
-            lines.append(f"User: {row['question']}\nAssistant: {conclusion}")
-        return "\n".join(lines)
+        turns) from stored answer payloads.  Frozen-signature delegate riding
+        the caller's connection (the mode engines own the transaction)."""
+        return self._runtime.ask_state.conversation_history(db, conversation_id, limit)
 
     def get_conversation(self, conversation_id: str) -> "ConversationDetail":
         """Rebuild a ConversationDetail from the conversations row + its answer
         turns. Raises KeyError if the conversation does not exist."""
-        from app.models.schemas import (
-            ConversationDetail,
-            ConversationTurn,
-        )
-        with self._connect() as db:
-            conv = db.execute(
-                "SELECT id, notebook_id, title, updated_at FROM conversations WHERE id = ?",
-                (conversation_id,),
-            ).fetchone()
-            if conv is None:
-                raise KeyError(conversation_id)
-            rows = db.execute(
-                "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
-                (conversation_id,),
-            ).fetchall()
-            job = db.execute(
-                "SELECT id, question, mode FROM ask_jobs "
-                "WHERE conversation_id=? AND status='running' "
-                "ORDER BY created_at DESC LIMIT 1", (conversation_id,)).fetchone()
-            job_trace = self._read_ask_trace(db, job["id"]) if job is not None else []
-        turns = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"] or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            turns.append(
-                ConversationTurn(
-                    answer_id=row["id"],
-                    question=row["question"],
-                    response=AskResponse(**payload),
-                    created_at=row["created_at"],
-                )
-            )
-        used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
-        active_job = None
-        if job is not None:
-            from app.models.schemas import ActiveAskJob
-            active_job = ActiveAskJob(job_id=job["id"], question=job["question"] or "",
-                                      mode=job["mode"] or "", trace=job_trace)
-        return ConversationDetail(
-            id=conv["id"],
-            notebook_id=conv["notebook_id"],
-            title=conv["title"] or "",
-            updated_at=conv["updated_at"] or "",
-            turn_count=len(turns),
-            used_reasoning=used_reasoning,
-            turns=turns,
-            active_job=active_job,
-        )
+        return self._runtime.ask_state.get_conversation(conversation_id)
 
     def list_conversations(self, notebook_id: str) -> "List[ConversationSummary]":
         """List conversations for a notebook (most-recently-updated first) with
         a per-conversation turn count. Raises KeyError if the notebook is gone."""
-        from app.models.schemas import ConversationSummary
         self.get_notebook(notebook_id)
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT c.id, c.notebook_id, c.title, c.updated_at, "
-                "(SELECT COUNT(*) FROM answers a WHERE a.conversation_id = c.id) AS turn_count, "
-                "(SELECT COALESCE(json_array_length(json_extract(a.payload, '$.reasoning_trace')), 0) > 0 "
-                "   FROM answers a WHERE a.conversation_id = c.id "
-                "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning "
-                "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
-                "ORDER BY c.updated_at DESC",
-                (notebook_id, self.current_user().id),
-            ).fetchall()
-        return [
-            ConversationSummary(
-                id=row["id"],
-                notebook_id=row["notebook_id"],
-                title=row["title"] or "",
-                updated_at=row["updated_at"] or "",
-                turn_count=row["turn_count"],
-                used_reasoning=bool(row["used_reasoning"]),
-            )
-            for row in rows
-        ]
+        return self._runtime.ask_state.list_conversations(
+            notebook_id, self.current_user().id)
 
     def rename_conversation(self, conversation_id: str, title: str) -> None:
-        with self._write() as db:
-            cur = db.execute(
-                "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
-                (title, _now(), conversation_id),
-            )
-            if cur.rowcount == 0:
-                raise KeyError(conversation_id)
+        return self._runtime.ask_state.rename_conversation(conversation_id, title)
 
     def delete_conversation(self, conversation_id: str) -> None:
-        with self._write() as db:
-            cur = db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
-            if cur.rowcount == 0:
-                raise KeyError(conversation_id)
-            db.execute("DELETE FROM answers WHERE conversation_id=?", (conversation_id,))
+        return self._runtime.ask_state.delete_conversation(conversation_id)
 
     def bulk_delete_conversations(self, notebook_id: str, older_than_days: int) -> int:
         """Delete the current user's conversations in `notebook_id` whose last
@@ -4682,19 +4496,8 @@ class SQLiteRepository:
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
         self.get_notebook(notebook_id)
-        cutoff = (datetime.now() - timedelta(days=older_than_days)).replace(microsecond=0).isoformat()
-        with self._write() as db:
-            ids = [
-                row["id"]
-                for row in db.execute(
-                    "SELECT id FROM conversations "
-                    "WHERE notebook_id = ? AND created_by = ? AND updated_at < ?",
-                    (notebook_id, self.current_user().id, cutoff),
-                ).fetchall()
-            ]
-            db.executemany("DELETE FROM answers WHERE conversation_id = ?", [(cid,) for cid in ids])
-            db.executemany("DELETE FROM conversations WHERE id = ?", [(cid,) for cid in ids])
-        return len(ids)
+        return self._runtime.ask_state.bulk_delete_conversations(
+            notebook_id, older_than_days, self.current_user().id)
 
     # --- 深度报告 ---
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
@@ -4851,28 +4654,7 @@ class SQLiteRepository:
         return {"count": actionable, "items": items}
 
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse:
-        if payload.rating not in {"useful", "not_useful"}:
-            raise ValueError("rating must be useful or not_useful")
-        now = _now()
-        feedback_id = _new_id("fb")
-        with self._write() as db:
-            answer = db.execute(
-                "SELECT notebook_id FROM answers WHERE id = ?",
-                (answer_id,),
-            ).fetchone()
-            if answer is None:
-                raise KeyError(answer_id)
-            db.execute(
-                "INSERT INTO feedback (id, answer_id, notebook_id, rating, comment, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (feedback_id, answer_id, answer["notebook_id"], payload.rating, payload.comment, now),
-            )
-        return FeedbackResponse(
-            id=feedback_id,
-            answer_id=answer_id,
-            rating=payload.rating,
-            comment=payload.comment,
-        )
+        return self._runtime.ask_state.submit_feedback(answer_id, payload)
 
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         return self._runtime.catalog.notebook_analytics(notebook_id)
