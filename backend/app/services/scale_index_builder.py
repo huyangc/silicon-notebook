@@ -482,20 +482,9 @@ class ScaleIndexBuilder:
                 manifest["n_chunk_ann"] = len(chunk_labels)
 
             if idx.relation_ann_path and idx.relation_ann_labels is not None:
-                relation_ids = []
-                with self.projections.connect() as db:
-                    for batch in self.projections.in_batches(
-                        delta["delta_sources"]
-                    ):
-                        placeholders = ",".join("?" for _ in batch)
-                        relation_ids.extend(
-                            row["id"]
-                            for row in db.execute(
-                                "SELECT id FROM knowledge_relations "
-                                f"WHERE notebook_id=? AND source_id IN ({placeholders})",
-                                (notebook_id, *batch),
-                            ).fetchall()
-                        )
+                relation_ids = self._delta_relation_ids(
+                    notebook_id, delta["delta_sources"]
+                )
                 relation_vector_ids, relation_matrix = delta_vectors(
                     "relation_embeddings", "relation_id", relation_ids
                 )
@@ -546,17 +535,25 @@ class ScaleIndexBuilder:
                 if completed:
                     self.notify_index_done(notebook_id)
 
+    def _delta_relation_ids(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> list[str]:
+        relation_ids = []
+        with self.projections.connect() as db:
+            for batch in self.projections.in_batches(source_ids):
+                relation_ids.extend(
+                    self.projections.relation_ids_for_source_batch(
+                        db, notebook_id, batch
+                    )
+                )
+        return relation_ids
+
     def _derive_object_graph_lite(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)
         from app.services.kg_merge import derive_unified_graph
 
         with self.projections.connect() as db:
-            rows = db.execute(
-                "SELECT id, object_type, json_extract(payload,'$.name') AS name "
-                "FROM knowledge_objects "
-                "WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,),
-            ).fetchall()
+            rows = self.projections.active_object_graph_rows(db, notebook_id)
         nodes = [
             {
                 "id": row["id"],

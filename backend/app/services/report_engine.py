@@ -78,28 +78,17 @@ class ReportEngine:
     @classmethod
     def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
         """Frozen-call-site adapter; extracts narrow ports and retains no facade."""
-        from app.services.communities import CommunityQueryService
-        runtime = repository._runtime
-        retrieval = repository.retrieval   # 惰性接线;同时保证 evidence_context 就绪
-        dependencies = ReportEngineDependencies(
-            reports=runtime.report_store,
-            retrieval=retrieval,
-            evidence_context=runtime.evidence_context,
-            model_clients=runtime.models,
-            model_errors=runtime.models,
-            source_query=runtime.source_store,
-            communities=CommunityQueryService(
-                notebooks=runtime.notebook_store,
-                unified_kg=runtime.unified_kg,
-                event_log=runtime.event_log,
-                sibling_min_bridge=settings.sibling_min_bridge,
-            ),
-            settings=settings,
-            event_log=runtime.event_log,
+        engine = repository.report_execution.engine_factory(
+            user_id=repository.current_user().id,
+            cancel_event=cancel_event,
         )
-        return cls(dependencies,
-                   user_id=runtime.identity.current_user().id,
-                   cancel_event=cancel_event)
+        if cls is ReportEngine:
+            return engine
+        return cls(
+            engine.dependencies,
+            user_id=engine.user_id,
+            cancel_event=engine.cancel_event,
+        )
 
     # --- Stage A ---
     def _plan_outline(self, notebook_id: str, question: str, history: str) -> List[dict]:

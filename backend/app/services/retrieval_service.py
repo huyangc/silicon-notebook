@@ -5,9 +5,13 @@ from typing import Any
 
 
 class RetrievalService:
-    def __init__(self, *, candidates, graph) -> None:
+    def __init__(self, *, candidates, graph, community_queries) -> None:
         self.candidates = candidates
         self.graph = graph
+        self._community_queries = community_queries
+
+    def community_queries(self):
+        return self._community_queries()
 
     def replace_embedder(self, embedder: Any) -> None:
         self.candidates.embedder = embedder

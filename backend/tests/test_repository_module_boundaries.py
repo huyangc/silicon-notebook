@@ -54,7 +54,7 @@ def test_communities_module_consumes_unified_store_not_connect():
     source = (BACKEND / "app/services/communities.py").read_text(encoding="utf-8")
     assert "_connect" not in source
     assert ".execute(" not in source
-    assert "_runtime.unified_kg" in source
+    assert "self.unified_kg" in source and "_runtime" not in source
 
 
 def test_stores_own_the_plan_frozen_primitives():

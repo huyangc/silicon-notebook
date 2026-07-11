@@ -177,6 +177,27 @@ class IndexProjectionStore:
                     (notebook_id, *batch)).fetchone()["c"]
         return int(nchunks)
 
+    def relation_ids_for_source_batch(
+        self, db, notebook_id: str, source_ids: Sequence[str]
+    ) -> list[str]:
+        placeholders = ",".join("?" for _ in source_ids)
+        return [
+            row["id"]
+            for row in db.execute(
+                "SELECT id FROM knowledge_relations "
+                f"WHERE notebook_id=? AND source_id IN ({placeholders})",
+                (notebook_id, *source_ids),
+            ).fetchall()
+        ]
+
+    def active_object_graph_rows(self, db, notebook_id: str) -> list:
+        return db.execute(
+            "SELECT id, object_type, json_extract(payload,'$.name') AS name "
+            "FROM knowledge_objects "
+            "WHERE notebook_id=? AND status!='deprecated'",
+            (notebook_id,),
+        ).fetchall()
+
     # ─────────────────────────────────────────────────── graph snapshots ──
     def graph_rows(
         self,

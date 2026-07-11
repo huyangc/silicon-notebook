@@ -250,22 +250,22 @@ def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():
         and n.func.attr in {"execute", "executemany", "executescript"}
     ]
     assert sql_calls == []
-# Exact debt ledger: removing/moving a call deletes its entry; new calls fail.
+CLOSED_REMEDIATION_MODULES = {
+    "product_sql": (
+        "backend/app/services/scale_index_builder.py",
+    ),
+    "private_repository": (
+        "backend/app/services/communities.py",
+        "backend/app/services/report_engine.py",
+    ),
+}
+CLOSED_REMEDIATION_ATTRIBUTES = {
+    "product_sql": {"execute", "executemany", "executescript"},
+    "private_repository": {"_runtime"},
+}
 EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
-    "product_sql": {
-        ("backend/app/services/scale_index_builder.py", 493, "db.execute"),
-        ("backend/app/services/scale_index_builder.py", 554, "db.execute"),
-    },
-    "private_repository": {
-        # Remediation Task 3 removed four exact private reaches.
-        # Keep later frozen test-import coordinates stable.
-        #
-        #
-        ("backend/app/services/communities.py", 87, "_runtime"),
-        ("backend/app/services/communities.py", 93, "_runtime"),
-        ("backend/app/services/communities.py", 136, "_runtime"),
-        ("backend/app/services/report_engine.py", 82, "_runtime"),
-    },
+    "product_sql": set(),
+    "private_repository": set(),
 }
 
 RETIRED_RETRIEVAL_PRIVATES = {

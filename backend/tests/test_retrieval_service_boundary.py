@@ -20,15 +20,21 @@ class _Graph:
 
 
 def test_retrieval_service_has_no_repository_backreference():
-    service = RetrievalService(candidates=_Candidates(), graph=_Graph())
+    communities = lambda: object()
+    service = RetrievalService(
+        candidates=_Candidates(), graph=_Graph(), community_queries=communities
+    )
     assert service.__dict__ == {
         "candidates": service.candidates,
         "graph": service.graph,
+        "_community_queries": communities,
     }
 
 
 def test_retrieval_service_does_not_call_facade_private_retrieval():
-    service = RetrievalService(candidates=_Candidates(), graph=_Graph())
+    service = RetrievalService(
+        candidates=_Candidates(), graph=_Graph(), community_queries=lambda: object()
+    )
     assert service.retrieve_scored("nb", "query") == []
 
 

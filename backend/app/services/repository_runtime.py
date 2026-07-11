@@ -354,9 +354,20 @@ class RepositoryRuntime:
                 embedder=self.embedder,
                 notebook_languages=self.notebook_languages,
             )
+            from app.services.communities import CommunityQueryService
+
             candidates = CandidateRetrievalService(**common)
             graph = GraphRetrievalService(**common)
-            retrieval = RetrievalService(candidates=candidates, graph=graph)
+            retrieval = RetrievalService(
+                candidates=candidates,
+                graph=graph,
+                community_queries=lambda: CommunityQueryService(
+                    notebooks=self.notebook_store,
+                    unified_kg=self.unified_kg,
+                    event_log=self.event_log,
+                    sibling_min_bridge=self.settings.sibling_min_bridge,
+                ),
+            )
             candidates.bind(peer=graph, retrieval=retrieval)
             graph.bind(peer=candidates, retrieval=retrieval)
             evidence = EvidenceContextService(
@@ -874,7 +885,6 @@ class RepositoryRuntime:
         launch time — mirroring the frozen per-deep-dive construction.
         Deliberately NO restart recovery: a dead process leaves the report row
         at its last persisted status."""
-        from app.services.communities import CommunityQueryService
         from app.services.report_engine import ReportEngine, ReportEngineDependencies
 
         def engine_factory(*, user_id: str, cancel_event=None) -> ReportEngine:
@@ -890,12 +900,7 @@ class RepositoryRuntime:
                 model_clients=self.models,
                 model_errors=self.models,
                 source_query=self.source_store,
-                communities=CommunityQueryService(
-                    notebooks=self.notebook_store,
-                    unified_kg=self.unified_kg,
-                    event_log=self.event_log,
-                    sibling_min_bridge=self.settings.sibling_min_bridge,
-                ),
+                communities=retrieval_port.community_queries(),
                 settings=self.settings,
                 event_log=self.event_log,
             )
@@ -941,8 +946,6 @@ class RepositoryRuntime:
                 return self.ask
             if self._ask_retrieval is None:
                 raise RuntimeError("ask_service requires wire_ask() first")
-            from app.services.communities import CommunityQueryService
-
             retrieval = self._ask_retrieval()
             if self.evidence_context is None or self.scale_artifacts is None:
                 raise RuntimeError(
@@ -956,12 +959,7 @@ class RepositoryRuntime:
                 evidence_context=self.evidence_context,
                 model_clients=self.models,
                 model_errors=self.models,
-                communities=lambda: CommunityQueryService(
-                    notebooks=self.notebook_store,
-                    unified_kg=self.unified_kg,
-                    event_log=self.event_log,
-                    sibling_min_bridge=self.settings.sibling_min_bridge,
-                ),
+                communities=retrieval.community_queries,
                 scale_profiles=lambda: NotebookScaleProfile(
                     self.settings,
                     self.queries,

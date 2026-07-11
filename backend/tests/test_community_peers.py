@@ -21,7 +21,9 @@ import sqlite3
 import pytest
 
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
-from app.services.communities import _norm, community_peers, first_base_notebook_id
+from app.services.communities import (
+    CommunityQueryService, _norm, community_peers, first_base_notebook_id,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -58,6 +60,11 @@ class _FakeRepo:
         self._conn = conn
         self._runtime = _FakeRuntime(conn)
         self.event_log = _EventLog()
+        self.community_queries = CommunityQueryService(
+            notebooks=object(),
+            unified_kg=self._runtime.unified_kg,
+            event_log=self.event_log,
+        )
 
 
 def _make_db() -> sqlite3.Connection:
@@ -159,9 +166,9 @@ def test_norm_collapses_ws_and_lowercases():
 def test_first_base_notebook_excludes_active(repo_with_communities):
     repo = repo_with_communities
     # active 恰是 nb-base 本身 → 应被 id != ? 排除 → None
-    assert first_base_notebook_id(repo, "nb-base") is None
+    assert first_base_notebook_id(repo.community_queries, "nb-base") is None
     # active 是别的 nb → 返回 base 库
-    assert first_base_notebook_id(repo, "nb-active") == "nb-base"
+    assert first_base_notebook_id(repo.community_queries, "nb-active") == "nb-base"
 
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +177,7 @@ def test_first_base_notebook_excludes_active(repo_with_communities):
 def test_peers_from_community(repo_with_communities):
     repo = repo_with_communities
     peers = community_peers(
-        repo, "nb-base", "DeepSeek-V4", "efficiency of qwen", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "DeepSeek-V4", "efficiency of qwen", top_k=5, candidates=50
     )
     # 兄弟里含 Qwen-X，且不含焦点自身
     assert any("qwen" in p.lower() for p in peers)
@@ -186,7 +193,7 @@ def test_peers_from_community(repo_with_communities):
 def test_peers_respects_top_k(repo_with_communities):
     repo = repo_with_communities
     peers = community_peers(
-        repo, "nb-base", "DeepSeek-V4", "llm", top_k=1, candidates=50
+        repo.community_queries, "nb-base", "DeepSeek-V4", "llm", top_k=1, candidates=50
     )
     assert len(peers) == 1
 
@@ -194,7 +201,7 @@ def test_peers_respects_top_k(repo_with_communities):
 def test_focal_name_matched_case_insensitively(repo_with_communities):
     repo = repo_with_communities
     peers = community_peers(
-        repo, "nb-base", "  deepseek-v4 ", "qwen", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "  deepseek-v4 ", "qwen", top_k=5, candidates=50
     )
     assert any("qwen" in p.lower() for p in peers)
     assert not repo.event_log.events
@@ -206,7 +213,7 @@ def test_focal_name_matched_case_insensitively(repo_with_communities):
 def test_focal_unresolved_failopen(repo_with_communities):
     repo = repo_with_communities
     out = community_peers(
-        repo, "nb-base", "NoSuchModelXYZ", "q", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "NoSuchModelXYZ", "q", top_k=5, candidates=50
     )
     assert out == []
     assert any(
@@ -218,14 +225,14 @@ def test_focal_unresolved_failopen(repo_with_communities):
 
 def test_empty_focal_name_returns_empty_no_event(repo_with_communities):
     repo = repo_with_communities
-    assert community_peers(repo, "nb-base", "   ", "q", top_k=5, candidates=50) == []
+    assert community_peers(repo.community_queries, "nb-base", "   ", "q", top_k=5, candidates=50) == []
     # 空 focal 是入参问题，直接短路返回、不 emit
     assert not repo.event_log.events
 
 
 def test_empty_base_nb_returns_empty_no_event(repo_with_communities):
     repo = repo_with_communities
-    assert community_peers(repo, "", "DeepSeek-V4", "q", top_k=5, candidates=50) == []
+    assert community_peers(repo.community_queries, "", "DeepSeek-V4", "q", top_k=5, candidates=50) == []
     assert not repo.event_log.events
 
 
@@ -235,7 +242,7 @@ def test_empty_base_nb_returns_empty_no_event(repo_with_communities):
 def test_not_built_failopen(repo_no_communities):
     repo = repo_no_communities
     out = community_peers(
-        repo, "nb-base", "DeepSeek-V4", "q", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "DeepSeek-V4", "q", top_k=5, candidates=50
     )
     assert out == []
     assert any(
