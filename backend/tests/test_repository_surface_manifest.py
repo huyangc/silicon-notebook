@@ -1046,6 +1046,9 @@ TASK21_ALLOWED_PATCHES = {
     ('backend/tests/test_scale_xlayer_bridge_delta.py', 188, '_vector_matrix', 'repo'),
     ('backend/tests/test_scale_xlayer_bridge_delta.py', 221, '_vector_matrix', 'repo'),
     ('backend/tests/test_scale_xlayer_bridge_delta.py', 248, '_scale_xlayer_bridge_edges', 'repo'),
+    # c9ddf31 single-owner cache follow-up：冻结 fixture 记录的 _loader_spy 旧 patch 座
+    # （repo._connect@134）已迁到 runtime.database.connect（等行数替换），retired。
+    ('backend/tests/test_incremental_fuse_perf.py', 134, '_connect', 'repo'),
 }
 
 TASK20_ALLOWED_MEMBER_FILES = {
@@ -1418,6 +1421,13 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
         "find_notebook_by_share_token",
         "backend/tests/test_notebook_share_copy.py:445",
     ),
+    # c9ddf31 single-owner cache follow-up：_loader_spy 探针座从 repo._connect 迁到
+    # runtime.database.connect（cluster_map loader 实际经过的连接边界）。旧 _connect
+    # 站点留在冻结 fixture、新 _runtime 站点是等行数替换后的现役座。
+    ("_connect", "backend/tests/test_incremental_fuse_perf.py:110"),
+    ("_connect", "backend/tests/test_incremental_fuse_perf.py:134"),
+    ("_runtime", "backend/tests/test_incremental_fuse_perf.py:110"),
+    ("_runtime", "backend/tests/test_incremental_fuse_perf.py:134"),
 }
 
 
