@@ -1,8 +1,10 @@
 """Task 20: scale/viz cache, version and scheduling state has one owner."""
 from __future__ import annotations
 
+import gc
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -15,6 +17,10 @@ from app.services.sqlite_repository import SQLiteRepository
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
+    return _make_repo(tmp_path, monkeypatch)
+
+
+def _make_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
@@ -117,6 +123,26 @@ def test_scale_runtime_callbacks_do_not_retain_repository_facade(repo):
         }
     }
     assert [name for name, callback in callbacks.items() if retains(callback, repo)] == []
+
+
+def test_retained_scale_runtime_does_not_transitively_retain_repository(
+    tmp_path, monkeypatch
+):
+    repository = _make_repo(tmp_path, monkeypatch)
+    notebook = repository.create_notebook(NotebookCreate(name="retention"))
+    notebook_id = notebook.id
+    scale = repository._runtime.scale_artifacts
+
+    assert scale.unified_status(notebook_id)["dirty"] is False
+
+    repository_ref = weakref.ref(repository)
+    del notebook
+    del repository
+    gc.collect()
+
+    assert repository_ref() is None
+    with pytest.raises(RuntimeError, match="knowledge lifecycle is not wired"):
+        scale.unified_status(notebook_id)
 
 
 def test_version_cold_failure_releases_singleflight_and_does_not_poison_memo(

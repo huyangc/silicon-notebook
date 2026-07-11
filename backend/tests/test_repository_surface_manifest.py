@@ -937,7 +937,7 @@ TASK19_ALLOWED_MEMBER_FILES = {
 TASK20_ALLOWED_IMPORTS = {
     (
         "backend/tests/test_scale_artifact_runtime.py",
-        13,
+        15,
         "app.services.sqlite_repository",
         "SQLiteRepository",
     ),

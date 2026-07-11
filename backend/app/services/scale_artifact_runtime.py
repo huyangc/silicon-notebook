@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import threading
 import time
+import weakref
 from typing import Any, Callable, Optional
 
 
@@ -68,7 +69,7 @@ class ScaleArtifactRuntime:
         self.notebooks = notebooks
         self.facts_repo = facts_repo
         self.snapshots = snapshots
-        self.lifecycle = None
+        self._lifecycle_ref: weakref.ReferenceType | None = None
 
         # Retarget Task 18/19 to this owner's canonical state and methods.
         self.catalog.version = self.version
@@ -89,6 +90,14 @@ class ScaleArtifactRuntime:
 
     def get_notebook(self, notebook_id: str):
         return self.notebooks.get_notebook(notebook_id)
+
+    @property
+    def lifecycle(self):
+        return self._lifecycle_ref() if self._lifecycle_ref is not None else None
+
+    @lifecycle.setter
+    def lifecycle(self, value) -> None:
+        self._lifecycle_ref = weakref.ref(value) if value is not None else None
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
         from app.services.notebook_scale import NotebookScaleProfile
@@ -173,9 +182,10 @@ class ScaleArtifactRuntime:
                 pass
 
     def unified_status(self, notebook_id: str) -> dict:
-        if self.lifecycle is None:
+        lifecycle = self.lifecycle
+        if lifecycle is None:
             raise RuntimeError("knowledge lifecycle is not wired")
-        return self.lifecycle.unified_kg_status(notebook_id)
+        return lifecycle.unified_kg_status(notebook_id)
 
     def _cache_viz(self, notebook_id: str, index: Any) -> None:
         self.viz_cache[notebook_id] = index
