@@ -9,10 +9,14 @@ Frozen baseline sequence (routes._stream_ask_events before the move):
   never mutates a second time) → register cancel event → emit started →
   emit the synthetic start step WITHOUT persistence → submit the worker
   through the copied-context job helper → per real trace: persist first,
-  fail-open (log and still deliver) → runner saves the answer → finish job
+  fail-open (log and still deliver) → the engine saves the answer → finish job
   transaction → unregister cancel event → (failed/cancelled) empty-
   conversation cleanup in a LATER transaction → terminal final/cancelled/
   error event → sentinel.
+
+Task 24: the worker executes the runtime-owned AskService (``ask`` resolver
+injected at composition; on_trace reaches streaming engines only) — the fake
+below stands in for it with the same registry-driven split.
 
 Transport disconnect only stops route queue consumption — it NEVER sets the
 cancel event (PR#220 WS2a detached execution).  The explicit cancel endpoint
@@ -103,12 +107,30 @@ def _response(conversation_id="conv-t23"):
                        related_knowledge=[], citations=[], llm_mode="x")
 
 
-def _coordinator(state, registry=None, submitter=None, logger=None):
+class FakeAskService:
+    """AskService 假件:按同一 ask_modes 注册表分派 on_trace(只达 streaming
+    引擎)——把测试 runner 保持在冻结的 handler 签名上。"""
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def ask(self, notebook_id, payload, *, user_id, on_trace=None, cancel_event=None):
+        from app.services.ask_modes import resolve_mode
+        spec = resolve_mode(getattr(payload, "mode", None))
+        if spec.streaming:
+            return self.fn(notebook_id, payload, on_trace=on_trace,
+                           cancel_event=cancel_event)
+        return self.fn(notebook_id, payload, cancel_event=cancel_event)
+
+
+def _coordinator(state, registry=None, submitter=None, logger=None, runner=None):
+    service = FakeAskService(runner)
     return AskExecutionCoordinator(
         ask_state=state,
         cancellations=registry if registry is not None else AskCancellationRegistry(),
         job_submitter=submitter if submitter is not None else InlineSubmitter(),
         event_log=_event_log(logger),
+        ask=lambda: service,
     )
 
 
@@ -127,14 +149,13 @@ def _drain(events, timeout=2.0):
 
 def test_started_is_emitted_before_progress_and_final_closes_the_stream():
     calls = []
-    coordinator = _coordinator(RecordingAskState(calls))
-
     def runner(notebook_id, payload, cancel_event=None):
         return _response()
 
+    coordinator = _coordinator(RecordingAskState(calls), runner=runner)
     events = coordinator.start(
         "nb-1", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
-        user_id="user-t23", runner=runner)
+        user_id="user-t23")
     delivered = _drain(events)
     kinds = [e["event"] for e in delivered]
     assert kinds[0] == "started" and delivered[0]["job_id"] == "askjob-t23"
@@ -147,14 +168,13 @@ def test_started_is_emitted_before_progress_and_final_closes_the_stream():
 
 def test_synthetic_start_is_emitted_but_never_persisted():
     calls = []
-    coordinator = _coordinator(RecordingAskState(calls))
-
     def runner(notebook_id, payload, on_trace=None, cancel_event=None):
         return _response()
 
+    coordinator = _coordinator(RecordingAskState(calls), runner=runner)
     events = coordinator.start(
         "nb-1", AskRequest(question="Q?", mode="reasoning"), ASK_MODES["reasoning"],
-        user_id="user-t23", runner=runner)
+        user_id="user-t23")
     delivered = _drain(events)
     assert any(e["event"] == "progress" and e["step"]["step_type"] == "start"
                for e in delivered)
@@ -177,9 +197,9 @@ def test_begin_mutates_payload_in_place_and_coordinator_never_mutates_again():
         return _response()
 
     payload = AskRequest(question="Q?", mode="chunk")
-    coordinator = _coordinator(DecoyReturnState(calls))
+    coordinator = _coordinator(DecoyReturnState(calls), runner=runner)
     events = coordinator.start("nb-1", payload, ASK_MODES["chunk"],
-                               user_id="user-t23", runner=runner)
+                               user_id="user-t23")
     _drain(events)
     assert seen and seen[0] is payload               # 同一 payload 对象直达 runner
     assert payload.conversation_id == "conv-t23"     # begin 的就地写回是唯一一次改写
@@ -205,10 +225,11 @@ def test_real_trace_is_persisted_before_delivery():
         on_trace(TraceStep(step_type="plan", summary="s-real", detail={}))
         return _response()
 
-    coordinator = _coordinator(GatedState(calls), submitter=background_jobs)
+    coordinator = _coordinator(GatedState(calls), submitter=background_jobs,
+                               runner=runner)
     events = coordinator.start(
         "nb-1", AskRequest(question="Q?", mode="reasoning"), ASK_MODES["reasoning"],
-        user_id="user-t23", runner=runner)
+        user_id="user-t23")
     assert persist_entered.wait(2)
     # 持久化尚未返回 → 真实 trace 绝不能已在交付队列上(persist 先行)
     snapshot = [e for e in list(events.queue) if e is not None]
@@ -224,15 +245,15 @@ def test_real_trace_is_persisted_before_delivery():
 def test_trace_persistence_failure_logs_and_still_delivers():
     calls = []
     logger = _RecordingLogger()
-    coordinator = _coordinator(RecordingAskState(calls, fail_trace=True), logger=logger)
-
     def runner(notebook_id, payload, on_trace=None, cancel_event=None):
         on_trace(TraceStep(step_type="plan", summary="s1", detail={}))
         return _response()
 
+    coordinator = _coordinator(RecordingAskState(calls, fail_trace=True), logger=logger,
+                               runner=runner)
     events = coordinator.start(
         "nb-1", AskRequest(question="Q?", mode="reasoning"), ASK_MODES["reasoning"],
-        user_id="user-t23", runner=runner)
+        user_id="user-t23")
     delivered = _drain(events)
     assert any(e["event"] == "progress" and e["step"].get("summary") == "s1"
                for e in delivered)                     # fail-open:照常交付
@@ -247,15 +268,15 @@ def test_trace_persistence_failure_logs_and_still_delivers():
 def test_answer_save_occurs_before_job_finish():
     calls = []
     state = RecordingAskState(calls)
-    coordinator = _coordinator(state)
 
     def runner(notebook_id, payload, cancel_event=None):
         state.save_answer(notebook_id, payload.conversation_id, payload.question,
                           _response(), "user-t23")
         return _response()
 
+    coordinator = _coordinator(state, runner=runner)
     events = coordinator.start("nb-1", AskRequest(question="Q?", mode="chunk"),
-                               ASK_MODES["chunk"], user_id="user-t23", runner=runner)
+                               ASK_MODES["chunk"], user_id="user-t23")
     _drain(events)
     assert calls.index(("answer", "conv-t23")) < calls.index(("finish", "done", "ans-t23", ""))
 
@@ -276,9 +297,9 @@ def test_finish_commit_precedes_unregister_which_precedes_cleanup_and_delivery()
         raise RuntimeError("boom")
 
     coordinator = _coordinator(RecordingAskState(calls), registry=GatedRegistry(),
-                               submitter=background_jobs)
+                               submitter=background_jobs, runner=runner)
     events = coordinator.start("nb-1", AskRequest(question="Q?", mode="chunk"),
-                               ASK_MODES["chunk"], user_id="user-t23", runner=runner)
+                               ASK_MODES["chunk"], user_id="user-t23")
     assert unregister_entered.wait(2)
     # 终态 job 行已提交、注销进行中——终态事件此刻绝不能已在交付队列上
     assert ("finish", "failed", "", "RuntimeError: boom") in calls
@@ -311,9 +332,9 @@ def test_explicit_cancel_sets_the_event_and_final_checkpoint_yields_no_answer():
         raise AssertionError("cancelled run must not reach the answer")
 
     coordinator = _coordinator(RecordingAskState(calls), registry=registry,
-                               submitter=background_jobs)
+                               submitter=background_jobs, runner=runner)
     events = coordinator.start("nb-1", AskRequest(question="Q?", mode="chunk"),
-                               ASK_MODES["chunk"], user_id="user-t23", runner=runner)
+                               ASK_MODES["chunk"], user_id="user-t23")
     started = events.get(timeout=2)
     assert started["event"] == "started"
     assert entered.wait(2)
@@ -330,15 +351,15 @@ def test_cancel_after_the_final_checkpoint_is_not_atomic_completed_answer_wins()
     calls = []
     registry = AskCancellationRegistry()
     state = RecordingAskState(calls)
-    coordinator = _coordinator(state, registry=registry)
 
     def runner(notebook_id, payload, cancel_event=None):
         state.save_answer(notebook_id, payload.conversation_id, payload.question,
                           _response(), "user-t23")
         return _response()
 
+    coordinator = _coordinator(state, registry=registry, runner=runner)
     events = coordinator.start("nb-1", AskRequest(question="Q?", mode="chunk"),
-                               ASK_MODES["chunk"], user_id="user-t23", runner=runner)
+                               ASK_MODES["chunk"], user_id="user-t23")
     # checkpoint 之后才到的取消不承诺原子性:job 已终态并注销,cancel 落空、答案已存
     assert registry.cancel("askjob-t23") is False
     delivered = _drain(events)
@@ -362,12 +383,13 @@ def test_copied_request_context_reaches_the_detached_worker():
         seen_user.append(request_user_id())
         return _response()
 
-    coordinator = _coordinator(RecordingAskState(calls), submitter=background_jobs)
+    coordinator = _coordinator(RecordingAskState(calls), submitter=background_jobs,
+                               runner=runner)
     token = set_request_user(UserProfile(id="u-ctx", email="c@x", display_name="c",
                                          role="user", username="c00123456"))
     try:
         events = coordinator.start("nb-1", AskRequest(question="Q?", mode="chunk"),
-                                   ASK_MODES["chunk"], user_id="u-ctx", runner=runner)
+                                   ASK_MODES["chunk"], user_id="u-ctx")
     finally:
         reset_request_user(token)
     delivered = _drain(events)
@@ -395,6 +417,8 @@ def test_runtime_owns_the_coordinator_and_facade_shares_its_registry(repo):
     assert runtime.ask_execution.ask_state is runtime.ask_state
     assert runtime.ask_execution.cancellations is runtime.ask_cancellations
     assert runtime.ask_execution.job_submitter is background_jobs
+    # Task 24: 协调器的执行体解析到 runtime-owned AskService(一个所有者)
+    assert runtime.ask_execution.ask() is runtime.ask_service()
     # 冻结的 facade 兼容座与注册表是同一对象(一个所有者)
     assert repo._ask_cancel_events is runtime.ask_cancellations.events
     assert repo._ask_cancel_lock is runtime.ask_cancellations.lock

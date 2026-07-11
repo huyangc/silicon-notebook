@@ -48,11 +48,25 @@ def test_disconnect_does_not_cancel_worker_runs_to_completion():
     队列消费与断连轮询。"""
     entered = threading.Event(); saw_cancel = []
     state = _StubAskState()
+
+    class _StubAskService:
+        """Task 24: 协调器的执行体是 AskService(注册表派发在服务内)。"""
+
+        def ask(self, nb, payload, *, user_id, on_trace=None, cancel_event=None):
+            entered.set()
+            saw_cancel.append(cancel_event)
+            from app.models.schemas import AskResponse
+            return AskResponse(answer_id="ans-1", conversation_id="conv-1", conclusion="",
+                               answer="a", grounded=True, anchors=[], related_knowledge=[],
+                               citations=[], llm_mode="x")
+
+    service = _StubAskService()
     coordinator = AskExecutionCoordinator(
         ask_state=state,
         cancellations=AskCancellationRegistry(),
         job_submitter=background_jobs,
         event_log=SimpleNamespace(logger=logging.getLogger("test-stream-cancel")),
+        ask=lambda: service,
     )
 
     class Stub:
@@ -60,14 +74,6 @@ def test_disconnect_does_not_cancel_worker_runs_to_completion():
 
         def current_user(self):
             return SimpleNamespace(id="user-x")
-
-        def ask_chunk(self, nb, payload, cancel_event=None):
-            entered.set()
-            saw_cancel.append(cancel_event)
-            from app.models.schemas import AskResponse
-            return AskResponse(answer_id="ans-1", conversation_id="conv-1", conclusion="",
-                               answer="a", grounded=True, anchors=[], related_knowledge=[],
-                               citations=[], llm_mode="x")
 
     async def drive():
         stream = _stream_ask_events(Stub(), "nb", AskRequest(question="q", mode="chunk"),

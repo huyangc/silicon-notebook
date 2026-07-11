@@ -52,3 +52,30 @@ def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
     assert kinds[-1] == "final"
     assert "reasoning_trace" not in events[-1]["response"] or \
         not events[-1]["response"]["reasoning_trace"]
+
+
+def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
+    """Task 24: 流式端点经 AskExecutionCoordinator 调 runtime-owned AskService
+    (不再是 facade 回调)—— stub 掉服务的 ask 即可拦到整条流的 final 响应。"""
+    import json
+    from app.api.routes import repository
+    from app.models.schemas import AskResponse
+
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    repo = repository()
+    service = repo._runtime.ask_service()
+    seen = {}
+
+    def fake_ask(notebook_id, payload, *, user_id, on_trace=None, cancel_event=None):
+        seen["user_id"] = user_id
+        return AskResponse(conclusion="service-stub", conversation_id=payload.conversation_id or "")
+
+    monkeypatch.setattr(service, "ask", fake_ask, raising=False)
+    r = client.post(f"/api/notebooks/{nb}/ask/stream",
+                    json={"question": "q", "mode": "chunk"})
+    assert r.status_code == 200
+    events = [json.loads(l) for l in r.text.splitlines() if l.strip()]
+    assert events[-1]["event"] == "final"
+    assert events[-1]["response"]["conclusion"] == "service-stub"
+    assert seen["user_id"] == repo.current_user().id

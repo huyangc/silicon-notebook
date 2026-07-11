@@ -958,6 +958,51 @@ TASK23_ALLOWED_IMPORTS = {
     ),
 }
 
+# Task 24: the Ask mode engines + synthesis move to the runtime-owned
+# AskService; the facade keeps frozen-signature delegates, so the moved
+# bodies' internal self-call sites disappear from the facade file (the
+# engines now consume the retrieval/evidence-context/ask-state/model ports
+# directly).  The new boundary suite imports the compatibility exports at a
+# fresh site.
+TASK24_ALLOWED_IMPORTS = {
+    ("backend/tests/test_ask_service_boundary.py", 32, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_ask_service_boundary.py", 32, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_ask_service_boundary.py", 32, "app.services.sqlite_repository", "reset_request_user"),
+    # the coordinator suite's Task-24 docstring note shifts its frozen
+    # compatibility import down from the Task-23 site (line 40).
+    ("backend/tests/test_ask_execution_coordinator.py", 44, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
+TASK24_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", name)
+    for name in {
+        "_MIX_KG_KEY_BASE", "_MIX_PROMPT_BUFFER_TOKENS", "_answer_chunks",
+        "_answer_context", "_answer_mix", "_answer_reasoning",
+        "_answer_with_retry", "_any_base_notebook_has_kg",
+        "_build_chunk_retrieval_plan", "_chunk_answer_context",
+        "_citations_from", "_conversation_history", "_ensure_conversation",
+        "_federated_graph_is_large", "_federated_rx_graph",
+        "_graph_seed_fusion", "_keyword_chunk_candidates", "_kg_source_chunks",
+        "_knowledge_headline", "_mix_retrieve", "_mmr_select_chunks",
+        "_needs_index", "_notebook_langs", "_parse_answer_anchors",
+        "_ppr_retrieve", "_refine_context", "_retrieve_chunks",
+        "_retrieve_chunks_multi", "_rewrite_followup_query", "_save_answer",
+        "_tier_map_for", "_truncate_kg_block", "_unconfigured_model_response",
+        "_union_chunk_candidates", "federated_retrieve",
+        "get_community_reports",
+    }
+} | {
+    ("backend/tests/test_ask_service_boundary.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "ask", "ask_chunk",
+        "create_notebook", "current_user", "embedder", "reset_request_user",
+        "set_request_user", "set_user_model_settings",
+    }
+} | {
+    ("backend/tests/test_ask_modes_api.py", name)
+    for name in {"_runtime", "current_user"}
+}
+
 # Task 20: ScaleArtifactRuntime becomes the one owner of the Task-18/19
 # caches, locks, build markers and scheduling state.  Compatibility facade
 # attributes become write-through properties and the focused probes patch the
@@ -1477,6 +1522,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK21_ALLOWED_MEMBER_FILES
     | TASK22_ALLOWED_MEMBER_FILES
     | TASK23_ALLOWED_MEMBER_FILES
+    | TASK24_ALLOWED_MEMBER_FILES
     | TASK25_ALLOWED_MEMBER_FILES
 )
 
@@ -1953,6 +1999,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK20_ALLOWED_IMPORTS
                     or site in TASK22_ALLOWED_IMPORTS
                     or site in TASK23_ALLOWED_IMPORTS
+                    or site in TASK24_ALLOWED_IMPORTS
                     or site in TASK25_ALLOWED_IMPORTS
                 )
 

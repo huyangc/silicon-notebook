@@ -197,16 +197,21 @@ def test_coordinator_run_replays_trace_via_conversation_active_job(repo):
     payload = AskRequest(question="Q-t23?", mode="reasoning")
     release = threading.Event()
 
-    def runner(notebook_id, p, on_trace=None, cancel_event=None):
+    # Task 24: 协调器执行 runtime-owned AskService —— 在服务座上替换 ask,
+    # 门控轨迹与完成时点(与旧 runner 回调同一观察面)。
+    service = repo._runtime.ask_service()
+
+    def fake_ask(notebook_id, p, *, user_id, on_trace=None, cancel_event=None):
         on_trace(TraceStep(step_type="plan", summary="s1", detail={}))
         assert release.wait(2)
         return AskResponse(answer_id="ans-t23", conversation_id=p.conversation_id,
                            conclusion="", answer="a", grounded=True, anchors=[],
                            related_knowledge=[], citations=[], llm_mode="x")
 
+    service.ask = fake_ask
     events = repo._runtime.ask_execution.start(
         nb.id, payload, ASK_MODES["reasoning"],
-        user_id=repo.current_user().id, runner=runner)
+        user_id=repo.current_user().id)
     started = events.get(timeout=2)
     job_id = started["job_id"]
     assert started["event"] == "started" and job_id

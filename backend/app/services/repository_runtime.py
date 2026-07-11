@@ -51,6 +51,9 @@ from app.services.vector_cache import VectorCache
 # Gate-8 tracks keep the shared import list above untouched).
 from app.services import background_jobs
 from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
+# Task 24: Ask mode engines + synthesis (appended — same convention).
+from app.services.ask_service import AskService
+from app.services.notebook_scale import NotebookScaleProfile
 
 
 @dataclass(frozen=True)
@@ -223,15 +226,22 @@ class RepositoryRuntime:
         # owns and constructs them eagerly.  The facade's frozen
         # _ask_cancel_events/_ask_cancel_lock attributes become compatibility
         # handles over THIS registry (one owner — the explicit cancel endpoint
-        # and the coordinator's register/unregister meet in the same map); the
-        # runner stays a late-bound facade callback per start until Task 24
-        # lands AskService.
+        # and the coordinator's register/unregister meet in the same map).
+        # Task 24: the coordinator's runner is no longer a facade callback —
+        # it resolves the ONE runtime-owned AskService through the bound
+        # ``ask_service`` accessor (lazy: composition rides the wired
+        # retrieval port, which is embedder-bound and only exists after the
+        # facade constructor finishes and the first ask touches it).
         self.ask_cancellations = AskCancellationRegistry()
+        self.ask: "AskService | None" = None
+        self._ask_wire_lock = threading.Lock()
+        self._ask_retrieval: "Callable[[], Any] | None" = None
         self.ask_execution = AskExecutionCoordinator(
             ask_state=self.ask_state,
             cancellations=self.ask_cancellations,
             job_submitter=background_jobs,
             event_log=self.event_log,
+            ask=self.ask_service,
         )
 
     def wire_retrieval(self, *, embedder) -> RetrievalService:
@@ -799,3 +809,72 @@ class RepositoryRuntime:
             job_submitter=job_submitter,
         )
         return self.report_execution
+
+    def wire_ask(self, *, retrieval: Callable[[], Any]) -> None:
+        """Store the Ask composition's retrieval resolver (Task 24).
+
+        ``retrieval`` resolves the facade's lazy ``retrieval`` property per
+        first use (wire_retrieval is embedder-bound and lazy; resolving it
+        also finishes the evidence-context service) — mirroring
+        wire_report_execution's engine factory.  The AskService itself is
+        composed by :meth:`ask_service` on first ask."""
+        self._ask_retrieval = retrieval
+
+    def ask_service(self) -> AskService:
+        """The ONE runtime-owned AskService (Task 24), composed lazily.
+
+        Ports: the Task-22 ask-state store (prepare_turn/save_answer with
+        EXPLICIT user_id), the Task-21 retrieval + evidence-context services,
+        the model provider doubling as the model-error sink (per-user client
+        resolution stays a per-access ContextVar chain), a fresh
+        CommunityQueryService PER USE (``sibling_min_bridge`` read at call
+        time — the frozen per-ask/per-engine construction), a fresh
+        NotebookScaleProfile PER ``_needs_index`` call (reads the CURRENT
+        ``retrieval_snapshots.vector_cache`` so facade-level cache swaps stay
+        observed), the catalog's notebook guard, the schema registry, the
+        lifecycle-owned community reports and the source-title projection."""
+        if self.ask is not None:
+            return self.ask
+        with self._ask_wire_lock:
+            if self.ask is not None:
+                return self.ask
+            if self._ask_retrieval is None:
+                raise RuntimeError("ask_service requires wire_ask() first")
+            from app.services.communities import CommunityQueryService
+
+            retrieval = self._ask_retrieval()
+            if self.evidence_context is None or self.scale_artifacts is None:
+                raise RuntimeError(
+                    "ask_service requires wired retrieval and scale runtime"
+                )
+            self.ask = AskService(
+                ask_state=self.ask_state,
+                retrieval=retrieval,
+                evidence_context=self.evidence_context,
+                model_clients=self.models,
+                model_errors=self.models,
+                communities=lambda: CommunityQueryService(
+                    notebooks=self.notebook_store,
+                    unified_kg=self.unified_kg,
+                    event_log=self.event_log,
+                    sibling_min_bridge=self.settings.sibling_min_bridge,
+                ),
+                scale_profiles=lambda: NotebookScaleProfile(
+                    self.settings,
+                    self.queries,
+                    lambda nb: tuple(self.scale_artifacts.version(nb)),
+                    self.retrieval_snapshots.vector_cache,
+                ),
+                scale_index_probe=lambda nb: (
+                    self.scale_artifacts.load(nb, allow_stale=True) is not None
+                ),
+                settings=self.settings,
+                event_log=self.event_log,
+                notebooks=self.catalog,
+                schemas=self.schema_registry,
+                community_reports=(
+                    lambda nb: self.knowledge_lifecycle.get_community_reports(nb)
+                ),
+                source_titles=self.source_store.source_titles,
+            )
+        return self.ask

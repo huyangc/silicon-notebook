@@ -139,3 +139,21 @@ def test_reasoning_conversation_persists(arepo):
     assert detail.turn_count == 1
     # 存回的轮次能反序列化(reasoning_trace 不破坏 AskResponse 往返)
     assert detail.turns[0].response.evidence_level == t1.evidence_level
+
+
+def test_reasoning_service_streams_trace_with_explicit_user_id(arepo):
+    """Task 24: reasoning 引擎在 AskService 上以显式 keyword-only user_id 运行,
+    on_trace 逐步上流、答案照存 —— 与 facade 路径同一引擎、同一语义。"""
+    nb = _seed(arepo)
+    arepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "服务级答案 [k1].", "grounded": True})
+    service = arepo._runtime.ask_service()
+    steps = []
+    resp = service.ask_reasoning(
+        nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"),
+        user_id=arepo.current_user().id, on_trace=steps.append)
+    assert steps and steps[0].step_type == "plan"       # on_trace 逐步可见
+    assert resp.mode == "reasoning" and resp.answer_id  # 引擎收口照存答案
+    assert arepo.get_conversation(resp.conversation_id).turn_count == 1

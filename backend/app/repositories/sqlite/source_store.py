@@ -175,6 +175,20 @@ class SourceStore:
             ).fetchall()
         return [{"title": row["title"]} for row in rows]
 
+    def source_titles(self, source_ids: List[str]) -> Dict[str, str]:
+        """Batch {source_id: title} lookup (Task 24): ask_graph 的源 chunk 引用
+        标签补全 — SQL frozen from the engine's inline query (one IN(...) list;
+        the caller dedups and the post-truncation id count stays tiny)."""
+        ids = [str(s) for s in source_ids if s]
+        if not ids:
+            return {}
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT id, title FROM sources WHERE id IN ({','.join('?' for _ in ids)})",
+                ids,
+            ).fetchall()
+        return {row["id"]: row["title"] for row in rows}
+
     def notebook_element_sample(
         self, notebook_id: str, *, max_chars: int = 8000
     ) -> List[dict]:

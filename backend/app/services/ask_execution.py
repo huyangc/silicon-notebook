@@ -16,7 +16,7 @@ Owns the streaming-ask EXECUTION orchestration that previously lived inline in
   persistence → submit the worker through the copied-context job helper
   (contextvars propagation is the per-user model lifeline) → per real trace:
   persist first, fail-open (log and still deliver — error_policies.json:
-  append_ask_trace) → the runner saves the answer → finish-job transaction →
+  append_ask_trace) → the engine saves the answer → finish-job transaction →
   unregister the cancel event → (failed/cancelled) empty-conversation cleanup
   in a LATER transaction → terminal ``final``/``cancelled``/``error`` event →
   sentinel.  No terminal event is ever put on the delivery queue while its job
@@ -24,8 +24,10 @@ Owns the streaming-ask EXECUTION orchestration that previously lived inline in
 
 Composition rules (Gate 8): identity is EXPLICIT — ``user_id`` comes from the
 caller per start; this module never reads request ContextVars and must not
-import SQLiteRepository.  The ``runner`` is a late-bound facade callback
-supplied per start; Task 24 replaces it with AskService.
+import SQLiteRepository.  Task 24: the worker calls the runtime-owned
+AskService (``ask`` resolver injected at composition — the service itself
+dispatches through the frozen ask_modes registry and forwards ``on_trace``
+only to streaming engines), replacing the Task-23 late-bound facade callback.
 """
 from __future__ import annotations
 
@@ -56,6 +58,22 @@ class BackgroundJobSubmitter(Protocol):
         notify_pending: bool = False,
         **kwargs,
     ) -> threading.Thread: ...
+
+
+class AskServicePort(Protocol):
+    """The mode-engine contract the worker executes (Task 24): registry
+    dispatch with EXPLICIT ``user_id``; ``on_trace`` reaches streaming engines
+    only — the service owns that split, mirroring the frozen route runner."""
+
+    def ask(
+        self,
+        notebook_id: str,
+        payload: "AskRequest",
+        *,
+        user_id: str,
+        cancel_event: "threading.Event | None" = None,
+        on_trace: "Callable[[Any], None] | None" = None,
+    ) -> "AskResponse": ...
 
 
 class AskCancellationRegistry:
@@ -102,11 +120,13 @@ class AskExecutionCoordinator:
         cancellations: AskCancellationRegistry,
         job_submitter: BackgroundJobSubmitter,
         event_log: "EventLogger",
+        ask: "Callable[[], AskServicePort]",
     ) -> None:
         self.ask_state = ask_state
         self.cancellations = cancellations
         self.job_submitter = job_submitter
         self.event_log = event_log
+        self.ask = ask
 
     def start(
         self,
@@ -115,7 +135,6 @@ class AskExecutionCoordinator:
         mode: "AskMode",
         *,
         user_id: str,
-        runner: "Callable[..., AskResponse]",
     ) -> "queue.Queue[dict[str, Any] | None]":
         """启动一次脱离连接的流式 ask,返回交付队列(None 哨兵收尾)。
 
@@ -123,6 +142,8 @@ class AskExecutionCoordinator:
         conversation_id 在该事务体内就地写回 payload(基线时点)——本方法只观察
         返回值、绝不二次改写。job_id 先于一切 progress 发给客户端(供「停止」调
         cancel 端点)。传输断连只由调用方停止消费本队列,worker 照跑到完。
+        执行体 = runtime-owned AskService(Task 24;on_trace 只达 streaming
+        引擎——注册表派发在服务内,与基线 route-runner 的分派逐字等价)。
         """
         events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
         cancel_event = threading.Event()
@@ -149,10 +170,9 @@ class AskExecutionCoordinator:
 
         def worker() -> None:
             try:
-                response = runner(
-                    notebook_id, payload, on_trace=on_trace, cancel_event=cancel_event,
-                ) if mode.streaming else runner(
-                    notebook_id, payload, cancel_event=cancel_event,
+                response = self.ask().ask(
+                    notebook_id, payload, user_id=user_id,
+                    on_trace=on_trace, cancel_event=cancel_event,
                 )
                 self._finish(job_id, "done", answer_id=response.answer_id)
                 events.put({"event": "final", "response": response.model_dump()})

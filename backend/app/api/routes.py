@@ -600,12 +600,11 @@ async def _stream_ask_events(
     # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
     # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
     # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
-    # 交付队列消费与断连轮询。runner 逐调用晚绑 getattr(repo, spec.handler)
-    # (Task 24 换成 AskService)。
+    # 交付队列消费与断连轮询。Task 24: 执行体 = runtime-owned AskService(三模式
+    # 注册表派发在服务内),不再是 facade runner 回调。
     events = repo._runtime.ask_execution.start(  # type: ignore[attr-defined]
         notebook_id, payload, spec,
         user_id=repo.current_user().id,
-        runner=lambda *args, **kwargs: getattr(repo, spec.handler)(*args, **kwargs),
     )
     # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。

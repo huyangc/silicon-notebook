@@ -1725,10 +1725,16 @@ def collect_ask_goldens() -> dict[str, object]:
                     case_root / "fixture.db", case_root / "storage", required=required
                 )
                 notebook_id = _seed_ask_repository(repo, include_kg=include_kg)
+                # Task 24: the graph engine lives in AskService and consumes the
+                # retrieval port directly — seat the replay stubs on the canonical
+                # candidate-retrieval owner (facade instance patches no longer sit
+                # on the engine's call path). Frozen goldens stay byte-identical.
                 if case_name == "no_hits":
-                    repo.federated_retrieve = lambda *_args, **_kwargs: []
+                    repo.retrieval.candidates.federated_retrieve = (
+                        lambda *_args, **_kwargs: [])
                 if case_name == "large_graph_refusal":
-                    repo._federated_graph_is_large = lambda *_args, **_kwargs: True
+                    repo.retrieval.candidates._federated_graph_is_large = (
+                        lambda *_args, **_kwargs: True)
                 cases[case_name] = _capture_ask_case(
                     repo, notebook_id, mode, question
                 )
