@@ -7,17 +7,13 @@ from app.repositories.ports import (
     RetrievalPort,
 )
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
-from app.services.sqlite_repository import SQLiteRepository
+from tests import test_repository_facade_contract as facade_contract
 from tests.test_repository_callers_static import (
     EXPECTED_REMEDIATION_SITES as CALLER_REMEDIATION_SITES,
     INDEPENDENT_PRIVATE_SITES,
     INDEPENDENT_SQL_SITES,
     private_repository_sites,
     product_sql_sites,
-)
-from tests.test_repository_facade_contract import (
-    facade_body_violations,
-    manifest_delegate_mismatches,
 )
 from tests.test_repository_protocol_coverage import protocol_calls
 
@@ -294,8 +290,12 @@ def test_completed_repository_boundary_claims_are_source_guarded():
         "product_sql": set(),
         "private_repository": set(),
     }
-    assert facade_body_violations(SQLiteRepository) == []
-    assert manifest_delegate_mismatches(SQLiteRepository, OWNER_BY_MEMBER) == []
+    assert facade_contract.facade_body_violations(
+        facade_contract.SQLiteRepository
+    ) == []
+    assert facade_contract.manifest_delegate_mismatches(
+        facade_contract.SQLiteRepository, OWNER_BY_MEMBER
+    ) == []
 
     assert protocol_calls("RetrievalPort") - set(RetrievalPort.__dict__) == set()
     for name, protocol in (
