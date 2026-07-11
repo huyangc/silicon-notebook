@@ -242,7 +242,7 @@ class SQLiteRepository:
         self._runtime.wire_sharing(
             insert_row=lambda db, table, data: self._insert_row(db, table, data),
             copy_stats=lambda notebook_id: self.notebook_copy_stats(notebook_id),
-            storage_dir=lambda: self.storage_dir,
+            storage_dir=lambda: self._runtime.storage_dir,
         )
         # Task 10: vector flushes stay on the facade's `_write` seat (resolved
         # per call) so transaction-counting/failure-injection monkeypatches
@@ -254,7 +254,7 @@ class SQLiteRepository:
         # (incremental object-vector commits stay per-instance patchable) and
         # the _mark_unified_kg_dirty KG seat (stays facade-owned until Gate 5).
         self._runtime.wire_source_pipeline(
-            embedder=lambda: self.embedder,
+            embedder=lambda: self._runtime.embedder,
             flush_object_vectors=lambda notebook_id, rows: self._flush_object_vectors(
                 notebook_id, rows
             ),
@@ -274,10 +274,10 @@ class SQLiteRepository:
         # `_unified_cache` / `_vector_cache` below are write-through property
         # descriptors over those SAME objects — no facade-only copies.
         self._user_model_cfg_cache = self._runtime.identity.model_config_cache
-        # Bilingual-query hint: per-notebook detected corpus languages (subset of
-        # ["zh","en"]), sampled cheaply and memoized. Staleness is harmless — a
-        # wrong guess only over/under-generates FTS keywords, never breaks recall.
-        self._notebook_langs_cache: Dict[str, List[str]] = {}
+        # Bilingual-query hints are runtime-owned and shared by every consumer;
+        # this compatibility property never retains a facade-only copy.
+        # A stale hint affects query expansion only, never storage correctness.
+        self._notebook_langs_cache = self._runtime.notebook_languages
         # C7: bounded LRU (was an unbounded plain dict — every notebook ever
         # touched stayed resident for the life of the process; each entry is
         # numpy arrays + a memoized hnsw handle, tens-of-MB to GB). Eviction
@@ -2849,7 +2849,7 @@ class SQLiteRepository:
     def retrieval(self):
         """Explicit candidate + graph retrieval port with no facade backreference."""
         if self._runtime.retrieval is None:
-            self._runtime.wire_retrieval(embedder=self.embedder)
+            self._runtime.wire_retrieval(embedder=self._runtime.embedder)
         return self._runtime.retrieval
 
     def _retrieve_scored(self, notebook_id: str, query: str,
@@ -3455,6 +3455,30 @@ class SQLiteRepository:
 
     def _delete_file(self, file_path: str) -> None:
         return self._runtime.source_files.delete(file_path)
+
+    @property
+    def storage_dir(self):
+        return self._runtime.storage_dir
+
+    @storage_dir.setter
+    def storage_dir(self, value) -> None:
+        self._runtime.storage_dir = value
+
+    @property
+    def embedder(self):
+        return self._runtime.embedder
+
+    @embedder.setter
+    def embedder(self, value) -> None:
+        self._runtime.embedder = value
+
+    @property
+    def _notebook_langs_cache(self):
+        return self._runtime.notebook_languages
+
+    @_notebook_langs_cache.setter
+    def _notebook_langs_cache(self, value) -> None:
+        self._runtime.notebook_languages = value
 
 
 def _now() -> str:

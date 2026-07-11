@@ -1686,6 +1686,14 @@ TASK23_COMPAT_PROPERTIES = {
     "_ask_cancel_lock": False,
 }
 
+# Remediation Task 2 transfers the three mutable operational values from
+# facade instance attributes to write-through properties over RepositoryRuntime.
+REMEDIATION_TASK2_COMPAT_PROPERTIES = {
+    "_notebook_langs_cache": True,
+    "embedder": True,
+    "storage_dir": True,
+}
+
 # Internal line numbers in this source file are intentionally not API surface:
 # Task 3 adds the scale-profile construction/import and shifts later private
 # implementation lines. Keep exact member+path coverage while normalizing only
@@ -2559,6 +2567,13 @@ def test_frozen_members_still_exist_with_the_same_callable_signatures():
             member = inspect.getattr_static(SQLiteRepository, name)
             assert isinstance(member, property), name
             assert (member.fset is not None) is TASK23_COMPAT_PROPERTIES[name], name
+            continue
+        if name in REMEDIATION_TASK2_COMPAT_PROPERTIES:
+            member = inspect.getattr_static(SQLiteRepository, name)
+            assert isinstance(member, property), name
+            assert (
+                member.fset is not None
+            ) is REMEDIATION_TASK2_COMPAT_PROPERTIES[name], name
             continue
         if kind in {"instance_attribute", "mutable_property"} and not hasattr(
             SQLiteRepository, name

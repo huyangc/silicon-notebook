@@ -1,11 +1,23 @@
 """Public retrieval port composed from candidate and graph owners."""
 from __future__ import annotations
 
+from typing import Any
+
 
 class RetrievalService:
     def __init__(self, *, candidates, graph) -> None:
         self.candidates = candidates
         self.graph = graph
+
+    def replace_embedder(self, embedder: Any) -> None:
+        self.candidates.embedder = embedder
+        self.graph.embedder = embedder
+
+    def replace_notebook_languages(
+        self, notebook_languages: dict[str, list[str]]
+    ) -> None:
+        self.candidates._notebook_langs_cache = notebook_languages
+        self.graph._notebook_langs_cache = notebook_languages
 
     def retrieve_scored(self, *args, **kwargs):
         """按关键词 + 语义混合打分检索知识对象 → List[RetrievedKnowledge]。"""

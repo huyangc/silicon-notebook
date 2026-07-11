@@ -25,7 +25,7 @@ from app.services.report_execution import (
 
 class _Reports:
     def __init__(self, depth=7, boom=False):
-        self.depth = depth
+        self.depth, self.updates = depth, []
         self.boom = boom
 
     def get_report(self, notebook_id, report_id):
@@ -33,8 +33,8 @@ class _Reports:
             raise KeyError(report_id)
         return {"id": report_id, "depth": self.depth}
 
-    def update_report(self, *a, **k):
-        pass
+    def update_report(self, *args, **kwargs):
+        self.updates.append((args, kwargs))
 
 
 class _Engine:
@@ -251,3 +251,66 @@ def test_routes_launch_helpers_delegate_to_runtime_coordinator(repo, monkeypatch
     assert calls[0][0] == "plan" and calls[0][1] == ("nb", "rid", "q", "h", True)
     assert calls[1][0] == "gen" and calls[1][1] == ("nb", "rid", "q", 5)
     assert calls[0][2]["user_id"] and calls[1][2]["user_id"]   # 发起者身份随行
+
+
+@pytest.mark.parametrize(
+    ("launch", "progress"),
+    [
+        (lambda coord: coord.start_plan("nb", "rid-submit", "q", user_id="u"),
+         "规划失败"),
+        (lambda coord: coord.start_generate("nb", "rid-submit", "q", user_id="u"),
+         "失败"),
+    ],
+)
+def test_submit_failure_marks_report_failed_and_unregisters(launch, progress):
+    class _RaisingSubmitter:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def __call__(self, fn, *args, name=None, notify_pending=False, **kwargs):
+            raise self.exc
+
+    reports = _Reports()
+    registry = ReportCancellationRegistry()
+    coord, _engine, _reg, _captured = _coordinator(
+        reports=reports,
+        registry=registry,
+        submitter=_RaisingSubmitter(RuntimeError("thread start failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        launch(coord)
+
+    assert registry.cancel("rid-submit") is False
+    assert reports.updates == [(('nb', 'rid-submit'), {
+        "status": "failed",
+        "error": "RuntimeError: thread start failed",
+        "progress": progress,
+    })]
+
+
+def test_submit_failure_marks_the_existing_report_row_failed(repo):
+    from app.models.schemas import NotebookCreate
+
+    class _RaisingSubmitter:
+        def __call__(self, fn, *args, name=None, notify_pending=False, **kwargs):
+            raise RuntimeError("thread start failed")
+
+    notebook = repo._runtime.catalog.create_notebook(
+        NotebookCreate(name="n", purpose="p")
+    )
+    coordinator = repo._runtime.report_execution
+    report_id = coordinator.reports.create_report(notebook.id, "q")
+    original_submitter = coordinator.job_submitter
+    coordinator.job_submitter = _RaisingSubmitter()
+    try:
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            coordinator.start_plan(notebook.id, report_id, "q", user_id="admin")
+    finally:
+        coordinator.job_submitter = original_submitter
+
+    report = coordinator.reports.get_report(notebook.id, report_id)
+    assert report["status"] == "failed"
+    assert report["progress"] == "规划失败"
+    assert report["error"] == "RuntimeError: thread start failed"
+    assert coordinator.cancellations.cancel(report_id) is False

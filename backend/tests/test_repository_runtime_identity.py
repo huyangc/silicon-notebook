@@ -37,16 +37,32 @@ def test_settings_storage_and_database_identities(repo):
     assert repo._user_model_cfg_cache is runtime.models.model_config_cache
 
 
-def test_storage_dir_swap_is_observed_by_the_sharing_composition(repo, tmp_path):
-    replacement = tmp_path / "elsewhere"
-    repo.storage_dir = replacement
-    assert repo._runtime.notebook_copies._storage_dir() is replacement
+def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_path):
+    _ = repo.retrieval
+    replacement_dir = tmp_path / "elsewhere"
+    replacement_embedder = object()
+    replacement_languages = {"nb-1": ["zh", "en"]}
 
+    repo.storage_dir = replacement_dir
+    repo.embedder = replacement_embedder
+    repo._notebook_langs_cache = replacement_languages
 
-def test_embedder_swap_is_observed_by_the_wired_pipeline(repo):
-    sentinel = object()
-    repo.embedder = sentinel
-    assert repo._runtime.source_embedding.embedder() is sentinel
+    runtime = repo._runtime
+    assert "storage_dir" not in repo.__dict__
+    assert "embedder" not in repo.__dict__
+    assert "_notebook_langs_cache" not in repo.__dict__
+    assert runtime.storage_dir is replacement_dir
+    assert runtime.source_files.storage_dir is replacement_dir
+    assert runtime.notebook_copies._storage_dir() is replacement_dir
+    assert runtime.source_ingestion.source_files.storage_dir is replacement_dir
+    assert runtime.source_embedding.embedder() is replacement_embedder
+    assert runtime.source_ingestion.embedding.embedder() is replacement_embedder
+    assert repo.retrieval.candidates.embedder is replacement_embedder
+    assert repo.retrieval.graph.embedder is replacement_embedder
+    assert runtime.notebook_languages is replacement_languages
+    assert runtime.kg_mutations.notebook_languages is replacement_languages
+    assert repo.retrieval.candidates._notebook_langs_cache is replacement_languages
+    assert repo.retrieval.graph._notebook_langs_cache is replacement_languages
 
 
 def test_model_client_setters_write_through_to_the_provider(repo):

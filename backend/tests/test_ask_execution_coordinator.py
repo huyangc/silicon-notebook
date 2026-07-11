@@ -89,6 +89,14 @@ class InlineSubmitter:
         return threading.current_thread()
 
 
+class RaisingSubmitter:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def submit(self, fn, *args, name=None, notify_pending=False, **kwargs):
+        raise self.exc
+
+
 class _RecordingLogger:
     def __init__(self):
         self.exceptions = []
@@ -164,6 +172,27 @@ def test_started_is_emitted_before_progress_and_final_closes_the_stream():
     assert delivered[1]["step"]["detail"] == {"mode": "chunk"}
     assert kinds[-1] == "final"
     assert delivered[-1]["response"]["answer_id"] == "ans-t23"
+
+
+def test_submit_failure_finishes_durable_job_and_unregisters_cancellation():
+    calls = []
+    registry = AskCancellationRegistry()
+    coordinator = _coordinator(
+        RecordingAskState(calls),
+        registry=registry,
+        submitter=RaisingSubmitter(RuntimeError("thread start failed")),
+        runner=lambda *_args, **_kwargs: _response(),
+    )
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        coordinator.start(
+            "nb-1", AskRequest(question="Q?", mode="chunk"),
+            ASK_MODES["chunk"], user_id="user-t23",
+        )
+
+    assert ("finish", "failed", "", "RuntimeError: thread start failed") in calls
+    assert ("cleanup", "conv-t23") in calls
+    assert registry.get("askjob-t23") is None
 
 
 def test_synthetic_start_is_emitted_but_never_persisted():

@@ -97,8 +97,18 @@ class ReportExecutionCoordinator:
                 self.cancellations.unregister(report_id)
 
         # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
-        self.job_submitter(worker, name=f"report-plan-{report_id}",
-                           notify_pending=True)
+        try:
+            self.job_submitter(worker, name=f"report-plan-{report_id}",
+                               notify_pending=True)
+        except BaseException as exc:
+            try:
+                self.reports.update_report(
+                    notebook_id, report_id, status="failed",
+                    error=f"{type(exc).__name__}: {exc}", progress="规划失败",
+                )
+            finally:
+                self.cancellations.unregister(report_id)
+            raise
 
     def start_generate(self, notebook_id: str, report_id: str, question: str,
                        depth: int = 2, *, user_id: str = "") -> None:
@@ -113,5 +123,15 @@ class ReportExecutionCoordinator:
             finally:
                 self.cancellations.unregister(report_id)
 
-        self.job_submitter(worker, name=f"report-gen-{report_id}",
-                           notify_pending=True)
+        try:
+            self.job_submitter(worker, name=f"report-gen-{report_id}",
+                               notify_pending=True)
+        except BaseException as exc:
+            try:
+                self.reports.update_report(
+                    notebook_id, report_id, status="failed",
+                    error=f"{type(exc).__name__}: {exc}", progress="失败",
+                )
+            finally:
+                self.cancellations.unregister(report_id)
+            raise

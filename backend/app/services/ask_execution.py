@@ -185,7 +185,11 @@ class AskExecutionCoordinator:
             finally:
                 events.put(None)
 
-        self.job_submitter.submit(worker, name=f"ask-{mode.id}")
+        try:
+            self.job_submitter.submit(worker, name=f"ask-{mode.id}")
+        except BaseException as exc:
+            self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            raise
         return events
 
     def _finish(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:

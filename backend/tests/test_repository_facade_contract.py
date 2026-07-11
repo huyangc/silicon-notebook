@@ -102,14 +102,11 @@ MODULE_SURFACE_OWNER_EXCEPTIONS = {
 NON_CALLABLE_INSTANCE_SURFACE = {
     "_kg_building",
     "_kg_building_lock",
-    "_notebook_langs_cache",
-    "embedder",
     "event_log",
     "mineru_client",
     "mineru_cloud_client",
     "root_dir",
     "settings",
-    "storage_dir",
 }
 SCALAR_IDENTITY_ADAPTERS = {"bool", "float", "int", "str"}
 

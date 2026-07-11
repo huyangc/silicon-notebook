@@ -127,6 +127,8 @@ class RepositoryRuntime:
             self.database.resolve_path(settings.storage_dir),
             resolve_path=self.database.resolve_path,
         )
+        self._embedder: Any = None
+        self._notebook_languages: dict[str, list[str]] = {}
         # Task 18: scale/viz artifact FILE persistence is seam-free (raw
         # settings.storage_dir paths + the pure kg.scale_index / kg.viz_index
         # load/save modules), so the runtime owns and constructs it eagerly.
@@ -248,6 +250,45 @@ class RepositoryRuntime:
         # embedder-bound retrieval provider, exactly like `ask` above).
         self.maintenance: Any = None
 
+    @property
+    def storage_dir(self) -> Path:
+        return self.source_files.storage_dir
+
+    @storage_dir.setter
+    def storage_dir(self, value: Path) -> None:
+        self.set_storage_dir(value)
+
+    def set_storage_dir(self, value: Path) -> None:
+        self.source_files.storage_dir = value if isinstance(value, Path) else Path(value)
+
+    @property
+    def embedder(self) -> Any:
+        return self._embedder
+
+    @embedder.setter
+    def embedder(self, value: Any) -> None:
+        self.set_embedder(value)
+
+    def set_embedder(self, value: Any) -> None:
+        self._embedder = value
+        if self.retrieval is not None:
+            self.retrieval.replace_embedder(value)
+
+    @property
+    def notebook_languages(self) -> dict[str, list[str]]:
+        return self._notebook_languages
+
+    @notebook_languages.setter
+    def notebook_languages(self, value: dict[str, list[str]]) -> None:
+        self.set_notebook_languages(value)
+
+    def set_notebook_languages(self, value: dict[str, list[str]]) -> None:
+        self._notebook_languages = value
+        if self.kg_mutations is not None:
+            self.kg_mutations.notebook_languages = value
+        if self.retrieval is not None:
+            self.retrieval.replace_notebook_languages(value)
+
     def wire_retrieval(self, *, embedder) -> RetrievalService:
         if self.retrieval is not None:
             return self.retrieval
@@ -256,6 +297,7 @@ class RepositoryRuntime:
                 return self.retrieval
             if self.embedding_store is None or self.scale_artifacts is None:
                 raise RuntimeError("wire_retrieval requires persistence and scale runtime")
+            self.set_embedder(embedder)
             common = dict(
                 notebooks=self.notebook_store,
                 sources=self.source_store,
@@ -271,11 +313,8 @@ class RepositoryRuntime:
                 settings=self.settings,
                 event_log=self.event_log,
                 database=self.database,
-                embedder=embedder,
-                notebook_languages=(
-                    self.kg_mutations.notebook_languages
-                    if self.kg_mutations is not None else {}
-                ),
+                embedder=self.embedder,
+                notebook_languages=self.notebook_languages,
             )
             candidates = CandidateRetrievalService(**common)
             graph = GraphRetrievalService(**common)
@@ -441,11 +480,12 @@ class RepositoryRuntime:
         traces and failure injections keep observing the dirty bump's commit
         boundary.  The unified store and the `_now` clock seam come from this
         runtime."""
+        self.set_notebook_languages(notebook_languages)
         self.kg_mutations = KgMutationCoordinator(
             self.unified_kg,
             self.retrieval_snapshots,
             auto_index_checked,
-            notebook_languages,
+            self.notebook_languages,
             write=write,
             now=self.seams.now,
         )
