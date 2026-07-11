@@ -223,6 +223,7 @@ def test_live_wal_shm_mtime_is_an_explicit_metadata_exception(tmp_path):
         assert shm.is_file(), "test setup: live WAL must have an SHM sidecar"
         before = module._source_metadata(database)
         stat = shm.stat()
+        shm_size = stat.st_size
         os.utime(
             shm,
             ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
@@ -233,7 +234,42 @@ def test_live_wal_shm_mtime_is_an_explicit_metadata_exception(tmp_path):
         writer.close()
 
     assert before == after
-    assert before[-1] == (f"{database.name}-shm", 1, 0)
+    assert before[-1] == (f"{database.name}-shm", shm_size, 0)
+
+
+def test_live_wal_shm_size_change_fails_source_metadata_guard(tmp_path, monkeypatch):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    writer = sqlite3.connect(database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-shm-size', 'shm size guard', 't0', 't0')"
+        )
+        writer.commit()
+        shm = Path(f"{database}-shm")
+        assert shm.is_file(), "test setup: live WAL must have an SHM sidecar"
+        initial_size = shm.stat().st_size
+        real_exercise_reads = module.exercise_reads
+
+        def resize_shm(repo, backup_path):
+            counts = real_exercise_reads(repo, backup_path)
+            with shm.open("ab") as stream:
+                stream.write(b"size-change")
+            assert shm.stat().st_size > initial_size
+            return counts
+
+        monkeypatch.setattr(module, "exercise_reads", resize_shm)
+        result = module.verify_snapshot(database, storage)
+    finally:
+        writer.close()
+
+    assert not result.ok
+    assert result.source_unchanged is False
+    assert "original-database-metadata-changed" in result.discrepancies
 
 
 def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
@@ -369,6 +405,50 @@ def test_cleanup_failure_is_authoritative_and_reports_only_retained_path(
     assert retained
     assert f"temporary_backup_retained={retained[0]}" in output
     assert "private-row-content" not in output
+
+
+def test_primary_failure_is_preserved_when_cleanup_succeeds(tmp_path, monkeypatch):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    class ExplodingRepository:
+        def __init__(self, _settings):
+            raise RuntimeError("primary private row content")
+
+    monkeypatch.setattr(module, "SQLiteRepository", ExplodingRepository)
+
+    with pytest.raises(RuntimeError, match="primary private row content"):
+        module.verify_snapshot(database, storage)
+
+
+def test_cleanup_failure_wins_over_primary_failure_without_leaking_errors(
+    tmp_path, monkeypatch
+):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    retained: list[Path] = []
+
+    class ExplodingRepository:
+        def __init__(self, _settings):
+            raise RuntimeError("primary private row content")
+
+    def fail_cleanup(path, *args, **kwargs):
+        retained.append(Path(path))
+        raise OSError("cleanup private row content")
+
+    monkeypatch.setattr(module, "SQLiteRepository", ExplodingRepository)
+    monkeypatch.setattr(module.shutil, "rmtree", fail_cleanup)
+
+    with pytest.raises(SystemExit) as caught:
+        module.verify_snapshot(database, storage)
+
+    assert retained
+    assert str(caught.value) == (
+        "repository-snapshot: FAIL "
+        f"temporary_backup_retained={retained[0]}"
+    )
+    assert "primary private row content" not in str(caught.value)
+    assert "cleanup private row content" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

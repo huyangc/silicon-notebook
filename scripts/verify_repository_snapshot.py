@@ -26,8 +26,8 @@ Safety contract (Task 28):
   ``builtin`` label alone.  Recovery and admin normalization remain limited
   to their documented fields, and every other row digest must match.
 - Original database/WAL metadata is guarded.  A read-only attachment to a
-  live WAL may change rebuildable ``-shm`` mtime, so only SHM existence is
-  compared; database and WAL size/mtime remain exact.
+  live WAL may change rebuildable ``-shm`` mtime; SHM existence/size and
+  database/WAL size/mtime remain exact.
 - stdout carries object names, counts and digests only — never row content.
 
 Success line::
@@ -871,14 +871,16 @@ def _source_read_uri(database: Path) -> str:
 def _source_metadata(database: Path) -> List[Tuple[str, int, int]]:
     """size/mtime of the database and its -wal sidecar.  The -shm file is a
     rebuildable lock/index support file whose mtime legitimately moves when a
-    read-only reader attaches to a live WAL database, so only its existence is
-    tracked (it carries no persistent data)."""
+    read-only reader attaches to a live WAL database, so its exact size and
+    existence are tracked while its mtime is normalized."""
     entries: List[Tuple[str, int, int]] = []
     for candidate in (database, Path(f"{database}-wal")):
         if candidate.exists():
             stat = candidate.stat()
             entries.append((candidate.name, stat.st_size, stat.st_mtime_ns))
-    entries.append((f"{database.name}-shm", int(Path(f"{database}-shm").exists()), 0))
+    shm = Path(f"{database}-shm")
+    shm_size = shm.stat().st_size if shm.exists() else -1
+    entries.append((f"{database.name}-shm", shm_size, 0))
     return entries
 
 
@@ -902,6 +904,8 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
 
     temp_root = Path(tempfile.mkdtemp(prefix="repository-snapshot-"))
     cleanup_problem = ""
+    primary_error: BaseException | None = None
+    primary_traceback = None
     try:
         backup_path = temp_root / "backup.db"
         temp_storage = temp_root / "storage"
@@ -951,6 +955,9 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
         changed_tables, discrepancies, migration_added, normalized = (
             compare_snapshots(pre, post)
         )
+    except BaseException as exc:
+        primary_error = exc
+        primary_traceback = exc.__traceback__
     finally:
         try:
             shutil.rmtree(temp_root)
@@ -958,6 +965,11 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
             # The retained backup may contain private rows.  Report its path so
             # the operator can remove it, but never include exception text.
             cleanup_problem = f"temporary_backup_retained={temp_root}"
+
+    if primary_error is not None:
+        if cleanup_problem:
+            raise _fail(cleanup_problem) from None
+        raise primary_error.with_traceback(primary_traceback)
 
     storage_after = storage_manifest(storage_dir)
     source_after = _source_metadata(database)

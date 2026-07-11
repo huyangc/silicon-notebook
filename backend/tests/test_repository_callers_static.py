@@ -321,10 +321,10 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/verify_repository_snapshot.py", 767, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 910, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 914, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 912, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 916, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }
