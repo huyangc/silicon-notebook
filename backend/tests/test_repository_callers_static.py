@@ -119,17 +119,17 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "snapshot verifier reads only its backup/probe database"
         for site in {
-            ("scripts/verify_repository_snapshot.py", 233, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 240, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 262, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 266, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 285, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 286, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 296, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 308, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 560, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 567, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 596, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 358, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 365, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 387, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 391, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 416, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 417, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 434, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 446, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 773, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 780, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 809, "probe.execute"),
         }
     },
 }
@@ -164,7 +164,7 @@ FACADE_CLASS_IMPORT_SITES: dict[tuple[str, int], str] = {
     ("scripts/reextract_notebook.py", 10): "offline CLI composition root",
     ("scripts/replay_retrieval.py", 40): "offline CLI composition root",
     ("scripts/smoke_backend.py", 24): "offline smoke composition root",
-    ("scripts/verify_repository_snapshot.py", 58): "backup-only verifier composition root",
+    ("scripts/verify_repository_snapshot.py", 59): "backup-only verifier composition root",
 }
 
 # Exact exceptions must name the call site and explain why it is outside the
@@ -312,19 +312,19 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 281, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 412, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 282, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 413, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 554, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 767, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 696, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 910, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 698, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 912, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }

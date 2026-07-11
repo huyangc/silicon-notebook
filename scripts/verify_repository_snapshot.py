@@ -21,14 +21,14 @@ Safety contract (Task 28):
   environment defaults) and every model/embedding/rerank/MinerU provider must
   be unconfigured/off; a socket guard rejects any network call while the
   repository is alive.
-- The only rows allowed to change when the repository opens the backup are
-  the documented startup normalizations: running ``merge_review_jobs`` become
-  ``failed`` and running ``ask_jobs`` become ``interrupted`` (both with the
-  restart error), missing built-in user/profile/whitelist/object-schema seed
-  rows are inserted, and the ``user-local`` admin in-place upgrade rewrites
-  username/role/password hash/salt/iterations/updated_at.  Every other
-  existing primary key, row count and canonical row digest must match.
-- stdout carries table names, counts and digests only — never row content.
+- Schema migration and startup seed manifests enumerate every accepted
+  object, primary key and stable value; no object or row is trusted by a
+  ``builtin`` label alone.  Recovery and admin normalization remain limited
+  to their documented fields, and every other row digest must match.
+- Original database/WAL metadata is guarded.  A read-only attachment to a
+  live WAL may change rebuildable ``-shm`` mtime, so only SHM existence is
+  compared; database and WAL size/mtime remain exact.
+- stdout carries object names, counts and digests only — never row content.
 
 Success line::
 
@@ -48,6 +48,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = REPO_ROOT / "backend"
@@ -87,6 +88,130 @@ ADMIN_UPGRADE_COLUMNS = frozenset(
         "updated_at",
     }
 )
+
+EXPECTED_KG_REBUILD_CHECKPOINT_SQL = """CREATE TABLE kg_rebuild_checkpoint (
+                    notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                    input_version TEXT NOT NULL,
+                    stage         TEXT NOT NULL,
+                    item_key      TEXT NOT NULL,
+                    payload       TEXT NOT NULL,
+                    created_at    TEXT NOT NULL,
+                    PRIMARY KEY (notebook_id, input_version, stage, item_key)
+                )"""
+
+# Every schema object accepted for one version hop is named here with its exact
+# sqlite_master SQL.  An absent hop means that this verifier does not know how
+# to prove that migration and must fail closed.
+MIGRATION_MANIFEST = {
+    (9, 10): {
+        "tables": {
+            "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
+        },
+        "columns": {},
+        "indexes": {},
+        "triggers": {},
+        "views": {},
+    },
+}
+
+_BUILTIN_WHITELIST = (
+    "ac", "adc", "bicmos", "bjt", "cmos", "cmrr", "dac", "dc", "esd",
+    "fet", "ic", "if", "jfet", "lna", "lo", "mos", "mosfet", "nmos",
+    "op amp", "pll", "pmos", "psrr", "pvt", "rf", "vco",
+)
+
+_BUILTIN_OBJECT_SCHEMAS = {
+    "concept": {
+        "object_type": "concept",
+        "plural": "concepts",
+        "fields": '["name", "section_path"]',
+        "primary_field": "name",
+        "description": "a named entity (term/method/component/device/material)",
+        "label": "概念 Concept",
+        "list_fields": "[]",
+        "source": "builtin",
+        "status": "active",
+        "rationale": "",
+        "notebook_id": "",
+    },
+    "claim": {
+        "object_type": "claim",
+        "plural": "claims",
+        "fields": '["name", "section_path"]',
+        "primary_field": "name",
+        "description": "a truth-evaluable assertion about concepts",
+        "label": "论断 Claim",
+        "list_fields": "[]",
+        "source": "builtin",
+        "status": "active",
+        "rationale": "",
+        "notebook_id": "",
+    },
+    "formula": {
+        "object_type": "formula",
+        "plural": "formulas",
+        "fields": '["name", "section_path"]',
+        "primary_field": "name",
+        "description": "an equation / expression",
+        "label": "公式 Formula",
+        "list_fields": "[]",
+        "source": "builtin",
+        "status": "active",
+        "rationale": "",
+        "notebook_id": "",
+    },
+    "procedure": {
+        "object_type": "procedure",
+        "plural": "procedures",
+        "fields": '["name", "section_path"]',
+        "primary_field": "name",
+        "description": "an ordered process / derivation / worked example",
+        "label": "过程 Procedure",
+        "list_fields": "[]",
+        "source": "builtin",
+        "status": "active",
+        "rationale": "",
+        "notebook_id": "",
+    },
+}
+
+# Stable values for every startup-insertable row.  Timestamp, password hash,
+# and salt columns are explicitly volatile; no other key or value is accepted.
+SEED_MANIFEST = {
+    "users": {
+        "user-local": {
+            "id": "user-local",
+            "email": "local-user@silicon-notebook.dev",
+            "display_name": "Local Curator",
+            "role": "admin",
+            "status": "active",
+            "username": "admin",
+            "password_iterations": 200_000,
+        },
+    },
+    "user_profiles": {
+        "profile-local": {
+            "id": "profile-local",
+            "user_id": "user-local",
+            "memory_mode": "manual",
+            "domain_focus": '["Analog IC", "Packaging", "Reliability"]',
+            "model_settings": "{}",
+        },
+    },
+    "concept_whitelist": {
+        term: {"term": term, "note": "builtin"} for term in _BUILTIN_WHITELIST
+    },
+    "object_schemas": _BUILTIN_OBJECT_SCHEMAS,
+}
+
+SEED_VOLATILE_COLUMNS = {
+    "users": frozenset(
+        {"password_hash", "password_salt", "created_at", "updated_at"}
+    ),
+    "user_profiles": frozenset({"created_at", "updated_at"}),
+    "concept_whitelist": frozenset({"created_at"}),
+    "object_schemas": frozenset({"created_at", "updated_at"}),
+}
 
 
 def _fail(message: str) -> "SystemExit":
@@ -191,7 +316,7 @@ class TableSnapshot:
 class DatabaseSnapshot:
     user_version: int
     tables: Dict[str, TableSnapshot]
-    indexes: Tuple[str, ...]
+    schema_objects: Dict[str, Dict[str, str]]
     special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]]
 
 
@@ -274,10 +399,16 @@ def _special_table_rows(
     return rows
 
 
+def _sqlite_read_uri(database: Path, *, immutable: bool = False) -> str:
+    encoded_path = quote(Path(database).as_posix(), safe="/")
+    suffix = "&immutable=1" if immutable else ""
+    return f"file:{encoded_path}?mode=ro{suffix}"
+
+
 def snapshot_database(
     db_path: Path, column_plan: Optional[Dict[str, Tuple[str, ...]]] = None
 ) -> DatabaseSnapshot:
-    uri = f"file:{db_path.as_posix()}?mode=ro"
+    uri = _sqlite_read_uri(db_path)
     meta_conn = sqlite3.connect(uri, uri=True)
     digest_conn = sqlite3.connect(uri, uri=True)
     digest_conn.text_factory = bytes  # byte-exact TEXT digesting, no decode risk
@@ -287,7 +418,14 @@ def snapshot_database(
             "SELECT type, name, sql FROM sqlite_master "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()
-        indexes = tuple(sorted(name for kind, name, _sql in master if kind == "index"))
+        schema_objects: Dict[str, Dict[str, str]] = {
+            kind: {
+                name: sql or ""
+                for object_kind, name, sql in master
+                if object_kind == kind
+            }
+            for kind in ("table", "index", "trigger", "view")
+        }
         tables: Dict[str, TableSnapshot] = {}
         special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]] = {}
         for kind, name, sql in master:
@@ -330,7 +468,7 @@ def snapshot_database(
         return DatabaseSnapshot(
             user_version=user_version,
             tables=tables,
-            indexes=indexes,
+            schema_objects=schema_objects,
             special_rows=special_rows,
         )
     finally:
@@ -384,6 +522,19 @@ def _compare_special_rows(
         keys = set(pre) | set(post)
         return all(pre.get(k) == post.get(k) for k in keys if k not in skip)
 
+    def seed_row_matches(post: Dict[str, Any]) -> bool:
+        manifest_rows = SEED_MANIFEST.get(table, {})
+        row_key = str(next(iter(post.get(name) for name in (
+            "id", "term", "object_type"
+        ) if post.get(name) is not None), ""))
+        expected = manifest_rows.get(row_key)
+        if expected is None:
+            return False
+        volatile = SEED_VOLATILE_COLUMNS.get(table, frozenset())
+        if set(post) - set(expected) - set(volatile):
+            return False
+        return all(post.get(name) == value for name, value in expected.items())
+
     for key, pre_row in pre_rows.items():
         post_row = post_rows.get(key)
         if post_row is None:
@@ -392,6 +543,12 @@ def _compare_special_rows(
         if table == "users" and pre_row.get("id") == "user-local":
             if not rows_equal(pre_row, post_row, ADMIN_UPGRADE_COLUMNS):
                 problems.append(f"table={table} reason=admin-row-changed-beyond-upgrade")
+            elif any(
+                post_row.get(name) != value
+                for name, value in SEED_MANIFEST["users"]["user-local"].items()
+                if name in ADMIN_UPGRADE_COLUMNS
+            ):
+                problems.append(f"table={table} reason=admin-upgrade-value-mismatch")
             elif not rows_equal(pre_row, post_row, frozenset()):
                 normalized["admin_upgraded"] = 1
             continue
@@ -421,13 +578,15 @@ def _compare_special_rows(
     for key, post_row in post_rows.items():
         if key in pre_rows:
             continue
-        if table == "users" and post_row.get("id") == "user-local":
+        if not seed_row_matches(post_row):
+            problems.append(f"table={table} reason=row-inserted")
+        elif table == "users":
             normalized["seeded_users"] += 1
-        elif table == "user_profiles" and post_row.get("id") == "profile-local":
+        elif table == "user_profiles":
             normalized["seeded_user_profiles"] += 1
-        elif table == "concept_whitelist" and post_row.get("note") == "builtin":
+        elif table == "concept_whitelist":
             normalized["seeded_concept_whitelist"] += 1
-        elif table == "object_schemas" and post_row.get("source") == "builtin":
+        elif table == "object_schemas":
             normalized["seeded_object_schemas"] += 1
         else:
             problems.append(f"table={table} reason=row-inserted")
@@ -437,7 +596,6 @@ def compare_snapshots(
     pre: DatabaseSnapshot, post: DatabaseSnapshot
 ) -> Tuple[List[str], List[str], List[str], Dict[str, int]]:
     """Returns (changed_tables, discrepancies, migration_added_tables, normalized)."""
-    migrated = pre.user_version < SCHEMA_VERSION
     discrepancies: List[str] = []
     migration_added: List[str] = []
     normalized = _empty_normalized()
@@ -451,35 +609,97 @@ def compare_snapshots(
             f"user_version={post.user_version} expected={SCHEMA_VERSION}"
         )
 
-    for name in pre.tables:
-        if name not in post.tables:
-            note(name, "table-dropped")
-    for name, post_table in post.tables.items():
-        if name in pre.tables:
-            continue
-        if not migrated:
-            note(name, "table-added-without-migration")
-        elif post_table.row_count != 0:
-            note(name, "migration-added-table-not-empty")
-        else:
-            migration_added.append(name)
+    if pre.user_version == post.user_version:
+        migration_manifest: Dict[str, Any] = {
+            "tables": {}, "columns": {}, "indexes": {}, "triggers": {}, "views": {}
+        }
+    else:
+        migration_manifest = MIGRATION_MANIFEST.get(
+            (pre.user_version, post.user_version), {}
+        )
+        if not migration_manifest:
+            discrepancies.append(
+                "migration-manifest-missing="
+                f"v{pre.user_version}-to-v{post.user_version}"
+            )
+
+    manifest_key = {
+        "table": "tables",
+        "index": "indexes",
+        "trigger": "triggers",
+        "view": "views",
+    }
+    for kind, key in manifest_key.items():
+        before = pre.schema_objects.get(kind, {})
+        after = post.schema_objects.get(kind, {})
+        expected_added = migration_manifest.get(key, {})
+        for name in sorted(set(before) - set(after)):
+            if kind == "table":
+                note(name, "table-dropped")
+            else:
+                discrepancies.append(f"schema={kind} name={name} reason=dropped")
+        for name in sorted(set(before) & set(after)):
+            if before[name] == after[name]:
+                continue
+            if kind == "table":
+                note(name, "schema-sql-changed")
+            else:
+                discrepancies.append(
+                    f"schema={kind} name={name} reason=definition-changed"
+                )
+        for name in sorted(set(after) - set(before)):
+            expected_sql = expected_added.get(name)
+            if expected_sql is None:
+                if kind == "table":
+                    note(name, "unmanifested-table-added")
+                else:
+                    discrepancies.append(
+                        f"schema={kind} name={name} reason=unmanifested-addition"
+                    )
+                continue
+            if after[name] != expected_sql:
+                if kind == "table":
+                    note(name, "migration-table-definition-mismatch")
+                else:
+                    discrepancies.append(
+                        f"schema={kind} name={name} reason=manifest-definition-mismatch"
+                    )
+                continue
+            if kind == "table":
+                if post.tables[name].row_count:
+                    note(name, "migration-added-table-not-empty")
+                else:
+                    migration_added.append(name)
+        for name in sorted(set(expected_added) - (set(after) - set(before))):
+            discrepancies.append(
+                f"schema={kind} name={name} reason=manifest-addition-missing"
+            )
 
     for name, pre_table in pre.tables.items():
         post_table = post.tables.get(name)
         if post_table is None:
             continue
-        pre_cols = set(pre_table.column_names)
-        post_cols = set(post_table.column_names)
-        if pre_cols - post_cols:
+        pre_columns = {column[0]: column for column in pre_table.columns}
+        post_columns = {column[0]: column for column in post_table.columns}
+        if set(pre_columns) - set(post_columns):
             note(name, "column-removed")
             continue
-        if (post_cols - pre_cols) and not migrated:
-            note(name, "column-added-without-migration")
+        expected_columns = migration_manifest.get("columns", {}).get(name, {})
+        added_columns = set(post_columns) - set(pre_columns)
+        if added_columns != set(expected_columns):
+            note(name, f"unmanifested-columns={sorted(added_columns)}")
+        else:
+            for column, definition in expected_columns.items():
+                if post_columns[column] != tuple(definition):
+                    note(name, f"column-definition-mismatch={column}")
+        if any(
+            pre_columns[column] != post_columns[column]
+            for column in set(pre_columns) & set(post_columns)
+        ):
+            note(name, "column-definition-changed")
         if pre_table.pk_columns != post_table.pk_columns:
             note(name, "primary-key-changed")
             continue
-        if pre_table.sql != post_table.sql and not migrated:
-            note(name, "schema-sql-changed")
         if name in SPECIAL_TABLES:
             problems: List[str] = []
             _compare_special_rows(
@@ -503,13 +723,6 @@ def compare_snapshots(
             note(name, "row-count-changed")
         elif pre_table.digest != post_table.digest:
             note(name, "row-digest-changed")
-
-    new_indexes = set(post.indexes) - set(pre.indexes)
-    missing_indexes = set(pre.indexes) - set(post.indexes)
-    if missing_indexes:
-        discrepancies.append(f"indexes-dropped={sorted(missing_indexes)}")
-    if new_indexes and not migrated:
-        discrepancies.append(f"indexes-added-without-migration={sorted(new_indexes)}")
 
     changed_tables = sorted(changed)
     for table in changed_tables:
@@ -551,7 +764,7 @@ def exercise_reads(repo: Any, backup_path: Path) -> Dict[str, int]:
         key=lambda row: (-(ko_counts.get(row["id"], 0)), row["id"]),
     )
 
-    probe = sqlite3.connect(f"file:{backup_path.as_posix()}?mode=ro", uri=True)
+    probe = sqlite3.connect(_sqlite_read_uri(backup_path), uri=True)
     try:
         # Top KG notebooks plus notebooks that actually hold Ask jobs/reports,
         # so those read paths are exercised whenever the database has them.
@@ -651,8 +864,8 @@ def _source_read_uri(database: Path) -> str:
     wal = Path(f"{database}-wal")
     shm = Path(f"{database}-shm")
     if wal.exists() or shm.exists():
-        return f"file:{database.as_posix()}?mode=ro"
-    return f"file:{database.as_posix()}?mode=ro&immutable=1"
+        return _sqlite_read_uri(database)
+    return _sqlite_read_uri(database, immutable=True)
 
 
 def _source_metadata(database: Path) -> List[Tuple[str, int, int]]:
@@ -688,6 +901,7 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
     source_before = _source_metadata(database)
 
     temp_root = Path(tempfile.mkdtemp(prefix="repository-snapshot-"))
+    cleanup_problem = ""
     try:
         backup_path = temp_root / "backup.db"
         temp_storage = temp_root / "storage"
@@ -738,7 +952,12 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
             compare_snapshots(pre, post)
         )
     finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+        try:
+            shutil.rmtree(temp_root)
+        except OSError:
+            # The retained backup may contain private rows.  Report its path so
+            # the operator can remove it, but never include exception text.
+            cleanup_problem = f"temporary_backup_retained={temp_root}"
 
     storage_after = storage_manifest(storage_dir)
     source_after = _source_metadata(database)
@@ -748,6 +967,8 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
         discrepancies.append("original-storage-changed")
     if not source_unchanged:
         discrepancies.append("original-database-metadata-changed")
+    if cleanup_problem:
+        discrepancies.append(cleanup_problem)
 
     return VerificationResult(
         ok=not changed_tables and not discrepancies,

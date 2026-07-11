@@ -1391,27 +1391,27 @@ TASK27_ALLOWED_CONSUMERS = {
 # public read surface (representative reads on the temporary backup) at exact
 # ledger sites; it never touches private facade seams.
 TASK28_ALLOWED_IMPORTS = {
-    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "SCHEMA_VERSION"),
-    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "reset_request_user"),
-    ("scripts/verify_repository_snapshot.py", 58, "app.services.sqlite_repository", "set_request_user"),
+    ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "SCHEMA_VERSION"),
+    ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "reset_request_user"),
+    ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:601"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:594"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:579"),
-    ("get_report", "scripts/verify_repository_snapshot.py:606"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:582"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:591"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:585"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:603"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:580"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:542"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:546"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:548"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:573"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:615"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:589"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:814"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:807"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:792"),
+    ("get_report", "scripts/verify_repository_snapshot.py:819"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:795"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:804"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:798"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:816"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:793"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:755"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:759"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:761"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:786"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:828"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:802"),
 }
 
 # Task 26: the consolidated facade delegates its last SQL bodies to the

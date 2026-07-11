@@ -99,6 +99,19 @@ def _insert_running_jobs(database: Path) -> None:
     db.close()
 
 
+def _verify_with_repository_mutation(module, database, storage, mutation, monkeypatch):
+    real_repository = module.SQLiteRepository
+
+    class MutatingRepository(real_repository):
+        def __init__(self, settings):
+            super().__init__(settings)
+            with self._write() as db:
+                mutation(db)
+
+    monkeypatch.setattr(module, "SQLiteRepository", MutatingRepository)
+    return module.verify_snapshot(database, storage)
+
+
 def test_repository_is_never_constructed_with_original_database_path(
     tmp_path, monkeypatch
 ):
@@ -191,6 +204,38 @@ def test_wal_committed_rows_are_present_in_backup(tmp_path):
     assert result.table_counts["notebooks"] == 2
 
 
+def test_live_wal_shm_mtime_is_an_explicit_metadata_exception(tmp_path):
+    import os
+
+    module = _load_verifier()
+    database, _storage = _copy_fixture(tmp_path)
+
+    writer = sqlite3.connect(database)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-shm', 'shm exception', 't0', 't0')"
+        )
+        writer.commit()
+        shm = Path(f"{database}-shm")
+        assert shm.is_file(), "test setup: live WAL must have an SHM sidecar"
+        before = module._source_metadata(database)
+        stat = shm.stat()
+        os.utime(
+            shm,
+            ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+        )
+        assert shm.stat().st_mtime_ns != stat.st_mtime_ns
+        after = module._source_metadata(database)
+    finally:
+        writer.close()
+
+    assert before == after
+    assert before[-1] == (f"{database.name}-shm", 1, 0)
+
+
 def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -221,6 +266,109 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["conversations"] >= 1
     assert result.reads["ask_jobs"] >= 1
     assert result.reads["reports"] >= 1
+
+
+@pytest.mark.parametrize(
+    "mutation, expected_fragment",
+    [
+        (
+            lambda db: db.execute("CREATE TABLE verifier_backdoor (id TEXT)"),
+            "verifier_backdoor",
+        ),
+        (
+            lambda db: db.execute("ALTER TABLE notebooks ADD COLUMN verifier_flag TEXT"),
+            "notebooks",
+        ),
+        (
+            lambda db: (
+                db.execute("DROP INDEX idx_chunks_nb"),
+                db.execute("CREATE INDEX idx_chunks_nb ON chunks(source_id)"),
+            ),
+            "idx_chunks_nb",
+        ),
+        (
+            lambda db: db.execute(
+                "CREATE TRIGGER verifier_trigger AFTER INSERT ON notebooks "
+                "BEGIN SELECT 1; END"
+            ),
+            "verifier_trigger",
+        ),
+        (
+            lambda db: db.execute(
+                "CREATE VIEW verifier_view AS SELECT id FROM notebooks"
+            ),
+            "verifier_view",
+        ),
+    ],
+    ids=["empty-table", "column", "index-definition", "trigger", "view"],
+)
+def test_unmanifested_schema_changes_fail_verification(
+    tmp_path, monkeypatch, mutation, expected_fragment
+):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    result = _verify_with_repository_mutation(
+        module, database, storage, mutation, monkeypatch
+    )
+
+    assert not result.ok
+    assert expected_fragment in " ".join(result.discrepancies)
+
+
+def test_fake_builtin_seed_row_fails_verification(tmp_path, monkeypatch):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    result = _verify_with_repository_mutation(
+        module,
+        database,
+        storage,
+        lambda db: db.execute(
+            "INSERT INTO concept_whitelist (term, note, created_at) "
+            "VALUES ('verifier-backdoor', 'builtin', 'private-row-content')"
+        ),
+        monkeypatch,
+    )
+
+    assert not result.ok
+    assert "concept_whitelist" in result.changed_tables
+
+
+@pytest.mark.parametrize("filename", ["snapshot?.db", "snapshot#.db", "snapshot%.db"])
+def test_database_uri_punctuation_is_percent_encoded(tmp_path, filename):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    punctuated = database.with_name(filename)
+    database.rename(punctuated)
+
+    result = module.verify_snapshot(punctuated, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 9
+
+
+def test_cleanup_failure_is_authoritative_and_reports_only_retained_path(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    retained: list[Path] = []
+
+    def fail_cleanup(path, *args, **kwargs):
+        retained.append(Path(path))
+        raise OSError("private-row-content cleanup secret")
+
+    monkeypatch.setattr(module.shutil, "rmtree", fail_cleanup)
+
+    result = module.verify_snapshot(database, storage)
+    module._print_report(result)
+    output = capsys.readouterr().out
+
+    assert not result.ok
+    assert retained
+    assert f"temporary_backup_retained={retained[0]}" in output
+    assert "private-row-content" not in output
 
 
 @pytest.mark.parametrize(
