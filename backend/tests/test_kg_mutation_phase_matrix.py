@@ -646,3 +646,114 @@ def test_migration_and_fixture_writes_bypass_the_coordinator(repo, monkeypatch):
     _spy_coordinator(repo, monkeypatch, events)
     repo._test_insert_object(notebook.id, "claim", {"name": "fixture row"})
     assert events == []
+
+
+# Task 5 review contracts are appended so frozen pre-existing line coordinates
+# above remain unchanged.
+def _trace_transaction_connections(repo, monkeypatch, events):
+    import sqlite3
+    runtime = object.__getattribute__(repo, "_runtime")
+    original = runtime.database.write
+
+    @contextmanager
+    def traced():
+        with original() as db:
+            assert isinstance(db, sqlite3.Connection)
+            events.append(("write.begin", id(db)))
+            yield db
+        events.append(("write.commit", id(db)))
+
+    monkeypatch.setattr(runtime.database, "write", traced)
+
+
+def _delegating_store_spy(monkeypatch, owner, name, events, *, cursor=False):
+    import sqlite3
+    original = getattr(owner, name)
+
+    def wrapped(db, *args, **kwargs):
+        assert isinstance(db, sqlite3.Connection)
+        result = original(db, *args, **kwargs)
+        if cursor:
+            assert isinstance(result, sqlite3.Cursor)
+        events.append((name, id(db), args))
+        return result
+
+    monkeypatch.setattr(owner, name, wrapped)
+
+
+def test_delete_delegates_in_write_then_commits_before_cache_invalidation(repo, monkeypatch):
+    notebook = getattr(repo, "create_notebook")(NotebookCreate(name="delete delegation"))
+    runtime = object.__getattribute__(repo, "_runtime")
+    events = []
+    _trace_transaction_connections(repo, monkeypatch, events)
+    _delegating_store_spy(
+        monkeypatch, runtime.knowledge, "delete_notebook_graph_rows", events
+    )
+    monkeypatch.setattr(
+        runtime.kg_mutations, "invalidate_unified_cache",
+        lambda notebook_id: events.append(("invalidate", notebook_id)),
+    )
+
+    counts = getattr(repo, "delete_notebook_kg")(notebook.id)
+
+    assert [event[0] for event in events] == [
+        "write.begin", "delete_notebook_graph_rows", "write.commit", "invalidate",
+    ]
+    assert events[0][1] == events[1][1] == events[2][1]
+    assert counts["knowledge_objects"] == 0
+
+
+def test_relink_store_spies_observe_read_projection_and_caller_write_connection(repo, monkeypatch):
+    notebook_id, object_ids, _relations = _seed_kg(repo, "relink delegation")
+    runtime = object.__getattribute__(repo, "_runtime")
+    monkeypatch.setattr(
+        kg_relink, "complete_isolated_edges",
+        lambda nodes, edges: [{
+            "source_object_id": object_ids[0], "target_object_id": object_ids[2],
+            "edge_type": "mentions", "basis": "delegation",
+        }],
+    )
+    events = []
+    _delegating_store_spy(monkeypatch, runtime.knowledge, "relink_rows", events)
+    _trace_transaction_connections(repo, monkeypatch, events)
+    _delegating_store_spy(monkeypatch, runtime.knowledge, "insert_relation_chunk", events)
+    monkeypatch.setattr(
+        runtime.kg_mutations, "invalidate_unified_cache",
+        lambda notebook_id: events.append(("invalidate", notebook_id)),
+    )
+    monkeypatch.setattr(
+        runtime.kg_mutations, "mark_unified_kg_dirty",
+        lambda notebook_id: events.append(("dirty", notebook_id)),
+    )
+
+    out = getattr(repo, "relink_notebook_kg")(notebook_id)
+
+    assert [event[0] for event in events] == [
+        "relink_rows", "write.begin", "insert_relation_chunk", "write.commit",
+        "invalidate", "dirty",
+    ]
+    assert events[1][1] == events[2][1] == events[3][1]
+    assert out["edges_added"] == 1
+
+
+def test_canonical_relation_stream_and_rewrite_delegate_without_materializing(repo, monkeypatch):
+    notebook_id, _objects, _relations = _seed_kg(repo, "canonical delegation")
+    runtime = object.__getattribute__(repo, "_runtime")
+    events = []
+    _delegating_store_spy(
+        monkeypatch, runtime.unified_kg,
+        "canonical_relation_seed_rows", events, cursor=True,
+    )
+    _trace_transaction_connections(repo, monkeypatch, events)
+    _delegating_store_spy(
+        monkeypatch, runtime.unified_kg, "replace_canonical_relations", events
+    )
+
+    count = getattr(repo, "rebuild_canonical_relations")(notebook_id, force=True)
+
+    assert [event[0] for event in events] == [
+        "canonical_relation_seed_rows", "write.begin",
+        "replace_canonical_relations", "write.commit",
+    ]
+    assert events[1][1] == events[2][1] == events[3][1]
+    assert count == 2

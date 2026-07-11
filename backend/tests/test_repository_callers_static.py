@@ -201,58 +201,58 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     },
 }
 
-# Temporary, exact debt ledger for remediation Tasks 2–6.  This is not an
-# allowlist: tests assert the complete AST result equals independent exceptions
-# plus these sites, so removing/moving a call requires deleting its entry and a
-# new call fails immediately.  Task 6 must leave both sets empty.
+LIFECYCLE_STORE_CALLS = {
+    "knowledge": {
+        "active_object_count", "community_context_rows", "delete_notebook_graph_rows",
+        "embedding_rows", "embedding_rows_for_objects", "incremental_object_rows",
+        "insert_kg_fts_rows", "insert_object_chunk", "insert_object_source_rows",
+        "insert_relation_chunk", "neighbor_relation_rows", "notebook_tier_row",
+        "object_meta_rows_for_notebook", "relink_rows", "source_build_rows",
+        "unified_graph_rows",
+    },
+    "governance_store": {
+        "delete_clusters", "delete_pending_merges", "incremental_cluster_rows",
+        "insert_clusters", "insert_merge_candidate", "insert_pending_merge_rows",
+        "merge_candidate_pairs", "sweep_orphan_clusters", "valid_object_ids",
+    },
+    "unified_kg": {
+        "canonical_relation_seed_rows", "canonical_relations_count", "checkpoint_clear",
+        "checkpoint_gc", "checkpoint_load", "checkpoint_put", "claim_name_rows",
+        "clear_mention_bridge", "clear_scratch_run", "cluster_description_rows",
+        "cluster_evidence_rows", "cluster_input_facts", "communities_count",
+        "community_graph_rows", "community_member_ids", "community_reports",
+        "community_rows_for_summary", "concept_clusters_count", "distinct_cluster_count",
+        "finish_rebuild_state", "insert_scratch_rows", "mention_edges_count",
+        "mention_scan_matches", "mention_seed_rows", "replace_canonical_relations",
+        "replace_cluster_rows_streamed", "replace_communities", "replace_mention_bridge",
+        "scratch_vector_rows", "seed_payload_rows", "set_community_seq",
+        "set_community_summary", "state_row", "stream_scratch_rows", "stream_seed_rows",
+    },
+}
+def _lifecycle_store_calls() -> dict[str, set[str]]:
+    path = BACKEND_APP / "services" / "knowledge_lifecycle.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    actual = {owner: set() for owner in LIFECYCLE_STORE_CALLS}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        seat = node.func.value
+        if isinstance(seat, ast.Attribute) and isinstance(seat.value, ast.Name):
+            if seat.value.id == "self" and seat.attr in actual:
+                actual[seat.attr].add(node.func.attr)
+    return actual
+def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():
+    assert _lifecycle_store_calls() == LIFECYCLE_STORE_CALLS
+    path = BACKEND_APP / "services" / "knowledge_lifecycle.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    sql_calls = [(n.lineno, n.func.attr) for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr in {"execute", "executemany", "executescript"}
+    ]
+    assert sql_calls == []
+# Exact debt ledger: removing/moving a call deletes its entry; new calls fail.
 EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
     "product_sql": {
-        # Task 5 moved lifecycle persistence into these cohesive store phases.
-        # This executable inventory replaces the 46-site debt block at equal
-        # layout width so unrelated frozen consumer coordinates remain stable.
-        # KnowledgeStore phases:
-        # - notebook graph deletion and notebook tier lookup
-        # - relink object/relation/source snapshots
-        # - incremental object and embedding projections
-        # - source-build state and active-object count
-        # - unified graph, neighbors, metadata, community context
-        # GovernanceStore phases:
-        # - orphan-cluster sweep
-        # - incremental canonical projections
-        # - merge decision-pair projection
-        # - live-object validation
-        # UnifiedKgStore phases:
-        # - scratch-run cleanup
-        # - ordered payload and object seed streams
-        # - batched scratch writes
-        # - streamed scratch/vector reads
-        # - streamed cluster replacement
-        # - description/evidence projections
-        # - canonical-relation seed stream
-        # - mention seed and TEMP-FTS operations
-        # - canonical community graph stream
-        # Transaction ownership remains in KnowledgeLifecycleService:
-        # - delete is one caller-owned write
-        # - store chunks preserve one write per chunk
-        # - orphan sweep and mutation-seq bump share one write
-        # - scratch reset, scratch fill, and vector pass stay separate
-        # - cluster replace and cluster-seq bump share one write
-        # - rebuild checkpoints retain self-owned store writes
-        # - canonical, mention, and community rewrites retain their writes
-        # Streaming invariants:
-        # - object seed ordering remains ORDER BY rowid
-        # - store readers return cursors rather than fetchall at scale
-        # - scratch and cluster writes retain 1000-row batches
-        # - service generators retain policy and id allocation
-        # Failure-policy invariants:
-        # - merge review remains fail-open
-        # - concept description checkpoint failures remain fail-open
-        # - mutation invalidation order remains post-commit
-        # Static enforcement below compares all discovered product SQL with
-        # this now-shrunken exact debt set, so any lifecycle SQL regression
-        # fails without adding a service-wide allowance.
-        # The scale-index builder entries below are separate Task 6 debt;
-        # Task 5 neither refreshes nor broadens those exact coordinates.
         ("backend/app/services/scale_index_builder.py", 493, "db.execute"),
         ("backend/app/services/scale_index_builder.py", 554, "db.execute"),
     },

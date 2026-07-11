@@ -655,3 +655,60 @@ def test_tier2_ann_skips_deprecated_concepts(repo, monkeypatch):
     dep_cid = "K-" + _norm("Old Routing")
     assert all(dep_cid not in p for p in pairs)   # deprecated 概念绝不入候选
     assert pairs == {tuple(sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Expert Routing"))))}
+
+
+def test_incremental_merge_pair_reads_delegate_on_caller_connections(repo, monkeypatch):
+    import sqlite3
+    nb = getattr(repo, "create_notebook")(NotebookCreate(name="merge delegation"))
+    runtime = object.__getattribute__(repo, "_runtime")
+    now = "2026-06-22T00:00:00"
+    from app.services.kg_merge import _norm
+    with getattr(repo, "_write")() as db:
+        for oid, name, source_id, vector in (
+            ("ko-old", "Expert Routing", "src-A", [1.0] + [0.0] * 15),
+            ("ko-new", "MoE Gating", "src-B", [0.99] + [0.0] * 15),
+        ):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}),
+                 "[]", source_id, now, now),
+            )
+            db.execute(
+                "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                "VALUES (?,?,?,?)", (oid, nb.id, json.dumps(vector), now),
+            )
+        db.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("cc-old", nb.id, "K-" + _norm("Expert Routing"), "ko-old",
+             "Expert Routing", "concept", now),
+        )
+    opened = set()
+    original_connect = runtime.database.connect
+
+    def traced_connect():
+        db = original_connect()
+        opened.add(id(db))
+        return db
+
+    monkeypatch.setattr(runtime.database, "connect", traced_connect)
+    calls = []
+    store = runtime.governance
+    original = store.merge_candidate_pairs
+
+    def wrapped(db, notebook_id, statuses):
+        assert isinstance(db, sqlite3.Connection) and id(db) in opened
+        calls.append((notebook_id, tuple(statuses), id(db)))
+        return original(db, notebook_id, statuses)
+
+    monkeypatch.setattr(store, "merge_candidate_pairs", wrapped)
+
+    getattr(repo, "incremental_fuse_source")(nb.id, "src-B")
+
+    assert [statuses for _nb, statuses, _db in calls] == [
+        ("pending",), ("confirmed", "rejected", "deferred"),
+    ]
+    assert all(notebook_id == nb.id for notebook_id, _statuses, _db in calls)

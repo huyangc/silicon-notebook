@@ -173,3 +173,53 @@ def test_resolve_comparison_peers_prefers_comention_then_community(repo, monkeyp
         repo, nb.id, "Grouped-query attention (GQA)", "q", top_k=5, candidates=50)
     assert source2 == "community"
     assert names2 == ["STUB-COMMUNITY-PEER"]
+
+
+def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch):
+    from contextlib import contextmanager
+    nb = _seed_bridge_nb(repo)
+    runtime = object.__getattribute__(repo, "_runtime")
+    store = runtime.unified_kg
+    events = []
+    write_ids = set()
+    original_write = runtime.database.write
+
+    @contextmanager
+    def traced_write():
+        with original_write() as db:
+            write_ids.add(id(db))
+            yield db
+
+    monkeypatch.setattr(runtime.database, "write", traced_write)
+
+    def spy(name, *, cursor=False):
+        original = getattr(store, name)
+
+        def wrapped(db, *args, **kwargs):
+            assert isinstance(db, sqlite3.Connection)
+            result = original(db, *args, **kwargs)
+            if cursor:
+                assert isinstance(result, sqlite3.Cursor)
+            events.append((name, id(db), args))
+            return result
+
+        monkeypatch.setattr(store, name, wrapped)
+
+    spy("mention_seed_rows")
+    spy("claim_name_rows")
+    spy("mention_scan_matches", cursor=True)
+    spy("replace_mention_bridge")
+
+    count = getattr(repo, "rebuild_mention_bridge")(nb.id, force=True)
+
+    assert count >= 5
+    names = [name for name, _db, _args in events]
+    assert names[0] == "mention_seed_rows"
+    assert "claim_name_rows" in names and "mention_scan_matches" in names
+    temp_ids = {
+        db_id for name, db_id, _args in events
+        if name in {"claim_name_rows", "mention_scan_matches"}
+    }
+    assert len(temp_ids) == 1
+    replace = next(event for event in events if event[0] == "replace_mention_bridge")
+    assert replace[1] in write_ids

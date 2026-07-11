@@ -244,3 +244,50 @@ def test_incremental_gate_skips_when_kg_unchanged(repo):
     assert _built() == 2
     repo.rebuild_communities(nb.id, level=0, force=True)  # force 无视版本闸
     assert _built() == 3
+
+
+def test_community_graph_stream_and_rewrite_use_store_connections(repo, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+    nb = _seed_two_docs_shared_canonical(repo)
+    runtime = object.__getattribute__(repo, "_runtime")
+    store = runtime.unified_kg
+    events = []
+    write_ids = set()
+    original_graph = store.community_graph_rows
+    original_replace = store.replace_communities
+    original_write = runtime.database.write
+
+    def graph_spy(db, notebook_id):
+        assert isinstance(db, sqlite3.Connection)
+        names, rows = original_graph(db, notebook_id)
+        assert isinstance(rows, sqlite3.Cursor)
+        events.append(("community_graph_rows", id(db), notebook_id))
+        return names, rows
+
+    @contextmanager
+    def traced_write():
+        with original_write() as db:
+            write_ids.add(id(db))
+            events.append(("write.begin", id(db), nb.id))
+            yield db
+        events.append(("write.commit", id(db), nb.id))
+
+    def replace_spy(db, *args, **kwargs):
+        assert isinstance(db, sqlite3.Connection)
+        events.append(("replace_communities", id(db), args[0]))
+        return original_replace(db, *args, **kwargs)
+
+    monkeypatch.setattr(store, "community_graph_rows", graph_spy)
+    monkeypatch.setattr(runtime.database, "write", traced_write)
+    monkeypatch.setattr(store, "replace_communities", replace_spy)
+
+    count = getattr(repo, "rebuild_communities")(nb.id, level=0, force=True)
+
+    names = [event[0] for event in events]
+    assert names[:4] == [
+        "community_graph_rows", "write.begin", "replace_communities", "write.commit",
+    ]
+    assert events[1][1] == events[2][1] == events[3][1]
+    assert events[2][1] in write_ids
+    assert count >= 1
