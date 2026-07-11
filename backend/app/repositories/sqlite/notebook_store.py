@@ -212,3 +212,45 @@ class NotebookStore:
             db.execute("DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,))
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
         return [row["file_path"] for row in source_rows]
+
+    # ------------------------------------------------- Task 26 primitives
+    @staticmethod
+    def meta_row(db: sqlite3.Connection, notebook_id: str) -> "dict | None":
+        """Name + purpose_auto flag for the metadata-augmentation guard
+        (moved verbatim from the facade's `_notebook_meta_row`)."""
+        row = db.execute(
+            "SELECT name, purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "name": row["name"],
+            "purpose_auto": ("purpose_auto" in row.keys() and row["purpose_auto"] == 1),
+        }
+
+    def apply_meta(
+        self, db: sqlite3.Connection, notebook_id: str, *,
+        guard_name: str, name: str, purpose: str,
+    ) -> None:
+        """Optimistically apply auto-derived notebook metadata: the name only
+        overwrites the placeholder we read (no clobber of a concurrent
+        rename); the purpose only lands while purpose_auto=1. The caller owns
+        the ONE write transaction; the clock rides the compatibility seam."""
+        if name:
+            db.execute(
+                "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
+                (name, self.now(), notebook_id, guard_name),
+            )
+        if purpose:
+            db.execute(
+                "UPDATE notebooks SET purpose = ?, updated_at = ? "
+                "WHERE id = ? AND purpose_auto = 1",
+                (purpose, self.now(), notebook_id),
+            )
+
+    @staticmethod
+    def tier_on(db: sqlite3.Connection, notebook_id: str) -> str:
+        row = db.execute(
+            "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+        ).fetchone()
+        return str(row["tier"]) if row is not None and row["tier"] else ""

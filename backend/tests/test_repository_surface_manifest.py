@@ -177,6 +177,12 @@ TASK19_ALLOWED_IMPORTS = {
     ("backend/tests/test_scale_builder_failure_boundaries.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/app/services/sqlite_repository.py", 116, "app.services.repository", "UploadedSourceFile"),
 }
+# Task 26: the two consolidation contract suites (facade surface + runtime
+# identity) import the compatibility facade at fresh sites.
+TASK26_ALLOWED_IMPORTS = {
+    ("backend/tests/test_repository_facade_contract.py", 20, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_runtime_identity.py", 13, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -1262,6 +1268,60 @@ TASK25_ALLOWED_MEMBER_FILES = {
     for name in {"SQLiteRepository", "_runtime"}
 }
 
+# Task 26: the last three test-only facade-private patch seats migrate to
+# their canonical components (source-embedding backfill / candidate gather /
+# graph-side index delta); the frozen facade sites below stop appearing in
+# the static scan.
+TASK26_ALLOWED_PATCHES = {
+    ("backend/tests/test_ask_vector_matrix.py", 125, "_backfill_knowledge_embeddings", "repo"),
+    ("backend/tests/test_dedup_scale.py", 32, "_gather_elements", "repo"),
+    ("backend/tests/test_scale_idx_disk_cache.py", 190, "_index_delta", "repo"),
+}
+
+# Task 26: the consolidated facade delegates its last SQL bodies to the
+# stores, so two facade-internal helper call sites disappear (_in_batches
+# now feeds retrieval_objects as a batch size; storage_dir is the runtime
+# SourceFileStore's path object, not a fresh _resolve_path result); the
+# migrated patch seats leave `_runtime`/`retrieval` residue at their exact
+# frozen lines; the two new contract suites and the hardening composition
+# pin consume the facade at fresh sites.
+TASK26_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/sqlite_repository.py", "_in_batches"),
+    ("backend/app/services/sqlite_repository.py", "_resolve_path"),
+    ("backend/tests/test_ask_vector_matrix.py", "_backfill_knowledge_embeddings"),
+    ("backend/tests/test_ask_vector_matrix.py", "_runtime"),
+    ("backend/tests/test_dedup_scale.py", "_gather_elements"),
+    ("backend/tests/test_dedup_scale.py", "retrieval"),
+    ("backend/tests/test_scale_idx_disk_cache.py", "_index_delta"),
+    ("backend/tests/test_scale_idx_disk_cache.py", "retrieval"),
+    ("backend/tests/test_architecture_hardening.py", "_runtime"),
+    ("backend/tests/test_architecture_hardening.py", "settings"),
+} | {
+    ("backend/tests/test_repository_facade_contract.py", name)
+    for name in {
+        "SQLiteRepository", "SCHEMA_VERSION", "UploadedSourceFile",
+        "KNOWLEDGE_STATUSES", "KnowledgeGraphTooLargeError",
+        "RetrievedKnowledge", "USABLE_STATUSES", "_COPY_CHUNK",
+        "_REQUEST_USER", "_fast_loads", "_new_id", "_now",
+        "_remap_json_ids", "reset_request_user", "set_request_user",
+    }
+} | {
+    ("backend/tests/test_repository_runtime_identity.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "settings", "storage_dir",
+        "event_log", "db_path", "_write_lock", "_user_model_cfg_cache",
+        "embedder", "llm_client", "rerank_client", "retrieval",
+        "_vector_cache", "_unified_cache", "_scale_idx_cache",
+        "_viz_idx_cache", "_scale_ver_cache", "_scale_ver_lock",
+        "_scale_ver_locks", "_scale_idx_load_lock", "_scale_idx_load_locks",
+        "_scale_idle_queue", "_viz_building", "_viz_building_lock",
+        "_scale_building", "_scale_building_lock", "_auto_index_checked",
+        "_scale_scheduler_started", "_kg_building", "_kg_building_lock",
+        "_notebook_langs_cache", "_ask_cancel_events", "_ask_cancel_lock",
+        "report_execution",
+    }
+}
+
 TASK21_ALLOWED_MEMBER_FILES |= {
     ('backend/app/services/sqlite_repository.py', '_CJK_RE'),
     ('backend/app/services/sqlite_repository.py', '_LATIN_RE'),
@@ -1524,6 +1584,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK23_ALLOWED_MEMBER_FILES
     | TASK24_ALLOWED_MEMBER_FILES
     | TASK25_ALLOWED_MEMBER_FILES
+    | TASK26_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2001,6 +2062,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK23_ALLOWED_IMPORTS
                     or site in TASK24_ALLOWED_IMPORTS
                     or site in TASK25_ALLOWED_IMPORTS
+                    or site in TASK26_ALLOWED_IMPORTS
                 )
 
 
@@ -2012,7 +2074,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES | TASK25_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES | TASK25_ALLOWED_PATCHES | TASK26_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",

@@ -122,7 +122,7 @@ def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
     def fail_backfill(*args, **kwargs):
         raise AssertionError("ask() must not synchronously backfill knowledge embeddings")
 
-    monkeypatch.setattr(repo, "_backfill_knowledge_embeddings", fail_backfill)
+    monkeypatch.setattr(repo._runtime.source_embedding, "backfill_knowledge_embeddings", fail_backfill)
     resp = repo.ask(nb.id, AskRequest(question="channel loss equalization"))
     assert resp.conversation_id
     assert resp.answer_id

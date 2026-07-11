@@ -969,3 +969,180 @@ class KnowledgeStore:
         db.execute(
             "DELETE FROM object_schemas WHERE object_type = ?", (object_type,)
         )
+
+    # ------------------------------------------------- Task 26 primitives
+    # The last facade SQL bodies, moved verbatim.  All connection-taking —
+    # the facade keeps its `_connect`/`_write` boundaries (and the frozen
+    # patch seats on them) and passes the possibly-wrapped connection down.
+
+    @staticmethod
+    def source_has_kg(db: sqlite3.Connection, source_id: str) -> bool:
+        """True iff the source has ≥1 knowledge_objects row with a matching
+        source_id."""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
+            (source_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    def insert_test_object(
+        self,
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        payload: dict,
+        source_id: str = "",
+    ) -> str:
+        """Test-only direct insert (facade `_test_insert_object` delegate).
+        Ids/clock ride the compatibility seams — module `_new_id`/`_now`
+        patches stay authoritative."""
+        object_id = self.seams.new_id("ko")
+        now = self.seams.now()
+        db.execute(
+            """INSERT INTO knowledge_objects
+               (id, notebook_id, object_type, status, owner, payload, evidence,
+                source_candidate_id, source_id, created_at, updated_at)
+               VALUES (?, ?, ?, 'approved', '', ?, '[]', NULL, ?, ?, ?)""",
+            (object_id, notebook_id, object_type,
+             json.dumps(payload, ensure_ascii=False), source_id, now, now),
+        )
+        return object_id
+
+    @staticmethod
+    def edge_centrality_source_rows(
+        db: sqlite3.Connection, notebook_id: str, max_nodes: int
+    ) -> "tuple[List[str], List[dict]]":
+        """Bounded (top-K by SQL degree) node ids + live relation dicts for the
+        edge-betweenness loader (P0-3 semantics moved verbatim):
+
+        1. Degree ranking via GROUP BY over non-rejected knowledge_relations —
+           bounded by the distinct node count touched by an edge (isolated
+           nodes cannot be edge endpoints and never rank).
+        2. When bounded, only relations with BOTH endpoints in the top-K id
+           set survive, loaded via json_each(?) (pure read-side join — no
+           thousand-placeholder IN and no temp-table write).
+        3. Under-K graphs load every live relation plus the full object id
+           set — identical result to the unbounded path.
+        """
+        degree: Dict[str, int] = {}
+        for row in db.execute(
+            "SELECT source_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
+            "WHERE notebook_id = ? AND review_status != 'rejected' "
+            "GROUP BY source_object_id", (notebook_id,),
+        ).fetchall():
+            degree[row["n"]] = degree.get(row["n"], 0) + row["c"]
+        for row in db.execute(
+            "SELECT target_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
+            "WHERE notebook_id = ? AND review_status != 'rejected' "
+            "GROUP BY target_object_id", (notebook_id,),
+        ).fetchall():
+            degree[row["n"]] = degree.get(row["n"], 0) + row["c"]
+
+        if len(degree) > max_nodes:
+            # Deterministic top-K: sort by (-degree, id) so ties break on a
+            # stable, reproducible key.
+            top_ids = [n for n, _ in sorted(
+                degree.items(), key=lambda kv: (-kv[1], kv[0])
+            )[:max_nodes]]
+            top_ids_json = json.dumps(top_ids)
+            rel_rows = db.execute(
+                "SELECT r.id, r.source_object_id, r.target_object_id, "
+                "r.edge_type, r.evidence FROM knowledge_relations r "
+                "JOIN json_each(?) s ON s.value = r.source_object_id "
+                "JOIN json_each(?) t ON t.value = r.target_object_id "
+                "WHERE r.notebook_id = ? AND r.review_status != 'rejected'",
+                (top_ids_json, top_ids_json, notebook_id),
+            ).fetchall()
+            node_ids = top_ids
+        else:
+            rel_rows = db.execute(
+                "SELECT id, source_object_id, target_object_id, edge_type, "
+                "evidence FROM knowledge_relations "
+                "WHERE notebook_id = ? AND review_status != 'rejected'",
+                (notebook_id,),
+            ).fetchall()
+            obj_rows = db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchall()
+            node_ids = [row["id"] for row in obj_rows]
+
+        relations = [{
+            "id": row["id"],
+            "source_object_id": row["source_object_id"],
+            "target_object_id": row["target_object_id"],
+            "edge_type": row["edge_type"],
+            "evidence": json.loads(row["evidence"] or "[]"),
+        } for row in rel_rows]
+        return node_ids, relations
+
+    @staticmethod
+    def concept_cluster_detail_rows(
+        db: sqlite3.Connection, notebook_id: str, canonical_id: str
+    ) -> "tuple[List[sqlite3.Row], str]":
+        """Cluster member rows (joined onto live knowledge_objects) plus the
+        canonical name for one concept cluster."""
+        cluster_rows = db.execute(
+            "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
+            "FROM concept_clusters cc "
+            "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
+            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
+            (notebook_id, canonical_id),
+        ).fetchall()
+        name_row = db.execute(
+            "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
+            (notebook_id, canonical_id),
+        ).fetchone()
+        return cluster_rows, (name_row["canonical_name"] if name_row else "")
+
+    @staticmethod
+    def concept_neighbor_rows(
+        db: sqlite3.Connection, notebook_id: str, member_ids: "List[str]"
+    ) -> "tuple[List[dict], Dict[str, dict]]":
+        """Relations touching the member set plus the batch-read non-member
+        endpoint objects: returns (rel_edges, objects_by_id)."""
+        member_set = set(member_ids)
+        placeholders = ",".join("?" for _ in member_set)
+        member_list = list(member_set)
+        rels_out = db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type "
+            f"FROM knowledge_relations WHERE notebook_id=? AND source_object_id IN ({placeholders})",
+            [notebook_id] + member_list,
+        ).fetchall()
+        rels_in = db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type "
+            f"FROM knowledge_relations WHERE notebook_id=? AND target_object_id IN ({placeholders})",
+            [notebook_id] + member_list,
+        ).fetchall()
+
+        attached_ids: set = set()
+        rel_edges: List[dict] = []
+        for rel in rels_out:
+            other = rel["target_object_id"]
+            if other not in member_set:
+                attached_ids.add(other)
+                rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+        for rel in rels_in:
+            other = rel["source_object_id"]
+            if other not in member_set:
+                attached_ids.add(other)
+                rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
+
+        by_other: Dict[str, dict] = {}
+        if attached_ids:
+            attached_placeholders = ",".join("?" for _ in attached_ids)
+            attached_rows = db.execute(
+                f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
+                f"WHERE id IN ({attached_placeholders}) AND status!='deprecated'",
+                list(attached_ids),
+            ).fetchall()
+            by_other = {
+                row["id"]: {
+                    "id": row["id"],
+                    "object_type": row["object_type"],
+                    "payload": json.loads(row["payload"] or "{}"),
+                    "evidence": json.loads(row["evidence"] or "[]"),
+                }
+                for row in attached_rows
+            }
+        return rel_edges, by_other

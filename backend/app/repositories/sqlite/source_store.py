@@ -467,3 +467,20 @@ class SourceStore:
             return None
         tw = int(m.group(2))
         return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
+
+    @staticmethod
+    def meta_source_rows(
+        db: sqlite3.Connection, notebook_id: str, pending_source_id: str = ""
+    ) -> List[dict]:
+        """Title/doc_type/summary rows feeding notebook metadata augmentation
+        (Task 26: moved verbatim from the facade's `_notebook_meta_sources`)."""
+        rows = db.execute(
+            "SELECT title, doc_type, summary FROM sources "
+            "WHERE notebook_id = ? AND (status = 'extracted' OR id = ?) "
+            "ORDER BY created_at ASC",
+            (notebook_id, pending_source_id),
+        ).fetchall()
+        return [
+            {"title": r["title"], "doc_type": r["doc_type"], "summary": r["summary"]}
+            for r in rows
+        ]

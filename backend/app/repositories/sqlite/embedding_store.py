@@ -183,3 +183,27 @@ class EmbeddingStore:
             f"SELECT {id_col} AS vid, vector FROM {table} WHERE {id_col} IN ({ph})",
             values,
         ).fetchall()
+
+    @staticmethod
+    def embedded_object_ids(db, notebook_id: str) -> set:
+        """object_ids that already hold a knowledge-payload vector (Task 26:
+        the backfill "have" probe, moved verbatim from the facade)."""
+        return {
+            row["object_id"]
+            for row in db.execute(
+                "SELECT object_id FROM knowledge_embeddings "
+                "WHERE notebook_id = ? AND vector IS NOT NULL",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+    @staticmethod
+    def embedded_relation_ids(db, notebook_id: str) -> set:
+        """relation_ids that already hold a relation vector (Task 26)."""
+        return {
+            row["relation_id"]
+            for row in db.execute(
+                "SELECT relation_id FROM relation_embeddings WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+        }

@@ -345,3 +345,15 @@ class SharingStore:
             )
             db.execute(f"DELETE FROM notebooks WHERE id IN ({placeholders})", stuck_ids)
         return len(stuck_ids)
+
+    @staticmethod
+    def insert_row_values(db: sqlite3.Connection, table: str, data: dict) -> None:
+        """Insert one dict-shaped row (Task 26: the facade `_insert_row`
+        compatibility seat's SQL body, moved verbatim — the seat itself stays
+        the injectable per-row boundary for copy failure injection)."""
+        columns = list(data.keys())
+        db.execute(
+            f"INSERT INTO {table} ({','.join(columns)}) "
+            f"VALUES ({','.join('?' * len(columns))})",
+            [data[column] for column in columns],
+        )

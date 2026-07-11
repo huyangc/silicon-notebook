@@ -149,3 +149,16 @@ class ChunkStore:
         return db.execute(
             "SELECT id FROM chunks WHERE notebook_id=?", (notebook_id,),
         ).fetchall()
+
+    @staticmethod
+    def backfill_fts(db: sqlite3.Connection, notebook_id: str) -> int:
+        """从 chunks 重建 chunks_fts(DELETE+re-INSERT),返回写入行数(Task 26:
+        SQL 正文自 facade 迁入;调用方持有唯一写事务边界)。"""
+        db.execute("DELETE FROM chunks_fts WHERE notebook_id=?", (notebook_id,))
+        rows = db.execute(
+            "SELECT id, text FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchall()
+        if rows:
+            db.executemany(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                [(r["id"], notebook_id, r["text"] or "") for r in rows])
+        return len(rows)

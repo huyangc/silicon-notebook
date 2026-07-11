@@ -114,6 +114,7 @@ from app.services.prompts import (
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
+from app.repositories.sqlite.sharing_store import SharingStore
 from app.services.retrieval import (
     RetrievedKnowledge,
     RetrievedElement,
@@ -230,7 +231,11 @@ class SQLiteRepository:
                 remap_json_ids=lambda value, maps: _remap_json_ids(value, maps),
             ),
         )
-        self.storage_dir = self._resolve_path(settings.storage_dir)
+        # Task 26: the resolved storage root has ONE owner — the runtime's
+        # SourceFileStore.  The facade attribute is the SAME Path object (the
+        # sharing/copy composition still resolves it late, so tests may swap
+        # `repo.storage_dir` post-construction).
+        self.storage_dir = self._runtime.source_files.storage_dir
         # Task 9: finish the sharing/deep-copy composition with facade-bound
         # late seams — the _insert_row seat and the memoized copy-stats keep
         # honouring per-instance monkeypatches, storage_dir stays live.
@@ -968,23 +973,17 @@ class SQLiteRepository:
 
     def _source_has_kg(self, db: sqlite3.Connection, source_id: str) -> bool:
         """True iff the source has ≥1 knowledge_objects row with a matching source_id."""
-        row = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
-            (source_id,),
-        ).fetchone()
-        return bool(row[0])
+        return self._runtime.knowledge.source_has_kg(db, source_id)
 
     def _count_pending_kg_sources(self, db: sqlite3.Connection, notebook_id: str) -> int:
         return self._runtime.notebook_summaries.count_pending_kg_sources(db, notebook_id)
 
     def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
         """True iff some tier='base' notebook has any knowledge_objects."""
-        sql = ("SELECT EXISTS(SELECT 1 FROM knowledge_objects ko "
-               "JOIN notebooks nb ON nb.id = ko.notebook_id WHERE nb.tier = 'base')")
         if db is not None:
-            return bool(db.execute(sql).fetchone()[0])
+            return self._runtime.knowledge.any_base_has_kg_on(db)
         with self._connect() as conn:
-            return bool(conn.execute(sql).fetchone()[0])
+            return self._runtime.knowledge.any_base_has_kg_on(conn)
 
     def _base_notebook_info(self, db: "sqlite3.Connection | None" = None) -> "tuple[str, bool]":
         return self._runtime.notebook_summaries.base_notebook_info(db)
@@ -1041,49 +1040,16 @@ class SQLiteRepository:
         statuses: Optional[Iterable[str]] = USABLE_STATUSES,
         id_filter: Optional[Iterable[str]] = None,
     ) -> List[dict]:
-        base_query = (
-            "SELECT * FROM knowledge_objects WHERE notebook_id = ? AND object_type = ?"
-        )
-        base_params: List[object] = [notebook_id, object_type]
-        if statuses is not None:
-            status_list = list(statuses)
-            placeholders = ",".join("?" for _ in status_list)
-            base_query += f" AND status IN ({placeholders})"
-            base_params.extend(status_list)
+        # 候选集(id_filter,如 _retrieve_scored 的 cand_sims keys)可能超
+        # _IN_CHUNK(delta 开且候选量大)——去重保序后按 _IN_CHUNK 分批查询,批间
+        # 用 (created_at,id) 重排合并,保持与单条 IN + ORDER BY 完全一致的输出序
+        # (KnowledgeStore.retrieval_objects,Task 26 delegate)。
         if id_filter is not None:
-            # 候选集(id_filter,如 _retrieve_scored 的 cand_sims keys)可能超
-            # _IN_CHUNK(delta 开且候选量大)——按 _in_batches 分批查询,批间用
-            # (created_at,id) 重排合并,保持与单条 IN + ORDER BY 完全一致的输出序。
-            id_list = list(id_filter)
-            if not id_list:
-                return []
-            raw_rows = []
-            for batch in self._in_batches(id_list):
-                phid = ",".join("?" for _ in batch)
-                raw_rows.extend(db.execute(
-                    base_query + f" AND id IN ({phid})",
-                    (*base_params, *batch)).fetchall())
-            rows = sorted(raw_rows, key=lambda row: (row["created_at"], row["id"]))
-        else:
-            query = base_query + " ORDER BY created_at ASC, id ASC"
-            rows = db.execute(query, base_params).fetchall()
-        objects: List[dict] = []
-        for row in rows:
-            keys = row.keys()
-            objects.append(
-                {
-                    "id": row["id"],
-                    "payload": json.loads(row["payload"] or "{}"),
-                    "evidence": [
-                        Evidence(**item)
-                        for item in json.loads(row["evidence"] or "[]")
-                    ],
-                    "status": row["status"],
-                    "owner": row["owner"],
-                    "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
-                }
-            )
-        return objects
+            id_filter = list(dict.fromkeys(id_filter))
+        return self._runtime.knowledge.retrieval_objects(
+            db, notebook_id, object_type, statuses, id_filter,
+            batch_size=self._IN_CHUNK,
+        )
 
     def list_notebooks(self) -> List[NotebookSummary]:
         return self._runtime.catalog.list_notebooks()
@@ -1135,12 +1101,7 @@ class SQLiteRepository:
 
     @staticmethod
     def _insert_row(db, table: str, data: dict) -> None:
-        columns = list(data.keys())
-        db.execute(
-            f"INSERT INTO {table} ({','.join(columns)}) "
-            f"VALUES ({','.join('?' * len(columns))})",
-            [data[column] for column in columns],
-        )
+        SharingStore.insert_row_values(db, table, data)
 
     def _sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
         return self._runtime.sharing.sweep_stuck_copies(created_by)
@@ -1225,17 +1186,11 @@ class SQLiteRepository:
         供 copy_notebook / 刷新图谱等重建派生索引的路径调用。
         """
         with self._write() as db:
-            db.execute("DELETE FROM chunks_fts WHERE notebook_id=?", (notebook_id,))
-            rows = db.execute(
-                "SELECT id, text FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchall()
-            if rows:
-                db.executemany(
-                    "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
-                    [(r["id"], notebook_id, r["text"] or "") for r in rows])
+            count = self._runtime.chunk_store.backfill_fts(db, notebook_id)
         # Chunk set was just (re)indexed — drop the corpus-language hint so it
         # re-samples (copy_notebook / refresh-graph can bring new-language content).
         self._notebook_langs_cache.pop(notebook_id, None)
-        return len(rows)
+        return count
 
     def _semantic_search(self, notebook_id: str, q: str, k: int) -> list:
         """ANN semantic search over the notebook's scale index.
@@ -1534,54 +1489,29 @@ class SQLiteRepository:
             notebook_id, pending_source_id
         )
 
-    # --- TEMPORARY Task-12 catalog callbacks (Task 13/15 move this SQL into
-    # --- the notebook/source stores); the ingestion service owns the
-    # --- metadata-augmentation BUSINESS body and calls back through the
-    # --- constructor-injected seams below.
+    # --- Task-12 catalog callbacks — SQL now lives on the notebook/source
+    # --- stores (Task 26); the ingestion service owns the metadata-
+    # --- augmentation BUSINESS body and calls back through the constructor-
+    # --- injected seams below (the facade keeps its connection boundaries).
     def _notebook_meta_row(self, notebook_id: str) -> Optional[dict]:
         with self._connect() as db:
-            nb = db.execute(
-                "SELECT name, purpose_auto FROM notebooks WHERE id = ?", (notebook_id,)
-            ).fetchone()
-        if nb is None:
-            return None
-        return {
-            "name": nb["name"],
-            "purpose_auto": ("purpose_auto" in nb.keys() and nb["purpose_auto"] == 1),
-        }
+            return self._runtime.notebook_store.meta_row(db, notebook_id)
 
     def _notebook_meta_sources(
         self, notebook_id: str, pending_source_id: str = ""
     ) -> List[dict]:
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT title, doc_type, summary FROM sources "
-                "WHERE notebook_id = ? AND (status = 'extracted' OR id = ?) "
-                "ORDER BY created_at ASC",
-                (notebook_id, pending_source_id),
-            ).fetchall()
-        return [
-            {"title": r["title"], "doc_type": r["doc_type"], "summary": r["summary"]}
-            for r in rows
-        ]
+            return self._runtime.source_store.meta_source_rows(
+                db, notebook_id, pending_source_id
+            )
 
     def _apply_notebook_meta(
         self, notebook_id: str, *, guard_name, name: str, purpose: str
     ) -> None:
         with self._write() as db:
-            if name:
-                # Optimistic guard: only overwrite if the name is still the
-                # placeholder we read (no clobber of a concurrent rename).
-                db.execute(
-                    "UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
-                    (name, _now(), notebook_id, guard_name),
-                )
-            if purpose:
-                db.execute(
-                    "UPDATE notebooks SET purpose = ?, updated_at = ? "
-                    "WHERE id = ? AND purpose_auto = 1",
-                    (purpose, _now(), notebook_id),
-                )
+            self._runtime.notebook_store.apply_meta(
+                db, notebook_id, guard_name=guard_name, name=name, purpose=purpose
+            )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
         return self._runtime.source_store.source_elements(source_id)
@@ -1631,10 +1561,7 @@ class SQLiteRepository:
 
     def _notebook_tier(self, notebook_id: str) -> str:
         with self._connect() as db:
-            row = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
-            ).fetchone()
-        return str(row["tier"]) if row is not None and row["tier"] else ""
+            return self._runtime.notebook_store.tier_on(db, notebook_id)
 
     def _source_raw_text(self, source, elements) -> str:
         return self._runtime.source_files.read_source_text(
@@ -1696,89 +1623,17 @@ class SQLiteRepository:
     def _embed_chunks_batch(self, notebook_id: str, items: List[dict]) -> None:
         return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)
 
-    def _knowledge_vectors(
-        self,
-        db: sqlite3.Connection,
-        notebook_id: str,
-        objects: List[dict],
-    ) -> Dict[str, List[float]]:
-        """⚠ 死代码(全仓无调用者,2026-07-03 核实)——若复活用于相似度计算,
-        必须对 decode_vector 结果接 truncate_vec(运行时截断),否则查询/语料混空间
-        静默零召回(见 tests/test_dim_invariants.py 的白名单与风险登记 R2)。
-
-        Map object_id -> payload embedding. Lazily backfills missing vectors
-        for the given objects (one-time per object) so pre-existing / seed
-        knowledge also gains payload-level semantic recall."""
-        from app.services.vector_index import decode_vector
-
-        rows = db.execute(
-            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchall()
-        vectors: Dict[str, List[float]] = {}
-        for row in rows:
-            if not row["vector"]:
-                continue
-            arr = decode_vector(row["vector"])
-            if arr is not None:
-                vectors[row["object_id"]] = arr.tolist()
-        if not self.settings.embedder_configured:
-            return vectors
-        pending_ids, pending_texts = [], []
-        for obj in objects:
-            object_id = obj["id"]
-            if object_id in vectors:
-                continue
-            text = _payload_text(obj.get("payload", {})).strip()
-            if not text:
-                continue
-            pending_ids.append(object_id); pending_texts.append(text[:2000])
-        if not pending_texts:
-            return vectors
-        try:
-            new_vectors = self.embedder.embed_texts(pending_texts)
-        except Exception:
-            return vectors  # backfill best-effort; never block search
-        from app.services.vector_index import encode_vector
-        now = _now()
-        for object_id, vector in zip(pending_ids, new_vectors):
-            vectors[object_id] = vector
-            db.execute(
-                """
-                INSERT OR REPLACE INTO knowledge_embeddings
-                (object_id, notebook_id, vector, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (object_id, notebook_id, encode_vector(vector), now),
-            )
-        return vectors
-
     def _backfill_knowledge_embeddings(self, db: sqlite3.Connection,
                                        notebook_id: str, objects: List[dict],
                                        progress=None) -> None:
         """Embed + persist any knowledge objects missing a vector, concurrently
-        (reuses the concurrent _embed_objects_batch). No-op when all are embedded
+        (reuses the concurrent embed_objects_batch). No-op when all are embedded
         or no embedder. Lets ask() build a complete knowledge matrix without
-        materializing a Python-list dict of every vector."""
-        if not self.settings.embedder_configured:
-            return
-        have = {
-            r["object_id"]
-            for r in db.execute(
-                "SELECT object_id FROM knowledge_embeddings "
-                "WHERE notebook_id = ? AND vector IS NOT NULL",
-                (notebook_id,),
-            ).fetchall()
-        }
-        missing = [
-            {"_oid": o["id"], "payload": o.get("payload", {})}
-            for o in objects
-            if o["id"] not in have and _payload_text(o.get("payload", {})).strip()
-        ]
-        if missing:
-            self._embed_objects_batch(notebook_id, missing, progress=progress)
-        elif progress:
-            progress(0, 0)
+        materializing a Python-list dict of every vector.  SourceEmbeddingService
+        owns the orchestration (Task 26); frozen-signature delegate."""
+        return self._runtime.source_embedding.backfill_knowledge_embeddings(
+            db, notebook_id, objects, progress=progress
+        )
 
     def _backfill_relation_embeddings(self, notebook_id: str) -> None:
         """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。无 embedder 则 no-op。"""
@@ -1786,9 +1641,7 @@ class SQLiteRepository:
             return
         with self._connect() as db:
             relations = self._relations_with_names(db, notebook_id)
-            have = {r["relation_id"] for r in db.execute(
-                "SELECT relation_id FROM relation_embeddings WHERE notebook_id=?",
-                (notebook_id,)).fetchall()}
+            have = self._runtime.embedding_store.embedded_relation_ids(db, notebook_id)
         missing = [{"_rid": r["id"], "text": r["text"]} for r in relations
                    if r["id"] not in have]
         if missing:
@@ -2014,74 +1867,19 @@ class SQLiteRepository:
         version = tuple(self._scale_index_version(notebook_id))
 
         def _load() -> Dict[str, float]:
+            # 1./2. Degree-bounded node ids + live relation dicts — SQL moved
+            #    verbatim to KnowledgeStore.edge_centrality_source_rows
+            #    (Task 26); the facade keeps its `_connect` read boundary.
             with self._connect() as db:
-                max_nodes = self.settings.edge_centrality_max_nodes
+                node_ids, rels = self._runtime.knowledge.edge_centrality_source_rows(
+                    db, notebook_id, self.settings.edge_centrality_max_nodes
+                )
 
-                # 1. Degree ranking via SQL — bounded by distinct node count
-                #    touched by a non-rejected relation (never the full
-                #    knowledge_objects table).
-                degree: Dict[str, int] = {}
-                for r in db.execute(
-                    "SELECT source_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
-                    "WHERE notebook_id = ? AND review_status != 'rejected' "
-                    "GROUP BY source_object_id", (notebook_id,),
-                ).fetchall():
-                    degree[r["n"]] = degree.get(r["n"], 0) + r["c"]
-                for r in db.execute(
-                    "SELECT target_object_id AS n, COUNT(*) AS c FROM knowledge_relations "
-                    "WHERE notebook_id = ? AND review_status != 'rejected' "
-                    "GROUP BY target_object_id", (notebook_id,),
-                ).fetchall():
-                    degree[r["n"]] = degree.get(r["n"], 0) + r["c"]
-
-                bounded = len(degree) > max_nodes
-                if bounded:
-                    # Deterministic top-K: sort by (-degree, id) so ties break
-                    # on a stable, reproducible key (unlike the old
-                    # insertion-order tiebreak, which depended on dict-iteration
-                    # order of a full objects load we no longer perform).
-                    top_ids = [n for n, _ in sorted(
-                        degree.items(), key=lambda kv: (-kv[1], kv[0])
-                    )[:max_nodes]]
-                    top_ids_json = json.dumps(top_ids)
-                    rel_rows = db.execute(
-                        "SELECT r.id, r.source_object_id, r.target_object_id, "
-                        "r.edge_type, r.evidence FROM knowledge_relations r "
-                        "JOIN json_each(?) s ON s.value = r.source_object_id "
-                        "JOIN json_each(?) t ON t.value = r.target_object_id "
-                        "WHERE r.notebook_id = ? AND r.review_status != 'rejected'",
-                        (top_ids_json, top_ids_json, notebook_id),
-                    ).fetchall()
-                    node_ids = top_ids
-                else:
-                    rel_rows = db.execute(
-                        "SELECT id, source_object_id, target_object_id, edge_type, "
-                        "evidence FROM knowledge_relations "
-                        "WHERE notebook_id = ? AND review_status != 'rejected'",
-                        (notebook_id,),
-                    ).fetchall()
-                    obj_rows = db.execute(
-                        "SELECT id FROM knowledge_objects WHERE notebook_id = ?",
-                        (notebook_id,),
-                    ).fetchall()
-                    node_ids = [r["id"] for r in obj_rows]
-
-            # 2. Node dict for build_rx_graph — type/name are unused by
+            # 3. Node dict for build_rx_graph — type/name are unused by
             #    compute_edge_centrality (only `rel_id` is read back), so a
             #    minimal empty-string payload keeps graph SHAPE (node count,
             #    indices) identical without a knowledge_objects payload load.
             nodes = {oid: {"type": "", "name": ""} for oid in node_ids}
-
-            rels = []
-            for r in rel_rows:
-                rels.append({
-                    "id": r["id"],
-                    "source_object_id": r["source_object_id"],
-                    "target_object_id": r["target_object_id"],
-                    "edge_type": r["edge_type"],
-                    "evidence": json.loads(r["evidence"] or "[]"),
-                })
-
             G, idx_to_oid, oid_to_idx = build_rx_graph(nodes, rels)
             return compute_edge_centrality(G)
 
@@ -2508,20 +2306,10 @@ class SQLiteRepository:
     def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            # Get cluster members and canonical name in one query
-            cluster_rows = db.execute(
-                "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
-                "FROM concept_clusters cc "
-                "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-                "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
-                (notebook_id, canonical_id),
-            ).fetchall()
-            # canonical_name comes from the cluster table (same for all rows)
-            name_row = db.execute(
-                "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
-                (notebook_id, canonical_id),
-            ).fetchone()
-            name = name_row["canonical_name"] if name_row else ""
+            # Cluster members + canonical name in one store call (Task 26)
+            cluster_rows, name = self._runtime.knowledge.concept_cluster_detail_rows(
+                db, notebook_id, canonical_id
+            )
 
         members = []
         member_ids = []
@@ -2535,61 +2323,17 @@ class SQLiteRepository:
             members.append(obj)
             member_ids.append(r["member_object_id"])
 
-        mset = set(member_ids)
-
-        if not mset:
+        if not member_ids:
             # No members found; still return valid shape
             return {"canonical_id": canonical_id, "canonical_name": name,
                     "members": [], "attached": [], "evidence": []}
 
-        ph = ",".join("?" for _ in mset)
-        mlist = list(mset)
-
         with self._connect() as db:
-            # Targeted relation queries using member placeholders
-            rels_out = db.execute(
-                f"SELECT source_object_id, target_object_id, edge_type "
-                f"FROM knowledge_relations WHERE notebook_id=? AND source_object_id IN ({ph})",
-                [notebook_id] + mlist,
-            ).fetchall()
-            rels_in = db.execute(
-                f"SELECT source_object_id, target_object_id, edge_type "
-                f"FROM knowledge_relations WHERE notebook_id=? AND target_object_id IN ({ph})",
-                [notebook_id] + mlist,
-            ).fetchall()
-
-            # Collect attached object ids (non-member side of relations)
-            attached_ids: set[str] = set()
-            rel_edges: list[dict] = []
-            for rel in rels_out:
-                other = rel["target_object_id"]
-                if other not in mset:
-                    attached_ids.add(other)
-                    rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
-            for rel in rels_in:
-                other = rel["source_object_id"]
-                if other not in mset:
-                    attached_ids.add(other)
-                    rel_edges.append({"other": other, "edge_type": rel["edge_type"]})
-
-            # Batch-read attached objects
-            by_other: dict[str, dict] = {}
-            if attached_ids:
-                aph = ",".join("?" for _ in attached_ids)
-                arows = db.execute(
-                    f"SELECT id, object_type, payload, evidence FROM knowledge_objects "
-                    f"WHERE id IN ({aph}) AND status!='deprecated'",
-                    list(attached_ids),
-                ).fetchall()
-                by_other = {
-                    r["id"]: {
-                        "id": r["id"],
-                        "object_type": r["object_type"],
-                        "payload": json.loads(r["payload"] or "{}"),
-                        "evidence": json.loads(r["evidence"] or "[]"),
-                    }
-                    for r in arows
-                }
+            # Relations touching the member set + batch-read non-member
+            # endpoint objects (Task 26 store primitive)
+            rel_edges, by_other = self._runtime.knowledge.concept_neighbor_rows(
+                db, notebook_id, member_ids
+            )
 
         attached = []
         seen_attached: set[str] = set()
@@ -2619,17 +2363,10 @@ class SQLiteRepository:
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
-        oid = _new_id("ko")
-        now = _now()
         with self._write() as db:
-            db.execute(
-                """INSERT INTO knowledge_objects
-                   (id, notebook_id, object_type, status, owner, payload, evidence,
-                    source_candidate_id, source_id, created_at, updated_at)
-                   VALUES (?, ?, ?, 'approved', '', ?, '[]', NULL, ?, ?, ?)""",
-                (oid, notebook_id, object_type, json.dumps(payload, ensure_ascii=False), source_id, now, now),
+            return self._runtime.knowledge.insert_test_object(
+                db, notebook_id, object_type, payload, source_id
             )
-        return oid
 
     # --- Governance: promotion state machine (Track F) -------------------
     # KnowledgeGovernanceService owns the domain (Task 16); the facade keeps
@@ -3326,10 +3063,7 @@ class SQLiteRepository:
         """联邦参与库:active 在首位 + 全部 base tier(与 _ppr_graph/federated_retrieve
         的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。"""
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                (notebook_id,)).fetchall()
-        return [notebook_id] + [r["id"] for r in rows]
+            return self._runtime.notebook_store.participant_ids(db, notebook_id)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0) -> tuple:

@@ -120,3 +120,44 @@ def test_sharing_helpers_remain_backwards_compatible():
 
     assert sqlite_repository._remap_json_ids is sqlite_notebook_sharing._remap_json_ids
     assert sqlite_repository._COPY_CHUNK == 1000
+
+
+def test_remaining_sql_bodies_are_composed_with_explicit_delegates():
+    """Task 26: the last SQL bodies leave the facade for their canonical
+    connection-taking store/service primitives; the facade keeps
+    frozen-signature delegates (and every `_connect`/`_write` boundary)."""
+    from app.repositories.sqlite.chunk_store import ChunkStore
+    from app.repositories.sqlite.embedding_store import EmbeddingStore
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+    from app.repositories.sqlite.notebook_store import NotebookStore
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.services.source_embedding import SourceEmbeddingService
+
+    component_methods = {
+        KnowledgeStore: (
+            "source_has_kg", "any_base_has_kg_on", "retrieval_objects",
+            "edge_centrality_source_rows", "concept_cluster_detail_rows",
+            "concept_neighbor_rows", "insert_test_object",
+        ),
+        ChunkStore: ("backfill_fts",),
+        NotebookStore: ("meta_row", "apply_meta", "tier_on", "participant_ids"),
+        SourceStore: ("meta_source_rows",),
+        EmbeddingStore: ("embedded_object_ids", "embedded_relation_ids"),
+        SharingStore: ("insert_row_values",),
+        SourceEmbeddingService: ("backfill_knowledge_embeddings",),
+    }
+    for component, method_names in component_methods.items():
+        for method_name in method_names:
+            assert method_name in component.__dict__, (component.__name__, method_name)
+
+    facade_delegates = (
+        "_source_has_kg", "_any_base_notebook_has_kg", "_knowledge_objects",
+        "_insert_row", "backfill_chunk_fts", "_notebook_meta_row",
+        "_notebook_meta_sources", "_apply_notebook_meta", "_notebook_tier",
+        "_backfill_knowledge_embeddings", "_backfill_relation_embeddings",
+        "_edge_centrality_map", "concept_detail", "_test_insert_object",
+        "_participant_notebook_ids",
+    )
+    for method_name in facade_delegates:
+        assert method_name in SQLiteRepository.__dict__, method_name

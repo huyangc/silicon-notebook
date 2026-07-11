@@ -438,3 +438,49 @@ def validate_ownership_manifest(
 
 
 OWNER_BY_MEMBER = validate_ownership_manifest()
+
+
+@dataclass(frozen=True)
+class LateBoundSeam:
+    """An intentionally late-bound production compatibility seam (Task 26).
+
+    ``scope`` is ``"module"`` for the ``sqlite_repository`` module-namespace
+    seams the runtime resolves through ``RepositoryCompatibilitySeams``, or
+    ``"facade"`` for the per-call facade seats the runtime wiring lambdas
+    resolve.  ``resolved_through`` names the wiring-visible member that proves
+    the late binding — the member itself, or the facade helper that reads it
+    per call (``_IN_CHUNK`` is read by the wired ``_in_batches`` seat).
+
+    Tests may keep monkeypatching exactly these members on the facade/module
+    (the patches stay authoritative for production flows because every
+    consumer resolves them at call time).  Every other private facade member
+    is component-owned: probes belong on the canonical store/service/runtime
+    seam, never on a facade wrapper kept only for compatibility.
+    """
+
+    name: str
+    scope: str
+    resolved_through: str
+
+
+LATE_BOUND_COMPATIBILITY_SEAMS: Mapping[str, LateBoundSeam] = {
+    seam.name: seam
+    for seam in (
+        # RepositoryCompatibilitySeams module seams (id/clock/copy-chunk/remap).
+        LateBoundSeam("_now", "module", "_now"),
+        LateBoundSeam("_new_id", "module", "_new_id"),
+        LateBoundSeam("_COPY_CHUNK", "module", "_COPY_CHUNK"),
+        LateBoundSeam("_remap_json_ids", "module", "_remap_json_ids"),
+        # Facade seats the runtime wiring resolves per call.
+        LateBoundSeam("_connect", "facade", "_connect"),
+        LateBoundSeam("_write", "facade", "_write"),
+        LateBoundSeam("_insert_row", "facade", "_insert_row"),
+        LateBoundSeam("_flush_object_vectors", "facade", "_flush_object_vectors"),
+        LateBoundSeam("_mark_unified_kg_dirty", "facade", "_mark_unified_kg_dirty"),
+        LateBoundSeam("_invalidate_unified_cache", "facade", "_invalidate_unified_cache"),
+        LateBoundSeam("_source_ids_from_evidence", "facade", "_source_ids_from_evidence"),
+        LateBoundSeam("_summarize_source", "facade", "_summarize_source"),
+        LateBoundSeam("_run_extraction", "facade", "_run_extraction"),
+        LateBoundSeam("_IN_CHUNK", "facade", "_in_batches"),
+    )
+}
