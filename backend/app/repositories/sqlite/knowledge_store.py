@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from app.models.schemas import Evidence
 from app.repositories.sqlite.database import SqliteDatabase
@@ -26,6 +26,406 @@ class KnowledgeStore:
     def __init__(self, database: SqliteDatabase, seams) -> None:
         self.database = database
         self.seams = seams
+
+    def _connect(self):
+        return self.database.connect()
+
+    def get_notebook(self, notebook_id: str) -> None:
+        with self.database.connect() as db:
+            if db.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone() is None:
+                raise KeyError(notebook_id)
+
+    def has_kg(self, notebook_id: str) -> bool:
+        with self.database.connect() as db:
+            return bool(db.execute(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=?)",
+                (notebook_id,),
+            ).fetchone()[0])
+
+    def any_base_has_kg(self) -> bool:
+        with self.database.connect() as db:
+            return bool(db.execute(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_objects ko "
+                "JOIN notebooks nb ON nb.id=ko.notebook_id WHERE nb.tier='base')"
+            ).fetchone()[0])
+
+    @staticmethod
+    def any_base_has_kg_on(db: sqlite3.Connection) -> bool:
+        return bool(db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects ko JOIN notebooks nb "
+            "ON nb.id=ko.notebook_id WHERE nb.tier='base')"
+        ).fetchone()[0])
+
+    @staticmethod
+    def object_version_row(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,),
+        ).fetchone()
+
+    @staticmethod
+    def relation_context_rows(db: sqlite3.Connection, notebook_id: str,
+                              relation_ids=None, *, batch_size: int = 900):
+        base_sql = (
+            "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
+            "r.edge_type AS et, r.evidence AS ev, so.payload AS sp, tp.payload AS tpl "
+            "FROM knowledge_relations r "
+            "JOIN knowledge_objects so ON so.id = r.source_object_id "
+            "JOIN knowledge_objects tp ON tp.id = r.target_object_id "
+            "WHERE r.notebook_id = ?"
+        )
+        if relation_ids is None:
+            return db.execute(base_sql, (notebook_id,)).fetchall()
+        ids = list(relation_ids)
+        rows = []
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            ph = ",".join("?" for _ in batch)
+            rows.extend(db.execute(
+                base_sql + f" AND r.id IN ({ph})", (notebook_id, *batch),
+            ).fetchall())
+        return rows
+
+    @staticmethod
+    def relation_exists(db: sqlite3.Connection, notebook_id: str) -> bool:
+        return db.execute(
+            "SELECT 1 FROM knowledge_relations WHERE notebook_id = ? LIMIT 1",
+            (notebook_id,),
+        ).fetchone() is not None
+
+    @staticmethod
+    def relation_endpoint_rows(db: sqlite3.Connection, notebook_id: str,
+                               source_ids=None):
+        if source_ids:
+            values = list(source_ids)
+            ph = ",".join("?" for _ in values)
+            return db.execute(
+                f"SELECT source_object_id, target_object_id FROM knowledge_relations "
+                f"WHERE notebook_id=? AND source_id IN ({ph})",
+                (notebook_id, *values),
+            ).fetchall()
+        return db.execute(
+            "SELECT source_object_id, target_object_id FROM knowledge_relations "
+            "WHERE notebook_id = ?", (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def relation_connected_rows(db: sqlite3.Connection, notebook_id: str, object_ids):
+        values = list(object_ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT source_object_id, target_object_id FROM knowledge_relations "
+            f"WHERE notebook_id=? AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
+            (notebook_id, *values, *values),
+        ).fetchall()
+
+    @staticmethod
+    def neighbor_ids(db: sqlite3.Connection, notebook_id: str, object_id: str,
+                     *, endpoint: str, edge_type=None):
+        selected = ("target_object_id" if endpoint == "source_object_id"
+                    else "source_object_id")
+        edge_clause = " AND edge_type=?" if edge_type else ""
+        params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
+        return db.execute(
+            f"SELECT {selected} FROM knowledge_relations "
+            f"WHERE notebook_id=? AND {endpoint}=?{edge_clause}", params,
+        ).fetchall()
+
+    def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
+        with self.database.connect() as db:
+            rows = self.usable_object_rows_on(
+                db, object_ids, ("reviewed", "approved", "project_specific", "conflict"),
+            )
+        return [dict(row) for row in rows if row["notebook_id"] == notebook_id]
+
+    @staticmethod
+    def usable_object_rows_on(db: sqlite3.Connection, object_ids, statuses):
+        ids = list(object_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        status_ph = ",".join("?" for _ in statuses)
+        return db.execute(
+            f"SELECT * FROM knowledge_objects WHERE id IN ({ph}) "
+            f"AND status IN ({status_ph})", [*ids, *statuses],
+        ).fetchall()
+
+    @staticmethod
+    def graph_version_rows(db: sqlite3.Connection, notebook_id: str):
+        rel = db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
+            "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
+            "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
+            "FROM knowledge_relations WHERE notebook_id = ?", (notebook_id,),
+        ).fetchone()
+        obj = db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
+            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,),
+        ).fetchone()
+        return rel, obj
+
+    @staticmethod
+    def graph_object_rows(db: sqlite3.Connection, notebook_id: str, statuses):
+        ph = ",".join("?" for _ in statuses)
+        return db.execute(
+            "SELECT id, object_type, payload FROM knowledge_objects "
+            f"WHERE notebook_id = ? AND status IN ({ph})",
+            (notebook_id, *statuses),
+        ).fetchall()
+
+    @staticmethod
+    def graph_relation_rows(db: sqlite3.Connection, notebook_id: str,
+                            *, include_id_evidence: bool = True):
+        columns = ("id, source_object_id, target_object_id, edge_type, evidence"
+                   if include_id_evidence else
+                   "source_object_id, target_object_id")
+        return db.execute(
+            f"SELECT {columns} FROM knowledge_relations "
+            "WHERE notebook_id = ? AND review_status != 'rejected'",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def object_evidence_rows(db: sqlite3.Connection, object_ids):
+        ids = list(object_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT id, evidence FROM knowledge_objects WHERE id IN ({ph})", ids,
+        ).fetchall()
+
+    @staticmethod
+    def notebook_object_evidence_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def follow_start_row(db: sqlite3.Connection, object_id: str,
+                         active_notebook_id: str, statuses):
+        ph = ",".join("?" for _ in statuses)
+        return db.execute(
+            f"SELECT ko.*, n.tier AS notebook_tier "
+            f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
+            f"WHERE ko.id=? AND ko.status IN ({ph}) "
+            f"AND (ko.notebook_id=? OR n.tier='base')",
+            (object_id, *statuses, active_notebook_id),
+        ).fetchone()
+
+    @staticmethod
+    def follow_endpoint_rows(db: sqlite3.Connection, notebook_id: str, object_id: str,
+                             endpoint: str, limit: int):
+        index_name = ("idx_knowledge_relations_nb_source"
+                      if endpoint == "source_object_id"
+                      else "idx_knowledge_relations_nb_target")
+        return db.execute(
+            f"SELECT r.id, r.notebook_id, r.source_id, "
+            f"r.source_object_id, r.target_object_id, r.edge_type, r.review_status "
+            f"FROM knowledge_relations AS r INDEXED BY {index_name} "
+            f"WHERE r.notebook_id=? AND r.{endpoint}=? LIMIT ?",
+            (notebook_id, object_id, limit),
+        ).fetchall()
+
+    @staticmethod
+    def follow_relation_evidence_rows(db: sqlite3.Connection, relation_ids):
+        ids = list(relation_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT r.id, r.evidence, s.title AS source_title "
+            f"FROM knowledge_relations r LEFT JOIN sources s ON s.id=r.source_id "
+            f"WHERE r.id IN ({ph})", tuple(ids),
+        ).fetchall()
+
+    @staticmethod
+    def follow_object_rows(db: sqlite3.Connection, notebook_id: str,
+                           object_ids, statuses):
+        ids = list(object_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        status_ph = ",".join("?" for _ in statuses)
+        return db.execute(
+            f"SELECT * FROM knowledge_objects WHERE notebook_id=? "
+            f"AND id IN ({ph}) AND status IN ({status_ph})",
+            (notebook_id, *ids, *statuses),
+        ).fetchall()
+
+    @staticmethod
+    def in_network_relation_rows(db: sqlite3.Connection, notebook_id: str,
+                                 object_ids):
+        ids = list(object_ids)
+        if len(ids) < 2:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type "
+            f"FROM knowledge_relations WHERE notebook_id=? "
+            f"AND review_status!='rejected' "
+            f"AND source_object_id IN ({ph}) "
+            f"AND target_object_id IN ({ph})",
+            [notebook_id, *ids, *ids],
+        ).fetchall()
+
+    @staticmethod
+    def retrieval_objects(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        statuses: Optional[Iterable[str]],
+        id_filter: Optional[Iterable[str]],
+    ) -> List[dict]:
+        base_query = "SELECT * FROM knowledge_objects WHERE notebook_id=? AND object_type=?"
+        params: List[object] = [notebook_id, object_type]
+        if statuses is not None:
+            values = list(statuses)
+            base_query += f" AND status IN ({','.join('?' for _ in values)})"
+            params.extend(values)
+        if id_filter is not None:
+            ids = list(id_filter)
+            if not ids:
+                return []
+            rows = []
+            for offset in range(0, len(ids), 900):
+                batch = ids[offset:offset + 900]
+                rows.extend(db.execute(
+                    base_query + f" AND id IN ({','.join('?' for _ in batch)})",
+                    (*params, *batch),
+                ).fetchall())
+            rows.sort(key=lambda row: (row["created_at"], row["id"]))
+        else:
+            rows = db.execute(base_query + " ORDER BY created_at ASC, id ASC", params).fetchall()
+        return [{
+            "id": row["id"],
+            "payload": json.loads(row["payload"] or "{}"),
+            "evidence": [Evidence(**item) for item in json.loads(row["evidence"] or "[]")],
+            "status": row["status"],
+            "owner": row["owner"],
+            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
+        } for row in rows]
+
+    def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
+        ids = [e for e in element_ids if e]
+        if not ids:
+            return {}, {}
+        ph = ",".join("?" for _ in ids)
+        rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
+        texts = {r["id"]: r["text"] for r in rows}
+        if not with_ordinal:
+            return texts, {}
+        order_rows = db.execute(
+            "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
+            "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
+            "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
+            "ORDER BY se.created_at ASC, se.id ASC",
+            (ids[0],),
+        ).fetchall()
+        ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
+        return texts, ordinal
+    def _enrich_evidence(self, db, evidence):
+        texts, _ = self._element_texts(db, [e.get("element_id") for e in evidence])
+        out = []
+        for e in evidence:
+            out.append({"quoted_span": e.get("quoted_span", ""),
+                        "source_title": e.get("source_title", "") or e.get("source_id", ""),
+                        "element_text": texts.get(e.get("element_id", ""), e.get("quoted_span", ""))})
+        return out
+    def node_context(self, notebook_id, object_id):
+        self.get_notebook(notebook_id)
+        with self._connect() as db:
+            row = db.execute("SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE id=? AND notebook_id=?", (object_id, notebook_id)).fetchone()
+            if row is None:
+                raise KeyError(object_id)
+            obj_type = row["object_type"]
+            payload = json.loads(row["payload"] or "{}")
+            section = payload.get("section_path", "")
+            occurrences = self._enrich_evidence(db, json.loads(row["evidence"] or "[]"))
+            result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
+                      "section_path": section, "occurrences": occurrences, "definition": None, "steps": None}
+            if obj_type == "concept":
+                # prefer the unified cluster's fused description when present
+                crow = db.execute(
+                    "SELECT canonical_description FROM concept_clusters "
+                    "WHERE notebook_id=? AND member_object_id=? AND canonical_description!='' LIMIT 1",
+                    (notebook_id, object_id)).fetchone()
+                if crow and crow["canonical_description"]:
+                    result["definition"] = crow["canonical_description"]
+                else:
+                    drow = db.execute(
+                        "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
+                        "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
+                    if drow is not None:
+                        dpay = json.loads(drow["payload"] or "{}")
+                        den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
+                        result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
+            if obj_type == "procedure":
+                steps_payload = payload.get("steps")
+                if isinstance(steps_payload, list) and steps_payload:
+                    # New self-contained shape: ordered steps live in the object's payload.
+                    eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
+                    texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
+                    result["steps"] = [
+                        {"name": s.get("name", ""),
+                         "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
+                         "section_path": section}
+                        for s in steps_payload
+                    ]
+                else:
+                    # Legacy fallback: group sibling procedure nodes by exact section_path
+                    # (precedes edges are sparse). Two distinct procedures sharing a heading
+                    # would merge — acceptable for inspection.
+                    #
+                    # P2-3: this used to scan EVERY procedure object in the notebook
+                    # (regardless of section) and filter in Python — O(procedures in
+                    # notebook) per call. When the target node's own section_path is
+                    # known (the common case — payload.get("section_path") above),
+                    # bind the query to it directly in SQL via json_extract (JSON1,
+                    # already used elsewhere in this file), so SQLite only reads
+                    # matching rows. section_path is free text (not a dedicated
+                    # column) so this is the only way to push the filter down without
+                    # a schema change. If section_path is unavailable (rare: an old
+                    # or malformed payload), fall back to a bounded LIMIT — this path
+                    # is a display-only legacy fallback, not a correctness-critical
+                    # query, so an arbitrary-but-bounded sample is acceptable.
+                    if section:
+                        prows = db.execute(
+                            "SELECT id, payload, evidence FROM knowledge_objects "
+                            "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
+                            "AND json_extract(payload,'$.section_path')=?",
+                            (notebook_id, section)).fetchall()
+                    else:
+                        prows = db.execute(
+                            "SELECT id, payload, evidence FROM knowledge_objects "
+                            "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
+                            "LIMIT 500",
+                            (notebook_id,)).fetchall()
+                    candidate_steps = []
+                    for pr in prows:
+                        ppay = json.loads(pr["payload"] or "{}")
+                        if ppay.get("section_path", "") != section:
+                            continue
+                        ev = json.loads(pr["evidence"] or "[]")
+                        first_eid = ev[0].get("element_id") if ev else ""
+                        candidate_steps.append((ppay.get("name", ""), first_eid))
+                    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
+                    if all_step_first_eids:
+                        texts, ordinal = self._element_texts(db, all_step_first_eids, with_ordinal=True)
+                    else:
+                        texts, ordinal = {}, {}
+                    steps = []
+                    for step_name, first_eid in candidate_steps:
+                        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
+                                      "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
+                    steps.sort(key=lambda s: s["_ord"])
+                    for s in steps:
+                        s.pop("_ord", None)
+                    result["steps"] = steps
+            return result
 
     # ------------------------------------------------------------- counts
     @staticmethod

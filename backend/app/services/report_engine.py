@@ -209,12 +209,14 @@ class ReportEngine:
 
     # --- Stage B(单节):完整 reasoning 深挖 ---
     def _deep_dive(self, notebook_id, section, question, depth=None, on_step=None):
-        from app.services.reasoning_retrieval import ReasoningRetriever
+        from app.services.reasoning_retrieval import reasoning_retriever_from_repository
         sec_question = (f"{question}\n[报告章节] {section['title']}: {section['scope']}\n"
                         f"[本节检索方向] " + "; ".join(section["sub_queries"]))
         # 与 ask 走同一套流程:不传 top_n → run 按本节方面数自适应证据预算
         # (effective_top_n:floor=retrieval_top_n,横向对比节因兄弟子查询多而扩容)。
-        return ReasoningRetriever(self.repo, self.settings, self.cancel_event).run(
+        return reasoning_retriever_from_repository(
+            self.repo, self.settings, self.cancel_event,
+        ).run(
             notebook_id, sec_question, on_step=on_step, max_steps=depth)
 
     # --- Stage C(单节):撰写 ---

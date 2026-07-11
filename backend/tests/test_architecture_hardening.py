@@ -52,9 +52,9 @@ def test_multi_query_retrieval_copies_context_per_worker(tmp_path, monkeypatch):
         time.sleep(0.03)
         return [], [], None
 
-    monkeypatch.setattr(repo, "_retrieve_chunks", fake_retrieve)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", fake_retrieve)
     try:
-        repo._retrieve_chunks_multi("nb", ["q1", "q2", "q3", "q4"])
+        repo.retrieval.candidates._retrieve_chunks_multi("nb", ["q1", "q2", "q3", "q4"])
     finally:
         owner.reset(token)
 
@@ -87,7 +87,7 @@ def test_scale_graph_excludes_rejected_relations(tmp_path):
     assert (rel["source_object_id"], rel["target_object_id"], 1.0) not in edges
     assert (rel["target_object_id"], rel["source_object_id"], 1.0) not in edges
 
-    graph, key_to_idx, _chunk_map = repo._ppr_graph(nb.id)
+    graph, key_to_idx, _chunk_map = repo.retrieval.graph._ppr_graph(nb.id)
     assert not graph.has_edge(
         key_to_idx[rel["source_object_id"]], key_to_idx[rel["target_object_id"]]
     )
@@ -100,7 +100,7 @@ def test_federated_large_guard_includes_base_notebooks(tmp_path, monkeypatch):
     repo.mark_notebook_base(base.id)
 
     monkeypatch.setattr(
-        repo,
+        repo.retrieval.candidates,
         "notebook_copy_stats",
         lambda notebook_id: {"copyable": notebook_id != base.id},
     )

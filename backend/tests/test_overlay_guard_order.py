@@ -54,13 +54,14 @@ def _capture_events(repo, monkeypatch):
 
 def _spy(repo, monkeypatch, name):
     called = {"n": 0}
-    orig = getattr(repo, name)
+    owner = repo.retrieval.candidates
+    orig = getattr(owner, name)
 
     def wrapper(*a, **kw):
         called["n"] += 1
         return orig(*a, **kw)
 
-    monkeypatch.setattr(repo, name, wrapper)
+    monkeypatch.setattr(owner, name, wrapper)
     return called
 
 
@@ -68,7 +69,7 @@ def test_large_notebook_skips_seed_retrieval_entirely(repo, monkeypatch):
     """大库(copyable=False):federated_retrieve / federated_retrieve_relations
     绝不被调用(spy 计数为 0),直接发 graph_walk_refused 事件并返回 ("", {}, [])。"""
     nb = _seed(repo)
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
     node_calls = _spy(repo, monkeypatch, "federated_retrieve")
     rel_calls = _spy(repo, monkeypatch, "federated_retrieve_relations")
@@ -90,7 +91,7 @@ def test_small_notebook_keeps_legacy_seed_retrieval(repo, monkeypatch):
     """小库(copyable=True):字节不变——两路种子检索仍被调用,无 refusal 事件,
     行为与守卫上移前完全一致。"""
     nb = _seed(repo)
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": True, "size": {}})
     node_calls = _spy(repo, monkeypatch, "federated_retrieve")
     rel_calls = _spy(repo, monkeypatch, "federated_retrieve_relations")

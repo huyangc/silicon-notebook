@@ -64,13 +64,13 @@ def _capture_events(repo, monkeypatch):
 
 def _spy_gather_chunks(repo, monkeypatch):
     calls = []
-    orig = repo._gather_chunks
+    orig = repo.retrieval.candidates._gather_chunks
 
     def wrapper(db, notebook_id):
         calls.append(notebook_id)
         return orig(db, notebook_id)
 
-    monkeypatch.setattr(repo, "_gather_chunks", wrapper)
+    monkeypatch.setattr(repo.retrieval.candidates, "_gather_chunks", wrapper)
     return calls
 
 
@@ -86,7 +86,7 @@ def test_over_threshold_degrades_to_fts_and_never_gathers(repo, monkeypatch):
     calls = _spy_gather_chunks(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "bandgap")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert calls == [], "guarded path must NOT full-scan chunks"
     assert {c.chunk_id for c in scored} <= {f"c{i}" for i in range(3)}
@@ -106,7 +106,7 @@ def test_under_threshold_bruteforce_unchanged(repo, monkeypatch):
     calls = _spy_gather_chunks(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "bandgap")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert calls == [nb.id]
     assert len(scored) >= 1
@@ -120,7 +120,7 @@ def test_zero_threshold_disables_guard(repo, monkeypatch):
     calls = _spy_gather_chunks(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    repo._retrieve_chunks(nb.id, "bandgap")
+    repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert calls == [nb.id]
     assert _skipped(events) == []
@@ -131,11 +131,11 @@ def test_embed_failure_still_bounded(repo, monkeypatch):
     (keyword-only 打分),不磨全库;事件 embed_ok=False。"""
     nb = _seed_chunks(repo, 3)
     monkeypatch.setattr(repo.settings, "chunk_bruteforce_max_chunks", 1)
-    monkeypatch.setattr(repo, "_embed_query", lambda q: None)
+    monkeypatch.setattr(repo.retrieval.candidates, "_embed_query", lambda q: None)
     calls = _spy_gather_chunks(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "bandgap")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert calls == []
     assert len(scored) >= 1                      # 词法命中 + keyword 分兜底
@@ -150,7 +150,7 @@ def test_fts_miss_returns_empty_with_event(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "chunk_bruteforce_max_chunks", 1)
     events = _capture_events(repo, monkeypatch)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "zzzqqqvvv")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "zzzqqqvvv")
 
     assert scored == [] and ids == [] and mat is None
     sk = _skipped(events)
@@ -169,7 +169,7 @@ def test_ann_path_untouched_by_guard(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "chunk_bruteforce_max_chunks", 1)
     events = _capture_events(repo, monkeypatch)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "bandgap")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert len(scored) >= 1
     assert _skipped(events) == []

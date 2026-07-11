@@ -121,9 +121,9 @@ def _dispatch_spies(repo, monkeypatch):
         calls["single"] += 1
         return [], [], None                            # scored, ids, mat
 
-    monkeypatch.setattr(repo, "_mix_retrieve", _mix)
-    monkeypatch.setattr(repo, "_retrieve_chunks_multi", _multi)
-    monkeypatch.setattr(repo, "_retrieve_chunks", _single)
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve", _mix)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_multi", _multi)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", _single)
     return calls
 
 
@@ -185,13 +185,13 @@ def test_ask_chunk_multi_subquery_quota_fuse_end_to_end(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "chunk_mmr_k", 3)
 
     calls = {"multi": 0}
-    orig = repo._retrieve_chunks_multi
+    orig = repo.retrieval.candidates._retrieve_chunks_multi
 
     def _spy(notebook_id, sub_queries):
         calls["multi"] += 1
         return orig(notebook_id, sub_queries)
 
-    monkeypatch.setattr(repo, "_retrieve_chunks_multi", _spy)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_multi", _spy)
 
     resp = repo.ask_chunk(nb.id, AskRequest(question="alpha vs beta"))
 
@@ -214,14 +214,14 @@ def test_ask_chunk_mmr_uses_settings_k_and_lambda(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "chunk_mmr_lambda", 0.9)
 
     seen = {}
-    orig = repo._mmr_select_chunks
+    orig = repo.retrieval.candidates._mmr_select_chunks
 
     def _spy(scored, ids, mat, k, lambda_):
         seen["k"] = k
         seen["lambda"] = lambda_
         return orig(scored, ids, mat, k, lambda_)
 
-    monkeypatch.setattr(repo, "_mmr_select_chunks", _spy)
+    monkeypatch.setattr(repo.retrieval.candidates, "_mmr_select_chunks", _spy)
 
     repo.ask_chunk(nb.id, AskRequest(question="shared topic"))
 
@@ -298,13 +298,13 @@ def test_ask_chunk_expand_query_uses_chunk_max_subqueries(repo, monkeypatch):
     # spy 单查询分发目标,证明确实按 [retrieval_query] 单查询走(_retrieve_chunks 收到的 query
     # == 规整后的问题,而非某子查询)
     seen_single = {}
-    orig_single = repo._retrieve_chunks
+    orig_single = repo.retrieval.candidates._retrieve_chunks
 
     def _spy_single(notebook_id, query, recall=0):
         seen_single["query"] = query
         return orig_single(notebook_id, query, recall)
 
-    monkeypatch.setattr(repo, "_retrieve_chunks", _spy_single)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", _spy_single)
     repo.ask_chunk(nb.id, AskRequest(question="topic"))
     assert called["expand"] == 0, "query_rewrite_enabled=False 时不应调 expand_query"
     assert seen_single.get("query") == "topic", (
@@ -323,29 +323,29 @@ def test_retrieve_chunks_large_library_copyable_degrades(repo, monkeypatch):
     nb, _ = _seed_chunks(repo, [f"bandgap reference topic {i} body detail " * 5 for i in range(3)])
     repo.backfill_chunk_fts(nb.id)
     # 阈值保持默认(20000,不动),仅令 copyable=False 触发 large 臂
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda nb_id: {"copyable": False, "size": {}})
     # 未建 scale 索引 → ANN 分支不可用,自然落到大库守卫
 
     fts_calls = {"n": 0}
-    orig_fts = repo._retrieve_chunks_fts_degraded
+    orig_fts = repo.retrieval.candidates._retrieve_chunks_fts_degraded
 
     def _spy_fts(notebook_id, query, query_vector, recall, n_chunks):
         fts_calls["n"] += 1
         return orig_fts(notebook_id, query, query_vector, recall, n_chunks)
 
-    monkeypatch.setattr(repo, "_retrieve_chunks_fts_degraded", _spy_fts)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", _spy_fts)
 
     gather_calls = {"n": 0}
-    orig_gather = repo._gather_chunks
+    orig_gather = repo.retrieval.candidates._gather_chunks
 
     def _spy_gather(db, notebook_id):
         gather_calls["n"] += 1
         return orig_gather(db, notebook_id)
 
-    monkeypatch.setattr(repo, "_gather_chunks", _spy_gather)
+    monkeypatch.setattr(repo.retrieval.candidates, "_gather_chunks", _spy_gather)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "bandgap")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert fts_calls["n"] == 1, "copyable=False 大库必须走 _retrieve_chunks_fts_degraded"
     assert gather_calls["n"] == 0, "大库降级路径绝不 _gather_chunks 全表"
@@ -378,18 +378,18 @@ def test_retrieve_chunks_ann_failopen_falls_through_to_bruteforce(repo, monkeypa
         ann_calls["n"] += 1
         return None                                   # fail-open
 
-    monkeypatch.setattr(repo, "_retrieve_chunks_ann", _ann_none)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_ann", _ann_none)
 
     gather_calls = {"n": 0}
-    orig_gather = repo._gather_chunks
+    orig_gather = repo.retrieval.candidates._gather_chunks
 
     def _spy_gather(db, notebook_id):
         gather_calls["n"] += 1
         return orig_gather(db, notebook_id)
 
-    monkeypatch.setattr(repo, "_gather_chunks", _spy_gather)
+    monkeypatch.setattr(repo.retrieval.candidates, "_gather_chunks", _spy_gather)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "deepseek moe routing")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "deepseek moe routing")
 
     assert ann_calls["n"] == 1, "前置:ANN 分支确实被走到并返回 None(fail-open)"
     assert gather_calls["n"] == 1, "ANN None 后须 fallthrough 到全表暴力 _gather_chunks"
@@ -448,7 +448,7 @@ def test_ask_chunk_mix_token_budget_actually_trims(repo, monkeypatch):
     candidates = [_long_chunk(i) for i in range(10)]
 
     # _mix_retrieve 直接给一堆长候选;identity rerank 保原序。
-    monkeypatch.setattr(repo, "_mix_retrieve",
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda nb_id, q, hl, subs: (candidates, "", {}, [], 0))
     # 预算逼到只能容纳前 1~2 条:max_total_tokens 极小。
     monkeypatch.setattr(repo.settings, "max_total_tokens", 4000)
@@ -498,7 +498,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     #    _chunk_answer_context 给它们 k1/k2/k3;_FakeLLM 只引用 [k2] → 只有 ck-cite-1 有 anchor。
     nb1, _ = _seed_chunks(repo, ["moe routing expert " * 20])
     _enable_overlay(repo, nb1.id)
-    monkeypatch.setattr(repo, "_mix_retrieve",
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda nb_id, q, hl, subs: (list(selected), "", {}, [], 0))
     monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)  # 够大,不触发截断
     repo.llm_client = _FakeLLM(markers=("k2",))        # 答案只引用 k2 → 只绑 ck-cite-1
@@ -522,9 +522,9 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     repo.rerank_client = _IdentityRerank().__class__.__new__(_IdentityRerank)
     monkeypatch.setattr(repo.rerank_client, "configured", False, raising=False)  # overlay_on=False
     _stub_expand(monkeypatch, 1)                       # 单查询 → MMR 分支
-    monkeypatch.setattr(repo, "_retrieve_chunks",
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks",
                         lambda nb_id, q, recall=0: (list(selected), [], None))
-    monkeypatch.setattr(repo, "_mmr_select_chunks",
+    monkeypatch.setattr(repo.retrieval.candidates, "_mmr_select_chunks",
                         lambda scored, ids, mat, k, lam: list(selected))
     repo.llm_client = _FakeLLM(markers=("k2",))        # 答案仍只引用 k2
 
@@ -572,7 +572,7 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
         notebook_id=base_nb.id)                        # PPR 标了来源 notebook
 
     _enable_overlay(repo, active_nb.id)
-    monkeypatch.setattr(repo, "_mix_retrieve",
+    monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda nb_id, q, hl, subs: ([own_chunk, ppr_chunk], "", {}, [], 1))
     monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)
     repo.llm_client = _FakeLLM(markers=("k1", "k2"))    # 两条都被引用

@@ -1,8 +1,8 @@
 """推理模式 (mode=reasoning) 的 agentic KG 检索。
 
 结构化骨架 Plan→Retrieve→Reflect→Answer + Reflect 阶段自由图遍历深挖。
-手搓 JSON-action 循环(无原生 tool calling),复用 SQLiteRepository 的检索原语。
-ReasoningRetriever 持 repo 引用,运行时注入,避免与 sqlite_repository 循环导入。
+手搓 JSON-action 循环(无原生 tool calling),通过窄检索/模型/社区端口取证。
+ReasoningRetriever 只保留这些端口；旧 repository 调用点由一次性工厂适配。
 """
 from __future__ import annotations
 
@@ -115,18 +115,44 @@ class ReasoningResult:
 
 
 class ReasoningRetriever:
-    def __init__(self, repo, settings, cancel_event: CancelEvent = None):
-        self.repo = repo
+    def __init__(
+        self,
+        *,
+        retrieval,
+        model_clients,
+        communities,
+        settings,
+        cancel_event: CancelEvent = None,
+    ):
+        self.retrieval = retrieval
+        self.model_clients = model_clients
+        self.communities = communities
         self.settings = settings
         self.cancel_event = cancel_event
         # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
         # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
         self._per_query_scored: Dict[str, Dict[str, tuple]] = {}
 
+    @classmethod
+    def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
+        """Frozen-call-site adapter; extracts narrow ports and retains no facade."""
+        from app.services.communities import CommunityQueryService
+        return cls(
+            retrieval=repository.retrieval,
+            model_clients=repository._runtime.models,
+            communities=CommunityQueryService(
+                notebooks=repository._runtime.notebook_store,
+                unified_kg=repository._runtime.unified_kg,
+                event_log=repository.event_log,
+            ),
+            settings=settings,
+            cancel_event=cancel_event,
+        )
+
     # --- KG 工具箱(薄封装 repo 原语) ---
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
-        hits = self.repo.retrieval.federated_retrieve(notebook_id, query, types=types,
+        hits = self.retrieval.federated_retrieve(notebook_id, query, types=types,
                                                       w_keyword=wk, w_semantic=ws)
         # P1-B: 留存本次查询的全量打分(轻量 (relevance,score) map,含未进 collected
         # 的候选)。收尾 _quota_rerank 直接复用——一次 run 内图只读、打分确定,
@@ -145,23 +171,23 @@ class ReasoningRetriever:
         return hits
 
     def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
-        return self.repo.retrieval.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
+        return self.retrieval.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
 
     def get(self, notebook_id, object_id):
         try:
-            return self.repo.retrieval.node_context(notebook_id, object_id)
+            return self.retrieval.node_context(notebook_id, object_id)
         except KeyError:
             return {}
 
     def search_elements(self, notebook_id, query):
-        return self.repo.retrieval.retrieve_elements(notebook_id, query)
+        return self.retrieval.retrieve_elements(notebook_id, query)
 
     def ppr_retrieve(self, notebook_id, query):
-        return self.repo.retrieval.ppr_retrieve(notebook_id, query)
+        return self.retrieval.ppr_retrieve(notebook_id, query)
 
     def follow_chain(self, notebook_id, start_object_id, edge_type=None,
                      target_object_id="", direction="out"):
-        return self.repo.retrieval.follow_chain(
+        return self.retrieval.follow_chain(
             notebook_id, start_object_id, edge_type=edge_type,
             target_object_id=target_object_id, direction=direction)
 
@@ -170,7 +196,7 @@ class ReasoningRetriever:
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
-        ex = expand_query(self.repo.reasoning_llm_client, question, history,
+        ex = expand_query(self.model_clients.reasoning_llm_client, question, history,
                           timeout=self.settings.reasoning_timeout_seconds,
                           max_retries=self.settings.reasoning_max_retries,
                           max_subqueries=self.settings.reasoning_max_subqueries,
@@ -183,10 +209,10 @@ class ReasoningRetriever:
     def reflect(self, question, candidates_summary):
         raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
-        if not getattr(self.repo.reasoning_llm_client, "configured", False):
+        if not getattr(self.model_clients.reasoning_llm_client, "configured", False):
             return answer_decision
         try:
-            raw = self.repo.reasoning_llm_client.chat_json(
+            raw = self.model_clients.reasoning_llm_client.chat_json(
                 [{"role": "user", "content": reflect_prompt(question, candidates_summary)}],
                 REFLECT_SCHEMA_HINT,
                 timeout=self.settings.reasoning_timeout_seconds,
@@ -672,7 +698,6 @@ class ReasoningRetriever:
             elif decision.next_action == "expand_community":
                 # 横向对比:焦点 → 兄弟实体(共提优先、社区回退),逐个发子查询。
                 # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
-                from app.services.communities import resolve_comparison_peers, first_base_notebook_id
                 focal_name = decision.community_focal or (
                     max(collected.values(), key=lambda h: h.score).payload.get("name", "")
                     if collected else "")
@@ -685,10 +710,10 @@ class ReasoningRetriever:
                     community_focals_done.add(fkey)
                     peers, peer_source = [], "community"
                     try:
-                        base_nb = first_base_notebook_id(self.repo, notebook_id)
+                        base_nb = self.communities.first_base_notebook_id(notebook_id)
                         if base_nb:
-                            peers, peer_source = resolve_comparison_peers(
-                                self.repo, base_nb, focal_name, question,
+                            peers, peer_source = self.communities.resolve_comparison_peers(
+                                base_nb, focal_name, question,
                                 top_k=self.settings.community_peers_topk,
                                 candidates=self.settings.community_rerank_candidates)
                     except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
@@ -750,7 +775,7 @@ class ReasoningRetriever:
             answer_detail["quota"] = counts[:len(used_queries)]
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            scored_map = {h.object_id: h for h in self.repo.retrieval.retrieve_scored(notebook_id, question)}
+            scored_map = {h.object_id: h for h in self.retrieval.retrieve_scored(notebook_id, question)}
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[:top_n]
@@ -764,3 +789,13 @@ class ReasoningRetriever:
             chains=chains,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])
+
+
+def reasoning_retriever_from_repository(
+    repository, settings, cancel_event: CancelEvent = None,
+):
+    """Compatibility construction seam for callers/tests that replace the class."""
+    factory = getattr(ReasoningRetriever, "from_repository", None)
+    if factory is not None:
+        return factory(repository, settings, cancel_event)
+    return ReasoningRetriever(repository, settings, cancel_event)

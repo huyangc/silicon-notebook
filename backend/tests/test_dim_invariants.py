@@ -13,7 +13,7 @@ import pytest
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 REPO_PY = APP / "services" / "sqlite_repository.py"
 # Task 15:四旁路正文迁到 lifecycle/governance 服务 —— 扫描面跟着代码走。
-_SCAN_FILES = (REPO_PY, APP / "services" / "knowledge_lifecycle.py",
+_SCAN_FILES = (REPO_PY, APP / "services" / "retrieval_candidates.py", APP / "services" / "knowledge_lifecycle.py",
                APP / "services" / "knowledge_governance.py")
 # 允许调用 decode_vector 的函数(_SCAN_FILES 内)。新增消费点必须:①在此白名单登记;
 # ②若做相似度,同函数须调 truncate_vec(见下条测试)。白名单外 decode_vector = 红。

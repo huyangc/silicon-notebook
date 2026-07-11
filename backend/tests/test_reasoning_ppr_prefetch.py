@@ -50,9 +50,18 @@ class _StubRepo:
         self.reasoning_llm_client = type("C", (), {"configured": False})()
 
 
+class _StubCommunities:
+    pass
+
+
 def _mk(settings=None):
     repo = _StubRepo()
-    r = ReasoningRetriever(repo, settings or _StubSettings())
+    r = ReasoningRetriever(
+        retrieval=repo.retrieval,
+        model_clients=repo,
+        communities=_StubCommunities(),
+        settings=settings or _StubSettings(),
+    )
     # plan/reflect 固定:1 个子查询,反思立即 answer
     r.plan = lambda question, history="": [SubQuery(query=question)]
     r.reflect = lambda question, s: ReflectDecision(sufficient=True, next_action="answer")

@@ -185,7 +185,7 @@ class TestTask3:
                     object_id="p1", object_type="claim", payload={}, score=0.20, relevance=0.20)]
             return []
 
-        repo._retrieve_scored = fake_retrieve_scored
+        repo.retrieval.candidates._retrieve_scored = fake_retrieve_scored
         hits = repo.federated_retrieve(personal_nb.id, "capacitance")
         tied = [h for h in hits if h.score == 0.20]
         assert [h.tier for h in tied][:2] == ["base", "personal"], \

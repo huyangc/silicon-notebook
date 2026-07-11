@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Callable, List, Literal
+from typing import Callable, List, Literal, Sequence
 
 from app.models.schemas import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
@@ -30,6 +30,60 @@ class NotebookStore:
         self.database = database
         self.new_id = new_id
         self.now = now
+
+    def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
+        ids = list(dict.fromkeys(notebook_id for notebook_id in notebook_ids if notebook_id))
+        if not ids:
+            return {}
+        out: dict[str, str] = {}
+        with self.database.connect() as db:
+            for offset in range(0, len(ids), 900):
+                batch = ids[offset:offset + 900]
+                placeholders = ",".join("?" for _ in batch)
+                for row in db.execute(
+                    f"SELECT id, tier FROM notebooks WHERE id IN ({placeholders})",
+                    batch,
+                ):
+                    out[row["id"]] = row["tier"] or "personal"
+        return out
+
+    def participant_notebook_ids(self, active_notebook_id: str) -> list[str]:
+        with self.database.connect() as db:
+            return self.participant_ids(db, active_notebook_id)
+
+    @staticmethod
+    def participant_ids(db: sqlite3.Connection, active_notebook_id: str) -> list[str]:
+        rows = db.execute(
+            "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+            (active_notebook_id,),
+        ).fetchall()
+        return [active_notebook_id] + [row["id"] for row in rows]
+
+    @staticmethod
+    def participant_rows(db: sqlite3.Connection, active_notebook_id: str):
+        base_rows = db.execute(
+            "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+            (active_notebook_id,),
+        ).fetchall()
+        active_row = db.execute(
+            "SELECT id, tier FROM notebooks WHERE id=?", (active_notebook_id,),
+        ).fetchone()
+        return active_row, base_rows
+
+    @staticmethod
+    def participant_tiers(db: sqlite3.Connection, active_notebook_id: str):
+        rows = db.execute(
+            "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
+            (active_notebook_id,),
+        ).fetchall()
+        ids = [active_notebook_id] + [row["id"] for row in rows]
+        tiers = {}
+        for notebook_id in ids:
+            row = db.execute(
+                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,),
+            ).fetchone()
+            tiers[notebook_id] = row["tier"] if row else "personal"
+        return ids, tiers
 
     def create_row(self, payload: NotebookCreate, created_by: str) -> str:
         """Minimal creation: only name + description (purpose). When the user

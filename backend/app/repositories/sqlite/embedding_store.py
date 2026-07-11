@@ -95,3 +95,91 @@ class EmbeddingStore:
                 [(cid, notebook_id, encode_vector(vec), created_at)
                  for cid, vec in rows],
             )
+
+    @staticmethod
+    def version_row(db, notebook_id: str, table: str):
+        return db.execute(
+            f"SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
+            f"FROM {table} WHERE notebook_id = ?", (notebook_id,),
+        ).fetchone()
+
+    @staticmethod
+    def vector_rows(db, notebook_id: str, table: str, id_col: str):
+        return db.execute(
+            f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def vector_rows_for_ids(db, notebook_id: str, table: str, id_col: str, ids):
+        values = list(ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT {id_col} AS vid, vector FROM {table} "
+            f"WHERE notebook_id = ? AND {id_col} IN ({ph})",
+            (notebook_id, *values),
+        ).fetchall()
+
+    @staticmethod
+    def relation_delta_rows(db, notebook_id: str, source_ids):
+        values = list(source_ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT relation_id AS vid, vector FROM relation_embeddings "
+            f"WHERE notebook_id=? AND relation_id IN "
+            f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph}))",
+            (notebook_id, notebook_id, *values),
+        ).fetchall()
+
+    @staticmethod
+    def knowledge_delta_rows(db, notebook_id: str, source_ids):
+        values = list(source_ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT object_id AS vid, vector FROM knowledge_embeddings "
+            f"WHERE notebook_id=? AND object_id IN "
+            f"(SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id IN ({ph}))",
+            (notebook_id, notebook_id, *values),
+        ).fetchall()
+
+    @staticmethod
+    def element_delta_rows(db, notebook_id: str, source_ids):
+        values = list(source_ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT element_id AS vid, vector FROM element_embeddings "
+            f"WHERE notebook_id=? AND source_id IN ({ph})",
+            (notebook_id, *values),
+        ).fetchall()
+
+    @staticmethod
+    def chunk_delta_rows(db, notebook_id: str, source_ids):
+        values = list(source_ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
+            f"WHERE notebook_id=? AND chunk_id IN "
+            f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph}))",
+            (notebook_id, notebook_id, *values),
+        ).fetchall()
+
+    @staticmethod
+    def rows_by_ids(db, table: str, id_col: str, ids):
+        values = list(ids)
+        if not values:
+            return []
+        ph = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT {id_col} AS vid, vector FROM {table} WHERE {id_col} IN ({ph})",
+            values,
+        ).fetchall()

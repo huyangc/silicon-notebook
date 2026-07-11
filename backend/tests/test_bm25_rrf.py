@@ -65,7 +65,7 @@ def test_rrf_path_ask_returns_relevant_hit(repo):
     ], [])
 
     repo.settings.retrieval_rrf_enabled = True
-    hits = repo._retrieve_scored(nb.id, "cascode output resistance")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "cascode output resistance")
     # 返回正常结果,不崩
     assert hits is not None
     # 命中了与 cascode 相关的 claim A
@@ -96,7 +96,7 @@ def test_rrf_scored_relevance_on_fused_scale_not_rrf(repo):
                    "evidence": [], "status": "approved", "owner": "", "last_reviewed": ""}],
         "concept": [], "formula": [], "procedure": [],
     }
-    hits = repo._rrf_scored("cascode output resistance", kg_objs, None)
+    hits = repo.retrieval.candidates._rrf_scored("cascode output resistance", kg_objs, None)
     assert hits
     h = hits[0]
     assert h.relevance >= 0.35     # full keyword match -> crosses tau_high (grounded-capable)
@@ -126,14 +126,14 @@ def test_retrieve_scored_uses_rrf_when_enabled(repo, monkeypatch):
     nb_id = _seed_cascode_notebook(repo)
     monkeypatch.setattr(repo.settings, "retrieval_rrf_enabled", True)
     calls = {}
-    orig = repo._rrf_scored
+    orig = repo.retrieval.candidates._rrf_scored
 
     def _spy(query, kg_objs, knowledge_sims, element_sims=None):
         calls["hit"] = True
         return orig(query, kg_objs, knowledge_sims, element_sims)
 
-    monkeypatch.setattr(repo, "_rrf_scored", _spy)
-    hits = repo._retrieve_scored(nb_id, "cascode output resistance")
+    monkeypatch.setattr(repo.retrieval.candidates, "_rrf_scored", _spy)
+    hits = repo.retrieval.candidates._retrieve_scored(nb_id, "cascode output resistance")
     assert calls.get("hit") is True, "_rrf_scored must be called when retrieval_rrf_enabled=True"
     assert all(0.0 <= h.relevance <= 1.0 for h in hits), "all relevance values must be in [0,1]"
 
@@ -147,6 +147,6 @@ def test_retrieve_scored_skips_rrf_when_disabled(repo, monkeypatch):
         calls["hit"] = True
         return []
 
-    monkeypatch.setattr(repo, "_rrf_scored", _spy)
-    repo._retrieve_scored(nb_id, "cascode output resistance")  # default: retrieval_rrf_enabled=False
+    monkeypatch.setattr(repo.retrieval.candidates, "_rrf_scored", _spy)
+    repo.retrieval.candidates._retrieve_scored(nb_id, "cascode output resistance")  # default: retrieval_rrf_enabled=False
     assert "hit" not in calls, "_rrf_scored must NOT be called when retrieval_rrf_enabled=False"

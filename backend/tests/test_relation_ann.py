@@ -379,7 +379,7 @@ def test_relation_scoring_skipped_guard_when_large_cold_no_ann(repo, monkeypatch
     _backfill_relation_vector(repo, nb.id)
     # No build_scale_index() call → no ANN. Force "large" the same way
     # master's guard tests do (copyable=False == over the copy thresholds).
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
 
     events = []
@@ -409,7 +409,7 @@ def test_relation_scoring_ann_bypasses_large_cold_guard(repo, monkeypatch):
     repo.build_scale_index(nb.id)
     # Evict any matrix warmth so ONLY the ANN branch can explain a non-skip.
     repo._vector_cache.invalidate(f"{nb.id}:matrix:relation_embeddings")
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
 
     events = []

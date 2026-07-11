@@ -68,3 +68,84 @@ class ChunkStore:
             rows = db.execute(
                 "SELECT id, text FROM chunks WHERE source_id=?", (source_id,)).fetchall()
         return [{"id": r["id"], "text": r["text"]} for r in rows]
+
+    @staticmethod
+    def language_probe_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT text FROM ("
+            "  SELECT rowid AS rid, text FROM chunks WHERE notebook_id=? "
+            "  ORDER BY rowid LIMIT 30) "
+            "UNION "
+            "SELECT text FROM ("
+            "  SELECT rowid AS rid, text FROM chunks WHERE notebook_id=? "
+            "  ORDER BY rowid DESC LIMIT 30)",
+            (notebook_id, notebook_id),
+        ).fetchall()
+
+    @staticmethod
+    def retrieval_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            """
+            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,
+                   s.title AS source_title
+            FROM chunks c JOIN sources s ON s.id = c.source_id
+            WHERE c.notebook_id = ?
+            """,
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def count_row(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchone()
+
+    @staticmethod
+    def hydrate_rows(db: sqlite3.Connection, chunk_ids: Sequence[str]):
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
+            f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+            f"WHERE c.id IN ({ph})", ids,
+        ).fetchall()
+
+    @staticmethod
+    def graph_hydrate_rows(db: sqlite3.Connection, chunk_ids: Sequence[str]):
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
+            f"c.notebook_id AS chunk_notebook_id, s.title AS source_title "
+            f"FROM chunks c JOIN sources s ON s.id=c.source_id "
+            f"WHERE c.id IN ({ph})", ids,
+        ).fetchall()
+
+    @staticmethod
+    def id_element_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT id, element_ids FROM chunks WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def rows_by_ids(db: sqlite3.Connection, chunk_ids: Sequence[str]):
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT id, source_id, text, section_path, element_ids "
+            f"FROM chunks WHERE id IN ({ph})", ids,
+        ).fetchall()
+
+    @staticmethod
+    def id_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT id FROM chunks WHERE notebook_id=?", (notebook_id,),
+        ).fetchall()

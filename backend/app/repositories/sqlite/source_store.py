@@ -111,6 +111,58 @@ class SourceStore:
             for row in rows
         ]
 
+    def evidence_elements(
+        self, element_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        ids = list(dict.fromkeys(element_id for element_id in element_ids if element_id))
+        if not ids:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        with self.database.connect() as db:
+            for offset in range(0, len(ids), self.IN_CHUNK):
+                batch = ids[offset:offset + self.IN_CHUNK]
+                placeholders = ",".join("?" for _ in batch)
+                for row in db.execute(
+                    "SELECT id, source_id, element_type, location_label, text, metadata "
+                    f"FROM source_elements WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall():
+                    out[row["id"]] = dict(row)
+        return out
+
+    def source_metadata(
+        self, source_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
+        if not ids:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        with self.database.connect() as db:
+            for offset in range(0, len(ids), self.IN_CHUNK):
+                batch = ids[offset:offset + self.IN_CHUNK]
+                placeholders = ",".join("?" for _ in batch)
+                for row in db.execute(
+                    "SELECT id, notebook_id, title, file_name, summary, doc_type "
+                    f"FROM sources WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall():
+                    out[row["id"]] = dict(row)
+        return out
+
+    @staticmethod
+    def retrieval_element_rows(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            """
+            SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
+                   s.title AS source_title, em.vector AS vector
+            FROM source_elements e
+            JOIN sources s ON s.id = e.source_id
+            LEFT JOIN element_embeddings em ON em.element_id = e.id
+            WHERE s.notebook_id = ?
+            """,
+            (notebook_id,),
+        ).fetchall()
+
     def notebook_element_sample(
         self, notebook_id: str, *, max_chars: int = 8000
     ) -> List[dict]:

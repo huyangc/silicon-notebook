@@ -1510,52 +1510,7 @@ class SQLiteRepository:
     _LATIN_RE = re.compile(r"[A-Za-z]")
 
     def _notebook_langs(self, notebook_id: str) -> List[str]:
-        """Cheap, cached probe of a notebook's corpus languages (subset of
-        ["zh","en"]) for bilingual query expansion — used so the query rewriter
-        mints keywords in each corpus language, and (via _keyword_chunk_candidates)
-        so those bilingual keywords carry the 2nd language into the CHUNK FTS as
-        well as the KG-name/relation FTS. Samples a bounded SPREAD (head ∪ tail by
-        rowid, up to ~60 texts) — not the first N — so 2nd-language content appended
-        after many first-language chunks is still caught. Detects CJK vs Latin
-        letters; returns ["en"] when empty/unknown, both when mixed. This is a
-        HINT: a wrong guess only over/under-generates FTS keywords, never breaks
-        retrieval. Cached per-notebook; the cache is invalidated at chunk-write
-        settle points (source add / re-chunk / FTS backfill) so a notebook that
-        gains new-language content re-reflects it."""
-        cached = self._notebook_langs_cache.get(notebook_id)
-        if cached is not None:
-            return cached
-        has_cjk = has_latin = False
-        with self._connect() as db:
-            # Head ∪ tail spread by rowid (bounded, no full-table sort — never
-            # ORDER BY RANDOM()): catches both the earliest and the most recently
-            # added chunks cheaply.
-            rows = db.execute(
-                "SELECT text FROM ("
-                "  SELECT rowid AS rid, text FROM chunks WHERE notebook_id=? "
-                "  ORDER BY rowid LIMIT 30) "
-                "UNION "
-                "SELECT text FROM ("
-                "  SELECT rowid AS rid, text FROM chunks WHERE notebook_id=? "
-                "  ORDER BY rowid DESC LIMIT 30)",
-                (notebook_id, notebook_id)).fetchall()
-        for r in rows:
-            t = r["text"] or ""
-            if not has_cjk and self._CJK_RE.search(t):
-                has_cjk = True
-            if not has_latin and self._LATIN_RE.search(t):
-                has_latin = True
-            if has_cjk and has_latin:
-                break
-        langs: List[str] = []
-        if has_cjk:
-            langs.append("zh")
-        if has_latin:
-            langs.append("en")
-        if not langs:
-            langs = ["en"]   # empty/unknown → safe single-language default
-        self._notebook_langs_cache[notebook_id] = langs
-        return langs
+        return self.retrieval.candidates._notebook_langs(notebook_id)
 
     def _should_extract_kg(self, notebook_id: str) -> bool:
         return self._runtime.source_ingestion.should_extract_kg(notebook_id)
@@ -2710,124 +2665,13 @@ class SQLiteRepository:
                 "attached": attached, "evidence": evidence}
 
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
-        ids = [e for e in element_ids if e]
-        if not ids:
-            return {}, {}
-        ph = ",".join("?" for _ in ids)
-        rows = db.execute(f"SELECT id, text FROM source_elements WHERE id IN ({ph})", ids).fetchall()
-        texts = {r["id"]: r["text"] for r in rows}
-        if not with_ordinal:
-            return texts, {}
-        order_rows = db.execute(
-            "SELECT se.id FROM source_elements se JOIN sources s ON se.source_id=s.id "
-            "WHERE s.notebook_id=(SELECT notebook_id FROM sources WHERE id=("
-            "SELECT source_id FROM source_elements WHERE id=? LIMIT 1)) "
-            "ORDER BY se.created_at ASC, se.id ASC",
-            (ids[0],),
-        ).fetchall()
-        ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
-        return texts, ordinal
+        return self._runtime.knowledge._element_texts(db, element_ids, with_ordinal=with_ordinal)
 
     def _enrich_evidence(self, db, evidence):
-        texts, _ = self._element_texts(db, [e.get("element_id") for e in evidence])
-        out = []
-        for e in evidence:
-            out.append({"quoted_span": e.get("quoted_span", ""),
-                        "source_title": e.get("source_title", "") or e.get("source_id", ""),
-                        "element_text": texts.get(e.get("element_id", ""), e.get("quoted_span", ""))})
-        return out
+        return self._runtime.knowledge._enrich_evidence(db, evidence)
 
     def node_context(self, notebook_id, object_id):
-        self.get_notebook(notebook_id)
-        with self._connect() as db:
-            row = db.execute("SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE id=? AND notebook_id=?", (object_id, notebook_id)).fetchone()
-            if row is None:
-                raise KeyError(object_id)
-            obj_type = row["object_type"]
-            payload = json.loads(row["payload"] or "{}")
-            section = payload.get("section_path", "")
-            occurrences = self._enrich_evidence(db, json.loads(row["evidence"] or "[]"))
-            result = {"id": object_id, "object_type": obj_type, "name": payload.get("name", ""),
-                      "section_path": section, "occurrences": occurrences, "definition": None, "steps": None}
-            if obj_type == "concept":
-                # prefer the unified cluster's fused description when present
-                crow = db.execute(
-                    "SELECT canonical_description FROM concept_clusters "
-                    "WHERE notebook_id=? AND member_object_id=? AND canonical_description!='' LIMIT 1",
-                    (notebook_id, object_id)).fetchone()
-                if crow and crow["canonical_description"]:
-                    result["definition"] = crow["canonical_description"]
-                else:
-                    drow = db.execute(
-                        "SELECT ko.payload, ko.evidence FROM knowledge_relations r JOIN knowledge_objects ko ON ko.id=r.source_object_id "
-                        "WHERE r.notebook_id=? AND r.target_object_id=? AND r.edge_type='defines' LIMIT 1", (notebook_id, object_id)).fetchone()
-                    if drow is not None:
-                        dpay = json.loads(drow["payload"] or "{}")
-                        den = self._enrich_evidence(db, json.loads(drow["evidence"] or "[]"))
-                        result["definition"] = (den[0]["element_text"] if den else dpay.get("name", ""))
-            if obj_type == "procedure":
-                steps_payload = payload.get("steps")
-                if isinstance(steps_payload, list) and steps_payload:
-                    # New self-contained shape: ordered steps live in the object's payload.
-                    eids = [s.get("element_id") for s in steps_payload if s.get("element_id")]
-                    texts, _ord = self._element_texts(db, eids) if eids else ({}, {})
-                    result["steps"] = [
-                        {"name": s.get("name", ""),
-                         "element_text": texts.get(s.get("element_id") or "", s.get("quote", "")),
-                         "section_path": section}
-                        for s in steps_payload
-                    ]
-                else:
-                    # Legacy fallback: group sibling procedure nodes by exact section_path
-                    # (precedes edges are sparse). Two distinct procedures sharing a heading
-                    # would merge — acceptable for inspection.
-                    #
-                    # P2-3: this used to scan EVERY procedure object in the notebook
-                    # (regardless of section) and filter in Python — O(procedures in
-                    # notebook) per call. When the target node's own section_path is
-                    # known (the common case — payload.get("section_path") above),
-                    # bind the query to it directly in SQL via json_extract (JSON1,
-                    # already used elsewhere in this file), so SQLite only reads
-                    # matching rows. section_path is free text (not a dedicated
-                    # column) so this is the only way to push the filter down without
-                    # a schema change. If section_path is unavailable (rare: an old
-                    # or malformed payload), fall back to a bounded LIMIT — this path
-                    # is a display-only legacy fallback, not a correctness-critical
-                    # query, so an arbitrary-but-bounded sample is acceptable.
-                    if section:
-                        prows = db.execute(
-                            "SELECT id, payload, evidence FROM knowledge_objects "
-                            "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
-                            "AND json_extract(payload,'$.section_path')=?",
-                            (notebook_id, section)).fetchall()
-                    else:
-                        prows = db.execute(
-                            "SELECT id, payload, evidence FROM knowledge_objects "
-                            "WHERE notebook_id=? AND object_type='procedure' AND status!='deprecated' "
-                            "LIMIT 500",
-                            (notebook_id,)).fetchall()
-                    candidate_steps = []
-                    for pr in prows:
-                        ppay = json.loads(pr["payload"] or "{}")
-                        if ppay.get("section_path", "") != section:
-                            continue
-                        ev = json.loads(pr["evidence"] or "[]")
-                        first_eid = ev[0].get("element_id") if ev else ""
-                        candidate_steps.append((ppay.get("name", ""), first_eid))
-                    all_step_first_eids = [eid for _, eid in candidate_steps if eid]
-                    if all_step_first_eids:
-                        texts, ordinal = self._element_texts(db, all_step_first_eids, with_ordinal=True)
-                    else:
-                        texts, ordinal = {}, {}
-                    steps = []
-                    for step_name, first_eid in candidate_steps:
-                        steps.append({"name": step_name, "element_text": texts.get(first_eid, ""),
-                                      "section_path": section, "_ord": ordinal.get(first_eid, 1_000_000)})
-                    steps.sort(key=lambda s: s["_ord"])
-                    for s in steps:
-                        s.pop("_ord", None)
-                    result["steps"] = steps
-            return result
+        return self._runtime.knowledge.node_context(notebook_id, object_id)
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:
@@ -2966,33 +2810,7 @@ class SQLiteRepository:
         return self._runtime.models.note_model_error(stage, model, exc)
 
     def _embed_query(self, query: str) -> Optional[List[float]]:
-        """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
-        与语料侧 build_matrix 共用 truncate_vec 同一口径)。查询/语料两侧维度
-        不一致 = 静默零召回,是截断项目的头号风险 —— 勿在别处另行截断。
-        P1-A:ask 作用域内(_ASK_EMBED_CACHE 非 None)按 query[:2000] 复用同文本
-        的截断后向量,砍 federated 双 tier/seed/quota 对同一问题的重复 RTT;
-        失败不缓存(保留每次重试语义)。default None(非 ask 路径)行为不变。"""
-        if not self.settings.embedder_configured:
-            return None
-        cache = _ASK_EMBED_CACHE.get()
-        key = query[:2000]
-        if cache is not None:
-            hit = cache.get(key)
-            if hit is not None:
-                return hit
-        try:
-            vec = self.embedder.embed_query(query[:2000])
-        except Exception as exc:
-            self._note_model_error("embed", self.settings.embed_model, exc)
-            return None
-        from app.services.vector_index import resolve_runtime_dim, truncate_vec
-        rd = resolve_runtime_dim(self.settings)
-        if rd and vec is not None and len(vec) > rd:
-            import numpy as np
-            vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
-        if cache is not None and vec is not None:
-            cache[key] = vec
-        return vec
+        return self.retrieval.candidates._embed_query(query)
 
     def _runtime_dim(self) -> int:
         """本 repo 生效的运行时截断维(读 self.settings,非全局 get_settings)。
@@ -3007,414 +2825,41 @@ class SQLiteRepository:
         # 运行时截断旁路(计划 §1.2 旁路 1):element 兜底不走 build_matrix,逐向量
         # 进 retrieval.cosine 与 _embed_query(已截断,T2)比较 —— cosine 对 len 不等
         # 静默返 0.0,漏截 = 全部 element 静默零相似度。
-        from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
-
-        rd = resolve_runtime_dim(self.settings)
-        rows = db.execute(
-            """
-            SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,
-                   s.title AS source_title, em.vector AS vector
-            FROM source_elements e
-            JOIN sources s ON s.id = e.source_id
-            LEFT JOIN element_embeddings em ON em.element_id = e.id
-            WHERE s.notebook_id = ?
-            """,
-            (notebook_id,),
-        ).fetchall()
-        elements: List[dict] = []
-        for row in rows:
-            vector = None
-            if with_vectors and row["vector"]:
-                arr = decode_vector(row["vector"])
-                if arr is not None and rd:
-                    arr = truncate_vec(arr, rd)
-                vector = arr.tolist() if arr is not None else None
-            elements.append(
-                {
-                    "element_id": row["id"],
-                    "source_id": row["source_id"],
-                    "source_title": row["source_title"],
-                    "location_label": row["location_label"],
-                    "element_type": row["element_type"],
-                    "text": row["text"],
-                    "vector": vector,
-                }
-            )
-        return elements
+        return self.retrieval.candidates._gather_elements(db, notebook_id, with_vectors)
 
     @staticmethod
     def _element_vectors(elements: List[dict]) -> dict:
-        """Map element_id -> embedding vector for elements that have one."""
-        return {
-            element["element_id"]: element["vector"]
-            for element in elements
-            if element.get("vector")
-        }
+        from app.services.retrieval_candidates import CandidateRetrievalService
+        return CandidateRetrievalService._element_vectors(elements)
 
     def _gather_chunks(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
-        rows = db.execute(
-            """
-            SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids,
-                   s.title AS source_title
-            FROM chunks c JOIN sources s ON s.id = c.source_id
-            WHERE c.notebook_id = ?
-            """,
-            (notebook_id,),
-        ).fetchall()
-        return [{
-            "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
-            "section_path": r["section_path"], "source_title": r["source_title"],
-            "element_ids": json.loads(r["element_ids"] or "[]"),
-        } for r in rows]
+        return self.retrieval.candidates._gather_chunks(db, notebook_id)
 
     def _vector_matrix_version(self, db: sqlite3.Connection, notebook_id: str, table: str):
-        """(table, count, max created_at) version tuple for a notebook's `table`
-        embeddings — the same cheap aggregate query _vector_matrix uses to key
-        its cache. Factored out so callers can `peek()` cache warmth (e.g. the
-        large-notebook cold-matrix guard in _retrieve_relations_scored) without
-        duplicating the SQL or paying for the (potentially GB-scale) loader.
-
-        Includes the runtime truncation dim (T3 / 风险 R4): the cached matrix
-        lives in the runtime similarity space, so flipping EMBED_RUNTIME_DIM
-        without a restart must miss — serving an old-dim matrix would make
-        every query_sims silently return {} (dim-mismatch guard). Warm-peek
-        (_vector_matrix_warm) shares this version, so guard warmth judgments
-        stay in sync with the real cache by construction."""
-        from app.services.vector_index import resolve_runtime_dim
-        ver = db.execute(
-            f"SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
-            f"FROM {table} WHERE notebook_id = ?",
-            (notebook_id,),
-        ).fetchone()
-        return (table, ver["c"], ver["ts"], resolve_runtime_dim(self.settings))
+        return self.retrieval.candidates._vector_matrix_version(db, notebook_id, table)
 
     def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
                        table: str, id_col: str):
-        """Cached (ids, normalized float32 matrix) for a notebook's embeddings.
-
-        Streams JSON vectors straight into one float32 matrix (vector_index.
-        build_matrix) so retrieval is a single matmul with bounded memory — vs
-        materializing thousands of vectors as Python float lists (~1.3 GB on a
-        large KG). Version-keyed on (count, max created_at) so it self-invalidates
-        after (re)ingest. `table`/`id_col` are internal constants (not user input)."""
-        from app.services.vector_index import build_matrix
-
-        version = self._vector_matrix_version(db, notebook_id, table)
-        # 键↔loader 同源:截断维取 version 元组里那份(而非各自再读 settings),
-        # 缓存键声称的空间与实际加载的空间 by construction 一致(T3/R4)。
-        runtime_dim = version[-1]
-
-        def _load():
-            rows = db.execute(
-                f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
-                (notebook_id,),
-            ).fetchall()
-            return build_matrix(((r["vid"], r["vector"]) for r in rows),
-                                runtime_dim=runtime_dim)
-
-        return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
+        return self.retrieval.candidates._vector_matrix(db, notebook_id, table, id_col)
 
     def _vector_matrix_warm(self, db: sqlite3.Connection, notebook_id: str, table: str) -> bool:
-        """True 当且仅当 `table` 的向量矩阵已经暖在 _vector_cache 里(版本匹配当前
-        数据)—— 不触发 loader,只是 peek。供大库场景「加载前先问值不值得」的
-        守卫使用(见 _retrieve_relations_scored)。"""
-        version = self._vector_matrix_version(db, notebook_id, table)
-        return self._vector_cache.peek(f"{notebook_id}:matrix:{table}", version)
+        return self.retrieval.candidates._vector_matrix_warm(db, notebook_id, table)
 
     def _keyword_token_sets(self, db, notebook_id: str, objects: list,
                             bounded: bool = False) -> dict:
-        """Cached {object_id: frozenset(haystack_tokens)} for keyword scoring.
-
-        Version-keyed on (COUNT, MAX(updated_at)) of knowledge_objects so any
-        payload or evidence edit invalidates the cache. Evidence text is included
-        so the token set is byte-equivalent to what score_knowledge builds live.
-
-        bounded=True(ANN 门控的有界候选路径):跳过版本 COUNT 与进程缓存,直接对
-        本批 objects 现场构建(与 _load 同构建逻辑,逐字节等价——为 ≤recall 个候选
-        付一次百万行 COUNT 是倒挂;该缓存对每查询候选集不同的 ANN 路径也从未命中过)。"""
-        from app.services.retrieval import _tokens, _payload_text
-
-        def _build(objs):
-            out = {}
-            for o in objs:
-                ev_text = " ".join(
-                    e.quoted_span for e in o.get("evidence", [])
-                )
-                out[o["id"]] = frozenset(_tokens(f"{_payload_text(o['payload'])} {ev_text}"))
-            return out
-
-        if bounded:
-            return _build(objects)
-
-        ver = db.execute(
-            "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
-            "FROM knowledge_objects WHERE notebook_id = ?", (notebook_id,)).fetchone()
-        version = ("kwtok", ver["c"], ver["ts"])
-        return self._vector_cache.get(f"{notebook_id}:kwtok", version, lambda: _build(objects))
+        return self.retrieval.candidates._keyword_token_sets(db, notebook_id, objects, bounded)
 
     def _federated_rx_graph(self, active_notebook_id: str):
-        """Return a federated PyDiGraph merging base notebook(s) + active notebook.
-
-        Version-keyed, per participating notebook, on BOTH the relations
-        (COUNT, MAX created_at, per-review-status counts) and the objects
-        (COUNT, MAX updated_at), so an ingest into ANY of them — or an
-        object-only change (status flip / payload edit bumps updated_at) — or
-        an edge review flip (Track E) — triggers a rebuild even without an
-        explicit eviction.  Cache key: "{active_id}:fed_rxgraph".
-
-        Track E: relations with review_status = 'rejected' are excluded — a
-        curator's rejection must not flow into reasoning via the federated
-        path either.
-
-        Each relation row is tagged with its notebook_id before passing to
-        build_rx_graph so per-edge tier stamping works.
-        """
-        from app.services.kg.graph_reason import build_rx_graph
-        with self._connect() as db:
-            # Participating notebooks: active + all base notebooks (excl. active
-            # if active is itself base, to avoid duplication).
-            base_rows = db.execute(
-                "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
-                (active_notebook_id,),
-            ).fetchall()
-            active_row = db.execute(
-                "SELECT id, tier FROM notebooks WHERE id=?",
-                (active_notebook_id,),
-            ).fetchone()
-            active_tier = active_row["tier"] if active_row else "personal"
-
-            # Build participating list: active first, then all base notebooks.
-            participants = [(active_notebook_id, active_tier)] + [
-                (r["id"], r["tier"]) for r in base_rows
-            ]
-            # Version key: per-notebook (nb_id, relations (count, max created_at,
-            # per-review-status counts), objects (count, max updated_at),
-            # concept_clusters (count, max created_at)). Object coverage makes
-            # object-only changes (deprecate / status flip / payload edit)
-            # rebuild the graph. Track E: the per-status counts (n_rej, n_ver)
-            # make a single edge flip between pending/verified/rejected change
-            # the version even when (COUNT, MAX created_at) is unchanged.
-            # set_edge_review's explicit evict-all-fed_rxgraph remains as
-            # belt-and-braces. TD2: the
-            # concept_clusters part means a rebuild_unified_kg on ANY participant
-            # (which rewrites clusters without touching relations) invalidates
-            # the federated graph, so the cross-doc hubs are rebuilt.
-            version_parts = []
-            for nb_id, _ in participants:
-                rel_ver = db.execute(
-                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts, "
-                    "COALESCE(SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END), 0) AS n_rej, "
-                    "COALESCE(SUM(CASE WHEN review_status = 'verified' THEN 1 ELSE 0 END), 0) AS n_ver "
-                    "FROM knowledge_relations WHERE notebook_id = ?",
-                    (nb_id,),
-                ).fetchone()
-                obj_ver = db.execute(
-                    "SELECT COUNT(*) AS c, COALESCE(MAX(updated_at), '') AS ts "
-                    "FROM knowledge_objects WHERE notebook_id = ?",
-                    (nb_id,),
-                ).fetchone()
-                clu_ver = db.execute(
-                    "SELECT COUNT(*) AS c, COALESCE(MAX(created_at), '') AS ts "
-                    "FROM concept_clusters WHERE notebook_id = ?",
-                    (nb_id,),
-                ).fetchone()
-                version_parts.append(
-                    (nb_id, rel_ver["c"], rel_ver["ts"],
-                     rel_ver["n_rej"], rel_ver["n_ver"],
-                     obj_ver["c"], obj_ver["ts"],
-                     clu_ver["c"], clu_ver["ts"]))
-            version = ("fed_rxgraph", tuple(version_parts))
-
-            tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
-
-            def _load():
-                nodes: dict = {}
-                all_relations: list = []
-                cluster_groups: dict = {}
-                ph = ",".join("?" for _ in USABLE_STATUSES)
-                for nb_id, _ in participants:
-                    obj_rows = db.execute(
-                        "SELECT id, object_type, payload FROM knowledge_objects "
-                        f"WHERE notebook_id = ? AND status IN ({ph})",
-                        (nb_id, *USABLE_STATUSES),
-                    ).fetchall()
-                    for r in obj_rows:
-                        p = json.loads(r["payload"] or "{}")
-                        nodes[r["id"]] = {
-                            "type": r["object_type"],
-                            "name": p.get("name", ""),
-                            "tier": tier_map.get(nb_id, "personal"),
-                        }
-                    # Track E: rejected edges are excluded from the federated
-                    # reasoning graph too (curation feedback loop) — bare
-                    # filter; the column is NOT NULL DEFAULT 'pending'
-                    # (migration runs in __init__), so NULL is impossible.
-                    rel_rows = db.execute(
-                        "SELECT id, source_object_id, target_object_id, edge_type, evidence "
-                        "FROM knowledge_relations "
-                        "WHERE notebook_id = ? AND review_status != 'rejected'",
-                        (nb_id,),
-                    ).fetchall()
-                    for r in rel_rows:
-                        d = dict(r)
-                        d["notebook_id"] = nb_id   # tag for tier_map lookup
-                        all_relations.append(d)
-                    # TD2: aggregate concept-cluster membership across ALL
-                    # participants. canonical_ids are name-derived and shared
-                    # across tiers (same as _ppr_graph), so a base-tier member
-                    # and an active-tier member of the same canonical land in
-                    # one group → build_rx_graph adds a transit-only hub that
-                    # bridges them cross-document. object_ids are globally unique
-                    # so no collision across notebooks.
-                    for r in db.execute(
-                        "SELECT canonical_id, member_object_id FROM concept_clusters "
-                        "WHERE notebook_id = ?",
-                        (nb_id,),
-                    ).fetchall():
-                        cluster_groups.setdefault(r["canonical_id"], []).append(
-                            r["member_object_id"])
-                # `or None`: no clusters → None-path (no kind tag, no hubs),
-                # byte-identical to the pre-hub federated graph shape.
-                return build_rx_graph(
-                    nodes, all_relations, tier="personal", tier_map=tier_map,
-                    cluster_groups=cluster_groups or None)
-
-            return self._vector_cache.get(
-                f"{active_notebook_id}:fed_rxgraph", version, _load)
+        return self.retrieval.graph._federated_rx_graph(active_notebook_id)
 
     def _federated_graph_is_large(self, active_notebook_id: str) -> bool:
-        """Return true if *any* graph participant is above the in-memory guard.
-
-        Federated graph loaders include the active notebook plus every base
-        notebook. Guarding only the active notebook lets a tiny personal
-        notebook pull an arbitrarily large base graph into rustworkx.
-        """
-        with self._connect() as db:
-            participants = [active_notebook_id] + [
-                r["id"] for r in db.execute(
-                    "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                    (active_notebook_id,),
-                ).fetchall()
-            ]
-        return any(
-            not self.notebook_copy_stats(notebook_id)["copyable"]
-            for notebook_id in participants
-        )
+        return self.retrieval.candidates._federated_graph_is_large(active_notebook_id)
 
     def _mention_extra_edges(self, notebook_id: str) -> List[Tuple[str, str, float]]:
-        """P2 共提桥 → 图 extra_edges:每条 mention_edges 行转一条软边
-        (claim_object_id ↔ f"cluster:{concept_canonical_id}", 权重 mention_edge_weight)。
-        claim 是已在图内的 KG 对象节点;cluster router 由既有 cluster_groups 机制生成
-        ——mention_edges 只指向跨 >=2 源的 concept canonical(构造保证),故 router 必存在;
-        偶发缺失由 build_ppr_graph / _gather_kg_graph 的 key 查表静默跳过(可接受降级)。
-
-        一次 SELECT(数万行级),不加每边 SQL;flag 关或表空返 []。fail-open:任何异常返 []
-        (派生数据,绝不因共提层崩掉图构建)。"""
-        if not self.settings.mention_bridge_enabled:
-            return []
-        try:
-            w = float(self.settings.mention_edge_weight)
-            with self._connect() as db:
-                rows = db.execute(
-                    "SELECT claim_object_id, concept_canonical_id FROM mention_edges "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall()
-            return [(r["claim_object_id"], f"cluster:{r['concept_canonical_id']}", w)
-                    for r in rows]
-        except Exception:
-            return []
+        return self.retrieval.graph._mention_extra_edges(notebook_id)
 
     def _ppr_graph(self, notebook_id: str):
-        """Build (and version-cache) the graph-mode PPR graph: KG nodes + chunk
-        nodes + relation/membership/synonym(+variant) edges. Always spans active
-        + base-tier notebooks (object_ids / chunk_ids are globally unique;
-        concept_clusters share name-derived canonical_ids so a concept in active
-        and base bridges naturally).
-        返回 (G, key_to_idx, chunk_idx_to_id)。"""
-        from app.services.kg.ppr import build_ppr_graph
-        with self._connect() as db:
-            participants = [notebook_id] + [r["id"] for r in db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                (notebook_id,)).fetchall()]
-            version_parts = []
-            for nb in participants:
-                rel_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                                     "FROM knowledge_relations WHERE notebook_id=? "
-                                     "AND review_status!='rejected'", (nb,)).fetchone()
-                obj_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(updated_at),'') AS ts "
-                                     "FROM knowledge_objects WHERE notebook_id=?", (nb,)).fetchone()
-                chunk_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                                       "FROM chunks WHERE notebook_id=?", (nb,)).fetchone()
-                clu_ver = db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                                     "FROM concept_clusters WHERE notebook_id=?", (nb,)).fetchone()
-                # mention_seq(P2 共提桥):派生 mention_edges 上次重建时的 kg_mutation_seq。
-                # O(1) unified_kg_state 单行读——mention 数据变更(重建/flag/权重)须让图缓存失效。
-                men_ver = db.execute("SELECT COALESCE(mention_seq,-1) AS ms FROM unified_kg_state "
-                                     "WHERE notebook_id=?", (nb,)).fetchone()
-                version_parts.append((nb, obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
-                                      chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"],
-                                      men_ver["ms"] if men_ver else -1))
-        # runtime_dim 入键(T3/R4):emb_synonym 边由向量矩阵派生,切
-        # EMBED_RUNTIME_DIM 后旧空间算出的图不能再服役。
-        from app.services.vector_index import resolve_runtime_dim
-        version = ("ppr_graph", tuple(version_parts),
-                   self.settings.ppr_variant_edge_weight,
-                   self.settings.ppr_emb_synonym_enabled, self.settings.ppr_emb_synonym_threshold,
-                   self.settings.ppr_emb_synonym_topk,
-                   resolve_runtime_dim(self.settings),
-                   self.settings.mention_bridge_enabled, self.settings.mention_edge_weight,)
-
-        def _load():
-            ph = ",".join("?" for _ in USABLE_STATUSES)
-            kg_nodes: Dict[str, dict] = {}
-            chunk_ids: list = []
-            relations: list = []
-            cluster_groups: Dict[str, list] = {}
-            with self._connect() as db:
-                for nb in participants:
-                    for r in db.execute(
-                            f"SELECT id, object_type, payload FROM knowledge_objects "
-                            f"WHERE notebook_id=? AND status IN ({ph})",
-                            (nb, *USABLE_STATUSES)).fetchall():
-                        kg_nodes[r["id"]] = {"type": r["object_type"],
-                                             "name": json.loads(r["payload"] or "{}").get("name", "")}
-                    for r in db.execute("SELECT source_object_id, target_object_id FROM knowledge_relations "
-                                        "WHERE notebook_id=? AND review_status!='rejected'", (nb,)).fetchall():
-                        relations.append(dict(r))
-                    for r in db.execute("SELECT id FROM chunks WHERE notebook_id=?", (nb,)).fetchall():
-                        chunk_ids.append(r["id"])
-                    for r in db.execute("SELECT canonical_id, member_object_id FROM concept_clusters "
-                                        "WHERE notebook_id=?", (nb,)).fetchall():
-                        cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-            memberships = [(oid, cid)
-                           for nb in participants
-                           for oid, cids in self._ent_chunk_map(nb).items()
-                           for cid in cids]
-            from app.services.kg.ppr import variant_edge_pairs
-            extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
-            if self.settings.ppr_emb_synonym_enabled:
-                from app.services.kg.ppr import emb_synonym_edges
-                import numpy as np
-                all_ids, mats = [], []
-                with self._connect() as db:
-                    for nb in participants:
-                        ids, mat = self._vector_matrix(db, nb, "knowledge_embeddings", "object_id")
-                        if ids and mat is not None and len(mat):
-                            all_ids.extend(ids)
-                            mats.append(np.asarray(mat))
-                if mats:
-                    extra_edges = extra_edges + emb_synonym_edges(
-                        all_ids, np.vstack(mats),
-                        self.settings.ppr_emb_synonym_threshold,
-                        self.settings.ppr_emb_synonym_topk,
-                        self.settings.ppr_emb_synonym_max_entities,
-                        ef_construction=self.settings.hnsw_ef_construction)
-            # P2 共提桥:每 participant 一次 mention_edges SELECT,追加 claim↔cluster 软边,
-            # 让 PPR 质量在 claim 与跨文档概念 router 间流动。
-            for nb in participants:
-                extra_edges = extra_edges + self._mention_extra_edges(nb)
-            return build_ppr_graph(kg_nodes, chunk_ids, relations, memberships, cluster_groups, extra_edges=extra_edges)
-
-        return self._vector_cache.get(f"{notebook_id}:ppr_graph", version, _load)
+        return self.retrieval.graph._ppr_graph(notebook_id)
 
     # ── scale index (offline build) ──────────────────────────────────────────
 
@@ -3616,584 +3061,33 @@ class SQLiteRepository:
         return self._runtime.scale_artifacts.build_viz(notebook_id)
 
     def _active_kg_delta(self, notebook_id: str):
-        """Gather the ACTIVE/self notebook's KG delta for splicing onto a base or
-        self scale index. Delegates to _gather_kg_graph (shared with
-        build_scale_index) so node/edge conventions are guaranteed identical.
-
-        When the notebook itself is already scale-indexed, only the post-watermark
-        sources (self-delta) are gathered — the index core is already represented
-        by its own CSR participant, so re-splicing the whole self KG would
-        double-count. Otherwise the whole notebook is gathered (unchanged).
-        Returns (active_node_ids, active_edges, active_chunk_ids).
-        """
-        # 廉价门控早退:indexed(磁盘有 manifest)且 flag 关时,图基底只含已索引部分,
-        # 直接返空——省掉 _index_delta 对 delta_sources 的分批 COUNT(生产 48,739 源、
-        # 55 批,结果本会被丢弃)。gate 结果与「先 _index_delta 再判 indexed」一致:
-        # _index_delta 的 indexed 恰是 manifest 是否存在。
-        scale_manifest = (self._runtime.scale_artifact_store.scale_dir(notebook_id)
-                          / "manifest.json")
-        if (scale_manifest.exists()
-                and not self.settings.scale_search_include_delta):
-            # 同一原则第四处:已索引库的图基底只含已索引部分(核心 CSR 本身),水位后
-            # delta 由 auto-fold 收进索引后自然可达。未索引的 active 小库(下方
-            # src=None 整库 gather)是 two-tier 联邦的 active 层,不是 delta,不受门控。
-            return [], [], []
-        delta = self._index_delta(notebook_id)
-        src = delta["delta_sources"] if delta["indexed"] else None
-        node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
-            self._gather_kg_graph(notebook_id, source_ids=src)
-        return node_ids, edges, chunk_ids
+        return self.retrieval.graph._active_kg_delta(notebook_id)
 
     def _delta_vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
                              table: str, id_col: str, node_ids: List[str]):
-        """Like `_vector_matrix` but scoped to exactly `node_ids` — for hot paths
-        that only need vectors for a bounded delta node set (e.g. the active KG
-        delta spliced onto a base scale index), not the notebook's FULL embedding
-        table. Loads via chunked `IN (...)` (SQLite variable-count safe, see
-        `_IN_CHUNK`) instead of `_vector_matrix`'s `WHERE notebook_id = ?` (which
-        would pull every row in the notebook — 490k×1024 when active IS the
-        indexed big lib). Not version-cached (the delta itself is already
-        version-scoped by the caller's cache key) — bounded by len(node_ids), so
-        a fresh per-call load is cheap. Returns (ids, matrix) via the same
-        `build_matrix` path, so output is bit-identical to filtering the full
-        `_vector_matrix` result down to `node_ids` (same decode, same
-        normalization, same skip-on-invalid semantics)."""
-        from app.services.vector_index import build_matrix
-        if not node_ids:
-            return [], None
-
-        def _rows():
-            ids = list(dict.fromkeys(node_ids))  # de-dupe, preserve order
-            for i in range(0, len(ids), self._IN_CHUNK):
-                batch = ids[i:i + self._IN_CHUNK]
-                ph = ",".join("?" for _ in batch)
-                rows = db.execute(
-                    f"SELECT {id_col} AS vid, vector FROM {table} "
-                    f"WHERE notebook_id = ? AND {id_col} IN ({ph})",
-                    (notebook_id, *batch),
-                ).fetchall()
-                by_id = {r["vid"]: r["vector"] for r in rows}
-                for nid in batch:
-                    if nid in by_id:
-                        yield nid, by_id[nid]
-
-        return build_matrix(_rows())
+        return self.retrieval.graph._delta_vector_matrix(db, notebook_id, table, id_col, node_ids)
 
     def _scale_xlayer_bridge_edges(self, notebook_id: str, base_indexes,
                                    active_edges, active_node_ids=None):
-        """Append bounded cross-layer synonym bridge edges to active_edges.
-
-        For each active KG node vector, query each base ANN — if cosine sim >=
-        threshold and the base node id differs from the active node id (no
-        duplicate of the exact-id unification splice_active already does), add
-        an undirected edge (active↔base, weight=cosine). The active node lands
-        in combined_ids via splice_active (new id); the base node is already in
-        combined_ids — so build_transition keeps both endpoints.
-
-        Complexity: |active_kg_nodes| × topk per base (small; no base matmul).
-        NOTE: this depends only on the active node embedding matrix and the base
-        ANN indexes — NOT on the query vector — so it can live inside the cached
-        combined-graph loader. Returns the (possibly extended) active_edges list.
-
-        active_node_ids: the ACTIVE DELTA node id set (from `_active_kg_delta`,
-        i.e. the same nodes being spliced onto the combined graph this call).
-        None = caller didn't have the delta id set → the pre-delta-scoping
-        full-table load is used for EVERY participant (safety fallback).
-
-        Iteration-domain dispatch is PER PARTICIPANT (semantic fix — the
-        original delta-only scoping dropped edges in Case B below):
-
-        - participant == self (the active notebook's own scale index,
-          P0-00): domain = the DELTA node set. Core (pre-watermark) nodes'
-          synonym edges were already baked into self's CSR by
-          build_scale_index — re-bridging them into their own index would
-          be redundant; only the not-yet-indexed delta nodes need query-time
-          bridges into the self core.
-        - participant != self (an EXTERNAL base notebook): domain = ALL
-          active nodes (full `_vector_matrix` load — the query-path,
-          version-cached loader; consistent with the pre-delta-scoping
-          behavior for this participant class). Case B: when self is
-          indexed AND an external base exists, self's core nodes are NOT in
-          the delta, but their cross-layer bridges to the external base can
-          ONLY be computed at query time — build_scale_index builds each
-          library in isolation and never bakes cross-library bridges, and
-          exact-id unification can't help (the two libraries mint different
-          object ids for the same concept). Restricting the external-base
-          domain to the delta silently severed every core-concept↔external-
-          base synonym path in scale_ppr.
-
-        Net effect: the current production shape (one big self-indexed
-        library, NO external base participants) keeps the full C1 saving —
-        no full-matrix load at all; layered-federation deployments get
-        their cross-layer connectivity back. Both loads happen inside the
-        version-cached combined-graph loader (once per version, not per
-        query)."""
-        import numpy as np
-        if not self.settings.ppr_emb_synonym_enabled:
-            return active_edges
-        _syn_k = self.settings.ppr_emb_synonym_topk
-        _syn_thr = self.settings.ppr_emb_synonym_threshold
-
-        _participants = [(bid, bidx) for bid, bidx in base_indexes
-                         if bidx.ann_labels]
-        if not _participants:
-            return active_edges
-        # Which vector domains do we actually need this call?
-        _need_full = (active_node_ids is None) or any(
-            bid != notebook_id for bid, _ in _participants)
-        _need_delta = (active_node_ids is not None and len(active_node_ids) > 0
-                       and any(bid == notebook_id for bid, _ in _participants))
-
-        _full_ids = _full_mat = None
-        _delta_ids = _delta_mat = None
-        with self._connect() as _db:
-            if _need_full:
-                _full_ids, _full_mat = self._vector_matrix(
-                    _db, notebook_id, "knowledge_embeddings", "object_id")
-            if _need_delta:
-                _delta_ids, _delta_mat = self._delta_vector_matrix(
-                    _db, notebook_id, "knowledge_embeddings", "object_id",
-                    list(active_node_ids))
-
-        _bridge_edges: List[Tuple[str, str, float]] = []
-        for _bid, _bidx in _participants:
-            if _bid == notebook_id and active_node_ids is not None:
-                _a_ids, _a_mat = _delta_ids, _delta_mat   # self → delta domain
-            else:
-                _a_ids, _a_mat = _full_ids, _full_mat     # external base → full domain
-            if _a_ids is None or _a_mat is None or len(_a_mat) == 0:
-                continue
-            _a_mat_arr = np.asarray(_a_mat, dtype=np.float32)
-            _dim = int(_bidx.manifest.get("dim", _a_mat_arr.shape[1]))
-            if _dim != _a_mat_arr.shape[1]:
-                continue
-            _ann = self._open_scale_ann(_bidx, "kg")
-            if _ann is None:
-                continue
-            _ann.set_ef(max(_syn_k + 1, 50))
-            for _ai, _a_id in enumerate(_a_ids):
-                _avec = _a_mat_arr[_ai]
-                try:
-                    _k = min(_syn_k, len(_bidx.ann_labels))
-                    _labs, _dists = _ann.knn_query(_avec, k=_k)
-                except Exception as _exc:  # noqa: BLE001 — fail-open
-                    self._note_model_error(
-                        "scale_ppr_xbridge_query",
-                        self.settings.embed_model, _exc)
-                    continue
-                for _lab, _dist in zip(_labs[0], _dists[0]):
-                    _base_nid = _bidx.ann_labels[int(_lab)]
-                    if _base_nid == _a_id:
-                        continue  # exact-id: already unified by splice_active
-                    _sim = max(0.0, 1.0 - float(_dist))
-                    if _sim >= _syn_thr:
-                        _bridge_edges.append((_a_id, _base_nid, _sim))
-                        _bridge_edges.append((_base_nid, _a_id, _sim))
-        if _bridge_edges:
-            active_edges = list(active_edges) + _bridge_edges
-        return active_edges
+        return self.retrieval.graph._scale_xlayer_bridge_edges(notebook_id, base_indexes, active_edges, active_node_ids)
 
     def _scale_combined_graph(self, notebook_id: str, base_indexes):
-        """Build (and version-cache) the query-INDEPENDENT combined base⊕active
-        CSR graph used by scale_ppr. Version key = each base's manifest version +
-        (conditionally) the active notebook's _scale_index_version — see the
-        active_ver comment below for exactly when it is included — so the cache
-        invalidates whenever a participant's KG/embeddings/settings change in a
-        way that can affect the combined graph. Same _vector_cache /
-        version-loader pattern as _ppr_graph.
-
-        Returns dict: combined_ids, combined_A, combined_index,
-        combined_chunk_ids, combined_idf.
-        """
-        import numpy as np
-        from app.services.kg import scale_index as si
-
-        base_ver = tuple(
-            (bid, tuple(idx.manifest.get("version", [])))
-            for bid, idx in base_indexes)
-        active_indexed = (self._runtime.scale_artifact_store.scale_dir(notebook_id)
-                          / "manifest.json").exists()
-        # Drop the churning active_ver from the key ONLY when the active notebook is
-        # ITSELF indexed and delta is gated off: then _active_kg_delta early-returns
-        # empty (its gate = active manifest exists), so the combined graph is fully
-        # determined by participants' on-disk manifest versions (in base_ver), and the
-        # ingestion churn (kg_mutation_seq) is irrelevant. If the active notebook is
-        # UN-indexed (two-tier federation: un-indexed active over a base index),
-        # _active_kg_delta gathers the whole active KG into the graph, so its mutations
-        # MUST stay in the key — keep active_ver.
-        active_ver = (None
-                      if (active_indexed and not self.settings.scale_search_include_delta)
-                      else tuple(self._scale_index_version(notebook_id)))
-        version = ("scale_combined", base_ver, active_ver,
-                   bool(self.settings.scale_search_include_delta),
-                   "f32" if self.settings.ppr_float32 else "f64")
-
-        def _load():
-            # 2. Combined graph: start from the first base index, splice remaining
-            #    base indexes' nodes/edges, then splice the active delta.
-            first_id, first = base_indexes[0]
-            combined_ids = list(first.node_ids)
-            combined_A = first.transition
-            # combined_idf aligned to combined node order: base.idf for base nodes,
-            # 1.0 for any node introduced later (extra base nodes / active / hubs).
-            combined_idf_map: Dict[str, float] = {
-                nid: float(first.idf[i]) for i, nid in enumerate(first.node_ids)
-            }
-            # base chunk node ids of the FIRST base (raw chunk_id convention).
-            combined_chunk_ids: set = {
-                first.node_ids[i] for i in first.chunk_index
-                if 0 <= int(i) < len(first.node_ids)
-            }
-            for bid, idx in base_indexes[1:]:
-                # reconstruct this base's edges from its CSR and splice as "active"-style
-                extra_ids, extra_A = si.splice_active(
-                    combined_ids, combined_A, list(idx.node_ids),
-                    si.csr_to_edges(idx.node_ids, idx.transition))
-                combined_ids, combined_A = extra_ids, extra_A
-                for i, nid in enumerate(idx.node_ids):
-                    combined_idf_map.setdefault(nid, float(idx.idf[i]))
-                for i in idx.chunk_index:
-                    if 0 <= int(i) < len(idx.node_ids):
-                        combined_chunk_ids.add(idx.node_ids[int(i)])
-
-            active_node_ids, active_edges, active_chunk_ids = \
-                self._active_kg_delta(notebook_id)
-
-            # 2b. Cross-layer synonym bridge (query-independent; see helper).
-            # Delta-scoped: only active_node_ids' vectors are needed (they are
-            # exactly the nodes being spliced this call) — never the full
-            # notebook embedding table (see _scale_xlayer_bridge_edges docstring).
-            active_edges = self._scale_xlayer_bridge_edges(
-                notebook_id, base_indexes, active_edges,
-                active_node_ids=active_node_ids)
-
-            if active_node_ids or active_edges:
-                combined_ids, combined_A = si.splice_active(
-                    combined_ids, combined_A, active_node_ids, active_edges)
-            combined_index = {nid: i for i, nid in enumerate(combined_ids)}
-            combined_chunk_ids.update(active_chunk_ids)
-
-            # combined_idf array aligned to combined_ids (1.0 for unknown nodes).
-            combined_idf = np.array(
-                [combined_idf_map.get(nid, 1.0) for nid in combined_ids],
-                dtype=np.float64)
-
-            # P0-B: PPR 迭代全程 float32(SpMV 带宽减半≈2x;top-k 稳定,长尾分数
-            # 波动已获用户接受)。flag 已掺进上面的 version key,翻转即失效缓存。
-            if self.settings.ppr_float32:
-                combined_A = combined_A.astype(np.float32)
-
-            return {
-                "combined_ids": combined_ids,
-                "combined_A": combined_A,
-                "combined_index": combined_index,
-                "combined_chunk_ids": combined_chunk_ids,
-                "combined_idf": combined_idf,
-            }
-
-        return self._vector_cache.get(
-            f"{notebook_id}:scale_combined", version, _load)
+        return self.retrieval.graph._scale_combined_graph(notebook_id, base_indexes)
 
     def scale_ppr(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
-        """规模化 PPR:base 有持久化 scale 索引时,用 ANN 取 base KG 种子(避免
-        4GB 暴力 matmul)+ 把 active 增量 splice 进 base CSR 图 → personalized_ppr
-        → chunk 排名。返回 [(chunk_id, 归一分 0..1), ...] 降序,与 run_ppr 同形。
-        无可用 base 索引 / reset 全零 / 无 chunk 节点 → [](调用方回退 rustworkx 路径)。
-
-        节点 id 约定与 build_scale_index 完全一致:KG 节点 key=object_id,
-        chunk 节点 key=原始 chunk_id(非 "chunk:" 前缀),cluster hub key=
-        "cluster:{canonical_id}"。
-        """
-        import numpy as np
-        from app.services.kg import scale_index as si
-        from app.services.vector_index import query_sims
-
-        # 1. Base set: tier='base' notebooks (excluding active) with a valid index.
-        #    v1: support the common SINGLE base case; if >1 base index exists,
-        #    splice them sequentially onto the combined graph.
-        with self._connect() as db:
-            base_ids = [r["id"] for r in db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                (notebook_id,)).fetchall()]
-        base_indexes = [(bid, self._scale_index(bid, allow_stale=True)) for bid in base_ids]
-        base_indexes = [(bid, idx) for bid, idx in base_indexes if idx is not None]
-        # P0-00: 自身若有(含 stale)索引,把 self 也当作 participant(self CSR=substrate,
-        # self ANN=种子源)。active splice 由 _active_kg_delta 自动收窄为 self-delta。
-        self_idx = self._scale_index(notebook_id, allow_stale=True)
-        if self_idx is not None:
-            base_indexes = base_indexes + [(notebook_id, self_idx)]
-        if not base_indexes:
-            self.event_log.emit({
-                "kind": "scale_ppr_bailout",
-                "notebook_id": notebook_id,
-                "reason": "no_participants",
-            })
-            return []
-
-        # 2. Combined graph: base⊕active spliced CSR.  This graph is INDEPENDENT
-        #    of the query (the cross-layer synonym bridge uses active node vectors,
-        #    not the query vector), so it is version-cached and reused across
-        #    consecutive queries against the same active notebook — the splice cost
-        #    is paid once per (base versions × active version) instead of per query.
-        graph = self._scale_combined_graph(notebook_id, base_indexes)
-        combined_ids = graph["combined_ids"]
-        combined_A = graph["combined_A"]
-        combined_index = graph["combined_index"]
-        combined_chunk_ids = graph["combined_chunk_ids"]
-        combined_idf = graph["combined_idf"]
-
-        # 3. Reset vector. dtype 以 combined_A 为准(而非 settings.ppr_float32 本身)——
-        #    缓存里的图可能是翻转前构建的旧 dtype,对齐它才不会在 dot() 里被隐式提升。
-        reset = np.zeros(len(combined_ids), dtype=combined_A.dtype)
-        qvec = self._embed_query(question)
-
-        # Bailout observability (Fix 2): 逐种子源计数,仅在 reset 全零(zero_reset)
-        # bail 时才附带到诊断事件,成功路径零额外开销(计数本身是几个 int 加法,可忽略)。
-        ann_seeds = 0
-        ann_sources_skipped = 0
-
-        # 3a. Base KG seeds via ANN (no 4GB matmul): query each base hnswlib index.
-        if qvec is not None:
-            qarr = np.asarray(qvec, dtype=np.float32)
-            top_n = self.settings.ppr_kg_seed_top_n
-            for bid, idx in base_indexes:
-                if not idx.ann_labels:
-                    continue
-                dim = int(idx.manifest.get("dim", qarr.shape[0]))
-                if dim != qarr.shape[0]:
-                    ann_sources_skipped += 1
-                    continue
-                ann = self._open_scale_ann(idx, "kg")
-                if ann is None:
-                    ann_sources_skipped += 1
-                    continue
-                try:
-                    ann.set_ef(max(top_n + 1, 50))
-                    k = min(top_n, len(idx.ann_labels))
-                    labels, distances = ann.knn_query(qarr, k=k)
-                except Exception as exc:  # noqa: BLE001 — fail-open per seed source
-                    self._note_model_error("scale_ppr_ann", self.settings.embed_model, exc)
-                    continue
-                for lab, dist in zip(labels[0], distances[0]):
-                    node_id = idx.ann_labels[int(lab)]
-                    ci = combined_index.get(node_id)
-                    if ci is None:
-                        continue
-                    sim = max(0.0, 1.0 - float(dist))  # cosine distance → similarity
-                    if sim > 0:
-                        reset[ci] += sim * combined_idf[ci]
-                        ann_seeds += 1
-
-        # 3b. Active KG seeds — 仅当 self 没有 scale 索引(self_idx is None,即
-        #     active 是真正的小 delta 库)时才做有界暴力余弦。self 已建索引的
-        #     P0-00 self-participant 情形(用户直接查询已索引的大库本身),self
-        #     的种子已在 3a 经它自己的 hnsw ANN 产出;这里再 _vector_matrix 全量
-        #     加载同一库的 knowledge_embeddings(生产 49万×1024:未 BLOB 化 =
-        #     ~36 分钟 JSON 解析 + 数 GB;BLOB 化也要 ~2GB 常驻)是纯重复,且违反
-        #     成本分离不变量(base/已索引库离线 ANN,暴力只留给小 active)→ 跳过。
-        active_seeds = 0
-        if qvec is not None and self_idx is None:
-            with self._connect() as db:
-                a_ids, a_mat = self._vector_matrix(
-                    db, notebook_id, "knowledge_embeddings", "object_id")
-            sims = query_sims(qvec, list(a_ids) if a_ids else [], a_mat) \
-                if a_ids is not None else {}
-            if sims:
-                top = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)[
-                    : self.settings.ppr_kg_seed_top_n]
-                for oid, sim in top:
-                    ci = combined_index.get(oid)
-                    if ci is not None and sim > 0:
-                        reset[ci] += float(sim) * combined_idf[ci]
-                        active_seeds += 1
-
-        # 3c. Chunk seeds: ACTIVE notebook dense chunk seeds (raw chunk_id key —
-        #     matches build's chunk node convention). NOTE (v1 follow-up): base
-        #     notebook chunk dense seeds via a chunk-vector ANN are deliberately
-        #     out of SP2 scope; base CHUNKS still receive PPR mass via graph
-        #     propagation from base KG ANN seeds, so they remain rankable.
-        scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
-        pw = self.settings.ppr_passage_node_weight
-        chunk_seeds = 0
-        for c in scored[: self.settings.ppr_chunk_seed_top_n]:
-            ci = combined_index.get(c.chunk_id)  # raw chunk_id, no "chunk:" prefix
-            if ci is not None and c.relevance > 0:
-                reset[ci] += float(c.relevance) * pw
-                chunk_seeds += 1
-
-        # 4. PPR.
-        if reset.sum() <= 0:
-            self.event_log.emit({
-                "kind": "scale_ppr_bailout",
-                "notebook_id": notebook_id,
-                "reason": "zero_reset",
-                "ann_seeds": ann_seeds,
-                "active_seeds": active_seeds,
-                "chunk_seeds": chunk_seeds,
-                "embed_ok": bool(qvec),
-                "ann_sources_skipped": ann_sources_skipped,
-            })
-            return []
-        t_ppr0 = time.perf_counter()
-        _ppr_stats: dict = {}
-        x = si.personalized_ppr(combined_A, reset, damping=self.settings.ppr_damping,
-                                tol=self.settings.ppr_tol, stats=_ppr_stats)
-        if x.sum() <= 0:
-            self.event_log.emit({
-                "kind": "scale_ppr_bailout",
-                "notebook_id": notebook_id,
-                "reason": "zero_ppr_mass",
-            })
-            return []
-
-        # 5. Chunk rankings: collect chunk node scores, min-max normalize into
-        #    [0,1] (mirror run_ppr exactly), sort desc. chunk node key is the raw
-        #    chunk_id, so it IS the downstream chunk-fetch id (no prefix to strip).
-        raw = []
-        for cid in combined_chunk_ids:
-            ci = combined_index.get(cid)
-            if ci is not None:
-                raw.append((cid, float(x[ci])))
-        if not raw:
-            self.event_log.emit({
-                "kind": "scale_ppr_bailout",
-                "notebook_id": notebook_id,
-                "reason": "no_chunk_nodes",
-            })
-            return []
-        vals = [s for _, s in raw]
-        lo, hi = min(vals), max(vals)
-        span = hi - lo
-        norm = [(cid, (s - lo) / span if span > 0 else 0.0) for cid, s in raw]
-        norm.sort(key=lambda kv: kv[1], reverse=True)
-        self.event_log.emit({
-            "kind": "scale_ppr_done", "notebook_id": notebook_id,
-            "iters": _ppr_stats.get("iters", -1),
-            "ppr_ms": round((time.perf_counter() - t_ppr0) * 1000),
-            "nodes": len(combined_ids), "seeds": ann_seeds + active_seeds + chunk_seeds,
-            "chunks_ranked": len(norm),
-        })
-        return norm
+        return self.retrieval.graph.scale_ppr(notebook_id, question)
 
     def _ppr_retrieve(self, notebook_id: str, question: str) -> List["RetrievedChunk"]:
-        """HippoRAG 式 PPR 检索:KG 种子 + chunk 种子 → reset 向量 → PPR →
-        取 chunk 节点分数。返回前 ppr_top_chunks 的 RetrievedChunk(relevance=
-        归一 PPR 分,守 [0,1])。无 KG/无 chunk 时返回 []。
-
-        分发:若存在有效 base scale 索引,走规模化 ANN-种子 + CSR PPR 路径
-        (scale_ppr);否则字节不变地回退到原 rustworkx 路径。
-
-        大库守卫:scale_ppr 返回 [] 时,原本无条件回退 self._ppr_graph(notebook_id)
-        = 全量 rustworkx 图构建(百万级节点/边,Python 边循环 → 数十分钟 + 数 GB 内存,
-        曾在 1.13M 节点库上导致 reasoning 模式冻结)。大库(与分享/拷贝阈值同一「大」
-        定义,not notebook_copy_stats()["copyable"])下拒绝构建该图,发
-        ppr_fallback_refused 事件后返回 []——调用方(reasoning 种子/agent 动作、
-        chunk 模式三路 mix、ask_graph PPR 分支)均已对 [] 容错降级。小库保留旧
-        回退路径,字节不变。"""
-        from app.services.kg.ppr import run_ppr
-        ranked = self.scale_ppr(notebook_id, question)
-        if not ranked:
-            if self._federated_graph_is_large(notebook_id):
-                self.event_log.emit({
-                    "kind": "ppr_fallback_refused",
-                    "notebook_id": notebook_id,
-                    "reason": "large_notebook",
-                })
-                return []
-            G, key_to_idx, chunk_idx_to_id = self._ppr_graph(notebook_id)
-            if G.num_nodes() == 0 or not chunk_idx_to_id:
-                return []
-            reset = self._ppr_reset_vector(notebook_id, question, key_to_idx)
-            if not reset:
-                return []
-            ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
-        ranked = ranked[: self.settings.ppr_top_chunks]
-        if not ranked:
-            return []
-
-        score_map = dict(ranked)
-        with self._connect() as db:
-            ph = ",".join("?" for _ in score_map)
-            rows = db.execute(
-                f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-                f"c.notebook_id AS chunk_notebook_id, s.title AS source_title "
-                f"FROM chunks c JOIN sources s ON s.id=c.source_id "
-                f"WHERE c.id IN ({ph})", list(score_map)).fetchall()
-        from app.services.retrieval import RetrievedChunk
-        # combined_chunk_ids (scale_ppr) spans base ⊕ active — a chunk here can
-        # belong to a base notebook even though this call is scoped to
-        # `notebook_id`. Tag each with its real origin so citation-building can
-        # resolve tier correctly (see Citation.tier).
-        out = [RetrievedChunk(
-            chunk_id=r["id"], source_id=r["source_id"], source_title=r["source_title"],
-            section_path=r["section_path"], text=r["text"],
-            element_ids=json.loads(r["element_ids"] or "[]"),
-            relevance=score_map[r["id"]],
-            notebook_id=r["chunk_notebook_id"]) for r in rows]
-        out.sort(key=lambda c: c.relevance, reverse=True)
-        return out
+        return self.retrieval.graph.ppr_retrieve(notebook_id, question)
 
     def _ppr_reset_vector(self, notebook_id: str, question: str,
                           key_to_idx: Dict[str, int]) -> Dict[int, float]:
-        """构造 PPR 的 reset/personalization 向量:KG 实体种子(federated_retrieve)
-        + chunk 种子(dense)。返回 {vertex_idx: weight}。仅 graph 模式 PPR 路径调用。"""
-        reset: Dict[int, float] = {}
-        ent_chunk_map = self._ent_chunk_map(notebook_id)
-        kg_hits = self.federated_retrieve(notebook_id, question)[: self.settings.ppr_kg_seed_top_n]
-        if self.settings.ppr_fact_rerank_enabled:
-            kg_hits = self._ppr_fact_rerank(question, kg_hits)
-        for h in kg_hits:
-            idx = key_to_idx.get(h.object_id)
-            if idx is not None and h.relevance > 0:
-                # 大众概念(出现在很多 chunk)降权,避免 Transformer/KV cache 灌满 PPR。
-                w = float(h.relevance) / max(1, len(ent_chunk_map.get(h.object_id) or ()))
-                reset[idx] = reset.get(idx, 0.0) + w
-        scored, _ids, _mat = self._retrieve_chunks(notebook_id, question)
-        pw = self.settings.ppr_passage_node_weight
-        for c in scored[: self.settings.ppr_chunk_seed_top_n]:
-            idx = key_to_idx.get(f"chunk:{c.chunk_id}")
-            if idx is not None and c.relevance > 0:
-                reset[idx] = reset.get(idx, 0.0) + float(c.relevance) * pw
-        return reset
+        return self.retrieval.graph._ppr_reset_vector(notebook_id, question, key_to_idx)
 
     _PPR_RERANK_SCHEMA = '{"relevant_ids": ["..."]}'
 
     def _ppr_fact_rerank(self, question: str, kg_hits: list) -> list:
-        """Recognition memory:LLM 过滤候选 KG 种子,只留与 question 相关的。
-        fail-open:LLM 未配/报错/非法返回/过滤后为空 → 原样返回 kg_hits(绝不因
-        rerank 失败而清空种子)。复用 reasoning_llm_client。"""
-        client = self.reasoning_llm_client
-        if not kg_hits or not getattr(client, "configured", False):
-            return kg_hits
-        lines = []
-        for h in kg_hits:
-            name = str(h.payload.get("name", "")).strip()
-            snippet = h.evidence[0].quoted_span[:80] if h.evidence else ""
-            lines.append(f"{h.object_id} - {name} - {snippet}")
-        prompt = (
-            "You are filtering knowledge-graph entries for relevance to a user question "
-            "(recognition memory). Keep an entry only if it could help answer the question; "
-            "when unsure, KEEP it.\n\n"
-            f"Question: {question}\n\nCandidates (id - name - snippet):\n"
-            + "\n".join(lines)
-            + '\n\nReturn JSON only: {"relevant_ids": [ids to keep]}.'
-        )
-        try:
-            raw = client.chat_json(
-                [{"role": "user", "content": prompt}], self._PPR_RERANK_SCHEMA,
-                timeout=self.settings.reasoning_timeout_seconds, max_retries=1)
-            data = json.loads(raw)
-            ids = data.get("relevant_ids") if isinstance(data, dict) else None
-            if not isinstance(ids, list):
-                return kg_hits
-            keep = {str(i) for i in ids}
-            kept = [h for h in kg_hits if h.object_id in keep]
-            return kept or kg_hits   # 过滤后为空 → fail-open(LLM 过度过滤)
-        except Exception as exc:
-            self._note_model_error(
-                "ppr_fact_rerank",
-                self.settings.reasoning_llm_model or self.settings.openai_compat_model, exc)
-            return kg_hits
+        return self.retrieval.graph._ppr_fact_rerank(question, kg_hits)
 
     def _rule_card(self, item: RetrievedKnowledge) -> RuleCard:
         payload = item.payload
@@ -4237,17 +3131,7 @@ class SQLiteRepository:
         base ⊕ active) so tier lookup is O(distinct notebooks), not O(citations).
         Missing/unknown ids default to "personal" (safe: matches Citation.tier's
         own default, never silently mislabels a source as authoritative base)."""
-        ids = {nid for nid in notebook_ids if nid}
-        if not ids:
-            return {}
-        tier_map: Dict[str, str] = {}
-        with self._connect() as db:
-            for batch in self._in_batches(ids):
-                ph = ",".join("?" for _ in batch)
-                for row in db.execute(
-                        f"SELECT id, tier FROM notebooks WHERE id IN ({ph})", batch):
-                    tier_map[row["id"]] = row["tier"] or "personal"
-        return tier_map
+        return self._runtime.evidence_context.tier_map(list(notebook_ids))
 
     def _citations_from(
         self,
@@ -4255,14 +3139,9 @@ class SQLiteRepository:
         valid_element_ids: set,
         label: str,
     ) -> List[Citation]:
-        citations: List[Citation] = []
-        for item in items:
-            tier = getattr(item, "tier", "personal") or "personal"
-            for evidence in item.evidence:
-                if evidence.element_id and evidence.element_id not in valid_element_ids:
-                    continue
-                citations.append(_citation(label, evidence, tier))
-        return citations
+        return self._runtime.evidence_context.citations_from(
+            items, valid_element_ids, label
+        )
 
     # SQLite default SQLITE_MAX_VARIABLE_NUMBER-safe chunk size for `IN (...)`
     # placeholder lists (mirrors the ~900 convention used elsewhere in this file).
@@ -4278,418 +3157,29 @@ class SQLiteRepository:
 
     def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str,
                               relation_ids: Optional[List[str]] = None) -> List[dict]:
-        """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
-        (端点不在 knowledge_objects),与图节点过滤一致。
-
-        relation_ids=None(默认): 全量(现状,仍是 _backfill_relation_embeddings 等
-        维护路径的正确语义 — 全库补全向量必须看到每一条关系)。
-        relation_ids=[...]: 只 JOIN 这些 id(P0-1/2 候选界定 — 热路径调用方先按
-        向量 sim 定好候选集,这里只 hydrate 需要打分的那几行文本),chunk 在
-        `_IN_CHUNK` 防止超 SQLite 变量数上限;空列表直接返回 []。"""
-        from app.services.retrieval import relation_embed_text, _payload_text
-        base_sql = (
-            "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
-            "r.edge_type AS et, r.evidence AS ev, so.payload AS sp, tp.payload AS tpl "
-            "FROM knowledge_relations r "
-            "JOIN knowledge_objects so ON so.id = r.source_object_id "
-            "JOIN knowledge_objects tp ON tp.id = r.target_object_id "
-            "WHERE r.notebook_id = ?"
-        )
-        if relation_ids is not None:
-            if not relation_ids:
-                return []
-            rows = []
-            ids = list(relation_ids)
-            for i in range(0, len(ids), self._IN_CHUNK):
-                batch = ids[i:i + self._IN_CHUNK]
-                ph = ",".join("?" for _ in batch)
-                rows.extend(db.execute(
-                    base_sql + f" AND r.id IN ({ph})",
-                    (notebook_id, *batch)).fetchall())
-        else:
-            rows = db.execute(base_sql, (notebook_id,)).fetchall()
-        out = []
-        for r in rows:
-            spans = [e.get("quoted_span", "") for e in json.loads(r["ev"] or "[]")
-                     if isinstance(e, dict)]
-            src_name = _payload_text(json.loads(r["sp"] or "{}"))[:80]
-            tgt_name = _payload_text(json.loads(r["tpl"] or "{}"))[:80]
-            out.append({
-                "id": r["id"], "source_object_id": r["s"], "target_object_id": r["t"],
-                "edge_type": r["et"],
-                "text": relation_embed_text(src_name, r["et"], tgt_name, spans),
-            })
-        return out
+        return self.retrieval.candidates._relations_with_names(db, notebook_id, relation_ids)
 
     def _relation_ann_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
-        """ANN 核候选(idx.relation_ann_path=relation_embeddings)⊕ delta 关系暴力。
-        镜像 _kg_object_candidates,relation 版。返回 {relation_id: sim∈[0,1]}。
-        fail-open 返回 {} 让上层退回全量矩阵/guard 路径。"""
-        import numpy as np
-        from app.services.vector_index import build_matrix, query_sims
-        sims: dict = {}
-        labels = getattr(idx, "relation_ann_labels", None)
-        if labels and query_vector is not None:
-            qarr = np.asarray(query_vector, dtype=np.float32)
-            dim = int(idx.manifest.get("dim", qarr.shape[0]))
-            if dim == qarr.shape[0]:
-                ann = self._open_scale_ann(idx, "relation")
-                if ann is None:
-                    return {}
-                try:
-                    ann.set_ef(max(recall + 1, 64))
-                    k = min(recall, len(labels))
-                    labs, dists = ann.knn_query(qarr, k=k)
-                    for l, d in zip(labs[0], dists[0]):
-                        sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
-                except Exception as exc:  # noqa: BLE001 — fail-open
-                    self._note_model_error("relation_ann_query", self.settings.embed_model, exc)
-                    return {}
-        # ⊕ delta 关系(水位后 source)暴力 —— opt-in(scale_search_include_delta,
-        # 默认关):与 chunk/KG对象侧同一原则「已索引的库只检索已索引部分」,delta
-        # 由 scale_auto_fold_on_add 的增量 fold 收进索引(最终一致)。True 时保持
-        # 强一致暴力(small id-scoped 向量加载,IN-chunked 由 build_matrix 自然
-        # 承载,这里量级由 delta 决定,通常远小于全库,但仍随 delta 无界增长)。
-        if self.settings.scale_search_include_delta:
-            try:
-                delta = self._index_delta(notebook_id)
-                if delta["delta_sources"] and query_vector is not None:
-                    drows = []
-                    with self._connect() as db:
-                        for batch in self._in_batches(delta["delta_sources"]):
-                            ph_s = ",".join("?" for _ in batch)
-                            drows.extend(db.execute(
-                                f"SELECT relation_id AS vid, vector FROM relation_embeddings "
-                                f"WHERE notebook_id=? AND relation_id IN "
-                                f"(SELECT id FROM knowledge_relations WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                                (notebook_id, notebook_id, *batch)).fetchall())
-                    d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
-                    for rid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
-                        sims[rid] = s
-            except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
-                self._note_model_error("relation_ann_delta", self.settings.embed_model, exc)
-        return sims
+        return self.retrieval.candidates._relation_ann_candidates(notebook_id, query_vector, idx, recall)
 
     def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
-        """对 notebook 关系按 query 打分(关键词 + 关系索引语义)。镜像 _retrieve_scored;
-        关系矩阵是独立索引(dual-index 分离)。
-
-        relation-ann task:候选界定优先级从高到低——
-          ① relations 表空 → 早退 [](原有语义不变)。
-          ② 持久化 relation ANN(self scale index allow_stale=True 且
-             has_relation_ann)存在 → ANN 核 ⊕ delta 暴力
-             (_relation_ann_candidates,镜像 _kg_object_candidates),只
-             hydrate top-K 候选文本做关键词+语义融合打分。knn_query 的 k 语义
-             与既有 relation_recall 一致(见下)。这是大库常态路径——ANN 侧路
-             让下面的冷矩阵守卫从常态退位为「无 ANN 大库」的最后兜底。
-          ③ 无 ANN(或 ANN fail-open)→ 大库冷矩阵守卫(见下方「生产事故修复」
-             段,语义原样保留:not copyable + _vector_matrix_warm peek 判冷 →
-             skip + relation_scoring_skipped 事件 + 返回 []);小库/已热 →
-             现状全量矩阵 top_k_sims 路径,字节不变。
-          ④ 无向量覆盖 → 关键词全量 JOIN 分支不动。
-
-        P0-1/2 候选界定(③ 的原注释):score_relations 混合关键词(需要 hydrate 的
-        关系文本)+ 语义(向量矩阵),所以不能像 _kg_object_candidates 那样单纯按
-        向量 top-K 过滤后完全跳过关键词——否则纯关键词命中(无向量覆盖/embedder
-        未配置)会被静默丢弃。折中(镜像 _kg_object_candidates 的 fail-open 哲学):
-          - notebook 该库 relations 表本身为空 → 早退 [](零 JOIN,COUNT(*) 探针
-            比全量 JOIN 便宜几个数量级,这是空库/关系检索关闭部署的主收益)。
-          - relations 非空但 relation_embeddings 整体为空(无 embedder 或未
-            回填)→ 向量矩阵提供不了候选界定信号,回退全量 JOIN(现状行为,
-            保关键词等价 —— 例如 test_mix_overlay.py 的 fixture 场景)。
-          - relation_embeddings 非空 → 向量覆盖是真实的候选信号:走
-            `top_k_sims`(matrix @ q 后 np.argpartition 直接取 top-K 索引,
-            不 materialize 全量 {id: float} dict —— 生产部署关系可达百万级,
-            query_sims 的全量 dict 本身就是 GB 级分配,argpartition 是 O(N)
-            但只产出 K 个 (id, sim) 元组)→ 只 hydrate 这 K 个 id 的文本做
-            关键词+语义融合打分。
-
-        注:与 _kg_object_candidates 的界定条件不对称,是有意的——这里"关系表非空
-        但向量表空"仍回退全量 JOIN(上面第二条),而 _kg_object_candidates 是"存在
-        持久化 scale ANN 索引"才收窄,否则 fail-open 返回 {} 让上层退回全量。两者
-        触发候选界定的前提不同(有向量 vs 有持久 ANN),但都遵循同一 fail-open
-        哲学:信号不足时宁可付全量代价也不静默丢候选。
-
-        生产事故修复(2026-07)——大库冷矩阵守卫:branch-3(本方法向量覆盖非空
-        场景)在 top_k_sims 之前要 _vector_matrix(nb, "relation_embeddings"),
-        这本身是 O(N_relations × dim) 内存(生产环境百万级关系 × 1024 维即数
-        GB,矩阵未 BLOB 化时还要逐行 json.loads,是灾难级耗时)。这条加载绝不能
-        在 ask 路径上对大库懒触发——保护全部调用方(reasoning
-        _graph_seed_fusion、chunk overlay、graph)。守卫:大库
-        (not notebook_copy_stats(nb)["copyable"]) 且矩阵未暖在 _vector_cache
-        (_vector_matrix_warm 纯 peek,不触发 loader)→ 跳过语义打分,发
-        relation_scoring_skipped 事件,返回 []。
-
-        选择返回 [] 而非退化到 branch-2 的关键词专用路径:branch-2 的
-        _relations_with_names(relation_ids=None) 本身是对 knowledge_relations
-        的无界全量 JOIN——对大库同样是内存/耗时炸弹,只是换了张表,并不比冷
-        矩阵加载更便宜。既然两条路径在大库场景下都不「有界」,选择保持
-        fail-open 语义最简单、最安全的出口([] + 事件),与本方法既有的
-        「关系表为空→[]」早退、以及 federated_retrieve_relations 上层对空结果
-        的既有容错完全一致,不引入新的部分結果语义。真正的修复——给关系建 ANN
-        索引(镜像 chunk_ann,scale index 侧)让候选界定本身有界——已由上方
-        分支②(relation ANN ⊕ delta)落地:已建索引的大库常态走 ANN,不再
-        触达本守卫;守卫保留为「未建索引的大库」的最后兜底,把 ask 路径钳制
-        在 O(bounded)。已暖(_vector_cache 命中)或小库:字节不变,走原路径。"""
-        from app.services.retrieval import score_relations
-        from app.services.vector_index import top_k_sims
-        with self._connect() as db:
-            has_any = db.execute(
-                "SELECT 1 FROM knowledge_relations WHERE notebook_id = ? LIMIT 1",
-                (notebook_id,)).fetchone()
-            if has_any is None:
-                return []
-
-            # ── 分支②: 持久化 relation ANN ⊕ delta(大库常态路径)─────────
-            # 必须先于下面的冷矩阵守卫:ANN 候选界定本身 O(bounded)、不加载
-            # 全量矩阵,已建索引的大库不该被守卫拦下。embed 只在 ANN 真实
-            # 存在时才发生(守卫路径保持 master 原语义:守卫命中时零 embed)。
-            idx = self._scale_index(notebook_id, allow_stale=True)
-            if idx is not None and getattr(idx, "relation_ann_labels", None):
-                query_vector = self._embed_query(query)
-                if query_vector is not None:
-                    cand_sims = self._relation_ann_candidates(
-                        notebook_id, query_vector, idx, self.settings.relation_recall)
-                    if cand_sims:
-                        top_ids = list(cand_sims.keys())
-                        relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
-                        return score_relations(query, relations, query_vector=query_vector,
-                                               relation_sims=cand_sims,
-                                               downweight_edges=self.settings.kg_about_downweight_enabled)
-                # fail-open(embed 失败/空候选/ANN 打开失败)→ 继续走守卫/全量路径。
-
-            # ── 分支③: 大库冷矩阵守卫(#171 语义原样;无 ANN 时的最后兜底)──
-            if (not self.notebook_copy_stats(notebook_id)["copyable"]
-                    and not self._vector_matrix_warm(db, notebook_id, "relation_embeddings")):
-                self.event_log.emit({
-                    "kind": "relation_scoring_skipped",
-                    "notebook_id": notebook_id,
-                    "reason": "large_matrix_cold",
-                })
-                return []
-            query_vector = self._embed_query(query)
-            rel_ids, rel_mat = self._vector_matrix(
-                db, notebook_id, "relation_embeddings", "relation_id")
-            if not rel_ids:
-                # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
-                relations = self._relations_with_names(db, notebook_id)
-                relation_sims = None
-            else:
-                top_pairs = top_k_sims(query_vector, rel_ids, rel_mat,
-                                       self.settings.relation_recall) if query_vector else []
-                if top_pairs:
-                    top_ids = [rid for rid, _ in top_pairs]
-                    relation_sims = dict(top_pairs)   # only K entries, not N
-                else:
-                    # no query_vector (embed_query 失败/未配置) → sim 界定不了,
-                    # 但向量覆盖存在时仍以 relation_recall 为界(取矩阵前 N 个 id,
-                    # 保持"有界"而非退回全量;顺序对无 sim 场景无关紧要)。
-                    # 注:这是退化路径(model_error 兜底),不追求与"有 query_vector"
-                    # 分支等价——矩阵内前 N 个 id 是任意切片,不是相关性排序;只保证
-                    # 有界不炸内存,排序质量让位于可用性。
-                    top_ids = rel_ids[: self.settings.relation_recall]
-                    relation_sims = {}
-                relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
-        return score_relations(query, relations, query_vector=query_vector,
-                               relation_sims=relation_sims,
-                               downweight_edges=self.settings.kg_about_downweight_enabled)
+        return self.retrieval.candidates._retrieve_relations_scored(notebook_id, query)
 
     def _kg_object_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
-        """ANN 核候选(idx.ann_path=knowledge_embeddings)⊕ delta 对象暴力。
-        返回 {object_id: sim∈[0,1]}。fail-open 返回 {} 让上层退回全量。"""
-        import numpy as np
-        from app.services.vector_index import build_matrix, query_sims
-        sims: dict = {}
-        labels = getattr(idx, "ann_labels", None)
-        if labels and query_vector is not None:
-            qarr = np.asarray(query_vector, dtype=np.float32)
-            dim = int(idx.manifest.get("dim", qarr.shape[0]))
-            if dim == qarr.shape[0]:
-                ann = self._open_scale_ann(idx, "kg")
-                if ann is None:
-                    return {}
-                try:
-                    ann.set_ef(max(recall + 1, 64))
-                    k = min(recall, len(labels))
-                    labs, dists = ann.knn_query(qarr, k=k)
-                    for l, d in zip(labs[0], dists[0]):
-                        sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
-                except Exception as exc:  # noqa: BLE001 — fail-open
-                    self._note_model_error("kg_obj_ann", self.settings.embed_model, exc)
-                    return {}
-        # ⊕ delta 对象(水位后 source)暴力 —— opt-in(scale_search_include_delta,
-        # 默认关):与 chunk 侧同一原则「已索引的库只检索已索引部分」,delta 由
-        # scale_auto_fold_on_add 的增量 fold 收进索引(最终一致)。True 时保持
-        # 强一致暴力(慢,且量级随 delta 无界增长)。
-        if self.settings.scale_search_include_delta:
-            try:
-                delta = self._index_delta(notebook_id)
-                if delta["delta_sources"] and query_vector is not None:
-                    drows = []
-                    with self._connect() as db:
-                        for batch in self._in_batches(delta["delta_sources"]):
-                            ph_s = ",".join("?" for _ in batch)
-                            drows.extend(db.execute(
-                                f"SELECT object_id AS vid, vector FROM knowledge_embeddings "
-                                f"WHERE notebook_id=? AND object_id IN "
-                                f"(SELECT id FROM knowledge_objects WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                                (notebook_id, notebook_id, *batch)).fetchall())
-                    d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
-                    for oid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
-                        sims[oid] = s
-            except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
-                self._note_model_error("kg_obj_delta", self.settings.embed_model, exc)
-        return sims
+        return self.retrieval.candidates._kg_object_candidates(notebook_id, query_vector, idx, recall)
 
     @property
     def retrieval(self):
-        """检索原语的显式接口（W2.1）。消费者(reasoning/graph)应经此调用，
-        而非穿透本类的私有 `_retrieve_*` 方法。当前委托回本类现有实现。"""
-        rs = getattr(self, "_retrieval_service", None)
-        if rs is None:
-            from app.services.retrieval_service import RetrievalService
-            rs = self._retrieval_service = RetrievalService(self)
-        return rs
+        """Explicit candidate + graph retrieval port with no facade backreference."""
+        if self._runtime.retrieval is None:
+            self._runtime.wire_retrieval(embedder=self.embedder)
+        return self._runtime.retrieval
 
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,
                          w_semantic: float = W_SEMANTIC) -> List[RetrievedKnowledge]:
-        """Score KG objects of `types` (default all 4 _KG_TYPES) for `query`,
-        returning RetrievedKnowledge sorted by fused relevance desc. Shared by
-        the reasoning retriever's tools; `w_keyword`/`w_semantic` carry the
-        per-sub-query `prefer` bias."""
-        # ask_stage 埋点(纯观测):阶段墙钟拆解,生产诊断 20-30s 级检索用。
-        t0 = time.perf_counter()
-        type_list = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
-        query_vector = self._embed_query(query)
-        t_embed = time.perf_counter()
-        # indexed 时用 ANN 核 ⊕ delta 取有界候选;无索引→cand_sims=None→全量(现状)。
-        cand_sims = None
-        if query_vector is not None:
-            idx = self._scale_index(notebook_id, allow_stale=True)
-            if idx is None:
-                # 无 ANN 核 → 本次退回全量暴力(O(N))。O(1) once-set 兜底:大库应
-                # 自动建索引,避免长期停留在暴力回退稳态。fail-open,不影响本次检索。
-                try:
-                    self.maybe_auto_index(notebook_id)
-                except Exception:
-                    pass
-            elif getattr(idx, "ann_labels", None):
-                cand_sims = self._kg_object_candidates(
-                    notebook_id, query_vector, idx, self.settings.chunk_recall)
-                if not cand_sims:
-                    cand_sims = None   # fail-open → 全量
-        if cand_sims is None and not self.notebook_copy_stats(notebook_id)["copyable"]:
-            # 大库拿不到 ANN 候选(未建索引/ANN 打不开/维度失配/embed 失败)——
-            # 一个原则:绝不全量暴力(全表 json 解析 + 全量分词 + GB 级矩阵,
-            # 49 万对象生产实测数十分钟)。FTS 词法有界兜底:kg_objects_fts 覆盖
-            # 全部对象(含 delta),候选的语义分仍由下方按候选 evidence 元素向量
-            # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
-            with self._connect() as db:
-                lex = self._runtime.knowledge.fts_search(
-                    db, notebook_id, query, k=self.settings.chunk_recall)
-            self.event_log.emit({
-                "kind": "kg_bruteforce_refused", "notebook_id": notebook_id,
-                "site": "_retrieve_scored", "lexical_candidates": len(lex),
-            })
-            if not lex:
-                return []
-            cand_sims = {h["object_id"]: 0.0 for h in lex}
-        t_ann = time.perf_counter()
-        from app.services.vector_index import query_sims, build_matrix
-        with self._connect() as db:
-            id_filter = set(cand_sims.keys()) if cand_sims is not None else None
-            kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
-                       for t in type_list}
-            all_kg_objs = [o for objs in kg_objs.values() for o in objs]
-            # P0-A: cand_sims is not None ⟺ we're on the bounded ANN/FTS candidate
-            # path (≤chunk_recall objects) — skip the knowledge_objects COUNT probe
-            # and the process-wide cache (which the candidate-set-varies-per-query
-            # path never hit anyway) and build the token sets directly for this batch.
-            token_sets = self._keyword_token_sets(
-                db, notebook_id, all_kg_objs, bounded=cand_sims is not None)
-            # candidate object ids for this retrieval call
-            candidate_ids = {o["id"] for o in all_kg_objs}
-            # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
-            if cand_sims is not None:
-                # 有界:仅按候选对象查边(避免全表扫),element_sims 仅候选证据元素。
-                # candidate_ids 量随 delta 候选无界增长——按 _in_batches 分批,每批
-                # 两个 IN 位置都放该批(并集正确:一条边只要任一端点落在某批即被
-                # 捕获,批间可能重复捕获同一条边,但 rel_rows 只喂 connected_ids
-                # 集合,重复无害)。
-                rel_rows = []
-                for batch in self._in_batches(candidate_ids):
-                    phc = ",".join("?" for _ in batch)
-                    rel_rows.extend(db.execute(
-                        f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=? AND (source_object_id IN ({phc}) OR target_object_id IN ({phc}))",
-                        (notebook_id, *batch, *batch)).fetchall())
-                elem_id_set = {ev.element_id for o in all_kg_objs
-                               for ev in o.get("evidence", []) if getattr(ev, "element_id", None)}
-                # elem_id_set 同理分批;各批互不相交(_in_batches 去重保序切片),
-                # extend 不会产生跨批重复行。
-                erows = []
-                for batch in self._in_batches(elem_id_set):
-                    phe = ",".join("?" for _ in batch)
-                    erows.extend(db.execute(
-                        f"SELECT element_id AS vid, vector FROM element_embeddings "
-                        f"WHERE notebook_id=? AND element_id IN ({phe})",
-                        (notebook_id, *batch)).fetchall())
-            else:
-                rel_rows = db.execute(
-                    "SELECT source_object_id, target_object_id FROM knowledge_relations WHERE notebook_id = ?",
-                    (notebook_id,)).fetchall()
-            connected_ids: set = set()
-            for r in rel_rows:
-                connected_ids.add(r["source_object_id"])
-                connected_ids.add(r["target_object_id"])
-            isolated_ids: set = candidate_ids - connected_ids
-            if cand_sims is not None:
-                knowledge_sims = cand_sims
-                e_ids, e_mat = build_matrix((r["vid"], r["vector"]) for r in erows)
-                element_sims = query_sims(query_vector, e_ids, e_mat) if e_ids else {}
-            else:
-                elem_ids, elem_mat = self._vector_matrix(db, notebook_id, "element_embeddings", "element_id")
-                kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
-                element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
-                knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
-        t_hydrate = time.perf_counter()
-        penalty = self.settings.kg_isolated_rank_penalty
-        if self.settings.retrieval_rrf_enabled:
-            scored = self._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
-        else:
-            scored = []
-            for t in type_list:
-                objs = kg_objs.get(t) or []
-                if not objs:
-                    continue
-                scored.extend(score_knowledge(
-                    query, objs, t, query_vector, None, None,
-                    element_sims=element_sims, knowledge_sims=knowledge_sims,
-                    w_keyword=w_keyword, w_semantic=w_semantic,
-                    keyword_token_sets=token_sets,
-                    isolated_ids=isolated_ids,
-                    w_isolated_penalty=penalty,
-                ))
-            scored.sort(key=lambda it: it.score, reverse=True)
-        t_score = time.perf_counter()
-        if self.settings.kg_canonical_fold_enabled:
-            from app.services.retrieval import fold_by_canonical
-            scored = fold_by_canonical(scored, self.cluster_map(notebook_id))
-        self.event_log.emit({
-            "kind": "ask_stage", "site": "_retrieve_scored",
-            "notebook_id": notebook_id,
-            "embed_ms": round((t_embed - t0) * 1000),
-            "ann_ms": round((t_ann - t_embed) * 1000),
-            "hydrate_ms": round((t_hydrate - t_ann) * 1000),
-            "score_ms": round((t_score - t_hydrate) * 1000),
-            "fold_ms": round((time.perf_counter() - t_score) * 1000),
-            "total_ms": round((time.perf_counter() - t0) * 1000),
-            "candidates": len(all_kg_objs),
-            "ann_gated": cand_sims is not None,
-        })
-        return scored
+        return self.retrieval.candidates.retrieve_scored(notebook_id, query, types, w_keyword, w_semantic)
 
     def federated_retrieve(
         self,
@@ -4699,121 +3189,16 @@ class SQLiteRepository:
         w_keyword: float = W_KEYWORD,
         w_semantic: float = W_SEMANTIC,
     ) -> List[RetrievedKnowledge]:
-        """Gather scored KG candidates from {base notebook(s)} ∪ {active personal
-        notebook}, tagging each hit with .notebook_id and .tier.
-
-        Each notebook's scoring path is IDENTICAL to _retrieve_scored — same
-        _fuse, same dual-index best-of — so the [0,1]/tau and dual-index best-of
-        invariants are preserved by construction. Hits are merged and sorted by
-        score desc; no cross-notebook normalisation is applied (the same fused
-        relevance scale applies to both tiers). Two-tier authority is a
-        ZERO-MAGNITUDE ordering strategy: ranking is pure relevance (tier-blind),
-        and base only wins as a tie-break on an EXACT score tie — never via any
-        multiplier/quota/floor. A personal hit with higher relevance still wins.
-        """
-        notebook_ids: List[str] = [active_notebook_id]
-        with self._connect() as db:
-            # Add base notebooks (excluding the active one if it is itself base).
-            base_rows = db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                (active_notebook_id,),
-            ).fetchall()
-            notebook_ids.extend(r["id"] for r in base_rows)
-            # Tier for each notebook_id (active + base) in one pass.
-            tier_map: Dict[str, str] = {}
-            for nid in notebook_ids:
-                row = db.execute("SELECT tier FROM notebooks WHERE id=?", (nid,)).fetchone()
-                tier_map[nid] = (row["tier"] if row else "personal")
-
-        all_hits: List[RetrievedKnowledge] = []
-        for nid in notebook_ids:
-            hits = self._retrieve_scored(
-                nid, query, types=types, w_keyword=w_keyword, w_semantic=w_semantic)
-            tier = tier_map.get(nid, "personal")
-            for h in hits:
-                h.notebook_id = nid
-                h.tier = tier
-            all_hits.extend(hits)
-
-        # Pure-relevance ordering (tier-blind); base wins ONLY on an exact score
-        # tie (True > False). Zero magnitude — no constant is added to any score.
-        all_hits.sort(key=lambda it: (it.score, getattr(it, "tier", "") == "base"), reverse=True)
-        return all_hits
+        return self.retrieval.candidates.federated_retrieve(active_notebook_id, query, types, w_keyword, w_semantic)
 
     def federated_retrieve_relations(self, active_notebook_id: str,
                                      query: str) -> List["RetrievedRelation"]:
-        """跨 {base notebook(s)} ∪ {active} 检索关系,逐本 .notebook_id/.tier 标注。
-        每本走 _retrieve_relations_scored(同尺),合并按 score 降序。"""
-        notebook_ids: List[str] = [active_notebook_id]
-        with self._connect() as db:
-            base_rows = db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-                (active_notebook_id,)).fetchall()
-            notebook_ids.extend(r["id"] for r in base_rows)
-            tier_map: Dict[str, str] = {}
-            for nid in notebook_ids:
-                row = db.execute("SELECT tier FROM notebooks WHERE id=?", (nid,)).fetchone()
-                tier_map[nid] = (row["tier"] if row else "personal")
-        all_hits: List["RetrievedRelation"] = []
-        for nid in notebook_ids:
-            hits = self._retrieve_relations_scored(nid, query)
-            tier = tier_map.get(nid, "personal")
-            for h in hits:
-                h.notebook_id = nid
-                h.tier = tier
-            all_hits.extend(hits)
-        all_hits.sort(key=lambda it: it.score, reverse=True)
-        return all_hits
+        return self.retrieval.candidates.federated_retrieve_relations(active_notebook_id, query)
 
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
                             direction: str = "both") -> List[RetrievedKnowledge]:
-        """1-hop graph neighbours of `object_id` as RetrievedKnowledge with
-        placeholder relevance=0 (final relevance unified by run() via the
-        original question). Honours edge_type filter; direction out=object as
-        source, in=as target, both=either."""
-        # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
-        # instead of loading every notebook edge: O(neighbours), not O(E).
-        edge_clause = " AND edge_type=?" if edge_type else ""
-        edge_param = [edge_type] if edge_type else []
-        neighbour_ids: set = set()
-        with self._connect() as db:
-            if direction in ("out", "both"):
-                neighbour_ids.update(
-                    r["target_object_id"] for r in db.execute(
-                        f"SELECT target_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=? AND source_object_id=?{edge_clause}",
-                        [notebook_id, object_id, *edge_param],
-                    ).fetchall()
-                )
-            if direction in ("in", "both"):
-                neighbour_ids.update(
-                    r["source_object_id"] for r in db.execute(
-                        f"SELECT source_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=? AND target_object_id=?{edge_clause}",
-                        [notebook_id, object_id, *edge_param],
-                    ).fetchall()
-                )
-            if not neighbour_ids:
-                return []
-            placeholders = ",".join("?" for _ in neighbour_ids)
-            status_ph = ",".join("?" for _ in USABLE_STATUSES)
-            rows = db.execute(
-                f"SELECT * FROM knowledge_objects WHERE id IN ({placeholders}) "
-                f"AND status IN ({status_ph})",
-                [*neighbour_ids, *USABLE_STATUSES],
-            ).fetchall()
-        out: List[RetrievedKnowledge] = []
-        for row in rows:
-            keys = row.keys()
-            out.append(RetrievedKnowledge(
-                object_id=row["id"], object_type=row["object_type"],
-                payload=json.loads(row["payload"] or "{}"),
-                evidence=[Evidence(**e) for e in json.loads(row["evidence"] or "[]")],
-                score=0.0, relevance=0.0, status=row["status"], owner=row["owner"],
-                last_reviewed=row["last_reviewed"] if "last_reviewed" in keys else "",
-            ))
-        return out
+        return self.retrieval.candidates.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
 
     def _follow_chain(
         self,
@@ -4825,538 +3210,39 @@ class SQLiteRepository:
         max_fan_out: int = 8,
         max_results: int = 4,
     ):
-        """查询期、fail-closed 的类型化两跳推理。
-
-        只在起点实际所属的 active/base notebook 内，按已有 source/target 复合索引
-        做两轮局部查询；不构建全图、不跨 notebook 虚构边、不持久化推论。返回
-        FollowChainResult(inferences, nodes)，其中 nodes 是路径端点的
-        RetrievedKnowledge，供 reasoning 候选池复用。
-        """
-        from app.services.kg.follow_chain import (
-            FollowChainResult,
-            TRANSITIVE_EDGE_TYPES,
-            compose_two_hop_paths,
-        )
-
-        start_object_id = str(start_object_id or "").strip()
-        target_object_id = str(target_object_id or "").strip()
-        if not start_object_id or direction not in {"out", "in", "both"}:
-            return FollowChainResult()
-        allowed_types = ([edge_type] if edge_type in TRANSITIVE_EDGE_TYPES
-                         else sorted(TRANSITIVE_EDGE_TYPES) if not edge_type else [])
-        if not allowed_types:
-            return FollowChainResult()
-        max_fan_out = max(1, min(int(max_fan_out), 16))
-        max_results = max(1, min(int(max_results), 16))
-        status_ph = ",".join("?" for _ in USABLE_STATUSES)
-
-        with self._connect() as db:
-            # Authorization/scope gate: an action may only start from the active
-            # notebook or an authoritative base notebook participating in this ask.
-            start = db.execute(
-                f"SELECT ko.*, n.tier AS notebook_tier "
-                f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
-                f"WHERE ko.id=? AND ko.status IN ({status_ph}) "
-                f"AND (ko.notebook_id=? OR n.tier='base')",
-                (start_object_id, *USABLE_STATUSES, active_notebook_id),
-            ).fetchone()
-            if start is None:
-                return FollowChainResult()
-            owner_notebook_id = start["notebook_id"]
-            owner_tier = start["notebook_tier"] or "personal"
-
-            # Production databases can already contain tens of millions of KG
-            # rows.  follow_chain therefore adds no startup migration/index.  It
-            # forces the two existing endpoint indexes and reads at most this many
-            # raw rows per frontier endpoint; type/review filtering and priority
-            # sorting happen only inside that bounded sample.  Missing a valid edge
-            # is acceptable (fail closed); scanning an unbounded supernode is not.
-            raw_scan_limit = min(256, max(32, max_fan_out * 8))
-            raw_cache: Dict[tuple, tuple[List[dict], bool]] = {}
-            hydrated_relation_cache: Dict[str, dict] = {}
-
-            def raw_endpoint_rows(endpoint: str, oid: str) -> tuple[List[dict], bool]:
-                key = (endpoint, oid)
-                cached = raw_cache.get(key)
-                if cached is not None:
-                    return cached
-                index_name = (
-                    "idx_knowledge_relations_nb_source"
-                    if endpoint == "source_object_id"
-                    else "idx_knowledge_relations_nb_target"
-                )
-                rows = db.execute(
-                    f"SELECT r.id, r.notebook_id, r.source_id, "
-                    f"r.source_object_id, r.target_object_id, r.edge_type, "
-                    f"r.review_status "
-                    f"FROM knowledge_relations AS r INDEXED BY {index_name} "
-                    f"WHERE r.notebook_id=? AND r.{endpoint}=? LIMIT ?",
-                    (owner_notebook_id, oid, raw_scan_limit + 1),
-                ).fetchall()
-                truncated = len(rows) > raw_scan_limit
-                decoded = [
-                    {
-                        "id": row["id"], "notebook_id": row["notebook_id"],
-                        "tier": owner_tier, "source_id": row["source_id"] or "",
-                        "source_object_id": row["source_object_id"],
-                        "target_object_id": row["target_object_id"],
-                        "edge_type": row["edge_type"],
-                        "review_status": row["review_status"] or "pending",
-                    }
-                    for row in rows[:raw_scan_limit]
-                ]
-                raw_cache[key] = (decoded, truncated)
-                return decoded, truncated
-
-            def hydrate_relations(rows: List[dict]) -> List[dict]:
-                missing = [row["id"] for row in rows
-                           if row["id"] not in hydrated_relation_cache]
-                for batch in self._in_batches(missing):
-                    ph = ",".join("?" for _ in batch)
-                    for row in db.execute(
-                        f"SELECT r.id, r.evidence, s.title AS source_title "
-                        f"FROM knowledge_relations r "
-                        f"LEFT JOIN sources s ON s.id=r.source_id "
-                        f"WHERE r.id IN ({ph})",
-                        tuple(batch),
-                    ).fetchall():
-                        try:
-                            evidence = json.loads(row["evidence"] or "[]")
-                        except Exception:
-                            evidence = []
-                        hydrated_relation_cache[row["id"]] = {
-                            "evidence": evidence,
-                            "source_title": row["source_title"] or "",
-                        }
-                hydrated = []
-                for row in rows:
-                    detail = hydrated_relation_cache.get(row["id"])
-                    if detail is not None:
-                        hydrated.append({**row, **detail})
-                return hydrated
-
-            def edge_rows(endpoint: str, oid: str, et: str) -> List[dict]:
-                rows, _truncated = raw_endpoint_rows(endpoint, oid)
-                usable = [
-                    row for row in rows
-                    if row["edge_type"] == et
-                    and row["review_status"] in {"verified", "pending"}
-                ]
-                usable.sort(key=lambda row: (
-                    0 if row["review_status"] == "verified" else 1,
-                    row["id"],
-                ))
-                return hydrate_relations(usable[:max_fan_out])
-
-            relations_by_id: Dict[str, dict] = {}
-            directions = ("out", "in") if direction == "both" else (direction,)
-            for walk_dir in directions:
-                endpoint = "source_object_id" if walk_dir == "out" else "target_object_id"
-                for et in allowed_types:
-                    first = edge_rows(endpoint, start_object_id, et)
-                    for rel in first:
-                        relations_by_id[rel["id"]] = rel
-                    middle_ids = list(dict.fromkeys(
-                        rel["target_object_id"] if walk_dir == "out"
-                        else rel["source_object_id"] for rel in first
-                    ))
-                    for middle_id in middle_ids:
-                        for rel in edge_rows(endpoint, middle_id, et):
-                            relations_by_id[rel["id"]] = rel
-
-            relations = list(relations_by_id.values())
-            if not relations:
-                return FollowChainResult()
-            node_ids = list(dict.fromkeys(
-                [start_object_id, target_object_id]
-                + [oid for rel in relations for oid in
-                   (rel["source_object_id"], rel["target_object_id"])]
-            ))
-            node_ids = [oid for oid in node_ids if oid]
-            nodes: Dict[str, dict] = {}
-            for batch in self._in_batches(node_ids):
-                ph = ",".join("?" for _ in batch)
-                for row in db.execute(
-                    f"SELECT * FROM knowledge_objects WHERE notebook_id=? "
-                    f"AND id IN ({ph}) AND status IN ({status_ph})",
-                    (owner_notebook_id, *batch, *USABLE_STATUSES),
-                ).fetchall():
-                    try:
-                        payload = json.loads(row["payload"] or "{}")
-                    except Exception:
-                        payload = {}
-                    try:
-                        evidence = json.loads(row["evidence"] or "[]")
-                    except Exception:
-                        evidence = []
-                    nodes[row["id"]] = {
-                        "id": row["id"], "notebook_id": owner_notebook_id,
-                        "tier": owner_tier, "object_type": row["object_type"],
-                        "status": row["status"], "owner": row["owner"],
-                        "last_reviewed": row["last_reviewed"],
-                        "payload": payload, "evidence": evidence,
-                    }
-
-        # Exact direct-edge guard over the same bounded raw endpoint sample.  If
-        # that sample was truncated and a candidate's direct A→C edge was not
-        # observed, absence cannot be proved; add a conservative sentinel triple
-        # so compose_two_hop_paths suppresses that inference.  This intentionally
-        # trades recall for a hard production bound and never scans a supernode.
-        by_source: Dict[str, List[dict]] = {}
-        for rel in relations:
-            by_source.setdefault(rel["source_object_id"], []).append(rel)
-        out_candidates: Dict[str, set] = {}
-        in_candidates: Dict[str, set] = {}
-        for first in relations:
-            for second in by_source.get(first["target_object_id"], []):
-                if first["edge_type"] != second["edge_type"]:
-                    continue
-                if first["source_object_id"] == start_object_id:
-                    out_candidates.setdefault(first["edge_type"], set()).add(
-                        second["target_object_id"])
-                if second["target_object_id"] == start_object_id:
-                    in_candidates.setdefault(first["edge_type"], set()).add(
-                        first["source_object_id"])
-        direct_triples: set = set()
-        out_rows, out_truncated = raw_cache.get(
-            ("source_object_id", start_object_id), ([], True))
-        for et, target_ids in out_candidates.items():
-            found_targets = set()
-            for row in out_rows:
-                if (row["edge_type"] == et
-                        and row["review_status"] != "rejected"
-                        and row["target_object_id"] in target_ids):
-                    triple = (start_object_id, row["target_object_id"], et)
-                    direct_triples.add(triple)
-                    found_targets.add(row["target_object_id"])
-            if out_truncated:
-                direct_triples.update(
-                    (start_object_id, target_id, et)
-                    for target_id in target_ids - found_targets
-                )
-
-        in_rows, in_truncated = raw_cache.get(
-            ("target_object_id", start_object_id), ([], True))
-        for et, source_ids in in_candidates.items():
-            found_sources = set()
-            for row in in_rows:
-                if (row["edge_type"] == et
-                        and row["review_status"] != "rejected"
-                        and row["source_object_id"] in source_ids):
-                    triple = (row["source_object_id"], start_object_id, et)
-                    direct_triples.add(triple)
-                    found_sources.add(row["source_object_id"])
-            if in_truncated:
-                direct_triples.update(
-                    (source_id, start_object_id, et)
-                    for source_id in source_ids - found_sources
-                )
-        inferences = compose_two_hop_paths(
-            nodes, relations, start_object_id,
-            direction=direction, edge_type=edge_type,
-            target_object_id=target_object_id,
-            direct_triples=frozenset(direct_triples),
-            max_results=max_results,
-        )
-        used_ids = list(dict.fromkeys(
-            oid for chain in inferences
-            for oid in (chain.source_id, chain.via_id, chain.target_id)
-        ))
-        hydrated: List[RetrievedKnowledge] = []
-        for oid in used_ids:
-            node = nodes.get(oid)
-            if node is None:
-                continue
-            hydrated.append(RetrievedKnowledge(
-                object_id=oid, object_type=node["object_type"],
-                payload=node["payload"],
-                evidence=[Evidence(**e) for e in node["evidence"]],
-                score=0.0, relevance=0.0, status=node["status"],
-                owner=node["owner"], last_reviewed=node["last_reviewed"],
-                notebook_id=owner_notebook_id, tier=owner_tier,
-            ))
-        return FollowChainResult(inferences=inferences, nodes=hydrated)
+        return self.retrieval.graph.follow_chain(active_notebook_id, start_object_id, edge_type, target_object_id, direction, max_fan_out, max_results)
 
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8) -> List[RetrievedElement]:
-        """Keyword+semantic search over raw source_elements (fallback layer 2)."""
-        if not self.notebook_copy_stats(notebook_id)["copyable"]:
-            # source_elements 没有索引模态,本方法=全表扫+逐行向量解码(生产
-            # 17 万元素×4096 维=数 GB/次)。大库跳过并发事件,返回 [] ——
-            # 调用方(reasoning search_elements、chunk 兜底层)均容错空结果。
-            self.event_log.emit({
-                "kind": "element_scoring_skipped", "notebook_id": notebook_id,
-                "site": "_retrieve_elements", "reason": "large_notebook",
-            })
-            return []
-        query_vector = self._embed_query(query)
-        with self._connect() as db:
-            elements = self._gather_elements(db, notebook_id, with_vectors=True)
-        return score_elements(query, elements, query_vector, limit=limit)
+        return self.retrieval.candidates.retrieve_elements(notebook_id, query, limit)
 
     def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
-        """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
-        (matrix 行已 L2 归一化, 点积即余弦)。"""
-        from app.services.retrieval import score_chunks
-        from app.services.vector_index import query_sims
-        recall = recall or self.settings.chunk_recall
-        query_vector = self._embed_query(query)
-        if self.settings.chunk_ann_enabled and query_vector is not None:
-            idx = self._scale_index(notebook_id, allow_stale=True)
-            if idx is not None and getattr(idx, "chunk_ann_labels", None):
-                ann = self._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
-                if ann is not None:
-                    return ann
-        # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
-        # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
-        # 绝不落进下面「全表拉文本 + 逐 chunk 纯 Python 分词」——生产 55 万 KG 级
-        # 库曾因 .env 丢失静默走到这里,单问磨半小时「思考中」。降级为 FTS 词法
-        # 候选 + 有界打分(候选内仍关键词+语义融合),发 chunk_bruteforce_skipped
-        # 事件;真解=建 scale 索引(chunk ANN)。小库/关守卫(0)字节不变。
-        # 大库暴力守卫(统一「大库」定义 = not copyable,与其余 5 条检索路径一把尺子):
-        # 大库无论 chunk 多少都强制走索引/FTS 降级,绝不全表暴力。chunk 计数阈值
-        # chunk_bruteforce_max_chunks 作叠加下限保留(小库 chunk 极多也降级)。
-        large = not self.notebook_copy_stats(notebook_id)["copyable"]
-        threshold = self.settings.chunk_bruteforce_max_chunks
-        if large or threshold > 0:
-            with self._connect() as db:
-                n_chunks = db.execute(
-                    "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id = ?",
-                    (notebook_id,)).fetchone()["c"]
-            if large or n_chunks > threshold:
-                return self._retrieve_chunks_fts_degraded(
-                    notebook_id, query, query_vector, recall, n_chunks)
-        # ↓ 现有暴力路径保持不变
-        with self._connect() as db:
-            chunks = self._gather_chunks(db, notebook_id)
-            ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
-        chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
-        return scored, ids, mat
+        return self.retrieval.candidates._retrieve_chunks(notebook_id, query, recall)
 
     def _retrieve_chunks_fts_degraded(self, notebook_id, query, query_vector,
                                       recall, n_chunks):
-        """大库且 chunk ANN 不可用时的有界降级:FTS5 词法候选(k=recall)→ 只对
-        候选 hydrate 文本+向量,候选内做关键词+语义融合打分。绝不 _gather_chunks
-        全表、不全量分词、不触发全量向量矩阵加载(与 PR#158「查询恒定成本」取向
-        一致)。fail-open:FTS 异常(如旧库缺 chunks_fts)按零候选处理 →
-        ([], [], None),事件携带 fts_error 供 diag_slow.py 定位。"""
-        from app.services.retrieval import score_chunks
-        from app.services.vector_index import query_sims
-        hits, fts_error = [], ""
-        try:
-            with self._connect() as db:
-                hits = self._runtime.knowledge.chunk_fts_search(
-                    db, notebook_id, query, k=recall)
-        except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
-            fts_error = f"{type(exc).__name__}: {exc}"
-        event = {
-            "kind": "chunk_bruteforce_skipped", "notebook_id": notebook_id,
-            "reason": "large_library_no_ann", "n_chunks": n_chunks,
-            "threshold": self.settings.chunk_bruteforce_max_chunks,
-            "fts_hits": len(hits), "embed_ok": query_vector is not None,
-        }
-        if fts_error:
-            event["fts_error"] = fts_error[:120]
-        self.event_log.emit(event)
-        if not hits:
-            return [], [], None
-        chunks, ids, mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
-        chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
-        return scored, ids, mat
+        return self.retrieval.candidates._retrieve_chunks_fts_degraded(notebook_id, query, query_vector, recall, n_chunks)
 
     def _retrieve_chunks_ann(self, notebook_id, query, query_vector, idx, recall):
-        """ANN 候选版 chunk 检索:只对 top-recall 候选打分,避免全表 matmul+重分词。
-        返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。"""
-        import numpy as np
-        from app.services.retrieval import score_chunks
-        from app.services.vector_index import build_matrix, query_sims
-        labels = idx.chunk_ann_labels
-        if not labels:
-            return None
-        qarr = np.asarray(query_vector, dtype=np.float32)
-        dim = int(idx.manifest.get("dim", qarr.shape[0]))
-        if dim != qarr.shape[0]:
-            self.event_log.emit({
-                "kind": "dim_mismatch", "notebook_id": notebook_id, "site": "chunk_ann",
-                "manifest_dim": dim, "query_dim": int(qarr.shape[0])})
-            return None
-        ann = self._open_scale_ann(idx, "chunk")
-        if ann is None:
-            return None
-        try:
-            ann.set_ef(max(recall + 1, 64))
-            k = min(recall, len(labels))
-            labs, dists = ann.knn_query(qarr, k=k)
-        except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
-            self._note_model_error("chunk_ann_query", self.settings.embed_model, exc)
-            return None
-        chunk_sims = {labels[int(l)]: max(0.0, 1.0 - float(d)) for l, d in zip(labs[0], dists[0])}
-        cand_ids = list(chunk_sims.keys())
-
-        # ⊕ delta(opt-in via scale_search_include_delta):水位后新增 source 的 chunk 不在
-        # 存量 ANN → 暴力补召回(delta 小)。默认关 —— 大库 delta 暴力不可扩展,改由
-        # scale_auto_fold_on_add 排增量 fold 把 delta 收进索引(下方 FTS 词法块始终覆盖
-        # 全部 chunk,delta 关时新内容仍词法可寻)。True 时保持强一致的暴力补召回(慢)。
-        if self.settings.scale_search_include_delta:
-            try:
-                delta = self._index_delta(notebook_id)
-                if delta["delta_sources"]:
-                    drows = []
-                    with self._connect() as db:
-                        for batch in self._in_batches(delta["delta_sources"]):
-                            ph_s = ",".join("?" for _ in batch)
-                            drows.extend(db.execute(
-                                f"SELECT chunk_id AS vid, vector FROM chunk_embeddings "
-                                f"WHERE notebook_id=? AND chunk_id IN "
-                                f"(SELECT id FROM chunks WHERE notebook_id=? AND source_id IN ({ph_s}))",
-                                (notebook_id, notebook_id, *batch)).fetchall())
-                    d_ids, d_mat = build_matrix((r["vid"], r["vector"]) for r in drows)
-                    d_sims = query_sims(query_vector, d_ids, d_mat) if d_ids else {}
-                    for cid, s in d_sims.items():
-                        if cid not in chunk_sims:
-                            cand_ids.append(cid)
-                        chunk_sims[cid] = s
-            except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
-                self._note_model_error("chunk_ann_delta", self.settings.embed_model, exc)
-
-        # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
-        try:
-            with self._connect() as db:
-                lex = self._runtime.knowledge.chunk_fts_search(
-                    db, notebook_id, query, k=recall)
-            for h in lex:
-                cid = h["chunk_id"]
-                if cid not in chunk_sims:
-                    cand_ids.append(cid)
-                    chunk_sims[cid] = 0.0   # 词法命中无语义分;score_chunks 的 keyword 分兜底
-        except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-            self._note_model_error("chunk_fts", self.settings.embed_model, exc)
-
-        if not cand_ids:
-            return [], [], None
-        chunks, ids, mat = self._hydrate_chunk_candidates(cand_ids)
-        scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
-        return scored, ids, mat
+        return self.retrieval.candidates._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
 
     def _hydrate_chunk_candidates(self, cand_ids):
-        """按候选 id 有界取数:chunk 文本行 + 归一化向量矩阵。候选界定之后的
-        hydrate,ANN 路径与大库 FTS 降级路径共用,绝不全表。返回 (chunks, ids, mat)。
-        cand_ids 随 delta⊕词法补召回可无界增长——按 _in_batches 分批,防超 SQLite
-        变量上限(调用方按构造去重,_in_batches 亦去重保序,extend 不产生重复行)。"""
-        from app.services.vector_index import build_matrix
-        rows, vrows = [], []
-        with self._connect() as db:
-            for batch in self._in_batches(cand_ids):
-                ph = ",".join("?" for _ in batch)
-                rows.extend(db.execute(
-                    f"SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
-                    f"s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
-                    f"WHERE c.id IN ({ph})", batch).fetchall())
-                vrows.extend(db.execute(
-                    f"SELECT chunk_id AS vid, vector FROM chunk_embeddings WHERE chunk_id IN ({ph})",
-                    batch).fetchall())
-        chunks = [{
-            "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
-            "section_path": r["section_path"], "source_title": r["source_title"],
-            "element_ids": json.loads(r["element_ids"] or "[]"),
-        } for r in rows]
-        ids, mat = build_matrix((r["vid"], r["vector"]) for r in vrows)
-        return chunks, ids, mat
+        return self.retrieval.candidates._hydrate_chunk_candidates(cand_ids)
 
     def _retrieve_chunks_multi(self, notebook_id, sub_queries):
-        """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
-        ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
-        from concurrent.futures import ThreadPoolExecutor
-
-        import contextvars as _cv
-        tasks = [(q, _cv.copy_context()) for q in sub_queries]
-        def _one(task):
-            q, ctx = task
-            try:
-                return ctx.run(self._retrieve_chunks, notebook_id, q)
-            except Exception:
-                return ([], [], None)
-
-        results = []
-        if sub_queries:
-            with ThreadPoolExecutor(max_workers=min(len(sub_queries), 8)) as ex:
-                results = list(ex.map(_one, tasks))
-        per_query, collected, ids, mat = [], {}, [], None
-        for scored, qids, qmat in results:
-            per_query.append({c.chunk_id: c for c in scored})
-            for c in scored:
-                cur = collected.get(c.chunk_id)
-                if cur is None or c.relevance > cur.relevance:
-                    collected[c.chunk_id] = c
-            if mat is None and len(qids):
-                ids, mat = qids, qmat
-        return collected, per_query, ids, mat
+        return self.retrieval.candidates._retrieve_chunks_multi(notebook_id, sub_queries)
 
     def _keyword_chunk_candidates(self, notebook_id: str, keywords: str,
                                   recall: int = 0):
-        """Bilingual-keyword CHUNK lexical recall (the chunk-side of "FTS carries
-        the 2nd language"). ONE chunk_fts_search over the combined bilingual
-        keyword string, hydrated + keyword-scored into RetrievedChunk (semantic 0,
-        exactly like the existing ANN∪FTS union). Empty/blank keywords → []. NO
-        vector embed — purely lexical. Called ONCE per ask (not per sub-query);
-        the caller merges these into whatever candidate set its branch built
-        (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
-        never the question-language sub_queries — is still retrieved. fail-open:
-        FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → []."""
-        from app.services.retrieval import score_chunks
-        needle = (keywords or "").strip()
-        if not needle:
-            return []
-        recall = recall or self.settings.chunk_recall
-        try:
-            with self._connect() as db:
-                hits = self._runtime.knowledge.chunk_fts_search(
-                    db, notebook_id, needle, k=recall)
-            if not hits:
-                return []
-            chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
-            # keyword-only score (no query_vector/chunk_sims) — mirrors the ANN∪FTS
-            # union where lexical hits get keyword score and semantic 0.
-            return score_chunks(needle, chunks, None, None, limit=recall)
-        except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
-            self._note_model_error("chunk_keyword_union", self.settings.embed_model, exc)
-            return []
+        return self.retrieval.candidates._keyword_chunk_candidates(notebook_id, keywords, recall)
 
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
-        """Append `extra` RetrievedChunks to `base`, deduped by chunk_id (keep the
-        existing entry on collision — base already scored it with semantic signal).
-        Order-preserving. Used to fold the bilingual-keyword lexical hits into a
-        list-shaped candidate set (mix / single-subquery branches)."""
-        if not extra:
-            return base
-        seen = {c.chunk_id for c in base}
-        out = list(base)
-        for c in extra:
-            if c.chunk_id not in seen:
-                seen.add(c.chunk_id)
-                out.append(c)
-        return out
+        from app.services.retrieval_candidates import CandidateRetrievalService
+        return CandidateRetrievalService._union_chunk_candidates(base, extra)
 
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
-        """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
-        from app.services.mmr import mmr_rerank
-        if len(scored) <= k:
-            return list(scored)
-        id_to_row = {cid: i for i, cid in enumerate(ids)}
-        relevance = {c.chunk_id: c.relevance for c in scored}
-
-        def pair_sim(a: str, b: str) -> float:
-            ia, ib = id_to_row.get(a), id_to_row.get(b)
-            if ia is None or ib is None:
-                return 0.0
-            return float(mat[ia] @ mat[ib])
-
-        chosen = mmr_rerank([c.chunk_id for c in scored], relevance, pair_sim, k, lambda_)
-        by_id = {c.chunk_id: c for c in scored}
-        return [by_id[cid] for cid in chosen]
+        return self.retrieval.candidates._mmr_select_chunks(scored, ids, mat, k, lambda_)
 
     def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None,
                                notebook_id: str = "") -> tuple:
@@ -5367,27 +3253,9 @@ class SQLiteRepository:
         (PPR/概念漫游可掺 base 库 chunk,c.notebook_id 已标;单库路径留空回退调用方
         传入的 notebook_id)。批量一次查询(O(distinct notebook) 非 O(chunk)),
         循环内只查表。"""
-        budget = self.settings.chunk_answer_budget_chars if budget_chars is None else budget_chars
-        tier_map = self._tier_map_for(
-            {getattr(c, "notebook_id", "") or notebook_id for c in chunks})
-        lines, id_map = [], {}
-        used = 0
-        for i, c in enumerate(chunks, 1):
-            if used >= budget and len(lines) >= 1:
-                break
-            key = f"k{i}"
-            line = f"{key}: {c.text}"
-            lines.append(line)
-            used += len(line)
-            c_nb = getattr(c, "notebook_id", "") or notebook_id
-            id_map[key] = {
-                "object_id": c.chunk_id, "object_type": "chunk",
-                "name": c.section_path or c.source_title, "definition": None,
-                "snippet": c.text[:300], "source_title": c.source_title,
-                "location_label": c.section_path,
-                "tier": tier_map.get(c_nb, "personal"),
-            }
-        return ("\n".join(lines) if lines else "(none)"), id_map
+        return self._runtime.evidence_context.chunk_context(
+            chunks, notebook_id=notebook_id, budget_chars=budget_chars
+        )
 
     def _answer_chunks(
         self,
@@ -5462,27 +3330,7 @@ class SQLiteRepository:
         return answer, llm_grounded, anchors
 
     def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
-        """一次读齐 chunk 检索路径的 flag/knob，产出不可变快照（W2.2）。见 ChunkRetrievalPlan。
-        strategy 复刻 ask_chunk 的 overlay_on 三元 AND 与 if/elif/else 顺序，逐真值等价；
-        fuse_k 复刻 multi 分支 quota_fuse 复用 chunk_mmr_k 的隐式契约。"""
-        s = self.settings
-        overlay_on = (s.chunk_kg_overlay_enabled
-                      and self.rerank_client.configured
-                      and (self._notebook_has_kg(notebook_id)
-                           or self._any_base_notebook_has_kg()))
-        if overlay_on:
-            strategy = "mix"
-        elif len(sub_queries) >= 2:
-            strategy = "multi"
-        else:
-            strategy = "single"
-        return ChunkRetrievalPlan(
-            strategy=strategy,
-            overlay_on=overlay_on,
-            mmr_k=s.chunk_mmr_k,
-            mmr_lambda=s.chunk_mmr_lambda,
-            fuse_k=s.chunk_mmr_k,
-        )
+        return self.retrieval.candidates._build_chunk_retrieval_plan(notebook_id, sub_queries)
 
     def ask_chunk(
         self,
@@ -5733,79 +3581,7 @@ class SQLiteRepository:
         knowledge_sims: Optional[Dict[str, float]],
         element_sims: Optional[Dict[str, float]] = None,
     ) -> List[RetrievedKnowledge]:
-        """BM25 + 语义 RRF 融合排序,产出与 score_knowledge 池化同构的列表。
-
-        - BM25: 对所有类型的对象文本计算 Okapi BM25 分。
-        - 语义: 直接使用 knowledge_sims (object_id->cosine_sim)。
-        - RRF: 两组排名融合得最终分。
-        - 不套 RELEVANCE_FLOOR(RRF 分量级很小,floor 会清空结果)。
-        - score=RRF 分(排序用); relevance=[0,1] 融合(keyword+语义)分,供
-          classify_evidence 的 tau 阈值判 grounded(RRF 微分会让全部判 inferred)。
-        - weight 取 _TYPE_WEIGHT(类型权威)。
-        """
-        # 汇集所有类型对象,构建 (id, text) 列表及 id->obj 映射
-        docs: List[tuple] = []
-        id_to_obj: Dict[str, dict] = {}
-        id_to_type: Dict[str, str] = {}
-        for t in _KG_TYPES:
-            for obj in (kg_objs.get(t) or []):
-                oid = obj["id"]
-                payload = obj.get("payload", {})
-                evidence = obj.get("evidence", [])
-                ev_text = " ".join(e.quoted_span for e in evidence)
-                text = _payload_text(payload) + (" " + ev_text if ev_text else "")
-                docs.append((oid, text))
-                id_to_obj[oid] = obj
-                id_to_type[oid] = t
-
-        bm25 = bm25_scores(query, docs)
-        sims: Dict[str, float] = knowledge_sims or {}
-
-        fused = rrf_fuse([bm25, sims], k=self.settings.retrieval_rrf_k)
-        text_by_id = dict(docs)
-
-        result: List[RetrievedKnowledge] = []
-        for oid, rrf_score in fused.items():
-            if rrf_score <= 0:
-                continue
-            obj = id_to_obj.get(oid)
-            if obj is None:
-                continue
-            object_type = id_to_type[oid]
-            weight = _TYPE_WEIGHT.get(object_type, 0.5)
-            # score = RRF (ordering); relevance = [0,1] fused keyword+semantic so
-            # classify_evidence's tau thresholds stay valid (RRF micro-scores would
-            # otherwise classify every answer as "inferred").
-            # Best-of: object-level sim OR max(element-level sims), same as
-            # score_knowledge — protects the dual-index invariant so an object
-            # grounded only via an evidence-element embedding is not downgraded.
-            semantic = sims.get(oid, 0.0)
-            has_vec = oid in sims
-            if element_sims:
-                for ev in obj.get("evidence", []):
-                    eid = getattr(ev, "element_id", "") or ""
-                    s = element_sims.get(eid)
-                    if s is not None:
-                        has_vec = True
-                        semantic = max(semantic, s)
-            relevance = _fuse(keyword_score(query, text_by_id.get(oid, "")),
-                              semantic, has_vec)
-            result.append(
-                RetrievedKnowledge(
-                    object_id=oid,
-                    object_type=object_type,
-                    payload=obj.get("payload", {}),
-                    evidence=obj.get("evidence", []),
-                    score=rrf_score,
-                    relevance=relevance,
-                    weight=weight,
-                    status=str(obj.get("status", "approved")),
-                    owner=str(obj.get("owner", "")),
-                    last_reviewed=str(obj.get("last_reviewed", "")),
-                )
-            )
-        result.sort(key=lambda it: it.score, reverse=True)
-        return result
+        return self.retrieval.candidates._rrf_scored(query, kg_objs, knowledge_sims, element_sims)
 
     def _graph_seed_fusion(
         self,
@@ -5814,194 +3590,23 @@ class SQLiteRepository:
         base_seeds: List[str],
         cancel_event: CancelEvent = None,
     ) -> List[str]:
-        """flag 关 → 原样返回 base_seeds(等价护栏:node recall 不降由「只增不减」保证)。
-        flag 开 → 用 high-level keywords 查关系索引,两端 object 并入;low-level
-        keywords 额外查节点并入。去重保序:base 在前(只增不减),其后并入关系两端
-        (≤2·relation_seed_top_n)与 low-level 节点命中(≤relation_seed_top_n);
-        multihop 自身有 max_depth/max_fan_out 兜底,此处不再硬截。"""
-        if not self.settings.relation_retrieval_enabled:
-            return base_seeds
-        from app.services.query_rewrite import expand_query
-        raise_if_cancelled(cancel_event)
-        exp = expand_query(self.rewrite_llm_client, question,
-                           corpus_langs=self._notebook_langs(notebook_id),
-                           cancel_event=cancel_event)
-        hl = " ".join(exp.high_level_keywords) or exp.query or question
-        ll = " ".join(exp.low_level_keywords)
-        extra: List[str] = []
-        rel_hits = self.federated_retrieve_relations(notebook_id, hl)[
-            : self.settings.relation_seed_top_n]
-        raise_if_cancelled(cancel_event)
-        for h in rel_hits:
-            extra.extend((h.source_object_id, h.target_object_id))
-        if ll:
-            node_hits = self.federated_retrieve(notebook_id, ll)[
-                : self.settings.relation_seed_top_n]
-            raise_if_cancelled(cancel_event)
-            extra.extend(h.object_id for h in node_hits)
-        seen, fused = set(), []
-        for oid in list(base_seeds) + extra:   # base 优先保序,只增不减
-            if oid and oid not in seen:
-                seen.add(oid)
-                fused.append(oid)
-        return fused
+        return self.retrieval.candidates._graph_seed_fusion(notebook_id, question, base_seeds, cancel_event)
 
     _MIX_NODE_SEEDS = 20
     _MIX_REL_SEEDS = 10
     _MIX_FANOUT = 8
 
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
-        """种子(节点∪关系端点)→1-hop 子图→渲染。返回 (block, id_map, kg_hits)。
-        kg_hits=种子命中(带 .relevance),供 grounding。无 KG/种子 → ("", {}, [])。
-
-        生产事故修复(2026-07):大库守卫必须在任何检索之前 —— 种子收集本身
-        (federated_retrieve + federated_retrieve_relations)不是免费的:后者
-        branch-3(_retrieve_relations_scored 向量覆盖非空场景)会加载
-        _vector_matrix(nb, "relation_embeddings") 全量关系向量矩阵,生产环境
-        百万级行 × 1024 维即数 GB(若行仍是回填中的 JSON 文本更是灾难级解析
-        耗时/挂起)。守卫若留在种子收集之后,大库场景这些种子会被立即丢弃
-        (直接 return ("", {}, []))——白算 + 可能挂起。挪到顶部后大库行为
-        字节不变(同样的空 overlay + 同样的 graph_walk_refused 事件),只是不
-        再触发任何检索;小库字节不变。真正的修复是给关系建 ANN 索引(镜像
-        chunk_ann,scale index 侧)——这个守卫只是在那之前把 ask 路径钳制在
-        O(bounded)。"""
-        if self._federated_graph_is_large(notebook_id):
-            self.event_log.emit({
-                "kind": "graph_walk_refused",
-                "notebook_id": notebook_id,
-                "reason": "large_notebook",
-                "site": "chunk_kg_overlay",
-            })
-            return "", {}, []
-        from app.services.kg.graph_reason import multihop_subgraph, render_subgraph_context
-        node_hits = self.federated_retrieve(notebook_id, query)[: self._MIX_NODE_SEEDS]
-        rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[: self._MIX_REL_SEEDS]
-        seeds = [h.object_id for h in node_hits]
-        for r in rel_hits:
-            seeds.extend((r.source_object_id, r.target_object_id))
-        seeds = list(dict.fromkeys(s for s in seeds if s))
-        if not seeds:
-            return "", {}, []
-        G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
-        if G is None or G.num_nodes() == 0:
-            return "", {}, []
-        subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
-                                     edge_types=None, max_depth=1, max_fan_out=self._MIX_FANOUT)
-        if not subgraph:
-            return "", {}, []
-        block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
-        return block, id_map, node_hits
+        return self.retrieval.candidates._chunk_kg_overlay(notebook_id, query, hl, id_offset)
 
     def _elem_chunk_map(self, notebook_id: str) -> Dict[str, list]:
-        """Cached {element_id: [chunk_id, ...]} — one chunks scan per version,
-        reused by both _kg_source_chunks (per-query, few object_ids) and
-        _ent_chunk_map (whole-notebook membership for PPR). P0-5: this used to
-        be re-scanned (all chunks, per-row json.loads) on every call of either
-        consumer; now it's version-cached like _vector_matrix/_keyword_token_sets."""
-        version = tuple(self._scale_index_version(notebook_id))
-
-        def _load():
-            with self._connect() as db:
-                chunk_rows = db.execute(
-                    "SELECT id, element_ids FROM chunks WHERE notebook_id=?",
-                    (notebook_id,),
-                ).fetchall()
-            out: Dict[str, list] = {}
-            for cr in chunk_rows:
-                for el in json.loads(cr["element_ids"] or "[]"):
-                    out.setdefault(el, []).append(cr["id"])
-            return out
-
-        return self._vector_cache.get(f"{notebook_id}:elemchunk", version, _load)
+        return self.retrieval.graph._elem_chunk_map(notebook_id)
 
     def _kg_source_chunks(self, notebook_id: str, object_ids: list) -> list:
-        """KG 对象 evidence 的 element_id → 含该 element 的 chunk(LightRAG 源 chunk)。
-        返回 List[RetrievedChunk](relevance 占位 0.3,后续 rerank 重排)。
-
-        P0-5: object_ids 是本次查询命中的一小撮 KG 对象(不是全库),所以 evidence
-        只按 IN(...) 取这几行;element_id → chunk 的反查改走缓存的 _elem_chunk_map,
-        不再对 chunks 表做全量扫描 + 逐行 json.loads + 集合交。
-
-        输出序 = 确定性 first-seen 序:按 object_ids 顺序 → 各对象 evidence 内
-        element 顺序 → _elem_chunk_map 内 chunk 列表序(即 chunks 扫描序)。
-        消费方 ask_graph 的 BFS 兜底路径无 rerank,顺序直接决定
-        truncate_by_tokens 的截断存活集和引用编号,所以序必须确定(旧实现的
-        「chunks 全表扫描序」依赖表物理序,本就不是契约)。"""
-        from app.services.retrieval import RetrievedChunk
-        if not object_ids:
-            return []
-        with self._connect() as db:
-            ph = ",".join("?" * len(object_ids))
-            erows = db.execute(
-                f"SELECT id, evidence FROM knowledge_objects WHERE id IN ({ph})",
-                list(object_ids)).fetchall()
-            # SQL IN(...) 不保证返回序 — 按 object_ids 输入序重放,evidence 内保持
-            # JSON 数组序,element_id 有序去重(dict.fromkeys 语义)。
-            ev_by_id = {r["id"]: r["evidence"] for r in erows}
-            elem_ids: list = []
-            seen_el = set()
-            for oid in object_ids:
-                for e in json.loads(ev_by_id.get(oid) or "[]"):
-                    el = e.get("element_id") if isinstance(e, dict) else None
-                    if el and el not in seen_el:
-                        seen_el.add(el)
-                        elem_ids.append(el)
-            if not elem_ids:
-                return []
-            elem_map = self._elem_chunk_map(notebook_id)
-            chunk_ids: list = []
-            seen_cid = set()
-            for el in elem_ids:
-                for cid in elem_map.get(el, ()):
-                    if cid not in seen_cid:
-                        seen_cid.add(cid)
-                        chunk_ids.append(cid)
-            if not chunk_ids:
-                return []
-            ph2 = ",".join("?" * len(chunk_ids))
-            crows = db.execute(
-                f"SELECT id, source_id, text, section_path, element_ids FROM chunks WHERE id IN ({ph2})",
-                chunk_ids).fetchall()
-        by_id = {cr["id"]: cr for cr in crows}
-        out = []
-        for cid in chunk_ids:
-            cr = by_id.get(cid)
-            if cr is None:
-                continue
-            out.append(RetrievedChunk(
-                chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
-                section_path=cr["section_path"], text=cr["text"],
-                element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
-        return out
+        return self.retrieval.graph._kg_source_chunks(notebook_id, object_ids)
 
     def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
-        """{object_id: set(chunk_id)} — KG 实体出现在哪些 chunk 里。
-        口径同 _kg_source_chunks:evidence[].element_id ∈ chunks.element_ids[]。
-        用于 PPR 的 membership 边 + (P2) specificity 权重分母。
-
-        P0-5: version-cached like _vector_matrix — this used to full-scan ALL
-        knowledge_objects.evidence + ALL chunks.element_ids (with per-row
-        json.loads) on every call, uncached, on the PPR-fallback query path."""
-        version = tuple(self._scale_index_version(notebook_id))
-
-        def _load():
-            with self._connect() as db:
-                obj_rows = db.execute(
-                    "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=?",
-                    (notebook_id,),
-                ).fetchall()
-            elem_to_chunks = self._elem_chunk_map(notebook_id)
-            out: Dict[str, set] = {}
-            for orow in obj_rows:
-                chunks: set = set()
-                for e in json.loads(orow["evidence"] or "[]"):
-                    if isinstance(e, dict) and e.get("element_id"):
-                        chunks |= set(elem_to_chunks.get(e["element_id"], ()))
-                if chunks:
-                    out[orow["id"]] = chunks
-            return out
-
-        return self._vector_cache.get(f"{notebook_id}:entchunk", version, _load)
+        return self.retrieval.graph._ent_chunk_map(notebook_id)
 
     # ── chunk×graph mix ──────────────────────────────────────────────────────
 
@@ -6011,52 +3616,13 @@ class SQLiteRepository:
     def _truncate_kg_block(self, block: str, max_tokens: int) -> str:
         """按行截断 KG block 至 token 预算(整行保留)。被截掉的行其 [k] 仍留在 id_map,
         _parse_answer_anchors 解析无害(只损失上下文,不破坏引用)。镜像 truncate_by_tokens。"""
-        from app.services.retrieval import est_tokens
-        if not block or est_tokens(block) <= max_tokens:
-            return block
-        out, used = [], 0
-        for ln in block.split("\n"):
-            used += est_tokens(ln)
-            if used > max_tokens and out:
-                break
-            out.append(ln)
-        return "\n".join(out)
+        return self._runtime.evidence_context.truncate_kg_block(block, max_tokens)
 
     def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
-        """向量 chunk 候选(多子查询合并去重;单查询直接 scored)。返回 List[RetrievedChunk]。"""
-        if len(sub_queries) >= 2:
-            collected, _per, _ids, _mat = self._retrieve_chunks_multi(notebook_id, sub_queries)
-            seen, out = set(), []
-            for c in collected.values():
-                if c.chunk_id not in seen:
-                    seen.add(c.chunk_id)
-                    out.append(c)
-            return out
-        scored, _ids, _mat = self._retrieve_chunks(notebook_id, sub_queries[0])
-        return scored
+        return self.retrieval.candidates._gather_vector_chunks(notebook_id, sub_queries)
 
     def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
-        """三路 mix:向量 chunk + KG-overlay 源 chunk + 概念漫游(PPR)跨文档 chunk,
-        round-robin 并池去重。返回 (candidates, kg_block, kg_id_map, kg_hits, ppr_count)。
-        PPR 跨文档扩散的噪声由 ask_chunk 侧现成 rerank 免费压低。"""
-        vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
-        kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
-        overlay_on = self.settings.chunk_kg_overlay_enabled and (
-            self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg())
-        if overlay_on:
-            kg_block, kg_id_map, kg_hits = self._chunk_kg_overlay(
-                notebook_id, query, hl, id_offset=self._MIX_KG_KEY_BASE)
-            kg_chunks = self._kg_source_chunks(
-                notebook_id, [v["object_id"] for v in kg_id_map.values()])
-        # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
-        ppr_chunks = self._ppr_retrieve(notebook_id, query) if self.settings.graph_ppr_enabled else []
-        merged, seen = [], set()
-        for i in range(max(len(vector_chunks), len(kg_chunks), len(ppr_chunks))):
-            for src in (vector_chunks, kg_chunks, ppr_chunks):
-                if i < len(src) and src[i].chunk_id not in seen:
-                    seen.add(src[i].chunk_id)
-                    merged.append(src[i])
-        return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
+        return self.retrieval.candidates._mix_retrieve(notebook_id, query, hl, sub_queries)
 
     def _participant_notebook_ids(self, notebook_id: str) -> List[str]:
         """联邦参与库:active 在首位 + 全部 base tier(与 _ppr_graph/federated_retrieve
@@ -6069,117 +3635,8 @@ class SQLiteRepository:
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0) -> tuple:
-        """Build the id-tagged enriched context block + id_map for the answer
-        LLM. Each surviving hit gets a stable `k{i}` id; enrichment (definition /
-        first-occurrence snippet / procedure steps) is pulled via node_context.
-        Hits belonging to the same unified cluster (any type) are collapsed —
-        the first (highest-scored) per cluster is kept, later duplicates dropped.
-        Objects without a cluster entry use their own object_id as cluster key,
-        so they are never erroneously deduplicated.
-        Returns (context_block_str, id_map)."""
-        budget = self.settings.answer_context_budget_chars
-        min_items = self.settings.answer_context_min_items
-        lines, id_map = [], {}
-        seen_clusters: set = set()
-        # Federation fold: merge every participant notebook's cluster_map so a base
-        # hit and an active hit sharing a canonical id (e.g. "K-cascode") collapse
-        # to one line. Concept canonical ids are name-derived (deterministic across
-        # notebooks), so cross-tier same-name concepts fold correctly.
-        cmap: Dict[str, str] = {}
-        participants = self._participant_notebook_ids(notebook_id)
-        for nb in participants:
-            cmap.update(self.cluster_map(nb))
-        used = 0
-        i = 0
-        for hit in top_hits:
-            cid = cmap.get(hit.object_id, hit.object_id)
-            if cid in seen_clusters:
-                continue
-            seen_clusters.add(cid)
-            # Federation: enrich each hit against ITS OWN notebook (a base hit
-            # lives in the base KG, not the active notebook). Falls back to the
-            # active notebook_id for legacy/untagged hits.
-            hit_nb = getattr(hit, "notebook_id", "") or notebook_id
-            try:
-                ctx = self.node_context(hit_nb, hit.object_id)
-            except KeyError:
-                continue
-            # Stop once the budget is spent, but always keep at least min_items.
-            if used >= budget and len(lines) >= min_items:
-                break
-            i += 1
-            key = f"k{i + id_offset}"
-            name = str(hit.payload.get("name", "")).strip()
-            occ = ctx.get("occurrences") or []
-            snippet = occ[0].get("element_text") if occ else ""
-            definition = ctx.get("definition") or snippet
-            remaining = max(0, budget - used)
-            def_cap = max(0, min(300, remaining))   # per-line cap shrinks as budget fills
-            extra = f" — def: {definition[:def_cap]}" if (definition and def_cap) else ""
-            if ctx.get("steps") and def_cap:   # steps share the per-line budget gate
-                extra += "; steps: " + " -> ".join(
-                    s.get("name", "") for s in ctx["steps"][:8]
-                )
-            tier = getattr(hit, "tier", "personal")
-            # Tier prefix surfaces authority to the LLM ([base] vs [personal]) so
-            # the conflict-precedence rule in answer_prompt has something to read.
-            line = f"{key}: [{hit.object_type}][{tier}] {name}{extra}"
-            lines.append(line)
-            used += len(line)
-            id_map[key] = {
-                "object_id": hit.object_id, "object_type": hit.object_type,
-                "name": name, "definition": definition, "snippet": snippet,
-                "source_title": (occ[0].get("source_title", "") if occ else ""),
-                "location_label": (occ[0].get("section_path", "") if occ else ""),
-                "tier": tier,
-            }
-        # In-network relations: edges whose BOTH endpoints are in the context.
-        # id_map values carry unique object_ids (one entry per surviving hit;
-        # concept-cluster de-dup runs above), so this inversion drops no keys.
-        oid_to_key = {v["object_id"]: k for k, v in id_map.items()}
-        if len(oid_to_key) >= 2:
-            ids = list(oid_to_key)
-            ph = ",".join("?" for _ in ids)
-            rel_rows: List[tuple] = []   # (s_key, edge_type, t_key, src_nb, s_oid, t_oid)
-            seen_rel = set()
-            # Federation: an active-notebook hit and a base hit can both be in
-            # context, so the edge linking them may live in EITHER notebook. One
-            # IN query per participant (participants <= active + bases).
-            with self._connect() as db:
-                for nb in participants:
-                    for r in db.execute(
-                            f"SELECT source_object_id, target_object_id, edge_type "
-                            f"FROM knowledge_relations WHERE notebook_id=? "
-                            f"AND review_status!='rejected' "
-                            f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
-                            [nb, *ids, *ids]).fetchall():
-                        s = oid_to_key.get(r["source_object_id"])
-                        t = oid_to_key.get(r["target_object_id"])
-                        if s and t and s != t and (s, r["edge_type"], t) not in seen_rel:
-                            seen_rel.add((s, r["edge_type"], t))
-                            rel_rows.append((s, r["edge_type"], t, nb,
-                                             r["source_object_id"], r["target_object_id"]))
-            if rel_rows:
-                # Rank by canonical source_count (breadth of support) so the most
-                # corroborated edges survive the cap. _edge_support_map / cluster_map
-                # are version-cached → these lookups are zero extra SQL over <=30 rows.
-                def _support(row):
-                    s_key, et, t_key, nb, s_oid, t_oid = row
-                    sup = self._edge_support_map(nb)
-                    cm = self.cluster_map(nb)
-                    hit = sup.get((cm.get(s_oid, s_oid), et, cm.get(t_oid, t_oid)))
-                    return hit[1] if hit else 1
-                rel_rows.sort(key=_support, reverse=True)
-                rel_lines = []
-                # Cap so a dense subgraph can't blow the answer context past budget
-                # (applied AFTER sorting by support, so the strongest edges win).
-                for row in rel_rows[:30]:
-                    s_key, et, t_key = row[0], row[1], row[2]
-                    n_src = _support(row)
-                    suffix = f" (×{n_src}源)" if n_src >= 2 else ""
-                    rel_lines.append(f"{s_key} -[{et}]-> {t_key}{suffix}")
-                lines.append("relations: " + "; ".join(rel_lines))
-        return ("\n".join(lines) if lines else "(none)"), id_map
+        _ = self.retrieval
+        return self._runtime.evidence_context.knowledge_context(notebook_id, top_hits, id_offset=id_offset)
 
     def _rewrite_followup_query(
         self,
@@ -6408,7 +3865,7 @@ class SQLiteRepository:
                     on_trace(step)
 
             try:
-                result = ReasoningRetriever(self, self.settings, cancel_event).run(
+                result = ReasoningRetriever.from_repository(self, self.settings, cancel_event).run(
                     notebook_id, question, history, on_step=checked_trace)
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
@@ -6915,29 +4372,7 @@ class SQLiteRepository:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
         objects (deduped, in first-seen order). Markers not in `id_map` and
         items never cited are dropped."""
-        from app.models.schemas import AnswerAnchor
-        cited = []
-        seen = set()
-        for marker_group in _MARKER_GROUP_RE.findall(answer or ""):
-            keys = [part.strip() for part in marker_group.split(",")]
-            # A mixed known/unknown group is not partially trusted: binding only
-            # the known subset would misrepresent which premises the model cited.
-            if not keys or any(key not in id_map for key in keys):
-                continue
-            for key in keys:
-                if key in seen:
-                    continue
-                seen.add(key)
-                ctx = id_map[key]
-                name = str(ctx.get("name", ""))
-                cited.append(AnswerAnchor(
-                    key=key, object_id=ctx["object_id"], object_type=ctx["object_type"],
-                    label=(name[:40] or key), name=name,
-                    definition=ctx.get("definition"), snippet=ctx.get("snippet"),
-                    source_title=ctx.get("source_title", ""), location_label=ctx.get("location_label", ""),
-                    tier=ctx.get("tier", "personal"),
-                ))
-        return cited
+        return self._runtime.evidence_context.parse_anchors(answer, id_map)
 
     def _needs_index(self, notebook_id: str) -> bool:
         """大库且磁盘完全无 scale 索引(从未建过)→ True。用于 AskResponse.index_required:

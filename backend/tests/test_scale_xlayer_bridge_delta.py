@@ -92,7 +92,7 @@ def test_case_a_external_base_uses_full_domain_equals_oracle(repo):
     all_node_ids, all_edges, _ = repo._active_kg_delta(active.id)
     assert len(all_node_ids) >= 2
 
-    oracle_edges = repo._scale_xlayer_bridge_edges(
+    oracle_edges = repo.retrieval.graph._scale_xlayer_bridge_edges(
         active.id, base_indexes, list(all_edges), active_node_ids=None)
     oracle_new = set(oracle_edges) - set(all_edges)
     assert oracle_new, "oracle should find the MOSFET<->base bridge"
@@ -102,7 +102,7 @@ def test_case_a_external_base_uses_full_domain_equals_oracle(repo):
     mosfet_id = name_to_id["MOSFET"]
     subset = [nid for nid in all_node_ids if nid != mosfet_id][:1]
     assert subset, "need a non-MOSFET subset node"
-    scoped_edges = repo._scale_xlayer_bridge_edges(
+    scoped_edges = repo.retrieval.graph._scale_xlayer_bridge_edges(
         active.id, base_indexes, list(all_edges), active_node_ids=subset)
     scoped_new = set(scoped_edges) - set(all_edges)
     assert scoped_new == oracle_new, (
@@ -137,7 +137,7 @@ def test_case_b_self_indexed_plus_external_base_keeps_core_bridges(repo):
     assert delta_ids == [], "fixture: self fully indexed, delta must be empty"
 
     # Pre-delta-scoping oracle: full domain for every participant.
-    oracle = repo._scale_xlayer_bridge_edges(
+    oracle = repo.retrieval.graph._scale_xlayer_bridge_edges(
         selfnb.id, base_indexes, [], active_node_ids=None)
     oracle_set = set(oracle)
     assert any(a == "eS" and b == "eB" for a, b, _ in oracle_set), (
@@ -146,7 +146,7 @@ def test_case_b_self_indexed_plus_external_base_keeps_core_bridges(repo):
         "oracle must contain the reverse bridge")
 
     # Fixed code path (delta passed, as _scale_combined_graph does).
-    got = repo._scale_xlayer_bridge_edges(
+    got = repo.retrieval.graph._scale_xlayer_bridge_edges(
         selfnb.id, base_indexes, [], active_node_ids=delta_ids)
     assert set(got) == oracle_set, (
         f"Case B: core-node bridges to the external base must match the "
@@ -179,14 +179,14 @@ def test_self_only_participant_uses_delta_no_full_load(repo, monkeypatch):
     assert "eNew" in delta_ids and "eS" not in delta_ids
 
     calls = {"full": 0}
-    orig = repo._vector_matrix
+    orig = repo.retrieval.candidates._vector_matrix
 
     def spy(*a, **kw):
         calls["full"] += 1
         return orig(*a, **kw)
 
-    monkeypatch.setattr(repo, "_vector_matrix", spy)
-    got = repo._scale_xlayer_bridge_edges(
+    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", spy)
+    got = repo.retrieval.graph._scale_xlayer_bridge_edges(
         selfnb.id, base_indexes, list(delta_edges), active_node_ids=delta_ids)
     assert calls["full"] == 0, (
         "self-only participant must keep the delta domain (no full matrix load)")
@@ -208,7 +208,7 @@ def test_self_only_empty_delta_no_load_at_all(repo, monkeypatch):
     assert delta_ids == []
 
     calls = {"full": 0, "delta": 0}
-    orig_full, orig_delta = repo._vector_matrix, repo._delta_vector_matrix
+    orig_full, orig_delta = repo.retrieval.candidates._vector_matrix, repo._delta_vector_matrix
 
     def spy_full(*a, **kw):
         calls["full"] += 1
@@ -218,9 +218,9 @@ def test_self_only_empty_delta_no_load_at_all(repo, monkeypatch):
         calls["delta"] += 1
         return orig_delta(*a, **kw)
 
-    monkeypatch.setattr(repo, "_vector_matrix", spy_full)
+    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", spy_full)
     monkeypatch.setattr(repo, "_delta_vector_matrix", spy_delta)
-    got = repo._scale_xlayer_bridge_edges(
+    got = repo.retrieval.graph._scale_xlayer_bridge_edges(
         selfnb.id, base_indexes, [], active_node_ids=[])
     assert got == []
     assert calls == {"full": 0, "delta": 0}, (
@@ -239,14 +239,14 @@ def test_scale_combined_graph_passes_delta_node_ids(repo, monkeypatch):
     base_indexes = [(base.id, base_idx)]
 
     captured = {}
-    orig = repo._scale_xlayer_bridge_edges
+    orig = repo.retrieval.graph._scale_xlayer_bridge_edges
 
     def spy(notebook_id, base_idxs, active_edges, active_node_ids=None):
         captured["active_node_ids"] = active_node_ids
         return orig(notebook_id, base_idxs, active_edges, active_node_ids=active_node_ids)
 
-    monkeypatch.setattr(repo, "_scale_xlayer_bridge_edges", spy)
-    repo._scale_combined_graph(active.id, base_indexes)
+    monkeypatch.setattr(repo.retrieval.graph, "_scale_xlayer_bridge_edges", spy)
+    repo.retrieval.graph._scale_combined_graph(active.id, base_indexes)
     assert captured.get("active_node_ids") is not None, (
         "_scale_combined_graph must pass the delta node id set, not rely on the "
         "None-fallback full-table load")

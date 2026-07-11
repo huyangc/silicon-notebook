@@ -219,7 +219,7 @@ def test_retrieve_elements_degrades_gracefully(rrepo):
 def test_toolbox_delegates_to_repo(rrepo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
-    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     hits = rr.search(nb.id, "RTL到GDSII流程", types=["claim"], prefer="keyword")
     assert all(h.object_type == "claim" for h in hits)
     claim = hits[0]
@@ -246,7 +246,7 @@ class _StubLLM:
 def _rr_with_llm(repo, **llm):
     from app.services.reasoning_retrieval import ReasoningRetriever
     repo.llm_client = _StubLLM(**llm)
-    return ReasoningRetriever(repo, repo.settings)
+    return ReasoningRetriever.from_repository(repo, repo.settings)
 
 
 class _KwargsRecordingLLM:
@@ -313,7 +313,7 @@ def test_plan_passes_reasoning_timeout_and_retries(rrepo):
     rrepo.settings.reasoning_max_retries = 1
     llm = _KwargsRecordingLLM(plan={"sub_queries": [{"query": "q"}]}, reflect={})
     rrepo.llm_client = llm
-    ReasoningRetriever(rrepo, rrepo.settings).plan("问题", "")
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).plan("问题", "")
     assert llm.calls, "plan must call chat_json"
     _, kwargs = llm.calls[0]
     assert kwargs.get("timeout") == rrepo.settings.reasoning_timeout_seconds
@@ -327,7 +327,7 @@ def test_reflect_passes_reasoning_timeout_and_retries(rrepo):
     llm = _KwargsRecordingLLM(
         plan={}, reflect={"next_action": "answer", "sufficient": True})
     rrepo.llm_client = llm
-    ReasoningRetriever(rrepo, rrepo.settings).reflect("问题", "summary")
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).reflect("问题", "summary")
     assert llm.calls, "reflect must call chat_json"
     _, kwargs = llm.calls[0]
     assert kwargs.get("timeout") == 77
@@ -462,7 +462,7 @@ def test_run_plan_then_answer(rrepo):
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "answer", "sufficient": True, "reason": "够了"}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     assert res.top_hits  # 召回到候选
     kinds = [t.step_type for t in res.trace]
     assert kinds[0] == "plan" and "retrieve" in kinds and kinds[-1] == "answer"
@@ -481,7 +481,7 @@ def test_run_expand_graph_records_trace(rrepo):
             {"next_action": "expand_graph", "expand": {"object_id": claim.object_id},
              "reason": "深挖关系"},
             {"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     assert any(t.step_type == "expand" for t in res.trace)
     assert any(h.object_type == "procedure" for h in res.top_hits)  # 邻居被纳入
 
@@ -504,7 +504,7 @@ def test_run_follow_chain_records_trace_and_keeps_transient_chain(rrepo):
         before = db.execute(
             "SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)
         ).fetchone()["c"]
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "Premise A 如何推到 Conclusion C", "", on_step=streamed.append)
     assert len(res.chains) == 1
     assert res.chains[0].target_name == "Conclusion C"
@@ -538,7 +538,7 @@ def test_run_follow_chain_rejects_start_outside_current_candidates(rrepo, monkey
             {"next_action": "answer", "sufficient": True},
         ],
     )
-    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
 
     def unexpected_follow_chain(*_args, **_kwargs):
         pytest.fail("follow_chain must not run for an arbitrary non-candidate id")
@@ -617,7 +617,7 @@ def test_run_dedups_expand_and_respects_step_cap(rrepo):
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "expand_graph",
                    "expand": {"object_id": claim.object_id}}] * 10)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) <= 3                 # circuit breaker 生效
     assert res.trace[-1].step_type == "answer"     # 仍正常收尾
@@ -631,7 +631,7 @@ def test_run_add_subquery_without_payload_continues(rrepo):
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "add_subquery"},
                   {"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) == 2                  # 两轮 reflect 都执行,未提前终止
     assert any(t.step_type == "skip" for t in res.trace)
@@ -670,7 +670,7 @@ def test_run_feeds_no_progress_signal_to_reflect_after_fruitless_retrieval(rrepo
             return json.dumps(nxt)
 
     rrepo.llm_client = _RecordingLLM()
-    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
 
     assert len(captured_reflect_prompts) == 2
     # 初检索命中 KG 节点(有新增)→ 首轮 reflect 不应带"无新进展"信号
@@ -712,7 +712,7 @@ def test_run_initial_retrieval_is_parallel(rrepo, monkeypatch):
         return [_mk_rk(f"id-{query}", query)]
 
     monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "原问题", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "原问题", "")
 
     # 并发成立才能跑到这里(否则 search 抛 BrokenBarrierError 被吞 → 三条都丢)。
     # 三个子查询各贡献一个不同 id → 初检索计数为 3。
@@ -749,7 +749,7 @@ def test_run_initial_retrieval_preserves_order_and_dedup(rrepo, monkeypatch):
         return returns[query]
 
     monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "原问题", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "原问题", "")
 
     by_id = {h.object_id: h for h in res.top_hits}
     assert set(by_id) == {"shared", "only1", "only2"}      # 去重:shared 只一份
@@ -772,7 +772,7 @@ def test_run_initial_retrieval_swallows_single_search_failure(rrepo, monkeypatch
         return [_mk_rk("ok-id", "ok")]
 
     monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "原问题", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "原问题", "")
 
     retrieve_steps = [t for t in res.trace if t.step_type == "retrieve"]
     assert retrieve_steps[0].detail["count"] == 1          # 只剩成功者
@@ -802,7 +802,7 @@ def test_run_stale_breaker_on_repeated_visited_expand(rrepo, monkeypatch):
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "q"}]},
         reflects=[{"next_action": "expand_graph", "expand": {"object_id": "A"}}] * 40)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) <= 5             # stale 熔断: 远小于 50
     assert res.trace[-1].step_type == "answer" # 仍正常收尾
@@ -829,7 +829,7 @@ def test_run_caps_repeated_element_search(rrepo, monkeypatch):
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "q"}]},
         reflects=[{"next_action": "search_elements", "elements_query": "q"}] * 40)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     assert counter["n"] <= 4                   # 实际执行的 element 检索不超过上限
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) < 20             # 远小于 50
@@ -856,7 +856,7 @@ def test_run_does_not_break_while_progressing(rrepo, monkeypatch):
                 for i in range(5)]                          # 5 轮深挖不同节点
     reflects.append({"next_action": "answer", "sufficient": True})
     rrepo.llm_client = _SeqLLM(plan={"sub_queries": [{"query": "q"}]}, reflects=reflects)
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) == 6             # 5 轮有进展深挖 + 1 轮 answer, 未误熔断
 
@@ -887,7 +887,7 @@ def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
             return json.dumps(self._r.pop(0) if self._r else {"next_action": "answer", "sufficient": True})
 
     rrepo.llm_client = _RecLLM()
-    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q", "")
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     assert len(prompts) >= 2
     # 第1轮 expand A 后, 第2轮 reflect 输入应带"已展开/已访问"节点提示, 含节点标识
     assert "nodeA" in prompts[1] or "A" in prompts[1]
@@ -911,7 +911,7 @@ def test_quota_rerank_rescues_weak_group(rrepo, monkeypatch):
     }
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
-    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     collected = {oid: _rk(oid, 0.0) for oid in ["A", "B", "C", "D", "E", "F"]}
     hits, counts = rr._quota_rerank(nb.id, collected, ["qV3", "qR1"], top_n=2)
     ids = [h.object_id for h in hits]
@@ -929,7 +929,7 @@ def test_quota_rerank_roundrobin_balance(rrepo, monkeypatch):
     }
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
-    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     collected = {oid: _rk(oid, 0.0) for oid in ["a1","a2","a3","a4","b1","b2"]}
     hits, counts = rr._quota_rerank(nb.id, collected, ["qA", "qB"], top_n=4)
     ids = {h.object_id for h in hits}
@@ -946,7 +946,7 @@ def test_quota_rerank_tolerates_subquery_failure(rrepo, monkeypatch):
             raise RuntimeError("search blew up")
         return [_rk("C", 0.9), _rk("D", 0.8)]
     monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
-    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     collected = {oid: _rk(oid, 0.0) for oid in ["C", "D"]}
     hits, counts = rr._quota_rerank(nb.id, collected, ["boom", "ok"], top_n=2)
     ids = {h.object_id for h in hits}
@@ -960,7 +960,7 @@ def test_quota_rerank_fallback_group_last(rrepo, monkeypatch):
     nb = _seed_two_nodes(rrepo)
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
-    rr = ReasoningRetriever(rrepo, rrepo.settings)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     # X 不在任何子查询结果 → 兜底组
     collected = {"A": _rk("A", 0.0), "X": _rk("X", 0.0)}
     hits, counts = rr._quota_rerank(nb.id, collected, ["qA"], top_n=2)
@@ -989,7 +989,7 @@ def test_run_quota_path_keeps_both_groups(rrepo, monkeypatch):
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "subV"}, {"query": "subR"}]},
         reflects=[{"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "subV subR", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "subV subR", "")
     ids = {h.object_id for h in res.top_hits}
     assert "A" in ids and "C" in ids          # 配额救回弱势组 A(全局 top-2 会是 C,D)
     ans = next(t for t in res.trace if t.step_type == "answer")
@@ -1006,7 +1006,7 @@ def test_run_single_subquery_uses_global(rrepo, monkeypatch):
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "only"}]},
         reflects=[{"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "only", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "only", "")
     ans = next(t for t in res.trace if t.step_type == "answer")
     assert "quota" not in (ans.detail or {})   # 全局路径不带 quota
 
@@ -1021,7 +1021,7 @@ def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "q1"}, {"query": "q2"}]},
         reflects=[{"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
     ans = next(t for t in res.trace if t.step_type == "answer")
     assert "quota" not in (ans.detail or {})   # 开关关 → 全局路径
 
@@ -1032,7 +1032,7 @@ def test_plan_uses_expand_query(rrepo, monkeypatch):
         query="x", sub_queries=[qr.SubQuerySpec("sub A", types=["concept"]),
                                 qr.SubQuerySpec("sub B")]))
     from app.services.reasoning_retrieval import ReasoningRetriever
-    r = ReasoningRetriever(rrepo, rrepo.settings)
+    r = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     subs = r.plan("中文复合问题")
     assert [s.query for s in subs] == ["sub A", "sub B"] and subs[0].types == ["concept"]
 
@@ -1047,7 +1047,7 @@ def test_run_expand_summary_uses_node_name_not_id(rrepo):
         plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
         reflects=[{"next_action": "expand_graph", "expand": {"object_id": claim.object_id}},
                   {"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     expand = next(t for t in res.trace if t.step_type == "expand")
     assert "RTL到GDSII流程概述" in expand.summary          # 人读名
     assert claim.object_id not in expand.summary           # 不再暴露裸 id
@@ -1084,7 +1084,7 @@ def test_run_duplicate_subquery_skipped_not_rerun(rrepo, monkeypatch):
             return json.dumps(nxt)
 
     rrepo.llm_client = _RepeatLLM()
-    retriever = ReasoningRetriever(rrepo, rrepo.settings)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls: list[str] = []
     orig_search = retriever.search
 
@@ -1134,7 +1134,7 @@ def test_run_feeds_attempted_subqueries_to_reflect(rrepo):
             return json.dumps(nxt)
 
     rrepo.llm_client = _RecordingRepeatLLM()
-    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
 
     assert len(captured) == 2
     # ① 首轮:初始 plan 两条子查询都在账目里,且带新增数与去重告诫
@@ -1163,7 +1163,7 @@ def test_summarize_shows_recent_tail_when_over_window(rrepo):
     前 30 条窗口外 → summary 不变 → reflect 误判无进展/重复请求」盲区);
     ≤30 条时输出与旧行为完全一致(无省略标记)。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
-    r = ReasoningRetriever(rrepo, rrepo.settings)
+    r = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     big = {f"ko-{i}": _mk_rk(f"ko-{i}", f"节点{i}") for i in range(45)}
     out = r._summarize(big, [], [])
     assert "节点0" in out and "节点19" in out        # 头段(最早 20 条)
@@ -1197,7 +1197,7 @@ def test_run_exposes_attempted_ledger_and_top_n_override(rrepo):
             return json.dumps({"next_action": "answer", "sufficient": True})
 
     rrepo.llm_client = _PlanOnlyLLM()
-    result = ReasoningRetriever(rrepo, rrepo.settings).run(
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "RTL到GDSII流程", "", top_n=1)
     assert len(result.top_hits) <= 1                       # top_n 覆盖生效
     assert result.attempted and result.attempted[0]["query"] == "RTL到GDSII流程"
@@ -1219,7 +1219,7 @@ def test_run_max_steps_override_caps_reflect_loop(rrepo):
             return json.dumps({"next_action": "search_elements", "elements_query": "q"})  # 永不 answer
 
     rrepo.llm_client = _LoopLLM()
-    ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
     assert calls["reflect"] <= 2      # 被 max_steps=2 封顶(而非 settings 的 50)
 
 
@@ -1228,15 +1228,20 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
     import app.services.communities as C
     nb = _seed_two_nodes(rrepo)
-    monkeypatch.setattr(C, "community_peers", lambda *a, **k: ["RTL综合", "布线"])
-    monkeypatch.setattr(C, "first_base_notebook_id", lambda *a, **k: nb.id)
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
             {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "DeepSeek-V4 相比其他", "")
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(retriever.communities, "first_base_notebook_id", lambda *a: nb.id)
+    monkeypatch.setattr(
+        retriever.communities,
+        "resolve_comparison_peers",
+        lambda *a, **k: (["RTL综合", "布线"], "community"),
+    )
+    res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
     assert any(t.step_type == "expand_community" for t in res.trace)
     attempted_q = [a["query"] for a in res.attempted]
     assert "RTL综合" in attempted_q and "布线" in attempted_q
@@ -1258,6 +1263,6 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
         reflects=[
             {"next_action": "expand_community", "community_focal": "X"},
             {"next_action": "answer", "sufficient": True}])
-    res = ReasoningRetriever(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
     assert called["peers"] == 0                     # base 为 None → 根本不调 community_peers
     assert any(t.step_type == "expand_community" for t in res.trace)

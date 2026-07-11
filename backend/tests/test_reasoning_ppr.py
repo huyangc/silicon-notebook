@@ -65,7 +65,7 @@ def test_ppr_retrieve_wrapper_delegates_cross_doc(repo):
     """薄封装委托 repo._ppr_retrieve:问 DeepSeek 的 MoE,经概念簇桥接到 GLM 那篇的 cB。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
-    rr = ReasoningRetriever(repo, repo.settings)
+    rr = ReasoningRetriever.from_repository(repo, repo.settings)
     chunks = rr.ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts architecture")
     ids = {c.chunk_id for c in chunks}
     assert "cA" in ids and "cB" in ids
@@ -93,10 +93,19 @@ def test_reflect_parses_ppr_retrieve_decision():
             return json.dumps({"next_action": "ppr_retrieve",
                                "ppr_query": "DeepSeek vs GLM MoE", "reason": "需跨文档对比"})
 
-    class _Repo:
-        def __init__(self): self.reasoning_llm_client = _LLM()
+    class _Retrieval:
+        pass
 
-    rr = ReasoningRetriever(_Repo(), Settings(_env_file=None))
+    class _Models:
+        reasoning_llm_client = _LLM()
+
+    class _Communities:
+        pass
+
+    rr = ReasoningRetriever(
+        retrieval=_Retrieval(), model_clients=_Models(), communities=_Communities(),
+        settings=Settings(_env_file=None),
+    )
     d = rr.reflect("对比题", "候选摘要")
     assert d.next_action == "ppr_retrieve"
     assert d.ppr_query == "DeepSeek vs GLM MoE"
@@ -118,7 +127,7 @@ def test_run_seed_pass_populates_cross_doc_chunks_when_flag_on(repo):
     nb = _seed_two_doc_moe(repo)
     repo._reasoning_llm_client = _AnswerOnlyLLM()
     assert repo.settings.graph_ppr_enabled is True   # 默认开
-    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     ids = {c.chunk_id for c in result.chunks}
     assert "cA" in ids and "cB" in ids               # seed pass 拉到跨文档 chunk
     assert any(s.step_type == "ppr" for s in result.trace)
@@ -129,7 +138,7 @@ def test_run_no_seed_when_flag_off(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)
     repo._reasoning_llm_client = _AnswerOnlyLLM()
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     assert result.chunks == []
     assert not any(s.step_type == "ppr" for s in result.trace)
 
@@ -158,7 +167,7 @@ def test_ppr_retrieve_action_caps_at_max(repo, monkeypatch):
     repo._reasoning_llm_client = _ScriptedReflectLLM(
         reflects=[{"next_action": "ppr_retrieve", "ppr_query": f"q{i}"} for i in range(4)]
         + [{"next_action": "answer", "sufficient": True}])
-    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "对比题")
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     ppr_actions = [s for s in result.trace
                    if s.step_type == "ppr" and s.detail.get("phase") == "action"]
     caps = [s for s in result.trace
@@ -176,7 +185,7 @@ def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
     repo._reasoning_llm_client = _ScriptedReflectLLM(
         reflects=[{"next_action": "ppr_retrieve", "ppr_query": "q"},
                   {"next_action": "answer", "sufficient": True}])
-    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "对比题")
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     assert any(s.step_type == "skip" and s.detail.get("reason") == "ppr_disabled"
                for s in result.trace)
     assert result.chunks == []
@@ -255,5 +264,5 @@ def test_chunk_relevance_within_unit_interval(repo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
     repo._reasoning_llm_client = _AnswerOnlyLLM()
-    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "MoE 对比")
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "MoE 对比")
     assert all(0.0 <= c.relevance <= 1.0 for c in result.chunks)

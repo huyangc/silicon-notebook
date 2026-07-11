@@ -43,9 +43,9 @@ def test_large_lib_few_chunks_degrades_to_fts(repo, monkeypatch):
 
     def _boom(*a, **k):
         raise AssertionError("大库不得走 _gather_chunks 全表暴力")
-    monkeypatch.setattr(repo, "_gather_chunks", _boom)
+    monkeypatch.setattr(repo.retrieval.candidates, "_gather_chunks", _boom)
 
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "alpha")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "alpha")
     assert any(e.get("kind") == "chunk_bruteforce_skipped" for e in events)
 
 
@@ -53,7 +53,7 @@ def test_small_lib_few_chunks_bruteforces(repo):
     """小库 chunk 少 → 全量暴力路径不变(能拿到打分结果)。"""
     nb = repo.create_notebook(NotebookCreate(name="small"))
     _add_chunk(repo, nb.id, "s1", "c1", "alpha beta")
-    scored, ids, mat = repo._retrieve_chunks(nb.id, "alpha")
+    scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "alpha")
     assert ids is not None   # 走了全量矩阵路径
 
 

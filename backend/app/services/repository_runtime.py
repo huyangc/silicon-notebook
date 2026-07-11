@@ -24,10 +24,14 @@ from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
+from app.services.evidence_context import EvidenceContextService
+from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
+from app.services.retrieval_candidates import CandidateRetrievalService
+from app.services.retrieval_service import RetrievalService
 from app.services.scale_artifact_catalog import ScaleArtifactCatalog
 from app.services.scale_artifact_runtime import ScaleArtifactRuntime
 from app.services.scale_index_builder import ScaleIndexBuilder
@@ -165,6 +169,15 @@ class RepositoryRuntime:
             self.event_log,
             ask_context,
         )
+        self.evidence_context = EvidenceContextService(
+            notebooks=self.notebook_store,
+            sources=self.source_store,
+            knowledge=self.knowledge,
+            settings=self.settings,
+        )
+        self.candidate_retrieval: "CandidateRetrievalService | None" = None
+        self.graph_retrieval: "GraphRetrievalService | None" = None
+        self.retrieval: "RetrievalService | None" = None
         # Task 13: schema CRUD + LLM-backed induction. Depends on the model
         # provider (late-bound per-user llm_client property), so it composes
         # after `models`.
@@ -175,6 +188,41 @@ class RepositoryRuntime:
             self.models,
             settings,
         )
+
+    def wire_retrieval(self, *, embedder) -> RetrievalService:
+        if self.embedding_store is None or self.scale_artifacts is None:
+            raise RuntimeError("wire_retrieval requires persistence and scale runtime")
+        common = dict(
+            notebooks=self.notebook_store,
+            sources=self.source_store,
+            chunks=self.chunk_store,
+            embeddings=self.embedding_store,
+            knowledge=self.knowledge,
+            governance=self.governance,
+            unified_kg=self.unified_kg,
+            snapshots=self.retrieval_snapshots,
+            scale_runtime=self.scale_artifacts,
+            model_clients=self.models,
+            model_error_sink=self.models,
+            settings=self.settings,
+            event_log=self.event_log,
+            database=self.database,
+            embedder=embedder,
+            notebook_languages=(
+                self.kg_mutations.notebook_languages
+                if self.kg_mutations is not None else {}
+            ),
+        )
+        self.candidate_retrieval = CandidateRetrievalService(**common)
+        self.graph_retrieval = GraphRetrievalService(**common)
+        self.retrieval = RetrievalService(
+            candidates=self.candidate_retrieval,
+            graph=self.graph_retrieval,
+        )
+        self.candidate_retrieval.bind(peer=self.graph_retrieval, retrieval=self.retrieval)
+        self.graph_retrieval.bind(peer=self.candidate_retrieval, retrieval=self.retrieval)
+        self.evidence_context.knowledge = self.graph_retrieval
+        return self.retrieval
 
     def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStore:
         """Compose the vector persistence (Task 10) once the facade-bound

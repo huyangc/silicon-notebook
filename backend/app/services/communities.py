@@ -10,6 +10,64 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 
+class CommunityQueryService:
+    def __init__(self, *, notebooks, unified_kg, event_log) -> None:
+        self.notebooks = notebooks
+        self.unified_kg = unified_kg
+        self.event_log = event_log
+
+    def first_base_notebook_id(self, active_notebook_id: str) -> Optional[str]:
+        return self.unified_kg.first_base_notebook_id(active_notebook_id)
+
+    def resolve_comparison_peers(self, base_notebook_id: str, focal_name: str,
+                                 question: str, *, top_k: int,
+                                 candidates: int) -> Tuple[List[str], str]:
+        try:
+            focal = _resolve_focal(self.unified_kg, base_notebook_id, focal_name)
+            min_bridges = int(getattr(self.notebooks, "sibling_min_bridge", 2))
+            siblings = (
+                self.unified_kg.comention_peers(
+                    base_notebook_id, focal, min_bridges, top_k
+                )
+                if focal else []
+            )
+        except Exception:
+            siblings = []
+        if siblings:
+            return [name for name, _claims in siblings], "comention"
+
+        from app.services.retrieval import keyword_score
+        key = _norm(focal_name)
+        if not base_notebook_id or not key:
+            return [], "community"
+        focal = _resolve_focal(self.unified_kg, base_notebook_id, focal_name)
+        if not focal:
+            self.event_log.emit({"kind": "community_unavailable", "notebook_id": base_notebook_id,
+                                 "reason": "focal_unresolved", "focal": focal_name})
+            return [], "community"
+        community_id = self.unified_kg.top_community_for(base_notebook_id, focal)
+        if not community_id:
+            self.event_log.emit({"kind": "community_unavailable", "notebook_id": base_notebook_id,
+                                 "reason": "not_built", "focal": focal_name})
+            return [], "community"
+        rows = self.unified_kg.community_member_peers(
+            base_notebook_id, community_id, focal, candidates
+        )
+        ranked = sorted(rows, key=lambda row: (
+            keyword_score(question, row["canonical_name"] or ""), row["centrality"]
+        ), reverse=True)
+        seen, out = set(), []
+        for row in ranked:
+            name = (row["canonical_name"] or "").strip()
+            normalized = _norm(name)
+            if name and normalized not in seen:
+                seen.add(normalized)
+                out.append(name)
+            if len(out) >= top_k:
+                break
+        return out, "community"
+
+
 def _norm(s: str) -> str:
     return " ".join((s or "").split()).lower()
 

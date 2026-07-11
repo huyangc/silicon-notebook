@@ -70,14 +70,14 @@ def _build_indexed_nb_with_delta_object(repo):
 def test_object_delta_excluded_by_default(repo):
     nb, oid = _build_indexed_nb_with_delta_object(repo)
     assert repo.settings.scale_search_include_delta is False
-    hits = repo._retrieve_scored(nb.id, "bravo")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "bravo")
     assert oid not in {h.object_id for h in hits}
 
 
 def test_object_delta_included_when_opted_in(repo, monkeypatch):
     nb, oid = _build_indexed_nb_with_delta_object(repo)
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
-    hits = repo._retrieve_scored(nb.id, "bravo")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "bravo")
     assert oid in {h.object_id for h in hits}
 
 
@@ -132,7 +132,7 @@ def _build_indexed_nb_with_delta_relation(repo):
 def test_relation_delta_excluded_by_default(repo):
     nb, rid = _build_indexed_nb_with_delta_relation(repo)
     assert repo.settings.scale_search_include_delta is False
-    sims = repo._relation_ann_candidates(
+    sims = repo.retrieval.candidates._relation_ann_candidates(
         nb.id, repo.embedder.embed_query("bravo"),
         repo._scale_index(nb.id, allow_stale=True), 10)
     assert rid not in sims
@@ -141,7 +141,7 @@ def test_relation_delta_excluded_by_default(repo):
 def test_relation_delta_included_when_opted_in(repo, monkeypatch):
     nb, rid = _build_indexed_nb_with_delta_relation(repo)
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
-    sims = repo._relation_ann_candidates(
+    sims = repo.retrieval.candidates._relation_ann_candidates(
         nb.id, repo.embedder.embed_query("bravo"),
         repo._scale_index(nb.id, allow_stale=True), 10)
     assert rid in sims
@@ -185,14 +185,14 @@ def test_ppr_splice_excludes_self_delta_by_default(repo):
     scale_ppr 排名里;开 flag 后出现。用 test_scale_delta_policy 同款构造:
     delta source 的 chunk embedding 与查询最匹配。"""
     nb, d_cid = _build_indexed_nb_with_delta_chunk(repo)
-    ranked = dict(repo.scale_ppr(nb.id, "bravo"))
+    ranked = dict(repo.retrieval.graph.scale_ppr(nb.id, "bravo"))
     assert d_cid not in ranked
 
 
 def test_ppr_splice_includes_self_delta_when_opted_in(repo, monkeypatch):
     nb, d_cid = _build_indexed_nb_with_delta_chunk(repo)
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
-    ranked = dict(repo.scale_ppr(nb.id, "bravo"))
+    ranked = dict(repo.retrieval.graph.scale_ppr(nb.id, "bravo"))
     assert d_cid in ranked
 
 
@@ -232,9 +232,9 @@ def test_big_unindexed_lib_refuses_bruteforce(repo, monkeypatch):
 
     def _boom(*a, **k):
         raise AssertionError("大库不得触发全量向量矩阵加载")
-    monkeypatch.setattr(repo, "_vector_matrix", _boom)
+    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", _boom)
 
-    hits = repo._retrieve_scored(nb.id, "obj 1")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "obj 1")
     assert oid in {h.object_id for h in hits}          # FTS 词法兜底仍可命中
     assert any(e.get("kind") == "kg_bruteforce_refused" for e in events)
 
@@ -242,7 +242,7 @@ def test_big_unindexed_lib_refuses_bruteforce(repo, monkeypatch):
 def test_small_lib_bruteforce_unchanged(repo):
     nb = repo.create_notebook(NotebookCreate(name="small"))
     _sid, _cid, oid = _insert_source_with_object(repo, nb.id, 2)
-    hits = repo._retrieve_scored(nb.id, "obj 2")       # 小库全量路径不受影响
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "obj 2")       # 小库全量路径不受影响
     assert oid in {h.object_id for h in hits}
 
 
@@ -323,6 +323,6 @@ def test_flag_on_big_delta_multibatch_no_sql_variable_blowup(repo, monkeypatch):
     nb, oids = _build_indexed_nb_with_multi_delta_objects(repo, n=4)
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     monkeypatch.setattr(SQLiteRepository, "_IN_CHUNK", 2)
-    hits = repo._retrieve_scored(nb.id, "bravo")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "bravo")
     hit_ids = {h.object_id for h in hits}
     assert set(oids) <= hit_ids

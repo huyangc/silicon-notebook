@@ -99,7 +99,7 @@ def test_reasoning_trace_uses_concept_walk_name(repo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
     repo._reasoning_llm_client = _AnswerOnlyReasoningLLM()
-    result = ReasoningRetriever(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     ppr_steps = [s for s in result.trace if s.step_type == "ppr"]
     assert ppr_steps                                            # 机器键不变
     assert any("概念漫游" in s.summary for s in ppr_steps)      # 文案已改名

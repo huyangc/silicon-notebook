@@ -198,7 +198,7 @@ def test_reasoning_search_federates_base(repo):
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "Engram"}, "evidence": []}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))
-    hits = ReasoningRetriever(repo, repo.settings).search(empty.id, "Engram")
+    hits = ReasoningRetriever.from_repository(repo, repo.settings).search(empty.id, "Engram")
     names = {h.payload.get("name") for h in hits}
     assert "Engram" in names                   # base hit surfaced via federation
 

@@ -58,11 +58,24 @@ class _StubRepo:
         self.reasoning_llm_client = type("C", (), {"configured": False})()
 
 
+class _StubCommunities:
+    pass
+
+
+def _retriever(repo, settings):
+    return ReasoningRetriever(
+        retrieval=repo.retrieval,
+        model_clients=repo,
+        communities=_StubCommunities(),
+        settings=settings,
+    )
+
+
 def _run(reuse: bool):
     s = _StubSettings()
     s.reasoning_quota_reuse_enabled = reuse
     repo = _StubRepo()
-    r = ReasoningRetriever(repo, s)
+    r = _retriever(repo, s)
     r.plan = lambda question, history="": [SubQuery(query="问题A"), SubQuery(query="问题B")]
     r.reflect = lambda question, sm: ReflectDecision(sufficient=True, next_action="answer")
     res = r.run("nb1", "总问题")
@@ -131,7 +144,7 @@ def _run_prefer(reuse: bool):
     s = _StubSettings()
     s.reasoning_quota_reuse_enabled = reuse
     repo = _PreferAwareRepo()
-    r = ReasoningRetriever(repo, s)
+    r = _retriever(repo, s)
     r.plan = lambda question, history="": [
         SubQuery(query="问题A", prefer="balanced"),
         SubQuery(query="问题B", prefer="keyword"),

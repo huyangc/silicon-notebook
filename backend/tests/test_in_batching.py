@@ -42,7 +42,7 @@ def _insert_source_with_object(repo, nb_id, i):
 
 
 def test_in_batches_dedup_and_order(repo):
-    batches = list(repo._in_batches(["a", "b", "a", "c"]))
+    batches = list(repo.retrieval.candidates._in_batches(["a", "b", "a", "c"]))
     assert [x for b in batches for x in b] == ["a", "b", "c"]
 
 
