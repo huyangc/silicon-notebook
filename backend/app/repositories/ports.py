@@ -10,7 +10,7 @@ import threading
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
 from app.core.config import Settings
 from app.models.schemas import (
@@ -273,6 +273,7 @@ class KnowledgeStorePort(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+@runtime_checkable
 class EvidenceKnowledgeContextPort(Protocol):
     def cluster_map(self, notebook_id: str) -> dict[str, str]: ...
     def node_context(self, notebook_id: str, object_id: str) -> dict[str, Any]: ...
@@ -285,6 +286,10 @@ class EvidenceKnowledgeContextPort(Protocol):
 
 
 class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
+    def retrieval_objects(self, db: sqlite3.Connection, notebook_id: str,
+                          object_type: str, statuses: Iterable[str] | None,
+                          id_filter: Iterable[str] | None, *,
+                          batch_size: int = 900) -> list[dict[str, Any]]: ...
     def any_base_has_kg_on(self, db: sqlite3.Connection) -> bool: ...
     def object_version_row(self, db: sqlite3.Connection, notebook_id: str) -> Any: ...
     def relation_context_rows(self, db: sqlite3.Connection, notebook_id: str, relation_ids: Sequence[str] | None = None, *, batch_size: int = 900) -> list[Any]: ...

@@ -170,7 +170,8 @@ class _RetrievalState:
     def _knowledge_objects(self, database, notebook_id, object_type,
                            statuses=USABLE_STATUSES, id_filter=None):
         return self.knowledge.retrieval_objects(
-            database, notebook_id, object_type, statuses, id_filter
+            database, notebook_id, object_type, statuses, id_filter,
+            batch_size=self._IN_CHUNK,
         )
 
     def _notebook_has_kg(self, notebook_id: str) -> bool:

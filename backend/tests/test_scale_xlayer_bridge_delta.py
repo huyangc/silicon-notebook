@@ -178,18 +178,25 @@ def test_self_only_participant_uses_delta_no_full_load(repo, monkeypatch):
     delta_ids, delta_edges, _ = repo._active_kg_delta(selfnb.id)
     assert "eNew" in delta_ids and "eS" not in delta_ids
 
-    calls = {"full": 0}
+    calls = {"full": 0, "delta": 0}
     orig = repo.retrieval.candidates._vector_matrix
+    orig_delta = repo.retrieval.graph._delta_vector_matrix
 
     def spy(*a, **kw):
         calls["full"] += 1
         return orig(*a, **kw)
 
+    def spy_delta(*a, **kw):
+        calls["delta"] += 1
+        return orig_delta(*a, **kw)
+
     monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", spy)
+    monkeypatch.setattr(repo.retrieval.graph, "_delta_vector_matrix", spy_delta)
     got = repo.retrieval.graph._scale_xlayer_bridge_edges(
         selfnb.id, base_indexes, list(delta_edges), active_node_ids=delta_ids)
     assert calls["full"] == 0, (
         "self-only participant must keep the delta domain (no full matrix load)")
+    assert calls["delta"] == 1
     new_edges = set(got) - set(delta_edges)
     assert any(a == "eNew" and b == "eS" for a, b, _ in new_edges), (
         "delta node must still bridge into the self core")
@@ -208,7 +215,8 @@ def test_self_only_empty_delta_no_load_at_all(repo, monkeypatch):
     assert delta_ids == []
 
     calls = {"full": 0, "delta": 0}
-    orig_full, orig_delta = repo.retrieval.candidates._vector_matrix, repo._delta_vector_matrix
+    orig_full = repo.retrieval.candidates._vector_matrix
+    orig_delta = repo.retrieval.graph._delta_vector_matrix
 
     def spy_full(*a, **kw):
         calls["full"] += 1
@@ -219,7 +227,7 @@ def test_self_only_empty_delta_no_load_at_all(repo, monkeypatch):
         return orig_delta(*a, **kw)
 
     monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", spy_full)
-    monkeypatch.setattr(repo, "_delta_vector_matrix", spy_delta)
+    monkeypatch.setattr(repo.retrieval.graph, "_delta_vector_matrix", spy_delta)
     got = repo.retrieval.graph._scale_xlayer_bridge_edges(
         selfnb.id, base_indexes, [], active_node_ids=[])
     assert got == []

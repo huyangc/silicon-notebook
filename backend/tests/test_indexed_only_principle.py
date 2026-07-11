@@ -322,7 +322,18 @@ def test_flag_on_big_delta_multibatch_no_sql_variable_blowup(repo, monkeypatch):
     结果一致",不是"不批会抛异常")。"""
     nb, oids = _build_indexed_nb_with_multi_delta_objects(repo, n=4)
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
-    monkeypatch.setattr(SQLiteRepository, "_IN_CHUNK", 2)
+    monkeypatch.setattr(repo.retrieval.candidates, "_IN_CHUNK", 2)
+    observed_batch_sizes = []
+    original = repo._runtime.knowledge.retrieval_objects
+
+    def spy_retrieval_objects(*args, **kwargs):
+        observed_batch_sizes.append(kwargs.get("batch_size"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo._runtime.knowledge, "retrieval_objects", spy_retrieval_objects,
+    )
     hits = repo.retrieval.candidates._retrieve_scored(nb.id, "bravo")
     hit_ids = {h.object_id for h in hits}
     assert set(oids) <= hit_ids
+    assert 2 in observed_batch_sizes

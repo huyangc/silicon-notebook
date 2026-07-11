@@ -279,6 +279,8 @@ class KnowledgeStore:
         object_type: str,
         statuses: Optional[Iterable[str]],
         id_filter: Optional[Iterable[str]],
+        *,
+        batch_size: int = 900,
     ) -> List[dict]:
         base_query = "SELECT * FROM knowledge_objects WHERE notebook_id=? AND object_type=?"
         params: List[object] = [notebook_id, object_type]
@@ -291,8 +293,9 @@ class KnowledgeStore:
             if not ids:
                 return []
             rows = []
-            for offset in range(0, len(ids), 900):
-                batch = ids[offset:offset + 900]
+            batch_size = max(1, int(batch_size))
+            for offset in range(0, len(ids), batch_size):
+                batch = ids[offset:offset + batch_size]
                 rows.extend(db.execute(
                     base_query + f" AND id IN ({','.join('?' for _ in batch)})",
                     (*params, *batch),

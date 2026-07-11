@@ -971,6 +971,8 @@ TASK21_ALLOWED_PATCHES = {
     ("backend/tests/test_overlay_guard_order.py", 63, "federated_retrieve_relations", "repo"),
     ("backend/tests/test_overlay_guard_order.py", 71, "notebook_copy_stats", "repo"),
     ("backend/tests/test_overlay_guard_order.py", 93, "notebook_copy_stats", "repo"),
+    ("backend/tests/test_indexed_only_principle.py", 325, "_IN_CHUNK", "SQLiteRepository"),
+    ("backend/tests/test_scale_xlayer_bridge_delta.py", 222, "_delta_vector_matrix", "repo"),
     ('backend/tests/test_architecture_hardening.py', 55, '_retrieve_chunks', 'repo'),
     ('backend/tests/test_architecture_hardening.py', 102, 'notebook_copy_stats', 'repo'),
     ('backend/tests/test_bm25_rrf.py', 135, '_rrf_scored', 'repo'),
@@ -1121,7 +1123,7 @@ TASK21_ALLOWED_MEMBER_FILES = {
 } | {
     ("backend/tests/test_repository_runtime.py", name)
     for name in {
-        "_answer_context", "_runtime", "_test_insert_object",
+        "_answer_context", "_chunk_answer_context", "_runtime", "_test_insert_object",
         "create_notebook", "retrieval",
     }
 }
@@ -1202,6 +1204,8 @@ TASK21_ALLOWED_MEMBER_FILES |= {
     ('backend/tests/test_indexed_only_principle.py', '_relation_ann_candidates'),
     ('backend/tests/test_indexed_only_principle.py', '_retrieve_scored'),
     ('backend/tests/test_indexed_only_principle.py', '_vector_matrix'),
+    ('backend/tests/test_indexed_only_principle.py', '_IN_CHUNK'),
+    ('backend/tests/test_indexed_only_principle.py', '_runtime'),
     ('backend/tests/test_indexed_only_principle.py', 'retrieval'),
     ('backend/tests/test_indexed_only_principle.py', 'scale_ppr'),
     ('backend/tests/test_language_policy.py', '_keyword_chunk_candidates'),
@@ -1242,6 +1246,9 @@ TASK21_ALLOWED_MEMBER_FILES |= {
     ('backend/tests/test_scale_xlayer_bridge_delta.py', '_scale_combined_graph'),
     ('backend/tests/test_scale_xlayer_bridge_delta.py', '_scale_xlayer_bridge_edges'),
     ('backend/tests/test_scale_xlayer_bridge_delta.py', '_vector_matrix'),
+    ('backend/tests/test_scale_xlayer_bridge_delta.py', '_delta_vector_matrix'),
+    ('backend/tests/test_scale_xlayer_bridge_delta.py', '_active_kg_delta'),
+    ('backend/tests/test_scale_xlayer_bridge_delta.py', '_scale_index'),
     ('backend/tests/test_scale_xlayer_bridge_delta.py', 'retrieval'),
 }
 

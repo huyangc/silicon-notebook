@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Any, Callable
 
 from app.core import ask_context
@@ -173,6 +174,7 @@ class RepositoryRuntime:
         self.candidate_retrieval: "CandidateRetrievalService | None" = None
         self.graph_retrieval: "GraphRetrievalService | None" = None
         self.retrieval: "RetrievalService | None" = None
+        self._retrieval_wire_lock = threading.Lock()
         # Task 13: schema CRUD + LLM-backed induction. Depends on the model
         # provider (late-bound per-user llm_client property), so it composes
         # after `models`.
@@ -187,44 +189,48 @@ class RepositoryRuntime:
     def wire_retrieval(self, *, embedder) -> RetrievalService:
         if self.retrieval is not None:
             return self.retrieval
-        if self.embedding_store is None or self.scale_artifacts is None:
-            raise RuntimeError("wire_retrieval requires persistence and scale runtime")
-        common = dict(
-            notebooks=self.notebook_store,
-            sources=self.source_store,
-            chunks=self.chunk_store,
-            embeddings=self.embedding_store,
-            knowledge=self.knowledge,
-            governance=self.governance,
-            unified_kg=self.unified_kg,
-            snapshots=self.retrieval_snapshots,
-            scale_runtime=self.scale_artifacts,
-            model_clients=self.models,
-            model_error_sink=self.models,
-            settings=self.settings,
-            event_log=self.event_log,
-            database=self.database,
-            embedder=embedder,
-            notebook_languages=(
-                self.kg_mutations.notebook_languages
-                if self.kg_mutations is not None else {}
-            ),
-        )
-        self.candidate_retrieval = CandidateRetrievalService(**common)
-        self.graph_retrieval = GraphRetrievalService(**common)
-        self.retrieval = RetrievalService(
-            candidates=self.candidate_retrieval,
-            graph=self.graph_retrieval,
-        )
-        self.candidate_retrieval.bind(peer=self.graph_retrieval, retrieval=self.retrieval)
-        self.graph_retrieval.bind(peer=self.candidate_retrieval, retrieval=self.retrieval)
-        self.evidence_context = EvidenceContextService(
-            notebooks=self.notebook_store,
-            sources=self.source_store,
-            knowledge=self.graph_retrieval,
-            settings=self.settings,
-        )
-        return self.retrieval
+        with self._retrieval_wire_lock:
+            if self.retrieval is not None:
+                return self.retrieval
+            if self.embedding_store is None or self.scale_artifacts is None:
+                raise RuntimeError("wire_retrieval requires persistence and scale runtime")
+            common = dict(
+                notebooks=self.notebook_store,
+                sources=self.source_store,
+                chunks=self.chunk_store,
+                embeddings=self.embedding_store,
+                knowledge=self.knowledge,
+                governance=self.governance,
+                unified_kg=self.unified_kg,
+                snapshots=self.retrieval_snapshots,
+                scale_runtime=self.scale_artifacts,
+                model_clients=self.models,
+                model_error_sink=self.models,
+                settings=self.settings,
+                event_log=self.event_log,
+                database=self.database,
+                embedder=embedder,
+                notebook_languages=(
+                    self.kg_mutations.notebook_languages
+                    if self.kg_mutations is not None else {}
+                ),
+            )
+            candidates = CandidateRetrievalService(**common)
+            graph = GraphRetrievalService(**common)
+            retrieval = RetrievalService(candidates=candidates, graph=graph)
+            candidates.bind(peer=graph, retrieval=retrieval)
+            graph.bind(peer=candidates, retrieval=retrieval)
+            evidence = EvidenceContextService(
+                notebooks=self.notebook_store,
+                sources=self.source_store,
+                knowledge=graph,
+                settings=self.settings,
+            )
+            self.candidate_retrieval = candidates
+            self.graph_retrieval = graph
+            self.evidence_context = evidence
+            self.retrieval = retrieval
+            return retrieval
 
     def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStore:
         """Compose the vector persistence (Task 10) once the facade-bound
