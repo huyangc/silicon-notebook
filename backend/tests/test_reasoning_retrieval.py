@@ -1249,11 +1249,39 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
 
 def test_from_repository_passes_configured_sibling_threshold(rrepo):
     from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.repositories.ports import ReasoningModelProvider
 
     rrepo.settings.sibling_min_bridge = 5
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
 
     assert retriever.communities.sibling_min_bridge == 5
+    assert isinstance(retriever.model_clients, ReasoningModelProvider)
+
+
+def test_compatibility_factory_constructs_replacement_without_classmethod(
+    rrepo, monkeypatch
+):
+    from app.services import reasoning_retrieval as module
+
+    class Replacement:
+        def __init__(self, *, retrieval, model_clients, communities, settings,
+                     cancel_event=None):
+            self.retrieval = retrieval
+            self.model_clients = model_clients
+            self.communities = communities
+            self.settings = settings
+            self.cancel_event = cancel_event
+
+    monkeypatch.setattr(module, "ReasoningRetriever", Replacement)
+    retriever = module.reasoning_retriever_from_repository(
+        rrepo, rrepo.settings, "cancel-token"
+    )
+
+    assert isinstance(retriever, Replacement)
+    assert retriever.retrieval is rrepo.retrieval
+    assert retriever.model_clients is rrepo
+    assert retriever.communities.sibling_min_bridge == rrepo.settings.sibling_min_bridge
+    assert retriever.cancel_event == "cancel-token"
 
 
 def test_run_expand_community_no_base_noop(rrepo, monkeypatch):

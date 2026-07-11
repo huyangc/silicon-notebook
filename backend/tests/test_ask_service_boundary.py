@@ -33,7 +33,7 @@ from app.services.sqlite_repository import SQLiteRepository, set_request_user, r
 import asyncio
 import queue
 from types import SimpleNamespace
-from app.services.retrieval import RetrievedKnowledge
+from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
 
 
 @pytest.fixture
@@ -126,7 +126,14 @@ class _MinimalModels:
     llm_client = SimpleNamespace(configured=False, model="")
     reasoning_llm_client = SimpleNamespace(configured=False)
     rewrite_llm_client = SimpleNamespace(configured=False)
-    rerank_client = SimpleNamespace(rerank=lambda *args, **kwargs: [])
+
+    class _Reranker:
+        configured = True
+
+        def rerank(self, query, documents, *, on_error=None):
+            return list(range(len(documents)))
+
+    rerank_client = _Reranker()
 
     def primary_unconfigured(self) -> bool:
         return False
@@ -138,7 +145,8 @@ class _MinimalCandidates:
 
     def chunk_plan(self, notebook_id, queries):
         return SimpleNamespace(
-            strategy="single", overlay_on=False, mmr_k=8, mmr_lambda=0.7
+            strategy="mix", overlay_on=True, mmr_k=8, mmr_lambda=0.7,
+            fuse_k=8,
         )
 
     def keyword_chunk_candidates(self, notebook_id, keywords):
@@ -146,6 +154,16 @@ class _MinimalCandidates:
 
     def retrieve_chunk_candidates(self, notebook_id, query):
         return [], [], []
+
+    def retrieve_chunk_candidates_multi(self, notebook_id, queries):
+        return {}, [], [], None
+
+    def mixed_chunk_candidates(self, notebook_id, query, high_level, queries):
+        return [RetrievedChunk(
+            chunk_id="chunk-1", source_id="source-1", source_title="Source",
+            section_path="§1", text="evidence", element_ids=["element-1"],
+            relevance=0.9,
+        )], "", {}, [], 0
 
     def merge_chunk_candidates(self, base, extra):
         return base
@@ -168,7 +186,11 @@ class _MinimalCandidates:
 
 class _MinimalGraph:
     def federated_graph(self, notebook_id):
-        return SimpleNamespace(num_nodes=lambda: 0), [], {}
+        from app.services.kg.graph_reason import build_rx_graph
+
+        return build_rx_graph(
+            {"ko-1": {"type": "concept", "name": "one"}}, []
+        )
 
     def source_chunks(self, notebook_id, object_ids):
         return []
@@ -224,6 +246,8 @@ def test_chunk_and_graph_ask_execute_on_declared_ports_only():
 
     assert chunk.answer_id == "answer-1"
     assert graph.answer_id == "answer-1"
+    assert chunk.conclusion == "Retrieved 1 relevant passage(s) for this question."
+    assert "Graph traversal found 1 node(s)" in graph.conclusion
     assert not hasattr(service.retrieval, "candidates")
     assert not hasattr(service.retrieval, "graph")
     assert not hasattr(service.model_clients, "identity")

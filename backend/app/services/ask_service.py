@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from app.repositories.ports import (
         AskCandidatePort,
         AskGraphPort,
-        ModelClientProvider,
+        AskModelClientProvider,
         RetrievalPort,
     )
 
@@ -134,7 +134,7 @@ class AskService:
         candidates: "AskCandidatePort",
         graph: "AskGraphPort",
         evidence_context,
-        model_clients: "ModelClientProvider",
+        model_clients: "AskModelClientProvider",
         model_errors,
         communities: Callable[[], Any],
         scale_profiles: Callable[[], Any],

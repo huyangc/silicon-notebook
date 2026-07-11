@@ -42,7 +42,12 @@ def _annotation_name(node: ast.AST | None) -> str:
 
 
 def _protocol_receivers(tree: ast.AST, protocol_name: str) -> set[str]:
-    receivers = {"retrieval", "_retrieval"}
+    receivers = {
+        "RetrievalPort": {"retrieval", "_retrieval"},
+        "AskCandidatePort": set(),
+        "AskGraphPort": set(),
+        "AskStreamPort": set(),
+    }[protocol_name].copy()
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for arg in (*node.args.args, *node.args.kwonlyargs):
@@ -73,13 +78,14 @@ def _protocol_receivers(tree: ast.AST, protocol_name: str) -> set[str]:
 def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
     """Return public calls made through the named production protocol seat.
 
-    Retrieval is intentionally detected by data-flow-neutral seat names as
-    well as annotations: production uses dataclass fields (``deps.retrieval``),
-    local adapters (``retrieval = repo.retrieval``), and ``self.retrieval``.
-    A new call therefore cannot evade the guard merely by dropping a type
-    annotation at one call site.
+    Each consumer-owned port is detected from its annotations and propagated
+    assignments; established semantic seat names cover dataclass fields and
+    local aliases. A new call cannot evade the guard merely by moving from a
+    constructor argument to ``self.<seat>``.
     """
-    if protocol_name != "RetrievalPort":
+    if protocol_name not in {
+        "RetrievalPort", "AskCandidatePort", "AskGraphPort", "AskStreamPort",
+    }:
         raise ValueError(f"unsupported protocol audit: {protocol_name}")
 
     calls: set[tuple[str, int, str]] = set()
@@ -90,12 +96,35 @@ def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
         }:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        if protocol_name == "AskStreamPort":
+            for scope in ast.walk(tree):
+                if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                stream_args = {
+                    arg.arg
+                    for arg in (*scope.args.args, *scope.args.kwonlyargs)
+                    if _annotation_name(arg.annotation).rsplit(".", 1)[-1]
+                    == protocol_name
+                }
+                for node in ast.walk(scope):
+                    if (
+                        stream_args
+                        and isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and _dotted(node.func.value) in stream_args
+                    ):
+                        calls.add((rel, node.lineno, node.func.attr))
+            continue
         receivers = _protocol_receivers(tree, protocol_name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             receiver = _dotted(node.func.value)
-            if receiver in receivers or receiver.rsplit(".", 1)[-1] in receivers:
+            loose_match = (
+                protocol_name == "RetrievalPort"
+                and receiver.rsplit(".", 1)[-1] in receivers
+            )
+            if receiver in receivers or loose_match:
                 calls.add((rel, node.lineno, node.func.attr))
     return calls
 
@@ -113,14 +142,16 @@ def test_retrieval_port_declares_every_production_retrieval_call():
 
 
 def test_ask_ports_declare_the_executable_service_and_route_surface():
-    assert {
-        "current_user", "start_ask_stream",
-    } <= set(AskStreamPort.__dict__)
-    assert {
-        "notebook_languages", "chunk_plan", "retrieve_chunk_candidates",
-        "graph_is_large",
-    } <= set(AskCandidatePort.__dict__)
-    assert {"federated_graph", "source_chunks"} <= set(AskGraphPort.__dict__)
+    for name, protocol in (
+        ("AskCandidatePort", AskCandidatePort),
+        ("AskGraphPort", AskGraphPort),
+        ("AskStreamPort", AskStreamPort),
+    ):
+        declared = {
+            member for member, value in protocol.__dict__.items()
+            if callable(value) and not member.startswith("_")
+        }
+        assert protocol_calls(name) == declared
 
 
 def test_maintenance_port_covers_every_public_sqlite_adapter_method():

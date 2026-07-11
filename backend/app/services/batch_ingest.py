@@ -19,7 +19,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Protocol, Tuple
+from typing import Callable, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.core.config import Settings
 from app.core.request_context import set_request_user, reset_request_user
@@ -27,11 +27,20 @@ from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
-from app.repositories.ports import SQLiteMaintenancePort
+import sqlite3
+from app.models.schemas import NotebookSummary, SourceSummary, UserProfile
+from app.repositories.ports import (
+    ExtractionProgress,
+    IndexStageProgress,
+    JsonChatClientPort,
+    RebuildProgress,
+    SQLiteMaintenancePort,
+    SourceScheduler,
+)
 
 SUPPORTED_EXTS = {".md", ".markdown", ".pdf"}
 
-LogFn = Callable[[dict], None]
+LogFn = Callable[[dict[str, object]], None]
 
 
 class BatchIngestRepository(Protocol):
@@ -40,19 +49,28 @@ class BatchIngestRepository(Protocol):
     settings: Settings
     storage_dir: Path
     maintenance: SQLiteMaintenancePort
-    llm_client: Any
+    llm_client: JsonChatClientPort
 
-    def current_user(self) -> Any: ...
-    def get_notebook(self, notebook_id: str) -> Any: ...
-    def create_notebook(self, payload: NotebookCreate) -> Any: ...
-    def upload_sources(self, notebook_id: str, files: Any, scheduler: Any = None) -> Any: ...
-    def process_source(self, source_id: str) -> Any: ...
-    def extract_source(self, source_id: str) -> Any: ...
-    def build_notebook_kg(self, notebook_id: str, *, progress: Any = None) -> dict: ...
-    def rebuild_unified_kg(self, notebook_id: str, progress: Any = None,
+    def current_user(self) -> UserProfile: ...
+    def get_notebook(self, notebook_id: str) -> NotebookSummary: ...
+    def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
+    def upload_sources(
+        self,
+        notebook_id: str,
+        files: Iterable[UploadedSourceFile],
+        scheduler: SourceScheduler | None = None,
+    ) -> list[SourceSummary]: ...
+    def process_source(self, source_id: str) -> SourceSummary: ...
+    def extract_source(self, source_id: str) -> None: ...
+    def build_notebook_kg(
+        self, notebook_id: str, *, progress: ExtractionProgress | None = None
+    ) -> dict[str, object]: ...
+    def rebuild_unified_kg(self, notebook_id: str,
+                           progress: RebuildProgress | None = None,
                            force: bool = False, fresh: bool = False) -> int: ...
     def build_scale_index(self, notebook_id: str,
-                          on_stage: Any = None) -> dict: ...
+                          on_stage: IndexStageProgress | None = None
+                          ) -> dict[str, object]: ...
 
 
 def _rebuild_progress(phase: str, i: int, n: int) -> None:
@@ -80,7 +98,7 @@ def _index_stage_progress(stage: str, latency_ms: int) -> None:
     print(f"  [index] {stage}: {latency_ms}ms", flush=True)
 
 
-def _live_embed_thread_counts() -> Counter:
+def _live_embed_thread_counts() -> Counter[str]:
     """Snapshot of live pool threads by name convention:
       - `embed-<sid>` per-source background embed daemons → "bg"
       - `emb-el`/`emb-ck`/`emb-kg`/`emb-rel` embed pool workers → "pool"
@@ -101,8 +119,14 @@ def _live_embed_thread_counts() -> Counter:
     return c
 
 
-def _format_pool_snapshot(ts: str, s: dict, embed: Counter, done: int, total: int,
-                          label: str = "") -> str:
+def _format_pool_snapshot(
+    ts: str,
+    s: Mapping[str, int],
+    embed: Counter[str],
+    done: int,
+    total: int,
+    label: str = "",
+) -> str:
     """Pure one-line snapshot of pool utilization. `ts` is the wall-clock time of
     the snapshot (so it lines up with the model-call logs); `s` is
     scheduler.stats(); `embed` is _live_embed_thread_counts(). Shows KG-LLM(window)
@@ -191,7 +215,9 @@ def source_id_by_hash(repo: BatchIngestRepository, notebook_id: str, digest: str
     return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
-def _resolve_owner_profile(repo: BatchIngestRepository, owner: Optional[str]):
+def _resolve_owner_profile(
+    repo: BatchIngestRepository, owner: Optional[str]
+) -> UserProfile:
     """解析 notebook 属主 → UserProfile。owner=用户名(大小写不敏感);
     None → 默认取 admin 用户(role='admin' 中最早建的=seeded admin)。找不到 → SystemExit。"""
     profile = repo.maintenance.resolve_owner_profile(owner)
@@ -215,14 +241,21 @@ def ensure_notebook(repo: BatchIngestRepository, notebook_id: Optional[str], nam
         reset_request_user(token)
 
 
-def run_ingest(repo: BatchIngestRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
+def run_ingest(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+    files: Iterable[Path],
+    workers: int = 4,
+    conc: int = 4,
+    log: LogFn | None = None,
+) -> dict[str, int]:
     """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。"""
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
 
-    def _one(path: Path):
+    def _one(path: Path) -> tuple[str, Path, str | None]:
         try:
             content = path.read_bytes()
             if already_ingested(repo, notebook_id, sha256_bytes(content)):
@@ -250,8 +283,12 @@ def run_ingest(repo: BatchIngestRepository, notebook_id, files, workers=4, conc=
     return counts
 
 
-def backfill_chunk_embeddings(repo: BatchIngestRepository, notebook_id, conc=4,
-                              missing_only=False) -> int:
+def backfill_chunk_embeddings(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+    conc: int = 4,
+    missing_only: bool = False,
+) -> int:
     """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
 
     - missing_only=False(默认):遍历每个 source 调 _embed_chunks_for_source 全量重嵌
@@ -290,9 +327,10 @@ def backfill_chunk_embeddings(repo: BatchIngestRepository, notebook_id, conc=4,
         repo.settings.embed_concurrency = orig_conc
 
 
-def run_kg(repo: BatchIngestRepository, notebook_id, limit=None, conc=4, log=None,
+def run_kg(repo: BatchIngestRepository, notebook_id: str,
+           limit: int | None = None, conc: int = 4, log: LogFn | None = None,
            no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
-           report_interval: int = 15) -> dict:
+           report_interval: int = 15) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
     Flags:
@@ -327,7 +365,9 @@ def run_kg(repo: BatchIngestRepository, notebook_id, limit=None, conc=4, log=Non
                     # progress 回调回填);查询很廉价。
                     kg_total = mnt.count_sources_missing_kg(notebook_id)
                     with _PoolReporter(report_interval, total=kg_total, log=log) as reporter:
-                        def _kg_progress(i, n, sid, ok):
+                        def _kg_progress(
+                            i: int, n: int, sid: str, ok: bool
+                        ) -> None:
                             reporter.done = i
                             reporter.total = n
                             print(f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True)
@@ -391,8 +431,10 @@ def run_kg(repo: BatchIngestRepository, notebook_id, limit=None, conc=4, log=Non
     return res
 
 
-def run_all(repo: BatchIngestRepository, notebook_id, files, workers=4, conc=4, log=None,
-            report_interval: int = 15, fresh: bool = False) -> dict:
+def run_all(repo: BatchIngestRepository, notebook_id: str,
+            files: Iterable[Path], workers: int = 4, conc: int = 4,
+            log: LogFn | None = None, report_interval: int = 15,
+            fresh: bool = False) -> dict[str, int]:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
     跨源并发提交到全局 KG job 池;**末尾一次** rebuild_unified_kg + 补节点向量(+ scale index)。
 
@@ -504,14 +546,16 @@ def run_all(repo: BatchIngestRepository, notebook_id, files, workers=4, conc=4, 
     return res
 
 
-def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict:
+def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict[str, int]:
     """Phase 3 (offline): build the scalable-retrieval index for a (base) notebook.
     Static base KGs should re-run this after a rebuild."""
     manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
     return {"indexed_nodes": manifest.get("n_nodes", 0)}
 
 
-def backfill_node_embeddings(repo: BatchIngestRepository, notebook_id, conc=4) -> int:
+def backfill_node_embeddings(
+    repo: BatchIngestRepository, notebook_id: str, conc: int = 4
+) -> int:
     """补 KG 节点向量(复用 backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
     if not repo.settings.embedder_configured:
         return 0
@@ -519,7 +563,7 @@ def backfill_node_embeddings(repo: BatchIngestRepository, notebook_id, conc=4) -
     orig_conc = repo.settings.embed_concurrency
     repo.settings.embed_concurrency = conc
     try:
-        def _p(done, total):
+        def _p(done: int, total: int) -> None:
             end = "\n" if done >= total else "\r"
             print(f"  节点向量: {done}/{total}", end=end, flush=True)
         count = mnt.backfill_node_embeddings(notebook_id, progress=_p)
@@ -532,15 +576,21 @@ def backfill_node_embeddings(repo: BatchIngestRepository, notebook_id, conc=4) -
     return count
 
 
-def _count_missing_chunk_vectors(repo: BatchIngestRepository, notebook_id) -> int:
+def _count_missing_chunk_vectors(
+    repo: BatchIngestRepository, notebook_id: str
+) -> int:
     return repo.maintenance.count_missing_chunk_vectors(notebook_id)
 
 
-def _count_missing_node_vectors(repo: BatchIngestRepository, notebook_id) -> int:
+def _count_missing_node_vectors(
+    repo: BatchIngestRepository, notebook_id: str
+) -> int:
     return repo.maintenance.count_missing_node_vectors(notebook_id)
 
 
-def run_embed(repo: BatchIngestRepository, notebook_id, conc=4) -> dict:
+def run_embed(
+    repo: BatchIngestRepository, notebook_id: str, conc: int = 4
+) -> dict[str, int]:
     """补该 notebook 缺失的 chunk + 节点向量(幂等,只补缺失)。
 
     先 SQL 盘点缺失数并打印,再 backfill_chunk_embeddings(missing_only=True) +
@@ -605,7 +655,9 @@ def _parse_encode(pair: Tuple[str, str]) -> Tuple[str, bytes]:
         return vid, b""
 
 
-def _parse_encode_batch_serial(rows) -> List[Tuple[bytes, str, str]]:
+def _parse_encode_batch_serial(
+    rows: Sequence[sqlite3.Row],
+) -> List[Tuple[bytes, str, str]]:
     """Serial parse+encode of a batch of rows — the exact pre-parallel code
     path. Returns [(blob, notebook_id, vid), ...] ready for executemany."""
     from app.services.vector_index import decode_vector, encode_vector
@@ -627,7 +679,7 @@ def _parse_encode_batch_serial(rows) -> List[Tuple[bytes, str, str]]:
 def _backfill_table_to_blob(repo: BatchIngestRepository, notebook_id: Optional[str],
                             table: str, id_col: str,
                             batch_size: int = _BACKFILL_BATCH_SIZE,
-                            workers: int = 1) -> dict:
+                            workers: int = 1) -> dict[str, object]:
     """把一个 embeddings 表里仍是 JSON TEXT 的 vector 行原地转成 float32 BLOB
     (encode_vector),分批事务提交 + 打印进度。幂等:每轮只选
     typeof(vector)='text' 的行(SQLite 原生类型探测,O(1) 判定、不逐行反序列化),
@@ -678,7 +730,9 @@ def _backfill_table_to_blob(repo: BatchIngestRepository, notebook_id: Optional[s
             )
             use_pool = False
 
-    def _encode(rows):
+    def _encode(
+        rows: Sequence[sqlite3.Row],
+    ) -> list[tuple[bytes, str, str]]:
         """Parse+encode one selected batch — runs inside the adapter's write
         transaction (same boundary as the old inline block)."""
         nonlocal use_pool, executor
@@ -715,7 +769,8 @@ def _backfill_table_to_blob(repo: BatchIngestRepository, notebook_id: Optional[s
 
 
 def run_vectors_to_blob(repo: BatchIngestRepository, notebook_id: Optional[str],
-                        all_notebooks: bool = False, workers: int = 1) -> dict:
+                        all_notebooks: bool = False,
+                        workers: int = 1) -> dict[str, object]:
     """向量存储 BLOB 化一次性 backfill:把指定 notebook(或 --all-notebooks 时全库)
     embeddings 表里的旧 JSON TEXT 行原地转成 float32 BLOB(encode_vector)。
     分批事务(每批 5000 行)+ 打印进度;typeof(vector)='blob' 的行已跳过 →
@@ -745,7 +800,9 @@ def run_vectors_to_blob(repo: BatchIngestRepository, notebook_id: Optional[str],
 _KOS_BACKFILL_BATCH_SIZE = 2000
 
 
-def _backfill_source_index_for_notebook(repo: BatchIngestRepository, notebook_id: str) -> dict:
+def _backfill_source_index_for_notebook(
+    repo: BatchIngestRepository, notebook_id: str
+) -> dict[str, object]:
     """Proactively populate knowledge_object_sources for ONE notebook (P0-4).
 
     Idempotent + restartable: clears any partial rows for this notebook first,
@@ -780,7 +837,7 @@ def _backfill_source_index_for_notebook(repo: BatchIngestRepository, notebook_id
 
 
 def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional[str],
-                              all_notebooks: bool = False) -> dict:
+                              all_notebooks: bool = False) -> dict[str, object]:
     """Proactive backfill CLI (P0-4 fast-follow): populate knowledge_object_sources
     ahead of the first source delete/reparse, so that operation is never the one
     paying the legacy full-evidence-scan cost online. Purely additive/idempotent —
@@ -808,7 +865,7 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
         return lambda _e: None
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _log(entry: dict) -> None:
+    def _log(entry: dict[str, object]) -> None:
         entry = dict(entry, ts=time.time())
         with manifest_path.open("a", encoding="utf-8") as fh:  # 每条 open/close,避免句柄泄漏
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")

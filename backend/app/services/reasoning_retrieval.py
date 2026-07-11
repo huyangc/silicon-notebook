@@ -12,16 +12,39 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, Protocol, TYPE_CHECKING
 
 from app.core.config import Settings
 
 if TYPE_CHECKING:
     from app.repositories.ports import (
         CommunityQueryPort,
-        ModelClientProvider,
+        JsonChatClientPort,
+        ReasoningModelProvider,
         RetrievalPort,
     )
+
+
+class _ReasoningRepositoryPort(Protocol):
+    settings: Settings
+
+    @property
+    def retrieval(self) -> "RetrievalPort": ...
+
+    @property
+    def reasoning_llm_client(self) -> "JsonChatClientPort": ...
+
+
+class _ReasoningRetrieverFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        retrieval: "RetrievalPort",
+        model_clients: "ReasoningModelProvider",
+        communities: "CommunityQueryPort",
+        settings: Settings,
+        cancel_event: CancelEvent = None,
+    ) -> object: ...
 
 from app.models.schemas import TraceStep
 from app.services.prompts import (
@@ -128,7 +151,7 @@ class ReasoningRetriever:
         self,
         *,
         retrieval: "RetrievalPort",
-        model_clients: "ModelClientProvider",
+        model_clients: "ReasoningModelProvider",
         communities: "CommunityQueryPort",
         settings: Settings,
         cancel_event: CancelEvent = None,
@@ -143,32 +166,15 @@ class ReasoningRetriever:
         self._per_query_scored: Dict[str, Dict[str, tuple]] = {}
 
     @classmethod
-    def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
+    def from_repository(
+        cls,
+        repository: _ReasoningRepositoryPort,
+        settings: Settings,
+        cancel_event: CancelEvent = None,
+    ):
         """Frozen-call-site adapter; extracts narrow ports and retains no facade."""
-        from app.services import communities as community_api
-
-        class RepositoryCommunityQueries:
-            sibling_min_bridge = settings.sibling_min_bridge
-
-            def first_base_notebook_id(self, active_notebook_id):
-                return community_api.first_base_notebook_id(
-                    repository, active_notebook_id
-                )
-
-            def resolve_comparison_peers(
-                self, base_notebook_id, focal_name, question, *, top_k, candidates
-            ):
-                return community_api.resolve_comparison_peers(
-                    repository, base_notebook_id, focal_name, question,
-                    top_k=top_k, candidates=candidates,
-                )
-
-        return cls(
-            retrieval=repository.retrieval,
-            model_clients=repository,
-            communities=RepositoryCommunityQueries(),
-            settings=settings,
-            cancel_event=cancel_event,
+        return _construct_reasoning_retriever(
+            cls, repository, settings, cancel_event
         )
 
     # --- KG 工具箱(薄封装 repo 原语) ---
@@ -813,11 +819,61 @@ class ReasoningRetriever:
                        for a in attempted.values()])
 
 
+class _RepositoryCommunityQueries:
+    def __init__(
+        self, repository: _ReasoningRepositoryPort, settings: Settings
+    ) -> None:
+        self.repository = repository
+        self.sibling_min_bridge = settings.sibling_min_bridge
+
+    def first_base_notebook_id(self, active_notebook_id: str) -> Optional[str]:
+        from app.services import communities as community_api
+
+        return community_api.first_base_notebook_id(
+            self.repository, active_notebook_id
+        )
+
+    def resolve_comparison_peers(
+        self,
+        base_notebook_id: str,
+        focal_name: str,
+        question: str,
+        *,
+        top_k: int,
+        candidates: int,
+    ) -> tuple[list[str], str]:
+        from app.services import communities as community_api
+
+        return community_api.resolve_comparison_peers(
+            self.repository, base_notebook_id, focal_name, question,
+            top_k=top_k, candidates=candidates,
+        )
+
+
+def _construct_reasoning_retriever(
+    factory: _ReasoningRetrieverFactory,
+    repository: _ReasoningRepositoryPort,
+    settings: Settings,
+    cancel_event: CancelEvent = None,
+):
+    return factory(
+        retrieval=repository.retrieval,
+        model_clients=repository,
+        communities=_RepositoryCommunityQueries(repository, settings),
+        settings=settings,
+        cancel_event=cancel_event,
+    )
+
+
 def reasoning_retriever_from_repository(
-    repository, settings, cancel_event: CancelEvent = None,
+    repository: _ReasoningRepositoryPort,
+    settings: Settings,
+    cancel_event: CancelEvent = None,
 ):
     """Compatibility construction seam for callers/tests that replace the class."""
     factory = getattr(ReasoningRetriever, "from_repository", None)
     if factory is not None:
         return factory(repository, settings, cancel_event)
-    return ReasoningRetriever.from_repository(repository, settings, cancel_event)
+    return _construct_reasoning_retriever(
+        ReasoningRetriever, repository, settings, cancel_event
+    )
