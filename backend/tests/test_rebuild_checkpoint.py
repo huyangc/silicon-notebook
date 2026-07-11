@@ -214,14 +214,14 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
     ver_before = repo._cluster_input_version(nb.id)
 
     # 首跑:写簇前(object_type=='concept' 的第一次调用)人为炸掉。
-    orig_write = repo._write_cluster_map_streamed
+    orig_write = repo._runtime.knowledge_lifecycle._write_cluster_map_streamed
 
     def _boom(notebook_id, object_type, *a, **kw):
         if object_type == "concept":
             raise RuntimeError("simulated crash before concept cluster write")
         return orig_write(notebook_id, object_type, *a, **kw)
 
-    monkeypatch.setattr(repo, "_write_cluster_map_streamed", _boom)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_write_cluster_map_streamed", _boom)
     with pytest.raises(RuntimeError):
         repo.rebuild_unified_kg(nb.id, force=True)
     first = fake.calls
@@ -240,7 +240,7 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
                                              # 二跑能在同一 input_version 下找到 checkpoint
 
     # 二跑:恢复写簇函数,重新 rebuild —— 应命中 concept_desc checkpoint,零新增调用。
-    monkeypatch.setattr(repo, "_write_cluster_map_streamed", orig_write)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_write_cluster_map_streamed", orig_write)
     repo.rebuild_unified_kg(nb.id, force=True)
     assert fake.calls == first              # 二跑零新增(old_desc 此刻仍为空,
                                              # 唯一可能的命中源是 concept_desc checkpoint)
@@ -273,15 +273,19 @@ def test_concept_desc_checkpoint_periodic_flush_at_16(repo, monkeypatch):
             "evidence": [{"quoted_span": f"topic {i} quote beta"}],
         }], [])
 
+    # Gate 5 (Task 13): checkpoint persistence moved to UnifiedKgStore —
+    # the canonical patch seat is the store's checkpoint_put, which
+    # rebuild_unified_kg now calls directly (the facade _rebuild_ckpt_put
+    # wrapper stays callable but is no longer the seam).
     put_calls = {"concept_desc": 0}
-    orig_put = repo._rebuild_ckpt_put
+    orig_put = repo._runtime.unified_kg.checkpoint_put
 
-    def _spy_put(notebook_id, input_version, stage, rows):
+    def _spy_put(notebook_id, input_version, stage, rows, now):
         if stage == "concept_desc":
             put_calls["concept_desc"] += 1
-        return orig_put(notebook_id, input_version, stage, rows)
+        return orig_put(notebook_id, input_version, stage, rows, now)
 
-    monkeypatch.setattr(repo, "_rebuild_ckpt_put", _spy_put)
+    monkeypatch.setattr(repo._runtime.unified_kg, "checkpoint_put", _spy_put)
 
     repo.rebuild_unified_kg(nb.id, force=True)
 
@@ -309,7 +313,8 @@ def test_concept_desc_checkpoint_put_failure_does_not_abort_rebuild(repo, monkey
     def _boom_put(*a, **kw):
         raise RuntimeError("simulated checkpoint put failure")
 
-    monkeypatch.setattr(repo, "_rebuild_ckpt_put", _boom_put)
+    # Gate 5 (Task 13): fail-open injection rides the store seam (see above).
+    monkeypatch.setattr(repo._runtime.unified_kg, "checkpoint_put", _boom_put)
 
     n = repo.rebuild_unified_kg(nb.id, force=True)   # 不应抛出——fail-open
     assert isinstance(n, int) and n > 0

@@ -97,6 +97,15 @@ class VectorCache:
             cached = self._store.get(key)
             return cached is not None and cached[0] == version
 
+    def keys(self) -> list:
+        """Lock-guarded snapshot of the current cache keys — a read-only
+        listing for key-family sweeps (e.g. evicting every '*:fed_rxgraph'
+        entry on KG mutation, see RetrievalSnapshotCache.invalidate_kg).
+        Returns a list copy, safe to iterate while other threads mutate; does
+        not touch LRU freshness."""
+        with self._global_lock:
+            return list(self._store)
+
 
 class LRUProcessCache:
     """Thread-safe, bounded dict-like LRU cache — the plain-dict-with-no-cap

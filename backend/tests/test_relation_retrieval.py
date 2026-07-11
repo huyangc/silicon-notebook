@@ -82,7 +82,7 @@ def test_retrieve_relations_scored_keyword_path(repo):
         {"source_local_id": "c", "target_local_id": "b", "edge_type": "about", "evidence": []},
     ]
     repo.store_kg(nb.id, None, objects, relations)
-    hits = repo._retrieve_relations_scored(nb.id, "regulated cascode")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "regulated cascode")
     assert hits, "应至少命中一条关系"
     assert "Regulated Cascode" in hits[0].text  # 含 'Regulated Cascode' 的边排第一(关键词)
 
@@ -168,9 +168,9 @@ def _oracle_retrieve_relations_scored(repo, notebook_id, query):
     from app.services.retrieval import score_relations
     from app.services.vector_index import query_sims
     relations = _oracle_relations_with_names(repo, notebook_id)
-    query_vector = repo._embed_query(query)
+    query_vector = repo.retrieval.candidates._embed_query(query)
     with repo._connect() as db:
-        rel_ids, rel_mat = repo._vector_matrix(db, notebook_id, "relation_embeddings", "relation_id")
+        rel_ids, rel_mat = repo.retrieval.candidates._vector_matrix(db, notebook_id, "relation_embeddings", "relation_id")
     relation_sims = query_sims(query_vector, rel_ids, rel_mat) if query_vector else None
     return score_relations(query, relations, query_vector=query_vector,
                            relation_sims=relation_sims,
@@ -211,7 +211,7 @@ def test_retrieve_relations_scored_empty_relations_no_join(repo, monkeypatch):
     """空 notebook(zero relations) → 不执行任何 relations JOIN，直接 []。"""
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     sqls = _execute_spy(repo, monkeypatch)
-    hits = repo._retrieve_relations_scored(nb.id, "anything")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "anything")
     assert hits == []
     assert not any("FROM knowledge_relations r" in s for s in sqls)
 
@@ -228,9 +228,9 @@ def test_retrieve_relations_scored_no_embedder_keeps_keyword_path(repo_no_embedd
     relations = [{"source_local_id": "a", "target_local_id": "b", "edge_type": "derived_from", "evidence": []}]
     repo.store_kg(nb.id, None, objects, relations)
     with repo._connect() as db:
-        rel_ids, _ = repo._vector_matrix(db, nb.id, "relation_embeddings", "relation_id")
+        rel_ids, _ = repo.retrieval.candidates._vector_matrix(db, nb.id, "relation_embeddings", "relation_id")
     assert rel_ids == [], "fixture 前提:no embedder → relation_embeddings 应为空"
-    hits = repo._retrieve_relations_scored(nb.id, "regulated cascode")
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "regulated cascode")
     assert hits, "关键词全命中应仍能检索到(向量矩阵空不代表无法检索)"
     assert "Regulated Cascode" in hits[0].text
     want = _oracle_retrieve_relations_scored(repo, nb.id, "regulated cascode")
@@ -244,7 +244,7 @@ def test_retrieve_relations_scored_equals_oracle_with_vectors(repo):
     (relation_recall 远大于关系数，界定不裁剪任何东西)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_many_relations(repo, nb.id, n_pairs=5)
-    got = repo._retrieve_relations_scored(nb.id, "cascode mirror concept")
+    got = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "cascode mirror concept")
     want = _oracle_retrieve_relations_scored(repo, nb.id, "cascode mirror concept")
     got_t = [(h.relation_id, round(h.relevance, 9), round(h.score, 9)) for h in got]
     want_t = [(h.relation_id, round(h.relevance, 9), round(h.score, 9)) for h in want]
@@ -257,15 +257,15 @@ def test_retrieve_relations_scored_bounded_by_relation_recall(repo, monkeypatch)
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_many_relations(repo, nb.id, n_pairs=20)
     monkeypatch.setattr(repo.settings, "relation_recall", 5)
-    orig = repo._relations_with_names
+    orig = repo.retrieval.candidates._relations_with_names
     calls = []
 
     def _spy(db, notebook_id, relation_ids=None):
         calls.append(relation_ids)
         return orig(db, notebook_id, relation_ids=relation_ids)
 
-    monkeypatch.setattr(repo, "_relations_with_names", _spy)
-    hits = repo._retrieve_relations_scored(nb.id, "cascode mirror concept")
+    monkeypatch.setattr(repo.retrieval.candidates, "_relations_with_names", _spy)
+    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "cascode mirror concept")
     assert len(calls) == 1
     assert calls[0] is not None and len(calls[0]) == 5   # bounded, not full 20
     assert len(hits) <= 5
@@ -276,23 +276,23 @@ def test_relations_with_names_relation_ids_filters_join(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_many_relations(repo, nb.id, n_pairs=3)
     with repo._connect() as db:
-        full = repo._relations_with_names(db, nb.id)
+        full = repo.retrieval.candidates._relations_with_names(db, nb.id)
         assert len(full) == 3
         want_id = full[0]["id"]
-        bounded = repo._relations_with_names(db, nb.id, relation_ids=[want_id])
+        bounded = repo.retrieval.candidates._relations_with_names(db, nb.id, relation_ids=[want_id])
         assert [r["id"] for r in bounded] == [want_id]
-        assert repo._relations_with_names(db, nb.id, relation_ids=[]) == []
+        assert repo.retrieval.candidates._relations_with_names(db, nb.id, relation_ids=[]) == []
 
 
 def test_relations_with_names_relation_ids_chunks_large_lists(repo, monkeypatch):
     """relation_ids 超过 _IN_CHUNK 时分批查询，仍返回全部命中行(无丢失)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_many_relations(repo, nb.id, n_pairs=5)
-    monkeypatch.setattr(repo, "_IN_CHUNK", 2)   # force multi-batch with only 5 rows
+    monkeypatch.setattr(repo.retrieval.candidates, "_IN_CHUNK", 2)   # force multi-batch with only 5 rows
     with repo._connect() as db:
-        full = repo._relations_with_names(db, nb.id)
+        full = repo.retrieval.candidates._relations_with_names(db, nb.id)
         ids = [r["id"] for r in full]
-        bounded = repo._relations_with_names(db, nb.id, relation_ids=ids)
+        bounded = repo.retrieval.candidates._relations_with_names(db, nb.id, relation_ids=ids)
     assert {r["id"] for r in bounded} == set(ids)
     assert len(bounded) == len(ids)
 
@@ -305,7 +305,7 @@ def test_mix_retrieve_overlay_no_relations_no_join(repo, monkeypatch):
         [{"local_id": "a", "object_type": "concept", "payload": {"name": "Cascode"}, "evidence": []}],
         [])
     sqls = _execute_spy(repo, monkeypatch)
-    cand, block, id_map, kg_hits, ppr_n = repo._mix_retrieve(nb.id, "cascode", "", ["cascode"])
+    cand, block, id_map, kg_hits, ppr_n = repo.retrieval.candidates._mix_retrieve(nb.id, "cascode", "", ["cascode"])
     assert not any("FROM knowledge_relations r" in s for s in sqls)
 
 

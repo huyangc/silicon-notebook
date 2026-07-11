@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-10
+更新日期：2026-07-12
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -41,7 +41,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 前端为唯一主线：Next.js / React / TypeScript，目录 `frontend/`。**原静态 `web/` fallback 目录已删除**，`scripts/dev.sh` 与 `scripts/check.sh` 已移除相关引用。
 - 本机默认持久化为 SQLite：`sqlite:///.local/silicon_notebook.db`（标准库 `sqlite3`）。
 - 原始上传文件保存到 `.local/storage`。
-- repository 边界：当前 `SQLiteRepository` 是兼容 facade；identity 与 sharing 已拆为 mixin 接缝，领域小 Protocol 与 PostgreSQL port 属后续阶段。
+- repository 边界：`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade——主业务库 SQL 只在 `backend/app/repositories/sqlite/` 领域 store，编排在 application services，消费者依赖 `backend/app/repositories/ports.py` 小型 Protocol；PostgreSQL adapter 留待将来在同一 ports 后实现。旧库兼容由冻结 v9 fixture、schema golden 与 `scripts/verify_repository_snapshot.py` backup-only 真库验证共同守护。
 - 向量检索本机实现：embedding 本地持久化，查询时使用有界 float32 矩阵或 scale index；PostgreSQL + pgvector 留作后续放量方向。
 - LLM 通过 OpenAI-compatible 配置接入：`OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_TIMEOUT_SECONDS`；embedding 独立使用 `EMBED_*` 配置。
 - `Settings.llm_configured` 与 `Settings.embedding_configured` 分别控制问答/抽取 LLM 与 embedding 能力是否启用。
@@ -153,7 +153,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   5. 保存 answer 并返回 `answer_id` 与 `conversation_id`，用于反馈和多 session 会话。
 - **历史记录（已退役）**：曾实现 `scenario_query()` / `case_search()` / `checklist()`；当前主线不再暴露这些 endpoint 或 tab。
 - **推理模式 agentic search 实时进度（§6.5 / §11）**：新增 `POST /api/notebooks/{id}/ask/stream` NDJSON 流；后端先发 `start`，再把 `ReasoningRetriever` 的 plan / retrieve / reflect / expand / fallback / answer trace step 逐行推给前端，最后发送完整 `AskResponse`。前端推理按钮开启时走 stream，在 pending answer 中实时显示一行 agent 轨迹摘要，按最新 progress 事件刷新，点击后展开完整步骤；最终回答中保留默认折叠的 `reasoning_trace` 供回看；普通 `/ask` 仍作为兼容非流式路径。Ask 生命周期已全栈接通：transport 断连、页面导航或刷新只停止当前客户端继续接收，detached Ask job 继续执行并持久化最终回答；只有用户显式点击中断、前端调用 `POST /notebooks/{id}/ask/jobs/{job_id}/cancel` 时，后端才设置 cancellation event，`ask_chunk` / `ask_reasoning` / `ask_graph` 与 LLM 流式读取路径在关键阶段停止，且不会保存被显式取消的最终回答。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
-- **`follow_chain` 类型化查询期推理（§5.9 query-time 子集 / §6.5 / §11）**：`reasoning` agent 新增两跳链路动作，通过已有 source/target 索引做有界局部抽样，仅组合 `derived_from/kind_of/prerequisite_of/precedes/part_of` 同类型关系。保持生产 schema v9，不新增迁移/索引/历史回填；高度节点被截断且无法确认不存在直接边时 fail-closed。三节点类型与 USABLE 状态、每跳 relation quote、edge review、候选起点、方向、环路/直接边重复、最低链可信度和 `validity_scope` 也全部 fail-closed；结果只进入本轮 Ask/深度报告上下文和实时 `推导` trace，不写回 KG。两条原始 hop 各自成为 relation evidence anchor；新抽取关系尽力绑定 `SourceElement`，旧 quote-only 关系降级为 source-level 展示且不影响原检索路径；临时 `A→C` 必须标作「推断」且不伪造引用。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
+- **`follow_chain` 类型化查询期推理（§5.9 query-time 子集 / §6.5 / §11）**：`reasoning` agent 新增两跳链路动作，通过已有 source/target 索引做有界局部抽样，仅组合 `derived_from/kind_of/prerequisite_of/precedes/part_of` 同类型关系。该能力不新增 migration/索引/历史回填；高度节点被截断且无法确认不存在直接边时 fail-closed。三节点类型与 USABLE 状态、每跳 relation quote、edge review、候选起点、方向、环路/直接边重复、最低链可信度和 `validity_scope` 也全部 fail-closed；结果只进入本轮 Ask/深度报告上下文和实时 `推导` trace，不写回 KG。两条原始 hop 各自成为 relation evidence anchor；新抽取关系尽力绑定 `SourceElement`，旧 quote-only 关系降级为 source-level 展示且不影响原检索路径；临时 `A→C` 必须标作「推断」且不伪造引用。已通过 `scripts/check.sh` 与 `cd frontend && npm run build`。
 
 ## 13. 历史记录：Article Studio（已退役）
 
@@ -213,7 +213,12 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **测试硬化**：`smoke_backend.py` 三处 `Settings` 清空 `OPENAI_COMPAT_*` + `mineru_mode=off`，`scripts/check.sh` 不再调用真实 LLM/embedding（即便 `.env` 有 key），全程离线 1–2s。
 - **架构硬化（2026-07-10，权限 / 图谱 / 异步状态 / 发布门禁）**：公共 `NotebookUpdate` 不再接受内部 `status`；深拷异常只补偿自身副本，崩溃清理由 `NOTEBOOK_COPY_STALE_SECONDS` 限定为过期 `copying` 行；KG conflict candidate 的读取/状态更新按 `(notebook_id, candidate_id)` 双重作用域，阻断跨库确认/拒绝；rejected relation 在 federated graph、PPR、scale graph 全路径排除，给 LLM 的关系方向保持 `source→target`，大图守卫覆盖 active + 全部 base；多子查询检索为每个 worker 单独传播 Context；URL 来源逐跳拒绝私网/localhost/link-local；认证解析移出 async event loop 且 session 续期节流。前端用 Ask run/workspace epoch 阻断跨 notebook/会话回写，分享/待办统一走原子 notebook opener，退出登录 abort 本地流并 remount。`Settings` 全部迁移到 Pydantic v2 `validation_alias`，非 SQLite URL fail fast；`scripts/check.sh` 禁用仓库 `.env`、运行全量 pytest + 递归前端测试 + tsc + production build，缺前端依赖不再跳过。本次完整门禁通过：后端 `2271 passed, 1 skipped`、前端 `143 passed`、TypeScript 与 Next.js production build 均成功。
 - **架构模块化第二阶段（2026-07-10）**：保持 endpoint、SQLite schema 与 `SQLiteRepository` 公共 API 不变，把账号/用户模型配置/admin 用量/auth session 领域迁入 `sqlite_identity.py` mixin，并把笔记本分享令牌、深复制、成员关系与读取权限迁入 `sqlite_notebook_sharing.py` mixin；`sqlite_repository.py` 从 14,815 行降到 14,059 行，继续兼容 `_REQUEST_USER` / set/reset、`_COPY_CHUNK` 与 `_remap_json_ids` 导出。前端把 workspace API/视图模型迁入 `workspace-model.ts`，答案/引用/推理轨迹迁入 `answer-panel.tsx`，KG 类型标记迁入 `kg-type-mark.tsx`，`page.tsx` 从 6,060 行降到 5,438 行。新增后端继承/导出兼容守卫与前端源码边界测试，防止职责回流。本次完整门禁通过：后端 `2275 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。
-- **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和绿色测试为行为真相，修复 Ask disconnect、mode-specific federation/tier 次序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移。transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；`chunk` 基线 active-only，KG overlay/PPR 可引入 federated KG/base-backed chunk，`graph`/`reasoning` 走 federated KG；exact-score 的 `base` 次序只适用于知识对象命中，relation hit 仍 score-only；workspace 是来源栏 + 问答/知识库/深度报告主栏两列结构。`architecture.md` 已改为稳定边界说明，文档契约测试进入常规 pytest。本次完整门禁通过：后端 `2281 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 仍为后续规划，未计入已完成。
+- **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和绿色测试为行为真相，修复 Ask disconnect、mode-specific federation/tier 次序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移。transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；`chunk` 基线 active-only，KG overlay/PPR 可引入 federated KG/base-backed chunk，`graph`/`reasoning` 走 federated KG；exact-score 的 `base` 次序只适用于知识对象命中，relation hit 仍 score-only；workspace 是来源栏 + 问答/知识库/深度报告主栏两列结构。`architecture.md` 已改为稳定边界说明，文档契约测试进入常规 pytest。本次完整门禁通过：后端 `2281 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 当时仍为后续规划。
+- **Repository composition refactor（2026-07-11～12，原阶段 2、4、6 的 Repository 部分）**：`backend/app/repositories/sqlite/` 领域 store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。application service 不再拼装主业务库 SQL，只保留业务顺序/策略/transaction seat；`SQLiteRepository` 保留为兼容 facade，公共操作只允许显式 adapter 或单跳委托，AST guard 验证真实 delegate target 与 ownership manifest，facade body/ownership debt 为 0。Ask chunk/reasoning/graph/stream、report、evaluation 使用 `backend/app/repositories/ports.py` 的可执行窄 Protocol，不再穿透 private runtime。`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference；其他可变 runtime state 支持组合后替换。Ask/report 同步提交失败会持久化 failed、注销 cancellation entry 后重抛，既有成功顺序和 transaction checkpoint 不变。旧库 verifier 采用精确 migration/seed manifest、URI 百分号编码与 backup-only 构造；cleanup 失败只报告 retained path，原 DB/WAL 与 SHM existence/size 均受保护，live WAL 只豁免 SHM mtime。旧阶段 4 的 Pydantic 模型分文件与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期仍延后为独立工作；这是一项内部架构收口，不新增产品功能或 migration。
+
+  本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
+
+  2026-07-12 复验：冻结 fixture 为 `database user_version=v9 final_user_version=v10`、`PASS schema=v9 changed_tables=0`；主 checkout 的 4.7GB schema-v10 旧库为 53 表、149 个 storage 文件，`PASS schema=v10 changed_tables=0`。原 DB/WAL 的 size 与 mtime、SHM 的存在性与 size、storage manifest 均未改变；只发生了 verifier 明确允许的 SHM mtime 更新。
 
 ## 21. 文档类型抽取 profile 注册表（方案 §5 对象模型 + §6.2 模板）
 
@@ -290,13 +295,13 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
 - 检索：BM25 / FTS5 / pgvector 放量、结构化硬过滤、Knowledge graph（已评估为低 ROI / 基础设施级，暂缓）。
 - 扫描件 OCR、DOCX/PPTX 公式（OMML）解析；MinerU 已覆盖 PDF 的公式/表格/版面（本机 MLX 或 GPU 主机）。
-- **架构渐进整改后续阶段**：阶段 2–6（Notebook 规模策略与 Repository ports、FastAPI routers 与前端 API client、SQLite migrations 与模型边界、前端 workspace 状态拆分、Runtime 生命周期与 Retrieval/Ask 实现）仍为计划项；当前只完成阶段 1 的行为契约与文档对齐。
+- **架构渐进整改后续阶段**：阶段 3（FastAPI routers 与前端 API client）与阶段 5（前端 workspace 状态拆分）仍为计划项。阶段 2、4、6 的 Repository 部分已由 Repository composition refactor 交付（见第 19 节账本 2026-07-11 条目）；其中旧阶段 4 的 Pydantic 模型分文件与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期延后为独立工作。
 
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
 
 - 已完成（2026-06-06）：大笔记本 KG 性能与合并治理——Ask 去同步 backfill/全量扫描 + notebook 级索引 + 阶段计时；node_context/concept_detail 收窄查询；unified-KG 改显式 rebuild + dirty status（摄取不再同步重建、打开图谱不自动重建）；跨文档概念合并改有界 top-k 向量候选 + 别名归一化；可选 LLM 概念合并预审。已通过 `scripts/check.sh` 与前端 build。
 - 已完成（2026-06-06）：推理模式 agentic search 实时进度——`/ask/stream` 输出 NDJSON progress/final 事件，Ask 前端在运行中展示按事件刷新的折叠 agent 轨迹摘要，点击可展开完整步骤，并在答案中保留默认折叠的最终 trace。已通过 `scripts/check.sh` 与前端 build。
-- 已完成（2026-07-10）：reasoning `follow_chain`——生产 schema v9 与历史数据保持不变，查询期复用既有端点索引，对有证据、审核可用、条件兼容的同类型两跳关系做有界类型化组合；关系前提可引用、推论不入库，Ask/深度报告与流式 `推导` 轨迹均已接通。已通过 `scripts/check.sh` 与前端 build。
+- 已完成（2026-07-10）：reasoning `follow_chain`——该能力不新增 migration 或改写历史数据，查询期复用既有端点索引，对有证据、审核可用、条件兼容的同类型两跳关系做有界类型化组合；关系前提可引用、推论不入库，Ask/深度报告与流式 `推导` 轨迹均已接通。已通过 `scripts/check.sh` 与前端 build。
 - 已完成（2026-06-25）：用户账号系统——
   - **后端**：`auth_sessions` 表存储不透明 Bearer session token；`app/services/auth_utils.py` 封装 PBKDF2-SHA256 密码哈希与 token 生成；`app/api/auth_routes.py` 实现 `POST /auth/register`、`POST /auth/login`、`POST /auth/logout`、`GET /auth/me`；`app/api/deps.py` 提供 `get_current_user` 依赖用于路由级鉴权；`notebooks.created_by` 列实现按 owner 隔离（用户只能看/操作自己的 notebook）；内置 `user-local` 账号原地升级为 `admin`（id 不变，登录用户名 `admin`，密码由 `SILICON_NOTEBOOK_ADMIN_PASSWORD` 控制，本地默认 `admin`，每次后端启动重置；production/对外监听必须改为强密码）；admin 拥有既有 notebook 并是唯一可标记基准库的用户；基准库从普通用户列表隐藏但仍参与问答上下文检索。新增环境变量：`SILICON_NOTEBOOK_ADMIN_PASSWORD`（admin 密码）和 `SILICON_NOTEBOOK_AUTH_OPTIONAL`（默认 false=强制登录；true=无 token 请求回退 admin，仅本地/测试）。
   - **前端**：首次加载展示登录/注册界面；注册用户名规则为单个字母 + `00` + 6 位数字（如 `a00123456`，存为小写）；Bearer token 写入 localStorage 并由 api() 自动注入请求头；顶栏展示当前登录用户名与退出按钮；"设为基准库"操作仅 admin 可见。

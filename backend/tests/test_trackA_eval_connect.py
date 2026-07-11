@@ -21,10 +21,10 @@ def test_repo_has_eval_insert_source_for_test():
         "SQLiteRepository missing eval_insert_source_for_test"
 
 
-def test_protocol_has_eval_insert_source_for_test():
+def test_production_protocol_excludes_eval_insert_source_for_test():
     from app.services.repository import NotebookRepository
-    assert hasattr(NotebookRepository, "eval_insert_source_for_test"), \
-        "NotebookRepository Protocol missing eval_insert_source_for_test"
+    assert not hasattr(NotebookRepository, "eval_insert_source_for_test"), \
+        "test-only eval helper leaked into production Protocol"
 
 
 def test_cleanup_delegates_to_delete_notebook(tmp_path, monkeypatch):

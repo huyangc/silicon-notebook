@@ -123,7 +123,18 @@ def test_fold_refuses_dim_mismatch_and_emits_event(repo, monkeypatch):
     monkeypatch.setattr(repo.event_log, "emit",
                         lambda e, **k: (events.append(e), orig(e, **k))[1])
     _set_runtime(repo, monkeypatch, 16)
-    repo.fold_scale_index_delta(nb.id, _assume_locked=True)   # 应转 build,不 hnswlib 硬错
+    builder = repo._runtime.scale_builder
+    builds = []
+    real_build = builder.build
+    monkeypatch.setattr(
+        builder,
+        "build",
+        lambda notebook_id, on_stage=None: (
+            builds.append(notebook_id), real_build(notebook_id, on_stage=on_stage)
+        )[1],
+    )
+    builder.fold(nb.id, assume_locked=True)   # 应转 build,不 hnswlib 硬错
+    assert builds == [nb.id]
     refused = [e for e in events if e.get("kind") == "scale_fold_refused"]
     assert len(refused) == 1 and refused[0]["reason"] == "dim_mismatch"
     # 转 build 后 manifest 已是新维

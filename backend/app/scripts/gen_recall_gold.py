@@ -36,11 +36,8 @@ def main() -> int:
     repo = SQLiteRepository(get_settings())
     assert repo.llm_client.configured, "LLM 未配置(.env)"
     out, dropped = [], 0
-    with repo._connect() as db:
-        objs = db.execute(
-            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND status IN ('approved','reviewed')",
-            (a.notebook,)).fetchall()
-        rels = repo._relations_with_names(db, a.notebook)
+    objs = repo.maintenance.gold_knowledge_object_rows(a.notebook)
+    rels = repo.maintenance.relations_with_names(a.notebook)
     for r in rng.sample(objs, min(a.n_obj, len(objs))):
         src = _payload_text(json.loads(r["payload"] or "{}"))
         q = _gen_question(repo.llm_client, src)

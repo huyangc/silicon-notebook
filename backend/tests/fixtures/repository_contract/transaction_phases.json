@@ -1,0 +1,166 @@
+{
+  "approve_promotion": {
+    "commit_boundaries": [
+      "base mutation and candidate approved state commit together",
+      "embedding, invalidation and dirty hooks are post-commit"
+    ],
+    "failure_boundary": "transaction failure rolls back base mutation and candidate state together; post-commit hook failure cannot revert approval",
+    "sequence": [
+      "validate candidate",
+      "commit base object/provenance and candidate approval in one transaction",
+      "embed fresh base object best effort",
+      "invalidate unified cache",
+      "mark base dirty"
+    ]
+  },
+  "confirm_conflict": {
+    "commit_boundaries": [
+      "resolution mutation commits before candidate status transaction",
+      "candidate status is a later independent commit"
+    ],
+    "failure_boundary": "candidate-status failure leaves the already committed resolution mutation applied",
+    "sequence": [
+      "load conflict candidate",
+      "apply resolution through its independently committed mutation primitive",
+      "set candidate applied in a separate transaction"
+    ]
+  },
+  "copy_notebook": {
+    "commit_boundaries": [
+      "sentinel and every table chunk are separate commits",
+      "filesystem copy precedes database sentinel",
+      "failure compensates only destination"
+    ],
+    "failure_boundary": "partial destination is removed; source and unrelated live sentinels are untouched",
+    "sequence": [
+      "sweep only stale own copies",
+      "copy source directory",
+      "insert copying sentinel",
+      "copy each table in configured chunks",
+      "validate counts and references",
+      "publish original status"
+    ]
+  },
+  "delete_source": {
+    "commit_boundaries": [
+      "database cleanup is atomic",
+      "filesystem deletion is post-commit"
+    ],
+    "failure_boundary": "a file-delete failure cannot roll back committed database cleanup",
+    "sequence": [
+      "load source",
+      "clear source-derived KG and embeddings plus delete source in one write",
+      "delete local file after commit",
+      "invalidate caches",
+      "mark unified KG dirty"
+    ]
+  },
+  "merge_knowledge": {
+    "commit_boundaries": [
+      "target evidence, reverse index and source deprecation are atomic"
+    ],
+    "failure_boundary": "post-commit dirty/cache failure cannot roll back merge",
+    "sequence": [
+      "merge evidence and deprecate source in one write",
+      "mark dirty",
+      "invalidate cache"
+    ]
+  },
+  "migration_recovery_seed": {
+    "commit_boundaries": [
+      "each migration version is stamped after its migration",
+      "recovery and seed use their existing connection commits"
+    ],
+    "failure_boundary": "startup completes these serial phases before serving requests; they bypass online mutation hooks",
+    "sequence": [
+      "apply missing versioned migrations serially",
+      "recover running jobs",
+      "seed and upgrade built-ins"
+    ]
+  },
+  "parse_source": {
+    "commit_boundaries": [
+      "inherits every process_source checkpoint"
+    ],
+    "failure_boundary": "inherits process_source failed-state recording and best-effort phases",
+    "sequence": [
+      "delegate synchronously to process_source",
+      "return final source projection"
+    ]
+  },
+  "process_source": {
+    "commit_boundaries": [
+      "status transitions are separate writes",
+      "element replacement commits before chunk/embed/extraction",
+      "chunk, embeddings, extraction and final status are later checkpoints"
+    ],
+    "failure_boundary": "pipeline errors record failed source state; chunk/embed/dirty hooks fail open",
+    "sequence": [
+      "set parsing",
+      "parse outside transaction",
+      "replace elements and source-derived state in one write",
+      "set parsed",
+      "best-effort chunk build",
+      "background embedding",
+      "foreground extraction",
+      "set extracted",
+      "join embedding thread",
+      "enqueue existing-index fold"
+    ]
+  },
+  "set_edge_review": {
+    "commit_boundaries": [
+      "review row commits before dirty and cache side effects"
+    ],
+    "failure_boundary": "missing relation raises; post-commit side-effect failure does not revert review",
+    "sequence": [
+      "validate review status",
+      "update relation review in one write",
+      "mark dirty",
+      "invalidate cache"
+    ]
+  },
+  "store_kg": {
+    "commit_boundaries": [
+      "each 1000-object block is a transaction",
+      "each 1000-relation block is a transaction",
+      "partial source state is an accepted crash window"
+    ],
+    "failure_boundary": "later chunks and post-commit hooks never roll back already committed chunks",
+    "sequence": [
+      "preallocate object and relation ids",
+      "commit object chunks of 1000",
+      "commit relation chunks of 1000",
+      "embed objects and relations best effort",
+      "invalidate retrieval caches",
+      "mark unified KG dirty and bump mutation sequence"
+    ]
+  },
+  "streaming_ask": {
+    "commit_boundaries": [
+      "begin, trace, answer and finish are independent short transactions",
+      "answer may exist before job finish after a crash"
+    ],
+    "failure_boundary": "transport disconnect leaves detached worker running; explicit cancel alone sets cancellation event",
+    "sequence": [
+      "begin conversation and running job transaction",
+      "detached retrieval/model outside transaction",
+      "persist trace steps individually",
+      "save answer transaction",
+      "finish job transaction",
+      "failed/cancel cleanup transaction"
+    ]
+  },
+  "update_knowledge": {
+    "commit_boundaries": [
+      "row update commits before embedding/invalidation"
+    ],
+    "failure_boundary": "embedding failure is swallowed; committed row remains and dirty/invalidation still run",
+    "sequence": [
+      "update row transaction",
+      "re-embed edited payload best effort",
+      "invalidate cache",
+      "mark dirty"
+    ]
+  }
+}

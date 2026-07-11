@@ -297,3 +297,22 @@ def test_bulk_delete_conversations_route(tmp_path, monkeypatch):
     resp = client.delete(f"/api/notebooks/{nb}/conversations", params={"older_than_days": 3})
     assert resp.status_code == 200 and resp.json()["deleted"] == 1
     assert client.get(f"/api/notebooks/{nb}/conversations").json() == []
+
+
+# ---- Task 22: 会话持久化在 runtime.ask_state 组件,按显式 user_id 作用域 ----
+
+def test_conversation_store_scopes_by_explicit_user_id(repo):
+    """AskStateStore 不读请求 ContextVar:ensure/list 都以调用方传入的 user_id
+    为准;传入他人 conversation_id 不接续、新建归自己的(created_by 语义保持)。"""
+    nb = _seed(repo)
+    store = repo._runtime.ask_state
+    with repo._write() as db:
+        cid = store.ensure_conversation(db, nb.id, None, "q-a", "user-a")
+    assert [c.id for c in store.list_conversations(nb.id, "user-a")] == [cid]
+    assert store.list_conversations(nb.id, repo.current_user().id) == []
+    with repo._write() as db:
+        other = store.ensure_conversation(db, nb.id, cid, "q-b", "user-b")
+    assert other != cid                       # 未注入 user-a 的对话
+    with repo._connect() as db:
+        assert db.execute("SELECT created_by FROM conversations WHERE id=?",
+                          (other,)).fetchone()[0] == "user-b"

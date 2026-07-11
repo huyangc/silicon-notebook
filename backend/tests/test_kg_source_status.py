@@ -182,3 +182,30 @@ def test_list_sources_includes_kg_extracted_field(repo):
     repo._test_insert_object(nb.id, "concept", {"name": "Gate"}, source_id=src_id)
     items = repo.list_sources(nb.id)
     assert items[0].kg_extracted is True
+
+
+# ---------------------------------------------------------------------------
+# Task 12: status transitions ride SourceIngestionService.set_source_status
+# ---------------------------------------------------------------------------
+
+def test_set_source_status_persists_and_emits_status_event(repo, monkeypatch):
+    """The facade _set_source_status delegate persists status/parse_status/
+    summary/error_message in one write AND emits the status-machine event —
+    behavior frozen across the Task 12 move into SourceIngestionService."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src_id = _insert_source(repo, nb.id)
+    events = []
+    original_emit = repo.event_log.emit
+    monkeypatch.setattr(
+        repo.event_log,
+        "emit",
+        lambda payload, **kw: (events.append(dict(payload)), original_emit(payload, **kw))[0],
+    )
+    repo._set_source_status(src_id, "failed", summary="S", error_message="boom")
+    src = repo.get_source(src_id)
+    assert (src.parse_status, src.summary, src.error_message) == ("failed", "S", "boom")
+    assert any(
+        e.get("kind") == "status" and e.get("status") == "failed"
+        and e.get("source_id") == src_id and e.get("error") == "boom"
+        for e in events
+    )

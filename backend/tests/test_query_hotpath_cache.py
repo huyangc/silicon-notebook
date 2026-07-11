@@ -159,13 +159,13 @@ def _seed(repo, nb_id, *, n_objects=3, chunks_per_elem=1, dangling=False):
 
 def _connect_spy(repo, monkeypatch):
     calls = {"n": 0}
-    orig = repo._connect
+    orig = repo._runtime.database.connect
 
     def _wrapped():
         calls["n"] += 1
         return orig()
 
-    monkeypatch.setattr(repo, "_connect", _wrapped)
+    monkeypatch.setattr(repo._runtime.database, "connect", _wrapped)
     return calls
 
 
@@ -174,13 +174,13 @@ def _connect_spy(repo, monkeypatch):
 def test_ent_chunk_map_equals_oracle_basic(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=3, chunks_per_elem=1)
-    assert repo._ent_chunk_map(nb.id) == _oracle_ent_chunk_map(repo, nb.id)
+    assert repo.retrieval.graph._ent_chunk_map(nb.id) == _oracle_ent_chunk_map(repo, nb.id)
 
 
 def test_ent_chunk_map_equals_oracle_multi_chunk_fanout(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=2, chunks_per_elem=3)
-    got = repo._ent_chunk_map(nb.id)
+    got = repo.retrieval.graph._ent_chunk_map(nb.id)
     want = _oracle_ent_chunk_map(repo, nb.id)
     assert got == want
     assert all(len(v) == 3 for v in got.values())
@@ -191,7 +191,7 @@ def test_ent_chunk_map_equals_oracle_dangling_element(repo):
     oids = _seed(repo, nb.id, n_objects=2, dangling=True)
     dangling_oid = oids[-1]
     assert dangling_oid.endswith("-dangling")
-    got = repo._ent_chunk_map(nb.id)
+    got = repo.retrieval.graph._ent_chunk_map(nb.id)
     want = _oracle_ent_chunk_map(repo, nb.id)
     assert got == want
     # dangling object's evidence element_id matches no chunk -> excluded from map
@@ -200,7 +200,7 @@ def test_ent_chunk_map_equals_oracle_dangling_element(repo):
 
 def test_ent_chunk_map_equals_oracle_empty_notebook(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    assert repo._ent_chunk_map(nb.id) == _oracle_ent_chunk_map(repo, nb.id) == {}
+    assert repo.retrieval.graph._ent_chunk_map(nb.id) == _oracle_ent_chunk_map(repo, nb.id) == {}
 
 
 # ── equivalence: _kg_source_chunks vs oracle ────────────────────────────────
@@ -208,7 +208,7 @@ def test_ent_chunk_map_equals_oracle_empty_notebook(repo):
 def test_kg_source_chunks_equals_oracle_basic(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=3, chunks_per_elem=1)
-    got = repo._kg_source_chunks(nb.id, oids)
+    got = repo.retrieval.graph._kg_source_chunks(nb.id, oids)
     want = _oracle_kg_source_chunks(repo, nb.id, oids)
     got_tuples = [(c.chunk_id, c.source_id, c.text, c.section_path, tuple(c.element_ids), c.relevance) for c in got]
     want_tuples = [(c.chunk_id, c.source_id, c.text, c.section_path, tuple(c.element_ids), c.relevance) for c in want]
@@ -219,7 +219,7 @@ def test_kg_source_chunks_equals_oracle_basic(repo):
 def test_kg_source_chunks_equals_oracle_multi_chunk_fanout(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=2, chunks_per_elem=3)
-    got = repo._kg_source_chunks(nb.id, oids)
+    got = repo.retrieval.graph._kg_source_chunks(nb.id, oids)
     want = _oracle_kg_source_chunks(repo, nb.id, oids)
     assert {c.chunk_id for c in got} == {c.chunk_id for c in want}
     assert len(got) == len(want) == 6
@@ -228,7 +228,7 @@ def test_kg_source_chunks_equals_oracle_multi_chunk_fanout(repo):
 def test_kg_source_chunks_equals_oracle_empty_object_ids(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=2)
-    assert repo._kg_source_chunks(nb.id, []) == _oracle_kg_source_chunks(repo, nb.id, []) == []
+    assert repo.retrieval.graph._kg_source_chunks(nb.id, []) == _oracle_kg_source_chunks(repo, nb.id, []) == []
 
 
 def test_kg_source_chunks_equals_oracle_object_no_evidence(repo):
@@ -236,7 +236,7 @@ def test_kg_source_chunks_equals_oracle_object_no_evidence(repo):
     oids = _seed(repo, nb.id, n_objects=2)
     empty_oid = oids[-1]
     assert empty_oid.endswith("-empty")
-    got = repo._kg_source_chunks(nb.id, [empty_oid])
+    got = repo.retrieval.graph._kg_source_chunks(nb.id, [empty_oid])
     want = _oracle_kg_source_chunks(repo, nb.id, [empty_oid])
     assert got == want == []
 
@@ -246,7 +246,7 @@ def test_kg_source_chunks_equals_oracle_dangling_element(repo):
     oids = _seed(repo, nb.id, n_objects=1, dangling=True)
     dangling_oid = oids[-1]
     assert dangling_oid.endswith("-dangling")
-    got = repo._kg_source_chunks(nb.id, [dangling_oid])
+    got = repo.retrieval.graph._kg_source_chunks(nb.id, [dangling_oid])
     want = _oracle_kg_source_chunks(repo, nb.id, [dangling_oid])
     assert got == want == []
 
@@ -254,7 +254,7 @@ def test_kg_source_chunks_equals_oracle_dangling_element(repo):
 def test_kg_source_chunks_equals_oracle_unknown_object_id(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=2)
-    got = repo._kg_source_chunks(nb.id, ["does-not-exist"])
+    got = repo.retrieval.graph._kg_source_chunks(nb.id, ["does-not-exist"])
     want = _oracle_kg_source_chunks(repo, nb.id, ["does-not-exist"])
     assert got == want == []
 
@@ -267,9 +267,9 @@ def test_ent_chunk_map_second_call_no_sql(repo, monkeypatch):
     kg_mutation_seq — not the O(N) evidence/chunk scan this cache eliminates)."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=3)
-    first = repo._ent_chunk_map(nb.id)
+    first = repo.retrieval.graph._ent_chunk_map(nb.id)
     calls = _connect_spy(repo, monkeypatch)
-    second = repo._ent_chunk_map(nb.id)
+    second = repo.retrieval.graph._ent_chunk_map(nb.id)
     assert calls["n"] == 1  # version-probe only, no full-scan connect
     assert second == first
 
@@ -281,9 +281,9 @@ def test_kg_source_chunks_second_call_no_full_scan(repo, monkeypatch):
     O(1) _scale_index_version probe each cache lookup pays."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=3)
-    repo._kg_source_chunks(nb.id, oids)  # warm _elem_chunk_map cache
+    repo.retrieval.graph._kg_source_chunks(nb.id, oids)  # warm _elem_chunk_map cache
     calls = _connect_spy(repo, monkeypatch)
-    repo._kg_source_chunks(nb.id, oids)
+    repo.retrieval.graph._kg_source_chunks(nb.id, oids)
     # 1 connect for the evidence+chunk-by-id lookups (both queries share one
     # `with self._connect() as db:` block) + 1 for the elem_chunk_map cache's
     # version probe (its own load is elided — no chunks full-scan connect).
@@ -295,9 +295,9 @@ def test_elem_chunk_map_cached_across_both_consumers(repo, monkeypatch):
     _kg_source_chunks's element lookup doesn't re-scan chunks either."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=3)
-    repo._ent_chunk_map(nb.id)  # warms {nb}:elemchunk
+    repo.retrieval.graph._ent_chunk_map(nb.id)  # warms {nb}:elemchunk
     calls = _connect_spy(repo, monkeypatch)
-    repo._kg_source_chunks(nb.id, oids)
+    repo.retrieval.graph._kg_source_chunks(nb.id, oids)
     # evidence+chunk-by-id lookup connect + elem_chunk_map version-probe connect;
     # no chunks full-scan (that's the whole point of sharing the cache).
     assert calls["n"] == 2
@@ -306,11 +306,11 @@ def test_elem_chunk_map_cached_across_both_consumers(repo, monkeypatch):
 def test_ent_chunk_map_invalidates_on_kg_mutation(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=2)
-    before = repo._ent_chunk_map(nb.id)
+    before = repo.retrieval.graph._ent_chunk_map(nb.id)
     assert len(before) == 2
 
     _seed(repo, nb.id, n_objects=1)  # adds one more concept+chunk, bumps kg_mutation_seq
-    after = repo._ent_chunk_map(nb.id)
+    after = repo.retrieval.graph._ent_chunk_map(nb.id)
     assert after != before
     assert len(after) == 3
     assert after == _oracle_ent_chunk_map(repo, nb.id)
@@ -320,7 +320,7 @@ def test_kg_source_chunks_invalidates_on_kg_mutation(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=1)
     target = oids[0]
-    before = repo._kg_source_chunks(nb.id, [target])
+    before = repo.retrieval.graph._kg_source_chunks(nb.id, [target])
     assert len(before) == 1
     target_elem = before[0].element_ids[0]
     target_source_id = before[0].source_id
@@ -334,7 +334,7 @@ def test_kg_source_chunks_invalidates_on_kg_mutation(repo):
                     json.dumps([target_elem]), now))
     repo._mark_unified_kg_dirty(nb.id)
 
-    after = repo._kg_source_chunks(nb.id, [target])
+    after = repo.retrieval.graph._kg_source_chunks(nb.id, [target])
     assert len(after) == 2
     assert after == _oracle_kg_source_chunks(repo, nb.id, [target])
 
@@ -342,7 +342,7 @@ def test_kg_source_chunks_invalidates_on_kg_mutation(repo):
 def test_elem_chunk_map_matches_manual_reverse_index(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed(repo, nb.id, n_objects=2, chunks_per_elem=2)
-    got = repo._elem_chunk_map(nb.id)
+    got = repo.retrieval.graph._elem_chunk_map(nb.id)
     with repo._connect() as db:
         rows = db.execute("SELECT id, element_ids FROM chunks WHERE notebook_id=?", (nb.id,)).fetchall()
     want = {}
@@ -360,7 +360,7 @@ def test_ppr_reset_vector_uses_ent_chunk_map_for_specificity_weight(repo, monkey
     of sets (consumer-shape audit)."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=2, chunks_per_elem=2)
-    m = repo._ent_chunk_map(nb.id)
+    m = repo.retrieval.graph._ent_chunk_map(nb.id)
     assert isinstance(m, dict)
     for oid in oids[:2]:
         v = m.get(oid)
@@ -373,7 +373,7 @@ def test_kg_source_chunks_return_shape_is_list_for_ordered_consumers(repo):
     list, not a set — guard the return type."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=3)
-    out = repo._kg_source_chunks(nb.id, oids)
+    out = repo.retrieval.graph._kg_source_chunks(nb.id, oids)
     assert isinstance(out, list)
     assert out[:] == out  # indexable/sliceable
 
@@ -421,11 +421,11 @@ def _seed_order_fixture(repo):
 
 def test_kg_source_chunks_order_follows_object_ids_then_evidence(repo):
     nb = _seed_order_fixture(repo)
-    out = repo._kg_source_chunks(nb.id, ["objB", "objA"])
+    out = repo.retrieval.graph._kg_source_chunks(nb.id, ["objB", "objA"])
     # objB first (evidence order el3, el2 -> c3, c2), then objA (el1 -> c1)
     assert [c.chunk_id for c in out] == ["c3", "c2", "c1"]
     # flipping object_ids order flips the output order accordingly
-    out2 = repo._kg_source_chunks(nb.id, ["objA", "objB"])
+    out2 = repo.retrieval.graph._kg_source_chunks(nb.id, ["objA", "objB"])
     assert [c.chunk_id for c in out2] == ["c1", "c3", "c2"]
     # same multiset as the old full-scan oracle (only the order contract changed)
     want = _oracle_kg_source_chunks(repo, nb.id, ["objB", "objA"])
@@ -436,8 +436,8 @@ def test_kg_source_chunks_order_stable_across_cache_states(repo):
     """Cold (loader runs) and warm (cache hit) calls must produce the identical
     list order — order is part of the contract, not a cache artifact."""
     nb = _seed_order_fixture(repo)
-    cold = [c.chunk_id for c in repo._kg_source_chunks(nb.id, ["objB", "objA"])]
-    warm = [c.chunk_id for c in repo._kg_source_chunks(nb.id, ["objB", "objA"])]
+    cold = [c.chunk_id for c in repo.retrieval.graph._kg_source_chunks(nb.id, ["objB", "objA"])]
+    warm = [c.chunk_id for c in repo.retrieval.graph._kg_source_chunks(nb.id, ["objB", "objA"])]
     assert cold == warm == ["c3", "c2", "c1"]
 
 
@@ -448,7 +448,7 @@ def test_kg_source_chunks_order_matches_oracle_when_scan_order_agrees(repo):
     check, not just a multiset check."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oids = _seed(repo, nb.id, n_objects=3, chunks_per_elem=2)
-    got = repo._kg_source_chunks(nb.id, oids)
+    got = repo.retrieval.graph._kg_source_chunks(nb.id, oids)
     want = _oracle_kg_source_chunks(repo, nb.id, oids)
     assert [c.chunk_id for c in got] == [c.chunk_id for c in want]
 
@@ -483,7 +483,7 @@ def test_kg_source_chunks_shared_element_dedup_keeps_first_seen_position(repo):
                    ("objS2", nb.id, "concept", "approved", "", json.dumps({"name": "S2"}), _ev("elO", "elS"),
                     f"s-{nb.id}", now, now))
     repo._mark_unified_kg_dirty(nb.id)
-    out = repo._kg_source_chunks(nb.id, ["objS1", "objS2"])
+    out = repo.retrieval.graph._kg_source_chunks(nb.id, ["objS1", "objS2"])
     assert [c.chunk_id for c in out] == ["cShared", "cOwn"]  # cShared first-seen via objS1
 
 
@@ -505,7 +505,7 @@ def test_build_chunks_bumps_seq_and_refreshes_elem_chunk_map(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "kg_auto_extract", False)
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     # warm the cache on the empty notebook
-    assert repo._elem_chunk_map(nb.id) == {}
+    assert repo.retrieval.graph._elem_chunk_map(nb.id) == {}
 
     # real chunk write path: source + source_elements -> _build_chunks_for_source
     import uuid
@@ -523,7 +523,7 @@ def test_build_chunks_bumps_seq_and_refreshes_elem_chunk_map(repo, monkeypatch):
     repo._build_chunks_for_source(sid)
     assert _mutation_seq(repo, nb.id) > seq_before  # choke point bumped unconditionally
 
-    refreshed = repo._elem_chunk_map(nb.id)
+    refreshed = repo.retrieval.graph._elem_chunk_map(nb.id)
     assert f"el-{sid}-0001" in refreshed  # warm cache was invalidated by the version bump
     with repo._connect() as db:
         cids = {r["id"] for r in db.execute(

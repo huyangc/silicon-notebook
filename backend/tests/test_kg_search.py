@@ -1,5 +1,11 @@
 import sqlite3
-from app.services.kg.search import fts_search, merge_search_hits
+from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.services.kg.search import merge_search_hits
+
+# Task 13: the FTS SQL moved to KnowledgeStore; kg/search keeps only the pure
+# hit merging. The primitive is connection-taking, so the in-memory fixture
+# keeps exercising it directly.
+fts_search = KnowledgeStore.fts_search
 
 
 def _fts_db():

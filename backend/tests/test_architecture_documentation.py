@@ -1,4 +1,23 @@
+import inspect
 from pathlib import Path
+
+from app.repositories.ports import (
+    AskCandidatePort,
+    AskGraphPort,
+    AskStreamPort,
+    RetrievalPort,
+)
+from app.repositories.ownership_manifest import OWNER_BY_MEMBER
+from app.services import report_engine, report_execution, repository_runtime
+from tests import test_repository_facade_contract as facade_contract
+from tests.test_repository_callers_static import (
+    EXPECTED_REMEDIATION_SITES as CALLER_REMEDIATION_SITES,
+    INDEPENDENT_PRIVATE_SITES,
+    INDEPENDENT_SQL_SITES,
+    private_repository_sites,
+    product_sql_sites,
+)
+from tests.test_repository_protocol_coverage import protocol_calls
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,6 +31,14 @@ CONTRACT_DOCS = (
     "docs/superpowers/plans/2026-07-10-architecture-contract-alignment.md",
 )
 LIVE_REFERENCE_DOCS = ("README.md", "README_zh.md", "AGENTS.md", "architecture.md")
+COMPOSITION_HISTORY_DOCS = (
+    "docs/superpowers/plans/2026-07-10-repository-composition-refactor.md",
+    "docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md",
+)
+REMEDIATION_DOCS = (
+    "docs/superpowers/specs/2026-07-11-repository-review-remediation-design.md",
+    "docs/superpowers/plans/2026-07-11-repository-review-remediation.md",
+)
 
 
 def _read(name: str) -> str:
@@ -193,7 +220,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-10" in fangan_done
+    assert "更新日期：2026-07-12" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 
@@ -209,3 +236,293 @@ def test_architecture_document_keeps_other_current_runtime_boundaries():
     assert "服务重启后仍为 `running` 的 job 会转为 `interrupted`" in architecture
     assert "`status`、`trace`、`answer_id`" in architecture
     assert "不直接返回 `AskResponse`" in architecture
+
+
+def test_repository_documentation_matches_composed_runtime_and_v9_compatibility():
+    """Task 28: docs describe the composed repository (runtime + stores +
+    consumer ports), the one-way dependency direction, the PostgreSQL
+    extension boundary, v9 compatibility and the backup-only verifier —
+    and stop presenting the retired mixin-inheritance stage as current."""
+    _assert_phrases(
+        {
+            "README.md":
+                "`SQLiteRepository` is the compatibility facade over a composed `RepositoryRuntime`",
+            "README_zh.md": "`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade",
+            "AGENTS.md": "`SQLiteRepository` is the compatibility facade over `RepositoryRuntime`",
+            "architecture.md": "不再通过 mixin 继承复用实现",
+            "fangan_done.md": "组合式 `RepositoryRuntime` 之上的兼容 facade",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "a future PostgreSQL adapter replaces the store layer behind the same ports",
+            "README_zh.md": "未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层",
+            "AGENTS.md": "a future PostgreSQL repository swaps the store layer behind the same ports",
+            "architecture.md": "facade → runtime → application services → stores → `SqliteDatabase`",
+        }
+    )
+    for name in LIVE_REFERENCE_DOCS + ("fangan_done.md",):
+        text = _read(name)
+        assert "verify_repository_snapshot.py" in text, (
+            f"{name} must document the backup-only real-database verifier"
+        )
+        assert (
+            "repository_v9" in text
+            or "v9 fixture" in text
+            or "v9 compatibility fixture" in text
+            or "v9 兼容 fixture" in text
+        ), (
+            f"{name} must document the frozen schema-v9 compatibility guard"
+        )
+        # Retired descriptions of the mixin-inheritance stage must not read
+        # as current architecture anywhere in the live reference docs.
+        assert "The facade inherits both implementations" not in text
+        assert "facade 通过继承复用两者" not in text
+        assert "cohesive SQLite domains should be extracted incrementally" not in text
+        assert "identity/sharing mixin 是迁移接缝" not in text
+        assert "仍混合 persistence 与业务编排" not in text
+        assert "已拆为 mixin 接缝" not in text
+
+
+def test_completed_repository_boundary_claims_are_source_guarded():
+    """The completion prose is coupled to production-source architecture guards.
+
+    These helpers are shared with the architecture suites instead of copying or
+    weakening their exact exception/debt ledgers here.
+    """
+    assert set(product_sql_sites()) - set(INDEPENDENT_SQL_SITES) == set()
+    assert set(private_repository_sites()) - set(INDEPENDENT_PRIVATE_SITES) == set()
+    assert CALLER_REMEDIATION_SITES == {
+        "product_sql": set(),
+        "private_repository": set(),
+    }
+    assert facade_contract.facade_body_violations(
+        facade_contract.SQLiteRepository
+    ) == []
+    assert facade_contract.manifest_delegate_mismatches(
+        facade_contract.SQLiteRepository, OWNER_BY_MEMBER
+    ) == []
+
+    assert protocol_calls("RetrievalPort") - set(RetrievalPort.__dict__) == set()
+    for name, protocol in (
+        ("AskCandidatePort", AskCandidatePort),
+        ("AskGraphPort", AskGraphPort),
+        ("AskStreamPort", AskStreamPort),
+    ):
+        declared = {
+            member
+            for member, value in protocol.__dict__.items()
+            if callable(value) and not member.startswith("_")
+        }
+        assert protocol_calls(name) == declared
+
+    _assert_phrases(
+        {
+            "README.md": "Application services do not assemble product SQL",
+            "README_zh.md": "application service 不拼装主业务库 SQL",
+            "AGENTS.md": "Application services do not assemble product SQL",
+            "architecture.md": "application service 不拼装主业务库 SQL",
+            "fangan_done.md": "application service 不再拼装主业务库 SQL",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "one-hop delegates",
+            "README_zh.md": "单跳委托",
+            "AGENTS.md": "one-hop delegates",
+            "architecture.md": "单跳委托",
+            "fangan_done.md": "单跳委托",
+        }
+    )
+
+
+def test_repository_runtime_and_verifier_completion_claims_are_synchronized():
+    _assert_phrases(
+        {
+            "README.md": "Synchronous Ask/report submission failures",
+            "README_zh.md": "Ask/report 同步提交失败",
+            "AGENTS.md": "Synchronous Ask/report submission failures",
+            "architecture.md": "Ask/report 同步提交失败",
+            "fangan_done.md": "Ask/report 同步提交失败",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "only SHM mtime is exempt",
+            "README_zh.md": "只豁免 SHM mtime",
+            "AGENTS.md": "only SHM mtime is exempt",
+            "architecture.md": "只豁免 SHM mtime",
+            "fangan_done.md": "只豁免 SHM mtime",
+        }
+    )
+
+
+def test_projection_ownership_claim_matches_sql_and_application_boundaries():
+    docs = (
+        LIVE_REFERENCE_DOCS
+        + ("fangan_done.md",)
+        + COMPOSITION_HISTORY_DOCS
+        + REMEDIATION_DOCS
+    )
+    for name in docs:
+        text = _read(name)
+        for overclaim in (
+            "row-to-domain projections",
+            "row-to-domain projection",
+            "SQL/row projection 只在 SQLite stores",
+            "SQL 与 row-to-domain projection 全部归",
+            "独占 SQL 与 row-to-domain projection",
+            "Stores own SQL and row-to-domain projection",
+        ):
+            assert overclaim not in text, f"{name} overstates projection ownership"
+
+    _assert_phrases(
+        {
+            "README.md": (
+                "Stores own product SQL and raw row selection; established "
+                "application/query components may assemble domain/application projections"
+            ),
+            "AGENTS.md": (
+                "Stores own product SQL and raw row selection; established "
+                "application/query components may assemble domain/application projections"
+            ),
+            "README_zh.md": (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            "architecture.md": (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            "fangan_done.md": (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            COMPOSITION_HISTORY_DOCS[0]: (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            COMPOSITION_HISTORY_DOCS[1]: (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            REMEDIATION_DOCS[0]: (
+                "Stores own product SQL and raw row selection; established "
+                "application/query components may assemble domain/application projections"
+            ),
+        }
+    )
+
+
+def test_report_cancellation_is_the_documented_process_global_runtime_exception():
+    assert report_engine.REPORT_CANCELLATIONS is report_execution.REPORT_CANCELLATIONS
+    assert repository_runtime.REPORT_CANCELLATIONS is report_execution.REPORT_CANCELLATIONS
+    init_source = inspect.getsource(repository_runtime.RepositoryRuntime.__init__)
+    wire_source = inspect.getsource(
+        repository_runtime.RepositoryRuntime.wire_report_execution
+    )
+    assert "self.report_cancellations = REPORT_CANCELLATIONS" in init_source
+    assert "cancellations=self.report_cancellations" in wire_source
+
+    _assert_phrases(
+        {
+            "README.md": (
+                "`RepositoryRuntime` owns or references composed runtime state; "
+                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
+            ),
+            "AGENTS.md": (
+                "`RepositoryRuntime` owns or references composed runtime state; "
+                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
+            ),
+            "README_zh.md": (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            "architecture.md": (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            "fangan_done.md": (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            COMPOSITION_HISTORY_DOCS[0]: (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            COMPOSITION_HISTORY_DOCS[1]: (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            REMEDIATION_DOCS[0]: (
+                "`RepositoryRuntime` owns or references composed runtime state; "
+                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
+            ),
+        }
+    )
+
+
+def test_repository_schema_baseline_wording_is_exact_and_not_stale():
+    english = (
+        "The refactor does not change the schema version present on its master "
+        "baseline\n(SCHEMA_VERSION = 10). The committed v9 compatibility fixture "
+        "upgrades through\nthe existing v10 migration and remains readable."
+    )
+    chinese = (
+        "本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。"
+        "已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。"
+    )
+    for name in ("README.md", "AGENTS.md"):
+        assert english in _read(name), f"{name} is missing the exact schema statement"
+    for name in ("README_zh.md", "architecture.md", "fangan_done.md") + COMPOSITION_HISTORY_DOCS:
+        assert chinese in _read(name), f"{name} is missing the schema statement"
+
+    for name in COMPOSITION_HISTORY_DOCS:
+        text = _read(name)
+        for stale in (
+            "SCHEMA_VERSION=9",
+            "SCHEMA_VERSION = 9",
+            "SCHEMA_VERSION 保持 9",
+            "SCHEMA_VERSION remains 9",
+            "schema v9 and frozen-master",
+        ):
+            assert stale not in text, f"{name} retains stale schema wording: {stale}"
+
+
+def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
+    """`chunk` (default) / `reasoning` / `graph` are the modes; persisted
+    `fast`/`global` ids survive only as aliases to `chunk`.  The older
+    fast/global product description must not resurface."""
+    _assert_phrases(
+        {
+            "README.md": "Retired ids `fast` and `global` are transparently remapped to `chunk`",
+            "README_zh.md": "退役 id `fast`、`global` 透明映射到 `chunk`",
+            "AGENTS.md": "retired `fast`/`global` ids map to `chunk` only for persisted-session compatibility",
+            "architecture.md": "退役 mode id 只保留兼容映射",
+            "fangan_done.md": "KG-native Ask（chunk / graph / reasoning",
+        }
+    )
+    for name in LIVE_REFERENCE_DOCS + ("fangan_done.md",):
+        text = _read(name)
+        assert "Global QA" not in text
+        assert 'mode="global"' not in text
+        assert 'mode="fast"' not in text
+
+
+def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferred():
+    remediation = _read(
+        "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md"
+    )
+    assert "取代范围仅限 Repository 工作" in remediation
+    assert "Pydantic 模型分文件" in remediation
+    assert "仍延后为独立工作" in remediation
+    composition = _read(
+        "docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md"
+    )
+    assert "`SCHEMA_VERSION` 现为 10" in composition
+    assert "不是本重构新增的迁移" in composition
+    for name in ("architecture.md", "fangan_done.md"):
+        text = _read(name)
+        assert "延后为独立工作" in text, (
+            f"{name} must keep the Pydantic/lifespan deferral factual"
+        )

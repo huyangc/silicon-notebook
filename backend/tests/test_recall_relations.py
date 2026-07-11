@@ -33,14 +33,20 @@ def test_run_recall_reports_relation_metrics(repo):
     assert rows[0]["relation_recall_at_k"] == 1.0   # 关系被检索到
 
 
-class _FakeRepo:
-    def __init__(self, hits, cmap):
-        self._hits, self._cmap = hits, cmap
-    def _retrieve_scored(self, nb, q):
+class _FakeRetrieval:
+    """run_recall 走公开 retrieval 端口(Task 27)——fake 镜像 RetrievalService 形状。"""
+    def __init__(self, hits):
+        self._hits = hits
+    def retrieve_scored(self, nb, q):
         class H:
             def __init__(s, oid): s.object_id = oid
         return [H(o) for o in self._hits]
-    def _retrieve_relations_scored(self, nb, q): return []
+    def retrieve_relations_scored(self, nb, q): return []
+
+
+class _FakeRepo:
+    def __init__(self, hits, cmap):
+        self.retrieval, self._cmap = _FakeRetrieval(hits), cmap
     def cluster_map(self, nb): return self._cmap
 
 

@@ -88,3 +88,28 @@ def test_embed_source_failed_batch_isolated(repo):
     with repo._connect() as db:
         (n,) = db.execute("SELECT COUNT(*) FROM element_embeddings WHERE source_id=?", (sid,)).fetchone()
     assert n == 20                    # the failed batch's 10 dropped; other 20 persisted
+
+
+class _ThreadNameEmbedder(_ConcEmbedder):
+    """Also records the worker-thread names embed_texts ran on."""
+    def __init__(self, dim=8):
+        super().__init__(dim=dim)
+        self.thread_names = set()
+
+    def embed_texts(self, texts):
+        with self._lock:
+            self.thread_names.add(threading.current_thread().name)
+        return super().embed_texts(texts)
+
+
+def test_embed_source_workers_use_emb_el_thread_prefix(repo):
+    """Task 11 pin: the element-embedding pool keeps its ``emb-el`` thread-name
+    prefix through the SourceEmbeddingService extraction (ops dashboards and
+    thread dumps key off it)."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(repo, nb.id, 25)   # 3 batches (10,10,5)
+    emb = _ThreadNameEmbedder(dim=8)
+    repo.embedder = emb
+    repo._embed_source(sid)
+    assert emb.thread_names
+    assert all(name.startswith("emb-el") for name in emb.thread_names)

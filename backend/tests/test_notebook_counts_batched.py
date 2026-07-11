@@ -84,12 +84,15 @@ def test_notebook_counts_respects_usable_statuses(repo):
 def test_list_notebooks_batches_knowledge_type_counts_not_n_plus_1(repo, monkeypatch):
     """list_notebooks over N notebooks must issue exactly 2 knowledge-count
     queries PER notebook (1 sources COUNT + 1 GROUP BY object_type), not 7 —
-    spy on the connection boundary for the specific query shapes."""
+    spy on the runtime database boundary (the seam every read path, facade or
+    NotebookSummaryQuery component, ultimately opens connections through) for
+    the specific query shapes."""
     for i in range(6):
         _seed_notebook_with_knowledge(repo, f"kb-{i}", {"rule": 1, "case": 1})
 
     calls = {"group_by": 0, "per_type_count": 0}
-    orig_connect = repo._connect
+    database = repo._runtime.database
+    orig_connect = database.connect
 
     class _SpyConn:
         def __init__(self, inner):
@@ -112,7 +115,7 @@ def test_list_notebooks_batches_knowledge_type_counts_not_n_plus_1(repo, monkeyp
         def __exit__(self, *exc):
             return self._inner.__exit__(*exc)
 
-    monkeypatch.setattr(repo, "_connect", lambda: _SpyConn(orig_connect()))
+    monkeypatch.setattr(database, "connect", lambda: _SpyConn(orig_connect()))
     notebooks = repo.list_notebooks()
     assert len(notebooks) == 6
     assert calls["per_type_count"] == 0, (

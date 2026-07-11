@@ -1,9 +1,7 @@
 import asyncio
-import contextvars
 import io
 import json
 import queue
-import threading
 import zipfile
 from pathlib import Path
 from typing import Any, List, Optional
@@ -12,8 +10,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
-    repository, require_notebook_access, require_notebook_read,
-    require_notebook_write, get_current_user,
+    admin_query_repository, identity_repository,
+    notebook_access_repository, notebook_catalog_repository,
+    notebook_sharing_repository, repository, require_notebook_access,
+    require_notebook_read, require_notebook_write, get_current_user, source_repository,
 )
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
@@ -84,11 +84,10 @@ from app.models.schemas import (
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
-from app.services.cancellation import AskCancelled
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.pending_bus import pending_bus
-from app.services.repository import NotebookRepository, UploadedSourceFile
+from app.repositories.ports import AskStreamPort, UploadedSourceFile
 
 router = APIRouter()
 
@@ -139,7 +138,7 @@ def _mask_key(key: str) -> str:
 
 @router.get("/me/model-settings")
 def get_model_settings(user: UserProfile = Depends(get_current_user)):
-    repo = repository()
+    repo = identity_repository()
     stored = repo.get_user_model_settings(user.id)
     out = {}
     for role in _MODEL_ROLES:
@@ -156,7 +155,7 @@ def get_model_settings(user: UserProfile = Depends(get_current_user)):
 
 @router.put("/me/model-settings")
 def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
-    repo = repository()
+    repo = identity_repository()
     stored = dict(repo.get_user_model_settings(user.id))
     for role in _MODEL_ROLES:
         upd = getattr(payload, role)
@@ -184,21 +183,22 @@ def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(ge
     import time
     if payload.service not in _MODEL_ROLES:
         return ModelTestResult(ok=False, error="未知服务")
-    repo = repository()
+    repo = identity_repository()
     stored = repo.get_user_model_settings(user.id).get(payload.service) or {}
     api_key = payload.api_key if payload.api_key else stored.get("api_key", "")
     base_url, model = payload.base_url.strip(), payload.model.strip()
     if not (base_url and model and api_key):
         return ModelTestResult(ok=False, error="缺少 base_url / model / api_key")
     started = time.perf_counter()
+    settings = get_settings()
     try:
         if payload.service == "rerank":
             from app.services.rerank_client import RerankClient
-            RerankClient(repo.settings, model=model, base_url=base_url, api_key=api_key)._rerank_batch(
+            RerankClient(settings, model=model, base_url=base_url, api_key=api_key)._rerank_batch(
                 "ping", ["a", "b"])
         else:
             from app.core.llm import OpenAICompatibleClient
-            OpenAICompatibleClient(repo.settings, base_url=base_url, api_key=api_key, model=model).chat_json(
+            OpenAICompatibleClient(settings, base_url=base_url, api_key=api_key, model=model).chat_json(
                 [{"role": "user", "content": "ping"}], "{}", timeout=10, max_retries=0)
         return ModelTestResult(ok=True, latency_ms=round((time.perf_counter() - started) * 1000))
     except Exception as exc:
@@ -234,29 +234,29 @@ def detect_doc_types(payload: DetectDocTypesRequest) -> List[DetectedDocType]:
 
 @router.get("/notebook-templates", response_model=List[NotebookTemplate])
 def list_notebook_templates() -> List[NotebookTemplate]:
-    return repository().list_notebook_templates()
+    return notebook_catalog_repository().list_notebook_templates()
 
 
 @router.get("/notebooks", response_model=List[NotebookSummary])
 def list_notebooks() -> List[NotebookSummary]:
-    return repository().list_notebooks()
+    return notebook_catalog_repository().list_notebooks()
 
 
 # 注意:静态段路由必须在 /notebooks/{notebook_id} 之前注册,否则 "shared-by-me" 被当作 {notebook_id}。
 @router.get("/notebooks/shared-by-me", response_model=List[SharedByMeItem])
 def shared_by_me_route(user: UserProfile = Depends(get_current_user)) -> List[SharedByMeItem]:
-    return [SharedByMeItem(**it) for it in repository().shared_by_me(user.id)]
+    return [SharedByMeItem(**it) for it in notebook_sharing_repository().shared_by_me(user.id)]
 
 
 @router.post("/notebooks", response_model=NotebookSummary)
 def create_notebook(payload: NotebookCreate) -> NotebookSummary:
-    return repository().create_notebook(payload)
+    return notebook_catalog_repository().create_notebook(payload)
 
 
 @router.get("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_read)])
 def get_notebook(notebook_id: str) -> NotebookSummary:
     try:
-        return repository().get_notebook(notebook_id)
+        return notebook_catalog_repository().get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -264,7 +264,7 @@ def get_notebook(notebook_id: str) -> NotebookSummary:
 @router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics, dependencies=[Depends(require_notebook_read)])
 def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
     try:
-        return repository().notebook_analytics(notebook_id)
+        return notebook_catalog_repository().notebook_analytics(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -275,7 +275,7 @@ def update_notebook(
     payload: NotebookUpdate,
 ) -> NotebookSummary:
     try:
-        return repository().update_notebook(notebook_id, payload)
+        return notebook_catalog_repository().update_notebook(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -283,7 +283,7 @@ def update_notebook(
 @router.delete("/notebooks/{notebook_id}", status_code=204, dependencies=[Depends(require_notebook_access)])
 def delete_notebook(notebook_id: str) -> None:
     try:
-        repository().delete_notebook(notebook_id)
+        notebook_catalog_repository().delete_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -295,7 +295,7 @@ def list_sources(
     limit: int = Query(50, ge=1, le=200),
     q: str = Query(""),
 ) -> PaginatedSources:
-    return repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
+    return source_repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
 
 
 @router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
@@ -306,7 +306,7 @@ def import_sources(
     try:
         for file in payload.files:
             _validate_source_file(file.file_name)
-        return repository().import_sources(notebook_id, payload)
+        return source_repository().import_sources(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -316,7 +316,7 @@ def add_url_sources(
     notebook_id: str,
     payload: AddUrlSourcesRequest,
 ) -> AddUrlSourcesResult:
-    repo = repository()
+    repo = source_repository()
     try:
         return repo.add_url_sources(
             notebook_id,
@@ -336,7 +336,7 @@ async def upload_sources(
     doc_types: List[str] = Form(default=[]),
 ) -> List[SourceSummary]:
     try:
-        repo = repository()
+        repo = source_repository()
         uploaded_files = []
         for index, file in enumerate(files):
             file_name = file.filename or "source.bin"
@@ -364,40 +364,40 @@ async def upload_sources(
 
 @router.get("/sources/{source_id}", response_model=SourceDetail)
 def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceDetail:
-    if not repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return repository().get_source(source_id)
+        return source_repository().get_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
 @router.post("/sources/{source_id}/parse", response_model=SourceSummary)
 def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceSummary:
-    if repository().source_owner(source_id) != user.id:
+    if notebook_access_repository().source_owner(source_id) != user.id:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return repository().parse_source(source_id)
+        return source_repository().parse_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
 def source_elements(source_id: str, user: UserProfile = Depends(get_current_user)) -> List[SourceElement]:
-    if not repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return repository().source_elements(source_id)
+        return source_repository().source_elements(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
 
 @router.delete("/sources/{source_id}", status_code=204)
 def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    if repository().source_owner(source_id) != user.id:
+    if notebook_access_repository().source_owner(source_id) != user.id:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        repository().delete_source(source_id)
+        source_repository().delete_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -541,7 +541,7 @@ def search_notebook(
     q: str = Query(""),
 ) -> NotebookSearchResponse:
     try:
-        return repository().search_notebook(notebook_id, q)
+        return notebook_catalog_repository().search_notebook(notebook_id, q)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -591,50 +591,23 @@ def _ndjson_line(payload: dict[str, Any]) -> str:
 
 
 async def _stream_ask_events(
-    repo: NotebookRepository,
+    repo: AskStreamPort,
     notebook_id: str,
     payload: AskRequest,
     spec,
     request: Request,
 ):
-    events: queue.Queue[dict[str, Any] | None] = queue.Queue()
-    cancel_event = threading.Event()
-    # 建/接续会话 + 建 ask_jobs 行 + 注册 cancel_event;job_id 先发给客户端(供「停止」调用)。
-    job_id, _conv_id = repo.begin_ask_job(notebook_id, payload, spec.id, cancel_event)
-    events.put({"event": "started", "job_id": job_id})
-    events.put({"event": "progress", "step": {
-        "step_type": "start", "summary": "启动检索", "detail": {"mode": spec.id}}})
-
-    def on_trace(step) -> None:
-        if not cancel_event.is_set():
-            payload_step = step.model_dump()
-            repo.append_ask_trace(job_id, payload_step)   # WS2b: 持久化供重开会话回放
-            events.put({"event": "progress", "step": payload_step})
-
-    def worker() -> None:
-        try:
-            handler = getattr(repo, spec.handler)
-            response = handler(
-                notebook_id, payload, on_trace=on_trace, cancel_event=cancel_event,
-            ) if spec.streaming else handler(
-                notebook_id, payload, cancel_event=cancel_event,
-            )
-            repo.finish_ask_job(job_id, "done", answer_id=response.answer_id)
-            events.put({"event": "final", "response": response.model_dump()})
-        except AskCancelled:
-            repo.finish_ask_job(job_id, "cancelled")
-            events.put({"event": "cancelled"})
-        except Exception as exc:  # noqa: BLE001
-            repo.finish_ask_job(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
-            events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
-        finally:
-            events.put(None)
-
-    ctx = contextvars.copy_context()
-    threading.Thread(target=lambda: ctx.run(worker), daemon=True).start()
-    # 关键改动:客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
-    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。也不再有
-    # finally: cancel_event.set()。
+    # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
+    # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
+    # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
+    # 交付队列消费与断连轮询。Task 24: 执行体 = runtime-owned AskService(三模式
+    # 注册表派发在服务内),不再是 facade runner 回调。
+    events = repo.start_ask_stream(
+        notebook_id, payload, spec,
+        user_id=repo.current_user().id,
+    )
+    # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
+    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
     while True:
         try:
             event = events.get_nowait()
@@ -701,7 +674,7 @@ def list_conversations(notebook_id: str) -> List[ConversationSummary]:
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
 def get_conversation(conversation_id: str, user: UserProfile = Depends(get_current_user)) -> ConversationDetail:
-    if repository().conversation_owner(conversation_id) != user.id:
+    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     try:
         return repository().get_conversation(conversation_id)
@@ -711,7 +684,7 @@ def get_conversation(conversation_id: str, user: UserProfile = Depends(get_curre
 
 @router.patch("/conversations/{conversation_id}")
 def rename_conversation(conversation_id: str, payload: ConversationRenameRequest, user: UserProfile = Depends(get_current_user)):
-    if repository().conversation_owner(conversation_id) != user.id:
+    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     try:
         repository().rename_conversation(conversation_id, payload.title)
@@ -722,7 +695,7 @@ def rename_conversation(conversation_id: str, payload: ConversationRenameRequest
 
 @router.delete("/conversations/{conversation_id}")
 def delete_conversation(conversation_id: str, user: UserProfile = Depends(get_current_user)):
-    if repository().conversation_owner(conversation_id) != user.id:
+    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
     try:
         repository().delete_conversation(conversation_id)
@@ -781,11 +754,12 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
     if tier not in {"base", "personal"}:
         raise HTTPException(status_code=400, detail="tier must be 'base' or 'personal'")
     try:
+        catalog = notebook_catalog_repository()
         if tier == "base":
-            repository().mark_notebook_base(notebook_id)
+            catalog.mark_notebook_base(notebook_id)
         else:
-            repository().set_notebook_personal(notebook_id)
-        return repository().get_notebook(notebook_id)
+            catalog.set_notebook_personal(notebook_id)
+        return catalog.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -794,7 +768,7 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
              dependencies=[Depends(require_notebook_access)])
 def share_notebook_route(notebook_id: str) -> ShareResponse:
     try:
-        return ShareResponse(**repository().share_notebook(notebook_id))
+        return ShareResponse(**notebook_sharing_repository().share_notebook(notebook_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -803,46 +777,47 @@ def share_notebook_route(notebook_id: str) -> ShareResponse:
                dependencies=[Depends(require_notebook_access)])
 def unshare_notebook_route(notebook_id: str) -> None:
     try:
-        repository().unshare_notebook(notebook_id)
+        notebook_sharing_repository().unshare_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get("/shared/{token}", response_model=SharedPreview)
 def shared_preview_route(token: str, user: UserProfile = Depends(get_current_user)) -> SharedPreview:
-    nb_id = repository().find_notebook_by_share_token(token)
+    sharing = notebook_sharing_repository()
+    nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    return SharedPreview(**repository().shared_preview(nb_id))
+    return SharedPreview(**sharing.shared_preview(nb_id))
 
 
 @router.post("/shared/{token}/copy", response_model=NotebookSummary)
 def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
-    repo = repository()
-    nb_id = repo.find_notebook_by_share_token(token)
+    sharing = notebook_sharing_repository()
+    nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if not repo.notebook_copy_stats(nb_id)["copyable"]:
+    if not sharing.notebook_copy_stats(nb_id)["copyable"]:
         raise HTTPException(status_code=409, detail="notebook too large to copy")
-    return repo.copy_notebook(nb_id, new_owner_id=user.id)
+    return sharing.copy_notebook(nb_id, new_owner_id=user.id)
 
 
 @router.post("/shared/{token}/join", response_model=NotebookSummary)
 def join_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
     """大库只读加入:凭 share_token 成为只读成员。小库应走 copy 而非 join。"""
-    repo = repository()
-    nb_id = repo.find_notebook_by_share_token(token)
+    sharing = notebook_sharing_repository()
+    nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if repo.notebook_copy_stats(nb_id)["copyable"]:
+    if sharing.notebook_copy_stats(nb_id)["copyable"]:
         raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
-    return repo.join_shared(nb_id, user.id)
+    return sharing.join_shared(nb_id, user.id)
 
 
 @router.delete("/notebooks/{notebook_id}/membership", status_code=204)
 def leave_notebook_route(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> None:
     """退出只读共享:只删自己的成员记录(幂等,不影响他人)。"""
-    repository().leave_notebook(notebook_id, user.id)
+    notebook_sharing_repository().leave_notebook(notebook_id, user.id)
 
 
 @router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_access)])
@@ -900,41 +875,20 @@ def _report_llm_ready(repo) -> bool:
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
                      auto_generate: bool = False) -> None:
     """阶段1(规划)后台 job:跑 plan_outline → outline_ready;auto_generate 时
-    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。"""
-    from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
-    cancel = register_cancel(rid)
-
-    def worker():
-        try:
-            depth = 2
-            try:
-                depth = int(repo.get_report(notebook_id, rid).get("depth", 2))
-            except Exception:
-                pass
-            ReportEngine(repo, repo.settings, cancel_event=cancel).run(
-                notebook_id, rid, question, history, depth=depth,
-                auto_generate=auto_generate)
-        finally:
-            unregister_cancel(rid)
-
-    # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
-    background_jobs.submit(worker, name=f"report-plan-{rid}", notify_pending=True)
+    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。
+    Task 25:helper 名保留(测试 monkeypatch 位),编排移交运行时协调器——
+    注册取消(submit 前)→ background_jobs.submit(copy_context)→ 收尾注销。"""
+    repo.report_execution.start_plan(
+        notebook_id, rid, question, history, auto_generate,
+        user_id=repo.current_user().id)
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
                          depth: int = 2) -> None:
     """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
-    from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
-    cancel = register_cancel(rid)
-
-    def worker():
-        try:
-            ReportEngine(repo, repo.settings, cancel_event=cancel).generate(
-                notebook_id, rid, question, depth=depth)
-        finally:
-            unregister_cancel(rid)
-
-    background_jobs.submit(worker, name=f"report-gen-{rid}", notify_pending=True)
+    repo.report_execution.start_generate(
+        notebook_id, rid, question, depth,
+        user_id=repo.current_user().id)
 
 
 @router.post("/notebooks/{notebook_id}/reports",
@@ -1048,7 +1002,7 @@ def delete_report(notebook_id: str, report_id: str) -> dict:
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
 def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile = Depends(get_current_user)) -> FeedbackResponse:
-    if not repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
+    if not notebook_access_repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
         raise HTTPException(status_code=404, detail="Answer not found")
     try:
         return repository().submit_feedback(answer_id, payload)
@@ -1375,7 +1329,7 @@ async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> Lis
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户总览")
     loop = asyncio.get_running_loop()
-    rows = await loop.run_in_executor(None, repository().list_user_usage)
+    rows = await loop.run_in_executor(None, admin_query_repository().list_user_usage)
     online = pending_bus.online_user_ids()
     return [AdminUserUsage(**row, is_online=row["id"] in online) for row in rows]
 
@@ -1385,7 +1339,10 @@ def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_curr
     """某用户名下笔记本详情。仅 admin。"""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可查看用户笔记本")
-    return [AdminUserNotebook(**row) for row in repository().list_user_notebooks(user_id)]
+    return [
+        AdminUserNotebook(**row)
+        for row in admin_query_repository().list_user_notebooks(user_id)
+    ]
 
 
 @router.get("/admin/online")

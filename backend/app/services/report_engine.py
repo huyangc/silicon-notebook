@@ -2,9 +2,14 @@
 (证据三层 [k]/（推断）/【通识】) → 汇总(执行摘要/参考文献/结尾局限)。
 
 设计对齐 docs/superpowers/specs/2026-07-03-deep-report-mode-design.md。
-形态镜像 ReasoningRetriever:持 (repo, settings, cancel_event),写库经 repo。
+形态镜像 ReasoningRetriever(Task 25 端口化):引擎只持 ReportEngineDependencies
+里的窄端口(reports/retrieval/evidence_context/model_clients/model_errors/
+source_query/communities),写库经 reports 端口,不再持 repository facade;
+旧 repository 调用点由 from_repository 一次性工厂适配。
 线程要点:节间 ThreadPoolExecutor 并行,worker 不继承 ContextVar——每个 submit
 用 contextvars.copy_context().run 包裹,保住 per-user 模型解析。
+取消注册表:进程全局所有权在 report_execution.REPORT_CANCELLATIONS,本模块的
+register_cancel/cancel_report/unregister_cancel 是它的显式委托(冻结调用点)。
 """
 from __future__ import annotations
 import contextvars
@@ -13,49 +18,83 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.report_execution import REPORT_CANCELLATIONS
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
+    from app.repositories.ports import (
+        CommunityQueryPort, EvidenceContextPort, ModelClientProvider,
+        ModelErrorSink, ReportRepository, ReportSourceQueryPort, RetrievalPort,
+    )
 
 _MARKER = re.compile(r"\[(k\d+(?:\s*,\s*k\d+)*)\]")   # 节内 [k_i] 或 [k_i, k_j] 引用标记(全局重编号用)
 
-# --- 取消注册表:report_id → threading.Event(活动后台 job 才在册) ---
-_ACTIVE_CANCELS: Dict[str, threading.Event] = {}
-_CANCELS_LOCK = threading.Lock()
 
+# --- 取消注册表委托:report_id → threading.Event(活动后台 job 才在册) ---
+# 所有权在 report_execution.REPORT_CANCELLATIONS(进程全局唯一实例);这三个
+# 函数保持冻结调用点(routes cancel 端点/测试)可用。
 
 def register_cancel(report_id: str) -> threading.Event:
     ev = threading.Event()
-    with _CANCELS_LOCK:
-        _ACTIVE_CANCELS[report_id] = ev
+    REPORT_CANCELLATIONS.register(report_id, ev)
     return ev
 
 
 def cancel_report(report_id: str) -> bool:
-    with _CANCELS_LOCK:
-        ev = _ACTIVE_CANCELS.get(report_id)
-    if ev is not None:
-        ev.set()
-        return True
-    return False
+    return REPORT_CANCELLATIONS.cancel(report_id)
 
 
 def unregister_cancel(report_id: str) -> None:
-    with _CANCELS_LOCK:
-        _ACTIVE_CANCELS.pop(report_id, None)
+    REPORT_CANCELLATIONS.unregister(report_id)
+
+
+@dataclass(frozen=True)
+class ReportEngineDependencies:
+    """引擎的全部协作面(窄端口,消费者所有的契约见 app.repositories.ports)。"""
+    reports: "ReportRepository"
+    retrieval: "RetrievalPort"
+    evidence_context: "EvidenceContextPort"
+    model_clients: "ModelClientProvider"
+    model_errors: "ModelErrorSink"
+    source_query: "ReportSourceQueryPort"
+    communities: "CommunityQueryPort"
+    settings: "Settings"
+    event_log: Any
 
 
 class ReportEngine:
-    def __init__(self, repo, settings, cancel_event: CancelEvent = None):
-        self.repo = repo
-        self.settings = settings
+    def __init__(self, dependencies: ReportEngineDependencies, *,
+                 user_id: str, cancel_event: CancelEvent = None):
+        self.dependencies = dependencies
+        self.settings = dependencies.settings
+        self.user_id = user_id            # 发起者身份(审计归属;模型解析走 ContextVar)
         self.cancel_event = cancel_event
+
+    @classmethod
+    def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
+        """Frozen-call-site adapter; extracts narrow ports and retains no facade."""
+        engine = repository.report_execution.engine_factory(
+            user_id=repository.current_user().id,
+            cancel_event=cancel_event,
+            settings=settings,
+        )
+        if cls is ReportEngine:
+            return engine
+        return cls(
+            engine.dependencies,
+            user_id=engine.user_id,
+            cancel_event=engine.cancel_event,
+        )
 
     # --- Stage A ---
     def _plan_outline(self, notebook_id: str, question: str, history: str) -> List[dict]:
         from app.services.prompts import report_outline_prompt, REPORT_OUTLINE_SCHEMA_HINT
-        client = self.repo.reasoning_llm_client
+        client = self.dependencies.model_clients.reasoning_llm_client
         try:
             raw = client.chat_json(
                 [{"role": "user", "content": report_outline_prompt(
@@ -79,7 +118,8 @@ class ReportEngine:
             pass
         # 回退骨架:expand_query 的子查询平铺为单节(保证总能出报告)。
         from app.services.query_rewrite import expand_query
-        ex = expand_query(self.repo.rewrite_llm_client, question, history)
+        ex = expand_query(self.dependencies.model_clients.rewrite_llm_client,
+                          question, history)
         return [{"title": "分析", "scope": question,
                  "sub_queries": [s.query for s in ex.sub_queries][:4] or [question]}]
 
@@ -90,19 +130,17 @@ class ReportEngine:
     def _build_corpus_map(self, notebook_id: str, question: str) -> str:
         """0-LLM 语料侦察:来源标题 + federated KG 命中 + PPR chunk 来源·路径。
         给 STORM 规划接地(治盲规划)。任一子步失败静默降级为空段。"""
+        deps = self.dependencies
         parts: List[str] = []
         try:
-            with self.repo._connect() as db:
-                rows = db.execute(
-                    "SELECT title FROM sources WHERE notebook_id=? ORDER BY created_at LIMIT 20",
-                    (notebook_id,)).fetchall()
+            rows = deps.source_query.report_source_rows(notebook_id)
             titles = [str(r["title"]).strip() for r in rows if str(r["title"]).strip()]
             if titles:
                 parts.append("本 notebook 来源文件:\n" + "\n".join(f"- {t}" for t in titles))
         except Exception:
             pass
         try:
-            kg = self.repo.federated_retrieve(notebook_id, question)[: self._SCOUT_KG_N]
+            kg = deps.retrieval.federated_retrieve(notebook_id, question)[: self._SCOUT_KG_N]
             if kg:
                 parts.append("检索到的知识条目(name[type][tier]):\n" + "\n".join(
                     f"- {str(h.payload.get('name','')).strip()}"
@@ -110,7 +148,7 @@ class ReportEngine:
         except Exception:
             pass
         try:
-            chunks = self.repo._ppr_retrieve(notebook_id, question)[: self._SCOUT_CHUNK_N]
+            chunks = deps.retrieval.ppr_retrieve(notebook_id, question)[: self._SCOUT_CHUNK_N]
             if chunks:
                 parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
                     f"- {c.source_title} · {c.section_path}" for c in chunks))
@@ -125,7 +163,7 @@ class ReportEngine:
             seen, base = set(), set()
             for q in (s.get("sub_queries") or []):
                 try:
-                    for h in self.repo.federated_retrieve(notebook_id, str(q)):
+                    for h in self.dependencies.retrieval.federated_retrieve(notebook_id, str(q)):
                         seen.add(h.object_id)
                         if getattr(h, "tier", "") == "base":
                             base.add(h.object_id)
@@ -136,28 +174,29 @@ class ReportEngine:
 
     # --- Stage A 编排:map → STORM → 探针 → Judge → 富大纲 → outline_ready ---
     def plan_outline(self, notebook_id, rid, question, history="") -> None:
+        reports = self.dependencies.reports
         try:
-            self.repo.update_report(notebook_id, rid, status="planning", progress="侦察语料中")
+            reports.update_report(notebook_id, rid, status="planning", progress="侦察语料中")
             corpus_map = self._build_corpus_map(notebook_id, question)
             raise_if_cancelled(self.cancel_event)
-            self.repo.update_report(notebook_id, rid, progress="多视角规划大纲中")
+            reports.update_report(notebook_id, rid, progress="多视角规划大纲中")
             sections = self._storm_outline(notebook_id, question, history, corpus_map)
             # 充分性:探针(0 LLM)+ Judge(flash)
             probe = self._probe_sufficiency(notebook_id, sections)
             sections = self._judge_sufficiency(question, sections, probe)
-            self.repo.update_report(notebook_id, rid, outline=sections,
-                                    status="outline_ready",
-                                    progress=f"大纲就绪({len(sections)} 节),待确认")
+            reports.update_report(notebook_id, rid, outline=sections,
+                                  status="outline_ready",
+                                  progress=f"大纲就绪({len(sections)} 节),待确认")
         except AskCancelled:
-            self.repo.update_report(notebook_id, rid, status="cancelled", progress="已取消")
+            reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
         except Exception as exc:
-            self.repo.update_report(notebook_id, rid, status="failed",
-                                    error=str(exc)[:500], progress="规划失败")
+            reports.update_report(notebook_id, rid, status="failed",
+                                  error=str(exc)[:500], progress="规划失败")
 
     def _storm_outline(self, notebook_id, question, history, corpus_map) -> List[dict]:
         from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
         try:
-            raw = self.repo.reasoning_llm_client.chat_json(
+            raw = self.dependencies.model_clients.reasoning_llm_client.chat_json(
                 [{"role": "user", "content": report_storm_outline_prompt(
                     question, corpus_map, max_sections=self.settings.report_max_sections,
                     history_block=history)}],
@@ -192,7 +231,7 @@ class ReportEngine:
             s.setdefault("action", "keep" if h["hits"] >= 3 else "supplement" if h["hits"] else "external")
         try:
             block = "\n".join(f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']}" for p in probe)
-            raw = self.repo.rewrite_llm_client.chat_json(
+            raw = self.dependencies.model_clients.rewrite_llm_client.chat_json(
                 [{"role": "user", "content": report_sufficiency_prompt(question, block)}],
                 REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
             for v in (json.loads(raw).get("verdicts") or []):
@@ -209,23 +248,32 @@ class ReportEngine:
 
     # --- Stage B(单节):完整 reasoning 深挖 ---
     def _deep_dive(self, notebook_id, section, question, depth=None, on_step=None):
+        # 经模块属性取 ReasoningRetriever(冻结的测试替换位),端口化构造:
+        # 深挖拿到的就是本引擎依赖里的同一批 retrieval/model/communities 端口。
         from app.services.reasoning_retrieval import ReasoningRetriever
+        deps = self.dependencies
         sec_question = (f"{question}\n[报告章节] {section['title']}: {section['scope']}\n"
                         f"[本节检索方向] " + "; ".join(section["sub_queries"]))
         # 与 ask 走同一套流程:不传 top_n → run 按本节方面数自适应证据预算
         # (effective_top_n:floor=retrieval_top_n,横向对比节因兄弟子查询多而扩容)。
-        return ReasoningRetriever(self.repo, self.settings, self.cancel_event).run(
-            notebook_id, sec_question, on_step=on_step, max_steps=depth)
+        return ReasoningRetriever(
+            retrieval=deps.retrieval,
+            model_clients=deps.model_clients,
+            communities=deps.communities,
+            settings=self.settings,
+            cancel_event=self.cancel_event,
+        ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth)
 
     # --- Stage C(单节):撰写 ---
     def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
-        chunk_block, chunk_map = self.repo._chunk_answer_context(
-            result.chunks, budget_chars=self.settings.report_section_chunk_budget,
-            notebook_id=notebook_id)
-        kg_block, kg_map = self.repo._answer_context(
+        deps = self.dependencies
+        chunk_block, chunk_map = deps.evidence_context.chunk_context(
+            result.chunks, notebook_id=notebook_id,
+            budget_chars=self.settings.report_section_chunk_budget)
+        kg_block, kg_map = deps.evidence_context.knowledge_context(
             notebook_id, result.top_hits, id_offset=len(chunk_map))
-        # 现场事实:_chunk_answer_context/_answer_context 空输入返回 "(none)" 哨兵
+        # 现场事实:chunk_context/knowledge_context 空输入返回 "(none)" 哨兵
         # (非空串),先归一再拼接,避免把哨兵当真实证据块。
         chunk_block = "" if chunk_block == "(none)" else chunk_block
         kg_block = "" if kg_block == "(none)" else kg_block
@@ -238,7 +286,7 @@ class ReportEngine:
                 result.chains, id_offset=2000)
             if chain_block and chain_block != "(none)":
                 context_block = f"{context_block}\n\n{chain_block}"
-        client = self.repo.reasoning_llm_client
+        client = deps.model_clients.reasoning_llm_client
         id_map = {**chunk_map, **kg_map, **chain_map}
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
@@ -270,7 +318,7 @@ class ReportEngine:
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
         if not markdown:
-            self.repo._note_model_error(
+            deps.model_errors.note_model_error(
                 "report_section",
                 self.settings.reasoning_llm_model or self.settings.openai_compat_model,
                 RuntimeError(f"report section '{section['title']}' produced empty content after retry "
@@ -294,7 +342,7 @@ class ReportEngine:
                 snap = [dict(x) for x in status]
             done = sum(1 for x in snap if x["phase"] in ("完成", "失败"))
             running = sum(1 for x in snap if x["phase"] not in ("排队", "完成", "失败"))
-            self.repo.update_report(
+            self.dependencies.reports.update_report(
                 notebook_id, rid, section_status=snap,
                 progress=f"章节 {done}/{len(outline)} 完成 · {running} 进行中")
 
@@ -347,30 +395,31 @@ class ReportEngine:
 
     # --- 入口:Stage B/C/D(生成阶段)——读 outline_json → 深挖 → 汇总 → done ---
     def generate(self, notebook_id, rid, question, depth: int = 2) -> None:
+        reports = self.dependencies.reports
         try:
-            d = self.repo.get_report(notebook_id, rid)
+            d = reports.get_report(notebook_id, rid)
             outline = d.get("outline") or []
             if not outline:
-                self.repo.update_report(notebook_id, rid, status="failed",
-                                        error="no outline to generate", progress="无大纲")
+                reports.update_report(notebook_id, rid, status="failed",
+                                      error="no outline to generate", progress="无大纲")
                 return
-            self.repo.update_report(notebook_id, rid, status="generating",
-                                    progress=f"章节 0/{len(outline)} 完成")
+            reports.update_report(notebook_id, rid, status="generating",
+                                  progress=f"章节 0/{len(outline)} 完成")
             sections = self._run_sections(notebook_id, rid, outline, question, depth)
             # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
-            self.repo.update_report(notebook_id, rid, progress="汇总中")
+            reports.update_report(notebook_id, rid, progress="汇总中")
             content_md, gaps, references = self._assemble(
                 notebook_id, rid, question, outline, sections)
             for s in sections:
                 s.pop("id_map", None)          # 账目仅供 assemble,不入库
-            self.repo.update_report(notebook_id, rid, sections=sections,
-                                    content_md=content_md, gaps=gaps,
-                                    references=references, status="done", progress="完成")
+            reports.update_report(notebook_id, rid, sections=sections,
+                                  content_md=content_md, gaps=gaps,
+                                  references=references, status="done", progress="完成")
         except AskCancelled:
-            self.repo.update_report(notebook_id, rid, status="cancelled", progress="已取消")
+            reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
         except Exception as exc:
-            self.repo.update_report(notebook_id, rid, status="failed",
-                                    error=str(exc)[:500], progress="失败")
+            reports.update_report(notebook_id, rid, status="failed",
+                                  error=str(exc)[:500], progress="失败")
 
     # --- 编排:规划(→outline_ready)+(auto_generate 时)生成,保留一键直出 ---
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
@@ -378,7 +427,7 @@ class ReportEngine:
         self.plan_outline(notebook_id, rid, question, history)
         if not auto_generate:
             return
-        if self.repo.get_report(notebook_id, rid).get("status") == "outline_ready":
+        if self.dependencies.reports.get_report(notebook_id, rid).get("status") == "outline_ready":
             self.generate(notebook_id, rid, question, depth)
 
     # --- Stage D:汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
@@ -389,7 +438,7 @@ class ReportEngine:
         try:
             sections_block = "\n\n".join(
                 s["markdown"][:2000] for s in sections if s.get("markdown"))
-            raw = self.repo.reasoning_llm_client.chat_json(
+            raw = self.dependencies.model_clients.reasoning_llm_client.chat_json(
                 [{"role": "user", "content": report_summary_prompt(question, sections_block)}],
                 '{"summary":""}', cancel_event=self.cancel_event)
             summary = str(json.loads(raw).get("summary", "")).strip()

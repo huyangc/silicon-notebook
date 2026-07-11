@@ -102,12 +102,12 @@ def _seed_cluster_row(repo, nb_id, *, cc_id, canonical_id, member_id, canonical_
 
 def _loader_spy(repo, monkeypatch):
     """Count calls to the concept_clusters full-scan query specifically (not just
-    any db.execute), so we measure loader invocations rather than incidental SQL
-    from version-probing or other reads. Wraps repo._connect so the returned
-    connection's execute() is spied (sqlite3.Connection itself can't be
-    monkeypatched — it's an immutable C type)."""
+    any db.execute), so we measure loader invocations rather than incidental SQL.
+    Wraps runtime.database.connect — the boundary the cluster_map loader actually
+    goes through since c9ddf31 single-owner'd it into RetrievalCandidateService
+    (the old repo._connect seat counted 0 forever). execute() is spied."""
     calls = {"n": 0}
-    orig_connect = repo._connect
+    orig_connect = repo._runtime.database.connect
 
     class _SpyConn:
         def __init__(self, inner):
@@ -131,7 +131,7 @@ def _loader_spy(repo, monkeypatch):
     def _wrapped_connect():
         return _SpyConn(orig_connect())
 
-    monkeypatch.setattr(repo, "_connect", _wrapped_connect)
+    monkeypatch.setattr(repo._runtime.database, "connect", _wrapped_connect)
     return calls
 
 

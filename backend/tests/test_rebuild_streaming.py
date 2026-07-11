@@ -172,3 +172,76 @@ def test_rebuild_streaming_scales(repo):
     print(
         f"\n[scale] rebuild_unified_kg {N} concepts: {dt:.2f}s, clusters={n_clusters}"
     )
+
+
+def test_scratch_seed_and_cluster_replace_keep_streaming_store_seams(repo, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+    runtime = object.__getattribute__(repo, "_runtime")
+    nb = getattr(repo, "create_notebook")(NotebookCreate(name="stream delegation"))
+    getattr(repo, "store_kg")(nb.id, None, [{
+        "local_id": "a", "object_type": "concept",
+        "payload": {"name": "MOSFET", "section_path": ""}, "evidence": [],
+    }], [])
+    events = []
+    opened_reads, opened_writes = set(), set()
+    original_connect = runtime.database.connect
+    original_write = runtime.database.write
+
+    def traced_connect():
+        db = original_connect()
+        opened_reads.add(id(db))
+        return db
+
+    @contextmanager
+    def traced_write():
+        with original_write() as db:
+            opened_writes.add(id(db))
+            events.append(("write.begin", id(db)))
+            yield db
+        events.append(("write.commit", id(db)))
+
+    monkeypatch.setattr(runtime.database, "connect", traced_connect)
+    monkeypatch.setattr(runtime.database, "write", traced_write)
+    store = runtime.unified_kg
+
+    def spy(name, *, cursor=False):
+        original = getattr(store, name)
+
+        def wrapped(db, *args, **kwargs):
+            assert isinstance(db, sqlite3.Connection)
+            result = original(db, *args, **kwargs)
+            if cursor:
+                assert isinstance(result, sqlite3.Cursor)
+            events.append((name, id(db)))
+            return result
+
+        monkeypatch.setattr(store, name, wrapped)
+
+    for name, cursor in (
+        ("clear_scratch_run", False), ("seed_payload_rows", True),
+        ("stream_seed_rows", True), ("insert_scratch_rows", False),
+        ("scratch_vector_rows", True), ("stream_scratch_rows", True),
+        ("replace_cluster_rows_streamed", False),
+    ):
+        spy(name, cursor=cursor)
+    progress = []
+
+    getattr(repo, "rebuild_unified_kg")(
+        nb.id, force=True,
+        progress=lambda stage, current, total: progress.append((stage, current, total)),
+    )
+
+    names = [event[0] for event in events]
+    assert names.index("clear_scratch_run") < names.index("seed_payload_rows")
+    assert names.index("seed_payload_rows") < names.index("stream_seed_rows")
+    assert names.index("stream_seed_rows") < names.index("insert_scratch_rows")
+    assert names.index("insert_scratch_rows") < names.index("scratch_vector_rows")
+    assert names.index("scratch_vector_rows") < names.index("stream_scratch_rows")
+    assert names.index("stream_scratch_rows") < names.index("replace_cluster_rows_streamed")
+    for name, db_id, *_ in events:
+        if name in {"clear_scratch_run", "insert_scratch_rows", "replace_cluster_rows_streamed"}:
+            assert db_id in opened_writes
+        elif name not in {"write.begin", "write.commit"}:
+            assert db_id in opened_reads
+    assert progress

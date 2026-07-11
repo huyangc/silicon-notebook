@@ -1,11 +1,12 @@
 """Task 5 — community_peers 原语的自给自足测试。
 
-刻意**不** import 真实 SQLiteRepository（该文件正被另一 agent 并行修改，其
-schema 尚未包含 community_members 反向索引）。改为在临时 sqlite 里直接建
+刻意**不** import 真实 SQLiteRepository。改为在临时 sqlite 里直接建
 community_members / concept_clusters / notebooks 三表并插最小数据，配一个只暴露
-community_peers 真正消费的两个接口的假 repo：
-  · _connect()      → 返回该 db 的连接（row_factory=sqlite3.Row），可作上下文管理器
-  · event_log.emit  → 把事件收集进 list 供断言
+community_peers 真正消费的两个接口的假 repo（Task 13 起持久化读走
+repo._runtime.unified_kg —— 这里给假 repo 组一个真 UnifiedKgStore，其 database
+座是共享同一条连接的最小包装）：
+  · _runtime.unified_kg → UnifiedKgStore(共享连接)，社区/簇/焦点读接口
+  · event_log.emit      → 把事件收集进 list 供断言
 
 覆盖：
   1) 正常出兄弟、按 (keyword_score×centrality) 排序、排除焦点自身；
@@ -19,7 +20,10 @@ import sqlite3
 
 import pytest
 
-from app.services.communities import _norm, community_peers, first_base_notebook_id
+from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.services.communities import (
+    CommunityQueryService, _norm, community_peers, first_base_notebook_id,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -35,13 +39,32 @@ class _EventLog:
         self.events.append(event)
 
 
+class _FakeDatabase:
+    """UnifiedKgStore 的最小 database 座：connect() 返回共享连接。
+    sqlite3.Connection 自身即上下文管理器（进入/退出=事务提交/回滚，不关连接）。"""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def connect(self) -> sqlite3.Connection:
+        return self._conn
+
+
+class _FakeRuntime:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.unified_kg = UnifiedKgStore(_FakeDatabase(conn))
+
+
 class _FakeRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._runtime = _FakeRuntime(conn)
         self.event_log = _EventLog()
-
-    def _connect(self) -> sqlite3.Connection:
-        return self._conn
+        self.community_queries = CommunityQueryService(
+            notebooks=object(),
+            unified_kg=self._runtime.unified_kg,
+            event_log=self.event_log,
+        )
 
 
 def _make_db() -> sqlite3.Connection:
@@ -143,9 +166,9 @@ def test_norm_collapses_ws_and_lowercases():
 def test_first_base_notebook_excludes_active(repo_with_communities):
     repo = repo_with_communities
     # active 恰是 nb-base 本身 → 应被 id != ? 排除 → None
-    assert first_base_notebook_id(repo, "nb-base") is None
+    assert first_base_notebook_id(repo.community_queries, "nb-base") is None
     # active 是别的 nb → 返回 base 库
-    assert first_base_notebook_id(repo, "nb-active") == "nb-base"
+    assert first_base_notebook_id(repo.community_queries, "nb-active") == "nb-base"
 
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +177,7 @@ def test_first_base_notebook_excludes_active(repo_with_communities):
 def test_peers_from_community(repo_with_communities):
     repo = repo_with_communities
     peers = community_peers(
-        repo, "nb-base", "DeepSeek-V4", "efficiency of qwen", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "DeepSeek-V4", "efficiency of qwen", top_k=5, candidates=50
     )
     # 兄弟里含 Qwen-X，且不含焦点自身
     assert any("qwen" in p.lower() for p in peers)
@@ -170,7 +193,7 @@ def test_peers_from_community(repo_with_communities):
 def test_peers_respects_top_k(repo_with_communities):
     repo = repo_with_communities
     peers = community_peers(
-        repo, "nb-base", "DeepSeek-V4", "llm", top_k=1, candidates=50
+        repo.community_queries, "nb-base", "DeepSeek-V4", "llm", top_k=1, candidates=50
     )
     assert len(peers) == 1
 
@@ -178,7 +201,7 @@ def test_peers_respects_top_k(repo_with_communities):
 def test_focal_name_matched_case_insensitively(repo_with_communities):
     repo = repo_with_communities
     peers = community_peers(
-        repo, "nb-base", "  deepseek-v4 ", "qwen", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "  deepseek-v4 ", "qwen", top_k=5, candidates=50
     )
     assert any("qwen" in p.lower() for p in peers)
     assert not repo.event_log.events
@@ -190,7 +213,7 @@ def test_focal_name_matched_case_insensitively(repo_with_communities):
 def test_focal_unresolved_failopen(repo_with_communities):
     repo = repo_with_communities
     out = community_peers(
-        repo, "nb-base", "NoSuchModelXYZ", "q", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "NoSuchModelXYZ", "q", top_k=5, candidates=50
     )
     assert out == []
     assert any(
@@ -202,14 +225,14 @@ def test_focal_unresolved_failopen(repo_with_communities):
 
 def test_empty_focal_name_returns_empty_no_event(repo_with_communities):
     repo = repo_with_communities
-    assert community_peers(repo, "nb-base", "   ", "q", top_k=5, candidates=50) == []
+    assert community_peers(repo.community_queries, "nb-base", "   ", "q", top_k=5, candidates=50) == []
     # 空 focal 是入参问题，直接短路返回、不 emit
     assert not repo.event_log.events
 
 
 def test_empty_base_nb_returns_empty_no_event(repo_with_communities):
     repo = repo_with_communities
-    assert community_peers(repo, "", "DeepSeek-V4", "q", top_k=5, candidates=50) == []
+    assert community_peers(repo.community_queries, "", "DeepSeek-V4", "q", top_k=5, candidates=50) == []
     assert not repo.event_log.events
 
 
@@ -219,7 +242,7 @@ def test_empty_base_nb_returns_empty_no_event(repo_with_communities):
 def test_not_built_failopen(repo_no_communities):
     repo = repo_no_communities
     out = community_peers(
-        repo, "nb-base", "DeepSeek-V4", "q", top_k=5, candidates=50
+        repo.community_queries, "nb-base", "DeepSeek-V4", "q", top_k=5, candidates=50
     )
     assert out == []
     assert any(

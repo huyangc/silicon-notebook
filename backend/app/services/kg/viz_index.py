@@ -28,6 +28,60 @@ class VizIndex:
     manifest: dict
 
 
+def arrays_from_graph(full: dict):
+    """Build the compact viz arrays from a folded object-level graph."""
+    nodes = full["nodes"]
+    edges = full["edges"]
+    viz_ids = [node["id"] for node in nodes]
+    viz_types = [node["object_type"] for node in nodes]
+    viz_names = [(node.get("payload") or {}).get("name", "") for node in nodes]
+    index = {node_id: i for i, node_id in enumerate(viz_ids)}
+    count = len(viz_ids)
+
+    degree = np.zeros(count, dtype=np.int64)
+    undirected_rows = []
+    undirected_columns = []
+    seen = set()
+    edge_list = []
+    for edge in edges:
+        source = edge["source_object_id"]
+        target = edge["target_object_id"]
+        source_index = index.get(source)
+        target_index = index.get(target)
+        if source_index is None or target_index is None:
+            continue
+        edge_list.append([source, target, edge["edge_type"]])
+        degree[source_index] += 1
+        degree[target_index] += 1
+        if source_index != target_index:
+            pair = (
+                (source_index, target_index)
+                if source_index < target_index
+                else (target_index, source_index)
+            )
+            if pair not in seen:
+                seen.add(pair)
+                undirected_rows += [pair[0], pair[1]]
+                undirected_columns += [pair[1], pair[0]]
+
+    if undirected_rows:
+        data = np.ones(len(undirected_rows), dtype=np.int8)
+        viz_adj = sp.csr_matrix(
+            (data, (undirected_rows, undirected_columns)),
+            shape=(count, count),
+        )
+    else:
+        viz_adj = sp.csr_matrix((count, count), dtype=np.int8)
+    return (
+        viz_ids,
+        viz_adj,
+        degree.astype(np.int32),
+        viz_types,
+        viz_names,
+        {"edges": edge_list},
+    )
+
+
 def save_viz_index(out_dir: str, *, viz_ids, viz_adj, viz_deg, viz_types,
                    viz_names, viz_payload: dict, manifest: dict) -> dict:
     """写 viz.npz + viz_adj.npz + manifest.json 到 out_dir。返回 manifest。"""

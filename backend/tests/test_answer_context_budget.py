@@ -26,8 +26,7 @@ def test_answer_context_respects_char_budget(repo, monkeypatch):
     long_def = "x" * 5000
     # Each concept reports a 5000-char definition; without a budget the block
     # would be ~25k chars. Distinct cluster ids so none are collapsed.
-    monkeypatch.setattr(repo, "_concept_cluster_id", lambda nbid, oid: oid)
-    monkeypatch.setattr(repo, "node_context", lambda nbid, oid: {
+    monkeypatch.setattr(repo.retrieval.graph, "node_context", lambda nbid, oid: {
         "occurrences": [{"element_text": long_def, "source_title": "S",
                          "section_path": "1"}],
         "definition": long_def, "steps": None})
@@ -41,8 +40,7 @@ def test_answer_context_respects_char_budget(repo, monkeypatch):
 
 def test_answer_context_keeps_all_when_small(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    monkeypatch.setattr(repo, "_concept_cluster_id", lambda nbid, oid: oid)
-    monkeypatch.setattr(repo, "node_context", lambda nbid, oid: {
+    monkeypatch.setattr(repo.retrieval.graph, "node_context", lambda nbid, oid: {
         "occurrences": [{"element_text": "short", "source_title": "S",
                          "section_path": "1"}],
         "definition": "short", "steps": None})

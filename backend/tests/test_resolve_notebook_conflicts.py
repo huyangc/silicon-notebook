@@ -294,19 +294,19 @@ def test_build_notebook_kg_calls_resolve_when_enabled(repo, monkeypatch):
     nb_id, *_ = _seed_notebook_with_contradicting_claims(repo)
     calls: list[str] = []
 
-    original = repo.resolve_notebook_conflicts
+    original = repo._runtime.knowledge_governance.resolve_notebook_conflicts
 
     def spy(notebook_id):
         calls.append(notebook_id)
         return original(notebook_id)
 
-    monkeypatch.setattr(repo, "resolve_notebook_conflicts", spy)
+    monkeypatch.setattr(repo._runtime.knowledge_governance, "resolve_notebook_conflicts", spy)
     repo.llm_client = FakeLLM([])  # no-op verdicts
     repo.settings.kg_conflict_resolution_enabled = True
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
-    # build_notebook_kg requires a real LLM, so we monkeypatch _run_extraction too
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    # build_notebook_kg requires a real LLM, so we monkeypatch run_extraction too
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     # Also ensure llm_client.configured is True (needed by build_notebook_kg guard)
     repo.llm_client.configured = True
 
@@ -323,12 +323,12 @@ def test_build_notebook_kg_skips_resolve_when_disabled(repo, monkeypatch):
     def spy(notebook_id):
         calls.append(notebook_id)
 
-    monkeypatch.setattr(repo, "resolve_notebook_conflicts", spy)
+    monkeypatch.setattr(repo._runtime.knowledge_governance, "resolve_notebook_conflicts", spy)
     repo.llm_client = FakeLLM([])
     repo.llm_client.configured = True
     repo.settings.kg_conflict_resolution_enabled = False
 
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
 
     repo.build_notebook_kg(nb_id)
 

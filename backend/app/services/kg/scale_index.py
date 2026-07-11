@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -333,6 +334,37 @@ def save_scale_index(
         json.dump(manifest, fh)
 
     return manifest
+
+
+def save_fold_core(out_dir, node_ids, transition, idf, chunk_index) -> None:
+    """Persist the non-ANN fold files in their historical checkpoint order."""
+    sp.save_npz(os.path.join(out_dir, "graph.npz"), transition)
+    np.save(os.path.join(out_dir, "node_ids.npy"), np.asarray(node_ids, dtype=object))
+    np.save(os.path.join(out_dir, "idf.npy"), np.asarray(idf, dtype=np.float32))
+    np.save(
+        os.path.join(out_dir, "chunk_index.npy"),
+        np.asarray(chunk_index, dtype=np.int32),
+    )
+
+
+def save_fold_ann(out_dir, index_name, labels_name, ann, labels) -> None:
+    """Persist one fold ANN handle and its row-aligned object labels."""
+    ann.save_index(os.path.join(out_dir, index_name))
+    np.save(os.path.join(out_dir, labels_name), np.asarray(labels, dtype=object))
+
+
+def copy_fold_viz(live_dir, temporary_dir) -> None:
+    """Carry the optional UI-only viz artifacts into a fold directory."""
+    for filename in ("viz.npz", "viz_adj.npz"):
+        source = os.path.join(live_dir, filename)
+        if os.path.exists(source):
+            shutil.copy2(source, os.path.join(temporary_dir, filename))
+
+
+def save_fold_manifest(out_dir, manifest) -> None:
+    """Write the fold manifest last, immediately before the directory swap."""
+    with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh)
 
 
 def csr_to_edges(

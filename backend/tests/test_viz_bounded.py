@@ -114,8 +114,8 @@ def test_viz_and_search_bounded_at_scale(repo, monkeypatch):
     repo.build_scale_index(nb.id)
     # bounded viz must NOT materialize the full graph
     calls = {"full": 0}
-    real_full = repo._unified_graph_full
-    monkeypatch.setattr(repo, "_unified_graph_full",
+    real_full = repo._runtime.knowledge_lifecycle._unified_graph_full
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "_unified_graph_full",
                         lambda *a, **k: (calls.__setitem__("full", calls["full"] + 1), real_full(*a, **k))[1])
     t = time.perf_counter()
     g = repo.unified_graph(nb.id, level="object", limit=80)

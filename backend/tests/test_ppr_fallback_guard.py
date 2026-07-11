@@ -105,20 +105,20 @@ def test_large_notebook_refuses_rustworkx_fallback(repo, monkeypatch):
     """大库(copyable=False)+ scale_ppr 强制返回空 → _ppr_retrieve 绝不调用
     self._ppr_graph(spy 验证零调用),直接返回 [],并发 ppr_fallback_refused 事件。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo, "scale_ppr", lambda notebook_id, question: [])
-    monkeypatch.setattr(repo, "notebook_copy_stats", lambda notebook_id: {"copyable": False, "size": {}})
+    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", lambda notebook_id, question: [])
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats", lambda notebook_id: {"copyable": False, "size": {}})
 
     called = {"n": 0}
-    orig_ppr_graph = repo._ppr_graph
+    orig_ppr_graph = repo.retrieval.graph._ppr_graph
 
     def spy_ppr_graph(notebook_id):
         called["n"] += 1
         return orig_ppr_graph(notebook_id)
 
-    monkeypatch.setattr(repo, "_ppr_graph", spy_ppr_graph)
+    monkeypatch.setattr(repo.retrieval.graph, "_ppr_graph", spy_ppr_graph)
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._ppr_retrieve(nb.id, "Mixture of Experts")
+    result = repo.retrieval.graph._ppr_retrieve(nb.id, "Mixture of Experts")
 
     assert result == []
     assert called["n"] == 0, "large notebook must NOT build the rustworkx graph"
@@ -132,20 +132,20 @@ def test_small_notebook_keeps_legacy_fallback(repo, monkeypatch):
     """小库(copyable=True)+ scale_ppr 返回空 → 旧行为不变:调用 self._ppr_graph
     (spy 验证被调用),不发 ppr_fallback_refused 事件。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo, "scale_ppr", lambda notebook_id, question: [])
-    monkeypatch.setattr(repo, "notebook_copy_stats", lambda notebook_id: {"copyable": True, "size": {}})
+    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", lambda notebook_id, question: [])
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats", lambda notebook_id: {"copyable": True, "size": {}})
 
     called = {"n": 0}
-    orig_ppr_graph = repo._ppr_graph
+    orig_ppr_graph = repo.retrieval.graph._ppr_graph
 
     def spy_ppr_graph(notebook_id):
         called["n"] += 1
         return orig_ppr_graph(notebook_id)
 
-    monkeypatch.setattr(repo, "_ppr_graph", spy_ppr_graph)
+    monkeypatch.setattr(repo.retrieval.graph, "_ppr_graph", spy_ppr_graph)
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._ppr_retrieve(nb.id, "Mixture of Experts")
+    result = repo.retrieval.graph._ppr_retrieve(nb.id, "Mixture of Experts")
 
     assert called["n"] == 1, "small notebook must keep legacy rustworkx fallback"
     # cross-doc bridge should still work via the legacy path (byte-identical behavior)
@@ -159,13 +159,13 @@ def test_ppr_retrieve_success_path_emits_no_fallback_events(repo, monkeypatch):
     """scale_ppr 命中(非空)时,_ppr_retrieve 完全不走 fallback 分支 —— 无
     ppr_fallback_refused 事件,也不调用 _ppr_graph。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo, "scale_ppr", lambda notebook_id, question: [("cA", 1.0)])
+    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", lambda notebook_id, question: [("cA", 1.0)])
 
     called = {"n": 0}
-    monkeypatch.setattr(repo, "_ppr_graph", lambda notebook_id: called.__setitem__("n", called["n"] + 1))
+    monkeypatch.setattr(repo.retrieval.graph, "_ppr_graph", lambda notebook_id: called.__setitem__("n", called["n"] + 1))
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._ppr_retrieve(nb.id, "Mixture of Experts")
+    result = repo.retrieval.graph._ppr_retrieve(nb.id, "Mixture of Experts")
 
     assert called["n"] == 0
     assert [e for e in events if e.get("kind") == "ppr_fallback_refused"] == []
@@ -179,7 +179,7 @@ def test_scale_ppr_no_participants_bailout_event(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     events = _capture_events(repo, monkeypatch)
 
-    result = repo.scale_ppr(nb.id, "anything")
+    result = repo.retrieval.graph.scale_ppr(nb.id, "anything")
 
     assert result == []
     bail = [e for e in events if e.get("kind") == "scale_ppr_bailout"]
@@ -197,11 +197,11 @@ def test_scale_ppr_zero_reset_bailout_carries_seed_diagnostics(repo, monkeypatch
     with repo._write() as db:
         db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
 
-    monkeypatch.setattr(repo, "_embed_query", lambda question: None)
-    monkeypatch.setattr(repo, "_retrieve_chunks", lambda notebook_id, query, recall=0: ([], [], None))
+    monkeypatch.setattr(repo.retrieval.candidates, "_embed_query", lambda question: None)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", lambda notebook_id, query, recall=0: ([], [], None))
 
     events = _capture_events(repo, monkeypatch)
-    result = repo.scale_ppr(nb.id, "anything")
+    result = repo.retrieval.graph.scale_ppr(nb.id, "anything")
 
     assert result == []
     bail = [e for e in events if e.get("kind") == "scale_ppr_bailout"]
@@ -231,15 +231,15 @@ def test_scale_ppr_zero_reset_folds_ann_source_skip_counts(embed_repo, monkeypat
     with repo._write() as db:
         db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
 
-    monkeypatch.setattr(repo, "_retrieve_chunks", lambda notebook_id, query, recall=0: ([], [], None))
-    monkeypatch.setattr(repo, "_open_scale_ann", lambda idx, kind: None)  # force ANN-open skip
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", lambda notebook_id, query, recall=0: ([], [], None))
+    monkeypatch.setattr(repo.retrieval.graph, "_open_scale_ann", lambda idx, kind: None)  # force ANN-open skip
     # 3b (active brute-force cosine) uses knowledge_embeddings directly and would
     # otherwise still seed reset (this notebook is both base and active/self) —
     # neutralize it so the zero_reset bail is solely due to the ANN-open skip.
-    monkeypatch.setattr(repo, "_vector_matrix", lambda db, nb_id, table, key: ([], None))
+    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", lambda db, nb_id, table, key: ([], None))
 
     events = _capture_events(repo, monkeypatch)
-    result = repo.scale_ppr(nb.id, "Mixture of Experts")
+    result = repo.retrieval.graph.scale_ppr(nb.id, "Mixture of Experts")
 
     assert result == []
     bail = [e for e in events if e.get("kind") == "scale_ppr_bailout"]
@@ -257,7 +257,7 @@ def test_scale_ppr_success_path_emits_no_bailout_event(repo, monkeypatch):
         db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
 
     events = _capture_events(repo, monkeypatch)
-    result = repo.scale_ppr(nb.id, "Mixture of Experts")
+    result = repo.retrieval.graph.scale_ppr(nb.id, "Mixture of Experts")
 
     assert result != []
     assert [e for e in events if e.get("kind") == "scale_ppr_bailout"] == []
@@ -268,13 +268,13 @@ def test_scale_ppr_success_path_emits_no_bailout_event(repo, monkeypatch):
 def _spy_fed_rx_graph(repo, monkeypatch):
     """Spy on _federated_rx_graph — counts calls, delegates to the original."""
     called = {"n": 0}
-    orig = repo._federated_rx_graph
+    orig = repo.retrieval.graph._federated_rx_graph
 
     def spy(notebook_id):
         called["n"] += 1
         return orig(notebook_id)
 
-    monkeypatch.setattr(repo, "_federated_rx_graph", spy)
+    monkeypatch.setattr(repo.retrieval.graph, "_federated_rx_graph", spy)
     return called
 
 
@@ -293,7 +293,7 @@ def test_ask_graph_large_notebook_refuses_graph_walk(repo, monkeypatch):
     with repo._write() as db:
         db.execute("INSERT INTO kg_objects_fts (object_id, notebook_id, name) VALUES (?,?,?)",
                    ("e1", nb.id, "DeepSeek MoE 架构?"))
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
     called = _spy_fed_rx_graph(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
@@ -331,12 +331,12 @@ def test_chunk_kg_overlay_large_notebook_skips_graph(repo, monkeypatch):
     """chunk 模式 KG overlay(第二个请求路径调用方):大库跳过 _federated_rx_graph,
     返回空 overlay(("", {}, []),ask_chunk 继续用向量/PPR chunk 作答)+ 事件。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
     called = _spy_fed_rx_graph(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    block, id_map, kg_hits = repo._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
+    block, id_map, kg_hits = repo.retrieval.candidates._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
 
     assert called["n"] == 0
     assert (block, id_map, kg_hits) == ("", {}, [])
@@ -351,7 +351,7 @@ def test_chunk_kg_overlay_small_notebook_builds_graph(repo, monkeypatch):
     called = _spy_fed_rx_graph(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    block, id_map, kg_hits = repo._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
+    block, id_map, kg_hits = repo.retrieval.candidates._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
 
     assert called["n"] == 1
     assert kg_hits  # 命中种子,真走了 overlay
@@ -363,13 +363,13 @@ def test_chunk_kg_overlay_small_notebook_builds_graph(repo, monkeypatch):
 def _spy_vector_matrix(repo, monkeypatch):
     """Spy on _vector_matrix — records (notebook_id, table) per call, delegates."""
     calls = []
-    orig = repo._vector_matrix
+    orig = repo.retrieval.candidates._vector_matrix
 
     def spy(db, notebook_id, table, id_col):
         calls.append((notebook_id, table))
         return orig(db, notebook_id, table, id_col)
 
-    monkeypatch.setattr(repo, "_vector_matrix", spy)
+    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", spy)
     return calls
 
 
@@ -398,7 +398,7 @@ def test_scale_ppr_self_indexed_skips_active_brute_force(embed_repo, monkeypatch
     nb = _seed_indexed_self_base(repo)
 
     calls = _spy_vector_matrix(repo, monkeypatch)
-    ranked = repo.scale_ppr(nb.id, "Mixture of Experts")
+    ranked = repo.retrieval.graph.scale_ppr(nb.id, "Mixture of Experts")
 
     kg_loads = [c for c in calls if c[1] == "knowledge_embeddings"]
     assert kg_loads == [], (
@@ -421,7 +421,7 @@ def test_scale_ppr_self_unindexed_keeps_active_brute_force(embed_repo, monkeypat
     repo._embed_knowledge("e22", active.id, {"name": "Mixture-of-Experts (MoE)"})
 
     calls = _spy_vector_matrix(repo, monkeypatch)
-    repo.scale_ppr(active.id, "Mixture of Experts")
+    repo.retrieval.graph.scale_ppr(active.id, "Mixture of Experts")
 
     kg_loads = [c for c in calls if c[1] == "knowledge_embeddings"]
     assert (active.id, "knowledge_embeddings") in kg_loads, (

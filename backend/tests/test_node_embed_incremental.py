@@ -46,21 +46,21 @@ def test_node_embed_commits_incrementally_and_resumes(repo, monkeypatch):
 
     # 第 3 次 flush 抛错模拟中断(前 2 组已落库)。flush 在主线程、不被 _embed_only 吞、
     # 会传播出 _embed_objects_batch。EMBED_COMMIT_BATCHES=1,batch=2 → 每 2 个一 flush。
-    real_flush = repo._flush_object_vectors
+    real_flush = repo.__dict__["_runtime"].source_embedding.flush_object_vectors
     calls = {"n": 0}
     def flaky_flush(nb_id, rows):
         calls["n"] += 1
         if calls["n"] == 3:
             raise RuntimeError("模拟中断")
         return real_flush(nb_id, rows)
-    monkeypatch.setattr(repo, "_flush_object_vectors", flaky_flush)
+    monkeypatch.setattr(repo.__dict__["_runtime"].source_embedding, "flush_object_vectors", flaky_flush)
 
     with pytest.raises(RuntimeError):
         batch_ingest.backfill_node_embeddings(repo, nb.id, conc=1)
     mid = _n_vectors(repo, nb.id)
     assert 0 < mid < 10                      # 中断前已增量落库前几组
 
-    monkeypatch.setattr(repo, "_flush_object_vectors", real_flush)  # 恢复
+    monkeypatch.setattr(repo.__dict__["_runtime"].source_embedding, "flush_object_vectors", real_flush)  # 恢复
     batch_ingest.backfill_node_embeddings(repo, nb.id, conc=1)
     assert _n_vectors(repo, nb.id) == 10     # 续跑补齐
 

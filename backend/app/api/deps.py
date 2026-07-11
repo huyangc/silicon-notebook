@@ -6,16 +6,36 @@ from fastapi import Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
+from app.core.request_context import set_request_user, reset_request_user
 from app.models.schemas import UserProfile
-from app.services.repository import NotebookRepository
-from app.services.sqlite_repository import (
-    SQLiteRepository, set_request_user, reset_request_user,
-)
+from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, AskStreamPort
+from app.services.sqlite_repository import SQLiteRepository
 
 
 @lru_cache
 def repository() -> NotebookRepository:
     return SQLiteRepository(get_settings())
+
+def identity_repository() -> IdentityRepository:
+    return repository()._runtime.identity  # type: ignore[attr-defined]
+
+def admin_query_repository() -> AdminQueryRepository:
+    return repository()._runtime.queries  # type: ignore[attr-defined]
+
+def notebook_catalog_repository() -> NotebookCatalogRepository:
+    return repository()._runtime.catalog  # type: ignore[attr-defined]
+
+def notebook_access_repository() -> NotebookAccessRepository:
+    return repository()._runtime.sharing  # type: ignore[attr-defined]
+
+def notebook_sharing_repository() -> NotebookSharingRepository:
+    return repository()._runtime.sharing  # type: ignore[attr-defined]
+
+def source_repository() -> SourceRepository:
+    return repository()
+
+def ask_stream_repository() -> AskStreamPort:
+    return repository()
 
 
 def _bearer_token(request: Request) -> str:
@@ -31,7 +51,7 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
     注意：必须是 async 依赖——其 ContextVar.set 在请求 task 上下文生效，
     随后被 Starlette 复制进同步路由的 threadpool；同步依赖里 set 不会传播。"""
     settings = get_settings()
-    repo = repository()
+    repo = identity_repository()
     token = _bearer_token(request)
     user: "UserProfile | None" = None
     if token:
@@ -55,7 +75,7 @@ async def require_notebook_write(
 ) -> str:
     """写守卫:仅 owner。非 owner → 404(不泄露存在性)。"""
     allowed = await run_in_threadpool(
-        repository().user_can_access_notebook, notebook_id, user.id
+        notebook_access_repository().user_can_access_notebook, notebook_id, user.id
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")
@@ -67,7 +87,7 @@ async def require_notebook_read(
 ) -> str:
     """读守卫:owner ∪ 只读成员。非授权 → 404(不泄露存在性)。"""
     allowed = await run_in_threadpool(
-        repository().user_can_read_notebook, notebook_id, user.id
+        notebook_access_repository().user_can_read_notebook, notebook_id, user.id
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Notebook not found")

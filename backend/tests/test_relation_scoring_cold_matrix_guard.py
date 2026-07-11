@@ -60,13 +60,13 @@ def _spy_vector_matrix(repo, monkeypatch):
     """Spy on _vector_matrix to record every (notebook_id, table) it is called
     with, without altering behavior."""
     calls = []
-    orig = repo._vector_matrix
+    orig = repo.retrieval.candidates._vector_matrix
 
     def wrapper(db, notebook_id, table, id_col):
         calls.append((notebook_id, table))
         return orig(db, notebook_id, table, id_col)
 
-    monkeypatch.setattr(repo, "_vector_matrix", wrapper)
+    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", wrapper)
     return calls
 
 
@@ -75,12 +75,12 @@ def test_large_notebook_cold_matrix_skips_semantic_scoring(repo, monkeypatch):
     _vector_matrix(relation_embeddings) 绝不被调用,发 relation_scoring_skipped
     事件,返回 []。"""
     nb = _seed(repo)
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
     calls = _spy_vector_matrix(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._retrieve_relations_scored(nb.id, "regulated cascode derived from cascode")
+    result = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "regulated cascode derived from cascode")
 
     assert result == []
     rel_matrix_calls = [c for c in calls if c[1] == "relation_embeddings"]
@@ -95,17 +95,17 @@ def test_large_notebook_warm_matrix_uses_normal_bounded_path(repo, monkeypatch):
     """大库 + 矩阵已经暖在 _vector_cache 里(版本匹配)→ 正常有界路径(top_k_sims),
     不发 relation_scoring_skipped 事件,不返回 []（除非本来就该有结果）。"""
     nb = _seed(repo)
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
 
     # Pre-warm the cache the same way _vector_matrix would, so peek() sees it.
     with repo._connect() as db:
-        repo._vector_matrix(db, nb.id, "relation_embeddings", "relation_id")
+        repo.retrieval.candidates._vector_matrix(db, nb.id, "relation_embeddings", "relation_id")
 
     calls = _spy_vector_matrix(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._retrieve_relations_scored(nb.id, "regulated cascode derived from cascode")
+    result = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "regulated cascode derived from cascode")
 
     rel_matrix_calls = [c for c in calls if c[1] == "relation_embeddings"]
     assert rel_matrix_calls, "warm matrix path should still call _vector_matrix (cache hit, cheap)"
@@ -119,12 +119,12 @@ def test_small_notebook_cold_matrix_uses_normal_path(repo, monkeypatch):
     """小库(copyable=True):字节不变——即便矩阵冷也走原有 top_k_sims 路径,
     不发 relation_scoring_skipped 事件。"""
     nb = _seed(repo)
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": True, "size": {}})
     calls = _spy_vector_matrix(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._retrieve_relations_scored(nb.id, "regulated cascode derived from cascode")
+    result = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "regulated cascode derived from cascode")
 
     rel_matrix_calls = [c for c in calls if c[1] == "relation_embeddings"]
     assert rel_matrix_calls, "small notebook must still load the matrix"
@@ -136,11 +136,11 @@ def test_small_notebook_cold_matrix_uses_normal_path(repo, monkeypatch):
 def test_no_relations_early_return_unaffected(repo, monkeypatch):
     """既有分支(关系表为空 → 早退 [])与新守卫无关,保持不变,即便大库。"""
     nb = repo.create_notebook(NotebookCreate(name="empty"))
-    monkeypatch.setattr(repo, "notebook_copy_stats",
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False, "size": {}})
     events = _capture_events(repo, monkeypatch)
 
-    result = repo._retrieve_relations_scored(nb.id, "anything")
+    result = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "anything")
 
     assert result == []
     skipped = [e for e in events if e.get("kind") == "relation_scoring_skipped"]

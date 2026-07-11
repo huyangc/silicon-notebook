@@ -29,7 +29,7 @@ def _no_gather(repo, monkeypatch):
     # Regression guard: the scaled path must NOT gather all elements/vectors.
     def _boom(*a, **k):
         raise AssertionError("find_duplicates must not gather all elements/vectors")
-    monkeypatch.setattr(repo, "_gather_elements", _boom)
+    monkeypatch.setattr(repo.retrieval.candidates, "_gather_elements", _boom)
 
 
 def test_find_duplicates_groups_by_normalized_seed(repo, monkeypatch):

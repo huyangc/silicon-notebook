@@ -21,7 +21,7 @@ def _client(repo, monkeypatch):
     from fastapi.testclient import TestClient
     import app.api.routes as routes_mod
     from app.main import app
-    monkeypatch.setattr(routes_mod, "repository", lambda: repo)
+    import app.api.deps as deps_mod; monkeypatch.setattr(deps_mod, "repository", lambda: repo); monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     monkeypatch.setattr(routes_mod.kg_scheduler, "submit_job", lambda fn, *a, **k: None)
     return TestClient(app)
 

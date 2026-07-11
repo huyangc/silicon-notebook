@@ -144,3 +144,24 @@ def test_process_source_url_branch_failure_marks_failed(cloud_repo, monkeypatch)
     detail = cloud_repo.get_source(sid)
     assert detail.parse_status == "failed"
     assert "超过页数" in detail.error_message
+
+
+def test_url_scheduler_sees_committed_queued_row(cloud_repo, monkeypatch):
+    """Task 12: the queued URL source row is COMMITTED before the scheduler
+    callback fires — a background job must never race an uncommitted row."""
+    nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf",
+        lambda url, **kw: PdfProbe(True, "", 10, "doc.pdf"),
+    )
+    seen = []
+
+    def scheduler(sid):
+        with cloud_repo._connect() as db:
+            row = db.execute(
+                "SELECT parse_status FROM sources WHERE id=?", (sid,)
+            ).fetchone()
+        seen.append((sid, row["parse_status"] if row else None))
+
+    res = cloud_repo.add_url_sources(nb.id, ["https://a/doc.pdf"], scheduler=scheduler)
+    assert seen == [(res.created[0].id, "queued")]

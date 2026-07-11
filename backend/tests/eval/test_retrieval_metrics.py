@@ -18,9 +18,14 @@ class _FakeHit:
         self.object_id = oid
 
 
-class _FakeRepo:
-    def _retrieve_scored(self, nb, q, **k):
+class _FakeRetrieval:
+    """run_recall 走公开 retrieval 端口(Task 27)——fake 镜像 RetrievalService 形状。"""
+    def retrieve_scored(self, nb, q, **k):
         return [_FakeHit("o2"), _FakeHit("o1"), _FakeHit("o3")]
+
+
+class _FakeRepo:
+    retrieval = _FakeRetrieval()
 
 
 def test_run_recall_skips_unannotated_and_scores_annotated():

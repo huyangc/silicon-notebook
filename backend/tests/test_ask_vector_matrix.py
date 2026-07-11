@@ -49,7 +49,7 @@ def test_vector_matrix_builds_from_embeddings(repo):
     oid = repo._test_insert_object(nb.id, "concept", {"name": "MOSFET"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "MOSFET"}}])
     with repo._connect() as db:
-        ids, mat = repo._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
+        ids, mat = repo.retrieval.candidates._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
     assert ids == [oid]
     assert mat.shape == (1, 16)
     # New writes go through _embed_objects_batch, which now stores BLOB (not JSON text).
@@ -80,7 +80,7 @@ def test_vector_matrix_mixed_json_and_blob_rows_matches_all_json_oracle(repo):
                 "VALUES (?,?,?,?)", (oid, nb.id, raw, now))
 
     with repo._connect() as db:
-        ids_mixed, mat_mixed = repo._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
+        ids_mixed, mat_mixed = repo.retrieval.candidates._vector_matrix(db, nb.id, "knowledge_embeddings", "object_id")
 
     # Oracle: rebuild the same notebook's embeddings table with every row as JSON text.
     nb2 = repo.create_notebook(NotebookCreate(name="nb2"))
@@ -94,7 +94,7 @@ def test_vector_matrix_mixed_json_and_blob_rows_matches_all_json_oracle(repo):
                 "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
                 "VALUES (?,?,?,?)", (f"{oid}-o", nb2.id, json.dumps(vec.tolist()), now))
     with repo._connect() as db:
-        ids_oracle, mat_oracle = repo._vector_matrix(db, nb2.id, "knowledge_embeddings", "object_id")
+        ids_oracle, mat_oracle = repo.retrieval.candidates._vector_matrix(db, nb2.id, "knowledge_embeddings", "object_id")
 
     # Same ids (modulo the "-o" suffix) and identical normalized matrix content.
     assert sorted(ids_mixed) == sorted(vecs.keys())
@@ -110,7 +110,7 @@ def test_ask_matrix_path_returns_matching_object(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Engram improves perplexity"}}])
-    hits = repo._retrieve_scored(nb.id, "does engram improve perplexity")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "does engram improve perplexity")
     assert any("Engram" in (h.payload.get("name") or "") for h in hits)
 
 
@@ -122,7 +122,7 @@ def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
     def fail_backfill(*args, **kwargs):
         raise AssertionError("ask() must not synchronously backfill knowledge embeddings")
 
-    monkeypatch.setattr(repo, "_backfill_knowledge_embeddings", fail_backfill)
+    monkeypatch.setattr(repo._runtime.source_embedding, "backfill_knowledge_embeddings", fail_backfill)
     resp = repo.ask(nb.id, AskRequest(question="channel loss equalization"))
     assert resp.conversation_id
     assert resp.answer_id
@@ -136,7 +136,7 @@ def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, mon
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Finite cable bandwidth attenuates high frequencies"}}])
-    hits = repo._retrieve_scored(nb.id, "why does cable bandwidth matter")
+    hits = repo.retrieval.candidates._retrieve_scored(nb.id, "why does cable bandwidth matter")
     assert any("bandwidth" in (h.payload.get("name") or "").lower() for h in hits)
 
 

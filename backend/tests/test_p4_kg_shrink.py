@@ -79,7 +79,7 @@ def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
     s1 = _make_source(repo, nb.id, "s1")
     s2 = _make_source(repo, nb.id, "s2")
     calls = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
     repo.build_notebook_kg(nb.id)
     assert set(calls) == {"s1", "s2"}
 
@@ -93,7 +93,7 @@ def test_build_notebook_kg_skips_sources_with_kg(repo, monkeypatch):
          "payload": {"name": "X"}, "evidence": []}], [])   # s1 already has KG
     s2 = _make_source(repo, nb.id, "s2")
     calls = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
     repo.build_notebook_kg(nb.id)
     assert calls == ["s2"]                                  # idempotent: skip s1
 
@@ -198,7 +198,7 @@ def test_reasoning_search_federates_base(repo):
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "Engram"}, "evidence": []}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))
-    hits = ReasoningRetriever(repo, repo.settings).search(empty.id, "Engram")
+    hits = ReasoningRetriever.from_repository(repo, repo.settings).search(empty.id, "Engram")
     names = {h.payload.get("name") for h in hits}
     assert "Engram" in names                   # base hit surfaced via federation
 

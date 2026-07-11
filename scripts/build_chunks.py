@@ -10,19 +10,16 @@ def main():
     if not nb:
         print("usage: build_chunks.py <notebook_id>"); sys.exit(2)
     repo = SQLiteRepository(Settings())
-    with repo._connect() as db:
-        sids = [r["id"] for r in db.execute(
-            "SELECT id FROM sources WHERE notebook_id=?", (nb,)).fetchall()]
+    mnt = repo.maintenance
+    sids = mnt.source_ids(nb)
     print(f"sources: {len(sids)}", flush=True)
     for i, sid in enumerate(sids, 1):
         try:
-            repo._chunk_and_embed_source(sid)
+            mnt.chunk_and_embed_source(sid)
             print(f"[{i}/{len(sids)}] {sid} ok", flush=True)
         except Exception as exc:
             print(f"[{i}/{len(sids)}] {sid} FAILED: {exc}", flush=True)
-    with repo._connect() as db:
-        n = db.execute("SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (nb,)).fetchone()["c"]
-    print(f"total chunks: {n}", flush=True)
+    print(f"total chunks: {mnt.count_chunks(nb)}", flush=True)
 
 
 if __name__ == "__main__":

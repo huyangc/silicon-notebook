@@ -17,11 +17,11 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
     repo = SQLiteRepository(Settings())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
-    calls = {}
+    calls = {}; ask_service = repo.__dict__["_runtime"].ask_component
     for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
         def make(mid):
-            return lambda notebook_id, payload: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
-        monkeypatch.setattr(repo, mid, make(mid))
+            return lambda notebook_id, payload, **kwargs: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
+        monkeypatch.setattr(ask_service, mid, make(mid))
 
     assert repo.ask(nb.id, AskRequest(question="q")).conclusion == "ask_chunk"       # 缺省
     assert repo.ask(nb.id, AskRequest(question="q", mode="graph")).conclusion == "ask_graph"
@@ -57,3 +57,33 @@ def test_resolve_known_default_and_unknown():
     with pytest.raises(UnknownAskMode) as exc:
         resolve_mode("bogus")
     assert exc.value.mode == "bogus"
+
+
+def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
+    """Task 24: AskService.ask 与 facade 同一注册表派发 —— mode id、退役别名
+    (fast/global→chunk)与 UnknownAskMode 语义逐字一致,user_id 关键字直达 handler。"""
+    from app.models.schemas import AskRequest, AskResponse
+    from app.services.ask_service import AskService
+
+    service = AskService.__new__(AskService)   # dispatch 不触任何端口
+    calls = {}
+
+    def make(mid):
+        def handler(notebook_id, payload, *, user_id,
+                    on_trace=None, cancel_event=None, seed_ids=None):
+            calls["hit"] = (mid, user_id)
+            return AskResponse(conclusion=mid)
+        return handler
+
+    for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
+        monkeypatch.setattr(service, mid, make(mid), raising=False)
+
+    assert service.ask("nb", AskRequest(question="q"), user_id="u1").conclusion == "ask_chunk"
+    assert calls["hit"] == ("ask_chunk", "u1")
+    assert service.ask("nb", AskRequest(question="q", mode="graph"), user_id="u1").conclusion == "ask_graph"
+    assert service.ask("nb", AskRequest(question="q", mode="reasoning"), user_id="u1").conclusion == "ask_reasoning"
+    # 退役 id 映射与 facade 完全一致(保旧会话/书签不 422)
+    assert service.ask("nb", AskRequest(question="q", mode="fast"), user_id="u1").conclusion == "ask_chunk"
+    assert service.ask("nb", AskRequest(question="q", mode="global"), user_id="u1").conclusion == "ask_chunk"
+    with pytest.raises(UnknownAskMode):
+        service.ask("nb", AskRequest(question="q", mode="bogus"), user_id="u1")

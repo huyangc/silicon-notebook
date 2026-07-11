@@ -2,7 +2,7 @@
 用法: PYTHONPATH=backend python -m app.scripts.reembed_kg <notebook_id>
 先清空该 nb 的 knowledge_embeddings/relation_embeddings,再全量重嵌(故用 _payload_text 新文本)。
 完成后建议再跑 `python -m app.scripts.recluster_kg <nb>`,在干净向量上刷新 canonical 簇。"""
-import json, sys
+import sys
 from app.core.config import get_settings
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -15,17 +15,15 @@ def main() -> int:
     if not repo.settings.embedder_configured:
         print("[reembed] ABORT: embedder 未配置 — 不清空向量(否则退化为关键词检索)。配置 EMBED_* 后重试。")
         return 2
-    with repo._write() as db:
-        db.execute("DELETE FROM knowledge_embeddings WHERE notebook_id=?", (nb,))
-        db.execute("DELETE FROM relation_embeddings WHERE notebook_id=?", (nb,))
-    with repo._connect() as db:
-        rows = db.execute("SELECT id, payload FROM knowledge_objects WHERE notebook_id=?", (nb,)).fetchall()
-    items = [{"_oid": r["id"], "payload": json.loads(r["payload"] or "{}")} for r in rows]
-    repo._embed_objects_batch(nb, items)        # 干净文本重嵌对象
-    repo._backfill_relation_embeddings(nb)      # 关系已清空 → 全量重嵌(名取自干净 _payload_text)
+    mnt = repo.maintenance
+    mnt.purge_kg_embeddings(nb)
+    rows = mnt.knowledge_object_payloads(nb, include_deprecated=True)
+    items = [{"_oid": r["id"], "payload": r["payload"]} for r in rows]
+    mnt.embed_objects_batch(nb, items)          # 干净文本重嵌对象
+    mnt.backfill_relation_embeddings(nb)        # 关系已清空 → 全量重嵌(名取自干净 _payload_text)
     # 重嵌改变了对象向量内容(COUNT 不变但内容变)→ 标脏使 kg_mutation_seq 前进,
     # 这样即便随后跑 force=False 的 rebuild 也不会因「计数未变」而跳过聚类。
-    repo._mark_unified_kg_dirty(nb)
+    mnt.mark_unified_kg_dirty(nb)
     print(f"[reembed] {nb}: re-embedded {len(items)} objects + relations"); return 0
 
 

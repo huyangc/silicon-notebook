@@ -216,7 +216,7 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     不再走 build_notebook_kg。无向量模式下抽取 no-op,但 parse 流程跑通,3 个 source 建成。"""
     d = _make_md_dir(tmp_path, n=2)
     monkeypatch.setenv("EMBED_PROVIDER", "")
-    monkeypatch.setattr(SQLiteRepository, "_run_extraction", lambda self, sid: None)
+    monkeypatch.setattr("app.services.source_ingestion.SourceIngestionService.run_extraction", lambda self, sid: None)
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg",
                         lambda self, nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
@@ -244,8 +244,8 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
                 (f"src-lim-{i}", nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
                  0, f"h{i}", "", "", "parsed", now, now))
     extracted_calls = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted_calls.append(sid))
-    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted_calls.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
 
     def _no_build(nb):
         raise AssertionError("build_notebook_kg must not be called when limit is set")
@@ -284,10 +284,10 @@ def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-conc")
     sids = _seed_sources(repo, nb_id, 6, "src-c")
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
-    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
-    monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "relink_notebook_kg", lambda nb: 0)
     seen = []
     out = repo.build_notebook_kg(nb_id, progress=lambda i, n, sid, ok: seen.append((i, n, sid, ok)))
     assert sorted(out["built"]) == sorted(sids) and out["failed"] == []
@@ -307,10 +307,10 @@ def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
     def _extract(sid):
         if sid == bad:
             raise RuntimeError("boom")
-    monkeypatch.setattr(repo, "_run_extraction", _extract)
-    monkeypatch.setattr(repo, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _extract)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
-    monkeypatch.setattr(repo, "relink_notebook_kg", lambda nb: 0)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "relink_notebook_kg", lambda nb: 0)
     out = repo.build_notebook_kg(nb_id)
     assert bad in out["failed"] and len(out["built"]) == 2
 
@@ -459,7 +459,7 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=2)                        # 2 个 docN.md + 1 个 nested.md = 3
     nb_id = bi.ensure_notebook(repo, None, "nb-all")
     extracted = []
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: extracted.append(sid))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted.append(sid))
     rebuild_calls = []
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: (rebuild_calls.append(nb), 5)[1])
@@ -486,7 +486,7 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-flags")
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
@@ -1208,7 +1208,7 @@ def test_run_all_fresh_flag_forces_rebuild(repo, monkeypatch, tmp_path):
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-all-fresh")
-    monkeypatch.setattr(repo, "_run_extraction", lambda sid: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
     seen = {}
     def _fake_rebuild(nb, progress=None, force=False, fresh=False):
         seen["force"] = force
@@ -1246,3 +1246,50 @@ def test_main_kg_fresh_dispatches_force_and_fresh(repo, monkeypatch):
 
     assert rc == 0
     assert seen == {"force": True, "fresh": True}
+
+
+# ── Task 27: batch ingest owns no SQLite plumbing ────────────────────────────
+
+def test_batch_ingest_module_reaches_no_private_facade_member():
+    """batch_ingest 是 CLI 组合根:构造 SQLiteRepository 合法,但所有 SQL/私有面
+    必须经 repo.maintenance(SQLiteMaintenanceAdapter)——模块内不得再出现
+    repo._x 私有属性访问(_connect/_write/_run_extraction/_embed_* 等)。"""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(bi))
+    offenders = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr.startswith("_")
+            and not node.attr.startswith("__")
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "repo"
+        ):
+            offenders.append((node.lineno, node.attr))
+    assert not offenders, f"batch_ingest still reaches private facade members: {offenders}"
+
+
+def test_repo_maintenance_is_cached_port_implementation(repo):
+    from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+
+    mnt = repo.maintenance
+    assert isinstance(mnt, SQLiteMaintenanceAdapter)
+    assert repo.maintenance is mnt                      # 同实例(缓存,非每次新建)
+    for name in ("delete_notebook_kg", "backfill_kg_fts", "backfill_chunk_fts",
+                 "build_scale_index", "fold_scale_index_delta"):
+        assert callable(getattr(mnt, name)), name
+
+
+def test_maintenance_extraction_routes_through_ingestion_service(repo, monkeypatch):
+    """adapter.run_extraction/set_source_status 必须动态经 runtime 组件转发——
+    组件级 monkeypatch(既有测试的座)对经 adapter 的调用同样可见。"""
+    calls = []
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction",
+                        lambda sid: calls.append(("run", sid)))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status",
+                        lambda sid, status, **k: calls.append(("status", sid, status)))
+    repo.maintenance.run_extraction("src-1")
+    repo.maintenance.set_source_status("src-1", "extracting")
+    assert calls == [("run", "src-1"), ("status", "src-1", "extracting")]

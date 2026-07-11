@@ -185,7 +185,7 @@ def test_build_notebook_kg_skips_relink_when_disabled(repo, monkeypatch):
     class _Cfg:
         configured = True
     monkeypatch.setattr(repo, "llm_client", _Cfg())
-    monkeypatch.setattr(repo, "_run_extraction", lambda *a, **k: None)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda *a, **k: None)
 
     repo.settings.kg_relink_enabled = False
     out = repo.build_notebook_kg(nb.id)

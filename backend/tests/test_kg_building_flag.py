@@ -60,11 +60,11 @@ def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="t"))
     repo.llm_client = types.SimpleNamespace(configured=True)  # build 不 RuntimeError；无 sources → 快
     seen = {}
-    orig_delete = repo.delete_notebook_kg
+    orig_delete = repo._runtime.knowledge_lifecycle.delete_notebook_kg
     def spy_delete(nid):
         seen["during_delete"] = nid in repo._kg_building
         return orig_delete(nid)
-    monkeypatch.setattr(repo, "delete_notebook_kg", spy_delete)
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "delete_notebook_kg", spy_delete)
     repo.rebuild_notebook_kg(nb.id)
     assert seen["during_delete"] is True          # delete 阶段标志已置位
     assert nb.id not in repo._kg_building           # rebuild 结束后清位

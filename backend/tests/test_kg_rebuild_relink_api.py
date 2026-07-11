@@ -135,8 +135,8 @@ def test_repo_rebuild_notebook_kg_calls_delete_then_build(tmp_path, monkeypatch)
         call_order.append(("build", notebook_id))
         return build_result
 
-    repo.delete_notebook_kg = fake_delete
-    repo.build_notebook_kg = fake_build
+    repo._runtime.knowledge_lifecycle.delete_notebook_kg = fake_delete
+    repo._runtime.knowledge_lifecycle.build_notebook_kg = fake_build
 
     result = repo.rebuild_notebook_kg("nb-123")
 

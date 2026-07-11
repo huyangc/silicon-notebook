@@ -182,3 +182,46 @@ def test_get_ask_job_endpoint_existing_job_returns_200_with_status(tmp_path, mon
     assert r.status_code == 200
     body = r.json()
     assert "status" in body and "trace" in body and "answer_id" in body
+
+
+# ---- Task 23: 经 AskExecutionCoordinator 的脱离连接执行,WS2b 接回语义不变 ----
+
+def test_coordinator_run_replays_trace_via_conversation_active_job(repo):
+    """轨迹经 coordinator 落 ask_trace_steps:运行中重开会话(get_conversation)
+    按 active_job 回放已持久化步骤(合成 start 不在内);跑完后 job 终态 done、
+    active_job 消失——重开实时接回不因执行编排搬迁而变。"""
+    from app.models.schemas import NotebookCreate, TraceStep
+    from app.services.ask_modes import ASK_MODES
+
+    nb = repo.create_notebook(NotebookCreate(name="t23"))
+    payload = AskRequest(question="Q-t23?", mode="reasoning")
+    release = threading.Event()
+
+    # Task 24: 协调器执行 runtime-owned AskService —— 在服务座上替换 ask,
+    # 门控轨迹与完成时点(与旧 runner 回调同一观察面)。
+    service = repo._runtime.ask_service()
+
+    def fake_ask(notebook_id, p, *, user_id, on_trace=None, cancel_event=None):
+        on_trace(TraceStep(step_type="plan", summary="s1", detail={}))
+        assert release.wait(2)
+        return AskResponse(answer_id="ans-t23", conversation_id=p.conversation_id,
+                           conclusion="", answer="a", grounded=True, anchors=[],
+                           related_knowledge=[], citations=[], llm_mode="x")
+
+    service.ask = fake_ask
+    events = repo._runtime.ask_execution.start(
+        nb.id, payload, ASK_MODES["reasoning"],
+        user_id=repo.current_user().id)
+    started = events.get(timeout=2)
+    job_id = started["job_id"]
+    assert started["event"] == "started" and job_id
+    for _ in range(2):                     # 合成 start + 真实 plan(持久化先于交付)
+        assert events.get(timeout=2)["event"] == "progress"
+    detail = repo.get_conversation(payload.conversation_id)
+    assert detail.active_job is not None and detail.active_job.job_id == job_id
+    assert [s["step_type"] for s in detail.active_job.trace] == ["plan"]
+    release.set()
+    while events.get(timeout=2) is not None:
+        pass
+    assert repo.ask_job_status(job_id)["status"] == "done"
+    assert repo.get_conversation(payload.conversation_id).active_job is None

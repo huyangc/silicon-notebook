@@ -243,7 +243,7 @@ def test_keyword_chunk_candidates_matches_second_language(repo):
                                     "低噪声放大器 的设计要点"])
     repo.backfill_chunk_fts(nb.id)
     # bilingual keyword string carries the Chinese 2nd-language term
-    hits = repo._keyword_chunk_candidates(nb.id, "低噪声放大器", recall=50)
+    hits = repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "低噪声放大器", recall=50)
     assert hits, "keyword union must surface the 2nd-language chunk"
     assert any("低噪声放大器" in h.text for h in hits)
     assert all(isinstance(h, RetrievedChunk) for h in hits)
@@ -255,8 +255,8 @@ def test_keyword_chunk_candidates_empty_keywords_no_hits(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb-kw2"))
     _seed_chunk_texts(repo, nb.id, ["anything"])
     repo.backfill_chunk_fts(nb.id)
-    assert repo._keyword_chunk_candidates(nb.id, "", recall=50) == []
-    assert repo._keyword_chunk_candidates(nb.id, "   ", recall=50) == []
+    assert repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "", recall=50) == []
+    assert repo.retrieval.candidates._keyword_chunk_candidates(nb.id, "   ", recall=50) == []
 
 
 def test_ask_chunk_unions_bilingual_keyword_hit_once(repo, monkeypatch):
@@ -280,13 +280,13 @@ def test_ask_chunk_unions_bilingual_keyword_hit_once(repo, monkeypatch):
                      qr.SubQuerySpec("amplifier design")]))
 
     calls = {"n": 0}
-    orig = repo._keyword_chunk_candidates
+    orig = repo.retrieval.candidates._keyword_chunk_candidates
 
     def _spy(nid, kws, recall=0):
         calls["n"] += 1
         return orig(nid, kws, recall)
 
-    monkeypatch.setattr(repo, "_keyword_chunk_candidates", _spy)
+    monkeypatch.setattr(repo.retrieval.candidates, "_keyword_chunk_candidates", _spy)
 
     class _FakeLLM:
         configured = True

@@ -145,3 +145,34 @@ def test_cancel_endpoint_existing_job_returns_200_with_status(tmp_path, monkeypa
     assert r.status_code == 200
     body = r.json()
     assert "status" in body
+
+
+# ---- Task 22: 持久化在 runtime.ask_state 组件;facade 保留取消注册编排 ----
+
+def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkeypatch):
+    """begin/finish 的持久化走 AskStateStore(显式 user_id);facade 只保
+    cancel-event 注册/注销与「cancelled/failed 清空会话」编排,行为不变。"""
+    nb = _nb(repo)
+    seen = []
+    store = repo._runtime.ask_state
+    real_begin, real_finish = store.begin_durable_job, store.finish_job
+
+    def spy_begin(notebook_id, payload, mode, user_id):
+        seen.append(("begin", user_id))
+        return real_begin(notebook_id, payload, mode, user_id)
+
+    def spy_finish(job_id, status, *, answer_id="", error=""):
+        seen.append(("finish", status))
+        return real_finish(job_id, status, answer_id=answer_id, error=error)
+
+    monkeypatch.setattr(store, "begin_durable_job", spy_begin)
+    monkeypatch.setattr(store, "finish_job", spy_finish)
+    ev = threading.Event()
+    payload = AskRequest(question="Q?", mode="chunk")
+    job_id, conv_id = repo.begin_ask_job(nb.id, payload, "chunk", ev)
+    assert repo._ask_cancel_events.get(job_id) is ev      # facade 注册表仍在
+    repo.finish_ask_job(job_id, "cancelled")
+    assert job_id not in repo._ask_cancel_events          # 注销
+    assert seen == [("begin", repo.current_user().id), ("finish", "cancelled")]
+    with pytest.raises(KeyError):
+        repo.get_conversation(conv_id)                    # 空壳清理仍生效

@@ -137,7 +137,7 @@ def test_ppr_graph_contains_mention_edges(repo):
 def test_sibling_peers_returns_comention_partner(repo):
     from app.services.communities import sibling_peers
     nb = _seed_bridge_nb(repo)
-    peers = sibling_peers(repo, nb.id, "Grouped-query attention (GQA)", top_k=5)
+    peers = sibling_peers(_community_queries(repo), nb.id, "Grouped-query attention (GQA)", top_k=5)
     assert peers and "Multi-Query Attention" in peers[0][0]
     assert peers[0][1] == 2
 
@@ -146,14 +146,14 @@ def test_sibling_peers_respects_min_bridge(repo):
     from app.services.communities import sibling_peers
     nb = _seed_bridge_nb(repo)
     repo.settings.sibling_min_bridge = 3          # 唯一共提对 bridge_claims=2 < 3 → 全过滤
-    assert sibling_peers(repo, nb.id, "Grouped-query attention (GQA)") == []
+    assert sibling_peers(_community_queries(repo), nb.id, "Grouped-query attention (GQA)") == []
 
 
 def test_sibling_peers_unresolved_focal_silent_empty(repo):
     """焦点解析不到 → [](不 emit,由调用方回退社区路径兜底文案)。"""
     from app.services.communities import sibling_peers
     nb = _seed_bridge_nb(repo)
-    assert sibling_peers(repo, nb.id, "No Such Concept XYZ") == []
+    assert sibling_peers(_community_queries(repo), nb.id, "No Such Concept XYZ") == []
 
 
 def test_resolve_comparison_peers_prefers_comention_then_community(repo, monkeypatch):
@@ -162,7 +162,7 @@ def test_resolve_comparison_peers_prefers_comention_then_community(repo, monkeyp
     nb = _seed_bridge_nb(repo)
     # 有 concept_comentions → source=comention,名单来自共提兄弟(本 fixture 未建社区数据)
     names, source = C.resolve_comparison_peers(
-        repo, nb.id, "Grouped-query attention (GQA)", "compare gqa and mqa",
+        _community_queries(repo), nb.id, "Grouped-query attention (GQA)", "compare gqa and mqa",
         top_k=5, candidates=50)
     assert source == "comention"
     assert any("Multi-Query Attention" in n for n in names)
@@ -170,6 +170,69 @@ def test_resolve_comparison_peers_prefers_comention_then_community(repo, monkeyp
     monkeypatch.setattr(C, "community_peers", lambda *a, **k: ["STUB-COMMUNITY-PEER"])
     repo.settings.sibling_min_bridge = 99
     names2, source2 = C.resolve_comparison_peers(
-        repo, nb.id, "Grouped-query attention (GQA)", "q", top_k=5, candidates=50)
+        _community_queries(repo), nb.id, "Grouped-query attention (GQA)", "q", top_k=5, candidates=50)
     assert source2 == "community"
     assert names2 == ["STUB-COMMUNITY-PEER"]
+
+
+def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch):
+    from contextlib import contextmanager
+    nb = _seed_bridge_nb(repo)
+    runtime = object.__getattribute__(repo, "_runtime")
+    store = runtime.unified_kg
+    events = []
+    write_ids = set()
+    original_write = runtime.database.write
+
+    @contextmanager
+    def traced_write():
+        with original_write() as db:
+            write_ids.add(id(db))
+            yield db
+
+    monkeypatch.setattr(runtime.database, "write", traced_write)
+
+    def spy(name, *, cursor=False):
+        original = getattr(store, name)
+
+        def wrapped(db, *args, **kwargs):
+            assert isinstance(db, sqlite3.Connection)
+            result = original(db, *args, **kwargs)
+            if cursor:
+                assert isinstance(result, sqlite3.Cursor)
+            events.append((name, id(db), args))
+            return result
+
+        monkeypatch.setattr(store, name, wrapped)
+
+    spy("mention_seed_rows")
+    spy("claim_name_rows")
+    spy("mention_scan_matches", cursor=True)
+    spy("replace_mention_bridge")
+
+    count = getattr(repo, "rebuild_mention_bridge")(nb.id, force=True)
+
+    assert count >= 5
+    names = [name for name, _db, _args in events]
+    assert names[0] == "mention_seed_rows"
+    assert "claim_name_rows" in names and "mention_scan_matches" in names
+    temp_ids = {
+        db_id for name, db_id, _args in events
+        if name in {"claim_name_rows", "mention_scan_matches"}
+    }
+    assert len(temp_ids) == 1
+    replace = next(event for event in events if event[0] == "replace_mention_bridge")
+    assert replace[1] in write_ids
+
+
+def _community_queries(repo):
+    from app.services.communities import CommunityQueryService
+
+    runtime = object.__getattribute__(repo, "_runtime")
+    settings = object.__getattribute__(repo, "settings")
+    return CommunityQueryService(
+        notebooks=runtime.notebook_store,
+        unified_kg=runtime.unified_kg,
+        event_log=runtime.event_log,
+        sibling_min_bridge=settings.sibling_min_bridge,
+    )

@@ -237,7 +237,7 @@ def test_ask_chunk_binds_anchor_to_chunk_with_llm(repo, monkeypatch):
 
 def test_ask_routes_default_mode_to_chunk(repo, monkeypatch):
     sentinel = object()
-    monkeypatch.setattr(repo, "ask_chunk", lambda nb, p: sentinel)
+    monkeypatch.setattr(repo.__dict__["_runtime"].ask_component, "ask_chunk", lambda nb, p, **kwargs: sentinel)
     # AskRequest() 默认 mode 应为 "chunk" → ask() 分发到 ask_chunk
     assert AskRequest(question="x").mode == "chunk"
     assert repo.ask("nb-irrelevant", AskRequest(question="x")) is sentinel
@@ -292,7 +292,9 @@ def test_chunk_fts_backfill_and_search(repo):
                 (cid, nb.id, "s1", txt, "", "[]", now))
     n = repo.backfill_chunk_fts(nb.id)
     assert n == 2
-    from app.services.kg.search import chunk_fts_search
+    # Task 13: the chunk FTS SQL moved to KnowledgeStore (kg/search keeps
+    # only pure hit merging); the primitive stays connection-taking.
+    chunk_fts_search = repo._runtime.knowledge.chunk_fts_search
     with repo._connect() as db:
         hits = chunk_fts_search(db, nb.id, "XZQW9000", k=10)
     assert "c1" in {h["chunk_id"] for h in hits}   # 罕见词法词命中

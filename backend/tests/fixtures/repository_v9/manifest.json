@@ -1,0 +1,71 @@
+{
+  "database": {
+    "path": "baseline.db",
+    "sha256": "e899d295fc25928f0c953cde5ba964e41ffc04d7a74f4a39a99504ddc1fd7ef8",
+    "size": 573440
+  },
+  "expected_snapshot": {
+    "path": "expected_snapshot.json",
+    "sha256": "51d1eddc8c35b191ebaa8f2e594858347be1d99f666c4ca73afe78f96f663b4a",
+    "size": 46445
+  },
+  "schema_version": 9,
+  "source_commit": "3334626",
+  "storage_files": [
+    {
+      "path": "kg_index/nb-fixture/ann.bin",
+      "sha256": "5323483918de6bfdeb464b3a09a03a5b3eef07fd526d03e5e5db64db5a52a071",
+      "size": 416
+    },
+    {
+      "path": "kg_index/nb-fixture/ann_labels.npy",
+      "sha256": "034e1dafce981f8e126dacdde6d8e2e0a24011a195592a14dabaa8582f2a03bc",
+      "size": 317
+    },
+    {
+      "path": "kg_index/nb-fixture/chunk_index.npy",
+      "sha256": "28d4b63fdadd72ed19f8fad1638746569959d59ee50d3e10d67810fced9dc78f",
+      "size": 136
+    },
+    {
+      "path": "kg_index/nb-fixture/graph.npz",
+      "sha256": "584b7de32bb5c5c4e0fc2fe004228743d6144a0a909babcc633357ac44d9aa60",
+      "size": 862
+    },
+    {
+      "path": "kg_index/nb-fixture/idf.npy",
+      "sha256": "b7f29327119fce464131b5c57b3bb681b69e145599cd43ec4e7f9eaadb28a691",
+      "size": 136
+    },
+    {
+      "path": "kg_index/nb-fixture/manifest.json",
+      "sha256": "23cdd1b0aa5b14412ca6efab3039d1e4a2362d71ee5320cd9e3f0442d6a09250",
+      "size": 266
+    },
+    {
+      "path": "kg_index/nb-fixture/node_ids.npy",
+      "sha256": "034e1dafce981f8e126dacdde6d8e2e0a24011a195592a14dabaa8582f2a03bc",
+      "size": 317
+    },
+    {
+      "path": "kg_viz/nb-fixture/manifest.json",
+      "sha256": "b2c5996b700b0dc97cf0147994e2deb0c2a3a59c07a2c0c2b65e418a11456ce8",
+      "size": 241
+    },
+    {
+      "path": "kg_viz/nb-fixture/viz.npz",
+      "sha256": "0f4cadbd158e5e3949f83a189a3f4efdfb3c5bc2d6f0d21e5bccdb32106a0461",
+      "size": 2089
+    },
+    {
+      "path": "kg_viz/nb-fixture/viz_adj.npz",
+      "sha256": "584b7de32bb5c5c4e0fc2fe004228743d6144a0a909babcc633357ac44d9aa60",
+      "size": 862
+    },
+    {
+      "path": "notebooks/nb-fixture/fixture-source.md",
+      "sha256": "ab3b58f2788ce6f707a764f9dfb4766704223fbde2a8e470335d3003920e92a4",
+      "size": 113
+    }
+  ]
+}

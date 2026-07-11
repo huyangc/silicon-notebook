@@ -186,8 +186,8 @@ def test_active_kg_delta_skips_count_when_gated(repo, monkeypatch):
     """indexed + flag 关:_active_kg_delta 返 ([],[],[]) 且不调 _index_delta 的完整 COUNT。"""
     nb = _indexed_nb_with_delta(repo)
     calls = {"index_delta": 0}
-    real = repo._index_delta
-    monkeypatch.setattr(repo, "_index_delta",
+    real = repo.retrieval.graph._index_delta
+    monkeypatch.setattr(repo.retrieval.graph, "_index_delta",
                         lambda n: (calls.__setitem__("index_delta", calls["index_delta"] + 1), real(n))[1])
     out = repo._active_kg_delta(nb.id)
     assert out == ([], [], [])

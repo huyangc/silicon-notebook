@@ -1,0 +1,34 @@
+{
+  "append_ask_trace": {
+    "observable_result": "log exception and keep Ask worker running; missing job is a no-op",
+    "policy": "best_effort"
+  },
+  "delete_report_missing": {
+    "observable_result": "zero-row DELETE returns normally",
+    "policy": "return_none"
+  },
+  "model_error_recording": {
+    "observable_result": "emit structured model_error and append request-local Ask model_errors when a sink exists",
+    "policy": "record_and_continue"
+  },
+  "report_corpus_map": {
+    "observable_result": "individual map failures become section/report diagnostics without aborting unrelated maps",
+    "policy": "best_effort"
+  },
+  "source_chunk_build": {
+    "observable_result": "log chunk-build failure and continue embedding/extraction pipeline",
+    "policy": "best_effort"
+  },
+  "source_embedding": {
+    "observable_result": "background failure is logged and does not prevent extracted status",
+    "policy": "best_effort"
+  },
+  "source_extraction": {
+    "observable_result": "pipeline exception records source failed status, summary and error_message",
+    "policy": "record_and_continue"
+  },
+  "update_report_missing": {
+    "observable_result": "zero-row UPDATE returns normally and creates no report",
+    "policy": "return_none"
+  }
+}

@@ -44,10 +44,17 @@ def test_concurrent_store_kg_no_database_locked(repo):
 
 
 def test_all_writes_go_through_write_lock():
+    """Task 27 expanded write audit: every primary SQLite adapter under
+    backend/app/repositories/sqlite/ (plus the compatibility facade) must run
+    its writes under SqliteDatabase.write() — a write keyword inside a plain
+    connect() block is an offender unless the function is an explicit
+    migration/startup allowlist entry. (The old single-file facade scan is
+    subsumed: the facade file is scanned alongside every adapter.)"""
     import pathlib
     import re
-    src = pathlib.Path(__file__).resolve().parents[1] / "app" / "services" / "sqlite_repository.py"
-    lines = src.read_text(encoding="utf-8").splitlines()
+    backend = pathlib.Path(__file__).resolve().parents[1]
+    targets = sorted((backend / "app" / "repositories" / "sqlite").glob("*.py"))
+    targets.append(backend / "app" / "services" / "sqlite_repository.py")
     # SQL 写关键字; (?<!\.) 排除 Python 的同名方法调用(集合 .update()/列表 .insert()/
     # 字符串 .replace() 等)。真正的 SQL 写在字符串字面量里, 关键字前是引号/空格而非 ".", 仍会命中。
     WRITE = re.compile(r"(?<!\.)\b(INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
@@ -57,32 +64,40 @@ def test_all_writes_go_through_write_lock():
     assert not WRITE.search("neighbour_ids.update(r['x'] for r in rows)")
     assert not WRITE.search("buf.insert(0, item)")
     assert not WRITE.search('name.replace("a", "b")')
+    # 读事务块的开启形态:facade 的 `with self._connect() as db:` 与组件层的
+    # `with self._database.connect() as db:` / `with X.connect() as db:`。
+    CONNECT_BLOCK = re.compile(r"with\s+[\w.]*(?:_connect|\.connect)\(\)\s+as\s+\w+:")
+    WRITE_BLOCK = re.compile(r"with\s+[\w.]*(?:_write|\.write)\(\)\s+as\s+\w+:")
     # 起步单线程, 不并发, 豁免。_migration_N = 版本化 schema 迁移步骤(基线=_migration_1);
     # _recover_interrupted_jobs = 启动崩溃兜底。均由 __init__ 在对外服务前调用。
-    # _migration_6(ask_jobs)/_migration_7(ask_trace_steps)/_migration_8(canonical_relations)/
-    # _migration_9(mention_edges/concept_comentions)/_migration_10(kg_rebuild_checkpoint) 的
-    # CREATE TABLE DDL 里 "ON DELETE CASCADE" 外键子句触发 DELETE 关键字误报(非真实 DML 写),
-    # 故与 _migration_1 同列入豁免——同属版本化迁移步骤范畴。
-    ALLOW = {"_migrate", "_migration_1", "_migration_6", "_migration_7", "_migration_8",
-             "_migration_9", "_migration_10", "_recover_interrupted_jobs", "_seed"}
-    cur = None
-    in_block = False
-    block_indent = 0
+    # CREATE TABLE DDL 里 "ON DELETE CASCADE" 外键子句触发 DELETE 关键字误报(非真实
+    # DML 写), 故版本化迁移步骤(_migration_*)整类豁免。
+    ALLOW_EXACT = {"_migrate", "_recover_interrupted_jobs", "_seed"}
     offenders = []
-    for i, ln in enumerate(lines, 1):
-        m = re.match(r"\s*def (\w+)\(", ln)
-        if m:
-            cur = m.group(1)
-        if "with self._connect() as db:" in ln:
-            in_block = True
-            block_indent = len(ln) - len(ln.lstrip())
-            continue
-        if in_block:
-            if ln.strip() and (len(ln) - len(ln.lstrip())) <= block_indent:
+    for src in targets:
+        cur = None
+        in_block = False
+        block_indent = 0
+        for i, ln in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+            m = re.match(r"\s*def (\w+)\(", ln)
+            if m:
+                cur = m.group(1)
                 in_block = False
-            elif WRITE.search(ln) and cur not in ALLOW:
-                offenders.append((i, cur, ln.strip()[:70]))
-    assert not offenders, f"这些写仍走 _connect()(应改 _write()): {offenders}"
+            if CONNECT_BLOCK.search(ln):
+                in_block = True
+                block_indent = len(ln) - len(ln.lstrip())
+                continue
+            if WRITE_BLOCK.search(ln):
+                in_block = False
+                continue
+            if in_block:
+                if ln.strip() and (len(ln) - len(ln.lstrip())) <= block_indent:
+                    in_block = False
+                elif WRITE.search(ln) and cur not in ALLOW_EXACT and not (
+                    cur or ""
+                ).startswith("_migration_"):
+                    offenders.append((src.name, i, cur, ln.strip()[:70]))
+    assert not offenders, f"这些写仍走 connect()(应改 write()): {offenders}"
 
 
 @pytest.fixture

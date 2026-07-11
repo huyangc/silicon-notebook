@@ -1,0 +1,603 @@
+"""Scale-index full-build, delta-fold, and viz-build orchestration.
+
+The builder composes the runtime-owned projection and artifact adapters.  It
+deliberately receives late-bound callbacks for the compatibility seams that
+still live on ``SQLiteRepository``; it never retains the facade itself.
+"""
+from __future__ import annotations
+
+import gc
+import time
+from typing import Any, Callable, Optional, Sequence
+
+import numpy as np
+
+from app.services.kg import scale_index as scale_index_module
+from app.services.kg import viz_index as viz_index_module
+
+
+class ScaleIndexBuilder:
+    def __init__(
+        self,
+        *,
+        settings,
+        projections,
+        artifacts,
+        event_log,
+        get_notebook: Callable[[str], Any],
+        version: Callable[[str], list],
+        load_scale: Callable[[str], Any],
+        full_viz_graph: Callable[[str], dict],
+        relations_for_notebook: Callable[[str], list],
+        cluster_map: Callable[[str], dict],
+        incremental_fuse_source: Callable[[str, str], None],
+        invalidate_scale_cache: Callable[[str], None],
+        cache_viz: Callable[[str, Any], None],
+        building: set,
+        building_lock,
+        notify_index_done: Callable[[str], None],
+        now: Callable[[], str],
+    ) -> None:
+        self.settings = settings
+        self.projections = projections
+        self.artifacts = artifacts
+        self.event_log = event_log
+        self.get_notebook = get_notebook
+        self.version = version
+        self.load_scale = load_scale
+        self.full_viz_graph = full_viz_graph
+        self.relations_for_notebook = relations_for_notebook
+        self.cluster_map = cluster_map
+        self.incremental_fuse_source = incremental_fuse_source
+        self.invalidate_scale_cache = invalidate_scale_cache
+        self.cache_viz = cache_viz
+        self.building = building
+        self.building_lock = building_lock
+        self.notify_index_done = notify_index_done
+        self.now = now
+
+    def gather_graph(
+        self,
+        notebook_id: str,
+        source_ids: Sequence[str] | None = None,
+        synonym_edges: Sequence[tuple[str, str, float]] | None = None,
+        as_arrays: bool = False,
+    ) -> tuple:
+        rows = self.projections.graph_rows(
+            notebook_id,
+            source_ids,
+            synonym_edges=synonym_edges,
+            as_arrays=as_arrays,
+        )
+        return (
+            rows.node_ids,
+            rows.edges,
+            rows.chunk_ids,
+            rows.kg_node_ids,
+            rows.membership_counts,
+        )
+
+    def _notify_stage(
+        self,
+        notebook_id: str,
+        on_stage: Callable[[str, int], None] | None,
+        stage_name: str,
+        latency_ms: int,
+    ) -> None:
+        if on_stage is None:
+            return
+        try:
+            on_stage(stage_name, latency_ms)
+        except Exception:  # noqa: BLE001 - progress observers are fail-open
+            self.event_log.logger.warning(
+                "build_scale_index on_stage callback failed for stage %s",
+                stage_name,
+                exc_info=False,
+            )
+
+    def build(
+        self,
+        notebook_id: str,
+        on_stage: Callable[[str, int], None] | None = None,
+    ) -> dict:
+        """Build the complete persisted scale index for one notebook."""
+        self.get_notebook(notebook_id)
+        build_started = time.perf_counter()
+        timings: dict[str, int] = {}
+
+        def timed(stage_name: str, fn: Callable[[], Any]):
+            started = time.perf_counter()
+            result = fn()
+            latency_ms = round((time.perf_counter() - started) * 1000)
+            timings[stage_name] = latency_ms
+            self.event_log.emit(
+                {
+                    "kind": "scale_index_build",
+                    "notebook_id": notebook_id,
+                    "stage": stage_name,
+                    "status": "done",
+                    "latency_ms": latency_ms,
+                }
+            )
+            self._notify_stage(notebook_id, on_stage, stage_name, latency_ms)
+            return result
+
+        ann_ids_raw, ann_matrix_raw = timed(
+            "kg_matrix",
+            lambda: self.projections.embedding_matrix(
+                notebook_id, "knowledge_embeddings", "object_id"
+            ),
+        )
+        ann_ids = list(ann_ids_raw) if ann_ids_raw else []
+        if ann_ids and ann_matrix_raw is not None:
+            ann_labels = ann_ids
+            ann_vectors = np.asarray(ann_matrix_raw, dtype=np.float32)
+        else:
+            ann_labels = []
+            ann_vectors = np.empty(
+                (0, max(1, self.settings.embed_dim)), dtype=np.float32
+            )
+
+        def build_kg_ann():
+            if ann_vectors.shape[0] == 0:
+                return None
+            import hnswlib
+
+            index = hnswlib.Index(
+                space="cosine", dim=int(ann_vectors.shape[1])
+            )
+            index.init_index(
+                max_elements=ann_vectors.shape[0],
+                ef_construction=self.settings.hnsw_ef_construction,
+                M=16,
+                random_seed=42,
+            )
+            index.add_items(ann_vectors, np.arange(ann_vectors.shape[0]))
+            return index
+
+        kg_ann_index = timed("ann_build", build_kg_ann)
+        gc.collect()
+
+        def synonym_edges():
+            if kg_ann_index is None or not self.settings.ppr_emb_synonym_enabled:
+                return []
+            from app.services.kg.ppr import emb_synonym_edges
+
+            return emb_synonym_edges(
+                ann_labels,
+                ann_vectors,
+                self.settings.ppr_emb_synonym_threshold,
+                self.settings.ppr_emb_synonym_topk,
+                self.settings.ppr_emb_synonym_max_entities,
+                prebuilt_index=kg_ann_index,
+                ef_construction=self.settings.hnsw_ef_construction,
+            )
+
+        synonyms = timed("synonym", synonym_edges)
+        (
+            node_ids,
+            (edge_src, edge_tgt, edge_weight),
+            chunk_ids,
+            kg_node_ids,
+            membership_counts,
+        ) = timed(
+            "gather",
+            lambda: self.gather_graph(
+                notebook_id, synonym_edges=synonyms, as_arrays=True
+            ),
+        )
+        del synonyms
+
+        kg_id_set = set(kg_node_ids)
+        id_to_idx = {node_id: i for i, node_id in enumerate(node_ids)}
+        chunk_index = [
+            id_to_idx[chunk_id]
+            for chunk_id in chunk_ids
+            if chunk_id in id_to_idx
+        ]
+        idf = []
+        for node_id in node_ids:
+            if node_id in kg_id_set:
+                count = membership_counts.get(node_id, 0)
+                idf.append(1.0 / count if count > 0 else 1.0)
+            else:
+                idf.append(1.0)
+        del kg_id_set, membership_counts
+
+        transition, _ = timed(
+            "transition",
+            lambda: scale_index_module.build_transition_arrays(
+                node_ids, edge_src, edge_tgt, edge_weight
+            ),
+        )
+        del edge_src, edge_tgt, edge_weight
+        gc.collect()
+
+        chunk_ids_raw, chunk_matrix_raw = timed(
+            "chunk_matrix",
+            lambda: self.projections.embedding_matrix(
+                notebook_id, "chunk_embeddings", "chunk_id"
+            ),
+        )
+        chunk_ann_labels = list(chunk_ids_raw) if chunk_ids_raw else []
+        chunk_ann_vectors = (
+            np.asarray(chunk_matrix_raw, dtype=np.float32)
+            if chunk_ann_labels and chunk_matrix_raw is not None
+            else None
+        )
+        del chunk_ids_raw, chunk_matrix_raw
+        gc.collect()
+
+        relation_ids_raw, relation_matrix_raw = timed(
+            "relation_matrix",
+            lambda: self.projections.embedding_matrix(
+                notebook_id, "relation_embeddings", "relation_id"
+            ),
+        )
+        relation_ann_labels = list(relation_ids_raw) if relation_ids_raw else []
+        relation_ann_vectors = (
+            np.asarray(relation_matrix_raw, dtype=np.float32)
+            if relation_ann_labels and relation_matrix_raw is not None
+            else None
+        )
+        del relation_ids_raw, relation_matrix_raw
+        gc.collect()
+
+        viz_artifacts = timed(
+            "viz_arrays",
+            lambda: viz_index_module.arrays_from_graph(
+                self.full_viz_graph(notebook_id)
+            ),
+        )
+        viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = (
+            viz_artifacts
+        )
+        gc.collect()
+
+        from app.services.vector_index import resolve_runtime_dim
+
+        built_dim = (
+            int(ann_vectors.shape[1])
+            if getattr(ann_vectors, "size", 0)
+            else (resolve_runtime_dim(self.settings) or self.settings.embed_dim)
+        )
+        manifest = {
+            "version": self.version(notebook_id),
+            "dim": built_dim,
+            "n_nodes": len(node_ids),
+            "n_kg_nodes": len(kg_node_ids),
+            "n_chunks": len(chunk_ids),
+            "n_hubs": len(node_ids) - len(kg_node_ids) - len(chunk_ids),
+            "n_ann": len(ann_labels),
+            "n_viz_nodes": len(viz_ids),
+            "n_viz_edges": len(viz_payload.get("edges", [])),
+            "watermark_sources": sorted(
+                self.projections.source_ids(notebook_id)
+            ),
+            "built_at": self.now(),
+            "build_ms": dict(timings),
+        }
+        persist_started = time.perf_counter()
+        saved_manifest = self.artifacts.save_full(
+            notebook_id,
+            {
+                "node_ids": node_ids,
+                "transition": transition,
+                "idf": idf,
+                "chunk_index": chunk_index,
+                "ann_vectors": ann_vectors,
+                "ann_labels": ann_labels,
+                "manifest": manifest,
+                "viz_ids": viz_ids,
+                "viz_adj": viz_adj,
+                "viz_deg": viz_deg,
+                "viz_types": viz_types,
+                "viz_names": viz_names,
+                "viz_payload": viz_payload,
+                "chunk_ann_vectors": chunk_ann_vectors,
+                "chunk_ann_labels": chunk_ann_labels,
+                "relation_ann_vectors": relation_ann_vectors,
+                "relation_ann_labels": relation_ann_labels,
+                "prebuilt_ann": kg_ann_index,
+                "ef_construction": self.settings.hnsw_ef_construction,
+            },
+        )
+        persist_ms = round((time.perf_counter() - persist_started) * 1000)
+        timings["persist"] = persist_ms
+        self.event_log.emit(
+            {
+                "kind": "scale_index_build",
+                "notebook_id": notebook_id,
+                "stage": "persist",
+                "status": "done",
+                "latency_ms": persist_ms,
+            }
+        )
+        self._notify_stage(notebook_id, on_stage, "persist", persist_ms)
+        total_ms = round((time.perf_counter() - build_started) * 1000)
+        timings["total"] = total_ms
+        self.event_log.emit(
+            {
+                "kind": "scale_index_build",
+                "notebook_id": notebook_id,
+                "stage": "total",
+                "status": "done",
+                "latency_ms": total_ms,
+            }
+        )
+        self._notify_stage(notebook_id, on_stage, "total", total_ms)
+        # Preserve the old checkpoint: only a successful save invalidates the
+        # live LRU entry. The callback resolves the existing facade-owned LRU.
+        self.invalidate_scale_cache(notebook_id)
+        return {**saved_manifest, "build_ms": dict(timings)}
+
+    def _index_delta(self, notebook_id: str) -> dict:
+        current_sources = self.projections.source_ids(notebook_id)
+        manifest = self.artifacts.read_manifest(
+            self.artifacts.scale_dir(notebook_id)
+        )
+        if manifest is None:
+            return {
+                "delta_sources": sorted(current_sources),
+                "delta_chunks": self.projections.total_chunk_count(notebook_id),
+                "indexed": False,
+            }
+        watermark = set(manifest.get("watermark_sources", []))
+        delta_sources = sorted(
+            source_id
+            for source_id in current_sources
+            if source_id not in watermark
+        )
+        if not delta_sources:
+            return {"delta_sources": [], "delta_chunks": 0, "indexed": True}
+        return {
+            "delta_sources": delta_sources,
+            "delta_chunks": self.projections.delta_chunk_count(
+                notebook_id, delta_sources
+            ),
+            "indexed": True,
+        }
+
+    def fold(self, notebook_id: str, assume_locked: bool = False) -> dict:
+        idx = self.load_scale(notebook_id)
+        if idx is None:
+            return self.build(notebook_id)
+
+        from app.services.vector_index import resolve_runtime_dim
+
+        effective_dim = (
+            resolve_runtime_dim(self.settings) or self.settings.embed_dim
+        )
+        if int(idx.manifest.get("dim", effective_dim)) != int(effective_dim):
+            self.event_log.emit(
+                {
+                    "kind": "scale_fold_refused",
+                    "notebook_id": notebook_id,
+                    "reason": "dim_mismatch",
+                    "manifest_dim": int(idx.manifest.get("dim", 0)),
+                    "runtime_dim": int(effective_dim),
+                }
+            )
+            return self.build(notebook_id)
+
+        delta = self._index_delta(notebook_id)
+        if not delta["delta_sources"]:
+            return idx.manifest
+        if not assume_locked:
+            with self.building_lock:
+                if notebook_id in self.building:
+                    return {"status": "already_building"}
+                self.building.add(notebook_id)
+
+        completed = False
+        try:
+            for source_id in delta["delta_sources"]:
+                try:
+                    self.incremental_fuse_source(notebook_id, source_id)
+                except Exception:  # noqa: BLE001 - fold continues without hubs
+                    self.event_log.logger.exception(
+                        "fold incremental_fuse failed for %s", source_id
+                    )
+
+            (
+                delta_nodes,
+                delta_edges,
+                delta_chunks,
+                delta_kg_ids,
+                delta_membership,
+            ) = self.gather_graph(
+                notebook_id, source_ids=delta["delta_sources"]
+            )
+            kg_ids = set(delta_kg_ids)
+            delta_idf = {
+                object_id: (1.0 / count if count > 0 else 1.0)
+                for object_id, count in delta_membership.items()
+            }
+            node_ids, transition, idf, chunk_index = (
+                scale_index_module.fold_arrays(
+                    list(idx.node_ids),
+                    idx.transition,
+                    idx.idf,
+                    idx.chunk_index,
+                    delta_nodes,
+                    delta_edges,
+                    delta_chunks,
+                    delta_idf,
+                )
+            )
+            live_dir = self.artifacts.scale_dir(notebook_id)
+            temporary = self.artifacts.prepare_fold_directory(notebook_id)
+            scale_index_module.save_fold_core(
+                str(temporary), node_ids, transition, idf, chunk_index
+            )
+
+            dim = int(
+                idx.manifest.get(
+                    "dim", resolve_runtime_dim(self.settings) or self.settings.embed_dim
+                )
+            )
+
+            def delta_vectors(table, column, ids):
+                return self.projections.embedding_matrix(
+                    notebook_id, table, column, object_ids=ids
+                )
+
+            kg_vector_ids, kg_matrix = delta_vectors(
+                "knowledge_embeddings", "object_id", list(kg_ids)
+            )
+            ann = scale_index_module.add_items_to_ann(
+                idx.ann_path,
+                dim,
+                kg_matrix if len(kg_matrix) else [],
+                len(idx.ann_labels),
+            )
+            ann_labels = list(idx.ann_labels) + list(kg_vector_ids)
+            scale_index_module.save_fold_ann(
+                str(temporary), "ann.bin", "ann_labels.npy", ann, ann_labels
+            )
+
+            manifest = dict(idx.manifest)
+            manifest["built_at"] = self.now()
+            if idx.chunk_ann_path and idx.chunk_ann_labels is not None:
+                chunk_vector_ids, chunk_matrix = delta_vectors(
+                    "chunk_embeddings", "chunk_id", list(delta_chunks)
+                )
+                chunk_ann = scale_index_module.add_items_to_ann(
+                    idx.chunk_ann_path,
+                    dim,
+                    chunk_matrix if len(chunk_matrix) else [],
+                    len(idx.chunk_ann_labels),
+                )
+                chunk_labels = list(idx.chunk_ann_labels) + list(
+                    chunk_vector_ids
+                )
+                scale_index_module.save_fold_ann(
+                    str(temporary),
+                    "chunk_ann.bin",
+                    "chunk_ann_labels.npy",
+                    chunk_ann,
+                    chunk_labels,
+                )
+                manifest["has_chunk_ann"] = True
+                manifest["n_chunk_ann"] = len(chunk_labels)
+
+            if idx.relation_ann_path and idx.relation_ann_labels is not None:
+                relation_ids = self._delta_relation_ids(
+                    notebook_id, delta["delta_sources"]
+                )
+                relation_vector_ids, relation_matrix = delta_vectors(
+                    "relation_embeddings", "relation_id", relation_ids
+                )
+                relation_ann = scale_index_module.add_items_to_ann(
+                    idx.relation_ann_path,
+                    dim,
+                    relation_matrix if len(relation_matrix) else [],
+                    len(idx.relation_ann_labels),
+                )
+                relation_labels = list(idx.relation_ann_labels) + list(
+                    relation_vector_ids
+                )
+                scale_index_module.save_fold_ann(
+                    str(temporary),
+                    "relation_ann.bin",
+                    "relation_ann_labels.npy",
+                    relation_ann,
+                    relation_labels,
+                )
+                manifest["has_relation_ann"] = True
+                manifest["n_relation_ann"] = len(relation_labels)
+
+            scale_index_module.copy_fold_viz(str(live_dir), str(temporary))
+            manifest.update(
+                {
+                    "version": self.version(notebook_id),
+                    "watermark_sources": sorted(
+                        self.projections.source_ids(notebook_id)
+                    ),
+                    "n_nodes": len(node_ids),
+                    "n_chunks": int(
+                        self.projections.total_chunk_count(notebook_id)
+                    ),
+                    "n_ann": len(ann_labels),
+                }
+            )
+            scale_index_module.save_fold_manifest(str(temporary), manifest)
+
+            with self.building_lock:
+                self.artifacts.swap_fold_directory(notebook_id, temporary)
+                self.invalidate_scale_cache(notebook_id)
+            completed = True
+            return manifest
+        finally:
+            if not assume_locked:
+                with self.building_lock:
+                    self.building.discard(notebook_id)
+                if completed:
+                    self.notify_index_done(notebook_id)
+
+    def _delta_relation_ids(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> list[str]:
+        relation_ids = []
+        with self.projections.connect() as db:
+            for batch in self.projections.in_batches(source_ids):
+                relation_ids.extend(
+                    self.projections.relation_ids_for_source_batch(
+                        db, notebook_id, batch
+                    )
+                )
+        return relation_ids
+
+    def _derive_object_graph_lite(self, notebook_id: str) -> dict:
+        self.get_notebook(notebook_id)
+        from app.services.kg_merge import derive_unified_graph
+
+        with self.projections.connect() as db:
+            rows = self.projections.active_object_graph_rows(db, notebook_id)
+        nodes = [
+            {
+                "id": row["id"],
+                "object_type": row["object_type"],
+                "payload": {"name": row["name"] or ""},
+            }
+            for row in rows
+        ]
+        edges = [
+            {
+                "source_object_id": relation["source_object_id"],
+                "target_object_id": relation["target_object_id"],
+                "edge_type": relation["edge_type"],
+            }
+            for relation in self.relations_for_notebook(notebook_id)
+        ]
+        return derive_unified_graph(
+            nodes, edges, self.cluster_map(notebook_id)
+        )
+
+    def build_viz(self, notebook_id: str) -> Optional[dict]:
+        self.get_notebook(notebook_id)
+        full = self._derive_object_graph_lite(notebook_id)
+        if not full["nodes"]:
+            return None
+        viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = (
+            viz_index_module.arrays_from_graph(full)
+        )
+        manifest = {
+            "version": self.version(notebook_id),
+            "n_viz_nodes": len(viz_ids),
+            "n_viz_edges": len(viz_payload.get("edges", [])),
+        }
+        self.artifacts.save_viz(
+            notebook_id,
+            {
+                "viz_ids": viz_ids,
+                "viz_adj": viz_adj,
+                "viz_deg": viz_deg,
+                "viz_types": viz_types,
+                "viz_names": viz_names,
+                "viz_payload": viz_payload,
+                "manifest": manifest,
+            },
+        )
+        self.cache_viz(notebook_id, self.artifacts.load_viz(notebook_id))
+        return manifest

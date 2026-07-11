@@ -1,10 +1,9 @@
 """对比 pre-denoise 快照 与 去噪重抽后 的 nb-012 KG，评估去噪/优化成效。
 用法: PYTHONPATH=backend python scripts/compare_kg_dbs.py
 """
-import json
 import re
-import sqlite3
 
+from app.repositories.sqlite.maintenance import ReadOnlySQLiteInspector
 from app.services.kg.filters import is_noise_concept
 
 ROOT = "/Users/hzf/workspace/silicon_notebook/.local"
@@ -12,20 +11,12 @@ OLD = f"{ROOT}/backups/snapshot_pre_denoise_20260606_103747.db"
 NEW = f"{ROOT}/silicon_notebook.db"
 NB = "nb-012fb94249"
 
-# 用新库的白名单对两库统一口径分类
-_con = sqlite3.connect(NEW)
-WL = {r[0] for r in _con.execute("SELECT term FROM concept_whitelist")}
-_con.close()
+# 用新库的白名单对两库统一口径分类(mode=ro,绝不写)
+WL = ReadOnlySQLiteInspector(NEW).concept_whitelist_terms()
 
 
 def concepts(path):
-    con = sqlite3.connect(path)
-    rows = con.execute(
-        "SELECT payload FROM knowledge_objects WHERE notebook_id=? AND object_type='concept'",
-        (NB,),
-    ).fetchall()
-    con.close()
-    return [json.loads(r[0] or "{}").get("name", "") for r in rows]
+    return ReadOnlySQLiteInspector(path).concept_names(NB)
 
 
 def analyze(path, label):

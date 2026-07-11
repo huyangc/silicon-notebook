@@ -21,11 +21,7 @@ NB = "nb-012fb94249"
 
 
 def _run_status(repo, sid):
-    with repo._connect() as db:
-        r = db.execute(
-            "SELECT status, error_message FROM extraction_runs WHERE source_id=? ORDER BY created_at DESC LIMIT 1",
-            (sid,),
-        ).fetchone()
+    r = repo.maintenance.latest_extraction_run(sid)
     return (r["status"], r["error_message"]) if r else ("?", "n/a")
 
 
@@ -39,9 +35,8 @@ def main():
         sys.exit(2)
 
     repo = SQLiteRepository(Settings())
-    with repo._connect() as db:
-        srcs = db.execute("SELECT id, title FROM sources WHERE notebook_id=? ORDER BY id", (NB,)).fetchall()
-        db.execute("UPDATE sources SET doc_type='textbook' WHERE notebook_id=?", (NB,))
+    srcs = repo.maintenance.source_title_rows(NB)
+    repo.maintenance.set_sources_doc_type(NB, "textbook")
     print("sources:", [(r["id"], r["title"][:30]) for r in srcs], flush=True)
 
     do_rebuild = full or bool(sources_arg)
@@ -60,7 +55,7 @@ def main():
     for sid in targets:
         t = time.perf_counter()
         try:
-            repo._run_extraction(sid)
+            repo.maintenance.run_extraction(sid)
             st, msg = _run_status(repo, sid)
             print(f"[{sid}] {time.perf_counter()-t:.1f}s {st} :: {msg}", flush=True)
             ok.append(sid)

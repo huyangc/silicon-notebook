@@ -37,7 +37,7 @@ def test_plan_is_faithful_frozen_snapshot_of_orchestration_knobs(tmp_path, monke
     monkeypatch.setattr(s, "chunk_mmr_k", 9)
     monkeypatch.setattr(s, "chunk_mmr_lambda", 0.42)
 
-    plan = repo._build_chunk_retrieval_plan(nb, ["q"])
+    plan = repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q"])
 
     assert plan.mmr_k == 9
     assert plan.mmr_lambda == 0.42
@@ -50,27 +50,27 @@ def test_plan_is_faithful_frozen_snapshot_of_orchestration_knobs(tmp_path, monke
 def test_plan_strategy_single_vs_multi_when_overlay_off(tmp_path, monkeypatch):
     repo, nb = _repo(tmp_path)
     monkeypatch.setattr(repo.settings, "chunk_kg_overlay_enabled", False)  # overlay_on 必 False
-    assert repo._build_chunk_retrieval_plan(nb, ["q"]).strategy == "single"
-    assert repo._build_chunk_retrieval_plan(nb, ["q1", "q2"]).strategy == "multi"
-    assert repo._build_chunk_retrieval_plan(nb, ["q"]).overlay_on is False
+    assert repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q"]).strategy == "single"
+    assert repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q1", "q2"]).strategy == "multi"
+    assert repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q"]).overlay_on is False
 
 
 def test_plan_strategy_mix_takes_priority_when_overlay_on(tmp_path, monkeypatch):
     repo, nb = _repo(tmp_path)
     repo.rerank_client = _IdentityRerank()
-    monkeypatch.setattr(repo, "_notebook_has_kg", lambda _nb: True)
-    monkeypatch.setattr(repo, "_any_base_notebook_has_kg", lambda: False)
+    monkeypatch.setattr(repo.retrieval.candidates, "_notebook_has_kg", lambda _nb: True)
+    monkeypatch.setattr(repo.retrieval.candidates, "_any_base_notebook_has_kg", lambda: False)
     # 即便 2 个子查询，overlay 优先 → mix（复刻 if overlay/elif multi/else single 顺序）
-    plan = repo._build_chunk_retrieval_plan(nb, ["q1", "q2"])
+    plan = repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q1", "q2"])
     assert plan.overlay_on is True
     assert plan.strategy == "mix"
 
 
 def test_plan_overlay_off_when_rerank_unconfigured(tmp_path, monkeypatch):
     repo, nb = _repo(tmp_path)
-    monkeypatch.setattr(repo, "_notebook_has_kg", lambda _nb: True)
-    monkeypatch.setattr(repo, "_any_base_notebook_has_kg", lambda: False)
+    monkeypatch.setattr(repo.retrieval.candidates, "_notebook_has_kg", lambda _nb: True)
+    monkeypatch.setattr(repo.retrieval.candidates, "_any_base_notebook_has_kg", lambda: False)
     repo.rerank_client = _UnconfiguredRerank()   # 三元 AND 断在 rerank.configured
-    plan = repo._build_chunk_retrieval_plan(nb, ["q"])
+    plan = repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q"])
     assert plan.overlay_on is False
     assert plan.strategy == "single"

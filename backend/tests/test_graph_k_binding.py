@@ -62,7 +62,7 @@ def _resolve_subgraph_keys(repo, nb_id, seed_oids):
     """Render the same subgraph ask_graph will build and return (id_map, key_by_oid)."""
     from app.services.kg.graph_reason import (
         DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context)
-    G, idx_to_oid, oid_to_idx = repo._federated_rx_graph(nb_id)
+    G, idx_to_oid, oid_to_idx = repo.retrieval.graph._federated_rx_graph(nb_id)
     sub = multihop_subgraph(
         G, oid_to_idx, idx_to_oid, seed_ids=seed_oids,
         edge_types=DEFAULT_REASONING_EDGES,
@@ -127,7 +127,7 @@ def _drive_ask_graph(repo, nb, monkeypatch):
             score=1.0, relevance=0.95, status="approved", owner="",
             last_reviewed="", evidence=[], notebook_id=notebook_id, tier="personal")]
 
-    monkeypatch.setattr(repo, "_retrieve_scored", _fake_retrieve_scored)
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_scored", _fake_retrieve_scored)
     repo.llm_client = _CitingLLM(valid_key)
     # Skip the adversarial chain verifier (and its LLM calls) for a focused test.
     # reasoning_llm_client is a read-only property that falls back to llm_client

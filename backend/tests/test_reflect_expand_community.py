@@ -23,7 +23,12 @@ def _make_rr(payload, configured=True):
     repo = type("R", (), {"reasoning_llm_client": _StubLLM(payload, configured)})()
     settings = type("S", (), {"reasoning_timeout_seconds": 1,
                               "reasoning_max_retries": 0})()
-    return ReasoningRetriever(repo, settings)
+    return ReasoningRetriever(
+        retrieval=object(),
+        model_clients=repo,
+        communities=object(),
+        settings=settings,
+    )
 
 
 def test_reflect_parses_expand_community():

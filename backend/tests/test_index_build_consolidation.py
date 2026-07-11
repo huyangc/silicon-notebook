@@ -27,7 +27,7 @@ def test_index_status_aggregates_three_systems(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="n"))
     # 纯读、不得触发 viz build
     called = {"viz": 0}
-    monkeypatch.setattr(repo, "_spawn_viz_build", lambda *a, **k: called.__setitem__("viz", called["viz"] + 1))
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "_spawn_viz_build", lambda *a, **k: called.__setitem__("viz", called["viz"] + 1))
     out = repo.index_status(nb.id)
     assert set(out) == {"kg", "unified_kg", "scale_index"}
     assert set(out["kg"]) >= {"ready", "building", "pending_sources"}

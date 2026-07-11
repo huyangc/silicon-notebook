@@ -1,0 +1,1535 @@
+{
+  "ask_metadata": {
+    "answers": [
+      {
+        "conversation_id": "<conv-id-1>",
+        "created_at": "<timestamp>",
+        "id": "<ans-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "payload": {
+          "anchors": [],
+          "answer": "Source degeneration stabilizes gain [k1].",
+          "answer_id": "<ans-id-1>",
+          "citations": [
+            {
+              "element_id": "<el-id-1>",
+              "label": "Fixture amplifier notes · §1 Gain",
+              "location_label": "§1 Gain",
+              "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+              "source_id": "<src-id-1>",
+              "tier": "personal"
+            }
+          ],
+          "conclusion": "Source degeneration stabilizes gain.",
+          "conversation_id": "<conv-id-1>",
+          "evidence_level": "grounded",
+          "grounded": true,
+          "index_required": false,
+          "kg_required": false,
+          "llm_mode": "grounded",
+          "mode": "reasoning",
+          "model_errors": [
+            {
+              "message": "RuntimeError: deterministic fallback",
+              "model": "fixture-rerank",
+              "stage": "rerank"
+            }
+          ],
+          "reasoning_trace": [
+            {
+              "detail": {
+                "found": 2
+              },
+              "duration_ms": 4,
+              "step_type": "retrieve",
+              "summary": "Retrieved fixture evidence"
+            }
+          ],
+          "related_knowledge": [],
+          "retrieval_query": "Why is fixture gain stable?",
+          "top_relevance": 0.91
+        },
+        "question": "Why is fixture gain stable?"
+      }
+    ],
+    "conversations": [
+      {
+        "created_at": "<timestamp>",
+        "created_by": "<user-id-1>",
+        "id": "<conv-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "title": "Why is gain stable?",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "jobs": [
+      {
+        "answer_id": "<ans-id-1>",
+        "conversation_id": "<conv-id-1>",
+        "created_at": "<timestamp>",
+        "created_by": "<user-id-1>",
+        "error": "",
+        "id": "<askjob-id-1>",
+        "mode": "reasoning",
+        "notebook_id": "<nb-id-1>",
+        "question": "Why is fixture gain stable?",
+        "status": "done",
+        "trace_json": "",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "trace": [
+      {
+        "created_at": "<timestamp>",
+        "job_id": "<askjob-id-1>",
+        "seq": 0,
+        "step_json": {
+          "detail": {
+            "found": 2
+          },
+          "duration_ms": 4,
+          "step_type": "retrieve",
+          "summary": "Retrieved fixture evidence"
+        }
+      }
+    ]
+  },
+  "context": {
+    "node": {
+      "definition": null,
+      "id": "<ko-id-2>",
+      "name": "source degeneration",
+      "object_type": "concept",
+      "occurrences": [
+        {
+          "element_text": "A source-degenerated stage stabilizes voltage gain.",
+          "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+          "source_title": "Fixture amplifier notes"
+        }
+      ],
+      "section_path": "§1 Gain",
+      "steps": null
+    },
+    "search": {
+      "hits": [
+        {
+          "element_id": "<el-id-1>",
+          "label": "Fixture amplifier notes · §1 Gain",
+          "notebook_id": "<nb-id-1>",
+          "scope": "Element",
+          "source_id": "<src-id-1>",
+          "text": "A source-degenerated stage stabilizes voltage gain."
+        },
+        {
+          "element_id": "",
+          "label": "source degeneration",
+          "notebook_id": "<nb-id-1>",
+          "scope": "概念 Concept",
+          "source_id": "",
+          "text": "...ration Local feedback that stabilizes amplifier gain. §1 Gain"
+        },
+        {
+          "element_id": "",
+          "label": "source degeneration stabilizes gain",
+          "notebook_id": "<nb-id-1>",
+          "scope": "论断 Claim",
+          "source_id": "",
+          "text": "source degeneration stabilizes gain Local feedback reduces gain sensitivity. §1 Gain"
+        }
+      ],
+      "query": "gain"
+    },
+    "source_files": [
+      {
+        "path": "kg_index/nb-fixture/ann.bin",
+        "sha256": "5323483918de6bfdeb464b3a09a03a5b3eef07fd526d03e5e5db64db5a52a071",
+        "size": 416
+      },
+      {
+        "path": "kg_index/nb-fixture/ann_labels.npy",
+        "sha256": "034e1dafce981f8e126dacdde6d8e2e0a24011a195592a14dabaa8582f2a03bc",
+        "size": 317
+      },
+      {
+        "path": "kg_index/nb-fixture/chunk_index.npy",
+        "sha256": "28d4b63fdadd72ed19f8fad1638746569959d59ee50d3e10d67810fced9dc78f",
+        "size": 136
+      },
+      {
+        "path": "kg_index/nb-fixture/graph.npz",
+        "sha256": "584b7de32bb5c5c4e0fc2fe004228743d6144a0a909babcc633357ac44d9aa60",
+        "size": 862
+      },
+      {
+        "path": "kg_index/nb-fixture/idf.npy",
+        "sha256": "b7f29327119fce464131b5c57b3bb681b69e145599cd43ec4e7f9eaadb28a691",
+        "size": 136
+      },
+      {
+        "path": "kg_index/nb-fixture/manifest.json",
+        "sha256": "23cdd1b0aa5b14412ca6efab3039d1e4a2362d71ee5320cd9e3f0442d6a09250",
+        "size": 266
+      },
+      {
+        "path": "kg_index/nb-fixture/node_ids.npy",
+        "sha256": "034e1dafce981f8e126dacdde6d8e2e0a24011a195592a14dabaa8582f2a03bc",
+        "size": 317
+      },
+      {
+        "path": "kg_viz/nb-fixture/manifest.json",
+        "sha256": "b2c5996b700b0dc97cf0147994e2deb0c2a3a59c07a2c0c2b65e418a11456ce8",
+        "size": 241
+      },
+      {
+        "path": "kg_viz/nb-fixture/viz.npz",
+        "sha256": "0f4cadbd158e5e3949f83a189a3f4efdfb3c5bc2d6f0d21e5bccdb32106a0461",
+        "size": 2089
+      },
+      {
+        "path": "kg_viz/nb-fixture/viz_adj.npz",
+        "sha256": "584b7de32bb5c5c4e0fc2fe004228743d6144a0a909babcc633357ac44d9aa60",
+        "size": 862
+      },
+      {
+        "path": "notebooks/nb-fixture/fixture-source.md",
+        "sha256": "ab3b58f2788ce6f707a764f9dfb4766704223fbde2a8e470335d3003920e92a4",
+        "size": 113
+      }
+    ]
+  },
+  "reads": {
+    "ask_job": {
+      "answer_id": "<ans-id-1>",
+      "conversation_id": "<conv-id-1>",
+      "created_by": "<user-id-1>",
+      "error": "",
+      "job_id": "<askjob-id-1>",
+      "mode": "reasoning",
+      "notebook_id": "<nb-id-1>",
+      "question": "Why is fixture gain stable?",
+      "status": "done",
+      "trace": [
+        {
+          "detail": {
+            "found": 2
+          },
+          "duration_ms": 4,
+          "step_type": "retrieve",
+          "summary": "Retrieved fixture evidence"
+        }
+      ]
+    },
+    "concepts": {
+      "items": [
+        {
+          "evidence": [
+            {
+              "confidence": 0.98,
+              "element_id": "<el-id-1>",
+              "element_type": "paragraph",
+              "location_label": "§1 Gain",
+              "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+              "source_id": "<src-id-1>",
+              "source_title": "Fixture amplifier notes"
+            }
+          ],
+          "fields": [
+            {
+              "key": "name",
+              "value": "source degeneration"
+            },
+            {
+              "key": "section_path",
+              "value": "§1 Gain"
+            }
+          ],
+          "headline": "source degeneration",
+          "id": "<ko-id-2>",
+          "last_reviewed": "<timestamp>",
+          "object_type": "concept",
+          "owner": "fixture-owner",
+          "status": "approved"
+        }
+      ],
+      "limit": 50,
+      "offset": 0,
+      "total_count": 1
+    },
+    "conversation": {
+      "active_job": null,
+      "id": "<conv-id-1>",
+      "notebook_id": "<nb-id-1>",
+      "title": "Why is gain stable?",
+      "turn_count": 1,
+      "turns": [
+        {
+          "answer_id": "<ans-id-1>",
+          "created_at": "<timestamp>",
+          "question": "Why is fixture gain stable?",
+          "response": {
+            "anchors": [],
+            "answer": "Source degeneration stabilizes gain [k1].",
+            "answer_id": "<ans-id-1>",
+            "citations": [
+              {
+                "element_id": "<el-id-1>",
+                "label": "Fixture amplifier notes · §1 Gain",
+                "location_label": "§1 Gain",
+                "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+                "source_id": "<src-id-1>",
+                "tier": "personal"
+              }
+            ],
+            "conclusion": "Source degeneration stabilizes gain.",
+            "conversation_id": "<conv-id-1>",
+            "evidence_level": "grounded",
+            "grounded": true,
+            "index_required": false,
+            "kg_required": false,
+            "llm_mode": "grounded",
+            "mode": "reasoning",
+            "model_errors": [
+              {
+                "message": "RuntimeError: deterministic fallback",
+                "model": "fixture-rerank",
+                "stage": "rerank"
+              }
+            ],
+            "reasoning_trace": [
+              {
+                "detail": {
+                  "found": 2
+                },
+                "duration_ms": 4,
+                "step_type": "retrieve",
+                "summary": "Retrieved fixture evidence"
+              }
+            ],
+            "related_knowledge": [],
+            "retrieval_query": "Why is fixture gain stable?",
+            "top_relevance": 0.91
+          }
+        }
+      ],
+      "updated_at": "<timestamp>",
+      "used_reasoning": true
+    },
+    "knowledge_types": [
+      {
+        "count": 1,
+        "label": "概念 Concept",
+        "object_type": "concept"
+      },
+      {
+        "count": 1,
+        "label": "论断 Claim",
+        "object_type": "claim"
+      }
+    ],
+    "notebook": {
+      "access": "owner",
+      "access_scope": "private",
+      "base_kg_available": false,
+      "base_notebook_name": "",
+      "counts": {
+        "cases": 0,
+        "checklist_items": 0,
+        "glossary": 0,
+        "methods": 0,
+        "risks": 0,
+        "rules": 0,
+        "sources": 1
+      },
+      "created_label": "2024年1月2日",
+      "expected_questions": [
+        "Why is gain stable?"
+      ],
+      "id": "<nb-id-1>",
+      "kg_building": false,
+      "kg_pending_sources": 0,
+      "kg_ready": true,
+      "name": "Repository contract fixture",
+      "primary_domain": "Analog IC",
+      "purpose": "Freeze schema-v9 repository composition behavior.",
+      "shared_from": "",
+      "source_types": [
+        "markdown"
+      ],
+      "status": "active",
+      "target_users": "circuit designers",
+      "taxonomy": [
+        "amplifier",
+        "feedback"
+      ],
+      "tier": "personal"
+    },
+    "report": {
+      "content_md": "# Gain stabilization\n\nGrounded summary.",
+      "created_at": "<timestamp>",
+      "created_by": "<user-id-1>",
+      "depth": 2,
+      "error": "",
+      "gaps": [
+        "No measured corner data"
+      ],
+      "id": "<rep-id-1>",
+      "notebook_id": "<nb-id-1>",
+      "outline": [
+        {
+          "goal": "Explain feedback",
+          "title": "Evidence"
+        }
+      ],
+      "progress": "complete",
+      "question": "Explain gain stabilization",
+      "references": [
+        {
+          "source_id": "<src-id-1>",
+          "title": "Fixture notes"
+        }
+      ],
+      "section_count": 1,
+      "section_status": [
+        {
+          "phase": "完成",
+          "step": 1,
+          "title": "Evidence"
+        }
+      ],
+      "sections": [
+        {
+          "content": "Grounded summary.",
+          "title": "Evidence"
+        }
+      ],
+      "status": "done",
+      "updated_at": "<timestamp>"
+    },
+    "sharing": {
+      "by_me": [
+        {
+          "id": "<nb-id-1>",
+          "members": [],
+          "mode": "copy",
+          "name": "Repository contract fixture",
+          "share_token": "<share_token>",
+          "size": {
+            "bytes": 113,
+            "chunks": 2,
+            "edges": 1,
+            "nodes": 2,
+            "sources": 1
+          }
+        }
+      ],
+      "preview": {
+        "edge_count": 1,
+        "mode": "copy",
+        "name": "Repository contract fixture",
+        "node_count": 2,
+        "owner_display": "a00123456",
+        "size": {
+          "bytes": 113,
+          "chunks": 2,
+          "edges": 1,
+          "nodes": 2,
+          "sources": 1
+        },
+        "source_count": 1,
+        "source_titles": [
+          "Fixture amplifier notes"
+        ]
+      }
+    },
+    "source_detail": {
+      "created_label": "2024年1月2日",
+      "doc_type": "textbook",
+      "element_count": 2,
+      "error_message": "",
+      "extraction_warning": null,
+      "file_hash": "ab3b58f2788ce6f707a764f9dfb4766704223fbde2a8e470335d3003920e92a4",
+      "file_name": "fixture-source.md",
+      "file_path": "<fixture-storage>/notebooks/nb-fixture/fixture-source.md",
+      "file_size": 113,
+      "id": "<src-id-1>",
+      "kg_extracted": true,
+      "notebook_id": "<nb-id-1>",
+      "parse_status": "parsed",
+      "source_url": "",
+      "status": "extracted",
+      "summary": "A deterministic mixed-format repository fixture.",
+      "title": "Fixture amplifier notes",
+      "type": "markdown"
+    },
+    "source_elements": [
+      {
+        "element_type": "paragraph",
+        "id": "<el-id-1>",
+        "location_label": "§1 Gain",
+        "metadata": {
+          "section_path": [
+            "Fixture amplifier",
+            "Gain"
+          ]
+        },
+        "source_id": "<src-id-1>",
+        "text": "A source-degenerated stage stabilizes voltage gain."
+      },
+      {
+        "element_type": "formula",
+        "id": "<el-id-2>",
+        "location_label": "§2 Formula",
+        "metadata": {
+          "latex": "A_v=-g_mR_D/(1+g_mR_S)"
+        },
+        "source_id": "<src-id-1>",
+        "text": "A_v = -g_m R_D / (1 + g_m R_S)"
+      }
+    ],
+    "sources": [
+      {
+        "created_label": "2024年1月2日",
+        "doc_type": "textbook",
+        "element_count": 2,
+        "extraction_warning": null,
+        "file_hash": "ab3b58f2788ce6f707a764f9dfb4766704223fbde2a8e470335d3003920e92a4",
+        "file_name": "fixture-source.md",
+        "file_size": 113,
+        "id": "<src-id-1>",
+        "kg_extracted": true,
+        "notebook_id": "<nb-id-1>",
+        "parse_status": "parsed",
+        "source_url": "",
+        "status": "extracted",
+        "summary": "A deterministic mixed-format repository fixture.",
+        "title": "Fixture amplifier notes",
+        "type": "markdown"
+      }
+    ]
+  },
+  "rows": {
+    "answers": [
+      {
+        "conversation_id": "<conv-id-1>",
+        "created_at": "<timestamp>",
+        "id": "<ans-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "payload": {
+          "anchors": [],
+          "answer": "Source degeneration stabilizes gain [k1].",
+          "answer_id": "<ans-id-1>",
+          "citations": [
+            {
+              "element_id": "<el-id-1>",
+              "label": "Fixture amplifier notes · §1 Gain",
+              "location_label": "§1 Gain",
+              "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+              "source_id": "<src-id-1>",
+              "tier": "personal"
+            }
+          ],
+          "conclusion": "Source degeneration stabilizes gain.",
+          "conversation_id": "<conv-id-1>",
+          "evidence_level": "grounded",
+          "grounded": true,
+          "index_required": false,
+          "kg_required": false,
+          "llm_mode": "grounded",
+          "mode": "reasoning",
+          "model_errors": [
+            {
+              "message": "RuntimeError: deterministic fallback",
+              "model": "fixture-rerank",
+              "stage": "rerank"
+            }
+          ],
+          "reasoning_trace": [
+            {
+              "detail": {
+                "found": 2
+              },
+              "duration_ms": 4,
+              "step_type": "retrieve",
+              "summary": "Retrieved fixture evidence"
+            }
+          ],
+          "related_knowledge": [],
+          "retrieval_query": "Why is fixture gain stable?",
+          "top_relevance": 0.91
+        },
+        "question": "Why is fixture gain stable?"
+      }
+    ],
+    "ask_jobs": [
+      {
+        "answer_id": "<ans-id-1>",
+        "conversation_id": "<conv-id-1>",
+        "created_at": "<timestamp>",
+        "created_by": "<user-id-1>",
+        "error": "",
+        "id": "<askjob-id-1>",
+        "mode": "reasoning",
+        "notebook_id": "<nb-id-1>",
+        "question": "Why is fixture gain stable?",
+        "status": "done",
+        "trace_json": "",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "ask_trace_steps": [
+      {
+        "created_at": "<timestamp>",
+        "job_id": "<askjob-id-1>",
+        "seq": 0,
+        "step_json": {
+          "detail": {
+            "found": 2
+          },
+          "duration_ms": 4,
+          "step_type": "retrieve",
+          "summary": "Retrieved fixture evidence"
+        }
+      }
+    ],
+    "auth_sessions": [
+      {
+        "created_at": "<timestamp>",
+        "expires_at": "<timestamp>",
+        "last_seen_at": "<timestamp>",
+        "token": "<token>",
+        "user_id": "<user-id-1>"
+      }
+    ],
+    "chunk_embeddings": [
+      {
+        "chunk_id": "<chunk-id-1>",
+        "created_at": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "vector": {
+          "encoding": "little-endian-float32-blob",
+          "sha256": "bb5f01878113000f16ce91be1275eda29f7ca5e04fb3e13f652a94ed5b480b5d",
+          "size": 16
+        }
+      },
+      {
+        "chunk_id": "<chunk-id-2>",
+        "created_at": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "vector": [
+          1.0,
+          0.0,
+          0.5,
+          0.25
+        ]
+      }
+    ],
+    "chunks": [
+      {
+        "created_at": "<timestamp>",
+        "element_ids": [
+          "<el-id-1>"
+        ],
+        "id": "<chunk-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "section_path": "§1 Gain",
+        "source_id": "<src-id-1>",
+        "text": "A source-degenerated stage stabilizes voltage gain."
+      },
+      {
+        "created_at": "<timestamp>",
+        "element_ids": [
+          "<el-id-2>"
+        ],
+        "id": "<chunk-id-2>",
+        "notebook_id": "<nb-id-1>",
+        "section_path": "§2 Formula",
+        "source_id": "<src-id-1>",
+        "text": "A_v = -g_m R_D / (1 + g_m R_S)"
+      }
+    ],
+    "conversations": [
+      {
+        "created_at": "<timestamp>",
+        "created_by": "<user-id-1>",
+        "id": "<conv-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "title": "Why is gain stable?",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "element_embeddings": [
+      {
+        "created_at": "<timestamp>",
+        "element_id": "<el-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "source_id": "<src-id-1>",
+        "vector": [
+          1.0,
+          0.0,
+          0.5,
+          0.25
+        ]
+      },
+      {
+        "created_at": "<timestamp>",
+        "element_id": "<el-id-2>",
+        "notebook_id": "<nb-id-1>",
+        "source_id": "<src-id-1>",
+        "vector": {
+          "encoding": "little-endian-float32-blob",
+          "sha256": "bb5f01878113000f16ce91be1275eda29f7ca5e04fb3e13f652a94ed5b480b5d",
+          "size": 16
+        }
+      }
+    ],
+    "knowledge_embeddings": [
+      {
+        "created_at": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "object_id": "<ko-id-1>",
+        "vector": [
+          1.0,
+          0.0,
+          0.5,
+          0.25
+        ]
+      },
+      {
+        "created_at": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "object_id": "<ko-id-2>",
+        "vector": {
+          "encoding": "little-endian-float32-blob",
+          "sha256": "bb5f01878113000f16ce91be1275eda29f7ca5e04fb3e13f652a94ed5b480b5d",
+          "size": 16
+        }
+      }
+    ],
+    "knowledge_object_sources": [
+      {
+        "notebook_id": "<nb-id-1>",
+        "object_id": "<ko-id-2>",
+        "source_id": "<src-id-1>"
+      },
+      {
+        "notebook_id": "<nb-id-1>",
+        "object_id": "<ko-id-1>",
+        "source_id": "<src-id-1>"
+      }
+    ],
+    "knowledge_objects": [
+      {
+        "created_at": "<timestamp>",
+        "evidence": [
+          {
+            "confidence": 0.98,
+            "element_id": "<el-id-1>",
+            "element_type": "paragraph",
+            "location_label": "§1 Gain",
+            "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_id": "<src-id-1>",
+            "source_title": "Fixture amplifier notes"
+          }
+        ],
+        "id": "<ko-id-1>",
+        "last_reviewed": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "object_type": "claim",
+        "owner": "fixture-owner",
+        "payload": {
+          "name": "source degeneration stabilizes gain",
+          "section_path": "§1 Gain",
+          "statement": "Local feedback reduces gain sensitivity."
+        },
+        "source_candidate_id": null,
+        "source_id": "<src-id-1>",
+        "status": "reviewed",
+        "updated_at": "<timestamp>"
+      },
+      {
+        "created_at": "<timestamp>",
+        "evidence": [
+          {
+            "confidence": 0.98,
+            "element_id": "<el-id-1>",
+            "element_type": "paragraph",
+            "location_label": "§1 Gain",
+            "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_id": "<src-id-1>",
+            "source_title": "Fixture amplifier notes"
+          }
+        ],
+        "id": "<ko-id-2>",
+        "last_reviewed": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "object_type": "concept",
+        "owner": "fixture-owner",
+        "payload": {
+          "definition": "Local feedback that stabilizes amplifier gain.",
+          "name": "source degeneration",
+          "section_path": "§1 Gain"
+        },
+        "source_candidate_id": null,
+        "source_id": "<src-id-1>",
+        "status": "approved",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "knowledge_relations": [
+      {
+        "created_at": "<timestamp>",
+        "edge_type": "supports",
+        "evidence": [
+          {
+            "confidence": 0.98,
+            "element_id": "<el-id-1>",
+            "element_type": "paragraph",
+            "location_label": "§1 Gain",
+            "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_id": "<src-id-1>",
+            "source_title": "Fixture amplifier notes"
+          }
+        ],
+        "id": "<rel-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "review_status": "verified",
+        "source_id": "<src-id-1>",
+        "source_object_id": "<ko-id-2>",
+        "target_object_id": "<ko-id-1>"
+      }
+    ],
+    "notebook_members": [
+      {
+        "added_at": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "role": "reader",
+        "user_id": "<user-id-3>"
+      }
+    ],
+    "notebooks": [
+      {
+        "access_scope": "private",
+        "created_at": "<timestamp>",
+        "created_by": "<user-id-1>",
+        "expected_questions": [
+          "Why is gain stable?"
+        ],
+        "id": "<nb-id-1>",
+        "is_shared": 1,
+        "name": "Repository contract fixture",
+        "primary_domain": "Analog IC",
+        "purpose": "Freeze schema-v9 repository composition behavior.",
+        "purpose_auto": 0,
+        "share_token": "<share_token>",
+        "source_types": [
+          "markdown"
+        ],
+        "status": "active",
+        "target_users": "circuit designers",
+        "taxonomy": [
+          "amplifier",
+          "feedback"
+        ],
+        "template": "",
+        "tier": "personal",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "relation_embeddings": [
+      {
+        "created_at": "<timestamp>",
+        "notebook_id": "<nb-id-1>",
+        "relation_id": "<rel-id-1>",
+        "vector": {
+          "encoding": "little-endian-float32-blob",
+          "sha256": "bb5f01878113000f16ce91be1275eda29f7ca5e04fb3e13f652a94ed5b480b5d",
+          "size": 16
+        }
+      }
+    ],
+    "reports": [
+      {
+        "content_md": "# Gain stabilization\n\nGrounded summary.",
+        "created_at": "<timestamp>",
+        "created_by": "<user-id-1>",
+        "depth": 2,
+        "error": "",
+        "gaps_json": [
+          "No measured corner data"
+        ],
+        "id": "<rep-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "outline_json": [
+          {
+            "goal": "Explain feedback",
+            "title": "Evidence"
+          }
+        ],
+        "progress": "complete",
+        "question": "Explain gain stabilization",
+        "references_json": [
+          {
+            "source_id": "<src-id-1>",
+            "title": "Fixture notes"
+          }
+        ],
+        "section_status_json": [
+          {
+            "phase": "完成",
+            "step": 1,
+            "title": "Evidence"
+          }
+        ],
+        "sections_json": [
+          {
+            "content": "Grounded summary.",
+            "title": "Evidence"
+          }
+        ],
+        "status": "done",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "source_elements": [
+      {
+        "created_at": "<timestamp>",
+        "element_type": "paragraph",
+        "id": "<el-id-1>",
+        "location_label": "§1 Gain",
+        "metadata": {
+          "section_path": [
+            "Fixture amplifier",
+            "Gain"
+          ]
+        },
+        "source_id": "<src-id-1>",
+        "text": "A source-degenerated stage stabilizes voltage gain."
+      },
+      {
+        "created_at": "<timestamp>",
+        "element_type": "formula",
+        "id": "<el-id-2>",
+        "location_label": "§2 Formula",
+        "metadata": {
+          "latex": "A_v=-g_mR_D/(1+g_mR_S)"
+        },
+        "source_id": "<src-id-1>",
+        "text": "A_v = -g_m R_D / (1 + g_m R_S)"
+      }
+    ],
+    "sources": [
+      {
+        "created_at": "<timestamp>",
+        "doc_type": "textbook",
+        "error_message": "",
+        "file_hash": "ab3b58f2788ce6f707a764f9dfb4766704223fbde2a8e470335d3003920e92a4",
+        "file_name": "fixture-source.md",
+        "file_path": "<fixture-storage>/notebooks/nb-fixture/fixture-source.md",
+        "file_size": 113,
+        "id": "<src-id-1>",
+        "notebook_id": "<nb-id-1>",
+        "parse_status": "parsed",
+        "source_type": "markdown",
+        "source_url": "",
+        "status": "extracted",
+        "summary": "A deterministic mixed-format repository fixture.",
+        "title": "Fixture amplifier notes",
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "unified_kg_state": [
+      {
+        "canonical_rel_seq": -1,
+        "cluster_count": 0,
+        "cluster_input_version": "fixture-cluster-v1",
+        "cluster_mutation_seq": 1,
+        "community_seq": -1,
+        "dirty": 0,
+        "kg_mutation_seq": 3,
+        "last_rebuild_at": "<timestamp>",
+        "mention_seq": -1,
+        "notebook_id": "<nb-id-1>",
+        "object_count": 2,
+        "relation_count": 1,
+        "source_index_backfilled": 1,
+        "updated_at": "<timestamp>"
+      }
+    ],
+    "user_profiles": [
+      {
+        "created_at": "<timestamp>",
+        "domain_focus": [
+          "Analog IC"
+        ],
+        "id": "<profile-id-1>",
+        "memory_mode": "manual",
+        "model_settings": {},
+        "updated_at": "<timestamp>",
+        "user_id": "<user-id-1>"
+      },
+      {
+        "created_at": "<timestamp>",
+        "domain_focus": [
+          "Analog IC",
+          "Packaging",
+          "Reliability"
+        ],
+        "id": "<profile-id-2>",
+        "memory_mode": "manual",
+        "model_settings": {},
+        "updated_at": "<timestamp>",
+        "user_id": "<user-id-2>"
+      },
+      {
+        "created_at": "<timestamp>",
+        "domain_focus": [],
+        "id": "<profile-id-3>",
+        "memory_mode": "manual",
+        "model_settings": {},
+        "updated_at": "<timestamp>",
+        "user_id": "<user-id-3>"
+      }
+    ],
+    "users": [
+      {
+        "created_at": "<timestamp>",
+        "display_name": "Fixture Owner",
+        "email": "a00123456@users.silicon-notebook.local",
+        "id": "<user-id-1>",
+        "password_hash": "<password_hash>",
+        "password_iterations": 200000,
+        "password_salt": "<password_salt>",
+        "role": "user",
+        "status": "active",
+        "updated_at": "<timestamp>",
+        "username": "a00123456"
+      },
+      {
+        "created_at": "<timestamp>",
+        "display_name": "Local Curator",
+        "email": "local-user@silicon-notebook.dev",
+        "id": "<user-id-2>",
+        "password_hash": "<password_hash>",
+        "password_iterations": 200000,
+        "password_salt": "<password_salt>",
+        "role": "admin",
+        "status": "active",
+        "updated_at": "<timestamp>",
+        "username": "admin"
+      },
+      {
+        "created_at": "<timestamp>",
+        "display_name": "Fixture Reader",
+        "email": "b00654321@users.silicon-notebook.local",
+        "id": "<user-id-3>",
+        "password_hash": "<password_hash>",
+        "password_iterations": 200000,
+        "password_salt": "<password_salt>",
+        "role": "user",
+        "status": "active",
+        "updated_at": "<timestamp>",
+        "username": "b00654321"
+      }
+    ]
+  },
+  "schema": {
+    "objects": [
+      {
+        "name": "idx_answers_conversation",
+        "sql_sha256": "dcff1ed1dace548cb5ffab73a3b16e92e196a48396f0f29d0a62fe497b87e554",
+        "type": "index"
+      },
+      {
+        "name": "idx_answers_nb",
+        "sql_sha256": "4dd3b821c5d7e5f8d3f580307fc007c3126a9fd18d9b415e494ab26c0cd127f1",
+        "type": "index"
+      },
+      {
+        "name": "idx_ask_jobs_conv",
+        "sql_sha256": "01ef3d5ed251b63d8a283f1575b43b2afc221708eafaf01362bc75bea2a399e5",
+        "type": "index"
+      },
+      {
+        "name": "idx_ask_jobs_nb_status",
+        "sql_sha256": "3c1ecb77ea88e3f8e52cc44458d1e2610f7a82d35239b33014f324406817bfd1",
+        "type": "index"
+      },
+      {
+        "name": "idx_auth_sessions_user",
+        "sql_sha256": "fcc1151d095734f5af74b5375e9c4c9742be89f64687d860784d1f19ebd07d4c",
+        "type": "index"
+      },
+      {
+        "name": "idx_candidates_nb_status",
+        "sql_sha256": "d74da44d5ba5e9951caf1a3c6dcbf3af56b4cf547c6dfdc70449c70d9b149ff8",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunk_embeddings_nb",
+        "sql_sha256": "886fffe3b799daf910469c1e9668e2a64f961c8349533e35e62fa5b32e039b3f",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunks_nb",
+        "sql_sha256": "b0c3cf5a688d83ac84b461bfb7ed940424d68b4844894a4d30d02136557a9d6c",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunks_nb_created",
+        "sql_sha256": "cf455f3cb38ac4e4b281bd9e4b61254c55d37bcd94aaeaa94683a497d54a9393",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunks_source",
+        "sql_sha256": "967cc2380cde12fab43aa5a5a2ed015d03ac3c887d14967ab44412fde41fc803",
+        "type": "index"
+      },
+      {
+        "name": "idx_clusters_member",
+        "sql_sha256": "f207f2925da4e6b3a557c13868993343415d0efb3f2f238a1e854344aed76f7e",
+        "type": "index"
+      },
+      {
+        "name": "idx_clusters_nb",
+        "sql_sha256": "a94ac4a97bc95e845d67003f9af6d4c37fbed08909d667306f54e1503b0635b5",
+        "type": "index"
+      },
+      {
+        "name": "idx_clusters_nb_created",
+        "sql_sha256": "62c104f28fe311793fec590a3bbc61fc9418f5f13d531de517f1723a860db089",
+        "type": "index"
+      },
+      {
+        "name": "idx_commmem_nb_can",
+        "sql_sha256": "0a8ae63a7724db967d2836fe9693ff47408e376b40f1e7a2a2c020bfb6fe5c52",
+        "type": "index"
+      },
+      {
+        "name": "idx_commmem_nb_comm",
+        "sql_sha256": "8b43362e9079a6bc0c20b1204343f588532847daacd4df2ff0a71b8327a26ac5",
+        "type": "index"
+      },
+      {
+        "name": "idx_communities_nb_level",
+        "sql_sha256": "5c707b9bedb4915a9ae77dff041634ec8580a2a9668476ae82fcfc6bf429902b",
+        "type": "index"
+      },
+      {
+        "name": "idx_conflict_candidates_nb_status",
+        "sql_sha256": "969c18a870cf2b747ab55dc32b03a027489ae259dba529ebd58e9f4343d48d25",
+        "type": "index"
+      },
+      {
+        "name": "idx_conversations_created_by",
+        "sql_sha256": "a0a3892af417fb782f6840c56d4844b173ff9871c2d82855a8c3dd4b2a080025",
+        "type": "index"
+      },
+      {
+        "name": "idx_element_embeddings_nb",
+        "sql_sha256": "05c09d46a07cb2fb0025a1a9239d8ac8cc44704ace57d9b73c4f09e966c5b293",
+        "type": "index"
+      },
+      {
+        "name": "idx_extraction_runs_source_created",
+        "sql_sha256": "61cc5c972f38f2d50a570ce4e4a335d44f2f9145525a09b2aa48ca86dcc2a40e",
+        "type": "index"
+      },
+      {
+        "name": "idx_feedback_answer",
+        "sql_sha256": "40cc2a819484476d011364d0ae073d55d598e11704fb2d33f7aff7eefc6d2725",
+        "type": "index"
+      },
+      {
+        "name": "idx_feedback_nb_rating",
+        "sql_sha256": "ba5ecc1bbcdef30e1cf96b6d9b858e45e350f7be27330c4956caf71f46d649be",
+        "type": "index"
+      },
+      {
+        "name": "idx_kg_cluster_scratch_nb_run",
+        "sql_sha256": "63dda4f6c99afb18cd60dd4f9107f4aef2dd87368713947c8dee6f6c108da7bf",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_embeddings_nb",
+        "sql_sha256": "cc4f740d660bed770b5b2434ca4ba1d2dce477e6a6e4327dc2f9f3f801b34c90",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_embeddings_nb_created",
+        "sql_sha256": "64d41a536e1414633895887a43ad7e04ffd1cc088062fbc12415fcf9653b5706",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_objects_nb_status",
+        "sql_sha256": "b4bfde7f8b66d93d45dabeb858e83609e1a8b1ced6ab98db4ee514f81ccadb38",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_objects_nb_type_created",
+        "sql_sha256": "a0a45f59d5919303eb783e42d92b43edc9c39797036452538320f5f6fbde78c9",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_objects_nb_type_status",
+        "sql_sha256": "688aa94ad2c6ba1ca8363ccab83d073759715dafdb2b371b7a27770a18718845",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_objects_nb_updated",
+        "sql_sha256": "46b215c37f7998b834415d8d7cc7c99c4a6b210ec865d75ae748dd58146588b9",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_objects_source",
+        "sql_sha256": "49da7467490c192ce4db609c352fb0bf89eeac3e3ea6ba7282cea57b1725ec9b",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_relations_nb_created",
+        "sql_sha256": "5165d9983806ae726dda31d8119beb2dfb57cd90b5af1165b51d3a9fd40a0c96",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_relations_nb_source",
+        "sql_sha256": "7c117724530a907aac78b3859a562836a3ac3f24b1d126a55719f95bec2618c9",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_relations_nb_target",
+        "sql_sha256": "f25bc67538780ba51f2a077d1942bd82a24bb4eeb2cc2eb91a436748f0a9e97a",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_relations_source",
+        "sql_sha256": "108c5e65971a958182edaa5aa02ff706bd2cbc4e5a5a841a4dfb612a67b635a0",
+        "type": "index"
+      },
+      {
+        "name": "idx_kos_notebook",
+        "sql_sha256": "786d52f5e142c2a2b8ad01e3c2f29ea971ba68207fe88514cf77a86e259b0bfa",
+        "type": "index"
+      },
+      {
+        "name": "idx_kos_object",
+        "sql_sha256": "1be36dcb042a1989845741c9ef23fe62ab3000b453bedf222f2525cbdaead026",
+        "type": "index"
+      },
+      {
+        "name": "idx_kos_source",
+        "sql_sha256": "7e3d617725c83ce21e784e3cd3a4bd3625aed69c24a30ea292007fcbf4ae77ba",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebook_members_user",
+        "sql_sha256": "d19d04e75eb1ca890f435ea4508b7da01eae29fa1214df4b76a9f8ed5d7cf6b1",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebooks_created_by",
+        "sql_sha256": "d8bb5f5ab8114a7eec4188731865be5033ae58750235b00760cf7135ab8cb994",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebooks_share_token",
+        "sql_sha256": "910ca22a12f3c1b45d2a6c5fa669b187ea333c272b078cbcc051784ccf5774e3",
+        "type": "index"
+      },
+      {
+        "name": "idx_promotion_nb",
+        "sql_sha256": "a47726974f014f6903fcd7b83ba51692f7b318131bc649543ea3fb66b9659cbc",
+        "type": "index"
+      },
+      {
+        "name": "idx_promotion_object",
+        "sql_sha256": "b90e5e2df240949faa5ef42bc4846acf7d974cd855a5e648d48b6d960c799131",
+        "type": "index"
+      },
+      {
+        "name": "idx_promotion_status",
+        "sql_sha256": "1ce2ed8f578ea55b49c574d72b51203000241a5739d16f215883e84ff62683a9",
+        "type": "index"
+      },
+      {
+        "name": "idx_relation_embeddings_nb",
+        "sql_sha256": "90a1446118601ff279d11923cd8008a6a89e1d6484655035abf03ae46d92701f",
+        "type": "index"
+      },
+      {
+        "name": "idx_reports_nb_created",
+        "sql_sha256": "1bf54e19971ecc87dec7cac15e3738d21c5424484543bf214255be0dd073e298",
+        "type": "index"
+      },
+      {
+        "name": "idx_source_elements_source",
+        "sql_sha256": "9a9faabe675ef91b0009936a4e01a0e58e61e7af2ffe8b0f5f23bbf9fc171567",
+        "type": "index"
+      },
+      {
+        "name": "idx_source_elements_source_created",
+        "sql_sha256": "955ecda9b187b810f32409dbae4770fafead611ecaff0f16e19c71829a297e69",
+        "type": "index"
+      },
+      {
+        "name": "idx_sources_notebook_created",
+        "sql_sha256": "06f4f2a4ff466cbb5d3ef988cab9444c404dc252b3d887ab2acf5d1dccf9f675",
+        "type": "index"
+      },
+      {
+        "name": "idx_sources_notebook_status",
+        "sql_sha256": "98ac9ec01586941da70d8487ee84cbf00df6be6724affbbc16e09c50179c1cba",
+        "type": "index"
+      },
+      {
+        "name": "idx_users_username",
+        "sql_sha256": "611bc0564c5f43d8133c0338b59cf46700be365953340d3e662cd834a78b0140",
+        "type": "index"
+      },
+      {
+        "name": "answers",
+        "sql_sha256": "13b89d17ef7f5fccfa08f938e9d7d9ce263c575331e793617315460b591c8575",
+        "type": "table"
+      },
+      {
+        "name": "ask_jobs",
+        "sql_sha256": "393b26cacbfa9da4d62c4f4c8bba973a33c561126c364993839c665d998047b9",
+        "type": "table"
+      },
+      {
+        "name": "ask_trace_steps",
+        "sql_sha256": "a8c5bb80075209fafe3cf69422f1bda61a03b326ba7885d3359c19a63823b85d",
+        "type": "table"
+      },
+      {
+        "name": "auth_sessions",
+        "sql_sha256": "bd2767aebd0aa0a1f97aabe40c7805443313ed9ca948ca759ab777c201096155",
+        "type": "table"
+      },
+      {
+        "name": "canonical_relations",
+        "sql_sha256": "c99d0bc176fddd8e58f7d6cfb94297139720ac09baafe243bf3d9894b96cd2ea",
+        "type": "table"
+      },
+      {
+        "name": "chunk_embeddings",
+        "sql_sha256": "ecc28ea792bf4078408e8973082923250c9a257ba026cdc30c14ef02db391867",
+        "type": "table"
+      },
+      {
+        "name": "chunks",
+        "sql_sha256": "96d5720ecccff9c489b9b99f9d04ad59f0ebb95f57677c7b7cb5e4f3caa5f08b",
+        "type": "table"
+      },
+      {
+        "name": "chunks_fts",
+        "sql_sha256": "ed872eb0c8928d64502a06eb990f223e54a10511e16b72943d696c7d22824046",
+        "type": "table"
+      },
+      {
+        "name": "chunks_fts_config",
+        "sql_sha256": "2a5b0e5c2bc65d05613ebb2a092ecdd4305868cdc780ce507464fadddc430279",
+        "type": "table"
+      },
+      {
+        "name": "chunks_fts_content",
+        "sql_sha256": "cf26831c7ffc2aaf69c9409c31390e75a3d0f56f7d95532d4498e614d3d1e258",
+        "type": "table"
+      },
+      {
+        "name": "chunks_fts_data",
+        "sql_sha256": "631ee21d4df4dc0abad55ed413a24f0ab9716a327b3e95c36b004050529d38a9",
+        "type": "table"
+      },
+      {
+        "name": "chunks_fts_docsize",
+        "sql_sha256": "90b3fde58a3ffa7276e6d9d32fa22b9a728109b5ca1194aa03cab4b783070d34",
+        "type": "table"
+      },
+      {
+        "name": "chunks_fts_idx",
+        "sql_sha256": "ff4ec573629dfa8f1b7d35f101c3689532cfb82445ddfaea48511fa28f65f93e",
+        "type": "table"
+      },
+      {
+        "name": "communities",
+        "sql_sha256": "91eb710475e4a57de419ec0d2263d7341292b9f326dd35dfdca23a814437e70e",
+        "type": "table"
+      },
+      {
+        "name": "community_members",
+        "sql_sha256": "50ee31d6d76ed64c2216cab94a30f784119d34471735818622a7da0113467dfe",
+        "type": "table"
+      },
+      {
+        "name": "concept_clusters",
+        "sql_sha256": "18e605e99ada25c02ba36cee4fcdc3490e9131d9b861e07da8788db3074e36ee",
+        "type": "table"
+      },
+      {
+        "name": "concept_comentions",
+        "sql_sha256": "abfec21477198b1c2f399cd85ff6de720fe8ef8604e5be2be7b01a159077b881",
+        "type": "table"
+      },
+      {
+        "name": "concept_merge_candidates",
+        "sql_sha256": "2581ec367051ae485cb1e45a9cf625afe9ec9c62060f331d0fcc80f9093106ae",
+        "type": "table"
+      },
+      {
+        "name": "concept_whitelist",
+        "sql_sha256": "b63e0e4ff848982ad7c31c17223bf3fd1d6a7762f707810ef13eba463ed95270",
+        "type": "table"
+      },
+      {
+        "name": "conversations",
+        "sql_sha256": "2561fb56c92b2d6ede61fb9b54e8a37250064f67f948ac99f1c7dc5b306d38aa",
+        "type": "table"
+      },
+      {
+        "name": "element_embeddings",
+        "sql_sha256": "9896e79225583474e7fcf5af34bab5001c72b7ee82a1d72f16552716518dc561",
+        "type": "table"
+      },
+      {
+        "name": "extraction_runs",
+        "sql_sha256": "250b627fc6817b094f9fab0ec1d320fe8d87b5ad265674c03baa02f3a814be04",
+        "type": "table"
+      },
+      {
+        "name": "feedback",
+        "sql_sha256": "f4f184b3c5273515dcf0dcb338c4e21e8505cf12ddde7dadc8f06a11341867cb",
+        "type": "table"
+      },
+      {
+        "name": "kg_cluster_scratch",
+        "sql_sha256": "99d623abe3512d8074f90faea3ba34e41af1042e09da59e2c8fe4432a08e7e0c",
+        "type": "table"
+      },
+      {
+        "name": "kg_conflict_candidates",
+        "sql_sha256": "ef9a2cb3a87f9fa19a4c5af85073370062d53a85c6e6024d007e50e145cef78d",
+        "type": "table"
+      },
+      {
+        "name": "kg_objects_fts",
+        "sql_sha256": "ff53771bb3f3e290c048c9490625a1a4d870a40261aafb6c4eac5be610c53c29",
+        "type": "table"
+      },
+      {
+        "name": "kg_objects_fts_config",
+        "sql_sha256": "2378cd6be419c90ab7181f2bbb51708b15d0069eaae1f1e7e99dcf246afc199d",
+        "type": "table"
+      },
+      {
+        "name": "kg_objects_fts_content",
+        "sql_sha256": "78c7c2693fd3b17a85f3d352a42488773f403ce0d2bbb68370b1fc10f7602886",
+        "type": "table"
+      },
+      {
+        "name": "kg_objects_fts_data",
+        "sql_sha256": "75eddfc0088f9ab6a1fc553dcd85539c664239251fa2fa6ee5b46aa453e00243",
+        "type": "table"
+      },
+      {
+        "name": "kg_objects_fts_docsize",
+        "sql_sha256": "8cf2ac378a21c3f72c7e7813b6a00aae19bf11dd9098865a44a84be717f369f9",
+        "type": "table"
+      },
+      {
+        "name": "kg_objects_fts_idx",
+        "sql_sha256": "1c24323ec7f74f6a59c646228f74d042e0abf0d8e935b9446f0b5dc5fc492fbe",
+        "type": "table"
+      },
+      {
+        "name": "kg_rebuild_checkpoint",
+        "sql_sha256": "0495aef2131e8270aff7c1f666433bb092aa0d44f8c3b91a68d3bade0dbbbd41",
+        "type": "table"
+      },
+      {
+        "name": "knowledge_embeddings",
+        "sql_sha256": "ec82054bf35efa642fe95d10f654f161a62c751c89777cfe4d422323b19a9e46",
+        "type": "table"
+      },
+      {
+        "name": "knowledge_object_sources",
+        "sql_sha256": "70b82ec656f0c78b556ae67b3319dbaed1507f7b0f94ec5ffcaaf4b85ad6d7bf",
+        "type": "table"
+      },
+      {
+        "name": "knowledge_objects",
+        "sql_sha256": "b7957406b2cfe929a570b68ebbb6770405de1dd5dfc4b81d04430ce43493daee",
+        "type": "table"
+      },
+      {
+        "name": "knowledge_relations",
+        "sql_sha256": "c4d9a797b47b5fd95f20bd700ee49d5954186c1f5137892d9782b444631ec46c",
+        "type": "table"
+      },
+      {
+        "name": "mention_edges",
+        "sql_sha256": "9846113ca76bd4de0669e123045a769b993940fdbfbcb7dbda33c287afb477fa",
+        "type": "table"
+      },
+      {
+        "name": "merge_review_jobs",
+        "sql_sha256": "436e2461e8c73e909c2a3993f7ea4fbda6ffe2dc2044dc29a7e77efd07d05d2b",
+        "type": "table"
+      },
+      {
+        "name": "notebook_members",
+        "sql_sha256": "86957dac313deb2ff589f331611d907888c21c00bafb0e79bf95af846697442e",
+        "type": "table"
+      },
+      {
+        "name": "notebooks",
+        "sql_sha256": "28665711d4b06b89aa1be3f04cbeafe7221b5abc877b0f16ca4fd89a7349ca19",
+        "type": "table"
+      },
+      {
+        "name": "object_schemas",
+        "sql_sha256": "7e9cda465e3ac30cfd751384fdaa870107522165c92fb6a52ee811657644adb7",
+        "type": "table"
+      },
+      {
+        "name": "promotion_candidates",
+        "sql_sha256": "2697cb7f18289e681bb7bf9d5e576c03b6a134fd61279cd4ef7e9591972d5259",
+        "type": "table"
+      },
+      {
+        "name": "relation_embeddings",
+        "sql_sha256": "72562e32b3076a87a61df1b543962f38616c56ea113e2058c7accdfeb3244218",
+        "type": "table"
+      },
+      {
+        "name": "reports",
+        "sql_sha256": "a9d808501c98af304a5993a924852cd88c380933a737718173908115e8aa63bc",
+        "type": "table"
+      },
+      {
+        "name": "source_elements",
+        "sql_sha256": "e79aec288e1bebd3e99e27ced8ab43d03fa82cf4be1be4602a512b7968fc7b5e",
+        "type": "table"
+      },
+      {
+        "name": "sources",
+        "sql_sha256": "6e739f01d08fdb894e46a36c27d0a2c905c6605e742ff93642c574f785372eb1",
+        "type": "table"
+      },
+      {
+        "name": "unified_kg_state",
+        "sql_sha256": "92f537ee8b95c98cc5a2de23dd74ac1e1b88f97a63f6f16782ae3355ab5f9383",
+        "type": "table"
+      },
+      {
+        "name": "user_profiles",
+        "sql_sha256": "c8f4b8d4f9072a816e10e2c0c5c332625a137aa659a0af9703ff36298b4a2cb8",
+        "type": "table"
+      },
+      {
+        "name": "users",
+        "sql_sha256": "8dd2fcd0cc994fbf94b64f764a8ca8903441ff1ea70cc8eeea9ce236bf79d265",
+        "type": "table"
+      }
+    ],
+    "user_version": 10
+  }
+}
