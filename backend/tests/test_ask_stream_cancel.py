@@ -70,10 +70,13 @@ def test_disconnect_does_not_cancel_worker_runs_to_completion():
     )
 
     class Stub:
-        _runtime = SimpleNamespace(ask_execution=coordinator)
-
         def current_user(self):
             return SimpleNamespace(id="user-x")
+
+        def start_ask_stream(self, notebook_id, payload, mode, *, user_id):
+            return coordinator.start(
+                notebook_id, payload, mode, user_id=user_id
+            )
 
     async def drive():
         stream = _stream_ask_events(Stub(), "nb", AskRequest(question="q", mode="chunk"),

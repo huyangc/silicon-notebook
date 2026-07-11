@@ -19,7 +19,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Protocol, Tuple
 
 from app.core.config import Settings
 from app.core.request_context import set_request_user, reset_request_user
@@ -27,10 +27,32 @@ from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
+from app.repositories.ports import SQLiteMaintenancePort
 
 SUPPORTED_EXTS = {".md", ".markdown", ".pdf"}
 
 LogFn = Callable[[dict], None]
+
+
+class BatchIngestRepository(Protocol):
+    """Public facade surface used by the batch workflow."""
+
+    settings: Settings
+    storage_dir: Path
+    maintenance: SQLiteMaintenancePort
+    llm_client: Any
+
+    def current_user(self) -> Any: ...
+    def get_notebook(self, notebook_id: str) -> Any: ...
+    def create_notebook(self, payload: NotebookCreate) -> Any: ...
+    def upload_sources(self, notebook_id: str, files: Any, scheduler: Any = None) -> Any: ...
+    def process_source(self, source_id: str) -> Any: ...
+    def extract_source(self, source_id: str) -> Any: ...
+    def build_notebook_kg(self, notebook_id: str, *, progress: Any = None) -> dict: ...
+    def rebuild_unified_kg(self, notebook_id: str, progress: Any = None,
+                           force: bool = False, fresh: bool = False) -> int: ...
+    def build_scale_index(self, notebook_id: str,
+                          on_stage: Any = None) -> dict: ...
 
 
 def _rebuild_progress(phase: str, i: int, n: int) -> None:
@@ -160,16 +182,16 @@ def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def already_ingested(repo: SQLiteRepository, notebook_id: str, digest: str) -> bool:
+def already_ingested(repo: BatchIngestRepository, notebook_id: str, digest: str) -> bool:
     return repo.maintenance.source_id_by_hash(notebook_id, digest) is not None
 
 
-def source_id_by_hash(repo: SQLiteRepository, notebook_id: str, digest: str) -> Optional[str]:
+def source_id_by_hash(repo: BatchIngestRepository, notebook_id: str, digest: str) -> Optional[str]:
     """已按内容哈希摄取过则返回其 source id,否则 None(续跑/去重用)。"""
     return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
-def _resolve_owner_profile(repo: SQLiteRepository, owner: Optional[str]):
+def _resolve_owner_profile(repo: BatchIngestRepository, owner: Optional[str]):
     """解析 notebook 属主 → UserProfile。owner=用户名(大小写不敏感);
     None → 默认取 admin 用户(role='admin' 中最早建的=seeded admin)。找不到 → SystemExit。"""
     profile = repo.maintenance.resolve_owner_profile(owner)
@@ -178,7 +200,7 @@ def _resolve_owner_profile(repo: SQLiteRepository, owner: Optional[str]):
     return profile
 
 
-def ensure_notebook(repo: SQLiteRepository, notebook_id: Optional[str], name: str,
+def ensure_notebook(repo: BatchIngestRepository, notebook_id: Optional[str], name: str,
                     owner: Optional[str] = None) -> str:
     """返回目标 notebook_id:给定则校验存在,否则以解析出的属主新建。
     owner=用户名(默认= admin 用户);notebook.created_by 记其 user id。"""
@@ -193,7 +215,7 @@ def ensure_notebook(repo: SQLiteRepository, notebook_id: Optional[str], name: st
         reset_request_user(token)
 
 
-def run_ingest(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
+def run_ingest(repo: BatchIngestRepository, notebook_id, files, workers=4, conc=4, log=None) -> dict:
     """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。"""
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
@@ -228,7 +250,7 @@ def run_ingest(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, lo
     return counts
 
 
-def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4,
+def backfill_chunk_embeddings(repo: BatchIngestRepository, notebook_id, conc=4,
                               missing_only=False) -> int:
     """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
 
@@ -268,7 +290,7 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4,
         repo.settings.embed_concurrency = orig_conc
 
 
-def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
+def run_kg(repo: BatchIngestRepository, notebook_id, limit=None, conc=4, log=None,
            no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
            report_interval: int = 15) -> dict:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
@@ -369,7 +391,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
     return res
 
 
-def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=None,
+def run_all(repo: BatchIngestRepository, notebook_id, files, workers=4, conc=4, log=None,
             report_interval: int = 15, fresh: bool = False) -> dict:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
     跨源并发提交到全局 KG job 池;**末尾一次** rebuild_unified_kg + 补节点向量(+ scale index)。
@@ -482,14 +504,14 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
     return res
 
 
-def run_index(repo: SQLiteRepository, notebook_id: str) -> dict:
+def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict:
     """Phase 3 (offline): build the scalable-retrieval index for a (base) notebook.
     Static base KGs should re-run this after a rebuild."""
     manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
     return {"indexed_nodes": manifest.get("n_nodes", 0)}
 
 
-def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int:
+def backfill_node_embeddings(repo: BatchIngestRepository, notebook_id, conc=4) -> int:
     """补 KG 节点向量(复用 backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
     if not repo.settings.embedder_configured:
         return 0
@@ -510,15 +532,15 @@ def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int
     return count
 
 
-def _count_missing_chunk_vectors(repo: SQLiteRepository, notebook_id) -> int:
+def _count_missing_chunk_vectors(repo: BatchIngestRepository, notebook_id) -> int:
     return repo.maintenance.count_missing_chunk_vectors(notebook_id)
 
 
-def _count_missing_node_vectors(repo: SQLiteRepository, notebook_id) -> int:
+def _count_missing_node_vectors(repo: BatchIngestRepository, notebook_id) -> int:
     return repo.maintenance.count_missing_node_vectors(notebook_id)
 
 
-def run_embed(repo: SQLiteRepository, notebook_id, conc=4) -> dict:
+def run_embed(repo: BatchIngestRepository, notebook_id, conc=4) -> dict:
     """补该 notebook 缺失的 chunk + 节点向量(幂等,只补缺失)。
 
     先 SQL 盘点缺失数并打印,再 backfill_chunk_embeddings(missing_only=True) +
@@ -602,7 +624,7 @@ def _parse_encode_batch_serial(rows) -> List[Tuple[bytes, str, str]]:
     return updates
 
 
-def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
+def _backfill_table_to_blob(repo: BatchIngestRepository, notebook_id: Optional[str],
                             table: str, id_col: str,
                             batch_size: int = _BACKFILL_BATCH_SIZE,
                             workers: int = 1) -> dict:
@@ -692,7 +714,7 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
     return {"table": table, "total": total, "converted": converted, "skipped_bad": skipped_bad}
 
 
-def run_vectors_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
+def run_vectors_to_blob(repo: BatchIngestRepository, notebook_id: Optional[str],
                         all_notebooks: bool = False, workers: int = 1) -> dict:
     """向量存储 BLOB 化一次性 backfill:把指定 notebook(或 --all-notebooks 时全库)
     embeddings 表里的旧 JSON TEXT 行原地转成 float32 BLOB(encode_vector)。
@@ -723,7 +745,7 @@ def run_vectors_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
 _KOS_BACKFILL_BATCH_SIZE = 2000
 
 
-def _backfill_source_index_for_notebook(repo: SQLiteRepository, notebook_id: str) -> dict:
+def _backfill_source_index_for_notebook(repo: BatchIngestRepository, notebook_id: str) -> dict:
     """Proactively populate knowledge_object_sources for ONE notebook (P0-4).
 
     Idempotent + restartable: clears any partial rows for this notebook first,
@@ -757,7 +779,7 @@ def _backfill_source_index_for_notebook(repo: SQLiteRepository, notebook_id: str
     return {"notebook_id": notebook_id, "objects": processed, "rows": rows_written}
 
 
-def run_backfill_source_index(repo: SQLiteRepository, notebook_id: Optional[str],
+def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional[str],
                               all_notebooks: bool = False) -> dict:
     """Proactive backfill CLI (P0-4 fast-follow): populate knowledge_object_sources
     ahead of the first source delete/reparse, so that operation is never the one

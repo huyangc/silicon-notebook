@@ -12,7 +12,16 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+from app.core.config import Settings
+
+if TYPE_CHECKING:
+    from app.repositories.ports import (
+        CommunityQueryPort,
+        ModelClientProvider,
+        RetrievalPort,
+    )
 
 from app.models.schemas import TraceStep
 from app.services.prompts import (
@@ -118,10 +127,10 @@ class ReasoningRetriever:
     def __init__(
         self,
         *,
-        retrieval,
-        model_clients,
-        communities,
-        settings,
+        retrieval: "RetrievalPort",
+        model_clients: "ModelClientProvider",
+        communities: "CommunityQueryPort",
+        settings: Settings,
         cancel_event: CancelEvent = None,
     ):
         self.retrieval = retrieval
@@ -136,16 +145,28 @@ class ReasoningRetriever:
     @classmethod
     def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
         """Frozen-call-site adapter; extracts narrow ports and retains no facade."""
-        from app.services.communities import CommunityQueryService
+        from app.services import communities as community_api
+
+        class RepositoryCommunityQueries:
+            sibling_min_bridge = settings.sibling_min_bridge
+
+            def first_base_notebook_id(self, active_notebook_id):
+                return community_api.first_base_notebook_id(
+                    repository, active_notebook_id
+                )
+
+            def resolve_comparison_peers(
+                self, base_notebook_id, focal_name, question, *, top_k, candidates
+            ):
+                return community_api.resolve_comparison_peers(
+                    repository, base_notebook_id, focal_name, question,
+                    top_k=top_k, candidates=candidates,
+                )
+
         return cls(
             retrieval=repository.retrieval,
-            model_clients=repository._runtime.models,
-            communities=CommunityQueryService(
-                notebooks=repository._runtime.notebook_store,
-                unified_kg=repository._runtime.unified_kg,
-                event_log=repository.event_log,
-                sibling_min_bridge=settings.sibling_min_bridge,
-            ),
+            model_clients=repository,
+            communities=RepositoryCommunityQueries(),
             settings=settings,
             cancel_event=cancel_event,
         )
@@ -799,4 +820,4 @@ def reasoning_retriever_from_repository(
     factory = getattr(ReasoningRetriever, "from_repository", None)
     if factory is not None:
         return factory(repository, settings, cancel_event)
-    return ReasoningRetriever(repository, settings, cancel_event)
+    return ReasoningRetriever.from_repository(repository, settings, cancel_event)

@@ -602,7 +602,7 @@ async def _stream_ask_events(
     # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
     # 交付队列消费与断连轮询。Task 24: 执行体 = runtime-owned AskService(三模式
     # 注册表派发在服务内),不再是 facade runner 回调。
-    events = repo._runtime.ask_execution.start(  # type: ignore[attr-defined]
+    events = repo.start_ask_stream(
         notebook_id, payload, spec,
         user_id=repo.current_user().id,
     )

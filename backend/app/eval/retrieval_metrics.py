@@ -3,7 +3,7 @@ Ground truth comes from optional `gold_object_ids` / `gold_relation_ids` fields
 on each question; questions without either are skipped."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 
 def recall_at_k(retrieved_ids: Sequence[str], gold_ids: Sequence[str],
@@ -36,7 +36,7 @@ def leakage_ratio(question: str, source_text: str) -> float:
     return sum(1 for t in q if t in src) / len(q)
 
 
-def run_recall(repo: Any, notebook_id: str, questions: List[Dict[str, Any]],
+def run_recall(repo: RetrievalEvaluationPort, notebook_id: str, questions: List[Dict[str, Any]],
                k: int = 12) -> List[Dict[str, Any]]:
     """对带 gold_object_ids 或 gold_relation_ids 的题分别跑节点/关系检索,各算
     recall@k + MRR。对象侧在 canonical 层比对(检索/gold 都映射到 canonical_id),
@@ -66,3 +66,12 @@ def run_recall(repo: Any, notebook_id: str, questions: List[Dict[str, Any]],
             row["n_gold_rel"] = len(gold_rel)
         rows.append(row)
     return rows
+
+
+from app.repositories.ports import RetrievalPort  # noqa: E402
+
+
+class RetrievalEvaluationPort(Protocol):
+    retrieval: RetrievalPort
+
+    def cluster_map(self, notebook_id: str) -> dict[str, str]: ...

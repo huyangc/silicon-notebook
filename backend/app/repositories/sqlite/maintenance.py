@@ -418,10 +418,8 @@ class SQLiteMaintenanceAdapter:
         Canonical body (Task 27) — the facade keeps a frozen-signature delegate."""
         if not self._runtime.settings.embedder_configured:
             return
+        relations = self._retrieval().relations_with_names(notebook_id)
         with self._runtime.database.connect() as db:
-            relations = self._retrieval().candidates._relations_with_names(
-                db, notebook_id
-            )
             have = self._runtime.embedding_store.embedded_relation_ids(db, notebook_id)
         missing = [
             {"_rid": r["id"], "text": r["text"]}
@@ -439,10 +437,7 @@ class SQLiteMaintenanceAdapter:
     def relations_with_names(
         self, notebook_id: str, relation_ids: Optional[list] = None
     ) -> list[dict]:
-        with self._runtime.database.connect() as db:
-            return self._retrieval().candidates._relations_with_names(
-                db, notebook_id, relation_ids
-            )
+        return self._retrieval().relations_with_names(notebook_id, relation_ids)
 
     def knowledge_context(self, notebook_id: str, hits: Sequence[Any]) -> tuple:
         """(context block, id map) over retrieval hits — diagnostics use."""

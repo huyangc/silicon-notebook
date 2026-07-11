@@ -3480,6 +3480,13 @@ class SQLiteRepository:
     def _notebook_langs_cache(self, value) -> None:
         self._runtime.notebook_languages = value
 
+    def start_ask_stream(self, notebook_id: str, payload: AskRequest, mode,
+                         *, user_id: str):
+        """Start detached Ask execution through the runtime-owned coordinator."""
+        return self._runtime.ask_execution.start(
+            notebook_id, payload, mode, user_id=user_id
+        )
+
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()

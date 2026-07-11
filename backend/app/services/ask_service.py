@@ -24,7 +24,15 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.repositories.ports import (
+        AskCandidatePort,
+        AskGraphPort,
+        ModelClientProvider,
+        RetrievalPort,
+    )
 
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
@@ -122,9 +130,11 @@ class AskService:
         self,
         *,
         ask_state,
-        retrieval,
+        retrieval: "RetrievalPort",
+        candidates: "AskCandidatePort",
+        graph: "AskGraphPort",
         evidence_context,
-        model_clients,
+        model_clients: "ModelClientProvider",
         model_errors,
         communities: Callable[[], Any],
         scale_profiles: Callable[[], Any],
@@ -138,6 +148,8 @@ class AskService:
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
+        self.candidates = candidates
+        self.graph = graph
         self.evidence_context = evidence_context
         self.model_clients = model_clients
         self.model_errors = model_errors
@@ -186,9 +198,7 @@ class AskService:
         """policy=required 且当前用户未配主 LLM(resolve_model_config(...)
         .source == "none")——与基线逐字同一判定;身份经注入 provider 的
         identity 现解析(per-user 模型命脉,每次调用走 ContextVar 链)。"""
-        identity = self.model_clients.identity
-        return identity.resolve_model_config(
-            identity.current_user(), "llm").source == "none"
+        return self.model_clients.primary_unconfigured()
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
@@ -537,7 +547,7 @@ class AskService:
                 ex = expand_query(self.model_clients.rewrite_llm_client,
                                   retrieval_query, history,
                                   max_subqueries=self.settings.chunk_max_subqueries,
-                                  corpus_langs=self.retrieval.candidates._notebook_langs(notebook_id),
+                                  corpus_langs=self.candidates.notebook_languages(notebook_id),
                                   cancel_event=cancel_event)
                 sub_queries = [s.query for s in ex.sub_queries]
             else:
@@ -564,7 +574,7 @@ class AskService:
             # reaches chunks (not just the KG-name/relation FTS). Computed ONCE;
             # merged into whichever candidate branch runs below (dedup by chunk_id).
             kw_str = " ".join(ex.high_level_keywords + ex.low_level_keywords) if ex else ""
-            kw_hits = (self.retrieval.candidates._keyword_chunk_candidates(notebook_id, kw_str)
+            kw_hits = (self.candidates.keyword_chunk_candidates(notebook_id, kw_str)
                        if kw_str.strip() else [])
             ask_stage("expand_query", _t, n=len(sub_queries))
 
@@ -574,17 +584,17 @@ class AskService:
             # W2.2:一次读齐 chunk-path flag/knob → 不可变 plan;overlay_on / strategy /
             # 各 knob 下面统一读 plan(不再就地读 self.settings)。plan.overlay_on 与旧三元
             # AND 逐字等价,答案/引用分支继续按 overlay_on 分派。
-            plan = self.retrieval.candidates._build_chunk_retrieval_plan(notebook_id, sub_queries)
+            plan = self.candidates.chunk_plan(notebook_id, sub_queries)
             overlay_on = plan.overlay_on
             kg_block, kg_id_map, kg_hits = "", {}, []
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
             if plan.strategy == "mix":
                 candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = (
-                    self.retrieval.candidates._mix_retrieve(
+                    self.candidates.mixed_chunk_candidates(
                         notebook_id, retrieval_query, hl, sub_queries))
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
-                candidates = self.retrieval.candidates._union_chunk_candidates(candidates, kw_hits)
+                candidates = self.candidates.merge_chunk_candidates(candidates, kw_hits)
                 raise_if_cancelled(cancel_event)
                 order = self.model_clients.rerank_client.rerank(
                     retrieval_query, [c.text for c in candidates],
@@ -602,7 +612,7 @@ class AskService:
                           concept_walk=concept_walk_n)
             elif plan.strategy == "multi":
                 collected, per_query, _ids, _mat = (
-                    self.retrieval.candidates._retrieve_chunks_multi(notebook_id, sub_queries))
+                    self.candidates.retrieve_chunk_candidates_multi(notebook_id, sub_queries))
                 raise_if_cancelled(cancel_event)
                 # ∪ bilingual-keyword chunk hits: merge into collected (best relevance)
                 # and add as an extra per_query group so quota_fuse can surface them.
@@ -616,12 +626,12 @@ class AskService:
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
-                scored, ids, mat = self.retrieval.candidates._retrieve_chunks(
+                scored, ids, mat = self.candidates.retrieve_chunk_candidates(
                     notebook_id, sub_queries[0])
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
-                scored = self.retrieval.candidates._union_chunk_candidates(scored, kw_hits)
+                scored = self.candidates.merge_chunk_candidates(scored, kw_hits)
                 raise_if_cancelled(cancel_event)
-                selected = self.retrieval.candidates._mmr_select_chunks(
+                selected = self.candidates.select_chunk_candidates(
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
                 ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
@@ -747,8 +757,8 @@ class AskService:
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning", user_id=user_id)
 
-        if not (self.retrieval.candidates._notebook_has_kg(notebook_id)
-                or self.retrieval.candidates._any_base_notebook_has_kg()):
+        if not (self.candidates.has_kg(notebook_id)
+                or self.candidates.any_base_has_kg()):
             response = AskResponse(
                 answer_id="",
                 conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
@@ -921,8 +931,8 @@ class AskService:
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "graph", user_id=user_id)
 
-        if not (self.retrieval.candidates._notebook_has_kg(notebook_id)
-                or self.retrieval.candidates._any_base_notebook_has_kg()):
+        if not (self.candidates.has_kg(notebook_id)
+                or self.candidates.any_base_has_kg()):
             response = AskResponse(
                 answer_id="",
                 conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
@@ -1043,7 +1053,7 @@ class AskService:
             # 并发 graph_walk_refused 事件;顺带省掉 _graph_seed_fusion 的
             # expand_query LLM 调用。放在 PPR 分支之后:大库若有 scale 索引,
             # PPR 分支仍可正常出跨文档答案,不受此守卫影响。
-            if self.retrieval.candidates._federated_graph_is_large(notebook_id):
+            if self.candidates.graph_is_large(notebook_id):
                 self.event_log.emit({
                     "kind": "graph_walk_refused",
                     "notebook_id": notebook_id,
@@ -1068,10 +1078,10 @@ class AskService:
 
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
             raise_if_cancelled(cancel_event)
-            use_seeds = self.retrieval.candidates._graph_seed_fusion(
+            use_seeds = self.candidates.fuse_graph_seeds(
                 notebook_id, question, base_seeds, cancel_event)
 
-            G, idx_to_oid, oid_to_idx = self.retrieval.graph._federated_rx_graph(notebook_id)
+            G, idx_to_oid, oid_to_idx = self.graph.federated_graph(notebook_id)
             raise_if_cancelled(cancel_event)
             subgraph = multihop_subgraph(
                 G, oid_to_idx, idx_to_oid,
@@ -1116,7 +1126,7 @@ class AskService:
             # 有源 chunk → 走 _answer_mix(KG 段 k1001+ / chunk 段 k1..N)、出 chunk 引用、直接 return;
             # 无源 chunk → 落到下方现状 KG-only 答案,行为不变。
             from app.services.retrieval import est_tokens, truncate_by_tokens
-            src_chunks = self.retrieval.graph._kg_source_chunks(
+            src_chunks = self.graph.source_chunks(
                 notebook_id, [n["object_id"] for n, _e, _s in subgraph])
             if src_chunks:
                 mix_kg_block, mix_id_map = render_subgraph_context(

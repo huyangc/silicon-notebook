@@ -4,14 +4,18 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from app.repositories.ports import RetrievalPort
+from app.repositories.ports import (
+    AskCandidatePort,
+    AskGraphPort,
+    AskStreamPort,
+    RetrievalPort,
+    SQLiteMaintenancePort,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = (ROOT / "backend" / "app", ROOT / "scripts")
-EXPECTED_REMEDIATION_SITES = {
-    ("backend/app/eval/retrieval_metrics.py", 63, "retrieve_relations_scored"),
-}
+EXPECTED_REMEDIATION_SITES = set()
 
 
 def _production_files():
@@ -106,3 +110,24 @@ def test_retrieval_port_declares_every_production_retrieval_call():
         site for site in protocol_call_sites("RetrievalPort") if site[2] in missing
     }
     assert missing_sites == EXPECTED_REMEDIATION_SITES
+
+
+def test_ask_ports_declare_the_executable_service_and_route_surface():
+    assert {
+        "current_user", "start_ask_stream",
+    } <= set(AskStreamPort.__dict__)
+    assert {
+        "notebook_languages", "chunk_plan", "retrieve_chunk_candidates",
+        "graph_is_large",
+    } <= set(AskCandidatePort.__dict__)
+    assert {"federated_graph", "source_chunks"} <= set(AskGraphPort.__dict__)
+
+
+def test_maintenance_port_covers_every_public_sqlite_adapter_method():
+    from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+
+    adapter_methods = {
+        name for name, value in SQLiteMaintenanceAdapter.__dict__.items()
+        if callable(value) and not name.startswith("_")
+    }
+    assert adapter_methods <= set(SQLiteMaintenancePort.__dict__)

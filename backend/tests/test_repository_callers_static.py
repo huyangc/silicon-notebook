@@ -279,13 +279,13 @@ EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
         ("backend/app/services/scale_index_builder.py", 554, "db.execute"),
     },
     "private_repository": {
-        ("backend/app/api/routes.py", 605, "_runtime"),
+        # Remediation Task 3 removed four exact private reaches.
+        # Keep later frozen test-import coordinates stable.
+        #
+        #
         ("backend/app/services/communities.py", 87, "_runtime"),
         ("backend/app/services/communities.py", 93, "_runtime"),
         ("backend/app/services/communities.py", 136, "_runtime"),
-        ("backend/app/services/reasoning_retrieval.py", 142, "_runtime"),
-        ("backend/app/services/reasoning_retrieval.py", 144, "_runtime"),
-        ("backend/app/services/reasoning_retrieval.py", 145, "_runtime"),
         ("backend/app/services/report_engine.py", 82, "_runtime"),
     },
 }

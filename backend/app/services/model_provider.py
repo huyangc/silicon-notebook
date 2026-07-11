@@ -111,6 +111,15 @@ class RuntimeModelProvider:
             return _UNCONFIGURED_LLM
         return self._system_llm_for(role)
 
+    def primary_unconfigured(self) -> bool:
+        """Whether the current user has no configured primary LLM."""
+        return (
+            self.identity.resolve_model_config(
+                self.identity.current_user(), "llm"
+            ).source
+            == "none"
+        )
+
     @property
     def llm_client(self):
         return self._llm_for_role("llm")

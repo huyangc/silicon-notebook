@@ -311,7 +311,7 @@ TASK2_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/repository.py", name)
     for name in {"UploadedSourceFile", "NotebookRepository"}
 }
-TASK3_ALLOWED_NEW_MEMBERS = {"load_notebook_scale_facts"}
+TASK3_ALLOWED_NEW_MEMBERS = {"load_notebook_scale_facts", "start_ask_stream"}
 # master v10(rebuild 可续跑轨道, schema 9→10)在冻结之后新增的 facade 成员:
 # kg_rebuild_checkpoint 迁移 + 4 个运行时 ckpt helper + 节点向量增量 flush。
 # 均为上游合法演进、非本重构产物;Gate 5(KG 域)搬迁时随 rebuild_unified_kg 移动。

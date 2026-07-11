@@ -894,6 +894,8 @@ class RepositoryRuntime:
             self.ask = AskService(
                 ask_state=self.ask_state,
                 retrieval=retrieval,
+                candidates=retrieval,
+                graph=retrieval,
                 evidence_context=self.evidence_context,
                 model_clients=self.models,
                 model_errors=self.models,

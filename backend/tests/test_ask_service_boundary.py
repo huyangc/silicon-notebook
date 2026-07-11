@@ -30,6 +30,10 @@ from app.models.schemas import AskRequest, AskResponse, NotebookCreate
 from app.services.ask_service import AskService
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository, set_request_user, reset_request_user
+import asyncio
+import queue
+from types import SimpleNamespace
+from app.services.retrieval import RetrievedKnowledge
 
 
 @pytest.fixture
@@ -108,3 +112,152 @@ def test_ask_service_module_never_imports_facade_or_private_db():
     # 绝不直接碰请求 ContextVar,也绝不开私有 DB 缝。
     assert "_REQUEST_USER" not in source
     assert "._connect(" not in source and "._write(" not in source
+
+
+class _MinimalAskState:
+    def prepare_turn(self, notebook_id, conversation_id, question, user_id):
+        return SimpleNamespace(conversation_id="conv", history="")
+
+    def save_answer(self, notebook_id, conversation_id, question, response, user_id):
+        return "answer-1"
+
+
+class _MinimalModels:
+    llm_client = SimpleNamespace(configured=False, model="")
+    reasoning_llm_client = SimpleNamespace(configured=False)
+    rewrite_llm_client = SimpleNamespace(configured=False)
+    rerank_client = SimpleNamespace(rerank=lambda *args, **kwargs: [])
+
+    def primary_unconfigured(self) -> bool:
+        return False
+
+
+class _MinimalCandidates:
+    def notebook_languages(self, notebook_id):
+        return ["en"]
+
+    def chunk_plan(self, notebook_id, queries):
+        return SimpleNamespace(
+            strategy="single", overlay_on=False, mmr_k=8, mmr_lambda=0.7
+        )
+
+    def keyword_chunk_candidates(self, notebook_id, keywords):
+        return []
+
+    def retrieve_chunk_candidates(self, notebook_id, query):
+        return [], [], []
+
+    def merge_chunk_candidates(self, base, extra):
+        return base
+
+    def select_chunk_candidates(self, scored, ids, matrix, k, lambda_):
+        return []
+
+    def has_kg(self, notebook_id):
+        return True
+
+    def any_base_has_kg(self):
+        return False
+
+    def graph_is_large(self, notebook_id):
+        return False
+
+    def fuse_graph_seeds(self, notebook_id, question, seeds, cancel_event):
+        return seeds
+
+
+class _MinimalGraph:
+    def federated_graph(self, notebook_id):
+        return SimpleNamespace(num_nodes=lambda: 0), [], {}
+
+    def source_chunks(self, notebook_id, object_ids):
+        return []
+
+
+class _MinimalRetrieval:
+    def federated_retrieve(self, notebook_id, query, **kwargs):
+        return [RetrievedKnowledge(
+            object_id="ko-1", notebook_id=notebook_id, object_type="concept",
+            payload={"name": "one"}, status="approved", score=1.0,
+            relevance=1.0, evidence=[],
+        )]
+
+    def ppr_retrieve(self, notebook_id, question):
+        return []
+
+
+class _MinimalEvidence:
+    def tier_map(self, notebook_ids):
+        return {}
+
+    def truncate_kg_block(self, block, max_tokens):
+        return block
+
+    def parse_anchors(self, answer, evidence_by_id):
+        return []
+
+
+def _minimal_ask_service():
+    return AskService(
+        ask_state=_MinimalAskState(), retrieval=_MinimalRetrieval(),
+        candidates=_MinimalCandidates(), graph=_MinimalGraph(),
+        evidence_context=_MinimalEvidence(), model_clients=_MinimalModels(),
+        model_errors=SimpleNamespace(note_model_error=lambda *args: None),
+        communities=lambda: SimpleNamespace(),
+        scale_profiles=lambda: SimpleNamespace(requires_index=lambda *args, **kwargs: False),
+        scale_index_probe=lambda notebook_id: False,
+        settings=Settings(query_rewrite_enabled=False, graph_ppr_enabled=False),
+        event_log=SimpleNamespace(emit=lambda event: None),
+        notebooks=SimpleNamespace(get_notebook=lambda notebook_id: object()),
+        schemas=SimpleNamespace(effective_schemas=lambda: {}),
+        community_reports=lambda notebook_id: [], source_titles=lambda ids: {},
+    )
+
+
+def test_chunk_and_graph_ask_execute_on_declared_ports_only():
+    service = _minimal_ask_service()
+
+    chunk = service.ask_chunk("nb", AskRequest(question="q"), user_id="user")
+    graph = service.ask_graph(
+        "nb", AskRequest(question="q", mode="graph"), user_id="user"
+    )
+
+    assert chunk.answer_id == "answer-1"
+    assert graph.answer_id == "answer-1"
+    assert not hasattr(service.retrieval, "candidates")
+    assert not hasattr(service.retrieval, "graph")
+    assert not hasattr(service.model_clients, "identity")
+
+
+def test_stream_route_helper_uses_ask_stream_port_without_runtime():
+    from app.api.routes import _stream_ask_events
+    from app.services.ask_modes import resolve_mode
+
+    class MinimalAskStream:
+        def __init__(self):
+            self.started = None
+
+        def current_user(self):
+            return SimpleNamespace(id="user-1")
+
+        def start_ask_stream(self, notebook_id, payload, mode, *, user_id):
+            self.started = (notebook_id, payload.question, mode.id, user_id)
+            events = queue.Queue()
+            events.put({"type": "started", "job_id": "job-1"})
+            events.put(None)
+            return events
+
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    async def collect(repo):
+        return [line async for line in _stream_ask_events(
+            repo, "nb", AskRequest(question="q"), resolve_mode("chunk"), Request()
+        )]
+
+    repo = MinimalAskStream()
+    lines = asyncio.run(collect(repo))
+    assert repo.started == ("nb", "q", "chunk", "user-1")
+    assert lines == ['{"type": "started", "job_id": "job-1"}\n']
+    assert not hasattr(repo, "_runtime")
