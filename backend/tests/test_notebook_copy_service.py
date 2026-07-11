@@ -232,13 +232,25 @@ def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
     notebook_id = _seed_plain_nb(repo, owner="user-local", name="join")
     _seed_user(repo, "user-joiner")
     store = repo._runtime.sharing_store
-    original = store.notebook_row_on  # staticmethod -> plain function
-    calls = []
+    summaries = repo._runtime.sharing._summaries
+    original_store = store.notebook_row_on  # staticmethod -> plain function
+    original_summary = summaries.from_row
+    store_dbs = []
+    summary_dbs = []
 
-    def spy(db, nb_id):
-        calls.append(nb_id)
-        return original(db, nb_id)
+    def spy_store(db, nb_id):
+        store_dbs.append(db)
+        return original_store(db, nb_id)
 
-    monkeypatch.setattr(store, "notebook_row_on", spy)
+    def spy_summary(db, row):
+        summary_dbs.append(db)
+        return original_summary(db, row)
+
+    monkeypatch.setattr(store, "notebook_row_on", spy_store)
+    monkeypatch.setattr(summaries, "from_row", spy_summary)
     result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner")
-    assert calls and calls[0] == notebook_id and result.access == "reader"  # MUT
+    assert len(store_dbs) == 1
+    assert len(summary_dbs) == 1
+    assert store_dbs[0] is summary_dbs[0]  # MUT
+    assert result.id == notebook_id
+    assert result.access == "reader"

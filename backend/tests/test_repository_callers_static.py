@@ -286,7 +286,10 @@ def test_task4_application_services_contain_no_sql_calls() -> None:
     )
     offenders: list[tuple[str, int, str]] = []
     for relative in modules:
-        tree = ast.parse((ROOT / relative).read_text())
+        tree = ast.parse(
+            (ROOT / relative).read_text(),
+            filename=relative,
+        )
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
