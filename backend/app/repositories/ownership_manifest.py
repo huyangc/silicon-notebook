@@ -423,10 +423,9 @@ SURFACE_MEMBERS = (
  SurfaceMember('write_conflict_candidate', 'KnowledgeGovernanceService', 'method', ('backend/app/services/sqlite_repository.py:5225', 'backend/tests/test_conflict_endpoints.py:102', 'backend/tests/test_kg_conflict_candidates.py:103', 'backend/tests/test_kg_conflict_candidates.py:115', 'backend/tests/test_kg_conflict_candidates.py:144', 'backend/tests/test_kg_conflict_candidates.py:166', 'backend/tests/test_kg_conflict_candidates.py:167', 'backend/tests/test_kg_conflict_candidates.py:36', 'backend/tests/test_kg_conflict_candidates.py:57', 'backend/tests/test_kg_conflict_candidates.py:58', 'backend/tests/test_kg_conflict_candidates.py:77', 'backend/tests/test_kg_conflict_candidates.py:86', 'backend/tests/test_kg_conflict_candidates.py:95')),
  SurfaceMember('write_merge_candidate', 'KnowledgeGovernanceService', 'method', ('backend/tests/test_unified_kg_repository.py:139', 'backend/tests/test_unified_kg_repository.py:242', 'backend/tests/test_unified_kg_repository.py:252', 'backend/tests/test_unified_kg_repository.py:262', 'backend/tests/test_unified_kg_repository.py:272', 'backend/tests/test_unified_kg_repository.py:287', 'backend/tests/test_unified_kg_repository.py:47', 'backend/tests/test_unified_kg_repository.py:56')),
 )
-def validate_ownership_manifest(
-    members: tuple[SurfaceMember, ...] = SURFACE_MEMBERS,
+def _unique_nonempty_owners(
+    members: tuple[SurfaceMember, ...],
 ) -> dict[str, str]:
-    """Return the canonical owner map and reject duplicate surface entries."""
     owners: dict[str, str] = {}
     for member in members:
         if not member.name or not member.owner:
@@ -434,6 +433,23 @@ def validate_ownership_manifest(
         if member.name in owners:
             raise ValueError(f"duplicate ownership entry for {member.name!r}")
         owners[member.name] = member.owner
+    return owners
+
+
+def validate_ownership_manifest(
+    members: tuple[SurfaceMember, ...] = SURFACE_MEMBERS,
+    delegates: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return canonical owners and optionally validate derived delegate evidence."""
+    owners = _unique_nonempty_owners(members)
+    if delegates is not None:
+        mismatches = {
+            name: (owners[name], owner)
+            for name, owner in delegates.items()
+            if name in owners and owners[name] != owner
+        }
+        if mismatches:
+            raise ValueError(f"ownership/delegate mismatch: {mismatches}")
     return owners
 
 

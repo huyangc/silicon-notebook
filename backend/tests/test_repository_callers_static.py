@@ -29,68 +29,265 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND_APP = ROOT / "backend" / "app"
 SCRIPTS = ROOT / "scripts"
 
+# Exact non-product SQL seats.  Values are reviewable reasons; keys are call
+# sites so both a newly added call and a stale exception fail the contract.
+INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
+    # Separate local LLM response cache database.
+    **{
+        site: "independent LLM cache database"
+        for site in {
+            ("backend/app/core/llm_cache.py", 49, "db.execute"),
+            ("backend/app/core/llm_cache.py", 58, "conn.execute"),
+            ("backend/app/core/llm_cache.py", 59, "conn.execute"),
+            ("backend/app/core/llm_cache.py", 64, "db.execute"),
+            ("backend/app/core/llm_cache.py", 72, "db.execute"),
+        }
+    },
+    # Separate evaluation-results database.
+    **{
+        site: "independent evaluation-results database"
+        for site in {
+            ("backend/app/eval/db.py", 29, "db.execute"),
+            ("backend/app/eval/db.py", 53, "db.execute"),
+            ("backend/app/eval/db.py", 64, "db.execute"),
+        }
+    },
+    ("scripts/bench_sqlite_writes.py", 86, "db.execute"): (
+        "synthetic temporary write benchmark; never opens the product database"
+    ),
+    # Host diagnostic opens the product database with mode=ro; the dedicated
+    # read-only test below also rejects app imports and DML.
+    **{
+        site: "host diagnostic opens the product database mode=ro"
+        for site in {
+            ("scripts/diag_slow.py", 373, "conn.execute"),
+            ("scripts/diag_slow.py", 403, "conn.execute"),
+            ("scripts/diag_slow.py", 410, "conn.execute"),
+            ("scripts/diag_slow.py", 416, "conn.execute"),
+            ("scripts/diag_slow.py", 469, "conn.execute"),
+            ("scripts/diag_slow.py", 482, "conn.execute"),
+            ("scripts/diag_slow.py", 491, "conn.execute"),
+            ("scripts/diag_slow.py", 550, "conn.execute"),
+            ("scripts/diag_slow.py", 556, "conn.execute"),
+            ("scripts/diag_slow.py", 713, "conn.execute"),
+        }
+    },
+    # Baseline fixture generator writes only disposable fixture databases.
+    **{
+        site: "contract fixture generator writes a disposable fixture database"
+        for site in {
+            ("scripts/generate_repository_contract_fixtures.py", 780, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 796, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 818, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 832, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 846, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 855, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 890, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 897, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1017, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1020, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1030, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1034, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1170, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1203, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1228, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1239, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1266, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1270, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1294, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1319, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1344, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1351, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1359, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1367, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1400, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1408, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1415, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1431, "db.executemany"),
+            ("scripts/generate_repository_contract_fixtures.py", 1439, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1444, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1456, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1468, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1487, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1504, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1528, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1700, "db.execute"),
+            ("scripts/generate_repository_contract_fixtures.py", 1992, "db.execute"),
+        }
+    },
+    # Snapshot verifier attaches only to a private backup/probe opened ro.
+    **{
+        site: "snapshot verifier reads only its backup/probe database"
+        for site in {
+            ("scripts/verify_repository_snapshot.py", 233, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 240, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 262, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 266, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 285, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 286, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 296, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 308, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 560, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 567, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 596, "probe.execute"),
+        }
+    },
+}
+
 # ---------------------------------------------------------------------------
 # rule 1 — the concrete facade class is a composition-root-only import
 # ---------------------------------------------------------------------------
 # The three compatibility facades plus every API/CLI/eval composition root
 # that constructs SQLiteRepository(Settings()) itself.  Application services
 # other than the batch-ingest CLI module never see the concrete class.
-FACADE_CLASS_IMPORT_ALLOWED = {
-    # transitional compatibility facades
-    "backend/app/services/sqlite_repository.py",
-    "backend/app/services/sqlite_identity.py",
-    "backend/app/services/sqlite_notebook_sharing.py",
-    # API composition root
-    "backend/app/api/deps.py",
-    # CLI composition root for scripts/batch_ingest.py (main() builds the repo)
-    "backend/app/services/batch_ingest.py",
-    # eval harness composition roots
-    "backend/app/eval/inference.py",
-    "backend/app/eval/run_all.py",
-    "backend/app/eval/sa_calibration.py",
-    "backend/app/eval/speed.py",
-    # offline CLI composition roots
-    "backend/app/scripts/backfill_relation_embeddings.py",
-    "backend/app/scripts/build_kg.py",
-    "backend/app/scripts/gen_recall_gold.py",
-    "backend/app/scripts/recluster_kg.py",
-    "backend/app/scripts/reembed_kg.py",
-    "scripts/backfill_kg_embeddings.py",
-    "scripts/bench_sqlite_writes.py",
-    "scripts/build_chunks.py",
-    "scripts/denoise_reextract_nb.py",
-    "scripts/diag_base_report.py",
-    "scripts/kg_product_smoke.py",
-    "scripts/reextract_notebook.py",
-    "scripts/replay_retrieval.py",
-    "scripts/smoke_backend.py",
-    "scripts/generate_repository_contract_fixtures.py",
-    "scripts/verify_repository_snapshot.py",
+FACADE_CLASS_IMPORT_SITES: dict[tuple[str, int], str] = {
+    ("backend/app/api/deps.py", 12): "API composition root",
+    ("backend/app/eval/inference.py", 67): "evaluation composition root",
+    ("backend/app/eval/run_all.py", 68): "evaluation composition root",
+    ("backend/app/eval/sa_calibration.py", 180): "evaluation composition root",
+    ("backend/app/eval/speed.py", 98): "evaluation composition root",
+    ("backend/app/scripts/backfill_relation_embeddings.py", 5): "offline CLI composition root",
+    ("backend/app/scripts/build_kg.py", 5): "offline CLI composition root",
+    ("backend/app/scripts/gen_recall_gold.py", 8): "offline CLI composition root",
+    ("backend/app/scripts/recluster_kg.py", 5): "offline CLI composition root",
+    ("backend/app/scripts/reembed_kg.py", 7): "offline CLI composition root",
+    ("backend/app/services/batch_ingest.py", 29): "batch-ingest CLI composition root",
+    ("scripts/backfill_kg_embeddings.py", 21): "offline CLI composition root",
+    ("scripts/bench_sqlite_writes.py", 20): "synthetic benchmark composition root",
+    ("scripts/build_chunks.py", 5): "offline CLI composition root",
+    ("scripts/denoise_reextract_nb.py", 18): "offline CLI composition root",
+    ("scripts/diag_base_report.py", 26): "offline diagnostic composition root",
+    ("scripts/generate_repository_contract_fixtures.py", 40): "contract fixture composition root",
+    ("scripts/generate_repository_contract_fixtures.py", 268): "contract fixture composition root",
+    ("scripts/generate_repository_contract_fixtures.py", 758): "contract fixture composition root",
+    ("scripts/kg_product_smoke.py", 16): "offline smoke composition root",
+    ("scripts/reextract_notebook.py", 10): "offline CLI composition root",
+    ("scripts/replay_retrieval.py", 40): "offline CLI composition root",
+    ("scripts/smoke_backend.py", 24): "offline smoke composition root",
+    ("scripts/verify_repository_snapshot.py", 58): "backup-only verifier composition root",
 }
 
-# ---------------------------------------------------------------------------
-# rule 2 — private facade member access is frozen to these exact seams
-# ---------------------------------------------------------------------------
-PRIVATE_MEMBER_ALLOWED = {
-    # typed-accessor composition plumbing (deps builds the narrow ports)
-    ("backend/app/api/deps.py", "_runtime"),
-    # Task-23 frozen seam: _stream_ask_events reaches the runtime-owned
-    # AskExecutionCoordinator through the repo it is handed
-    ("backend/app/api/routes.py", "_runtime"),
-    # ledgered production runtime reaches (ACTIVE_PRODUCTION_MEMBER_SITES)
-    ("backend/app/services/communities.py", "_runtime"),
-    ("backend/app/services/reasoning_retrieval.py", "_runtime"),
-    # Task-25 frozen-call-site adapter (from_repository extracts narrow ports)
-    ("backend/app/services/report_engine.py", "_runtime"),
-    # synthetic temporary write benchmark — never the product DB
-    ("scripts/bench_sqlite_writes.py", "_connect"),
+# Exact exceptions must name the call site and explain why it is outside the
+# product repository boundary.  A whole-file or (file, attribute) exception
+# would let new private reaches silently accumulate beside an old one.
+INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
+    **{
+        site: "API dependency composition root extracts a narrow runtime port"
+        for site in {
+            ("backend/app/api/deps.py", 20, "_runtime"),
+            ("backend/app/api/deps.py", 23, "_runtime"),
+            ("backend/app/api/deps.py", 26, "_runtime"),
+            ("backend/app/api/deps.py", 29, "_runtime"),
+            ("backend/app/api/deps.py", 32, "_runtime"),
+        }
+    },
+    ("scripts/bench_sqlite_writes.py", 85, "_connect"): (
+        "synthetic temporary write benchmark; never opens the product database"
+    ),
+    **{
+        site: "contract fixture generator operates on a disposable fixture database"
+        for site in {
+            ("scripts/generate_repository_contract_fixtures.py", 779, "_write"),
+            ("scripts/generate_repository_contract_fixtures.py", 1028, "_connect"),
+            ("scripts/generate_repository_contract_fixtures.py", 1169, "_write"),
+            (
+                "scripts/generate_repository_contract_fixtures.py",
+                1581,
+                "_scale_index_version",
+            ),
+            ("scripts/generate_repository_contract_fixtures.py", 1699, "_connect"),
+            ("scripts/generate_repository_contract_fixtures.py", 1989, "_connect"),
+        }
+    },
 }
 
-# Baseline-guarded contract tooling replays frozen private call patterns on
-# purpose; both files are pinned read-only/backup-only by their own suites.
-PRIVATE_MEMBER_EXEMPT_FILES = {
-    "scripts/generate_repository_contract_fixtures.py",
-    "scripts/verify_repository_snapshot.py",
+# Temporary, exact debt ledger for remediation Tasks 2–6.  This is not an
+# allowlist: tests assert the complete AST result equals independent exceptions
+# plus these sites, so removing/moving a call requires deleting its entry and a
+# new call fails immediately.  Task 6 must leave both sets empty.
+EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
+    "product_sql": {
+        ("backend/app/services/knowledge_governance.py", 193, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 204, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 605, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 613, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 619, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 1010, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 1016, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 1048, "db.execute"),
+        ("backend/app/services/knowledge_governance.py", 1083, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 185, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 187, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 233, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 299, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 305, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 314, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 435, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 458, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 462, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 473, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 493, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 495, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 520, "_db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 545, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 548, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 605, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 610, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 661, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 749, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 752, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 890, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 941, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1048, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1102, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1211, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1217, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1237, "rdb.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1256, "wdb.executemany"),
+        ("backend/app/services/knowledge_lifecycle.py", 1261, "wdb.executemany"),
+        ("backend/app/services/knowledge_lifecycle.py", 1285, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1334, "rdb.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1339, "wdb.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1350, "wdb.executemany"),
+        ("backend/app/services/knowledge_lifecycle.py", 1355, "wdb.executemany"),
+        ("backend/app/services/knowledge_lifecycle.py", 1571, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1605, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1807, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1879, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1890, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1923, "scan_db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 1925, "scan_db.executemany"),
+        ("backend/app/services/knowledge_lifecycle.py", 1935, "scan_db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 2014, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 2017, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 2110, "db.execute"),
+        ("backend/app/services/knowledge_lifecycle.py", 2112, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 55, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 69, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 82, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 93, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 118, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 121, "conn.execute"),
+        ("backend/app/services/notebook_catalog.py", 175, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 192, "db.execute"),
+        ("backend/app/services/notebook_catalog.py", 201, "db.execute"),
+        ("backend/app/services/notebook_sharing.py", 399, "db.execute"),
+        ("backend/app/services/scale_artifact_runtime.py", 142, "db.execute"),
+        ("backend/app/services/scale_artifact_runtime.py", 153, "db.execute"),
+        ("backend/app/services/scale_artifact_runtime.py", 449, "db.execute"),
+        ("backend/app/services/scale_index_builder.py", 493, "db.execute"),
+        ("backend/app/services/scale_index_builder.py", 554, "db.execute"),
+    },
+    "private_repository": {
+        ("backend/app/api/routes.py", 605, "_runtime"),
+        ("backend/app/services/communities.py", 87, "_runtime"),
+        ("backend/app/services/communities.py", 93, "_runtime"),
+        ("backend/app/services/communities.py", 136, "_runtime"),
+        ("backend/app/services/reasoning_retrieval.py", 142, "_runtime"),
+        ("backend/app/services/reasoning_retrieval.py", 144, "_runtime"),
+        ("backend/app/services/reasoning_retrieval.py", 145, "_runtime"),
+        ("backend/app/services/report_engine.py", 82, "_runtime"),
+    },
 }
 
 RETIRED_RETRIEVAL_PRIVATES = {
@@ -103,13 +300,33 @@ RETIRED_RETRIEVAL_PRIVATES = {
 # ---------------------------------------------------------------------------
 # rule 4 — the exact files allowed to open a SQLite connection themselves
 # ---------------------------------------------------------------------------
-SQLITE_CONNECT_ALLOWED = {
-    "backend/app/core/llm_cache.py",        # independent LLM cache DB
-    "backend/app/eval/db.py",               # independent evaluation DB (mode=ro)
-    "scripts/bench_sqlite_writes.py",       # synthetic temporary write benchmark
-    "scripts/diag_slow.py",                 # stdlib-only host diagnostic, mode=ro
-    "scripts/generate_repository_contract_fixtures.py",  # baseline-guarded fixture generator
-    "scripts/verify_repository_snapshot.py",             # mode=ro + sqlite backup only (Task 28)
+SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
+    ("backend/app/core/llm_cache.py", 56, "sqlite3.connect"): "independent LLM cache database",
+    ("backend/app/eval/db.py", 23, "sqlite3.connect"): "independent evaluation database",
+    ("scripts/diag_slow.py", 396, "sqlite3.connect"): "host diagnostic opens mode=ro",
+    ("scripts/diag_slow.py", 544, "sqlite3.connect"): "host diagnostic opens mode=ro",
+    ("scripts/diag_slow.py", 708, "sqlite3.connect"): "host diagnostic opens mode=ro",
+    ("scripts/generate_repository_contract_fixtures.py", 1649, "sqlite3.connect"): (
+        "contract fixture generator opens disposable fixture databases"
+    ),
+    ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
+        "contract fixture generator opens disposable fixture databases"
+    ),
+    ("scripts/verify_repository_snapshot.py", 281, "sqlite3.connect"): (
+        "snapshot verifier reads only backup/probe databases"
+    ),
+    ("scripts/verify_repository_snapshot.py", 282, "sqlite3.connect"): (
+        "snapshot verifier reads only backup/probe databases"
+    ),
+    ("scripts/verify_repository_snapshot.py", 554, "sqlite3.connect"): (
+        "snapshot verifier reads only backup/probe databases"
+    ),
+    ("scripts/verify_repository_snapshot.py", 696, "sqlite3.connect"): (
+        "snapshot verifier reads only backup/probe databases"
+    ),
+    ("scripts/verify_repository_snapshot.py", 698, "sqlite3.connect"): (
+        "snapshot verifier reads only backup/probe databases"
+    ),
 }
 
 REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
@@ -125,15 +342,58 @@ def _production_files():
             yield path, rel
 
 
-def _dotted(node: ast.AST) -> str:
-    parts = []
+def call_name(node: ast.AST) -> str:
+    """Return a dotted name for a call/attribute expression when statically known."""
+    parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
     if isinstance(node, ast.Name):
         parts.append(node.id)
-        return ".".join(reversed(parts))
-    return ""
+    return ".".join(reversed(parts))
+
+
+def _dotted(node: ast.AST) -> str:
+    return call_name(node)
+
+
+def product_sql_sites() -> list[tuple[str, int, str]]:
+    """Return every SQL-shaped call outside the canonical SQLite stores.
+
+    This deliberately follows injected connection seats (``db.execute`` and
+    ``self._connect().execute``), not just literal ``sqlite3.connect`` text.
+    Independent databases/read-only tools are filtered by the test through an
+    exact, reasoned site map rather than hidden here.
+    """
+    hits: list[tuple[str, int, str]] = []
+    for path, rel in _production_files():
+        if rel.startswith("backend/app/repositories/sqlite/"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and call_name(node.func).rsplit(".", 1)[-1]
+                in {"execute", "executemany", "executescript"}
+            ):
+                hits.append((rel, node.lineno, call_name(node.func)))
+    return sorted(hits)
+
+
+def _annotation_name(node: ast.AST | None) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return call_name(node)
+
+
+def _is_repository_annotation(node: ast.AST | None) -> bool:
+    name = _annotation_name(node).rsplit(".", 1)[-1].strip("'\"")
+    return name.endswith(("Repository", "RepositoryPort")) or name in {
+        "AskStreamPort",
+        "SQLiteMaintenancePort",
+    }
 
 
 def _repo_like_names(tree: ast.AST) -> set[str]:
@@ -150,46 +410,102 @@ def _repo_like_names(tree: ast.AST) -> set[str]:
                     names.update(t.id for t in targets if isinstance(t, ast.Name))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for arg in list(node.args.args) + list(node.args.kwonlyargs):
-                ann = arg.annotation
-                ann_name = ""
-                if isinstance(ann, ast.Name):
-                    ann_name = ann.id
-                elif isinstance(ann, ast.Attribute):
-                    ann_name = ann.attr
-                elif isinstance(ann, ast.Constant) and isinstance(ann.value, str):
-                    ann_name = ann.value.rsplit(".", 1)[-1]
-                if ann_name in {"SQLiteRepository", "NotebookRepository", "AskStreamPort"}:
+                if _is_repository_annotation(arg.annotation):
                     names.add(arg.arg)
     return names
 
 
-def _private_member_hits():
-    hits = []
+def _repo_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Find direct names and ``self.<name>`` aliases that retain a repository."""
+    names = _repo_like_names(tree)
+    attrs: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is None:
+                continue
+            value_is_repo = _is_repo_expression(value, names, attrs)
+            if not value_is_repo and isinstance(node, ast.AnnAssign):
+                value_is_repo = _is_repository_annotation(node.annotation)
+            if not value_is_repo:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in names:
+                    names.add(target.id)
+                    changed = True
+                elif (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                    and target.attr not in attrs
+                ):
+                    attrs.add(target.attr)
+                    changed = True
+    return names, attrs
+
+
+def _is_repo_expression(node: ast.AST, names: set[str], attrs: set[str]) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in names or bool(REPO_NAME_RE.match(node.id))
+    if isinstance(node, ast.Attribute):
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and (node.attr in attrs or bool(REPO_NAME_RE.match(node.attr)))
+        ):
+            return True
+        return False
+    if isinstance(node, ast.Call):
+        return call_name(node.func).rsplit(".", 1)[-1] in {
+            "SQLiteRepository",
+            "repository",
+        }
+    return False
+
+
+def private_repository_sites() -> list[tuple[str, int, str]]:
+    """Return private facade reaches, including aliases and ``self.repo`` fields."""
+    hits: list[tuple[str, int, str]] = []
     for path, rel in _production_files():
-        if rel in PRIVATE_MEMBER_EXEMPT_FILES:
+        if rel == "backend/app/services/sqlite_repository.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        repo_names = _repo_like_names(tree)
+        repo_names, repo_attrs = _repo_bindings(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Attribute):
                 continue
             attr = node.attr
             if not attr.startswith("_") or attr.startswith("__"):
                 continue
-            base = node.value
-            repo_base = False
-            if isinstance(base, ast.Name):
-                repo_base = bool(REPO_NAME_RE.match(base.id)) or base.id in repo_names
-            elif isinstance(base, ast.Call):
-                fn = _dotted(base.func).rsplit(".", 1)[-1]
-                repo_base = fn in {"SQLiteRepository", "repository"}
-            if repo_base:
+            if _is_repo_expression(node.value, repo_names, repo_attrs):
                 hits.append((rel, node.lineno, attr))
-    return hits
+    return sorted(hits)
+
+
+def _private_member_hits():
+    return private_repository_sites()
+
+
+def test_product_database_sql_is_store_owned():
+    assert set(product_sql_sites()) == (
+        set(INDEPENDENT_SQL_SITES) | EXPECTED_REMEDIATION_SITES["product_sql"]
+    )
+
+
+def test_routes_and_services_do_not_reach_private_repository_state():
+    assert set(private_repository_sites()) == (
+        set(INDEPENDENT_PRIVATE_SITES)
+        | EXPECTED_REMEDIATION_SITES["private_repository"]
+    )
 
 
 def test_facade_class_imports_only_in_composition_roots():
-    offenders = []
+    actual = set()
     for path, rel in _production_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         for node in ast.walk(tree):
@@ -202,33 +518,25 @@ def test_facade_class_imports_only_in_composition_roots():
             elif isinstance(node, ast.Import):
                 if any(alias.name == "app.services.sqlite_repository" for alias in node.names):
                     imported = True
-            if imported and rel not in FACADE_CLASS_IMPORT_ALLOWED:
-                offenders.append((rel, node.lineno))
-    assert not offenders, (
-        f"SQLiteRepository imported outside the frozen composition roots: {offenders}"
-    )
+            if imported:
+                actual.add((rel, node.lineno))
+    assert actual == set(FACADE_CLASS_IMPORT_SITES)
 
 
 def test_composition_root_allowlist_stays_exact():
-    # a stale allowlist entry (file deleted / no longer importing the facade)
-    # must be pruned consciously — verify_repository_snapshot.py lands in
-    # Task 28 and is the only tolerated not-yet-existing entry.
-    for rel in sorted(FACADE_CLASS_IMPORT_ALLOWED | SQLITE_CONNECT_ALLOWED):
-        if rel == "scripts/verify_repository_snapshot.py" and not (ROOT / rel).is_file():
-            continue
+    for rel, _line in sorted(FACADE_CLASS_IMPORT_SITES):
         assert (ROOT / rel).is_file(), f"stale allowlist entry: {rel}"
+    assert all(FACADE_CLASS_IMPORT_SITES.values())
+    assert all(SQLITE_CONNECT_SITES.values())
 
 
 def test_no_private_facade_member_access_outside_frozen_seams():
     offenders = [
         (rel, line, attr)
         for rel, line, attr in _private_member_hits()
-        if (rel, attr) not in PRIVATE_MEMBER_ALLOWED
+        if (rel, line, attr) not in INDEPENDENT_PRIVATE_SITES
     ]
-    assert not offenders, (
-        "production callers must use ports/typed accessors or repo.maintenance, "
-        f"not private facade members: {sorted(offenders)}"
-    )
+    assert set(offenders) == EXPECTED_REMEDIATION_SITES["private_repository"]
 
 
 def test_retired_retrieval_privates_have_no_production_callers():
@@ -259,18 +567,17 @@ def test_eval_insert_source_helper_has_no_production_consumer():
 
 
 def test_sqlite_connect_call_sites_are_frozen():
-    offenders = []
+    actual = set()
     for path, rel in _production_files():
         if rel.startswith("backend/app/repositories/sqlite/"):
             continue  # the database boundary owns its connections
-        if "sqlite3.connect(" not in path.read_text(encoding="utf-8"):
-            continue
-        if rel not in SQLITE_CONNECT_ALLOWED:
-            offenders.append(rel)
-    assert not offenders, (
-        "SQLite connections outside repositories/sqlite are frozen to the "
-        f"documented exception list: {offenders}"
-    )
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        actual.update(
+            (rel, node.lineno, call_name(node.func))
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and call_name(node.func) == "sqlite3.connect"
+        )
+    assert actual == set(SQLITE_CONNECT_SITES)
 
 
 def test_diag_slow_stays_host_safe_and_read_only():

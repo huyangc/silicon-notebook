@@ -9,8 +9,14 @@ from pathlib import Path
 import re
 import typing
 
+import pytest
+
 from app.services import repository, sqlite_repository
 from app.services.sqlite_repository import SQLiteRepository
+from app.repositories.ownership_manifest import (
+    OWNER_BY_MEMBER,
+    validate_ownership_manifest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -180,8 +186,9 @@ TASK19_ALLOWED_IMPORTS = {
 # Task 26: the two consolidation contract suites (facade surface + runtime
 # identity) import the compatibility facade at fresh sites.
 TASK26_ALLOWED_IMPORTS = {
-    ("backend/tests/test_repository_facade_contract.py", 20, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_facade_contract.py", 22, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/tests/test_repository_runtime_identity.py", 13, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_surface_manifest.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 # Task 27: the CLI composition roots keep their concrete-facade import while
 # their request-context imports move to the canonical app.core.request_context
@@ -195,7 +202,7 @@ TASK27_ALLOWED_IMPORTS = {
     ("scripts/kg_product_smoke.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/backfill_kg_embeddings.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("backend/tests/test_repository_callers_static.py", 359, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_callers_static.py", 666, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -1800,6 +1807,11 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
     ("_runtime", "backend/tests/test_incremental_fuse_perf.py:134"),
 }
 
+FROZEN_ONLY_MOVED_CONSUMERS = {
+    # Task 1 adds ownership imports above this test module's own facade import.
+    ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
+}
+
 
 def _normalize_consumer_site(site: str) -> str:
     path = site.rsplit(":", 1)[0]
@@ -2213,6 +2225,174 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                 )
 
 
+EXPECTED_PATCH_DELTAS = {
+    'recorded_only': {
+        ('backend/tests/test_answer_context_budget.py', 29, '_concept_cluster_id', 'repo'),
+        ('backend/tests/test_answer_context_budget.py', 30, 'node_context', 'repo'),
+        ('backend/tests/test_answer_context_budget.py', 44, '_concept_cluster_id', 'repo'),
+        ('backend/tests/test_answer_context_budget.py', 45, 'node_context', 'repo'),
+        ('backend/tests/test_architecture_hardening.py', 55, '_retrieve_chunks', 'repo'),
+        ('backend/tests/test_architecture_hardening.py', 102, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_ask_vector_matrix.py', 125, '_backfill_knowledge_embeddings', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 55, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 67, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 81, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 86, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 99, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 118, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 132, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 144, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 162, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 193, 'trigger_scale_index_rebuild', 'repo'),
+        ('backend/tests/test_auto_scale_index.py', 242, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 219, '_run_extraction', 'SQLiteRepository'),
+        ('backend/tests/test_batch_ingest.py', 247, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 248, '_set_source_status', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 287, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 288, '_set_source_status', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 290, 'relink_notebook_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 310, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 311, '_set_source_status', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 313, 'relink_notebook_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 462, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 489, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1211, '_run_extraction', 'repo'),
+        ('backend/tests/test_bm25_rrf.py', 135, '_rrf_scored', 'repo'),
+        ('backend/tests/test_bm25_rrf.py', 150, '_rrf_scored', 'repo'),
+        ('backend/tests/test_chunk_bruteforce_guard.py', 73, '_gather_chunks', 'repo'),
+        ('backend/tests/test_chunk_bruteforce_guard.py', 134, '_embed_query', 'repo'),
+        ('backend/tests/test_chunk_embed.py', 99, '_run_extraction', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 124, '_mix_retrieve', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 125, '_retrieve_chunks_multi', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 126, '_retrieve_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 194, '_retrieve_chunks_multi', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 224, '_mmr_select_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 307, '_retrieve_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 326, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 337, '_retrieve_chunks_fts_degraded', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 346, '_gather_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 381, '_retrieve_chunks_ann', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 390, '_gather_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 451, '_mix_retrieve', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 501, '_mix_retrieve', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 525, '_retrieve_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 527, '_mmr_select_chunks', 'repo'),
+        ('backend/tests/test_chunk_retrieval_characterization.py', 575, '_mix_retrieve', 'repo'),
+        ('backend/tests/test_chunk_retrieval_plan.py', 61, '_notebook_has_kg', 'repo'),
+        ('backend/tests/test_chunk_retrieval_plan.py', 62, '_any_base_notebook_has_kg', 'repo'),
+        ('backend/tests/test_chunk_retrieval_plan.py', 71, '_notebook_has_kg', 'repo'),
+        ('backend/tests/test_chunk_retrieval_plan.py', 72, '_any_base_notebook_has_kg', 'repo'),
+        ('backend/tests/test_dedup_scale.py', 32, '_gather_elements', 'repo'),
+        ('backend/tests/test_graph_k_binding.py', 130, '_retrieve_scored', 'repo'),
+        ('backend/tests/test_incremental_fuse_perf.py', 134, '_connect', 'repo'),
+        ('backend/tests/test_index_build_consolidation.py', 30, '_spawn_viz_build', 'repo'),
+        ('backend/tests/test_indexed_only_principle.py', 235, '_vector_matrix', 'repo'),
+        ('backend/tests/test_indexed_only_principle.py', 325, '_IN_CHUNK', 'SQLiteRepository'),
+        ('backend/tests/test_kg_building_flag.py', 67, 'delete_notebook_kg', 'repo'),
+        ('backend/tests/test_kg_llm_client.py', 53, '_source_raw_text', 'repo'),
+        ('backend/tests/test_kg_quality.py', 59, 'cluster_map', 'repo'),
+        ('backend/tests/test_kg_relink_repository.py', 188, '_run_extraction', 'repo'),
+        ('backend/tests/test_kg_repository.py', 380, '_run_extraction', 'repo'),
+        ('backend/tests/test_language_policy.py', 289, '_keyword_chunk_candidates', 'repo'),
+        ('backend/tests/test_large_lib_index_required.py', 46, '_gather_chunks', 'repo'),
+        ('backend/tests/test_notebook_counts_batched.py', 115, '_connect', 'repo'),
+        ('backend/tests/test_overlay_guard_order.py', 63, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_overlay_guard_order.py', 63, 'federated_retrieve_relations', 'repo'),
+        ('backend/tests/test_overlay_guard_order.py', 71, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_overlay_guard_order.py', 93, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_p4_kg_shrink.py', 82, '_run_extraction', 'repo'),
+        ('backend/tests/test_p4_kg_shrink.py', 96, '_run_extraction', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 108, 'scale_ppr', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 109, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 118, '_ppr_graph', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 135, 'scale_ppr', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 136, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 145, '_ppr_graph', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 162, 'scale_ppr', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 165, '_ppr_graph', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 200, '_embed_query', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 201, '_retrieve_chunks', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 234, '_retrieve_chunks', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 235, '_open_scale_ann', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 239, '_vector_matrix', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 277, '_federated_rx_graph', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 296, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 334, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_ppr_fallback_guard.py', 372, '_vector_matrix', 'repo'),
+        ('backend/tests/test_query_hotpath_cache.py', 168, '_connect', 'repo'),
+        ('backend/tests/test_rebuild_cache.py', 69, '_stream_seed_reps', 'repo'),
+        ('backend/tests/test_rebuild_checkpoint.py', 224, '_write_cluster_map_streamed', 'repo'),
+        ('backend/tests/test_rebuild_checkpoint.py', 243, '_write_cluster_map_streamed', 'repo'),
+        ('backend/tests/test_rebuild_communities.py', 195, '_scale_index', 'repo'),
+        ('backend/tests/test_rebuild_communities.py', 206, '_scale_index', 'repo'),
+        ('backend/tests/test_rebuild_wires_communities.py', 47, 'rebuild_communities', 'repo'),
+        ('backend/tests/test_rebuild_wires_communities.py', 60, 'rebuild_communities', 'repo'),
+        ('backend/tests/test_relation_ann.py', 382, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_relation_ann.py', 412, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_relation_retrieval.py', 267, '_relations_with_names', 'repo'),
+        ('backend/tests/test_relation_retrieval.py', 291, '_IN_CHUNK', 'repo'),
+        ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 69, '_vector_matrix', 'repo'),
+        ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 78, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 98, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 122, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 139, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_report_engine.py', 155, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 182, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 322, '_retrieve_neighbors', 'eng.repo'),
+        ('backend/tests/test_report_engine.py', 476, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 477, '_ppr_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 511, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 544, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 562, 'federated_retrieve', 'repo'),
+        ('backend/tests/test_report_engine.py', 598, 'get_report', 'repo'),
+        ('backend/tests/test_resolve_notebook_conflicts.py', 303, 'resolve_notebook_conflicts', 'repo'),
+        ('backend/tests/test_resolve_notebook_conflicts.py', 309, '_run_extraction', 'repo'),
+        ('backend/tests/test_resolve_notebook_conflicts.py', 326, 'resolve_notebook_conflicts', 'repo'),
+        ('backend/tests/test_resolve_notebook_conflicts.py', 331, '_run_extraction', 'repo'),
+        ('backend/tests/test_scale_delta_policy.py', 104, '_ensure_scale_scheduler', 'repo'),
+        ('backend/tests/test_scale_delta_policy.py', 115, '_ensure_scale_scheduler', 'repo'),
+        ('backend/tests/test_scale_delta_policy.py', 127, '_ensure_scale_scheduler', 'repo'),
+        ('backend/tests/test_scale_idx_disk_cache.py', 190, '_index_delta', 'repo'),
+        ('backend/tests/test_scale_index_repo.py', 871, 'fold_scale_index_delta', 'repo'),
+        ('backend/tests/test_scale_index_repo.py', 872, 'build_scale_index', 'repo'),
+        ('backend/tests/test_scale_xlayer_bridge_delta.py', 188, '_vector_matrix', 'repo'),
+        ('backend/tests/test_scale_xlayer_bridge_delta.py', 221, '_vector_matrix', 'repo'),
+        ('backend/tests/test_scale_xlayer_bridge_delta.py', 222, '_delta_vector_matrix', 'repo'),
+        ('backend/tests/test_scale_xlayer_bridge_delta.py', 248, '_scale_xlayer_bridge_edges', 'repo'),
+        ('backend/tests/test_sources_page_batched.py', 183, '_connect', 'repo'),
+        ('backend/tests/test_sqlite_write_optimization.py', 121, '_write', 'embed_repo'),
+        ('backend/tests/test_viz_bounded.py', 118, '_unified_graph_full', 'repo'),
+    },
+    'actual_only': {
+        ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
+        ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
+        ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
+        ('backend/tests/test_node_embed_incremental.py', 56, '_flush_object_vectors', 'repo'),
+        ('backend/tests/test_node_embed_incremental.py', 63, '_flush_object_vectors', 'repo'),
+        ('backend/tests/test_notebook_copy_service.py', 115, '_new_id', 'sqlite_repository'),
+        ('backend/tests/test_notebook_copy_service.py', 140, '_COPY_CHUNK', 'sqlite_repository'),
+        ('backend/tests/test_notebook_copy_service.py', 168, '_insert_row', 'repo'),
+        ('backend/tests/test_notebook_copy_service.py', 189, '_COPY_CHUNK', 'sqlite_repository'),
+        ('backend/tests/test_notebook_copy_service.py', 199, '_insert_row', 'repo'),
+        ('backend/tests/test_repository_runtime.py', 19, '_now', 'sqlite_repository'),
+        ('backend/tests/test_schema_registry_service.py', 157, 'llm_client', 'repo'),
+        ('backend/tests/test_schema_registry_service.py', 177, 'llm_client', 'repo'),
+        ('backend/tests/test_schema_registry_service.py', 180, 'llm_client', 'repo'),
+        ('backend/tests/test_schema_registry_service.py', 187, 'llm_client', 'repo'),
+        ('backend/tests/test_source_chunking_service.py', 103, '_new_id', 'sqlite_repository'),
+        ('backend/tests/test_source_chunking_service.py', 119, '_mark_unified_kg_dirty', 'repo'),
+        ('backend/tests/test_source_embedding_service.py', 181, '_flush_object_vectors', 'repo'),
+        ('backend/tests/test_source_embedding_service.py', 202, '_flush_object_vectors', 'repo'),
+        ('backend/tests/test_source_ingestion_failure_boundaries.py', 80, 'parse_source_file', 'facade_mod'),
+        ('backend/tests/test_source_ingestion_service.py', 155, 'parse_source_file', 'facade_mod'),
+        ('backend/tests/test_source_ingestion_service.py', 253, 'parse_source_file', 'facade_mod'),
+        ('backend/tests/test_source_ingestion_service.py', 260, '_run_extraction', 'repo'),
+        ('backend/tests/test_source_ingestion_service.py', 332, 'parse_source_file', 'facade_mod'),
+        ('backend/tests/test_sqlite_write_optimization.py', 136, '_write', 'embed_repo'),
+    },
+}
+
+
 def test_static_repository_patch_scan_matches_manifest_exactly():
     recorded = {
         (patch["file"], patch["line"], patch["target"], patch["base"])
@@ -2221,8 +2401,8 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES | TASK25_ALLOWED_PATCHES | TASK26_ALLOWED_PATCHES | TASK27_ALLOWED_PATCHES
-    assert recorded | allowed == actual | allowed
+    assert recorded - actual == EXPECTED_PATCH_DELTAS["recorded_only"]
+    assert actual - recorded == EXPECTED_PATCH_DELTAS["actual_only"]
     assert (
         "backend/tests/test_scale_index_repo.py",
         1094,
@@ -2243,7 +2423,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
@@ -2255,7 +2435,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     for name, sites in list(recorded.items()):
         recorded[name] = {
             site for site in sites
-                if (name, site) not in allowed_sites
+                if (name, site) not in allowed_sites | FROZEN_ONLY_MOVED_CONSUMERS
                     and not _member_file_site_allowed(name, site, frozen=True)
         }
     actual = {name: sites for name, sites in actual.items() if sites}
@@ -2285,6 +2465,12 @@ def test_ambiguous_surface_members_have_explicit_owners():
 
     for name, owner in EXPLICIT_OWNERS.items():
         assert surface[name]["owner"] == owner, name
+
+
+def test_ownership_manifest_validates_delegate_evidence():
+    assert validate_ownership_manifest(delegates=OWNER_BY_MEMBER) == OWNER_BY_MEMBER
+    with pytest.raises(ValueError, match="ownership/delegate mismatch"):
+        validate_ownership_manifest(delegates={"ask": "WrongOwner"})
 
 
 def test_member_file_allowlist_does_not_hide_new_production_sites():
