@@ -13,7 +13,6 @@ limit_requests），导致大批对象向量缺失。本脚本以**低并发 + �
   BACKFILL_SLEEP      轮间退避秒数（默认 3）
   BACKFILL_MAX_ROUNDS 最大轮数（默认 80）
 """
-import json
 import os
 import sys
 import time
@@ -28,15 +27,7 @@ MAX_ROUNDS = int(os.environ.get("BACKFILL_MAX_ROUNDS", "80"))
 
 
 def _counts(repo, nb):
-    with repo._connect() as db:
-        objs = db.execute(
-            "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-            (nb,),
-        ).fetchone()["c"]
-        emb = db.execute(
-            "SELECT COUNT(*) c FROM knowledge_embeddings WHERE notebook_id=?", (nb,)
-        ).fetchone()["c"]
-    return objs, emb
+    return repo.maintenance.node_embedding_counts(nb)
 
 
 def main():
@@ -54,16 +45,7 @@ def main():
     last = before
     stale = 0
     for rnd in range(MAX_ROUNDS):
-        with repo._connect() as db:
-            objects = [
-                {"id": r["id"], "payload": json.loads(r["payload"] or "{}")}
-                for r in db.execute(
-                    "SELECT id, payload FROM knowledge_objects "
-                    "WHERE notebook_id=? AND status!='deprecated'",
-                    (NB,),
-                ).fetchall()
-            ]
-            repo._backfill_knowledge_embeddings(db, NB, objects)
+        repo.maintenance.backfill_node_embeddings(NB)
         _, now = _counts(repo, NB)
         added = now - last
         print(f"round={rnd} embedded={now}/{objs_n} (+{added})", flush=True)

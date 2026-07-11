@@ -20,6 +20,7 @@ import logging
 import threading
 from typing import Callable
 
+from app.core.request_context import request_user_id
 from app.services.pending_bus import pending_bus
 
 _log = logging.getLogger("silicon_notebook.jobs")
@@ -28,7 +29,6 @@ _log = logging.getLogger("silicon_notebook.jobs")
 def _resolve_job_user() -> str | None:
     """在 job 线程(copy_context 已传播)里解析发起用户 id。"""
     try:
-        from app.core.request_context import request_user_id
         return request_user_id()
     except Exception:  # noqa: BLE001
         return None

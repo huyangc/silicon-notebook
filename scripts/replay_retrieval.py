@@ -36,9 +36,8 @@ def record_run(notebook_id: str, questions: list, full: bool, plan_map: dict,
     # `_resolve_owner_profile` + `set_request_user`/`reset_request_user` 包裹一段
     # 操作,notebook 存在性校验走 `repo.get_notebook`(不存在则 KeyError)。
     from app.core.config import Settings
-    from app.services.sqlite_repository import (
-        SQLiteRepository, set_request_user, reset_request_user,
-    )
+    from app.core.request_context import set_request_user, reset_request_user
+    from app.services.sqlite_repository import SQLiteRepository
     from app.services.batch_ingest import _resolve_owner_profile
 
     repo = SQLiteRepository(Settings())

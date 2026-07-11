@@ -1636,16 +1636,10 @@ class SQLiteRepository:
         )
 
     def _backfill_relation_embeddings(self, notebook_id: str) -> None:
-        """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。无 embedder 则 no-op。"""
-        if not self.settings.embedder_configured:
-            return
-        with self._connect() as db:
-            relations = self._relations_with_names(db, notebook_id)
-            have = self._runtime.embedding_store.embedded_relation_ids(db, notebook_id)
-        missing = [{"_rid": r["id"], "text": r["text"]} for r in relations
-                   if r["id"] not in have]
-        if missing:
-            self._embed_relations_batch(notebook_id, missing)
+        """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。无 embedder 则 no-op。
+        SQLiteMaintenanceAdapter owns the canonical body (Task 27);
+        frozen-signature delegate."""
+        return self.maintenance.backfill_relation_embeddings(notebook_id)
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         """All object types present in this notebook with non-deprecated counts,
@@ -3334,6 +3328,19 @@ class SQLiteRepository:
         """Explicit deep-report execution coordinator (Task 25); routes'
         _launch_plan_job/_launch_generate_job delegate here."""
         return self._runtime.report_execution
+
+    @property
+    def maintenance(self):
+        """SQLite maintenance face (Task 27): CLI/batch composition roots
+        instantiate SQLiteRepository and request this adapter — portable
+        application ports never include these operations."""
+        if self._runtime.maintenance is None:
+            from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+
+            self._runtime.maintenance = SQLiteMaintenanceAdapter(
+                self._runtime, retrieval=lambda: self.retrieval
+            )
+        return self._runtime.maintenance
 
     def pending_actions(self, user_id: str) -> dict:
         """聚合当前用户「我创建的」notebook 的三类待办(深度报告待确认/治理队列/

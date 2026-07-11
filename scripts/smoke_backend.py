@@ -6,7 +6,6 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from uuid import uuid4
 
 from app.core.config import Settings
 from app.models.schemas import (
@@ -22,7 +21,7 @@ from app.models.schemas import (
 from app.services.parsers import mineru_content_list_to_elements
 from app.services.repository import UploadedSourceFile
 from app.services.retrieval import score_knowledge
-from app.services.sqlite_repository import SQLiteRepository, _now
+from app.services.sqlite_repository import SQLiteRepository
 
 
 def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Settings:
@@ -89,8 +88,6 @@ def _insert_rule(
     recommendation: str = "",
     risk_if_ignored: str = "",
 ) -> str:
-    object_id = f"ko-{uuid4().hex[:10]}"
-    now = _now()
     payload = {
         "title": title,
         "statement": statement,
@@ -99,34 +96,16 @@ def _insert_rule(
         "risk_if_ignored": risk_if_ignored,
         "severity": "medium",
     }
-    with repository._connect() as db:
-        db.execute(
-            """
-            INSERT INTO knowledge_objects
-            (id, notebook_id, object_type, status, owner, payload, evidence,
-             source_candidate_id, source_id, created_at, updated_at)
-            VALUES (?, ?, 'rule', 'approved', '', ?, ?, NULL, ?, ?, ?)
-            """,
-            (
-                object_id,
-                notebook_id,
-                json.dumps(payload, ensure_ascii=False),
-                json.dumps([_source_evidence(repository, source_id)], ensure_ascii=False),
-                source_id,
-                now,
-                now,
-            ),
-        )
-    repository._invalidate_unified_cache(notebook_id)
-    return object_id
+    return repository.maintenance.seed_rule_object(
+        notebook_id,
+        payload=payload,
+        evidence=[_source_evidence(repository, source_id)],
+        source_id=source_id,
+    )
 
 
 def _latest_extraction_run(repository: SQLiteRepository, source_id: str) -> dict:
-    with repository._connect() as db:
-        row = db.execute(
-            "SELECT * FROM extraction_runs WHERE source_id = ? ORDER BY created_at DESC LIMIT 1",
-            (source_id,),
-        ).fetchone()
+    row = repository.maintenance.latest_extraction_run(source_id)
     assert row is not None, f"source {source_id} should have an extraction run"
     return dict(row)
 

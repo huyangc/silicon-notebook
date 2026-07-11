@@ -31,6 +31,10 @@ class RetrievalService:
         """取某对象的邻域上下文。"""
         return self.graph.node_context(*args, **kwargs)
 
+    def retrieve_relations_scored(self, *args, **kwargs):
+        """单 notebook 关系检索(词法∪语义) → List[RetrievedRelation]。"""
+        return self.candidates._retrieve_relations_scored(*args, **kwargs)
+
     def federated_retrieve(self, *args, **kwargs):
         """跨 tier（base ∪ active）联邦检索 → List[RetrievedKnowledge]。"""
         return self.candidates.federated_retrieve(*args, **kwargs)

@@ -44,11 +44,11 @@ def main():
     print("  SCALE_SEARCH_INCLUDE_DELTA:", getattr(s, "scale_search_include_delta", "?"))
     print("  SCALE_AUTO_FOLD_ON_ADD    :", getattr(s, "scale_auto_fold_on_add", "?"))
 
+    mnt = repo.maintenance
+
     # --- 1. notebooks + tier ---
-    with repo._connect() as db:
-        nbs = db.execute("SELECT id,name,tier,created_by FROM notebooks").fetchall()
-        kg_by_nb = {r["notebook_id"]: r["c"] for r in db.execute(
-            "SELECT notebook_id, COUNT(*) c FROM knowledge_objects GROUP BY notebook_id")}
+    nbs = mnt.notebook_rows()
+    kg_by_nb = mnt.kg_object_counts_by_notebook()
     print("\n== 1. notebooks ==")
     for n in nbs:
         print(f'  {n["id"]}  tier={str(n["tier"]):8}  kg={kg_by_nb.get(n["id"],0):>7}  '
@@ -63,9 +63,7 @@ def main():
     # --- 2. 最近报告的引用来源(直接看症状)---
     print("\n== 2. 最近一份 done 报告的引用 tier 分布 ==")
     active_id = sys.argv[1] if len(sys.argv) > 1 else None
-    with repo._connect() as db:
-        rep = db.execute("SELECT id,notebook_id,question,references_json,sections_json "
-                         "FROM reports WHERE status='done' ORDER BY created_at DESC LIMIT 1").fetchone()
+    rep = mnt.latest_done_report()
     if rep:
         refs = json.loads(rep["references_json"] or "[]")
         print(f'  report {rep["id"]}  active_nb={rep["notebook_id"]}')
@@ -83,9 +81,7 @@ def main():
     # --- 3. base 库索引/规模/可暴力性 ---
     print(f"\n== 3. base = {base_id} ({str(base['name'])[:30]}) ==")
     objs = kg_by_nb.get(base_id, 0)
-    with repo._connect() as db:
-        emb = db.execute("SELECT COUNT(*) c FROM knowledge_embeddings WHERE notebook_id=?",
-                         (base_id,)).fetchone()["c"]
+    emb = mnt.count_knowledge_embeddings(base_id)
     print("  KG 对象:", objs, " 向量:", emb)
     try:
         cs = repo.notebook_copy_stats(base_id)
@@ -98,34 +94,32 @@ def main():
     except Exception as e:
         print("  scale_index_status 异常:", repr(e))
     try:
-        idx = repo._scale_index(base_id, allow_stale=True)
+        idx = mnt.load_scale_index(base_id, allow_stale=True)
         if idx is None:
-            print("  _scale_index: None  ←←← base 无可用 ANN 索引(语义召回会死)")
+            print("  scale_index: None  ←←← base 无可用 ANN 索引(语义召回会死)")
         else:
-            print("  _scale_index: 有  ann_labels(已索引对象)=",
+            print("  scale_index: 有  ann_labels(已索引对象)=",
                   len(getattr(idx, "ann_labels", []) or []), " vs KG对象=", objs,
                   "  ←← 若远小于 KG对象 = base 大部分未索引(delta)")
     except Exception as e:
-        print("  _scale_index 异常:", repr(e))
+        print("  scale_index 异常:", repr(e))
 
     # --- 4. 检索探针 ---
     q = sys.argv[2] if len(sys.argv) > 2 else None
     if not q:
-        with repo._connect() as db:
-            row = db.execute("SELECT payload FROM knowledge_objects WHERE notebook_id=? "
-                             "AND status='approved' LIMIT 1", (base_id,)).fetchone()
-        try: q = (json.loads(row["payload"]).get("name") if row else None)
+        payload = mnt.sample_approved_object_payload(base_id)
+        try: q = (json.loads(payload).get("name") if payload else None)
         except Exception: q = None
     q = q or "transformer"
     print(f"\n== 4. 检索探针  query={q!r}  (取自 base 的真实对象名) ==")
     try:
-        direct = repo._retrieve_scored(base_id, q)
-        print("  A) _retrieve_scored(base):", len(direct), "hits",
+        direct = repo.retrieval.retrieve_scored(base_id, q)
+        print("  A) retrieve_scored(base):", len(direct), "hits",
               "  ←←← 若 0/极少 = base 自身检索就失效")
         for h in direct[:3]:
             print("       ", round(getattr(h, "relevance", 0), 3), h.object_id, _name(h))
     except Exception as e:
-        print("  A) _retrieve_scored(base) 异常:", repr(e))
+        print("  A) retrieve_scored(base) 异常:", repr(e))
     try:
         fed = repo.federated_retrieve(active_id, q)
         nb_ids = Counter(getattr(h, "notebook_id", "?") for h in fed)
@@ -144,9 +138,7 @@ def main():
     #   base 进上下文>0 但报告 0 引用 → 撰写 LLM 没引 base(相关性/prompt,非检索)
     print("\n== 5. 复现最近报告每节子查询的 base 命中(检索侧是否带出 base)==")
     try:
-        with repo._connect() as db:
-            rep2 = db.execute("SELECT outline_json FROM reports WHERE status='done' "
-                              "ORDER BY created_at DESC LIMIT 1").fetchone()
+        rep2 = mnt.latest_done_report()
         outline = json.loads(rep2["outline_json"] or "[]") if rep2 else []
         if not outline:
             print("  (报告无 outline_json,跳过)")
@@ -158,7 +150,7 @@ def main():
                     base_fed = sum(1 for h in fed if getattr(h, "notebook_id", "") == base_id)
                     top = sorted(fed, key=lambda h: getattr(h, "relevance", 0), reverse=True)[:12]
                     base_top = sum(1 for h in top if getattr(h, "notebook_id", "") == base_id)
-                    _blk, idm = repo._answer_context(active_id, top)
+                    _blk, idm = mnt.knowledge_context(active_id, top)
                     base_ctx = sum(1 for v in idm.values()
                                    if str(v.get("tier", "")) == "base"
                                    or v.get("object_id") in {h.object_id for h in top
@@ -177,18 +169,11 @@ def main():
     #   scale_ppr 返回 0   → 走了 rustworkx 单库兜底(base 无索引/bail)→ PPR 不跨层
     print(f"\n== 6. PPR 跨层:base 原文 chunk 是否进 PPR(active={active_id}, query={q!r})==")
     try:
-        chunks = repo._ppr_retrieve(active_id, q)
+        chunks = repo.retrieval.ppr_retrieve(active_id, q)
         ids = [c.chunk_id for c in chunks]
-        nb_of: dict = {}
-        if ids:
-            with repo._connect() as db:
-                for i in range(0, len(ids), 400):        # 分批防超 SQLite 变量上限
-                    part = ids[i:i + 400]
-                    ph = ",".join("?" for _ in part)
-                    for r in db.execute(f"SELECT id, notebook_id FROM chunks WHERE id IN ({ph})", part):
-                        nb_of[r["id"]] = r["notebook_id"]
+        nb_of = mnt.chunk_notebook_map(ids)
         base_ch = sum(1 for cid in ids if nb_of.get(cid) == base_id)
-        print(f"  _ppr_retrieve(active) 返回 {len(chunks)} chunk;其中 base 原文: {base_ch}"
+        print(f"  ppr_retrieve(active) 返回 {len(chunks)} chunk;其中 base 原文: {base_ch}"
               "   ←←← >0 = base 原文确经 PPR(scale_ppr 跨层)进来")
         print("   chunk 归属 notebook 分布:",
               dict(Counter(nb_of.get(c.chunk_id, "?") for c in chunks)))

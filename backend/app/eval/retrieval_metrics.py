@@ -40,9 +40,11 @@ def run_recall(repo: Any, notebook_id: str, questions: List[Dict[str, Any]],
                k: int = 12) -> List[Dict[str, Any]]:
     """对带 gold_object_ids 或 gold_relation_ids 的题分别跑节点/关系检索,各算
     recall@k + MRR。对象侧在 canonical 层比对(检索/gold 都映射到 canonical_id),
-    使 canonical 折叠不致 gold 假性 miss;关系侧按 relation_id(关系不聚类)。"""
+    使 canonical 折叠不致 gold 假性 miss;关系侧按 relation_id(关系不聚类)。
+    检索经公开 retrieval 端口(RetrievalService),不触私有面。"""
     cmap = repo.cluster_map(notebook_id) if hasattr(repo, "cluster_map") else {}
     def canon(i): return cmap.get(i, i)
+    retrieval = repo.retrieval
     rows: List[Dict[str, Any]] = []
     for q in questions:
         gold_obj = q.get("gold_object_ids")
@@ -52,13 +54,13 @@ def run_recall(repo: Any, notebook_id: str, questions: List[Dict[str, Any]],
         row: Dict[str, Any] = {"id": q.get("id", ""),
                                "track": q.get("track", ""), "bucket": q.get("bucket", "")}
         if gold_obj:
-            ids = [canon(h.object_id) for h in repo._retrieve_scored(notebook_id, q["question"])]
+            ids = [canon(h.object_id) for h in retrieval.retrieve_scored(notebook_id, q["question"])]
             g = [canon(x) for x in gold_obj]
             row["recall_at_k"] = recall_at_k(ids, g, k)
             row["mrr"] = mrr(ids, g)
             row["n_gold"] = len(gold_obj)
         if gold_rel:
-            rids = [h.relation_id for h in repo._retrieve_relations_scored(notebook_id, q["question"])]
+            rids = [h.relation_id for h in retrieval.retrieve_relations_scored(notebook_id, q["question"])]
             row["relation_recall_at_k"] = recall_at_k(rids, gold_rel, k)
             row["relation_mrr"] = mrr(rids, gold_rel)
             row["n_gold_rel"] = len(gold_rel)

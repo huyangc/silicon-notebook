@@ -11,7 +11,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
     repo = SQLiteRepository(get_settings())
-    repo._backfill_relation_embeddings(sys.argv[1])
+    repo.maintenance.backfill_relation_embeddings(sys.argv[1])
     print(f"[backfill] relation embeddings done for {sys.argv[1]}")
     return 0
 

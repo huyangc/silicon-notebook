@@ -183,6 +183,20 @@ TASK26_ALLOWED_IMPORTS = {
     ("backend/tests/test_repository_facade_contract.py", 20, "app.services.sqlite_repository", "SQLiteRepository"),
     ("backend/tests/test_repository_runtime_identity.py", 13, "app.services.sqlite_repository", "SQLiteRepository"),
 }
+# Task 27: the CLI composition roots keep their concrete-facade import while
+# their request-context imports move to the canonical app.core.request_context
+# home (dropping names shifts the surviving compatibility import sites); the
+# new static caller suite imports the facade at a fresh site.
+TASK27_ALLOWED_IMPORTS = {
+    ("backend/app/services/batch_ingest.py", 28, "app.services.repository", "UploadedSourceFile"),
+    ("backend/app/services/batch_ingest.py", 29, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("scripts/smoke_backend.py", 22, "app.services.repository", "UploadedSourceFile"),
+    ("scripts/smoke_backend.py", 24, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("scripts/kg_product_smoke.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("scripts/backfill_kg_embeddings.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_callers_static.py", 359, "app.services.sqlite_repository", "SQLiteRepository"),
+}
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
     for name in {"set_request_user", "reset_request_user", "user_can_access_notebook", "user_can_read_notebook"}
@@ -1278,6 +1292,92 @@ TASK26_ALLOWED_PATCHES = {
     ("backend/tests/test_scale_idx_disk_cache.py", 190, "_index_delta", "repo"),
 }
 
+# Task 27: the expanded write audit (every primary SQLite adapter) grows the
+# test_all_writes_go_through_write_lock body, shifting the embed-transaction
+# spy's frozen `_write` patch seat down within the same file.
+TASK27_ALLOWED_PATCHES = {
+    ("backend/tests/test_sqlite_write_optimization.py", 121, "_write", "embed_repo"),
+    ("backend/tests/test_sqlite_write_optimization.py", 136, "_write", "embed_repo"),
+}
+
+# Task 27: production callers migrate onto ports / repo.maintenance — the
+# private facade reaches below are frozen residue (their sites disappear from
+# the static scan); the compatibility request-context imports move to
+# app.core.request_context; the facade's _backfill_relation_embeddings body
+# moves to the maintenance adapter (its internal _relations_with_names call
+# site disappears); the new static suite imports the facade at a fresh site.
+TASK27_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/batch_ingest.py", name)
+    for name in {
+        "_backfill_knowledge_embeddings", "_connect", "_embed_chunks_batch",
+        "_embed_chunks_for_source", "_mark_source_index_backfilled",
+        "_mark_unified_kg_dirty", "_run_extraction", "_scale_index",
+        "_set_source_status", "_source_ids_from_evidence", "_user_profile",
+        "_write", "reset_request_user", "set_request_user",
+    }
+} | {
+    ("backend/app/eval/retrieval_metrics.py", name)
+    for name in {"_retrieve_relations_scored", "_retrieve_scored"}
+} | {
+    ("backend/app/scripts/backfill_relation_embeddings.py", "_backfill_relation_embeddings"),
+    ("backend/app/scripts/gen_recall_gold.py", "_connect"),
+    ("backend/app/scripts/gen_recall_gold.py", "_relations_with_names"),
+} | {
+    ("backend/app/scripts/reembed_kg.py", name)
+    for name in {
+        "_backfill_relation_embeddings", "_connect", "_embed_objects_batch",
+        "_mark_unified_kg_dirty", "_write",
+    }
+} | {
+    ("scripts/backfill_kg_embeddings.py", name)
+    for name in {"_backfill_knowledge_embeddings", "_connect"}
+} | {
+    ("scripts/build_chunks.py", name)
+    for name in {"_chunk_and_embed_source", "_connect"}
+} | {
+    ("scripts/denoise_reextract_nb.py", name)
+    for name in {"_connect", "_run_extraction"}
+} | {
+    ("scripts/diag_base_report.py", name)
+    for name in {
+        "_answer_context", "_connect", "_ppr_retrieve", "_retrieve_scored",
+        "_scale_index",
+    }
+} | {
+    ("scripts/kg_product_smoke.py", name)
+    for name in {"_connect", "_now", "_run_extraction"}
+} | {
+    ("scripts/smoke_backend.py", name)
+    for name in {"_connect", "_invalidate_unified_cache", "_now"}
+} | {
+    ("scripts/replay_retrieval.py", name)
+    for name in {"reset_request_user", "set_request_user"}
+} | {
+    ("backend/app/services/sqlite_repository.py", "_relations_with_names"),
+    ("backend/tests/test_repository_callers_static.py", "SQLiteRepository"),
+} | {
+    # the surviving compatibility imports of these composition roots shift
+    # lines (TASK27_ALLOWED_IMPORTS carries the exact live sites; these broad
+    # entries retire the frozen ones).
+    ("backend/app/services/batch_ingest.py", "SQLiteRepository"),
+    ("backend/app/services/batch_ingest.py", "UploadedSourceFile"),
+    ("scripts/backfill_kg_embeddings.py", "SQLiteRepository"),
+    ("scripts/kg_product_smoke.py", "SQLiteRepository"),
+    ("scripts/replay_retrieval.py", "SQLiteRepository"),
+    ("scripts/smoke_backend.py", "SQLiteRepository"),
+    ("scripts/smoke_backend.py", "UploadedSourceFile"),
+}
+
+# Task 27: the maintenance adapter handle is the one new facade member; the
+# two callers that switch onto the public retrieval port gain exact live
+# ledger sites (their files are line-normalized, the ledger stays exact).
+TASK27_ALLOWED_NEW_MEMBERS = {"maintenance"}
+TASK27_ALLOWED_CONSUMERS = {
+    ("retrieval", "backend/app/eval/retrieval_metrics.py:47"),
+    ("retrieval", "scripts/diag_base_report.py:116"),
+    ("retrieval", "scripts/diag_base_report.py:172"),
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -1558,6 +1658,22 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/api/routes.py",
     "backend/tests/test_architecture_module_boundaries.py",
     "backend/tests/test_repository_runtime.py",
+    # Task 27 migrates every production caller onto ports / repo.maintenance —
+    # these known edited caller files keep exact member+path coverage while
+    # their internal line numbers stop being API surface.
+    "backend/app/services/batch_ingest.py",
+    "backend/app/eval/retrieval_metrics.py",
+    "backend/app/scripts/backfill_relation_embeddings.py",
+    "backend/app/scripts/gen_recall_gold.py",
+    "backend/app/scripts/reembed_kg.py",
+    "scripts/backfill_kg_embeddings.py",
+    "scripts/build_chunks.py",
+    "scripts/denoise_reextract_nb.py",
+    "scripts/diag_base_report.py",
+    "scripts/kg_product_smoke.py",
+    "scripts/replay_retrieval.py",
+    "scripts/smoke_backend.py",
+    "backend/tests/test_sqlite_write_optimization.py",
 }
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (
@@ -1585,6 +1701,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK24_ALLOWED_MEMBER_FILES
     | TASK25_ALLOWED_MEMBER_FILES
     | TASK26_ALLOWED_MEMBER_FILES
+    | TASK27_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2063,6 +2180,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK24_ALLOWED_IMPORTS
                     or site in TASK25_ALLOWED_IMPORTS
                     or site in TASK26_ALLOWED_IMPORTS
+                    or site in TASK27_ALLOWED_IMPORTS
                 )
 
 
@@ -2074,7 +2192,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES | TASK25_ALLOWED_PATCHES | TASK26_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES | TASK25_ALLOWED_PATCHES | TASK26_ALLOWED_PATCHES | TASK27_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -2096,9 +2214,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -2127,7 +2245,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     for name in TASK7_ALLOWED_NEW_MEMBERS | TASK12_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
-    for name in TASK25_ALLOWED_NEW_MEMBERS:
+    for name in TASK25_ALLOWED_NEW_MEMBERS | TASK27_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

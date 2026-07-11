@@ -23,13 +23,12 @@ docs/superpowers/specs/2026-07-03-pgvector-migration-review.md。
 from __future__ import annotations
 
 import argparse
-import sqlite3
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
 from app.eval.retrieval_metrics import mrr, recall_at_k
-from app.services.vector_index import decode_vector
+from app.repositories.sqlite.maintenance import ReadOnlySQLiteInspector
 
 TABLES = {
     "knowledge": ("knowledge_embeddings", "object_id"),
@@ -106,97 +105,17 @@ def verdict_for(dim: int, recall_drop_pt: float, overlap10: float, regressed: in
     return f"{dim} 维:边界(降 {recall_drop_pt:.1f}pt,top-10 重合 {overlap10:.2f},回归 {regressed} 题)——升档或人工复核"
 
 
-# ── DB 侧 ────────────────────────────────────────────────────────────────────
-
-def _ro(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _iter_vec_blocks(conn, table: str, id_col: str, notebook_id: str,
-                     stored_dim: int, block_rows: int,
-                     id_subset: "Optional[List[str]]" = None):
-    """流式产出 (ids, matrix[float32, 未归一]) 块;坏行/维度不符行计数返回。
-    id_subset 非空 → 只按这批 id 取(大库抽样评测),分批 IN 免撞 SQLite
-    变量上限;否则全表游标扫。"""
-    def _row_batches():
-        if id_subset is None:
-            cur = conn.execute(
-                f"SELECT {id_col} AS vid, vector FROM {table} WHERE notebook_id = ?",
-                (notebook_id,))
-            while True:
-                rows = cur.fetchmany(block_rows)
-                if not rows:
-                    return
-                yield rows
-        else:
-            for lo in range(0, len(id_subset), min(block_rows, 800)):
-                batch = id_subset[lo:lo + min(block_rows, 800)]
-                ph = ",".join("?" for _ in batch)
-                yield conn.execute(
-                    f"SELECT {id_col} AS vid, vector FROM {table} "
-                    f"WHERE notebook_id = ? AND {id_col} IN ({ph})",
-                    (notebook_id, *batch)).fetchall()
-
-    skipped = 0
-    for rows in _row_batches():
-        ids, vecs = [], []
-        for r in rows:
-            try:
-                v = decode_vector(r["vector"])
-            except Exception:  # noqa: BLE001 — 坏行跳过计数,不拖垮评测
-                skipped += 1
-                continue
-            if v is None or v.shape[0] != stored_dim:
-                skipped += 1
-                continue
-            ids.append(r["vid"])
-            vecs.append(v)
-        if ids:
-            yield ids, np.vstack(vecs), skipped
-            skipped = 0
-    if skipped:
-        yield [], np.empty((0, stored_dim), dtype=np.float32), skipped
-
-
-def _detect_dim(conn, table: str, id_col: str, notebook_id: str) -> Optional[int]:
-    """取首个可解码向量的维度作为存储维(全表应同维;不同维行按 skip 计)。"""
-    cur = conn.execute(
-        f"SELECT vector FROM {table} WHERE notebook_id = ? LIMIT 20", (notebook_id,))
-    for r in cur.fetchall():
-        try:
-            v = decode_vector(r["vector"])
-        except Exception:  # noqa: BLE001
-            continue
-        if v is not None and v.shape[0] > 0:
-            return int(v.shape[0])
-    return None
-
+# ── DB 侧(SQL 全在 ReadOnlySQLiteInspector,mode=ro,绝不写) ────────────────
 
 def embedding_counts(db_path: str, notebook_id: str) -> Dict[str, int]:
     """四张 embeddings 表在该 notebook 的行数(顺带回答部署容量三问之一)。"""
-    out = {}
-    with _ro(db_path) as conn:
-        for key, (table, _)  in TABLES.items():
-            try:
-                out[key] = conn.execute(
-                    f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
-                    (notebook_id,)).fetchone()["c"]
-            except sqlite3.Error:
-                out[key] = -1   # 表不存在(旧库)
-    return out
+    insp = ReadOnlySQLiteInspector(db_path)
+    return {key: insp.table_count(table, notebook_id)   # -1 = 表不存在(旧库)
+            for key, (table, _) in TABLES.items()}
 
 
 def biggest_notebook(db_path: str) -> Optional[str]:
-    with _ro(db_path) as conn:
-        try:
-            row = conn.execute(
-                "SELECT notebook_id, COUNT(*) AS c FROM knowledge_embeddings "
-                "GROUP BY notebook_id ORDER BY c DESC LIMIT 1").fetchone()
-        except sqlite3.Error:
-            return None
-    return row["notebook_id"] if row else None
+    return ReadOnlySQLiteInspector(db_path).busiest_vector_notebook()
 
 
 # ── overlap 模式 ─────────────────────────────────────────────────────────────
@@ -211,73 +130,56 @@ def run_overlap_eval(db_path: str, notebook_id: str, table_key: str,
     邻居间距变大、重合率读数略偏乐观——判边界值时建议全量复核)。
     返回 {rows, sampled, used, skipped, stored_dim, dims:{dim:metrics}}。"""
     table, id_col = TABLES[table_key]
-    with _ro(db_path) as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
-            (notebook_id,)).fetchone()["c"]
-        if total == 0:
-            return {"rows": 0, "sampled": 0, "used": 0, "skipped": 0,
-                    "stored_dim": None, "dims": {}}
-        stored_dim = _detect_dim(conn, table, id_col, notebook_id)
-        if stored_dim is None:
-            return {"rows": total, "sampled": 0, "used": 0, "skipped": total,
-                    "stored_dim": None, "dims": {}}
-        dims = [d for d in dims if d < stored_dim]
+    insp = ReadOnlySQLiteInspector(db_path)
+    total = insp.table_count(table, notebook_id)
+    if total <= 0:
+        return {"rows": 0, "sampled": 0, "used": 0, "skipped": 0,
+                "stored_dim": None, "dims": {}}
+    stored_dim = insp.detect_vector_dim(table, id_col, notebook_id)
+    if stored_dim is None:
+        return {"rows": total, "sampled": 0, "used": 0, "skipped": total,
+                "stored_dim": None, "dims": {}}
+    dims = [d for d in dims if d < stored_dim]
 
-        # 先取全部 id(轻);语料抽样与查询抽样都从同一子集出
-        all_ids = [r["vid"] for r in conn.execute(
-            f"SELECT {id_col} AS vid FROM {table} WHERE notebook_id=?", (notebook_id,))]
-        rng = np.random.default_rng(seed)
-        id_subset = None
-        corpus_ids = all_ids
-        if sample_rows and sample_rows < len(all_ids):
-            corpus_ids = list(rng.choice(all_ids, size=sample_rows, replace=False))
-            id_subset = corpus_ids
-        q_ids = list(rng.choice(corpus_ids, size=min(n_queries, len(corpus_ids)),
-                                replace=False))
-        q_vecs = []
-        kept_q_ids = []
-        for lo in range(0, len(q_ids), 500):
-            batch = q_ids[lo:lo + 500]
-            ph = ",".join("?" for _ in batch)
-            for r in conn.execute(
-                    f"SELECT {id_col} AS vid, vector FROM {table} WHERE {id_col} IN ({ph})",
-                    batch):
-                try:
-                    v = decode_vector(r["vector"])
-                except Exception:  # noqa: BLE001
-                    continue
-                if v is not None and v.shape[0] == stored_dim:
-                    kept_q_ids.append(r["vid"])
-                    q_vecs.append(v)
-        if not q_vecs:
-            return {"rows": total, "sampled": len(corpus_ids), "used": 0,
-                    "skipped": total, "stored_dim": stored_dim, "dims": {}}
-        Q = np.vstack(q_vecs)
+    # 先取全部 id(轻);语料抽样与查询抽样都从同一子集出
+    all_ids = insp.vector_ids(table, id_col, notebook_id)
+    rng = np.random.default_rng(seed)
+    id_subset = None
+    corpus_ids = all_ids
+    if sample_rows and sample_rows < len(all_ids):
+        corpus_ids = list(rng.choice(all_ids, size=sample_rows, replace=False))
+        id_subset = corpus_ids
+    q_ids = list(rng.choice(corpus_ids, size=min(n_queries, len(corpus_ids)),
+                            replace=False))
+    kept_q_ids, q_vecs = insp.vectors_for_ids(table, id_col, q_ids, stored_dim)
+    if not q_vecs:
+        return {"rows": total, "sampled": len(corpus_ids), "used": 0,
+                "skipped": total, "stored_dim": stored_dim, "dims": {}}
+    Q = np.vstack(q_vecs)
 
-        # 流式累积:每个 (维度档∪基线) × 每个查询一个 TopK
-        eval_dims = [stored_dim] + list(dims)
-        acc = {d: [_TopK(k) for _ in kept_q_ids] for d in eval_dims}
-        used = skipped = 0
-        target = len(corpus_ids)
-        q_pos = {qid: qi for qi, qid in enumerate(kept_q_ids)}
-        for ids, block, skip in _iter_vec_blocks(conn, table, id_col, notebook_id,
-                                                 stored_dim, block_rows,
-                                                 id_subset=id_subset):
-            skipped += skip
-            if not ids:
-                continue
-            used += len(ids)
-            if progress and used % 100_000 < len(ids):
-                print(f"    … {used}/{target} 行", flush=True)
-            # 本块里出现的查询自身位置(排除自检索)
-            self_hits = [(row, q_pos[vid]) for row, vid in enumerate(ids) if vid in q_pos]
-            for d in eval_dims:
-                sims = truncated_sims_many(block, Q, d)      # (n, m) 单次 GEMM
-                for row, qi in self_hits:
-                    sims[row, qi] = -np.inf
-                for qi in range(len(kept_q_ids)):
-                    acc[d][qi].update(ids, sims[:, qi])
+    # 流式累积:每个 (维度档∪基线) × 每个查询一个 TopK
+    eval_dims = [stored_dim] + list(dims)
+    acc = {d: [_TopK(k) for _ in kept_q_ids] for d in eval_dims}
+    used = skipped = 0
+    target = len(corpus_ids)
+    q_pos = {qid: qi for qi, qid in enumerate(kept_q_ids)}
+    for ids, block, skip in insp.vector_blocks(table, id_col, notebook_id,
+                                               stored_dim, block_rows,
+                                               id_subset=id_subset):
+        skipped += skip
+        if not ids:
+            continue
+        used += len(ids)
+        if progress and used % 100_000 < len(ids):
+            print(f"    … {used}/{target} 行", flush=True)
+        # 本块里出现的查询自身位置(排除自检索)
+        self_hits = [(row, q_pos[vid]) for row, vid in enumerate(ids) if vid in q_pos]
+        for d in eval_dims:
+            sims = truncated_sims_many(block, Q, d)      # (n, m) 单次 GEMM
+            for row, qi in self_hits:
+                sims[row, qi] = -np.inf
+            for qi in range(len(kept_q_ids)):
+                acc[d][qi].update(ids, sims[:, qi])
 
     metrics: Dict[int, dict] = {}
     base_rank = [acc[stored_dim][qi].ids() for qi in range(len(kept_q_ids))]
@@ -315,25 +217,25 @@ def run_gold_eval(db_path: str, notebook_id: str, questions: List[dict],
                         dtype=np.float32)
 
     table, id_col = TABLES["knowledge"]
-    with _ro(db_path) as conn:
-        stored_dim = _detect_dim(conn, table, id_col, notebook_id)
-        if stored_dim is None:
-            return {"n_questions": len(qs), "dims": {}}
-        if q_vecs.shape[1] != stored_dim:
-            raise SystemExit(
-                f"embed 维度 {q_vecs.shape[1]} != 库内存储维 {stored_dim} —— "
-                f"gold 模式要求 embed 端点按原生维出向量(EMBED_DIM 配置核对)")
-        dims = [d for d in dims if d < stored_dim]
-        eval_dims = [stored_dim] + list(dims)
-        acc = {d: [_TopK(max(k, 50)) for _ in qs] for d in eval_dims}
-        for ids, block, _skip in _iter_vec_blocks(conn, table, id_col, notebook_id,
-                                                  stored_dim, block_rows):
-            if not ids:
-                continue
-            for d in eval_dims:
-                sims = truncated_sims_many(block, q_vecs, d)
-                for qi in range(len(qs)):
-                    acc[d][qi].update(ids, sims[:, qi])
+    insp = ReadOnlySQLiteInspector(db_path)
+    stored_dim = insp.detect_vector_dim(table, id_col, notebook_id)
+    if stored_dim is None:
+        return {"n_questions": len(qs), "dims": {}}
+    if q_vecs.shape[1] != stored_dim:
+        raise SystemExit(
+            f"embed 维度 {q_vecs.shape[1]} != 库内存储维 {stored_dim} —— "
+            f"gold 模式要求 embed 端点按原生维出向量(EMBED_DIM 配置核对)")
+    dims = [d for d in dims if d < stored_dim]
+    eval_dims = [stored_dim] + list(dims)
+    acc = {d: [_TopK(max(k, 50)) for _ in qs] for d in eval_dims}
+    for ids, block, _skip in insp.vector_blocks(table, id_col, notebook_id,
+                                                stored_dim, block_rows):
+        if not ids:
+            continue
+        for d in eval_dims:
+            sims = truncated_sims_many(block, q_vecs, d)
+            for qi in range(len(qs)):
+                acc[d][qi].update(ids, sims[:, qi])
 
     out: Dict[int, dict] = {}
     per_q_base: List[float] = []

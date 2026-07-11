@@ -6,7 +6,6 @@ import os
 import pathlib
 import sys
 import tempfile
-import uuid
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "backend"))
@@ -14,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv(REPO / ".env")
 
 from app.core.config import Settings  # noqa: E402
-from app.services.sqlite_repository import SQLiteRepository, _now  # noqa: E402
+from app.services.sqlite_repository import SQLiteRepository  # noqa: E402
 from app.services.kg.parsing import parse_elements  # noqa: E402
 from app.models.schemas import NotebookCreate  # noqa: E402
 
@@ -33,39 +32,25 @@ def insert_source(repo, nb_id, name, md_path, doc_type, char_limit, tmpdir):
         text = text[:char_limit]
     f = pathlib.Path(tmpdir) / f"{name}.md"
     f.write_text(text, encoding="utf-8")
-    sid = f"src-{uuid.uuid4().hex[:10]}"
-    now = _now()
     els = parse_elements(text, source_file=str(f))
-    with repo._connect() as db:
-        db.execute(
-            """INSERT INTO sources
-               (id, notebook_id, title, source_type, status, parse_status,
-                file_name, file_path, file_size, file_hash, summary, doc_type,
-                created_at, updated_at)
-               VALUES (?, ?, ?, 'markdown', 'extracted', 'parsed', ?, ?, 0, '', '', ?, ?, ?)""",
-            (sid, nb_id, name, f"{name}.md", str(f), doc_type, now, now))
-        for el in els:
-            db.execute(
-                """INSERT INTO source_elements
-                   (id, source_id, element_type, location_label, text, metadata, created_at)
-                   VALUES (?, ?, ?, ?, ?, '{}', ?)""",
-                (f"el-{uuid.uuid4().hex[:10]}", sid, el.type,
-                 f"L{el.line_start}-{el.line_end}", el.text, now))
+    sid = repo.maintenance.seed_parsed_source(
+        nb_id, title=name, doc_type=doc_type,
+        file_name=f"{name}.md", file_path=str(f),
+        elements=[{"element_type": el.type,
+                   "location_label": f"L{el.line_start}-{el.line_end}",
+                   "text": el.text} for el in els])
     return sid, len(els)
 
 
 def grounding_ok(repo, nb_id):
-    with repo._connect() as db:
-        objs = db.execute(
-            "SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE notebook_id=? LIMIT 5",
-            (nb_id,)).fetchall()
-        bad = 0
-        import json
-        for o in objs:
-            for ev in json.loads(o["evidence"] or "[]"):
-                row = db.execute("SELECT text FROM source_elements WHERE id=?", (ev["element_id"],)).fetchone()
-                if row is None or " ".join(ev["quoted_span"].split()) not in " ".join(row["text"].split()):
-                    bad += 1
+    objs = repo.maintenance.sample_knowledge_objects(nb_id, limit=5)
+    bad = 0
+    import json
+    for o in objs:
+        for ev in json.loads(o["evidence"] or "[]"):
+            text = repo.maintenance.element_text(ev["element_id"])
+            if text is None or " ".join(ev["quoted_span"].split()) not in " ".join(text.split()):
+                bad += 1
     return bad
 
 
@@ -81,7 +66,7 @@ def main():
         nb = repo.create_notebook(NotebookCreate(name=f"smoke-{name}"))
         sid, n_el = insert_source(repo, nb.id, name, md, dt, lim, tmpdir)
         print(f"\n[{name}] {n_el} elements, doc_type={dt} -> extracting...", flush=True)
-        repo._run_extraction(sid)
+        repo.maintenance.run_extraction(sid)
         g = repo.knowledge_graph(nb.id)
         types = sorted({n.object_type for n in g.nodes})
         empty_headlines = sum(1 for n in g.nodes if not n.headline.strip())

@@ -243,6 +243,10 @@ class RepositoryRuntime:
             event_log=self.event_log,
             ask=self.ask_service,
         )
+        # Task 27: SQLite maintenance face for CLI/batch composition roots —
+        # lazily wired by the facade `maintenance` property (it needs the
+        # embedder-bound retrieval provider, exactly like `ask` above).
+        self.maintenance: Any = None
 
     def wire_retrieval(self, *, embedder) -> RetrievalService:
         if self.retrieval is not None:

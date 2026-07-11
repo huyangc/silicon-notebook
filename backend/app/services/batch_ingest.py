@@ -22,11 +22,11 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from app.core.config import Settings
+from app.core.request_context import set_request_user, reset_request_user
 from app.models.schemas import NotebookCreate
+from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
-from app.services.sqlite_repository import (
-    SQLiteRepository, set_request_user, reset_request_user,
-)
+from app.services.sqlite_repository import SQLiteRepository
 
 SUPPORTED_EXTS = {".md", ".markdown", ".pdf"}
 
@@ -161,42 +161,21 @@ def sha256_bytes(content: bytes) -> str:
 
 
 def already_ingested(repo: SQLiteRepository, notebook_id: str, digest: str) -> bool:
-    with repo._connect() as db:
-        row = db.execute(
-            "SELECT id FROM sources WHERE notebook_id=? AND file_hash=?",
-            (notebook_id, digest),
-        ).fetchone()
-    return row is not None
+    return repo.maintenance.source_id_by_hash(notebook_id, digest) is not None
 
 
 def source_id_by_hash(repo: SQLiteRepository, notebook_id: str, digest: str) -> Optional[str]:
     """已按内容哈希摄取过则返回其 source id,否则 None(续跑/去重用)。"""
-    with repo._connect() as db:
-        row = db.execute(
-            "SELECT id FROM sources WHERE notebook_id=? AND file_hash=?",
-            (notebook_id, digest),
-        ).fetchone()
-    return row["id"] if row else None
+    return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
 def _resolve_owner_profile(repo: SQLiteRepository, owner: Optional[str]):
     """解析 notebook 属主 → UserProfile。owner=用户名(大小写不敏感);
     None → 默认取 admin 用户(role='admin' 中最早建的=seeded admin)。找不到 → SystemExit。"""
-    with repo._connect() as db:
-        if owner is not None:
-            from app.services.auth_utils import normalize_username
-            user = db.execute(
-                "SELECT * FROM users WHERE username=?", (normalize_username(owner),)).fetchone()
-            who = owner
-        else:
-            user = db.execute(
-                "SELECT * FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1").fetchone()
-            who = "admin"
-        if user is None:
-            raise SystemExit(f"error: owner not found: {who}")
-        profile = db.execute(
-            "SELECT * FROM user_profiles WHERE user_id=?", (user["id"],)).fetchone()
-    return repo._user_profile(user, profile)
+    profile = repo.maintenance.resolve_owner_profile(owner)
+    if profile is None:
+        raise SystemExit(f"error: owner not found: {owner if owner is not None else 'admin'}")
+    return profile
 
 
 def ensure_notebook(repo: SQLiteRepository, notebook_id: Optional[str], name: str,
@@ -260,31 +239,26 @@ def backfill_chunk_embeddings(repo: SQLiteRepository, notebook_id, conc=4,
     """
     if not repo.settings.embedder_configured:
         return 0
+    mnt = repo.maintenance
     orig_conc = repo.settings.embed_concurrency
     repo.settings.embed_concurrency = conc
     try:
         if missing_only:
-            with repo._connect() as db:
-                rows = db.execute(
-                    "SELECT c.id, c.text FROM chunks c WHERE c.notebook_id=? "
-                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)", (notebook_id,)).fetchall()
+            rows = mnt.missing_chunk_embedding_rows(notebook_id)
             items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
             if not items:
                 print("[embed] 无缺失 chunk 向量,跳过", flush=True)
                 return 0
             print(f"[embed] 补缺失 chunk 向量:{len(items)} 个", flush=True)
-            repo._embed_chunks_batch(notebook_id, items)
+            mnt.embed_chunks_batch(notebook_id, items)
             return len(items)
 
         done = 0
-        with repo._connect() as db:
-            sids = [r["id"] for r in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
+        sids = mnt.source_ids(notebook_id)
         n = len(sids)
         for i, sid in enumerate(sids, 1):
             try:
-                repo._embed_chunks_for_source(sid)
+                mnt.embed_chunks_for_source(sid)
                 done += 1
                 print(f"[embed {i}/{n}] {sid}", flush=True)
             except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
@@ -314,6 +288,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
         raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
 
     log = log or (lambda _e: None)
+    mnt = repo.maintenance
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
     repo.settings.kg_incremental_fusion_enabled = False   # 批量期关 per-source 融合,收尾一次全量
     res = {"extracted": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
@@ -328,12 +303,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
                 if llm_ok or not no_rebuild:
                     # 尚无 KG 的源数当 total(build_notebook_kg 内部自算目标,故 done 靠其
                     # progress 回调回填);查询很廉价。
-                    with repo._connect() as db:
-                        kg_total = db.execute(
-                            "SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
-                            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
-                            "WHERE k.source_id=s.id AND k.source_id!='')",
-                            (notebook_id,)).fetchone()["c"]
+                    kg_total = mnt.count_sources_missing_kg(notebook_id)
                     with _PoolReporter(report_interval, total=kg_total, log=log) as reporter:
                         def _kg_progress(i, n, sid, ok):
                             reporter.done = i
@@ -347,20 +317,16 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
                 if not llm_ok:
                     raise RuntimeError(
                         "KG LLM 未配置(KG_LLM_* 或主 LLM 均未配):--limit 抽取只会产出 no-llm 空结果")
-                with repo._connect() as db:
-                    all_sids = [r["id"] for r in db.execute(
-                        "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
-                    kgful = {r["source_id"] for r in db.execute(
-                        "SELECT DISTINCT source_id FROM knowledge_objects "
-                        "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
+                all_sids = mnt.source_ids(notebook_id)
+                kgful = mnt.kg_covered_source_ids(notebook_id)
                 targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
                 n_targets = len(targets)
                 with _PoolReporter(report_interval, total=n_targets, log=log) as reporter:
                     for i, sid in enumerate(targets, 1):
                         try:
-                            repo._set_source_status(sid, "extracting")
-                            repo._run_extraction(sid)
-                            repo._set_source_status(sid, "extracted")
+                            mnt.set_source_status(sid, "extracting")
+                            mnt.run_extraction(sid)
+                            mnt.set_source_status(sid, "extracted")
                             res["extracted"] += 1
                             log({"phase": "kg", "source_id": sid, "status": "extracted",
                                  "progress": f"{i}/{n_targets}"})
@@ -390,7 +356,7 @@ def run_kg(repo: SQLiteRepository, notebook_id, limit=None, conc=4, log=None,
             # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────
             nb = repo.get_notebook(notebook_id)
             is_base = (nb.tier == "base")
-            has_index = (repo._scale_index(notebook_id) is not None)
+            has_index = mnt.has_scale_index(notebook_id)
             if is_base or has_index:
                 manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
                 scale_nodes = manifest.get("n_nodes", 0)
@@ -443,10 +409,7 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
            "clusters": 0, "nodes_embedded": 0}
     try:
         # ── 分两批:新文件 vs 已 parse 缺 KG 的续抽源 ─────────────────────────────
-        with repo._connect() as db:
-            kgful = {r["source_id"] for r in db.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "WHERE notebook_id=? AND source_id!=''", (notebook_id,)).fetchall()}
+        kgful = repo.maintenance.kg_covered_source_ids(notebook_id)
         new_files: List[Path] = []
         resume_sids: List[str] = []
         for p in files:
@@ -506,7 +469,7 @@ def run_all(repo: SQLiteRepository, notebook_id, files, workers=4, conc=4, log=N
             res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
 
             nb = repo.get_notebook(notebook_id)
-            if nb.tier == "base" or repo._scale_index(notebook_id) is not None:
+            if nb.tier == "base" or repo.maintenance.has_scale_index(notebook_id):
                 manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
                 scale_nodes = manifest.get("n_nodes", 0)
                 res["scale_index_nodes"] = scale_nodes
@@ -527,47 +490,32 @@ def run_index(repo: SQLiteRepository, notebook_id: str) -> dict:
 
 
 def backfill_node_embeddings(repo: SQLiteRepository, notebook_id, conc=4) -> int:
-    """补 KG 节点向量(复用 _backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
+    """补 KG 节点向量(复用 backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
     if not repo.settings.embedder_configured:
         return 0
+    mnt = repo.maintenance
     orig_conc = repo.settings.embed_concurrency
     repo.settings.embed_concurrency = conc
     try:
-        with repo._connect() as db:
-            objects = [
-                {"id": r["id"], "payload": json.loads(r["payload"] or "{}")}
-                for r in db.execute(
-                    "SELECT id, payload FROM knowledge_objects "
-                    "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)).fetchall()
-            ]
-            def _p(done, total):
-                end = "\n" if done >= total else "\r"
-                print(f"  节点向量: {done}/{total}", end=end, flush=True)
-            repo._backfill_knowledge_embeddings(db, notebook_id, objects, progress=_p)
+        def _p(done, total):
+            end = "\n" if done >= total else "\r"
+            print(f"  节点向量: {done}/{total}", end=end, flush=True)
+        count = mnt.backfill_node_embeddings(notebook_id, progress=_p)
     finally:
         repo.settings.embed_concurrency = orig_conc
     # Backfilling node vectors changes the ANN inputs → mark dirty so the cluster
     # version's kg_mutation_seq advances (a later force=False rebuild must not skip
     # on the strength of unchanged object/decided counts alone).
-    repo._mark_unified_kg_dirty(notebook_id)
-    return len(objects)
+    mnt.mark_unified_kg_dirty(notebook_id)
+    return count
 
 
 def _count_missing_chunk_vectors(repo: SQLiteRepository, notebook_id) -> int:
-    with repo._connect() as db:
-        return db.execute(
-            "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
-            "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
-            (notebook_id,)).fetchone()["c"]
+    return repo.maintenance.count_missing_chunk_vectors(notebook_id)
 
 
 def _count_missing_node_vectors(repo: SQLiteRepository, notebook_id) -> int:
-    with repo._connect() as db:
-        return db.execute(
-            "SELECT COUNT(*) c FROM knowledge_objects o WHERE o.notebook_id=? "
-            "AND o.status!='deprecated' AND NOT EXISTS "
-            "(SELECT 1 FROM knowledge_embeddings e WHERE e.object_id=o.id)",
-            (notebook_id,)).fetchone()["c"]
+    return repo.maintenance.count_missing_node_vectors(notebook_id)
 
 
 def run_embed(repo: SQLiteRepository, notebook_id, conc=4) -> dict:
@@ -595,13 +543,8 @@ def run_embed(repo: SQLiteRepository, notebook_id, conc=4) -> dict:
     }
 
 
-# (table, id_column) for every embeddings table the BLOB backfill covers.
-_VECTOR_TABLES = (
-    ("chunk_embeddings", "chunk_id"),
-    ("knowledge_embeddings", "object_id"),
-    ("element_embeddings", "element_id"),
-    ("relation_embeddings", "relation_id"),
-)
+# (table, id_column) for every embeddings table the BLOB backfill covers —
+# canonical tuple lives with the maintenance adapter (imported above).
 
 _BACKFILL_BATCH_SIZE = 5000
 _BACKFILL_MAP_CHUNKSIZE = 256
@@ -678,21 +621,19 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
     multiprocessing machinery constructed. workers>1 parses+encodes each batch
     in a ProcessPoolExecutor (module-level `_parse_encode` worker, light
     imports only); the main process still owns 100% of the DB reads/writes —
-    SQLite stays single-writer, workers never open a connection. If the pool
-    dies (BrokenProcessPool), the run falls back to the serial path for this
-    batch and every subsequent one (fail-open: a crashed pool must never lose
-    the run, just lose the parallel speedup)."""
-    where = "WHERE typeof(vector)='text'"
-    params: tuple = ()
-    if notebook_id is not None:
-        where += " AND notebook_id=?"
-        params = (notebook_id,)
+    SQLite stays single-writer, workers never open a connection (the
+    per-batch SELECT+UPDATE transaction itself lives on the maintenance
+    adapter; the encode callback runs inside it, exactly like the old inline
+    `_write()` block). If the pool dies (BrokenProcessPool), the run falls
+    back to the serial path for this batch and every subsequent one
+    (fail-open: a crashed pool must never lose the run, just lose the
+    parallel speedup)."""
+    mnt = repo.maintenance
 
     # typeof() 无法走索引 → 这个 COUNT 是全表扫描,大表(如百万级 relation_embeddings)
     # 要几分钟。先出声,免得上一张表打完 N/N 后长时间静默被当成"卡死"。
     print(f"  [blob] {table}: 扫描待转行(大表可能数分钟,无输出≠卡死)…", flush=True)
-    with repo._connect() as db:
-        total = db.execute(f"SELECT COUNT(*) c FROM {table} {where}", params).fetchone()["c"]
+    total = mnt.count_text_vector_rows(table, id_col, notebook_id)
     converted = 0
     skipped_bad = 0
     if total == 0:
@@ -714,36 +655,36 @@ def _backfill_table_to_blob(repo: SQLiteRepository, notebook_id: Optional[str],
                 flush=True,
             )
             use_pool = False
+
+    def _encode(rows):
+        """Parse+encode one selected batch — runs inside the adapter's write
+        transaction (same boundary as the old inline block)."""
+        nonlocal use_pool, executor
+        if use_pool:
+            try:
+                pairs = [(r["vid"], r["vector"]) for r in rows]
+                by_vid = {vid: blob for vid, blob in executor.map(
+                    _parse_encode, pairs, chunksize=_BACKFILL_MAP_CHUNKSIZE)}
+                return [(by_vid[r["vid"]], r["notebook_id"], r["vid"]) for r in rows]
+            except BrokenProcessPool as exc:
+                print(f"  [blob] {table}: 进程池崩溃,回退串行(fallback to serial): {exc}",
+                      flush=True)
+                executor.shutdown(wait=False, cancel_futures=True)
+                executor = None
+                use_pool = False
+                return _parse_encode_batch_serial(rows)
+        return _parse_encode_batch_serial(rows)
+
     try:
         while True:
-            with repo._write() as db:
-                rows = db.execute(
-                    f"SELECT {id_col} AS vid, notebook_id, vector FROM {table} {where} "
-                    f"LIMIT {int(batch_size)}", params).fetchall()
-                if not rows:
-                    break
-                if use_pool:
-                    try:
-                        pairs = [(r["vid"], r["vector"]) for r in rows]
-                        by_vid = {vid: blob for vid, blob in executor.map(
-                            _parse_encode, pairs, chunksize=_BACKFILL_MAP_CHUNKSIZE)}
-                        updates = [(by_vid[r["vid"]], r["notebook_id"], r["vid"]) for r in rows]
-                    except BrokenProcessPool as exc:
-                        print(f"  [blob] {table}: 进程池崩溃,回退串行(fallback to serial): {exc}",
-                              flush=True)
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        executor = None
-                        use_pool = False
-                        updates = _parse_encode_batch_serial(rows)
-                else:
-                    updates = _parse_encode_batch_serial(rows)
-                skipped_bad += sum(1 for blob, _nb, _vid in updates if blob == b"")
-                db.executemany(
-                    f"UPDATE {table} SET vector=? WHERE notebook_id=? AND {id_col}=?",
-                    updates)
-            converted += len(rows)
+            n_rows, bad = mnt.convert_text_vector_batch(
+                table, id_col, notebook_id, batch_size, _encode)
+            if n_rows == 0:
+                break
+            skipped_bad += bad
+            converted += n_rows
             print(f"  [blob] {table}: {converted}/{total}", flush=True)
-            if len(rows) < batch_size:
+            if n_rows < batch_size:
                 break
     finally:
         if executor is not None:
@@ -792,14 +733,10 @@ def _backfill_source_index_for_notebook(repo: SQLiteRepository, notebook_id: str
     unified_kg_state.source_index_backfilled=1 at the end so the online
     _clear_source_extraction_state fast path activates immediately (no need to
     wait for a source delete/reparse to trigger the first-use backfill)."""
-    with repo._write() as db:
-        db.execute("DELETE FROM knowledge_object_sources WHERE notebook_id=?", (notebook_id,))
-        total = db.execute(
-            "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?", (notebook_id,)
-        ).fetchone()["c"]
+    mnt = repo.maintenance
+    total = mnt.clear_source_index(notebook_id)
     if total == 0:
-        with repo._write() as db:
-            repo._mark_source_index_backfilled(db, notebook_id)
+        mnt.mark_source_index_backfilled(notebook_id)
         print(f"  [source-index] {notebook_id}: 0/0 (无 knowledge_objects)", flush=True)
         return {"notebook_id": notebook_id, "objects": 0, "rows": 0}
 
@@ -807,33 +744,16 @@ def _backfill_source_index_for_notebook(repo: SQLiteRepository, notebook_id: str
     rows_written = 0
     last_id = ""
     while True:
-        with repo._write() as db:
-            batch = db.execute(
-                "SELECT id, evidence FROM knowledge_objects "
-                "WHERE notebook_id=? AND id > ? ORDER BY id LIMIT ?",
-                (notebook_id, last_id, _KOS_BACKFILL_BATCH_SIZE),
-            ).fetchall()
-            if not batch:
-                break
-            kos_rows = [
-                (row["id"], sid, notebook_id)
-                for row in batch
-                for sid in repo._source_ids_from_evidence(row["evidence"])
-            ]
-            if kos_rows:
-                db.executemany(
-                    "INSERT INTO knowledge_object_sources (object_id, source_id, notebook_id) "
-                    "VALUES (?, ?, ?)",
-                    kos_rows,
-                )
-                rows_written += len(kos_rows)
-        processed += len(batch)
-        last_id = batch[-1]["id"]
-        print(f"  [source-index] {notebook_id}: {processed}/{total}", flush=True)
-        if len(batch) < _KOS_BACKFILL_BATCH_SIZE:
+        n_batch, wrote, last_id = mnt.backfill_source_index_batch(
+            notebook_id, last_id, _KOS_BACKFILL_BATCH_SIZE)
+        if n_batch == 0:
             break
-    with repo._write() as db:
-        repo._mark_source_index_backfilled(db, notebook_id)
+        rows_written += wrote
+        processed += n_batch
+        print(f"  [source-index] {notebook_id}: {processed}/{total}", flush=True)
+        if n_batch < _KOS_BACKFILL_BATCH_SIZE:
+            break
+    mnt.mark_source_index_backfilled(notebook_id)
     return {"notebook_id": notebook_id, "objects": processed, "rows": rows_written}
 
 
@@ -847,8 +767,7 @@ def run_backfill_source_index(repo: SQLiteRepository, notebook_id: Optional[str]
     if not notebook_id and not all_notebooks:
         raise ValueError("run_backfill_source_index: 需要 notebook_id 或 all_notebooks=True")
     if all_notebooks:
-        with repo._connect() as db:
-            targets = [r["id"] for r in db.execute("SELECT id FROM notebooks ORDER BY id").fetchall()]
+        targets = repo.maintenance.all_notebook_ids()
     else:
         repo.get_notebook(notebook_id)  # KeyError if missing
         targets = [notebook_id]

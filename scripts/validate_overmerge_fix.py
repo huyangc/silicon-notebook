@@ -1,15 +1,13 @@
 """T6 验证去过度合并：①cluster_concepts 近线性计时 ②真实 nb-012 实证(垃圾簇消失)。
 用法: PYTHONPATH=backend python scripts/validate_overmerge_fix.py
 """
-import json
-import sqlite3
 import time
 from collections import defaultdict
 
 import numpy as np
 
+from app.repositories.sqlite.maintenance import ReadOnlySQLiteInspector
 from app.services.kg_merge import cluster_concepts, _discriminative_conflict, _norm
-from app.services.vector_index import decode_vector
 
 DB = "/Users/hzf/workspace/silicon_notebook/.local/silicon_notebook.db"
 NB = "nb-012fb94249"
@@ -34,19 +32,9 @@ for n in (1000, 2000, 4000):
     prev = el
 
 print("\n=== ② 真实 nb-012 实证 ===")
-con = sqlite3.connect(DB)
-con.row_factory = sqlite3.Row
-crows = con.execute(
-    "SELECT id, payload FROM knowledge_objects WHERE notebook_id=? AND object_type='concept'", (NB,)
-).fetchall()
-vrows = con.execute("SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?", (NB,)).fetchall()
-con.close()
-concepts = [{"object_id": r["id"], "name": json.loads(r["payload"] or "{}").get("name", "")} for r in crows]
-vectors = {}
-for r in vrows:
-    arr = decode_vector(r["vector"])
-    if arr is not None:
-        vectors[r["object_id"]] = arr.tolist()
+_insp = ReadOnlySQLiteInspector(DB)
+concepts = [{"object_id": oid, "name": name} for oid, name in _insp.concept_id_names(NB)]
+vectors = {oid: arr.tolist() for oid, arr in _insp.knowledge_vectors(NB).items()}
 vectors = {k: v for k, v in vectors.items() if len(v) == DIM}
 print(f"  concepts={len(concepts)}  with_vec={len(vectors)}")
 

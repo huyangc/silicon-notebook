@@ -1246,3 +1246,50 @@ def test_main_kg_fresh_dispatches_force_and_fresh(repo, monkeypatch):
 
     assert rc == 0
     assert seen == {"force": True, "fresh": True}
+
+
+# ── Task 27: batch ingest owns no SQLite plumbing ────────────────────────────
+
+def test_batch_ingest_module_reaches_no_private_facade_member():
+    """batch_ingest 是 CLI 组合根:构造 SQLiteRepository 合法,但所有 SQL/私有面
+    必须经 repo.maintenance(SQLiteMaintenanceAdapter)——模块内不得再出现
+    repo._x 私有属性访问(_connect/_write/_run_extraction/_embed_* 等)。"""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(bi))
+    offenders = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr.startswith("_")
+            and not node.attr.startswith("__")
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "repo"
+        ):
+            offenders.append((node.lineno, node.attr))
+    assert not offenders, f"batch_ingest still reaches private facade members: {offenders}"
+
+
+def test_repo_maintenance_is_cached_port_implementation(repo):
+    from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+
+    mnt = repo.maintenance
+    assert isinstance(mnt, SQLiteMaintenanceAdapter)
+    assert repo.maintenance is mnt                      # 同实例(缓存,非每次新建)
+    for name in ("delete_notebook_kg", "backfill_kg_fts", "backfill_chunk_fts",
+                 "build_scale_index", "fold_scale_index_delta"):
+        assert callable(getattr(mnt, name)), name
+
+
+def test_maintenance_extraction_routes_through_ingestion_service(repo, monkeypatch):
+    """adapter.run_extraction/set_source_status 必须动态经 runtime 组件转发——
+    组件级 monkeypatch(既有测试的座)对经 adapter 的调用同样可见。"""
+    calls = []
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction",
+                        lambda sid: calls.append(("run", sid)))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status",
+                        lambda sid, status, **k: calls.append(("status", sid, status)))
+    repo.maintenance.run_extraction("src-1")
+    repo.maintenance.set_source_status("src-1", "extracting")
+    assert calls == [("run", "src-1"), ("status", "src-1", "extracting")]

@@ -87,7 +87,7 @@ from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.pending_bus import pending_bus
-from app.services.repository import NotebookRepository, UploadedSourceFile
+from app.repositories.ports import AskStreamPort, UploadedSourceFile
 
 router = APIRouter()
 
@@ -591,7 +591,7 @@ def _ndjson_line(payload: dict[str, Any]) -> str:
 
 
 async def _stream_ask_events(
-    repo: NotebookRepository,
+    repo: AskStreamPort,
     notebook_id: str,
     payload: AskRequest,
     spec,
