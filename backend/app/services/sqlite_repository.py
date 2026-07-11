@@ -2174,20 +2174,11 @@ class SQLiteRepository:
             notebook_id, idx, ann, new_objs, cluster_map_
         )
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
-        """Cached {member_object_id: canonical_id} — one concept_clusters scan per
-        version, reused by unified_graph/viz build/kg_neighbors fallback/answer-context
-        fold/incremental_fuse_source etc. P1-2: this used to be re-scanned (ALL member
-        rows, at production scale millions) on every call of every consumer; now it's
-        version-cached like _vector_matrix/_ent_chunk_map/_elem_chunk_map. All known
-        consumers only .get() from the returned dict (never mutate it in place), so a
-        single cached dict object is safe to hand out to every caller."""
-        version = tuple(self._scale_index_version(notebook_id))
-
-        def _load():
-            with self._connect() as db:
-                return self._runtime.unified_kg.cluster_map_rows(db, notebook_id)
-
-        return self._vector_cache.get(f"{notebook_id}:clustermap", version, _load)
+        """Cached {member_object_id: canonical_id} — RetrievalCandidateService owns
+        the loader + version-cache body (Task 21); frozen-signature delegate。单一
+        owner：此前 facade 与服务各留一份等价实现、共享同一缓存键（"{nb}:clustermap"），
+        属双所有权漂移地雷（review 抓出），降为委托后 loader 只此一家。"""
+        return self.retrieval.candidates.cluster_map(notebook_id)
 
     def write_merge_candidate(self, notebook_id: str, a: str, b: str, score: float) -> None:
         """Merge-candidate insert — KnowledgeGovernanceService owns the body
@@ -2414,20 +2405,10 @@ class SQLiteRepository:
         return self._runtime.knowledge_lifecycle.unified_kg_status(notebook_id)
     def _edge_support_map(self, notebook_id: str) -> Dict[tuple, tuple]:
         """{(canonical_src, edge_type, canonical_tgt): (support_count, source_count)}。
-        版本 = canonical_rel_seq(O(1) 行读),表重建后自动失效。"""
-        with self._connect() as db:
-            st = self._runtime.unified_kg.state_row(db, notebook_id)
-        seq = int(st["canonical_rel_seq"]) if st else -1
-
-        def _load():
-            out: Dict[tuple, tuple] = {}
-            with self._connect() as db:
-                for r in self._runtime.unified_kg.edge_support_rows(db, notebook_id):
-                    out[(r["canonical_src"], r["edge_type"], r["canonical_tgt"])] = (
-                        int(r["support_count"]), int(r["source_count"]))
-            return out
-
-        return self._vector_cache.get(f"{notebook_id}:edge_support", ("edge_support", seq), _load)
+        GraphRetrievalService owns the loader + version-cache body (Task 21);
+        frozen-signature delegate（同 cluster_map：消除共享缓存键 "{nb}:edge_support"
+        的双所有权，loader 只此一家）。"""
+        return self.retrieval.graph._edge_support_map(notebook_id)
 
     def _annotate_edge_support(self, notebook_id: str, edges: List[dict]) -> List[dict]:
         """给 unified/neighbors 形状的边({source_object_id,target_object_id,edge_type})
