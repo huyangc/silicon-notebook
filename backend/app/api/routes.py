@@ -876,41 +876,20 @@ def _report_llm_ready(repo) -> bool:
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
                      auto_generate: bool = False) -> None:
     """阶段1(规划)后台 job:跑 plan_outline → outline_ready;auto_generate 时
-    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。"""
-    from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
-    cancel = register_cancel(rid)
-
-    def worker():
-        try:
-            depth = 2
-            try:
-                depth = int(repo.get_report(notebook_id, rid).get("depth", 2))
-            except Exception:
-                pass
-            ReportEngine(repo, repo.settings, cancel_event=cancel).run(
-                notebook_id, rid, question, history, depth=depth,
-                auto_generate=auto_generate)
-        finally:
-            unregister_cancel(rid)
-
-    # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
-    background_jobs.submit(worker, name=f"report-plan-{rid}", notify_pending=True)
+    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。
+    Task 25:helper 名保留(测试 monkeypatch 位),编排移交运行时协调器——
+    注册取消(submit 前)→ background_jobs.submit(copy_context)→ 收尾注销。"""
+    repo.report_execution.start_plan(
+        notebook_id, rid, question, history, auto_generate,
+        user_id=repo.current_user().id)
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
                          depth: int = 2) -> None:
     """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
-    from app.services.report_engine import ReportEngine, register_cancel, unregister_cancel
-    cancel = register_cancel(rid)
-
-    def worker():
-        try:
-            ReportEngine(repo, repo.settings, cancel_event=cancel).generate(
-                notebook_id, rid, question, depth=depth)
-        finally:
-            unregister_cancel(rid)
-
-    background_jobs.submit(worker, name=f"report-gen-{rid}", notify_pending=True)
+    repo.report_execution.start_generate(
+        notebook_id, rid, question, depth,
+        user_id=repo.current_user().id)
 
 
 @router.post("/notebooks/{notebook_id}/reports",

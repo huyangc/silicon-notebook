@@ -104,9 +104,11 @@ def test_report_prompts_contract():
 # ---------------------------------------------------------------------------
 
 def _mk_engine(repo, llm):
+    # Task 25:引擎端口化——测试经 from_repository 冻结适配器构造(提取窄端口,
+    # 不再持 facade);检索桩改打在 repo.retrieval / repo._runtime.* 的所有者上。
     from app.services.report_engine import ReportEngine
     repo.llm_client = llm
-    return ReportEngine(repo, repo.settings)
+    return ReportEngine.from_repository(repo, repo.settings)
 
 
 class _OutlineLLM:
@@ -152,7 +154,7 @@ def test_engine_runs_sections_in_parallel_and_tolerates_one_failure(repo, monkey
     llm = _OutlineLLM(n_fail_sections=1)
     eng = _mk_engine(repo, llm)
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
-    monkeypatch.setattr(repo, "federated_retrieve", lambda a, q: [])
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a, q: [])
     # stub 每节深挖:不跑真检索,返回空 ReasoningResult(编排测试与检索解耦)
     from app.services.reasoning_retrieval import ReasoningResult
     monkeypatch.setattr(eng, "_deep_dive",
@@ -177,9 +179,9 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
     cancel = threading.Event()
     from app.services.report_engine import ReportEngine
     repo.llm_client = llm
-    eng = ReportEngine(repo, repo.settings, cancel_event=cancel)
+    eng = ReportEngine.from_repository(repo, repo.settings, cancel_event=cancel)
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
-    monkeypatch.setattr(repo, "federated_retrieve", lambda a, q: [])
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a, q: [])
     from app.services.reasoning_retrieval import ReasoningResult
     def _dd(nb_id, section, question, depth=None, on_step=None):
         cancel.set()                                # 深挖中途被取消
@@ -319,7 +321,6 @@ def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
          "id_map": {"k1": razavi_b},          # 同 Razavi 来源,节内也叫 k1
          "attempted": [], "top_concepts": []},
     ]
-    monkeypatch.setattr(eng.repo, "_retrieve_neighbors", lambda *a, **k: [])
     rid = repo.create_report(nb.id, "q")
     md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
 
@@ -429,7 +430,7 @@ def test_deep_dive_passes_depth_as_max_steps(repo, monkeypatch):
     captured = {}
     from app.services.reasoning_retrieval import ReasoningResult
     class _R:
-        def __init__(self, *a): pass
+        def __init__(self, *a, **k): pass          # 端口化:仅关键字注入
         def run(self, nb_id, q, **kw):
             captured.update(kw); return ReasoningResult()
     monkeypatch.setattr("app.services.reasoning_retrieval.ReasoningRetriever", _R)
@@ -460,7 +461,7 @@ def test_build_corpus_map_grounds_on_corpus(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
     from app.services.retrieval import RetrievedKnowledge, RetrievedChunk
     nb = _mk_nb(repo)
-    eng = ReportEngine(repo, repo.settings)
+    eng = ReportEngine.from_repository(repo, repo.settings)
     # 来源
     with repo._write() as db:
         db.execute("INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,created_at,updated_at)"
@@ -473,8 +474,8 @@ def test_build_corpus_map_grounds_on_corpus(repo, monkeypatch):
     def _ppr(nbid, q):
         return [RetrievedChunk(chunk_id="c1", source_id="s2", source_title="Gray & Meyer",
                                section_path="§11.2", text="……很长的正文不该进 map……")]
-    monkeypatch.setattr(repo, "federated_retrieve", _fed)
-    monkeypatch.setattr(repo, "_ppr_retrieve", _ppr)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", _fed)
+    monkeypatch.setattr(repo.retrieval, "ppr_retrieve", _ppr)
     m = eng._build_corpus_map(nb.id, "why is bandgap 1.2V")
     assert "Razavi Analog CMOS" in m            # 来源标题
     assert "Bandgap Reference" in m and "[base]" in m   # KG + tier
@@ -503,12 +504,12 @@ def test_storm_outline_prompt_contract():
 def test_probe_sufficiency_counts_hits(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
     from app.services.retrieval import RetrievedKnowledge
-    eng = ReportEngine(repo, repo.settings)
+    eng = ReportEngine.from_repository(repo, repo.settings)
     def _fed(active, q):
         h = RetrievedKnowledge(object_id="k-"+q, object_type="concept", payload={})
         h.notebook_id = "nb-base" if "base" in q else "nb-x"; h.tier="base" if "base" in q else "personal"
         return [h]
-    monkeypatch.setattr(repo, "federated_retrieve", _fed)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", _fed)
     out = eng._probe_sufficiency("nb", [{"title":"A","sub_queries":["base-x","y"]},
                                         {"title":"B","sub_queries":[]}])
     assert out[0]["title"]=="A" and out[0]["hits"]==2 and out[0]["base_hits"]==1
@@ -541,8 +542,8 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
             return "{}"
     repo.llm_client = _LLM()          # reasoning/rewrite 都回退到它(测试桩)
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q: "MAP")
-    monkeypatch.setattr(repo, "federated_retrieve", lambda a,q: [])
-    eng = ReportEngine(repo, repo.settings)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a,q: [])
+    eng = ReportEngine.from_repository(repo, repo.settings)
     rid = repo.create_report(nb.id, "why bandgap 1.2V")
     eng.plan_outline(nb.id, rid, "why bandgap 1.2V")
     d = repo.get_report(nb.id, rid)
@@ -559,8 +560,8 @@ def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
         def chat_json(self, *a, **k): return "not json"
     repo.llm_client=_Bad()
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q:"MAP")
-    monkeypatch.setattr(repo, "federated_retrieve", lambda a,q: [])
-    eng=ReportEngine(repo, repo.settings)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a,q: [])
+    eng=ReportEngine.from_repository(repo, repo.settings)
     rid=repo.create_report(nb.id,"q")
     eng.plan_outline(nb.id, rid, "q")
     d=repo.get_report(nb.id, rid)
@@ -578,7 +579,7 @@ def test_generate_runs_sections_on_stored_outline(repo, monkeypatch):
     rid=repo.create_report(nb.id,"q")
     repo.update_report(nb.id, rid, outline=[{"title":"A","scope":"s","sub_queries":["q"]}],
                        status="outline_ready")
-    eng=ReportEngine(repo, repo.settings)
+    eng=ReportEngine.from_repository(repo, repo.settings)
     monkeypatch.setattr(eng, "_deep_dive", lambda *a,**k: ReasoningResult())
     class _S:
         configured=True
@@ -590,12 +591,14 @@ def test_generate_runs_sections_on_stored_outline(repo, monkeypatch):
 
 def test_run_backcompat_plans_then_generates(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
-    eng=ReportEngine(repo, repo.settings)
+    eng=ReportEngine.from_repository(repo, repo.settings)
     calls=[]
     monkeypatch.setattr(eng,"plan_outline", lambda *a,**k: calls.append("plan"))
     monkeypatch.setattr(eng,"generate", lambda *a,**k: calls.append("gen"))
     # outline_ready 由 stub plan_outline 不写,run 需自己判定;这里断言两阶段都被调用
-    monkeypatch.setattr(repo,"get_report", lambda n,r: {"status":"outline_ready","outline":[{"title":"A"}]})
+    # (Task 25:引擎读 reports 端口 = runtime 的 ReportStore,桩打在所有者上)
+    monkeypatch.setattr(repo._runtime.report_store, "get_report",
+                        lambda n,r: {"status":"outline_ready","outline":[{"title":"A"}]})
     eng.run("nb","rid","q", auto_generate=True)
     assert calls==["plan","gen"]
 
@@ -618,7 +621,8 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     eng = _mk_engine(repo, stub)
     nb = _mk_nb(repo)
     notes = []
-    repo._note_model_error = lambda stage, model, exc: notes.append(stage)  # spy 可观测
+    # spy 可观测(Task 25:引擎经 ModelErrorSink 端口 = runtime 的模型 provider)
+    repo._runtime.models.note_model_error = lambda stage, model, exc: notes.append(stage)
     out = eng._draft_section(nb.id, {"title": "T", "scope": "S"}, "q", ReasoningResult())
     assert stub.calls == 2                                   # 空 markdown 触发重试
     assert out["markdown"] == ""

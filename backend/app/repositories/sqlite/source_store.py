@@ -163,6 +163,18 @@ class SourceStore:
             (notebook_id,),
         ).fetchall()
 
+    def report_source_rows(self, notebook_id: str) -> List[Dict[str, str]]:
+        """Report corpus-map recon (Task 25): source titles in creation order,
+        LIMIT 20 — the deep-report engine's scout cap.  SQL frozen from the
+        facade's inline query; strip/filter formatting stays engine-side."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT title FROM sources WHERE notebook_id=? "
+                "ORDER BY created_at LIMIT 20",
+                (notebook_id,),
+            ).fetchall()
+        return [{"title": row["title"]} for row in rows]
+
     def notebook_element_sample(
         self, notebook_id: str, *, max_chars: int = 8000
     ) -> List[dict]:

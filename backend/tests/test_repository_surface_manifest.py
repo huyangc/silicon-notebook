@@ -1160,6 +1160,63 @@ TASK21_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 25: the deep-report domain moves off the facade — ReportEngine keeps
+# only narrow ports (its frozen repo.* call sites disappear), the facade's
+# report CRUD becomes ReportStore delegates (the internal _report_row_to_dict
+# self-calls move into the store), routes' launch helpers delegate to the
+# runtime ReportExecutionCoordinator (repo.settings leaves routes.py; the new
+# facade `report_execution` property is the coordinator handle) and the report
+# test files re-seat their stubs on the canonical owners
+# (repo.retrieval / repo._runtime.*).
+TASK25_ALLOWED_IMPORTS = {
+    ("backend/tests/test_report_store.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_report_execution.py", 223, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
+TASK25_ALLOWED_NEW_MEMBERS = {"report_execution"}
+
+TASK25_ALLOWED_PATCHES = {
+    ("backend/tests/test_report_engine.py", 155, "federated_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 182, "federated_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 322, "_retrieve_neighbors", "eng.repo"),
+    ("backend/tests/test_report_engine.py", 476, "federated_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 477, "_ppr_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 511, "federated_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 544, "federated_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 562, "federated_retrieve", "repo"),
+    ("backend/tests/test_report_engine.py", 598, "get_report", "repo"),
+}
+
+TASK25_ALLOWED_MEMBER_FILES = {
+    ("backend/app/services/report_engine.py", name)
+    for name in {
+        "_answer_context", "_chunk_answer_context", "_connect",
+        "_note_model_error", "_ppr_retrieve", "federated_retrieve",
+        "get_report", "reasoning_llm_client", "rewrite_llm_client",
+        "update_report",
+    }
+} | {
+    ("backend/app/services/sqlite_repository.py", "_report_row_to_dict"),
+    ("backend/app/api/routes.py", "settings"),
+} | {
+    ("backend/tests/test_report_engine.py", name)
+    for name in {
+        "_note_model_error", "_ppr_retrieve", "_retrieve_neighbors", "_write",
+        "_runtime", "create_report", "federated_retrieve", "get_report",
+        "llm_client", "retrieval", "update_report",
+    }
+} | {
+    ("backend/tests/test_report_store.py", name)
+    for name in {
+        "SQLiteRepository", "_report_row_to_dict", "_runtime",
+        "create_notebook", "create_report", "delete_report", "export_reports",
+        "get_report", "list_reports", "update_report",
+    }
+} | {
+    ("backend/tests/test_report_execution.py", name)
+    for name in {"SQLiteRepository", "_runtime"}
+}
+
 TASK21_ALLOWED_MEMBER_FILES |= {
     ('backend/app/services/sqlite_repository.py', '_CJK_RE'),
     ('backend/app/services/sqlite_repository.py', '_LATIN_RE'),
@@ -1420,6 +1477,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK21_ALLOWED_MEMBER_FILES
     | TASK22_ALLOWED_MEMBER_FILES
     | TASK23_ALLOWED_MEMBER_FILES
+    | TASK25_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -1895,6 +1953,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK20_ALLOWED_IMPORTS
                     or site in TASK22_ALLOWED_IMPORTS
                     or site in TASK23_ALLOWED_IMPORTS
+                    or site in TASK25_ALLOWED_IMPORTS
                 )
 
 
@@ -1906,7 +1965,7 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     }
 
     actual = _static_repository_patches()
-    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES
+    allowed = TASK4_ALLOWED_PATCHES | TASK5_ALLOWED_PATCHES | MASTER_V10_ALLOWED_PATCHES | TASK8_ALLOWED_PATCHES | TASK9_ALLOWED_PATCHES | TASK10_ALLOWED_PATCHES | TASK11_ALLOWED_PATCHES | TASK12_ALLOWED_PATCHES | TASK13_ALLOWED_PATCHES | TASK15_ALLOWED_PATCHES | TASK16_ALLOWED_PATCHES | TASK20_ALLOWED_PATCHES | TASK21_ALLOWED_PATCHES | TASK25_ALLOWED_PATCHES
     assert recorded | allowed == actual | allowed
     assert (
         "backend/tests/test_scale_index_repo.py",
@@ -1957,6 +2016,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in TASK7_ALLOWED_NEW_MEMBERS | TASK12_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in TASK25_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

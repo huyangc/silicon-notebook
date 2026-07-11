@@ -20,6 +20,7 @@ from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
+from app.repositories.sqlite.report_store import ReportStore
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
@@ -31,6 +32,10 @@ from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
+from app.services.report_execution import (
+    REPORT_CANCELLATIONS,
+    ReportExecutionCoordinator,
+)
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.retrieval_candidates import CandidateRetrievalService
 from app.services.retrieval_service import RetrievalService
@@ -83,6 +88,22 @@ class RepositoryRuntime:
         )
         self.source_store = SourceStore(self.database, now=seams.now)
         self.chunk_store = ChunkStore(self.database)
+        # Task 25: reports-table row persistence is seam-free (the shared
+        # database boundary + the id/clock seams + identity's current_user),
+        # so the runtime owns and constructs it eagerly.  The process-global
+        # cancellation registry is referenced BY IDENTITY (report_engine's
+        # register/cancel/unregister delegates observe the same instance);
+        # the execution coordinator is finished by wire_report_execution()
+        # because its engine factory rides the lazily wired retrieval and
+        # evidence-context ports.
+        self.report_store = ReportStore(
+            self.database,
+            new_id=seams.new_id,
+            now=seams.now,
+            current_user_id=lambda: self.identity.current_user().id,
+        )
+        self.report_cancellations = REPORT_CANCELLATIONS
+        self.report_execution: "ReportExecutionCoordinator | None" = None
         # Task 13: the three knowledge-domain persistence stores share the ONE
         # database boundary. Their primitives are connection-taking — the
         # facade keeps every transaction/connection boundary (its `_write` /
@@ -717,3 +738,64 @@ class RepositoryRuntime:
             copy_stats=copy_stats,
         )
         return self.sharing
+
+    def wire_report_execution(
+        self,
+        *,
+        retrieval: Callable[[], Any],
+        job_submitter: Any,
+    ) -> ReportExecutionCoordinator:
+        """Compose the deep-report execution domain (Task 25).
+
+        ``retrieval`` resolves the facade's lazy ``retrieval`` property per
+        engine construction (wire_retrieval is embedder-bound and lazy;
+        resolving it also finishes the evidence-context service), so a report
+        engine can only be built once retrieval exists — reports launch from
+        request handlers, well after construction.  ``job_submitter`` is
+        ``background_jobs.submit`` — the ONE detached-execution entry
+        (copy_context propagation of the per-user model context, top-level
+        exception guard, daemon naming).  The process-global
+        ``REPORT_CANCELLATIONS`` registry is referenced BY IDENTITY: the
+        ``report_engine`` module delegates (register_cancel/cancel_report/
+        unregister_cancel), the cancel endpoint and this coordinator all
+        observe the same instance.  A fresh CommunityQueryService is built per
+        engine (per report job) so ``settings.sibling_min_bridge`` is read at
+        launch time — mirroring the frozen per-deep-dive construction.
+        Deliberately NO restart recovery: a dead process leaves the report row
+        at its last persisted status."""
+        from app.services.communities import CommunityQueryService
+        from app.services.report_engine import ReportEngine, ReportEngineDependencies
+
+        def engine_factory(*, user_id: str, cancel_event=None) -> ReportEngine:
+            retrieval_port = retrieval()
+            if self.evidence_context is None:
+                raise RuntimeError(
+                    "wire_report_execution engine factory requires wired retrieval"
+                )
+            dependencies = ReportEngineDependencies(
+                reports=self.report_store,
+                retrieval=retrieval_port,
+                evidence_context=self.evidence_context,
+                model_clients=self.models,
+                model_errors=self.models,
+                source_query=self.source_store,
+                communities=CommunityQueryService(
+                    notebooks=self.notebook_store,
+                    unified_kg=self.unified_kg,
+                    event_log=self.event_log,
+                    sibling_min_bridge=self.settings.sibling_min_bridge,
+                ),
+                settings=self.settings,
+                event_log=self.event_log,
+            )
+            return ReportEngine(
+                dependencies, user_id=user_id, cancel_event=cancel_event
+            )
+
+        self.report_execution = ReportExecutionCoordinator(
+            reports=self.report_store,
+            engine_factory=engine_factory,
+            cancellations=self.report_cancellations,
+            job_submitter=job_submitter,
+        )
+        return self.report_execution

@@ -477,3 +477,13 @@ class AskStateStorePort(Protocol):
     ) -> str | None: ...
     def cleanup_empty_conversation(self, conversation_id: str) -> None: ...
     def ask_job_status(self, job_id: str) -> dict: ...
+
+
+class ReportSourceQueryPort(Protocol):
+    """Report corpus-map recon projection over sources (Task 25): title-only
+    rows in creation order, capped — the deep-report engine's 0-LLM 语料侦察
+    read (SQL frozen from the facade's inline query)."""
+
+    def report_source_rows(
+        self, notebook_id: str
+    ) -> list[dict[str, str]]: ...

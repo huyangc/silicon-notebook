@@ -589,6 +589,14 @@ class SQLiteRepository:
         # 经同一注册表)。_ask_cancel_events/_ask_cancel_lock 以下方兼容属性透出
         # 同一对象——cancel 端点据此 set 对应 worker 的 cancel_event(唯一真取消
         # 入口;断连不再取消)。
+        # Task 25: 深度报告脱离连接执行域——引擎工厂骑在 facade 惰性 `retrieval`
+        # 属性上(embedder 绑定),job 一律经 background_jobs.submit(copy_context
+        # 传播 per-user 模型);进程全局取消注册表按身份注入。
+        from app.services import background_jobs
+        self._runtime.wire_report_execution(
+            retrieval=lambda: self.retrieval,
+            job_submitter=background_jobs.submit,
+        )
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize()
 
@@ -4511,112 +4519,44 @@ class SQLiteRepository:
             notebook_id, older_than_days, self.current_user().id)
 
     # --- 深度报告 ---
+    # Task 25: reports 表行级持久化移入 runtime 所有的 ReportStore;此处保持
+    # 冻结签名委托(notebook 存在性守卫留在 create_report 委托里)。脱离连接
+    # 执行编排见 report_execution 属性(ReportExecutionCoordinator)。
     def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
         self.get_notebook(notebook_id)          # 不存在则 KeyError
-        rid = _new_id("rep")
-        now = _now()
-        with self._write() as db:
-            db.execute(
-                "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (rid, notebook_id, question, depth, self.current_user().id, now, now))
-        return rid
+        return self._runtime.report_store.create_report(
+            notebook_id, question, depth=depth)
 
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
                       gaps=None, references=None, content_md=None,
                       section_status=None) -> None:
-        sets, args = ["updated_at = ?"], [_now()]
-        for col, val, dump in (("status", status, False), ("progress", progress, False),
-                               ("error", error, False), ("content_md", content_md, False),
-                               ("outline_json", outline, True),
-                               ("sections_json", sections, True), ("gaps_json", gaps, True),
-                               ("references_json", references, True),
-                               ("section_status_json", section_status, True)):
-            if val is not None:
-                sets.append(f"{col} = ?")
-                args.append(json.dumps(val, ensure_ascii=False) if dump else val)
-        args.extend([report_id, notebook_id])
-        with self._write() as db:
-            db.execute(f"UPDATE reports SET {', '.join(sets)} WHERE id = ? AND notebook_id = ?", args)
+        return self._runtime.report_store.update_report(
+            notebook_id, report_id, status=status, progress=progress,
+            error=error, outline=outline, sections=sections, gaps=gaps,
+            references=references, content_md=content_md,
+            section_status=section_status)
 
     def _report_row_to_dict(self, row, *, full: bool) -> dict:
-        d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
-             "status": row["status"], "progress": row["progress"], "error": row["error"],
-             "created_by": row["created_by"], "created_at": row["created_at"],
-             "updated_at": row["updated_at"], "depth": row["depth"],
-             "section_count": len(json.loads(row["outline_json"] or "[]"))}
-        if full:
-            d.update(outline=json.loads(row["outline_json"] or "[]"),
-                     sections=json.loads(row["sections_json"] or "[]"),
-                     gaps=json.loads(row["gaps_json"] or "[]"),
-                     references=json.loads(row["references_json"] or "[]"),
-                     section_status=json.loads(row["section_status_json"] or "[]"),
-                     content_md=row["content_md"])
-        return d
+        return self._runtime.report_store.row_to_dict(row, full=full)
 
     def get_report(self, notebook_id: str, report_id: str) -> dict:
-        with self._connect() as db:
-            row = db.execute("SELECT * FROM reports WHERE id = ? AND notebook_id = ?",
-                             (report_id, notebook_id)).fetchone()
-        if row is None:
-            raise KeyError(report_id)
-        return self._report_row_to_dict(row, full=True)
+        return self._runtime.report_store.get_report(notebook_id, report_id)
 
     def list_reports(self, notebook_id: str) -> list:
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT * FROM reports WHERE notebook_id = ? ORDER BY created_at DESC, id",
-                (notebook_id,)).fetchall()
-        return [self._report_row_to_dict(r, full=False) for r in rows]
+        return self._runtime.report_store.list_reports(notebook_id)
 
     def delete_report(self, notebook_id: str, report_id: str) -> None:
-        with self._write() as db:
-            db.execute("DELETE FROM reports WHERE id = ? AND notebook_id = ?",
-                       (report_id, notebook_id))
+        return self._runtime.report_store.delete_report(notebook_id, report_id)
 
     def export_reports(self, notebook_id: str, report_ids: list) -> list:
-        """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
-        notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
-        id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+        return self._runtime.report_store.export_reports(notebook_id, report_ids)
 
-        只读走 _connect()。report_ids 数量通常极小(用户勾选的几份报告),直接构造
-        占位符即可;但仍按 _in_batches 分批以防罕见的大批量超 SQLite 变量上限
-        (3.32+ 上限 32,766),批间用 dict 汇总后按原顺序回放。"""
-        def _safe(name: str) -> str:
-            s = re.sub(r'[/\\:*?"<>|\r\n]', "_", name or "").strip()
-            return s or ""
-
-        ids = [r for r in (report_ids or []) if r]
-        if not ids:
-            return []
-        found: dict = {}                         # rid -> (question, content_md)
-        with self._connect() as db:
-            for batch in self._in_batches(ids):
-                placeholders = ",".join("?" for _ in batch)
-                rows = db.execute(
-                    f"SELECT id, question, content_md FROM reports "
-                    f"WHERE notebook_id = ? AND status = 'done' "
-                    f"AND content_md IS NOT NULL AND content_md != '' "
-                    f"AND id IN ({placeholders})",
-                    (notebook_id, *batch)).fetchall()
-                for row in rows:
-                    found[row["id"]] = (row["question"], row["content_md"])
-        out: list = []
-        seen: dict = {}                          # 文件名去重(极端同名 → 加 -N 后缀)
-        for rid in ids:                          # 保持传入顺序
-            if rid not in found:
-                continue
-            question, content_md = found[rid]
-            stem = _safe(question)[:40] or rid
-            fname = f"{stem}-{rid}.md"
-            if fname in seen:
-                seen[fname] += 1
-                fname = f"{stem}-{rid}-{seen[fname]}.md"
-            else:
-                seen[fname] = 0
-            out.append((fname, content_md))
-        return out
+    @property
+    def report_execution(self):
+        """Explicit deep-report execution coordinator (Task 25); routes'
+        _launch_plan_job/_launch_generate_job delegate here."""
+        return self._runtime.report_execution
 
     def pending_actions(self, user_id: str) -> dict:
         """聚合当前用户「我创建的」notebook 的三类待办(深度报告待确认/治理队列/
