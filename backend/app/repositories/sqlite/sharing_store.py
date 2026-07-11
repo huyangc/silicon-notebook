@@ -117,6 +117,15 @@ class SharingStore:
                 "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
             ).fetchone()
 
+    @staticmethod
+    def notebook_row_on(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> "sqlite3.Row | None":
+        """Read a notebook on the caller's summary-hydration snapshot."""
+        return db.execute(
+            "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
+        ).fetchone()
+
     def shared_preview_rows(self, notebook_id: str) -> "tuple[str, list[str]]":
         """(owner_display, first-50 source titles) for the share preview."""
         with self.database.connect() as db:

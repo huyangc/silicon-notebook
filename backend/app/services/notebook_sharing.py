@@ -396,9 +396,7 @@ class NotebookSharingService:
     def join_shared(self, notebook_id: str, user_id: str) -> NotebookSummary:
         self.add_member(notebook_id, user_id)
         with self._database.connect() as db:
-            row = db.execute(
-                "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
-            ).fetchone()
+            row = self._store.notebook_row_on(db, notebook_id)
             notebook = self._summaries.from_row(db, row)
         notebook.access = "reader"
         return notebook

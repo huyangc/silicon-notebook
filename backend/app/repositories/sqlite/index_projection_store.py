@@ -140,6 +140,28 @@ class IndexProjectionStore:
             return [r["id"] for r in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
 
+    def notebook_owner(self, notebook_id: str) -> "str | None":
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)
+            ).fetchone()
+        return row["created_by"] if row else None
+
+    def notebook_name(self, notebook_id: str) -> str:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT name FROM notebooks WHERE id = ?", (notebook_id,)
+            ).fetchone()
+        return row["name"] if row else ""
+
+    def unified_last_rebuild_at(self, notebook_id: str) -> str:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT last_rebuild_at FROM unified_kg_state WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()
+        return str(row["last_rebuild_at"]) if row and row["last_rebuild_at"] else ""
+
     def delta_chunk_count(self, notebook_id: str, source_ids: Sequence[str]) -> int:
         """Chunk count over the given (post-watermark) sources, batched through
         the facade's IN-clause chunking (SQLite variable-count safe)."""

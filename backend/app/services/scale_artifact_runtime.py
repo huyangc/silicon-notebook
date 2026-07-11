@@ -138,22 +138,13 @@ class ScaleArtifactRuntime:
         if user_id:
             return user_id
         try:
-            with self.projections.connect() as db:
-                row = db.execute(
-                    "SELECT created_by FROM notebooks WHERE id = ?",
-                    (notebook_id,),
-                ).fetchone()
-            return row["created_by"] if row else None
+            return self.projections.notebook_owner(notebook_id)
         except Exception:  # noqa: BLE001 - notification is fail-open
             return None
 
     def _notebook_name(self, notebook_id: str) -> str:
         try:
-            with self.projections.connect() as db:
-                row = db.execute(
-                    "SELECT name FROM notebooks WHERE id = ?", (notebook_id,)
-                ).fetchone()
-            return row["name"] if row else ""
+            return self.projections.notebook_name(notebook_id)
         except Exception:  # noqa: BLE001 - notification is fail-open
             return ""
 
@@ -445,17 +436,7 @@ class ScaleArtifactRuntime:
                 return "full"
             built_at = str(index.manifest.get("built_at", ""))
             if built_at:
-                with self.projections.connect() as db:
-                    row = db.execute(
-                        "SELECT last_rebuild_at FROM unified_kg_state "
-                        "WHERE notebook_id=?",
-                        (notebook_id,),
-                    ).fetchone()
-                last_rebuild = (
-                    str(row["last_rebuild_at"])
-                    if row and row["last_rebuild_at"]
-                    else ""
-                )
+                last_rebuild = self.projections.unified_last_rebuild_at(notebook_id)
                 if last_rebuild and last_rebuild > built_at:
                     return "full"
         try:

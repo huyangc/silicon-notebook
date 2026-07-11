@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from app.models.schemas import (
@@ -29,6 +30,86 @@ def _snippet(text: str, needle: str) -> str:
 class QueryStore:
     def __init__(self, database: SqliteDatabase) -> None:
         self.database = database
+
+    # NotebookSummary projection primitives.  The caller deliberately retains
+    # the connection so one summary is hydrated from one read snapshot.
+    @staticmethod
+    def count_rows(
+        db: sqlite3.Connection, table: str, column: str, value: str
+    ) -> int:
+        row = db.execute(
+            f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?", (value,)
+        ).fetchone()
+        return int(row["count"])
+
+    @staticmethod
+    def knowledge_type_count_rows(
+        db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
+    ) -> list[sqlite3.Row]:
+        placeholders = ",".join("?" for _ in statuses)
+        return db.execute(
+            f"SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
+            f"WHERE notebook_id = ? AND status IN ({placeholders}) "
+            f"GROUP BY object_type",
+            (notebook_id, *statuses),
+        ).fetchall()
+
+    @staticmethod
+    def notebook_has_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    @staticmethod
+    def pending_kg_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
+        row = db.execute(
+            """
+            SELECT COUNT(*) FROM sources s
+            WHERE s.notebook_id = ?
+              AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)
+              AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '')
+            """,
+            (notebook_id,),
+        ).fetchone()
+        return int(row[0])
+
+    @staticmethod
+    def base_notebook_info_row(db: sqlite3.Connection):
+        return db.execute(
+            "SELECT nb.name, "
+            "EXISTS(SELECT 1 FROM knowledge_objects ko "
+            "JOIN notebooks b ON b.id = ko.notebook_id WHERE b.tier = 'base') "
+            "FROM notebooks nb WHERE nb.tier = 'base' "
+            "ORDER BY nb.created_at ASC LIMIT 1"
+        ).fetchone()
+
+    @staticmethod
+    def summary_notebook_row(db: sqlite3.Connection, notebook_id: str):
+        return db.execute(
+            "SELECT * FROM notebooks WHERE id = ? AND status != 'copying'",
+            (notebook_id,),
+        ).fetchone()
+
+    @staticmethod
+    def owned_notebook_rows(db: sqlite3.Connection, user_id: str):
+        return db.execute(
+            "SELECT * FROM notebooks WHERE created_by = ? AND status != 'copying' "
+            "ORDER BY created_at ASC",
+            (user_id,),
+        ).fetchall()
+
+    @staticmethod
+    def joined_notebook_rows(db: sqlite3.Connection, user_id: str):
+        return db.execute(
+            "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
+            "JOIN notebooks nb ON nb.id = m.notebook_id "
+            "LEFT JOIN users u ON u.id = nb.created_by "
+            "WHERE m.user_id = ? AND nb.status != 'copying' "
+            "ORDER BY m.added_at ASC",
+            (user_id,),
+        ).fetchall()
 
     def list_user_usage(self) -> list[dict[str, Any]]:
         with self.database.connect() as db:

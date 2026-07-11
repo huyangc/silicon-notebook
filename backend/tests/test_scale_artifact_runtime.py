@@ -333,3 +333,76 @@ def test_daemon_start_failures_rearm_all_runtime_markers(repo, monkeypatch):
     with pytest.raises(RuntimeError, match="thread start failed"):
         scale._ensure_scheduler()
     assert scale.scheduler_started is False
+
+
+# ---------------------------------------------------------------------------
+# Task 4 delegation tests: ScaleArtifactRuntime holds ZERO notebook-metadata
+# SQL — `self.projections` (== repo._runtime.index_projections) owns the three
+# reads it used to run inline (owner / name / unified last-rebuild).  These
+# spies pin each fail-open notification / mode-resolution path to its store
+# method so the SQL can't be re-inlined.  Primary assertions tagged `# MUT`.
+# ---------------------------------------------------------------------------
+
+
+def _mute_pending_bus(monkeypatch):
+    # notify_index_done is fail-open: a prior test can leave the asyncio loop
+    # closed so pending_bus.mark_dirty raises and aborts the notify before the
+    # projection reads run.  Stub the bus so the delegation path is reached
+    # deterministically regardless of suite ordering.
+    from app.services.pending_bus import pending_bus
+
+    monkeypatch.setattr(pending_bus, "mark_dirty", lambda *a, **k: None)
+    monkeypatch.setattr(pending_bus, "emit", lambda *a, **k: None)
+
+
+def test_t4deleg_notebook_owner_delegate(repo, monkeypatch):
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    _mute_pending_bus(monkeypatch)
+    calls = []
+
+    def spy(notebook_id):
+        calls.append(notebook_id)
+        return "user-sentinel"
+
+    monkeypatch.setattr(repo._runtime.index_projections, "notebook_owner", spy)
+    # notify_index_done -> _resolve_index_owner (no request user in tests) ->
+    # projections.notebook_owner.
+    scale.notify_index_done(notebook.id)
+    assert calls and calls[0] == notebook.id  # MUT
+
+
+def test_t4deleg_notebook_name_delegate(repo, monkeypatch):
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    _mute_pending_bus(monkeypatch)
+    calls = []
+
+    def spy(notebook_id):
+        calls.append(notebook_id)
+        return "SENTINEL-NAME"
+
+    monkeypatch.setattr(repo._runtime.index_projections, "notebook_name", spy)
+    # Real notebook_owner returns a truthy owner, so notify_index_done proceeds
+    # to _notebook_name -> projections.notebook_name for the emit payload.
+    scale.notify_index_done(notebook.id)
+    assert calls and calls[0] == notebook.id  # MUT
+
+
+def test_t4deleg_unified_last_rebuild_at_delegate(repo, monkeypatch):
+    notebook = _seed(repo)
+    repo.build_scale_index(notebook.id)
+    scale = repo._runtime.scale_artifacts
+    calls = []
+
+    def spy(notebook_id):
+        calls.append(notebook_id)
+        # A last-rebuild strictly newer than the fresh index's built_at forces
+        # a full rebuild — proving the delegated value is consumed by the mode.
+        return "9999-12-31T23:59:59"
+
+    monkeypatch.setattr(
+        repo._runtime.index_projections, "unified_last_rebuild_at", spy
+    )
+    mode = scale._resolve_mode(notebook.id, "fold")
+    assert calls and calls[0] == notebook.id and mode == "full"  # MUT

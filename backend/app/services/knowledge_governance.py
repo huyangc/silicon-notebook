@@ -190,21 +190,9 @@ class KnowledgeGovernanceService:
 
         self.get_notebook(notebook_id)
         with self._connect() as db:
-            rel_rows = db.execute(
-                "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
-                "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
-                "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
-                "FROM knowledge_relations kr "
-                "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
-                "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
-                "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
-                (notebook_id,),
-            ).fetchall()
-            # Build node types + names for trust signals
-            obj_rows = db.execute(
-                "SELECT id, object_type, payload FROM knowledge_objects "
-                "WHERE notebook_id = ?", (notebook_id,)
-            ).fetchall()
+            rel_rows, obj_rows = self.governance_store.review_queue_rows(
+                db, notebook_id
+            )
 
         node_types: dict = {}
         node_names: dict = {}
@@ -601,24 +589,9 @@ class KnowledgeGovernanceService:
 
         # 2. Load objects + relations
         with self._connect() as db:
-            # Fetch all non-deprecated objects for this notebook
-            obj_rows = db.execute(
-                "SELECT id, object_type, payload, evidence, status "
-                "FROM knowledge_objects "
-                "WHERE notebook_id=? AND status != 'deprecated'",
-                (notebook_id,),
-            ).fetchall()
-
-            # Fetch embeddings for the semantic strategy
-            vec_rows = db.execute(
-                "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
-                (notebook_id,),
-            ).fetchall()
-
-            # Fetch the notebook tier (same for all objects in v1)
-            nb_row = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
-            ).fetchone()
+            obj_rows, vec_rows, nb_row = (
+                self.governance_store.conflict_resolution_rows(db, notebook_id)
+            )
 
         # Build objects list in detect_conflict_candidates format
         objects = []
@@ -1007,15 +980,12 @@ class KnowledgeGovernanceService:
         self.get_notebook(notebook_id)  # KeyError if notebook missing
         now = self._now()
         with self._write() as db:
-            obj = db.execute(
-                "SELECT object_type FROM knowledge_objects WHERE id=? AND notebook_id=?",
-                (object_id, notebook_id),
-            ).fetchone()
+            obj = self.governance_store.promotion_object_type_row(
+                db, notebook_id, object_id
+            )
             if obj is None:
                 raise KeyError(object_id)
-            nb_row = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
-            ).fetchone()
+            nb_row = self.governance_store.notebook_tier_row(db, notebook_id)
             if nb_row and nb_row["tier"] == "base":
                 raise ValueError("cannot propose from a base notebook — use the review gate")
             # Idempotency: return any active (non-approved, non-rejected) proposal.
@@ -1044,11 +1014,7 @@ class KnowledgeGovernanceService:
             obj_by_id: Dict[str, sqlite3.Row] = {}
             for i in range(0, len(object_ids), _IN_CHUNK):
                 batch = object_ids[i:i + _IN_CHUNK]
-                ph = ",".join("?" for _ in batch)
-                for r in db.execute(
-                    f"SELECT id, payload, evidence FROM knowledge_objects WHERE id IN ({ph})",
-                    batch,
-                ).fetchall():
+                for r in self.governance_store.promotion_object_rows(db, batch):
                     obj_by_id[r["id"]] = r
             out: List[dict] = []
             for row in rows:
@@ -1080,9 +1046,9 @@ class KnowledgeGovernanceService:
             was_approved = cand["status"] == "approved"
             src_payload = (
                 json.loads(
-                    (db.execute(
-                        "SELECT payload FROM knowledge_objects WHERE id=?",
-                        (cand["object_id"],)).fetchone() or {"payload": None})["payload"]
+                    (self.governance_store.object_payload_row(
+                        db, cand["object_id"]
+                    ) or {"payload": None})["payload"]
                     or "{}"
                 )
                 if not was_approved

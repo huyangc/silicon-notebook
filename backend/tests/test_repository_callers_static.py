@@ -207,15 +207,6 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
 # new call fails immediately.  Task 6 must leave both sets empty.
 EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
     "product_sql": {
-        ("backend/app/services/knowledge_governance.py", 193, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 204, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 605, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 613, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 619, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 1010, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 1016, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 1048, "db.execute"),
-        ("backend/app/services/knowledge_governance.py", 1083, "db.execute"),
         ("backend/app/services/knowledge_lifecycle.py", 185, "db.execute"),
         ("backend/app/services/knowledge_lifecycle.py", 187, "db.execute"),
         ("backend/app/services/knowledge_lifecycle.py", 233, "db.execute"),
@@ -262,19 +253,6 @@ EXPECTED_REMEDIATION_SITES: dict[str, set[tuple[str, int, str]]] = {
         ("backend/app/services/knowledge_lifecycle.py", 2017, "db.execute"),
         ("backend/app/services/knowledge_lifecycle.py", 2110, "db.execute"),
         ("backend/app/services/knowledge_lifecycle.py", 2112, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 55, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 69, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 82, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 93, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 118, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 121, "conn.execute"),
-        ("backend/app/services/notebook_catalog.py", 175, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 192, "db.execute"),
-        ("backend/app/services/notebook_catalog.py", 201, "db.execute"),
-        ("backend/app/services/notebook_sharing.py", 399, "db.execute"),
-        ("backend/app/services/scale_artifact_runtime.py", 142, "db.execute"),
-        ("backend/app/services/scale_artifact_runtime.py", 153, "db.execute"),
-        ("backend/app/services/scale_artifact_runtime.py", 449, "db.execute"),
         ("backend/app/services/scale_index_builder.py", 493, "db.execute"),
         ("backend/app/services/scale_index_builder.py", 554, "db.execute"),
     },
@@ -296,6 +274,25 @@ RETIRED_RETRIEVAL_PRIVATES = {
     "_answer_context",
     "_chunk_answer_context",
 }
+
+
+def test_task4_application_services_contain_no_sql_calls() -> None:
+    """Gate D: catalog/sharing/governance/scale orchestration owns no SQL."""
+    modules = (
+        "backend/app/services/notebook_catalog.py",
+        "backend/app/services/notebook_sharing.py",
+        "backend/app/services/knowledge_governance.py",
+        "backend/app/services/scale_artifact_runtime.py",
+    )
+    offenders: list[tuple[str, int, str]] = []
+    for relative in modules:
+        tree = ast.parse((ROOT / relative).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr in {"execute", "executemany", "executescript"}:
+                offenders.append((relative, node.lineno, node.func.attr))
+    assert offenders == []
 
 # ---------------------------------------------------------------------------
 # rule 4 — the exact files allowed to open a SQLite connection themselves

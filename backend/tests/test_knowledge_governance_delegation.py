@@ -159,3 +159,111 @@ def test_governance_module_never_imports_the_facade():
     assert not any(
         m.startswith("app.services.repository_runtime") for m in modules
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 4 delegation tests: the governance service holds ZERO SQL — each read it
+# used to run inline is now a GovernanceStore method on `repo._runtime.governance`.
+# These spies pin every public governance op to its store method (arg-for-arg),
+# so re-inlining the SQL or wiring an op to the wrong store method turns red.
+# Primary assertions tagged `# MUT` (mutation harness inverts them).
+# ---------------------------------------------------------------------------
+
+
+def test_t4deleg_review_queue_rows_delegate(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="rq"))
+    calls = []
+
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
+        return ([], [])
+
+    monkeypatch.setattr(repo._runtime.governance, "review_queue_rows", spy)
+    result = repo.review_queue(notebook.id)
+    assert calls and calls[0] == notebook.id and result == []  # MUT
+
+
+def test_t4deleg_promotion_object_type_row_delegate(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="promo"))
+    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "Widget"})
+    store = repo._runtime.governance
+    original = store.promotion_object_type_row  # staticmethod -> plain function
+    calls = []
+
+    def spy(db, notebook_id, obj_id):
+        calls.append((notebook_id, obj_id))
+        return original(db, notebook_id, obj_id)
+
+    monkeypatch.setattr(store, "promotion_object_type_row", spy)
+    repo.propose_promotion(notebook.id, object_id)
+    assert calls and calls[0] == (notebook.id, object_id)  # MUT
+
+
+def test_t4deleg_notebook_tier_row_delegate(repo, monkeypatch):
+    # promotion_object_type_row runs for real (real object); only the tier read
+    # is spied, so propose_promotion's base-notebook guard reaches the store.
+    notebook = repo.create_notebook(NotebookCreate(name="tier"))
+    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "T"})
+    calls = []
+
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
+        return {"tier": "personal"}
+
+    monkeypatch.setattr(repo._runtime.governance, "notebook_tier_row", spy)
+    repo.propose_promotion(notebook.id, object_id)
+    assert calls and calls[0] == notebook.id  # MUT
+
+
+def test_t4deleg_promotion_object_rows_delegate(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="pq"))
+    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "Q"})
+    repo.propose_promotion(notebook.id, object_id)  # seeds one 'proposed' candidate
+    calls = []
+
+    def spy(db, object_ids):
+        calls.append(list(object_ids))
+        return []
+
+    monkeypatch.setattr(repo._runtime.governance, "promotion_object_rows", spy)
+    repo.list_promotion_queue()
+    assert calls and calls[0] == [object_id]  # MUT
+
+
+def test_t4deleg_object_payload_row_delegate(repo, monkeypatch):
+    # object_payload_row is read BEFORE approve_promotion_in_transaction raises
+    # "no base notebook" (no base tier here) — the spy still records the call.
+    notebook = repo.create_notebook(NotebookCreate(name="approve"))
+    object_id = repo._test_insert_object(notebook.id, "concept", {"name": "A"})
+    candidate = repo.propose_promotion(notebook.id, object_id)
+    calls = []
+
+    def spy(db, obj_id):
+        calls.append(obj_id)
+        return {"payload": "{}"}
+
+    monkeypatch.setattr(repo._runtime.governance, "object_payload_row", spy)
+    with pytest.raises(ValueError, match="no base notebook"):
+        repo.approve_promotion(candidate["id"])
+    assert calls and calls[0] == object_id  # MUT
+
+
+def test_t4deleg_conflict_resolution_rows_delegate(repo, monkeypatch):
+    import types
+
+    notebook = repo.create_notebook(NotebookCreate(name="conflict"))
+    governance = repo._runtime.knowledge_governance
+    # Get past the "LLM not configured -> skip" guard so the compound
+    # conflict-resolution read is actually reached.
+    monkeypatch.setattr(
+        governance, "_llm", lambda: types.SimpleNamespace(configured=True)
+    )
+    calls = []
+
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
+        return ([], [], None)
+
+    monkeypatch.setattr(repo._runtime.governance, "conflict_resolution_rows", spy)
+    result = repo.resolve_notebook_conflicts(notebook.id)
+    assert calls and calls[0] == notebook.id and result["skipped_llm"] is False  # MUT

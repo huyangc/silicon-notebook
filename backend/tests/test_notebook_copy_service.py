@@ -213,3 +213,32 @@ def test_failure_after_first_chunk_compensates_rows_and_files(repo, monkeypatch)
         p.name for p in (repo.storage_dir / "notebooks").iterdir() if p.name != src
     ]
     assert leftover == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 delegation test: NotebookSharingService.join_shared holds ZERO SQL —
+# the on-snapshot notebook read is now SharingStore.notebook_row_on, reached on
+# the same connection join_shared hydrates the summary from.  The spy wraps the
+# real method (so from_row still gets a genuine row) and proves the delegation.
+# Primary assertion tagged `# MUT`.
+# ---------------------------------------------------------------------------
+
+
+def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
+    # Seed via the file's raw-SQL helper and reach join_shared through the
+    # service instance so this test adds no manifest-tracked facade-member
+    # consumer sites (repo._runtime.sharing is not the `repo`/`*_repo` base the
+    # surface scanner records).
+    notebook_id = _seed_plain_nb(repo, owner="user-local", name="join")
+    _seed_user(repo, "user-joiner")
+    store = repo._runtime.sharing_store
+    original = store.notebook_row_on  # staticmethod -> plain function
+    calls = []
+
+    def spy(db, nb_id):
+        calls.append(nb_id)
+        return original(db, nb_id)
+
+    monkeypatch.setattr(store, "notebook_row_on", spy)
+    result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner")
+    assert calls and calls[0] == notebook_id and result.access == "reader"  # MUT

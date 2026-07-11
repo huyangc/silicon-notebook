@@ -78,6 +78,26 @@ class GovernanceStore:
 
     # ------------------------------------------------------------- review
     @staticmethod
+    def review_queue_rows(
+        connection: sqlite3.Connection, notebook_id: str
+    ) -> "tuple[List[sqlite3.Row], List[sqlite3.Row]]":
+        relations = connection.execute(
+            "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
+            "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
+            "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
+            "FROM knowledge_relations kr "
+            "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
+            "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
+            "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
+            (notebook_id,),
+        ).fetchall()
+        objects = connection.execute(
+            "SELECT id, object_type, payload FROM knowledge_objects "
+            "WHERE notebook_id = ?", (notebook_id,)
+        ).fetchall()
+        return relations, objects
+
+    @staticmethod
     def update_edge_review(
         connection: sqlite3.Connection, notebook_id: str, relation_id: str, status: str
     ) -> None:
@@ -406,6 +426,63 @@ class GovernanceStore:
         connection.execute("DELETE FROM concept_whitelist WHERE term = ?", (term,))
 
     # ------------------------------------------------------------ promotion
+    @staticmethod
+    def promotion_object_type_row(
+        connection: sqlite3.Connection, notebook_id: str, object_id: str
+    ) -> "sqlite3.Row | None":
+        return connection.execute(
+            "SELECT object_type FROM knowledge_objects WHERE id=? AND notebook_id=?",
+            (object_id, notebook_id),
+        ).fetchone()
+
+    @staticmethod
+    def notebook_tier_row(
+        connection: sqlite3.Connection, notebook_id: str
+    ) -> "sqlite3.Row | None":
+        return connection.execute(
+            "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+        ).fetchone()
+
+    @staticmethod
+    def promotion_object_rows(
+        connection: sqlite3.Connection, object_ids: List[str]
+    ) -> List[sqlite3.Row]:
+        if not object_ids:
+            return []
+        placeholders = ",".join("?" for _ in object_ids)
+        return connection.execute(
+            f"SELECT id, payload, evidence FROM knowledge_objects "
+            f"WHERE id IN ({placeholders})",
+            object_ids,
+        ).fetchall()
+
+    @staticmethod
+    def object_payload_row(
+        connection: sqlite3.Connection, object_id: str
+    ) -> "sqlite3.Row | None":
+        return connection.execute(
+            "SELECT payload FROM knowledge_objects WHERE id=?", (object_id,)
+        ).fetchone()
+
+    @staticmethod
+    def conflict_resolution_rows(
+        connection: sqlite3.Connection, notebook_id: str
+    ) -> "tuple[List[sqlite3.Row], List[sqlite3.Row], sqlite3.Row | None]":
+        objects = connection.execute(
+            "SELECT id, object_type, payload, evidence, status "
+            "FROM knowledge_objects "
+            "WHERE notebook_id=? AND status != 'deprecated'",
+            (notebook_id,),
+        ).fetchall()
+        vectors = connection.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchall()
+        notebook = connection.execute(
+            "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
+        ).fetchone()
+        return objects, vectors, notebook
+
     @staticmethod
     def promotion_candidate_row(
         connection: sqlite3.Connection, candidate_id: str

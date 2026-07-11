@@ -82,7 +82,7 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
         )
-        self.notebook_summaries = NotebookSummaryQuery(self.database)
+        self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries)
         self.catalog = NotebookCatalogService(
             store=self.notebook_store,
             summaries=self.notebook_summaries,

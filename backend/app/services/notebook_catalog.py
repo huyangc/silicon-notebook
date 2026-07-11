@@ -46,17 +46,16 @@ class NotebookSummaryQuery:
         "method": "methods", "risk": "risks", "glossary": "glossary",
     }
 
-    def __init__(self, database: SqliteDatabase) -> None:
+    def __init__(
+        self, database: SqliteDatabase, queries: "QueryStore | None" = None
+    ) -> None:
         self.database = database
+        self.queries = queries or QueryStore(database)
 
     def count(
         self, db: sqlite3.Connection, table: str, column: str, value: str
     ) -> int:
-        row = db.execute(
-            f"SELECT COUNT(*) AS count FROM {table} WHERE {column} = ?",
-            (value,),
-        ).fetchone()
-        return int(row["count"])
+        return self.queries.count_rows(db, table, column, value)
 
     def knowledge_type_counts(
         self, db: sqlite3.Connection, notebook_id: str
@@ -65,13 +64,9 @@ class NotebookSummaryQuery:
         from_row surfaces, via ONE GROUP BY query instead of 6 separate
         per-type COUNT(*) calls. Same USABLE_STATUSES filter and same
         zero-default for absent types as the old per-type COUNT(*) calls."""
-        placeholders = ",".join("?" for _ in USABLE_STATUSES)
-        rows = db.execute(
-            f"SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-            f"WHERE notebook_id = ? AND status IN ({placeholders}) "
-            f"GROUP BY object_type",
-            (notebook_id, *USABLE_STATUSES),
-        ).fetchall()
+        rows = self.queries.knowledge_type_count_rows(
+            db, notebook_id, USABLE_STATUSES
+        )
         by_type = {r["object_type"]: int(r["c"]) for r in rows}
         return {
             key: by_type.get(otype, 0)
@@ -79,27 +74,14 @@ class NotebookSummaryQuery:
         }
 
     def has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
-        row = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
-            (notebook_id,),
-        ).fetchone()
-        return bool(row[0])
+        return self.queries.notebook_has_kg(db, notebook_id)
 
     def count_pending_kg_sources(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> int:
         """Count sources in the notebook that are PARSED (have ≥1 source_elements row)
         but have NO KG (no knowledge_objects row with that source_id)."""
-        row = db.execute(
-            """
-            SELECT COUNT(*) FROM sources s
-            WHERE s.notebook_id = ?
-              AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)
-              AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '')
-            """,
-            (notebook_id,),
-        ).fetchone()
-        return int(row[0])
+        return self.queries.pending_kg_source_count(db, notebook_id)
 
     def base_notebook_info(
         self, db: "sqlite3.Connection | None" = None
@@ -109,16 +91,11 @@ class NotebookSummaryQuery:
         基准库全局唯一(mark_notebook_base 会降级其它 tier='base'),取最早创建者;has_kg
         沿用 _any_base_notebook_has_kg 相同的 EXISTS 语义,保证 base_kg_available 值不变。
         无基准库 → ("", False)。"""
-        sql = ("SELECT nb.name, "
-               "EXISTS(SELECT 1 FROM knowledge_objects ko "
-               "JOIN notebooks b ON b.id = ko.notebook_id WHERE b.tier = 'base') "
-               "FROM notebooks nb WHERE nb.tier = 'base' "
-               "ORDER BY nb.created_at ASC LIMIT 1")
         if db is not None:
-            row = db.execute(sql).fetchone()
+            row = self.queries.base_notebook_info_row(db)
         else:
             with self.database.connect() as conn:
-                row = conn.execute(sql).fetchone()
+                row = self.queries.base_notebook_info_row(conn)
         if not row:
             return ("", False)
         return (row[0] or "", bool(row[1]))
@@ -172,9 +149,7 @@ class NotebookSummaryQuery:
         get(...) before acting, and a half-copied notebook must not be usable
         by any of them until the copy finishes."""
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT * FROM notebooks WHERE id = ? AND status != 'copying'",
-                (notebook_id,)).fetchone()
+            row = self.queries.summary_notebook_row(db, notebook_id)
             if row is None:
                 raise KeyError(notebook_id)
             summary = self.from_row(db, row)
@@ -189,21 +164,12 @@ class NotebookSummaryQuery:
         """
         out: List[NotebookSummary] = []
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT * FROM notebooks WHERE created_by = ? AND status != 'copying' "
-                "ORDER BY created_at ASC",
-                (user_id,),
-            ).fetchall()
+            rows = self.queries.owned_notebook_rows(db, user_id)
             for row in rows:
                 nb = self.from_row(db, row)
                 nb.access = "owner"
                 out.append(nb)
-            joined = db.execute(
-                "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
-                "JOIN notebooks nb ON nb.id = m.notebook_id "
-                "LEFT JOIN users u ON u.id = nb.created_by "
-                "WHERE m.user_id = ? AND nb.status != 'copying' "
-                "ORDER BY m.added_at ASC", (user_id,)).fetchall()
+            joined = self.queries.joined_notebook_rows(db, user_id)
             for row in joined:
                 nb = self.from_row(db, row)
                 nb.access = "reader"
