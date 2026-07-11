@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 from app.repositories.ports import (
@@ -7,6 +8,7 @@ from app.repositories.ports import (
     RetrievalPort,
 )
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
+from app.services import report_engine, report_execution, repository_runtime
 from tests import test_repository_facade_contract as facade_contract
 from tests.test_repository_callers_static import (
     EXPECTED_REMEDIATION_SITES as CALLER_REMEDIATION_SITES,
@@ -32,6 +34,10 @@ LIVE_REFERENCE_DOCS = ("README.md", "README_zh.md", "AGENTS.md", "architecture.m
 COMPOSITION_HISTORY_DOCS = (
     "docs/superpowers/plans/2026-07-10-repository-composition-refactor.md",
     "docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md",
+)
+REMEDIATION_DOCS = (
+    "docs/superpowers/specs/2026-07-11-repository-review-remediation-design.md",
+    "docs/superpowers/plans/2026-07-11-repository-review-remediation.md",
 )
 
 
@@ -347,6 +353,111 @@ def test_repository_runtime_and_verifier_completion_claims_are_synchronized():
             "AGENTS.md": "only SHM mtime is exempt",
             "architecture.md": "只豁免 SHM mtime",
             "fangan_done.md": "只豁免 SHM mtime",
+        }
+    )
+
+
+def test_projection_ownership_claim_matches_sql_and_application_boundaries():
+    docs = (
+        LIVE_REFERENCE_DOCS
+        + ("fangan_done.md",)
+        + COMPOSITION_HISTORY_DOCS
+        + REMEDIATION_DOCS
+    )
+    for name in docs:
+        text = _read(name)
+        for overclaim in (
+            "row-to-domain projections",
+            "row-to-domain projection",
+            "SQL/row projection 只在 SQLite stores",
+            "SQL 与 row-to-domain projection 全部归",
+            "独占 SQL 与 row-to-domain projection",
+            "Stores own SQL and row-to-domain projection",
+        ):
+            assert overclaim not in text, f"{name} overstates projection ownership"
+
+    _assert_phrases(
+        {
+            "README.md": (
+                "Stores own product SQL and raw row selection; established "
+                "application/query components may assemble domain/application projections"
+            ),
+            "AGENTS.md": (
+                "Stores own product SQL and raw row selection; established "
+                "application/query components may assemble domain/application projections"
+            ),
+            "README_zh.md": (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            "architecture.md": (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            "fangan_done.md": (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            COMPOSITION_HISTORY_DOCS[0]: (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            COMPOSITION_HISTORY_DOCS[1]: (
+                "store 独占 product SQL 与 raw row selection；既定 application/query "
+                "component 可组装 domain/application projection"
+            ),
+            REMEDIATION_DOCS[0]: (
+                "Stores own product SQL and raw row selection; established "
+                "application/query components may assemble domain/application projections"
+            ),
+        }
+    )
+
+
+def test_report_cancellation_is_the_documented_process_global_runtime_exception():
+    assert report_engine.REPORT_CANCELLATIONS is report_execution.REPORT_CANCELLATIONS
+    assert repository_runtime.REPORT_CANCELLATIONS is report_execution.REPORT_CANCELLATIONS
+    init_source = inspect.getsource(repository_runtime.RepositoryRuntime.__init__)
+    wire_source = inspect.getsource(
+        repository_runtime.RepositoryRuntime.wire_report_execution
+    )
+    assert "self.report_cancellations = REPORT_CANCELLATIONS" in init_source
+    assert "cancellations=self.report_cancellations" in wire_source
+
+    _assert_phrases(
+        {
+            "README.md": (
+                "`RepositoryRuntime` owns or references composed runtime state; "
+                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
+            ),
+            "AGENTS.md": (
+                "`RepositoryRuntime` owns or references composed runtime state; "
+                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
+            ),
+            "README_zh.md": (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            "architecture.md": (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            "fangan_done.md": (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            COMPOSITION_HISTORY_DOCS[0]: (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            COMPOSITION_HISTORY_DOCS[1]: (
+                "`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` "
+                "刻意保持 process-global canonical owner"
+            ),
+            REMEDIATION_DOCS[0]: (
+                "`RepositoryRuntime` owns or references composed runtime state; "
+                "`REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner"
+            ),
         }
     )
 

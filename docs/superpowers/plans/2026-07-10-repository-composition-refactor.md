@@ -8,11 +8,8 @@
 
 **Tech Stack:** Python 3.11+、FastAPI、标准库 sqlite3、numpy、pytest、Next.js 15 / TypeScript（仅做兼容验证）。
 
-> **完成态同步（2026-07-12）**：本计划的 Repository 范围已经落地。主业务库
-> SQL/row projection 只在 SQLite stores，application services 保留编排；facade
-> 只含显式 adapter/单跳委托且 ownership 由源码验证；消费者窄 Protocol 可独立执行。
-> `RepositoryRuntime` 唯一持有可变运行态，Ask/report 同步 submit 失败会持久化
-> failed 并注销 cancellation entry。backup-only verifier 使用精确 migration/seed
+> **完成态同步（2026-07-12）**：本计划的 Repository 范围已经落地。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。application services 保留编排；facade 只含显式 adapter/单跳委托且 ownership 由源码验证；消费者窄 Protocol 可独立执行。
+> `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference；其他可变运行态由 runtime 持有。Ask/report 同步 submit 失败会持久化 failed 并注销 cancellation entry。backup-only verifier 使用精确 migration/seed
 > manifest、URI 编码与 retained-backup 失败报告，并校验 DB/WAL 与 SHM existence/size，
 > live WAL 只豁免 SHM mtime。以上均为保持行为的架构整改，不新增产品功能或 migration。
 >

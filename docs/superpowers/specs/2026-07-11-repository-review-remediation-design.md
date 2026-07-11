@@ -83,13 +83,15 @@ dispatch across facade methods, or multiple component calls fail the contract.
 
 ## 5. Gate B — Runtime State and Launch Failure Safety
 
-Runtime is the only owner of mutable operational state. `storage_dir`, embedder,
-retrieval/evidence services, language caches, build sets, locks, cancellation
-registries, and artifact caches are exposed through explicit facade properties.
-Every setter updates the canonical runtime component and all already-composed
-consumers that retain the value. Tests perform post-composition replacement and
-assert that source files, retrieval, ingestion, and compatibility callers observe
-the replacement.
+`RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner. The runtime,
+`ReportExecutionCoordinator`, and report module compatibility functions share the
+same identity reference. Other mutable operational state (`storage_dir`, embedder,
+retrieval/evidence services, language caches, build sets, locks, the Ask cancellation
+registry, and artifact caches) is runtime-owned and exposed through explicit facade
+properties. Every setter updates the canonical runtime component and all
+already-composed consumers that retain the value. Tests perform post-composition
+replacement and assert that source files, retrieval, ingestion, and compatibility
+callers observe the replacement.
 
 Ask and report launch become exception-safe:
 
@@ -139,9 +141,10 @@ Move remaining product-database SQL out of application services:
 - scale artifact database projections move to `IndexProjectionStore`.
 
 Services continue to own business sequencing, error policy, progress reporting,
-LLM decisions, cache invalidation, and transaction selection. Stores own SQL and
-row-to-domain projection. Existing atomic operations remain in one store call;
-existing multi-transaction checkpoints remain separate service calls.
+LLM decisions, cache invalidation, transaction selection, and application/domain
+projection assembly. Stores own product SQL and raw row selection; established application/query components may assemble domain/application projections such as
+`NotebookSummaryQuery.from_row`. Existing atomic operations remain in one store
+call; existing multi-transaction checkpoints remain separate service calls.
 
 Move remaining facade algorithms to canonical services:
 
@@ -214,8 +217,10 @@ Before updating the existing pull request:
 - Minimal Protocol-only fakes can execute every service path they claim to support.
 - `SQLiteRepository` contains only explicit properties, identity/signature adapters,
   and one-hop delegates.
-- Mutable compatibility state is runtime-owned and replacement-safe after service
-  composition.
+- Composed mutable compatibility state is runtime-owned or runtime-referenced and
+  replacement-safe after service composition; the intentionally process-global
+  `REPORT_CANCELLATIONS` singleton remains its canonical owner and is shared by
+  identity.
 - Synchronous Ask/report submission failure leaves no running job or registered
   cancellation event.
 - Snapshot verification rejects every unmanifested schema/seed change and never

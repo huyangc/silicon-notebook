@@ -13,11 +13,7 @@
 > （见 `backend/tests/test_repository_v9_fixture.py`），真实旧库的 backup-only
 > 保护性验证由 `scripts/verify_repository_snapshot.py` 落地。
 >
-> **完成态同步（2026-07-12）**：主业务库 SQL/row projection 只在 SQLite
-> stores，application services 保留编排；facade 只含显式 adapter/单跳委托，
-> 实际 delegate target 与 ownership manifest 由 AST guard 对照；消费者窄 Protocol
-> 可脱离 facade/private runtime 执行。`RepositoryRuntime` 唯一持有可变运行态，
-> Ask/report 同步 submit 失败会持久化 failed 并注销 cancellation entry。backup-only
+> **完成态同步（2026-07-12）**：store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。application services 保留编排；facade 只含显式 adapter/单跳委托，实际 delegate target 与 ownership manifest 由 AST guard 对照；消费者窄 Protocol 可脱离 facade/private runtime 执行。`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference；其他可变运行态由 runtime 持有。Ask/report 同步 submit 失败会持久化 failed 并注销 cancellation entry。backup-only
 > verifier 使用精确 migration/seed manifest、URI 编码与 retained-backup 失败报告，
 > 并校验 DB/WAL 与 SHM existence/size，live WAL 只豁免 SHM mtime。
 >

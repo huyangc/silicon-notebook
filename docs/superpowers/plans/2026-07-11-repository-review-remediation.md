@@ -661,7 +661,10 @@ The refactor does not change the schema version present on its master baseline
 the existing v10 migration and remains readable.
 ```
 
-Describe the now-verified store-only SQL, thin facade, ports, launch compensation, verifier manifests, and live-WAL SHM metadata exception.
+Describe the now-verified store-only product SQL/raw row selection boundary, the
+established application/query projection assembly boundary, thin facade, ports,
+launch compensation, the process-global `REPORT_CANCELLATIONS` identity exception,
+verifier manifests, and live-WAL SHM metadata exception.
 
 - [ ] **Step 2: Replace prose-to-prose documentation tests**
 
