@@ -330,21 +330,15 @@ def _write_wrapper_is_exact(node: ast.FunctionDef) -> bool:
     ):
         return False
     variable = item.optional_vars.id
-    if not statement.body:
+    if len(statement.body) != 1:
         return False
-    yield_count = 0
-    for child in statement.body:
-        if isinstance(child, ast.Return) and child.value is None:
-            continue
-        if not (
-            isinstance(child, ast.Expr)
-            and isinstance(child.value, ast.Yield)
-            and isinstance(child.value.value, ast.Name)
-            and child.value.value.id == variable
-        ):
-            return False
-        yield_count += 1
-    return yield_count == 1
+    child = statement.body[0]
+    return (
+        isinstance(child, ast.Expr)
+        and isinstance(child.value, ast.Yield)
+        and isinstance(child.value.value, ast.Name)
+        and child.value.value.id == variable
+    )
 
 
 def _function_contract_owner(node: ast.FunctionDef) -> str | None:
@@ -557,6 +551,14 @@ class _WriteAssemblyEscape:
     def _write(self):
         with self._runtime.database.write() as db:
             yield {"connection": db}
+
+
+class _WriteEarlyReturnEscape:
+    @contextmanager
+    def _write(self):
+        with self._runtime.database.write() as db:
+            return
+            yield db
 
 
 class _NestedDelegateArgumentEscape:
@@ -1022,6 +1024,12 @@ def test_facade_checker_allows_explicit_scalar_identity_adaptation():
 )
 def test_connect_and_write_names_do_not_bypass_exact_wrapper_shapes(facade, member):
     assert {site[2] for site in facade_body_violations(facade)} == {member}
+
+
+def test_write_wrapper_rejects_bare_return_before_yield():
+    assert {site[2] for site in facade_body_violations(_WriteEarlyReturnEscape)} == {
+        "_write"
+    }
 
 
 def test_facade_checker_rejects_nested_global_delegate_arguments():
