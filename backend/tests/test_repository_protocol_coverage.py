@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
+from typing import get_type_hints
 
 from app.repositories.ports import (
     AskCandidatePort,
@@ -162,3 +164,42 @@ def test_maintenance_port_covers_every_public_sqlite_adapter_method():
         if callable(value) and not name.startswith("_")
     }
     assert adapter_methods <= set(SQLiteMaintenancePort.__dict__)
+
+
+def _parameter_contract(callable_):
+    return [
+        (parameter.name, parameter.kind, parameter.default)
+        for parameter in inspect.signature(callable_).parameters.values()
+        if parameter.name != "self"
+    ]
+
+
+def test_model_client_ports_match_concrete_call_signatures():
+    from app.core.llm import OpenAICompatibleClient
+    from app.repositories.ports import JsonChatClientPort, RerankClientPort
+    from app.services.rerank_client import RerankClient
+
+    assert _parameter_contract(JsonChatClientPort.chat_json) == _parameter_contract(
+        OpenAICompatibleClient.chat_json
+    )
+    assert get_type_hints(JsonChatClientPort.chat_json)["messages"] == (
+        get_type_hints(OpenAICompatibleClient.chat_json)["messages"]
+    )
+    assert _parameter_contract(RerankClientPort.rerank) == _parameter_contract(
+        RerankClient.rerank
+    )
+    assert get_type_hints(RerankClientPort.rerank)["documents"] == (
+        get_type_hints(RerankClient.rerank)["documents"]
+    )
+
+
+def test_batch_repository_returns_typed_consumer_projections():
+    from app.repositories.ports import KGBuildResult, ScaleBuildManifest
+    from app.services.batch_ingest import BatchIngestRepository
+
+    hints = get_type_hints(BatchIngestRepository.build_notebook_kg)
+    assert hints["return"] is KGBuildResult
+    hints = get_type_hints(BatchIngestRepository.build_scale_index)
+    assert hints["return"] is ScaleBuildManifest
+    assert KGBuildResult.__required_keys__ >= {"built", "failed"}
+    assert ScaleBuildManifest.__optional_keys__ == {"n_nodes"}

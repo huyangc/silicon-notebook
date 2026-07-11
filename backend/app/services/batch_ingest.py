@@ -33,7 +33,9 @@ from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,
     JsonChatClientPort,
+    KGBuildResult,
     RebuildProgress,
+    ScaleBuildManifest,
     SQLiteMaintenancePort,
     SourceScheduler,
 )
@@ -64,13 +66,13 @@ class BatchIngestRepository(Protocol):
     def extract_source(self, source_id: str) -> None: ...
     def build_notebook_kg(
         self, notebook_id: str, *, progress: ExtractionProgress | None = None
-    ) -> dict[str, object]: ...
+    ) -> KGBuildResult: ...
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: RebuildProgress | None = None,
                            force: bool = False, fresh: bool = False) -> int: ...
     def build_scale_index(self, notebook_id: str,
                           on_stage: IndexStageProgress | None = None
-                          ) -> dict[str, object]: ...
+                          ) -> ScaleBuildManifest: ...
 
 
 def _rebuild_progress(phase: str, i: int, n: int) -> None:

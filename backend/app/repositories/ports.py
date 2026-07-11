@@ -15,10 +15,14 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Dict,
     Iterable,
+    List,
     Mapping,
+    Optional,
     Protocol,
     Sequence,
+    TypedDict,
     runtime_checkable,
 )
 
@@ -66,26 +70,44 @@ VectorBatchEncoder = Callable[
 ]
 
 
+class KGBuildResult(TypedDict):
+    built: list[str]
+    failed: list[str]
+    skipped: list[str]
+
+
+class ScaleBuildManifest(TypedDict, total=False):
+    n_nodes: int
+
+
 class JsonChatClientPort(Protocol):
-    configured: bool
     model: str
+
+    @property
+    def configured(self) -> bool: ...
 
     def chat_json(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: List[Dict[str, str]],
         response_schema_hint: str,
-        **kwargs: object,
+        *,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        max_tokens: Optional[int] = None,
+        cancel_event: CancelEvent = None,
     ) -> str: ...
 
 
 class RerankClientPort(Protocol):
-    configured: bool
+    @property
+    def configured(self) -> bool: ...
 
     def rerank(
         self,
         query: str,
-        documents: Sequence[str],
-        *,
+        documents: List[str],
         on_error: Callable[[Exception], None] | None = None,
     ) -> list[int]: ...
 
