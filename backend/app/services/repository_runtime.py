@@ -169,12 +169,7 @@ class RepositoryRuntime:
             self.event_log,
             ask_context,
         )
-        self.evidence_context = EvidenceContextService(
-            notebooks=self.notebook_store,
-            sources=self.source_store,
-            knowledge=self.knowledge,
-            settings=self.settings,
-        )
+        self.evidence_context: "EvidenceContextService | None" = None
         self.candidate_retrieval: "CandidateRetrievalService | None" = None
         self.graph_retrieval: "GraphRetrievalService | None" = None
         self.retrieval: "RetrievalService | None" = None
@@ -190,6 +185,8 @@ class RepositoryRuntime:
         )
 
     def wire_retrieval(self, *, embedder) -> RetrievalService:
+        if self.retrieval is not None:
+            return self.retrieval
         if self.embedding_store is None or self.scale_artifacts is None:
             raise RuntimeError("wire_retrieval requires persistence and scale runtime")
         common = dict(
@@ -221,7 +218,12 @@ class RepositoryRuntime:
         )
         self.candidate_retrieval.bind(peer=self.graph_retrieval, retrieval=self.retrieval)
         self.graph_retrieval.bind(peer=self.candidate_retrieval, retrieval=self.retrieval)
-        self.evidence_context.knowledge = self.graph_retrieval
+        self.evidence_context = EvidenceContextService(
+            notebooks=self.notebook_store,
+            sources=self.source_store,
+            knowledge=self.graph_retrieval,
+            settings=self.settings,
+        )
         return self.retrieval
 
     def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStore:

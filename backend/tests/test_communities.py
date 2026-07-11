@@ -4,6 +4,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from app.services.communities import CommunityQueryService
 
 
 @pytest.fixture
@@ -55,3 +56,26 @@ def test_rebuild_communities_is_idempotent(repo):
     repo.rebuild_communities(nb.id)
     repo.rebuild_communities(nb.id)                 # rerun must not duplicate
     assert len(repo.list_communities(nb.id)) == 1   # one community {A,B}, not two
+
+
+def test_community_query_service_uses_explicit_sibling_threshold():
+    calls = []
+
+    class _Unified:
+        def resolve_focal(self, notebook_id, key):
+            return "cluster:focal"
+
+        def comention_peers(self, notebook_id, focal, min_bridges, top_k):
+            calls.append((notebook_id, focal, min_bridges, top_k))
+            return [("Peer", 5)] if min_bridges == 5 else []
+
+    service = CommunityQueryService(
+        notebooks=object(), unified_kg=_Unified(),
+        event_log=type("Log", (), {"emit": lambda *args, **kwargs: None})(),
+        sibling_min_bridge=5,
+    )
+
+    assert service.resolve_comparison_peers(
+        "base", "Focal", "compare", top_k=3, candidates=10,
+    ) == (["Peer"], "comention")
+    assert calls == [("base", "cluster:focal", 5, 3)]

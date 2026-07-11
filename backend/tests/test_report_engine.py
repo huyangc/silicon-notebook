@@ -624,3 +624,23 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     assert out["markdown"] == ""
     assert out.get("failed") is True and out.get("error")   # 不再静默:标 failed→渲染 note
     assert "report_section" in notes                        # report_engine 首次有 model_error 可观测
+
+
+def test_deep_dive_uses_configured_sibling_threshold(repo, monkeypatch):
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    repo.settings.sibling_min_bridge = 5
+    captured = {}
+
+    def _run(self, notebook_id, question, **kwargs):
+        captured["sibling_min_bridge"] = self.communities.sibling_min_bridge
+        return ReasoningResult()
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    engine = _mk_engine(repo, _OutlineLLM())
+    engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["q"]},
+        "Q", depth=3,
+    )
+
+    assert captured["sibling_min_bridge"] == 5

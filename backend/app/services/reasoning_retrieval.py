@@ -144,6 +144,7 @@ class ReasoningRetriever:
                 notebooks=repository._runtime.notebook_store,
                 unified_kg=repository._runtime.unified_kg,
                 event_log=repository.event_log,
+                sibling_min_bridge=settings.sibling_min_bridge,
             ),
             settings=settings,
             cancel_event=cancel_event,

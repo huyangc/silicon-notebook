@@ -1111,6 +1111,19 @@ TASK21_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_reasoning_ppr_prefetch.py", "retrieval"),
     ("backend/tests/test_two_tier_federated.py", "_retrieve_scored"),
     ("backend/tests/test_two_tier_federated.py", "retrieval"),
+    ("backend/tests/test_report_engine.py", "settings"),
+} | {
+    ("backend/tests/test_communities.py", name)
+    for name in {
+        "create_notebook", "embedder", "list_communities",
+        "rebuild_communities", "settings", "store_kg",
+    }
+} | {
+    ("backend/tests/test_repository_runtime.py", name)
+    for name in {
+        "_answer_context", "_runtime", "_test_insert_object",
+        "create_notebook", "retrieval",
+    }
 }
 
 TASK21_ALLOWED_MEMBER_FILES |= {
@@ -1338,6 +1351,12 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     ("event_log", "backend/app/services/communities.py:103"),
     ("_runtime", "backend/app/services/communities.py:135"),
     ("settings", "backend/app/services/communities.py:136"),
+    ("_runtime", "backend/app/services/communities.py:87"),
+    ("_runtime", "backend/app/services/communities.py:93"),
+    ("event_log", "backend/app/services/communities.py:99"),
+    ("event_log", "backend/app/services/communities.py:104"),
+    ("_runtime", "backend/app/services/communities.py:136"),
+    ("settings", "backend/app/services/communities.py:137"),
     ("retrieval", "backend/app/services/reasoning_retrieval.py:131"),
     ("_runtime", "backend/app/services/reasoning_retrieval.py:132"),
     ("_runtime", "backend/app/services/reasoning_retrieval.py:135"),

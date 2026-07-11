@@ -21,6 +21,10 @@ def test_required_protocol_catalogue_has_declared_operations():
         "AskStateRepository": {"begin_ask_job", "finish_ask_job", "ask_job_status", "append_ask_trace", "get_conversation", "submit_feedback"},
         "ReportRepository": {"create_report", "update_report", "get_report", "list_reports", "delete_report", "export_reports"},
         "RetrievalPort": {"retrieve_scored", "federated_retrieve", "federated_retrieve_relations", "retrieve_neighbors", "retrieve_elements", "ppr_retrieve", "follow_chain", "node_context"},
+        "EvidenceKnowledgeContextPort": {
+            "cluster_map", "node_context", "in_network_relations",
+            "relation_support_count",
+        },
         "SQLiteMaintenancePort": {"delete_notebook_kg", "backfill_kg_fts", "backfill_chunk_fts", "build_scale_index", "fold_scale_index_delta"},
     }
     for protocol_name, methods in required.items():

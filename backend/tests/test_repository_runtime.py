@@ -34,3 +34,43 @@ def test_runtime_construction_does_not_evaluate_seams():
     )
     RepositoryRuntime(settings=settings, root_dir=Path("."), seams=seams)
     assert calls == []
+
+
+def test_evidence_context_is_composed_once_with_truthful_graph_port(repo):
+    import inspect
+
+    from app.models.schemas import NotebookCreate
+    from app.services.repository_runtime import RepositoryRuntime
+    from app.services.retrieval import RetrievedKnowledge
+
+    runtime = repo._runtime
+    assert runtime.evidence_context is None
+
+    notebook = repo.create_notebook(NotebookCreate(name="evidence"))
+    object_id = repo._test_insert_object(
+        notebook.id, "concept", {"name": "Cascode"},
+    )
+    block, evidence = repo._answer_context(
+        notebook.id,
+        [RetrievedKnowledge(
+            object_id=object_id, object_type="concept",
+            payload={"name": "Cascode"}, evidence=[],
+        )],
+    )
+
+    context = runtime.evidence_context
+    assert context is not None
+    assert context.knowledge is repo.retrieval.graph
+    assert all(callable(getattr(context.knowledge, name)) for name in (
+        "cluster_map", "node_context", "in_network_relations",
+        "relation_support_count",
+    ))
+    assert block.startswith("k1: [concept][personal] Cascode")
+    assert evidence["k1"]["object_id"] == object_id
+
+    first_context = context
+    assert repo.retrieval is runtime.retrieval
+    assert runtime.evidence_context is first_context
+    assert "evidence_context.knowledge" not in inspect.getsource(
+        RepositoryRuntime.wire_retrieval
+    )

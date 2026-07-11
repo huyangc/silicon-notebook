@@ -1247,6 +1247,15 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
     assert "RTL综合" in attempted_q and "布线" in attempted_q
 
 
+def test_from_repository_passes_configured_sibling_threshold(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rrepo.settings.sibling_min_bridge = 5
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    assert retriever.communities.sibling_min_bridge == 5
+
+
 def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
     """无 base 库 → 不 fan-out,优雅继续(fail-open)。"""
     from app.services.reasoning_retrieval import ReasoningRetriever

@@ -11,10 +11,12 @@ from typing import List, Optional, Tuple
 
 
 class CommunityQueryService:
-    def __init__(self, *, notebooks, unified_kg, event_log) -> None:
+    def __init__(self, *, notebooks, unified_kg, event_log,
+                 sibling_min_bridge: int = 2) -> None:
         self.notebooks = notebooks
         self.unified_kg = unified_kg
         self.event_log = event_log
+        self.sibling_min_bridge = int(sibling_min_bridge)
 
     def first_base_notebook_id(self, active_notebook_id: str) -> Optional[str]:
         return self.unified_kg.first_base_notebook_id(active_notebook_id)
@@ -24,10 +26,9 @@ class CommunityQueryService:
                                  candidates: int) -> Tuple[List[str], str]:
         try:
             focal = _resolve_focal(self.unified_kg, base_notebook_id, focal_name)
-            min_bridges = int(getattr(self.notebooks, "sibling_min_bridge", 2))
             siblings = (
                 self.unified_kg.comention_peers(
-                    base_notebook_id, focal, min_bridges, top_k
+                    base_notebook_id, focal, self.sibling_min_bridge, top_k
                 )
                 if focal else []
             )

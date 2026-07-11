@@ -1194,9 +1194,6 @@ class GraphRetrievalService(_RetrievalState):
     def scale_ppr(self, *args, **kwargs):
         return self._scale_ppr_impl(*args, **kwargs)
 
-    def cluster_map(self, notebook_id: str):
-        return self._peer.cluster_map(notebook_id)
-
     def in_network_relations(self, participant_ids, object_ids):
         ids = list(object_ids)
         if len(ids) < 2:

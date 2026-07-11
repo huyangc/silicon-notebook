@@ -11,7 +11,9 @@ from typing import Any, Mapping, Sequence
 
 from app.core.config import Settings
 from app.models.schemas import AnswerAnchor, Citation
-from app.repositories.ports import KnowledgeStorePort, NotebookStorePort, SourceStorePort
+from app.repositories.ports import (
+    EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
+)
 from app.services.retrieval import RetrievedChunk, RetrievedKnowledge, est_tokens
 
 
@@ -24,7 +26,7 @@ class EvidenceContextService:
         *,
         notebooks: NotebookStorePort,
         sources: SourceStorePort,
-        knowledge: KnowledgeStorePort,
+        knowledge: EvidenceKnowledgeContextPort,
         settings: Settings,
     ) -> None:
         self.notebooks = notebooks

@@ -3131,6 +3131,7 @@ class SQLiteRepository:
         base ⊕ active) so tier lookup is O(distinct notebooks), not O(citations).
         Missing/unknown ids default to "personal" (safe: matches Citation.tier's
         own default, never silently mislabels a source as authoritative base)."""
+        _ = self.retrieval
         return self._runtime.evidence_context.tier_map(list(notebook_ids))
 
     def _citations_from(
@@ -3139,6 +3140,7 @@ class SQLiteRepository:
         valid_element_ids: set,
         label: str,
     ) -> List[Citation]:
+        _ = self.retrieval
         return self._runtime.evidence_context.citations_from(
             items, valid_element_ids, label
         )
@@ -3253,6 +3255,7 @@ class SQLiteRepository:
         (PPR/概念漫游可掺 base 库 chunk,c.notebook_id 已标;单库路径留空回退调用方
         传入的 notebook_id)。批量一次查询(O(distinct notebook) 非 O(chunk)),
         循环内只查表。"""
+        _ = self.retrieval
         return self._runtime.evidence_context.chunk_context(
             chunks, notebook_id=notebook_id, budget_chars=budget_chars
         )
@@ -3616,6 +3619,7 @@ class SQLiteRepository:
     def _truncate_kg_block(self, block: str, max_tokens: int) -> str:
         """按行截断 KG block 至 token 预算(整行保留)。被截掉的行其 [k] 仍留在 id_map,
         _parse_answer_anchors 解析无害(只损失上下文,不破坏引用)。镜像 truncate_by_tokens。"""
+        _ = self.retrieval
         return self._runtime.evidence_context.truncate_kg_block(block, max_tokens)
 
     def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
@@ -4372,6 +4376,7 @@ class SQLiteRepository:
         """Resolve the `[k_i]` markers present in `answer` into AnswerAnchor
         objects (deduped, in first-seen order). Markers not in `id_map` and
         items never cited are dropped."""
+        _ = self.retrieval
         return self._runtime.evidence_context.parse_anchors(answer, id_map)
 
     def _needs_index(self, notebook_id: str) -> bool:

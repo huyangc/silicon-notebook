@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 
 from app.core.config import Settings
@@ -41,6 +42,20 @@ def test_retrieval_owners_contain_no_sql_execution():
     for owner in (CandidateRetrievalService, GraphRetrievalService):
         source = inspect.getsource(inspect.getmodule(owner))
         assert ".execute(" not in source
+
+
+def test_graph_retrieval_has_one_cluster_map_definition():
+    source = inspect.getsource(inspect.getmodule(GraphRetrievalService))
+    tree = ast.parse(source)
+    graph_class = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "GraphRetrievalService"
+    )
+    assert sum(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "cluster_map"
+        for node in graph_class.body
+    ) == 1
 
 
 def test_reasoning_retriever_accepts_ports_without_sqlite_repository():
