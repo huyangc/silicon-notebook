@@ -98,6 +98,14 @@ class SqliteDatabase:
 
     @contextmanager
     def write(self) -> Iterator[sqlite3.Connection]:
+        """写事务:进程内写串行(write_lock)。每次用**独立新连接**(非线程复用读连接),
+        使每个 write() 独立提交 —— 保留嵌套增量提交(节点向量 backfill 每批 flush
+        独立落库、中断可续跑)的崩溃恢复语义(INV-8)。用完即 close(写串行,写连接峰值
+        = 嵌套写深度、fd 用完即还)。深度守卫不作用于 write()。"""
         with self.write_lock:
-            with self.connect() as db:
-                yield db
+            conn = self._new_connection()
+            try:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
