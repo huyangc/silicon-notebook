@@ -185,6 +185,307 @@
           "title": "AdminUserUsage",
           "type": "object"
         },
+        "AgentProfile": {
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "owner_id": {
+              "title": "Owner Id",
+              "type": "string"
+            },
+            "status": {
+              "default": "active",
+              "enum": [
+                "active",
+                "revoked"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "owner_id",
+            "name",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "AgentProfile",
+          "type": "object"
+        },
+        "AgentProfileCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Description",
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "AgentProfileCreate",
+          "type": "object"
+        },
+        "AgentProfileUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "active",
+                    "revoked"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          "title": "AgentProfileUpdate",
+          "type": "object"
+        },
+        "AgentTokenCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "agent_profile_id",
+            "default_notebook_id"
+          ],
+          "title": "AgentTokenCreate",
+          "type": "object"
+        },
+        "AgentTokenIssued": {
+          "properties": {
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            },
+            "token": {
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "token",
+            "agent_profile_id",
+            "default_notebook_id",
+            "created_at"
+          ],
+          "title": "AgentTokenIssued",
+          "type": "object"
+        },
+        "AgentTokenSummary": {
+          "properties": {
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "last_used_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Used At"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "profile_name": {
+              "title": "Profile Name",
+              "type": "string"
+            },
+            "revoked_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Revoked At"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "agent_profile_id",
+            "profile_name",
+            "default_notebook_id",
+            "created_at"
+          ],
+          "title": "AgentTokenSummary",
+          "type": "object"
+        },
         "AnswerAnchor": {
           "properties": {
             "definition": {
@@ -3743,6 +4044,293 @@
             }
           },
           "summary": "List Admin User Notebooks"
+        }
+      },
+      "/api/agent-profiles": {
+        "get": {
+          "operationId": "list_agent_profiles_api_agent_profiles_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 100,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/AgentProfile"
+                    },
+                    "title": "Response List Agent Profiles Api Agent Profiles Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Agent Profiles"
+        },
+        "post": {
+          "operationId": "create_agent_profile_api_agent_profiles_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentProfile"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Agent Profile"
+        }
+      },
+      "/api/agent-profiles/{profile_id}": {
+        "patch": {
+          "operationId": "update_agent_profile_api_agent_profiles__profile_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "profile_id",
+              "required": true,
+              "schema": {
+                "title": "Profile Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentProfile"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Agent Profile"
+        }
+      },
+      "/api/agent-profiles/{profile_id}/tokens": {
+        "post": {
+          "operationId": "issue_agent_token_api_agent_profiles__profile_id__tokens_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "profile_id",
+              "required": true,
+              "schema": {
+                "title": "Profile Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTokenCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentTokenIssued"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Issue Agent Token"
+        }
+      },
+      "/api/agent-tokens": {
+        "get": {
+          "operationId": "list_agent_tokens_api_agent_tokens_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 100,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/AgentTokenSummary"
+                    },
+                    "title": "Response List Agent Tokens Api Agent Tokens Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Agent Tokens"
+        }
+      },
+      "/api/agent-tokens/{token_id}": {
+        "delete": {
+          "operationId": "revoke_agent_token_api_agent_tokens__token_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token_id",
+              "required": true,
+              "schema": {
+                "title": "Token Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentTokenSummary"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Revoke Agent Token"
         }
       },
       "/api/answers/{answer_id}/feedback": {

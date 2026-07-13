@@ -114,7 +114,15 @@ from app.services.prompts import (
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
-from app.models.schemas import MemoryRecord, MemoryUpdate, PaginatedMemories
+from app.models.schemas import (
+    AgentPrincipal,
+    AgentProfile,
+    AgentTokenIssued,
+    AgentTokenSummary,
+    MemoryRecord,
+    MemoryUpdate,
+    PaginatedMemories,
+)
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.schema_registry import SchemaRegistryService
@@ -1071,6 +1079,65 @@ class SQLiteRepository:
     # Owner-private Memory lifecycle.  The facade remains a one-hop
     # compatibility adapter; orchestration lives in MemoryService and SQL in
     # MemoryStore.
+    def create_agent_profile(
+        self, owner_id: str, name: str, description: str = ""
+    ) -> AgentProfile:
+        return self._runtime.memory_service.create_agent_profile(
+            owner_id, name, description
+        )
+
+    def list_agent_profiles(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentProfile]:
+        return self._runtime.memory_service.list_agent_profiles(
+            owner_id, offset, limit
+        )
+
+    def update_agent_profile(
+        self, profile_id: str, owner_id: str, patch: Any
+    ) -> AgentProfile:
+        return self._runtime.memory_service.update_agent_profile(
+            profile_id, owner_id, patch
+        )
+
+    def issue_agent_token(
+        self,
+        owner_id: str,
+        agent_profile_id: str,
+        scopes: List[str],
+        default_notebook_id: str,
+        notebook_ids: List[str],
+        expires_at: "str | None",
+    ) -> AgentTokenIssued:
+        return self._runtime.memory_service.issue_agent_token(
+            owner_id,
+            agent_profile_id,
+            scopes,
+            default_notebook_id,
+            notebook_ids,
+            expires_at,
+        )
+
+    def list_agent_tokens(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentTokenSummary]:
+        return self._runtime.memory_service.list_agent_tokens(owner_id, offset, limit)
+
+    def revoke_agent_token(
+        self, owner_id: str, token_id: str
+    ) -> AgentTokenSummary:
+        return self._runtime.memory_service.revoke_agent_token(owner_id, token_id)
+
+    def resolve_agent_token(self, raw_token: str) -> "AgentPrincipal | None":
+        return self._runtime.memory_service.resolve_agent_token(raw_token)
+
+    def require_agent_access(
+        self, principal: AgentPrincipal, scope: str, notebook_id: str
+    ) -> None:
+        return self._runtime.memory_service.require_agent_access(
+            principal, scope, notebook_id
+        )
+
     def answer_memory_source(self, answer_id: str) -> dict:
         return self._runtime.ask_state.answer_memory_source(answer_id)
 

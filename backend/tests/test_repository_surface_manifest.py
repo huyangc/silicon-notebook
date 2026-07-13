@@ -1501,6 +1501,32 @@ TASK5_MEMORY_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 6 (Memory): Agent token tests compose a real repository/runtime to prove
+# owner isolation and notebook membership revocation across the service/store
+# boundary. These are test-only compatibility consumers added after the frozen
+# pre-Memory facade manifest.
+TASK6_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_agent_tokens.py", 11, "app.services.sqlite_repository", name)
+    for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
+}
+TASK6_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_agent_tokens.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook", "create_user",
+        "reset_request_user", "set_request_user",
+    }
+}
+TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "create_agent_profile",
+    "issue_agent_token",
+    "list_agent_profiles",
+    "list_agent_tokens",
+    "require_agent_access",
+    "resolve_agent_token",
+    "revoke_agent_token",
+    "update_agent_profile",
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -1813,6 +1839,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK2_MEMORY_ALLOWED_MEMBER_FILES
     | TASK3_MEMORY_ALLOWED_MEMBER_FILES
     | TASK5_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK6_MEMORY_ALLOWED_MEMBER_FILES
     | TASK4_ALLOWED_MEMBER_FILES
     | TASK5_ALLOWED_MEMBER_FILES
     | TASK6_ALLOWED_MEMBER_FILES
@@ -2372,7 +2399,8 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK27_ALLOWED_IMPORTS
                         or site in TASK28_ALLOWED_IMPORTS
                         or site in TASK2_MEMORY_ALLOWED_IMPORTS
-                        or site in TASK5_MEMORY_ALLOWED_IMPORTS
+                            or site in TASK5_MEMORY_ALLOWED_IMPORTS
+                            or site in TASK6_MEMORY_ALLOWED_IMPORTS
                 )
 
 
@@ -2576,7 +2604,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+            for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
@@ -2616,6 +2644,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in TASK3_MEMORY_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in TASK6_MEMORY_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

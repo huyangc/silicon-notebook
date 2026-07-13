@@ -1,9 +1,16 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, Edit3, Search, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { AnswerMarkdown } from "./answer-markdown";
+import {
+  AGENT_SCOPE_OPTIONS,
+  agentTokenDraft,
+  agentTokenRequest,
+  canIssueAgentToken,
+  type AgentTokenDraft,
+} from "./agent-token-model";
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
 import {
   canEditMemory,
@@ -20,6 +27,10 @@ import type {
   MemoryPreview,
   MemoryRecord,
   MemoryStatus,
+  AgentProfile,
+  AgentTokenIssued,
+  AgentTokenSummary,
+  NotebookSummary,
   PaginatedMemories,
 } from "./workspace-model";
 import "./memory-panel.css";
@@ -104,6 +115,223 @@ function MemoryEditor({
         />
       </label>
     </div>
+  );
+}
+
+function defaultExpiry(): string {
+  const date = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 16);
+}
+
+function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
+  const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const [tokens, setTokens] = useState<AgentTokenSummary[]>([]);
+  const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
+  const [profileName, setProfileName] = useState("");
+  const [profileDescription, setProfileDescription] = useState("");
+  const [selectedProfile, setSelectedProfile] = useState("");
+  const [draft, setDraft] = useState<AgentTokenDraft>(() => agentTokenDraft());
+  const [issued, setIssued] = useState<AgentTokenIssued | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  const requestEpochRef = useRef(0);
+  const listControllerRef = useRef<AbortController | null>(null);
+  const mutationControllersRef = useRef(new Set<AbortController>());
+  const mountedRef = useRef(true);
+
+  useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
+    listControllerRef.current?.abort();
+    mutationControllersRef.current.forEach((controller) => controller.abort());
+  }), [sessionSignal]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      listControllerRef.current?.abort();
+      mutationControllersRef.current.forEach((controller) => controller.abort());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!expanded || sessionSignal.aborted) return;
+    const epoch = ++requestEpochRef.current;
+    const controller = new AbortController();
+    listControllerRef.current = controller;
+    setLoading(true);
+    setError("");
+    Promise.all([
+      memoryApi<AgentProfile[]>("/agent-profiles", { signal: controller.signal }),
+      memoryApi<AgentTokenSummary[]>("/agent-tokens", { signal: controller.signal }),
+      memoryApi<NotebookSummary[]>("/notebooks", { signal: controller.signal }),
+    ]).then(([nextProfiles, nextTokens, nextNotebooks]) => {
+      if (controller.signal.aborted || epoch !== requestEpochRef.current) return;
+      setProfiles(nextProfiles);
+      setTokens(nextTokens);
+      setNotebooks(nextNotebooks);
+      const activeProfiles = nextProfiles.filter((profile) => profile.status === "active");
+      setSelectedProfile((current) => activeProfiles.some((profile) => profile.id === current)
+        ? current
+        : activeProfiles[0]?.id || "");
+      setDraft((current) => {
+        if (current.default_notebook_id && nextNotebooks.some((notebook) => notebook.id === current.default_notebook_id)) {
+          return current;
+        }
+        const next = agentTokenDraft(nextNotebooks[0]?.id || "");
+        return { ...next, expires_at: defaultExpiry() };
+      });
+    }).catch((cause) => {
+      if (!controller.signal.aborted && epoch === requestEpochRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    }).finally(() => {
+      if (epoch === requestEpochRef.current) setLoading(false);
+    });
+    return () => {
+      controller.abort();
+      if (listControllerRef.current === controller) listControllerRef.current = null;
+      if (requestEpochRef.current === epoch) requestEpochRef.current += 1;
+    };
+  }, [expanded, refresh, sessionSignal]);
+
+  async function mutate<T>(path: string, options: RequestInit): Promise<T | null> {
+    if (sessionSignal.aborted) return null;
+    const controller = new AbortController();
+    mutationControllersRef.current.add(controller);
+    setLoading(true);
+    setError("");
+    try {
+      const result = await memoryApi<T>(path, { ...options, signal: controller.signal });
+      return controller.signal.aborted || !mountedRef.current ? null : result;
+    } catch (cause) {
+      if (!controller.signal.aborted && mountedRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      return null;
+    } finally {
+      mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setLoading(false);
+    }
+  }
+
+  async function createProfile(event: FormEvent) {
+    event.preventDefault();
+    if (!profileName.trim()) return;
+    const profile = await mutate<AgentProfile>("/agent-profiles", {
+      method: "POST",
+      body: JSON.stringify({ name: profileName.trim(), description: profileDescription.trim() }),
+    });
+    if (!profile) return;
+    setProfileName("");
+    setProfileDescription("");
+    setSelectedProfile(profile.id);
+    setRefresh((value) => value + 1);
+  }
+
+  async function disableProfile(profileId: string) {
+    const profile = await mutate<AgentProfile>(`/agent-profiles/${encodeURIComponent(profileId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "revoked" }),
+    });
+    if (profile) setRefresh((value) => value + 1);
+  }
+
+  async function issueToken(event: FormEvent) {
+    event.preventDefault();
+    if (!canIssueAgentToken(selectedProfile, draft)) return;
+    const token = await mutate<AgentTokenIssued>(
+      `/agent-profiles/${encodeURIComponent(selectedProfile)}/tokens`,
+      { method: "POST", body: JSON.stringify(agentTokenRequest(selectedProfile, draft)) },
+    );
+    if (!token) return;
+    setIssued(token);
+    setRefresh((value) => value + 1);
+  }
+
+  async function revokeToken(tokenId: string) {
+    const token = await mutate<AgentTokenSummary>(`/agent-tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
+    if (token) setRefresh((value) => value + 1);
+  }
+
+  function setDefaultNotebook(notebookId: string) {
+    setDraft((current) => ({
+      ...current,
+      default_notebook_id: notebookId,
+      notebook_ids: Array.from(new Set([notebookId, ...current.notebook_ids].filter(Boolean))),
+    }));
+  }
+
+  return (
+    <section className="agent-access-card" aria-label="Agent 接入">
+      <button type="button" className="agent-access-toggle" onClick={() => setExpanded((value) => !value)}>
+        <span><KeyRound size={17} /><strong>Agent 接入</strong><small>管理 Claude Code、Codex 等客户端的最小权限 token</small></span>
+        <ChevronDown size={16} className={expanded ? "open" : ""} />
+      </button>
+      {expanded && (
+        <div className="agent-access-body">
+          {error && <div className="memory-error" role="alert">{error}</div>}
+          <div className="agent-access-grid">
+            <form className="agent-config-block" onSubmit={createProfile}>
+              <h3>Agent Profile</h3>
+              <p>稳定身份用于 Memory 来源和审计；停用后它的全部 token 立即失效。</p>
+              <label>名称<input value={profileName} maxLength={80} onChange={(event) => setProfileName(event.target.value)} placeholder="例如 Claude Code" /></label>
+              <label>说明<input value={profileDescription} maxLength={500} onChange={(event) => setProfileDescription(event.target.value)} placeholder="用途或运行环境" /></label>
+              <button type="submit" disabled={loading || !profileName.trim()}><Plus size={14} /> 新建 Profile</button>
+              <div className="agent-profile-list">
+                {profiles.map((profile) => (
+                  <div key={profile.id}>
+                    <span><strong>{profile.name}</strong><small>{profile.description || "无说明"} · {profile.status === "active" ? "启用" : "已停用"}</small></span>
+                    {profile.status === "active" && <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>}
+                  </div>
+                ))}
+              </div>
+            </form>
+
+            <form className="agent-config-block" onSubmit={issueToken}>
+              <h3>签发 Token</h3>
+              <label>Profile<select value={selectedProfile} onChange={(event) => setSelectedProfile(event.target.value)}>
+                <option value="">选择 Profile</option>
+                {profiles.filter((profile) => profile.status === "active").map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+              </select></label>
+              <label>默认 Notebook<select value={draft.default_notebook_id} onChange={(event) => setDefaultNotebook(event.target.value)}>
+                <option value="">选择 Notebook</option>
+                {notebooks.map((notebook) => <option key={notebook.id} value={notebook.id}>{notebook.name}</option>)}
+              </select></label>
+              <fieldset><legend>Notebook allowlist</legend>{notebooks.map((notebook) => (
+                <label className="agent-check" key={notebook.id}><input type="checkbox" checked={draft.notebook_ids.includes(notebook.id)} disabled={draft.default_notebook_id === notebook.id} onChange={(event) => setDraft((current) => ({ ...current, notebook_ids: event.target.checked ? [...current.notebook_ids, notebook.id] : current.notebook_ids.filter((id) => id !== notebook.id) }))} />{notebook.name}</label>
+              ))}</fieldset>
+              <fieldset><legend>Scopes</legend>{AGENT_SCOPE_OPTIONS.map((scope) => (
+                <label className="agent-check" key={scope.value}><input type="checkbox" checked={draft.scopes.includes(scope.value)} onChange={(event) => setDraft((current) => ({ ...current, scopes: event.target.checked ? [...current.scopes, scope.value] : current.scopes.filter((item) => item !== scope.value) }))} />{scope.label}</label>
+              ))}</fieldset>
+              <label>过期时间<input type="datetime-local" value={draft.expires_at} onChange={(event) => setDraft((current) => ({ ...current, expires_at: event.target.value }))} /></label>
+              <button type="submit" className="primary" disabled={loading || !canIssueAgentToken(selectedProfile, draft)}><KeyRound size={14} /> 签发 Token</button>
+            </form>
+          </div>
+
+          {issued && (
+            <div className="agent-issued-token" role="status">
+              <strong>请立即保存：明文 token 仅显示这一次</strong>
+              <code>{issued.token}</code>
+              <button type="button" onClick={() => navigator.clipboard.writeText(issued.token)}><Copy size={14} /> 复制</button>
+              <button type="button" onClick={() => setIssued(null)}><X size={14} /> 我已保存</button>
+            </div>
+          )}
+
+          <div className="agent-token-list">
+            <h3>已签发 Token</h3>
+            {tokens.length === 0 ? <p>暂无 token。</p> : tokens.map((token) => (
+              <article key={token.id}>
+                <span><strong>{token.profile_name}</strong><small>{token.scopes.join(" · ")}<br />默认：{notebooks.find((notebook) => notebook.id === token.default_notebook_id)?.name || token.default_notebook_id} · 允许 {token.notebook_ids.length} 个 notebook · {token.expires_at ? `到期 ${new Date(token.expires_at).toLocaleString("zh-CN")}` : "无到期时间"}</small></span>
+                {token.revoked_at ? <em>已撤销</em> : <button type="button" className="danger" disabled={loading} onClick={() => revokeToken(token.id)}>撤销</button>}
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -237,6 +465,8 @@ export function MemoryPanel({
         </div>
         <span className="memory-total">{total} 条</span>
       </header>
+
+      {scope === "global" && <AgentAccessManager sessionSignal={sessionSignal} />}
 
       <div className="memory-filterbar">
         <form className="memory-search" onSubmit={submitSearch}>

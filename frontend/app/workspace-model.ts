@@ -64,6 +64,33 @@ export type MemoryPreview = {
   provenance_summary: Record<string, unknown>;
 };
 
+export type AgentProfile = {
+  id: string;
+  owner_id: string;
+  name: string;
+  description: string;
+  status: "active" | "revoked";
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentTokenSummary = {
+  id: string;
+  agent_profile_id: string;
+  profile_name: string;
+  scopes: string[];
+  default_notebook_id: string;
+  notebook_ids: string[];
+  expires_at?: string | null;
+  revoked_at?: string | null;
+  last_used_at?: string | null;
+  created_at: string;
+};
+
+export type AgentTokenIssued = Omit<AgentTokenSummary, "profile_name" | "revoked_at" | "last_used_at"> & {
+  token: string;
+};
+
 export type SourceSummary = {
   id: string;
   notebook_id: string;

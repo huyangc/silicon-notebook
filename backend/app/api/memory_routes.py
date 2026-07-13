@@ -16,6 +16,12 @@ from app.api.deps import (
     require_notebook_read,
 )
 from app.models.schemas import (
+    AgentProfile,
+    AgentProfileCreate,
+    AgentProfileUpdate,
+    AgentTokenCreate,
+    AgentTokenIssued,
+    AgentTokenSummary,
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
     MemoryCreateFromAnswer,
@@ -61,6 +67,102 @@ def _clean_answer(text: str) -> str:
         cursor = match.end()
     parts.append(_clean_plain_answer(value[cursor:]))
     return "".join(parts).strip()
+
+
+@memory_router.get("/agent-profiles", response_model=list[AgentProfile])
+async def list_agent_profiles(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> list[AgentProfile]:
+    return await run_in_threadpool(service.list_agent_profiles, user.id, offset, limit)
+
+
+@memory_router.post(
+    "/agent-profiles",
+    response_model=AgentProfile,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_agent_profile(
+    payload: AgentProfileCreate,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AgentProfile:
+    try:
+        return await run_in_threadpool(
+            service.create_agent_profile, user.id, payload.name, payload.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@memory_router.patch("/agent-profiles/{profile_id}", response_model=AgentProfile)
+async def update_agent_profile(
+    profile_id: str,
+    payload: AgentProfileUpdate,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AgentProfile:
+    try:
+        return await run_in_threadpool(
+            service.update_agent_profile, profile_id, user.id, payload
+        )
+    except KeyError:
+        raise _not_found("Agent profile not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@memory_router.post(
+    "/agent-profiles/{profile_id}/tokens",
+    response_model=AgentTokenIssued,
+    status_code=status.HTTP_201_CREATED,
+)
+async def issue_agent_token(
+    profile_id: str,
+    payload: AgentTokenCreate,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AgentTokenIssued:
+    if payload.agent_profile_id != profile_id:
+        raise HTTPException(status_code=422, detail="profile path and payload differ")
+    try:
+        return await run_in_threadpool(
+            service.issue_agent_token,
+            user.id,
+            profile_id,
+            payload.scopes,
+            payload.default_notebook_id,
+            payload.notebook_ids,
+            payload.expires_at,
+        )
+    except KeyError:
+        raise _not_found("Agent profile not found")
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@memory_router.get("/agent-tokens", response_model=list[AgentTokenSummary])
+async def list_agent_tokens(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> list[AgentTokenSummary]:
+    return await run_in_threadpool(service.list_agent_tokens, user.id, offset, limit)
+
+
+@memory_router.delete("/agent-tokens/{token_id}", response_model=AgentTokenSummary)
+async def revoke_agent_token(
+    token_id: str,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AgentTokenSummary:
+    try:
+        return await run_in_threadpool(service.revoke_agent_token, user.id, token_id)
+    except KeyError:
+        raise _not_found("Agent token not found")
 
 
 def _not_found(detail: str = "Memory not found") -> HTTPException:

@@ -38,7 +38,7 @@ from app.models.schemas import (
     ConversationSummary, DuplicateGroup, FeedbackRequest, FeedbackResponse,
     KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
     NotebookAnalytics, NotebookCreate, NotebookSearchResponse, NotebookSummary,
-    MemoryRecord, MemoryUpdate, PaginatedMemories, NotebookTemplate, NotebookUpdate, ObjectSchemaCreate, ObjectSchemaModel,
+    AgentPrincipal, AgentProfile, AgentTokenIssued, AgentTokenSummary, MemoryRecord, MemoryUpdate, PaginatedMemories, NotebookTemplate, NotebookUpdate, ObjectSchemaCreate, ObjectSchemaModel,
     ObjectSchemaUpdate, PaginatedKnowledge, PaginatedSources, RuleCard,
     SourceDetail, SourceElement, SourceImportRequest, SourceSummary, UserProfile,
 )
@@ -142,6 +142,30 @@ class NotebookAccessRepository(Protocol):
 
 
 class MemoryRepository(Protocol):
+    def create_agent_profile(
+        self, owner_id: str, name: str, description: str = ""
+    ) -> AgentProfile: ...
+    def list_agent_profiles(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentProfile]: ...
+    def update_agent_profile(
+        self, profile_id: str, owner_id: str, patch: Mapping[str, Any] | Any
+    ) -> AgentProfile: ...
+    def issue_agent_token(
+        self, owner_id: str, agent_profile_id: str, scopes: Sequence[str],
+        default_notebook_id: str, notebook_ids: Sequence[str],
+        expires_at: str | None,
+    ) -> AgentTokenIssued: ...
+    def list_agent_tokens(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentTokenSummary]: ...
+    def revoke_agent_token(
+        self, owner_id: str, token_id: str
+    ) -> AgentTokenSummary: ...
+    def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None: ...
+    def require_agent_access(
+        self, principal: AgentPrincipal, scope: str, notebook_id: str
+    ) -> None: ...
     def create_memory_candidate(
         self, notebook_id: str, user_id: str, agent_profile_id: str | None,
         client_request_id: str, title: str, content_md: str, tags: Sequence[str],
@@ -696,6 +720,30 @@ from app.models.memory import (  # noqa: E402
 
 
 class MemoryStorePort(Protocol):
+    def create_agent_profile(
+        self, owner_id: str, name: str, description: str
+    ) -> AgentProfile: ...
+    def list_agent_profiles(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentProfile]: ...
+    def update_agent_profile(
+        self, profile_id: str, owner_id: str, fields: Mapping[str, Any]
+    ) -> AgentProfile: ...
+    def create_agent_token(
+        self, token_id: str, owner_id: str, agent_profile_id: str,
+        token_hash: str, scopes: Sequence[str], default_notebook_id: str,
+        notebook_ids: Sequence[str], expires_at: str | None,
+    ) -> AgentTokenSummary: ...
+    def list_agent_tokens(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentTokenSummary]: ...
+    def revoke_agent_token(
+        self, token_id: str, owner_id: str
+    ) -> AgentTokenSummary: ...
+    def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None: ...
+    def touch_agent_token(
+        self, token_id: str, used_at: str, touch_before: str
+    ) -> None: ...
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord: ...
     def create_candidate_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str

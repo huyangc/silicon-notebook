@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
 from app.models.memory import MemoryRevision, MemoryWrite
-from app.models.schemas import MemoryRecord, PaginatedMemories
+from app.models.schemas import AgentProfile, AgentTokenSummary, MemoryRecord, PaginatedMemories
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.vector_index import encode_vector
 
@@ -33,6 +33,200 @@ class MemoryStore:
         self.database = database
         self.new_id = new_id
         self.now = now
+
+    @staticmethod
+    def _profile(row: sqlite3.Row) -> AgentProfile:
+        return AgentProfile(
+            id=row["id"],
+            owner_id=row["owner_id"],
+            name=row["name"],
+            description=row["description"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _token(row: sqlite3.Row, notebook_ids: Sequence[str]) -> AgentTokenSummary:
+        return AgentTokenSummary(
+            id=row["id"],
+            agent_profile_id=row["agent_profile_id"],
+            profile_name=row["profile_name"],
+            scopes=_json_list(row["scopes_json"]),
+            default_notebook_id=row["default_notebook_id"],
+            notebook_ids=list(notebook_ids),
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
+            last_used_at=row["last_used_at"],
+            created_at=row["created_at"],
+        )
+
+    def create_agent_profile(
+        self, owner_id: str, name: str, description: str
+    ) -> AgentProfile:
+        now = self.now()
+        profile_id = self.new_id("agent")
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO agent_profiles "
+                "(id,owner_id,name,description,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,'active',?,?)",
+                (profile_id, owner_id, name, description, now, now),
+            )
+            row = db.execute(
+                "SELECT * FROM agent_profiles WHERE id=?", (profile_id,)
+            ).fetchone()
+        return self._profile(row)
+
+    def list_agent_profiles(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentProfile]:
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM agent_profiles WHERE owner_id=? "
+                "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
+                (owner_id, limit, offset),
+            ).fetchall()
+        return [self._profile(row) for row in rows]
+
+    def update_agent_profile(
+        self, profile_id: str, owner_id: str, fields: Mapping[str, Any]
+    ) -> AgentProfile:
+        assignments = [f"{key}=?" for key in fields]
+        values = list(fields.values())
+        assignments.append("updated_at=?")
+        values.append(self.now())
+        with self.database.write() as db:
+            cursor = db.execute(
+                f"UPDATE agent_profiles SET {','.join(assignments)} "
+                "WHERE id=? AND owner_id=?",
+                (*values, profile_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(profile_id)
+            row = db.execute(
+                "SELECT * FROM agent_profiles WHERE id=? AND owner_id=?",
+                (profile_id, owner_id),
+            ).fetchone()
+        return self._profile(row)
+
+    @staticmethod
+    def _token_notebooks_on(db: sqlite3.Connection, token_id: str) -> list[str]:
+        return [
+            str(row["notebook_id"])
+            for row in db.execute(
+                "SELECT notebook_id FROM agent_token_notebooks "
+                "WHERE token_id=? ORDER BY notebook_id",
+                (token_id,),
+            ).fetchall()
+        ]
+
+    def create_agent_token(
+        self,
+        token_id: str,
+        owner_id: str,
+        agent_profile_id: str,
+        token_hash: str,
+        scopes: Sequence[str],
+        default_notebook_id: str,
+        notebook_ids: Sequence[str],
+        expires_at: str | None,
+    ) -> AgentTokenSummary:
+        now = self.now()
+        with self.database.write() as db:
+            profile = db.execute(
+                "SELECT name FROM agent_profiles "
+                "WHERE id=? AND owner_id=? AND status='active'",
+                (agent_profile_id, owner_id),
+            ).fetchone()
+            if profile is None:
+                raise KeyError(agent_profile_id)
+            db.execute(
+                "INSERT INTO agent_access_tokens "
+                "(id,agent_profile_id,token_hash,scopes_json,default_notebook_id,"
+                "expires_at,created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    token_id,
+                    agent_profile_id,
+                    token_hash,
+                    json.dumps(list(scopes), ensure_ascii=False),
+                    default_notebook_id,
+                    expires_at,
+                    now,
+                ),
+            )
+            db.executemany(
+                "INSERT INTO agent_token_notebooks (token_id,notebook_id) VALUES (?,?)",
+                [(token_id, notebook_id) for notebook_id in notebook_ids],
+            )
+            row = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id WHERE t.id=?",
+                (token_id,),
+            ).fetchone()
+        return self._token(row, notebook_ids)
+
+    def list_agent_tokens(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentTokenSummary]:
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id "
+                "WHERE p.owner_id=? ORDER BY t.created_at DESC,t.id DESC "
+                "LIMIT ? OFFSET ?",
+                (owner_id, limit, offset),
+            ).fetchall()
+            return [
+                self._token(row, self._token_notebooks_on(db, row["id"]))
+                for row in rows
+            ]
+
+    def revoke_agent_token(
+        self, token_id: str, owner_id: str
+    ) -> AgentTokenSummary:
+        now = self.now()
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE agent_access_tokens SET revoked_at=COALESCE(revoked_at,?) "
+                "WHERE id=? AND EXISTS (SELECT 1 FROM agent_profiles p "
+                "WHERE p.id=agent_access_tokens.agent_profile_id AND p.owner_id=?)",
+                (now, token_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(token_id)
+            row = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id WHERE t.id=?",
+                (token_id,),
+            ).fetchone()
+            notebooks = self._token_notebooks_on(db, token_id)
+        return self._token(row, notebooks)
+
+    def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT t.*,p.owner_id,p.name AS profile_name,p.status AS profile_status "
+                "FROM agent_access_tokens t JOIN agent_profiles p "
+                "ON p.id=t.agent_profile_id WHERE t.id=?",
+                (token_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["notebook_ids"] = self._token_notebooks_on(db, token_id)
+        return result
+
+    def touch_agent_token(
+        self, token_id: str, used_at: str, touch_before: str
+    ) -> None:
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE agent_access_tokens SET last_used_at=? WHERE id=? "
+                "AND revoked_at IS NULL AND "
+                "(last_used_at IS NULL OR last_used_at<=?)",
+                (used_at, token_id, touch_before),
+            )
 
     @staticmethod
     def _record(row: sqlite3.Row) -> MemoryRecord:
