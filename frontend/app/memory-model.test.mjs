@@ -1,0 +1,67 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  canEditMemory,
+  memoryListPath,
+  memoryOriginMeta,
+  memoryProvenanceRows,
+  memoryStatusMeta,
+} from "./memory-model.ts";
+
+test("candidate labels remain distinct from confirmed", () => {
+  assert.equal(memoryStatusMeta("candidate").label, "待确认");
+  assert.equal(memoryStatusMeta("confirmed").label, "已确认");
+});
+
+test("all terminal memory statuses have explicit review labels", () => {
+  assert.equal(memoryStatusMeta("rejected").label, "已拒绝");
+  assert.equal(memoryStatusMeta("deprecated").label, "已停用");
+});
+
+test("origin metadata distinguishes Ask capture from agent proposals", () => {
+  assert.equal(memoryOriginMeta("ask_answer").label, "Ask 回答");
+  assert.equal(memoryOriginMeta("external_agent").label, "Agent 提议");
+});
+
+test("memory list paths preserve pagination and encode filters", () => {
+  assert.equal(
+    memoryListPath({
+      scope: "notebook",
+      notebookId: "nb/1",
+      status: "candidate",
+      origin: "external_agent",
+      query: "power rail",
+      offset: 20,
+      limit: 20,
+    }),
+    "/notebooks/nb%2F1/memories?status=candidate&origin=external_agent&query=power+rail&offset=20&limit=20",
+  );
+});
+
+test("only live candidate and confirmed memories are editable", () => {
+  assert.equal(canEditMemory("candidate"), true);
+  assert.equal(canEditMemory("confirmed"), true);
+  assert.equal(canEditMemory("rejected"), false);
+  assert.equal(canEditMemory("deprecated"), false);
+});
+
+test("provenance rows summarize evidence without exposing owner identities", () => {
+  const rows = memoryProvenanceRows({
+    origin: "external_agent",
+    provenance: {
+      reason: "Reusable constraint",
+      task_context: { task: "review" },
+      evidence_refs: [{ source: "spec.md" }, { source: "notes.pdf" }],
+      created_by: "private-user-id",
+      agent_profile_id: "private-agent-id",
+    },
+  });
+  assert.deepEqual(rows, [
+    ["提议原因", "Reusable constraint"],
+    ["任务上下文", "task: review"],
+    ["证据引用", "2 条"],
+  ]);
+  assert.equal(JSON.stringify(rows).includes("private-user-id"), false);
+  assert.equal(JSON.stringify(rows).includes("private-agent-id"), false);
+});

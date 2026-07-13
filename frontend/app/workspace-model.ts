@@ -25,6 +25,45 @@ export type NotebookSummary = {
   shared_from?: string;
 };
 
+export type MemoryOrigin = "ask_answer" | "external_agent";
+export type MemoryStatus = "candidate" | "confirmed" | "rejected" | "deprecated";
+export type MemoryPromotionState = "none" | "proposed" | "approved" | "rejected";
+
+export type MemoryRecord = {
+  id: string;
+  notebook_id: string;
+  created_by: string;
+  agent_profile_id?: string | null;
+  source_answer_id?: string | null;
+  origin: MemoryOrigin;
+  status: MemoryStatus;
+  promotion_state: MemoryPromotionState;
+  title: string;
+  content_md: string;
+  tags: string[];
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  embedding_status: string;
+  embedding_error: string;
+  created_at: string;
+  updated_at: string;
+  provenance: Record<string, unknown>;
+};
+
+export type PaginatedMemories = {
+  items: MemoryRecord[];
+  total_count: number;
+  offset: number;
+  limit: number;
+};
+
+export type MemoryPreview = {
+  title: string;
+  content_md: string;
+  tags: string[];
+  provenance_summary: Record<string, unknown>;
+};
+
 export type SourceSummary = {
   id: string;
   notebook_id: string;
@@ -146,11 +185,12 @@ export type ConversationDetail = {
   active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
 };
 
-export type ChatMode = "ask" | "rules" | "reports";
+export type ChatMode = "ask" | "rules" | "reports" | "memory";
 export const CHAT_MODES: Array<[ChatMode, string]> = [
   ["ask", "问答"],
   ["rules", "知识库"],
   ["reports", "深度报告"],
+  ["memory", "Memory"],
 ];
 
 export type KnowledgeKind = string;

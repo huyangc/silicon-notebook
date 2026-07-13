@@ -7,6 +7,8 @@ import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
+import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
+import { memoryHash, parseMemoryHash } from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
@@ -84,6 +86,7 @@ import {
   type KnowledgeTypeCount,
   type MergeReviewJob,
   type MergeReviewSummary,
+  type MemoryRecord,
   type NodeContext,
   type NotebookAnalytics,
   type NotebookSummary,
@@ -707,6 +710,7 @@ export default function Home() {
   const [searchHits, setSearchHits] = useState<Record<string, SearchHit[]>>({});
   const [currentNotebookId, setCurrentNotebookId] = useState<string | null>(null);
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
+  const [outerView, setOuterView] = useState<"notebooks" | "memory">("notebooks");
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourcesTotal, setSourcesTotal] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
@@ -752,6 +756,8 @@ export default function Home() {
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
   const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
+  const [memoryAnswerId, setMemoryAnswerId] = useState<string | null>(null);
+  const [memorySavedAnswers, setMemorySavedAnswers] = useState<Record<string, boolean>>({});
   const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
@@ -1170,7 +1176,21 @@ export default function Home() {
   useEffect(() => {
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
-      .then((u) => { setCurrentUser(u); return loadNotebookCollection(); })
+      .then(async (u) => {
+        setCurrentUser(u);
+        await loadNotebookCollection();
+        const target = parseMemoryHash(window.location.hash);
+        if (target?.scope === "global") {
+          setOuterView("memory");
+        } else if (target?.scope === "notebook" && target.notebookId) {
+          try {
+            await openNotebookMemory(target.notebookId);
+          } catch {
+            showCollection();
+            setToast("Memory 深链接不可用或已失效");
+          }
+        }
+      })
       .catch(() => { clearToken(); })
       .finally(() => setAuthChecked(true));
   }, []);
@@ -1734,6 +1754,7 @@ export default function Home() {
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
     setReconnectJob(null);
+    setMemoryAnswerId(null);
     const [notebook, sourcesPage] = await Promise.all([
       api<NotebookSummary>(`/notebooks/${notebookId}`),
       api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`)
@@ -1758,6 +1779,7 @@ export default function Home() {
     setRenamingSessionId(null);
     setSessionTitleDraft("");
     setChatMode("ask");
+    setOuterView("notebooks");
     setKnowledge(EMPTY_KNOWLEDGE);
     setKnowledgeKind("concept");
     setKnowledgeStatusFilter("all");
@@ -1769,6 +1791,12 @@ export default function Home() {
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
     window.scrollTo(0, 0);
     return true;
+  }
+
+  async function openNotebookMemory(notebookId: string) {
+    if (!await openNotebook(notebookId)) return;
+    setChatMode("memory");
+    window.history.replaceState(null, "", memoryHash(notebookId));
   }
 
   // --- Pending center: precise deep-link per item type --------------------
@@ -1815,8 +1843,28 @@ export default function Home() {
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
     setReconnectJob(null);
+    setMemoryAnswerId(null);
+    setOuterView("notebooks");
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     window.scrollTo(0, 0);
+  }
+
+  function showGlobalMemory() {
+    showCollection();
+    setOuterView("memory");
+    window.history.replaceState(null, "", memoryHash(null));
+  }
+
+  async function handleMemorySaved(memory: MemoryRecord) {
+    if (!memoryAnswerId || memory.notebook_id !== currentNotebookId) return;
+    setMemorySavedAnswers((previous) => ({ ...previous, [memoryAnswerId]: true }));
+    setMemoryAnswerId(null);
+    setToast("已保存到 Memory");
+    await loadNotebookCollection();
+    if (currentNotebookId) {
+      const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
+      if (activeNotebookIdRef.current === currentNotebookId) setCurrentNotebook(refreshed);
+    }
   }
 
   async function saveInlineNotebookName() {
@@ -2818,6 +2866,13 @@ export default function Home() {
 
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
+    if (currentNotebookId) {
+      window.history.replaceState(
+        null,
+        "",
+        mode === "memory" ? memoryHash(currentNotebookId) : `#notebook=${encodeURIComponent(currentNotebookId)}`,
+      );
+    }
     if (mode === "rules") {
       loadKnowledgeTypes().then((types) => {
         if (!types || types.length === 0) return;
@@ -2946,9 +3001,13 @@ export default function Home() {
           <button className="brand-mark" onClick={showCollection} title="Notebook collection">SN</button>
           <div>
             <div className="brand-title">silicon-notebook</div>
-            <div className="brand-subtitle">{isWorkspace ? "Notebook workspace" : "Notebook collection"}</div>
+            <div className="brand-subtitle">{isWorkspace ? "Notebook workspace" : outerView === "memory" ? "Private Memory" : "Notebook collection"}</div>
           </div>
         </div>
+        <nav className="outer-nav" aria-label="Primary">
+          <button type="button" className={outerView === "notebooks" ? "active" : ""} onClick={showCollection}>Notebooks</button>
+          <button type="button" className={outerView === "memory" ? "active" : ""} onClick={showGlobalMemory}>Memory</button>
+        </nav>
         <div className="topbar-right">
           <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
           <PendingBell
@@ -2997,7 +3056,7 @@ export default function Home() {
         </div>
       </header>
 
-      {!isWorkspace && (
+      {!isWorkspace && outerView === "notebooks" && (
         <main className="page collection-view">
           <section className="library-toolbar">
             <div className="tabs">
@@ -3058,6 +3117,7 @@ export default function Home() {
               <NotebookList
                 entries={visibleNotebooks}
                 openNotebook={(id) => openNotebook(id).catch(reportError)}
+                openMemory={(id) => openNotebookMemory(id).catch(reportError)}
                 openMenu={openNotebookMenu}
               />
             ) : (
@@ -3077,11 +3137,16 @@ export default function Home() {
                         <h2>{notebook.name}</h2>
                         <p>{notebook.purpose || "No purpose set yet."}</p>
                       </div>
-                      <div className="notebook-card-footer">
-                        <p>{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
-                      </div>
                       <SearchHits hits={hits} compact={false} />
                     </button>
+                    <div className="notebook-card-footer">
+                      <p>{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
+                      <button
+                        type="button"
+                        className="notebook-memory-link"
+                        onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
+                      >{notebook.counts.memories ?? 0} Memory</button>
+                    </div>
                   </article>
                 ))}
               </>
@@ -3093,6 +3158,12 @@ export default function Home() {
               </article>
             )}
           </section>
+        </main>
+      )}
+
+      {!isWorkspace && outerView === "memory" && (
+        <main className="page memory-view">
+          <MemoryPanel scope="global" notebookId={null} />
         </main>
       )}
 
@@ -3539,6 +3610,8 @@ export default function Home() {
                             notebookId={currentNotebookId}
                             onBuildScaleIndex={() => runScaleIndexOp("build")}
                             buildingScaleIndex={buildingScaleIndex}
+                            onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
+                            memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
                           />
                         </div>
                       </div>
@@ -3599,6 +3672,10 @@ export default function Home() {
                     onFocusConsumed={() => setPendingReportFocusId(null)}
                     readOnly={!capabilities.canManageReports}
                   />
+                )}
+
+                {chatMode === "memory" && currentNotebookId && (
+                  <MemoryPanel scope="notebook" notebookId={currentNotebookId} />
                 )}
               </div>
               {chatMode === "ask" && (
@@ -4001,6 +4078,15 @@ export default function Home() {
         </section>
       )}
 
+      {memoryAnswerId && currentNotebookId && (
+        <MemorySaveDialog
+          answerId={memoryAnswerId}
+          notebookId={currentNotebookId}
+          onClose={() => setMemoryAnswerId(null)}
+          onSaved={(memory) => handleMemorySaved(memory).catch(reportError)}
+        />
+      )}
+
       {editingNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true">
           <div className="utility-modal-card">
@@ -4035,7 +4121,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>删除 notebook</h2>
-                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和 Studio 输出。</p>
+                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；所有成员各自绑定到此笔记本的私有 Memory 也会按生命周期一并删除。</p>
               </div>
               <button className="icon-button" onClick={() => setDeleteNotebook(null)} title="Close">×</button>
             </div>
@@ -4889,16 +4975,18 @@ export default function Home() {
 function NotebookList({
   entries,
   openNotebook,
+  openMemory,
   openMenu
 }: {
   entries: Array<{ notebook: NotebookSummary; index: number; hits: SearchHit[] }>;
   openNotebook: (id: string) => void;
+  openMemory: (id: string) => void;
   openMenu: (id: string, event: MouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <section className="notebook-list">
       <div className="notebook-list-header">
-        <span>标题</span><span>来源</span><span>创建日期</span><span>角色</span><span />
+        <span>标题</span><span>来源</span><span>Memory</span><span>创建日期</span><span>角色</span><span />
       </div>
       {entries.map(({ notebook, index, hits }) => (
         <article className="notebook-list-row" key={notebook.id}>
@@ -4910,6 +4998,7 @@ function NotebookList({
             </span>
           </button>
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
+          <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
           <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>Owner</button>
           <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="Notebook actions">⋮</button>

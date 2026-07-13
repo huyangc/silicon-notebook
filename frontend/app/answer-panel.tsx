@@ -279,6 +279,8 @@ export function AnswerView({
   notebookId,
   onBuildScaleIndex,
   buildingScaleIndex,
+  onSaveMemory,
+  memorySaved,
 }: {
   answer: AskResponse;
   feedbackSent: string;
@@ -287,6 +289,8 @@ export function AnswerView({
   notebookId: string | null;
   onBuildScaleIndex: (notebookId: string) => void;
   buildingScaleIndex: boolean;
+  onSaveMemory: (answerId: string) => void;
+  memorySaved: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [citePopover, setCitePopover] = useState<{
@@ -404,6 +408,14 @@ export function AnswerView({
           title={copied ? "已复制" : "复制回答"}
           type="button"
         >{copied ? <Check size={16} /> : <Copy size={16} />}</button>
+        <button
+          aria-label={memorySaved ? "已保存到 Memory" : "保存到 Memory"}
+          className={`answer-action ${memorySaved ? "selected" : ""}`}
+          disabled={memorySaved}
+          onClick={() => onSaveMemory(answer.answer_id)}
+          title={memorySaved ? "已保存到 Memory" : "保存到 Memory"}
+          type="button"
+        >{memorySaved ? <Check size={16} /> : <Sparkles size={16} />}</button>
       </div>
     </div>
   );
