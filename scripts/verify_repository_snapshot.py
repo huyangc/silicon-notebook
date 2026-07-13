@@ -99,6 +99,162 @@ EXPECTED_KG_REBUILD_CHECKPOINT_SQL = """CREATE TABLE kg_rebuild_checkpoint (
                     PRIMARY KEY (notebook_id, input_version, stage, item_key)
                 )"""
 
+EXPECTED_V11_TABLES = {
+    "agent_profiles": """CREATE TABLE agent_profiles (
+                  id TEXT PRIMARY KEY,
+                  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  name TEXT NOT NULL,
+                  description TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','revoked')),
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "agent_access_tokens": """CREATE TABLE agent_access_tokens (
+                  id TEXT PRIMARY KEY,
+                  agent_profile_id TEXT NOT NULL
+                    REFERENCES agent_profiles(id) ON DELETE CASCADE,
+                  token_hash TEXT NOT NULL UNIQUE,
+                  scopes_json TEXT NOT NULL DEFAULT '[]',
+                  default_notebook_id TEXT
+                    REFERENCES notebooks(id) ON DELETE SET NULL,
+                  expires_at TEXT,
+                  revoked_at TEXT,
+                  last_used_at TEXT,
+                  created_at TEXT NOT NULL
+                )""",
+    "agent_token_notebooks": """CREATE TABLE agent_token_notebooks (
+                  token_id TEXT NOT NULL
+                    REFERENCES agent_access_tokens(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  PRIMARY KEY (token_id, notebook_id)
+                )""",
+    "memory_items": """CREATE TABLE memory_items (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+                  agent_profile_id TEXT
+                    REFERENCES agent_profiles(id) ON DELETE SET NULL,
+                  source_answer_id TEXT,
+                  origin TEXT NOT NULL
+                    CHECK(origin IN ('ask_answer','external_agent')),
+                  status TEXT NOT NULL
+                    CHECK(status IN ('candidate','confirmed','rejected','deprecated')),
+                  promotion_state TEXT NOT NULL DEFAULT 'none'
+                    CHECK(promotion_state IN ('none','proposed','approved','rejected')),
+                  title TEXT NOT NULL,
+                  content_md TEXT NOT NULL,
+                  tags_json TEXT NOT NULL DEFAULT '[]',
+                  confirmed_by TEXT REFERENCES users(id),
+                  confirmed_at TEXT,
+                  embedding_status TEXT NOT NULL DEFAULT 'pending',
+                  embedding_error TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "memory_revisions": """CREATE TABLE memory_revisions (
+                  id TEXT PRIMARY KEY,
+                  memory_id TEXT NOT NULL
+                    REFERENCES memory_items(id) ON DELETE CASCADE,
+                  revision INTEGER NOT NULL CHECK(revision > 0),
+                  title TEXT NOT NULL,
+                  content_md TEXT NOT NULL,
+                  tags_json TEXT NOT NULL DEFAULT '[]',
+                  status TEXT NOT NULL
+                    CHECK(status IN ('candidate','confirmed','rejected','deprecated')),
+                  promotion_state TEXT NOT NULL
+                    CHECK(promotion_state IN ('none','proposed','approved','rejected')),
+                  changed_by TEXT NOT NULL REFERENCES users(id),
+                  change_reason TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(memory_id, revision)
+                )""",
+    "memory_provenance": """CREATE TABLE memory_provenance (
+                  id TEXT PRIMARY KEY,
+                  memory_id TEXT NOT NULL UNIQUE
+                    REFERENCES memory_items(id) ON DELETE CASCADE,
+                  origin TEXT NOT NULL
+                    CHECK(origin IN ('ask_answer','external_agent')),
+                  payload_json TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL
+                )""",
+    "memory_embeddings": """CREATE TABLE memory_embeddings (
+                  memory_id TEXT PRIMARY KEY
+                    REFERENCES memory_items(id) ON DELETE CASCADE,
+                  model TEXT NOT NULL,
+                  dimension INTEGER NOT NULL CHECK(dimension > 0),
+                  vector BLOB NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "memory_items_fts": """CREATE VIRTUAL TABLE memory_items_fts USING fts5(
+                  title,
+                  content_md,
+                  tags_json,
+                  content='memory_items',
+                  content_rowid='rowid'
+                )""",
+    "memory_items_fts_data": "CREATE TABLE 'memory_items_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
+    "memory_items_fts_idx": "CREATE TABLE 'memory_items_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",
+    "memory_items_fts_docsize": "CREATE TABLE 'memory_items_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)",
+    "memory_items_fts_config": "CREATE TABLE 'memory_items_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
+}
+
+EXPECTED_V11_INDEXES = {
+    "idx_agent_profiles_owner_status": """CREATE INDEX idx_agent_profiles_owner_status
+                  ON agent_profiles(owner_id, status, updated_at DESC)""",
+    "idx_agent_tokens_profile": """CREATE INDEX idx_agent_tokens_profile
+                  ON agent_access_tokens(agent_profile_id, revoked_at, expires_at)""",
+    "idx_agent_token_notebooks_notebook": """CREATE INDEX idx_agent_token_notebooks_notebook
+                  ON agent_token_notebooks(notebook_id, token_id)""",
+    "idx_memory_answer_once": """CREATE UNIQUE INDEX idx_memory_answer_once
+                  ON memory_items(created_by, source_answer_id)
+                  WHERE source_answer_id IS NOT NULL""",
+    "idx_memory_owner_notebook_status": """CREATE INDEX idx_memory_owner_notebook_status
+                  ON memory_items(created_by, notebook_id, status, updated_at DESC)""",
+    "idx_memory_agent_candidate": """CREATE INDEX idx_memory_agent_candidate
+                  ON memory_items(created_by, notebook_id, status, agent_profile_id)""",
+    "idx_memory_revisions_memory": """CREATE INDEX idx_memory_revisions_memory
+                  ON memory_revisions(memory_id, revision DESC)""",
+    "idx_memory_embeddings_model": """CREATE INDEX idx_memory_embeddings_model
+                  ON memory_embeddings(model, dimension)""",
+}
+
+EXPECTED_V11_TRIGGERS = {
+    "memory_items_fts_insert": """CREATE TRIGGER memory_items_fts_insert
+                AFTER INSERT ON memory_items BEGIN
+                  INSERT INTO memory_items_fts(rowid, title, content_md, tags_json)
+                  VALUES (new.rowid, new.title, new.content_md, new.tags_json);
+                END""",
+    "memory_items_fts_delete": """CREATE TRIGGER memory_items_fts_delete
+                AFTER DELETE ON memory_items BEGIN
+                  INSERT INTO memory_items_fts(memory_items_fts, rowid, title, content_md, tags_json)
+                  VALUES ('delete', old.rowid, old.title, old.content_md, old.tags_json);
+                END""",
+    "memory_items_fts_update": """CREATE TRIGGER memory_items_fts_update
+                AFTER UPDATE OF title, content_md, tags_json ON memory_items BEGIN
+                  INSERT INTO memory_items_fts(memory_items_fts, rowid, title, content_md, tags_json)
+                  VALUES ('delete', old.rowid, old.title, old.content_md, old.tags_json);
+                  INSERT INTO memory_items_fts(rowid, title, content_md, tags_json)
+                  VALUES (new.rowid, new.title, new.content_md, new.tags_json);
+                END""",
+}
+
+# FTS5 initializes these shadow tables with index metadata even when the
+# external-content table has no rows. Their exact definitions are still
+# guarded by EXPECTED_V11_TABLES; non-empty state here is structural, not user
+# data introduced by the migration.
+V11_FTS_SHADOW_TABLES = frozenset(
+    {
+        "memory_items_fts_config",
+        "memory_items_fts_data",
+        "memory_items_fts_docsize",
+        "memory_items_fts_idx",
+    }
+)
+
 # Every schema object accepted for one version hop is named here with its exact
 # sqlite_master SQL.  An absent hop means that this verifier does not know how
 # to prove that migration and must fail closed.
@@ -110,6 +266,23 @@ MIGRATION_MANIFEST = {
         "columns": {},
         "indexes": {},
         "triggers": {},
+        "views": {},
+    },
+    (9, 11): {
+        "tables": {
+            "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
+            **EXPECTED_V11_TABLES,
+        },
+        "columns": {},
+        "indexes": EXPECTED_V11_INDEXES,
+        "triggers": EXPECTED_V11_TRIGGERS,
+        "views": {},
+    },
+    (10, 11): {
+        "tables": EXPECTED_V11_TABLES,
+        "columns": {},
+        "indexes": EXPECTED_V11_INDEXES,
+        "triggers": EXPECTED_V11_TRIGGERS,
         "views": {},
     },
 }
@@ -666,7 +839,7 @@ def compare_snapshots(
                     )
                 continue
             if kind == "table":
-                if post.tables[name].row_count:
+                if post.tables[name].row_count and name not in V11_FTS_SHADOW_TABLES:
                     note(name, "migration-added-table-not-empty")
                 else:
                     migration_added.append(name)

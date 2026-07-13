@@ -53,6 +53,12 @@ def test_fresh_schema_matches_committed_contract(tmp_path):
         "否则说明重构意外改动了表结构，会破坏既有库加载。")
 
 
+def test_v11_schema_version_is_current(tmp_path):
+    repo = _repo(tmp_path)
+    with repo._connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+
+
 def test_legacy_unversioned_db_loads_without_data_loss(tmp_path):
     """核心约束：把一个"上线于版本机制之前"的旧库（未版本化 + 有数据 + 卡死 job +
     缺种子）交给当前代码直接加载——不报错、数据原样、schema 收敛到契约、兜底与种子照跑。"""

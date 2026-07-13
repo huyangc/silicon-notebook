@@ -13,10 +13,10 @@ def test_initialize_orders_migrate_recover_seed():
     assert calls == ["migrate", "recover", "seed"]
 
 
-def test_schema_version_constant_is_v10():
-    # rebase 到 master 后随 kg_rebuild_checkpoint(迁移10)升到 v10;
+def test_schema_version_constant_is_v11():
+    # Memory / Agent schema 随迁移11升到 v11;
     # 与 facade 模块级 SCHEMA_VERSION、test_follow_chain 守卫同步。
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION == 11
 
 
 def test_add_column_guard_on_missing_table(tmp_path):

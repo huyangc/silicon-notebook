@@ -1035,6 +1035,21 @@
   "schema": {
     "objects": [
       {
+        "name": "idx_agent_profiles_owner_status",
+        "sql_sha256": "f2e301ea51275f35f96da261235cd1f52a110411aebae450dbe38a68d72a18b9",
+        "type": "index"
+      },
+      {
+        "name": "idx_agent_token_notebooks_notebook",
+        "sql_sha256": "9c5c001c4faec970f71a20abfbca29af7490fd8d71cf427933936baa49b34a21",
+        "type": "index"
+      },
+      {
+        "name": "idx_agent_tokens_profile",
+        "sql_sha256": "25dca1b0d3d0f0b97c7dcb48a54d58aeb33603509ba700d1d64d187020da5828",
+        "type": "index"
+      },
+      {
         "name": "idx_answers_conversation",
         "sql_sha256": "dcff1ed1dace548cb5ffab73a3b16e92e196a48396f0f29d0a62fe497b87e554",
         "type": "index"
@@ -1220,6 +1235,31 @@
         "type": "index"
       },
       {
+        "name": "idx_memory_agent_candidate",
+        "sql_sha256": "ad231aea3dfa6713485860a62dba2d9763303e47380ed3983d31e75ef4a013d4",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_answer_once",
+        "sql_sha256": "384ed1fbef32eefeb3f9be11957e1563abd0f84f83d0acd5cc09ed6114ddbe4e",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_embeddings_model",
+        "sql_sha256": "d786eedc21fb5021df65b6130c2c4040b3d0e5cc4a78669d90f2a278c6f2821a",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_owner_notebook_status",
+        "sql_sha256": "c5ef3453a089bb85ee3000328672d2f6969c4347e7bf184519473203cf135e70",
+        "type": "index"
+      },
+      {
+        "name": "idx_memory_revisions_memory",
+        "sql_sha256": "24e85de2609cdecc614aadb88879f1ebadd5509393012e94c2c2c1ff9685a368",
+        "type": "index"
+      },
+      {
         "name": "idx_notebook_members_user",
         "sql_sha256": "d19d04e75eb1ca890f435ea4508b7da01eae29fa1214df4b76a9f8ed5d7cf6b1",
         "type": "index"
@@ -1283,6 +1323,21 @@
         "name": "idx_users_username",
         "sql_sha256": "611bc0564c5f43d8133c0338b59cf46700be365953340d3e662cd834a78b0140",
         "type": "index"
+      },
+      {
+        "name": "agent_access_tokens",
+        "sql_sha256": "b23c650447b7643a0f7ac7fc0cfe7249fab36961aefaa8e2288e84ce707cacb3",
+        "type": "table"
+      },
+      {
+        "name": "agent_profiles",
+        "sql_sha256": "bd343e9937e743e441fc0be7136034698a87f3d4137b44c646bfd9a035d2a00e",
+        "type": "table"
+      },
+      {
+        "name": "agent_token_notebooks",
+        "sql_sha256": "584eb57840d2903793b0ce78096bdd45f647e656538bea9950c448210a20a9fc",
+        "type": "table"
       },
       {
         "name": "answers",
@@ -1465,6 +1520,51 @@
         "type": "table"
       },
       {
+        "name": "memory_embeddings",
+        "sql_sha256": "49df6fd7f24637793a28dc5bcb626fbfbd0be716684f1fc9e10abeea5218b6aa",
+        "type": "table"
+      },
+      {
+        "name": "memory_items",
+        "sql_sha256": "c46c541f98ddc8fafe58d38ce79fcc40b6921ab5fa91b6a535a7b95ab9740f02",
+        "type": "table"
+      },
+      {
+        "name": "memory_items_fts",
+        "sql_sha256": "44854af137d7ede03c0912d84a5bf652e92bc9f911e672a8a243def836079430",
+        "type": "table"
+      },
+      {
+        "name": "memory_items_fts_config",
+        "sql_sha256": "5d870b28e7cfbd218993e9511702455bca0b27317236ad05e986b2ee90fa69a2",
+        "type": "table"
+      },
+      {
+        "name": "memory_items_fts_data",
+        "sql_sha256": "a82c949cfcb484e896fedb3f7f63a3d3493daa078f8b0ff8331ce4b7676e0a79",
+        "type": "table"
+      },
+      {
+        "name": "memory_items_fts_docsize",
+        "sql_sha256": "b3b79a23c132fc8895887a046cc236e88f86f851b06d4e15b9ab2c8906186392",
+        "type": "table"
+      },
+      {
+        "name": "memory_items_fts_idx",
+        "sql_sha256": "bcbc2871c8c1c10201e93cd8c0ecf6a140c54f3b32b09f7b792ca6bc0138d2a1",
+        "type": "table"
+      },
+      {
+        "name": "memory_provenance",
+        "sql_sha256": "a399ca0c7cb1345533cbe57558d275f1c9be27c6749524ee001a8f54798d9c5a",
+        "type": "table"
+      },
+      {
+        "name": "memory_revisions",
+        "sql_sha256": "86cb9a50b21ae31098ed48e5e905ff21a9599bec7241dd0938174910ab98d961",
+        "type": "table"
+      },
+      {
         "name": "mention_edges",
         "sql_sha256": "9846113ca76bd4de0669e123045a769b993940fdbfbcb7dbda33c287afb477fa",
         "type": "table"
@@ -1528,8 +1628,23 @@
         "name": "users",
         "sql_sha256": "8dd2fcd0cc994fbf94b64f764a8ca8903441ff1ea70cc8eeea9ce236bf79d265",
         "type": "table"
+      },
+      {
+        "name": "memory_items_fts_delete",
+        "sql_sha256": "6d2df4a4e3156e571304769322f7b1685036e262356f13abf2c26f8e2515cd7d",
+        "type": "trigger"
+      },
+      {
+        "name": "memory_items_fts_insert",
+        "sql_sha256": "d4ed5ebe897d74119cf8b34c6a10f66bc256add40c8d61dc97b5b7fcdb43b523",
+        "type": "trigger"
+      },
+      {
+        "name": "memory_items_fts_update",
+        "sql_sha256": "d1de5b2f1895ad733199e2cc610fca188de13b36aa6707957f69986fc6154f03",
+        "type": "trigger"
       }
     ],
-    "user_version": 10
+    "user_version": 11
   }
 }

@@ -1397,21 +1397,42 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:814"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:807"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:792"),
-    ("get_report", "scripts/verify_repository_snapshot.py:819"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:795"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:804"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:798"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:816"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:793"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:755"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:759"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:761"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:786"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:828"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:802"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:987"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:980"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:965"),
+    ("get_report", "scripts/verify_repository_snapshot.py:992"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:968"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:977"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:971"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:989"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:966"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:928"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:932"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:934"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:959"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1001"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:975"),
+}
+
+# Task 1 (Memory): schema-version and migration tests add new compatibility
+# facade consumers, while inserting the v11 assertion shifts the frozen legacy
+# test sites. Keep both old and live exact sites out of the immutable baseline
+# comparison.
+TASK1_MEMORY_ALLOWED_CONSUMERS = {
+    ("SCHEMA_VERSION", "backend/tests/test_legacy_db_compat.py:82"),
+    ("SCHEMA_VERSION", "backend/tests/test_legacy_db_compat.py:88"),
+    ("SCHEMA_VERSION", "backend/tests/test_memory_migration.py:33"),
+    ("SQLiteRepository", "backend/tests/test_memory_migration.py:15"),
+    ("_connect", "backend/tests/test_legacy_db_compat.py:58"),
+    ("_connect", "backend/tests/test_legacy_db_compat.py:81"),
+    ("_connect", "backend/tests/test_legacy_db_compat.py:87"),
+    ("_connect", "backend/tests/test_memory_migration.py:34"),
+    ("_migrate", "backend/tests/test_legacy_db_compat.py:80"),
+    ("_migrate", "backend/tests/test_legacy_db_compat.py:86"),
+    ("_write", "backend/tests/test_legacy_db_compat.py:65"),
+    ("_write", "backend/tests/test_legacy_db_compat.py:71"),
+    ("_write", "backend/tests/test_memory_migration.py:52"),
+    ("_write", "backend/tests/test_memory_migration.py:91"),
 }
 
 # Task 26: the consolidated facade delegates its last SQL bodies to the
@@ -2482,7 +2503,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites

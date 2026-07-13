@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -11,6 +11,98 @@ class UserProfile(BaseModel):
     username: str = ""
     memory_mode: str = "manual"
     domain_focus: List[str] = Field(default_factory=list)
+
+
+MemoryOrigin = Literal["ask_answer", "external_agent"]
+MemoryStatus = Literal["candidate", "confirmed", "rejected", "deprecated"]
+MemoryPromotionState = Literal["none", "proposed", "approved", "rejected"]
+
+
+class MemoryRecord(BaseModel):
+    id: str
+    notebook_id: str
+    created_by: str
+    agent_profile_id: Optional[str] = None
+    source_answer_id: Optional[str] = None
+    origin: MemoryOrigin
+    status: MemoryStatus
+    promotion_state: MemoryPromotionState = "none"
+    title: str
+    content_md: str
+    tags: List[str] = Field(default_factory=list)
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    embedding_status: str = "pending"
+    embedding_error: str = ""
+    created_at: str
+    updated_at: str
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PaginatedMemories(BaseModel):
+    items: List[MemoryRecord]
+    total_count: int
+    offset: int
+    limit: int
+
+
+class MemoryPreview(BaseModel):
+    title: str
+    content_md: str
+    tags: List[str] = Field(default_factory=list)
+    provenance_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryCreateFromAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answer_id: str
+    title: str
+    content_md: str
+    tags: List[str] = Field(default_factory=list)
+
+
+class MemoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = None
+    content_md: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class MemoryReviewRequest(MemoryUpdate):
+    reason: Optional[str] = None
+
+
+class AgentProfile(BaseModel):
+    id: str
+    owner_id: str
+    name: str
+    description: str = ""
+    status: Literal["active", "revoked"] = "active"
+    created_at: str
+    updated_at: str
+
+
+class AgentTokenCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: str
+    scopes: List[str] = Field(default_factory=list)
+    default_notebook_id: str = ""
+    notebook_ids: List[str] = Field(default_factory=list)
+    expires_at: Optional[str] = None
+
+
+class AgentTokenIssued(BaseModel):
+    id: str
+    token: str
+    agent_profile_id: str
+    scopes: List[str] = Field(default_factory=list)
+    default_notebook_id: str = ""
+    notebook_ids: List[str] = Field(default_factory=list)
+    expires_at: Optional[str] = None
+    created_at: str
 
 
 class AuthRequest(BaseModel):

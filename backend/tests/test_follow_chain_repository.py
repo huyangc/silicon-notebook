@@ -266,14 +266,14 @@ def test_truncated_supernode_direct_guard_fails_closed(repo):
         max_fan_out=8).inferences == []
 
 
-def test_follow_chain_does_not_change_v10_schema(repo):
+def test_follow_chain_does_not_add_schema_objects(repo):
     from app.services import sqlite_repository as sr
     with repo._connect() as db:
         version = db.execute("PRAGMA user_version").fetchone()[0]
         indexes = {row["name"] for row in db.execute(
             "PRAGMA index_list(knowledge_relations)").fetchall()}
-    # SCHEMA_VERSION 由 kg_rebuild_checkpoint(_migration_10)推进到 10;本测试守的是
+    # SCHEMA_VERSION 已由 Memory / Agent _migration_11 推进到 11;本测试守的是
     # follow-chain 特性自身不动 schema(不加 follow 索引),故只钉「DB 版本==代码版本」
     # 且 follow-chain 没留索引,期望值随全局 schema 走。
-    assert version == sr.SCHEMA_VERSION == 10
+    assert version == sr.SCHEMA_VERSION == 11
     assert not any("follow" in name for name in indexes)
