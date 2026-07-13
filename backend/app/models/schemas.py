@@ -89,7 +89,7 @@ class AgentTokenCreate(BaseModel):
 
     agent_profile_id: str
     scopes: List[str] = Field(default_factory=list)
-    default_notebook_id: str = ""
+    default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str] = Field(default_factory=list)
     expires_at: Optional[str] = None
 
@@ -99,7 +99,7 @@ class AgentTokenIssued(BaseModel):
     token: str
     agent_profile_id: str
     scopes: List[str] = Field(default_factory=list)
-    default_notebook_id: str = ""
+    default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str] = Field(default_factory=list)
     expires_at: Optional[str] = None
     created_at: str

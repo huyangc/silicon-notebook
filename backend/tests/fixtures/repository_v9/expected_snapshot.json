@@ -1326,7 +1326,7 @@
       },
       {
         "name": "agent_access_tokens",
-        "sql_sha256": "b23c650447b7643a0f7ac7fc0cfe7249fab36961aefaa8e2288e84ce707cacb3",
+        "sql_sha256": "422fbf0a05c41604a7849112c8f3a3d78c21b211a5b5ac2de2e4522ad4533a23",
         "type": "table"
       },
       {
@@ -1531,7 +1531,7 @@
       },
       {
         "name": "memory_items_fts",
-        "sql_sha256": "44854af137d7ede03c0912d84a5bf652e92bc9f911e672a8a243def836079430",
+        "sql_sha256": "28eeaba04d1cec246a4b797a2b1830473e18143d96be696af62719b94be617a8",
         "type": "table"
       },
       {

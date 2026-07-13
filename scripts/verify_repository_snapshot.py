@@ -116,8 +116,8 @@ EXPECTED_V11_TABLES = {
                     REFERENCES agent_profiles(id) ON DELETE CASCADE,
                   token_hash TEXT NOT NULL UNIQUE,
                   scopes_json TEXT NOT NULL DEFAULT '[]',
-                  default_notebook_id TEXT
-                    REFERENCES notebooks(id) ON DELETE SET NULL,
+                  default_notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
                   expires_at TEXT,
                   revoked_at TEXT,
                   last_used_at TEXT,
@@ -194,7 +194,8 @@ EXPECTED_V11_TABLES = {
                   content_md,
                   tags_json,
                   content='memory_items',
-                  content_rowid='rowid'
+                  content_rowid='rowid',
+                  tokenize='trigram'
                 )""",
     "memory_items_fts_data": "CREATE TABLE 'memory_items_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
     "memory_items_fts_idx": "CREATE TABLE 'memory_items_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",

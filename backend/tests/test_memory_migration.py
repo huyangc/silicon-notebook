@@ -46,6 +46,16 @@ def test_v11_memory_schema_has_privacy_and_agent_indexes(repo):
         assert "idx_memory_answer_once" in indexes
         assert "idx_memory_owner_notebook_status" in indexes
         assert "idx_memory_agent_candidate" in indexes
+        token_columns = {
+            row["name"]: row for row in db.execute("PRAGMA table_info(agent_access_tokens)")
+        }
+        assert token_columns["default_notebook_id"]["notnull"] == 1
+        default_notebook_fk = next(
+            row
+            for row in db.execute("PRAGMA foreign_key_list(agent_access_tokens)")
+            if row["from"] == "default_notebook_id"
+        )
+        assert default_notebook_fk["on_delete"] == "CASCADE"
 
 
 def test_v11_memory_schema_enforces_lifecycle_and_answer_idempotency(repo):
@@ -114,6 +124,23 @@ def test_v11_memory_fts_tracks_insert_update_and_delete(repo):
         db.execute("DELETE FROM memory_items WHERE id='memory-fts'")
         assert not db.execute(
             "SELECT rowid FROM memory_items_fts WHERE memory_items_fts MATCH 'noise'"
+        ).fetchone()
+
+
+def test_v11_memory_fts_finds_unsegmented_chinese_substring(repo):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,created_at,updated_at) "
+            "VALUES ('nb-fts-zh','Memory','user-local','t','t')"
+        )
+        db.execute(
+            "INSERT INTO memory_items "
+            "(id,notebook_id,created_by,origin,status,title,content_md,created_at,updated_at) "
+            "VALUES ('memory-fts-zh','nb-fts-zh','user-local','external_agent','candidate',"
+            "'模拟电路稳定性分析','相位裕度与环路增益','t','t')"
+        )
+        assert db.execute(
+            "SELECT rowid FROM memory_items_fts WHERE memory_items_fts MATCH '稳定性'"
         ).fetchone()
 
 
@@ -192,6 +219,7 @@ def test_agent_models_keep_plaintext_token_on_issued_response_only():
     request = AgentTokenCreate(
         agent_profile_id="agent-1",
         scopes=["context:read", "memory:propose"],
+        default_notebook_id="nb-1",
         notebook_ids=["nb-1"],
     )
     assert "token" not in AgentTokenCreate.model_fields
@@ -200,8 +228,22 @@ def test_agent_models_keep_plaintext_token_on_issued_response_only():
         token="sn_agent_secret",
         agent_profile_id="agent-1",
         scopes=request.scopes,
+        default_notebook_id=request.default_notebook_id,
         notebook_ids=request.notebook_ids,
         created_at="t",
     )
     assert issued.token == "sn_agent_secret"
-    assert issued.default_notebook_id == ""
+    assert issued.default_notebook_id == "nb-1"
+
+    with pytest.raises(ValidationError):
+        AgentTokenCreate(agent_profile_id="agent-1")
+    with pytest.raises(ValidationError):
+        AgentTokenCreate(agent_profile_id="agent-1", default_notebook_id="")
+    with pytest.raises(ValidationError):
+        AgentTokenIssued(
+            id="token-2",
+            token="sn_agent_secret",
+            agent_profile_id="agent-1",
+            default_notebook_id="",
+            created_at="t",
+        )

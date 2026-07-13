@@ -1397,21 +1397,21 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:987"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:980"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:965"),
-    ("get_report", "scripts/verify_repository_snapshot.py:992"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:968"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:977"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:971"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:989"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:966"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:988"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:981"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:966"),
+    ("get_report", "scripts/verify_repository_snapshot.py:993"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:969"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:978"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:972"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:990"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:967"),
     ("maintenance", "scripts/verify_repository_snapshot.py:928"),
     ("maintenance", "scripts/verify_repository_snapshot.py:932"),
     ("maintenance", "scripts/verify_repository_snapshot.py:934"),
     ("maintenance", "scripts/verify_repository_snapshot.py:959"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1001"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:975"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1002"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:976"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1432,7 +1432,10 @@ TASK1_MEMORY_ALLOWED_CONSUMERS = {
     ("_write", "backend/tests/test_legacy_db_compat.py:65"),
     ("_write", "backend/tests/test_legacy_db_compat.py:71"),
     ("_write", "backend/tests/test_memory_migration.py:52"),
+    ("_write", "backend/tests/test_memory_migration.py:62"),
     ("_write", "backend/tests/test_memory_migration.py:91"),
+    ("_write", "backend/tests/test_memory_migration.py:101"),
+    ("_write", "backend/tests/test_memory_migration.py:131"),
 }
 
 # Task 26: the consolidated facade delegates its last SQL bodies to the
