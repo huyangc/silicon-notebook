@@ -336,6 +336,7 @@ worker。每多一个 worker 就多一份内存中的状态（大型 KG/ANN 索�
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
+SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
 DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
