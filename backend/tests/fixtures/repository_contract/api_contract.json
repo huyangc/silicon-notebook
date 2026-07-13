@@ -7663,6 +7663,27 @@
           "summary": "Reject Promotion"
         }
       },
+      "/api/ready": {
+        "get": {
+          "description": "Anonymous readiness probe the frontend polls before showing the app.\nReports migration / warm-up progress; ``{\"ready\": true}`` once fully\nwarm. Never constructs the repository (reads the process readiness flag),\nso it answers instantly even while migration is still running.",
+          "operationId": "ready_api_ready_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Ready Api Ready Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Ready"
+        }
+      },
       "/api/shared/{token}": {
         "get": {
           "operationId": "shared_preview_route_api_shared__token__get",

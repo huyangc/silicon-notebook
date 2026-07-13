@@ -1422,6 +1422,23 @@ TASK28_ALLOWED_CONSUMERS = {
 # never-frozen members, instead of trying to match its consumer sites against
 # a fixture that predates it.
 SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS = {"close_local"}
+# startup readiness: warm_open_path_caches is a brand-new facade delegate
+# (knowledge_counts_cache.warm_all wired through the startup daemon) that primes
+# the per-process open-path count caches for every notebook behind the readiness
+# gate. Its sole consumer (app/services/startup_warmup.py) postdates the frozen
+# facade_surface fixture, so exempt the member from the consumer-scan comparison
+# entirely — exactly like SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS does for
+# close_local — instead of regenerating the frozen golden.
+STARTUP_READINESS_ALLOWED_NEW_MEMBERS = {"warm_open_path_caches"}
+# The startup-readiness unit test drives the real repository through two frozen
+# public/test-only members (create_notebook to seed notebooks, _test_insert_object
+# to seed a KO); those consumer sites postdate the frozen fixture, so drop them
+# from the consumer-scan comparison exactly like the other component test files
+# above (warm_open_path_caches itself is handled by the NEW_MEMBERS pop).
+STARTUP_READINESS_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_startup_warmup.py", name)
+    for name in {"create_notebook", "_test_insert_object"}
+}
 # The new connection-reuse test suite imports the frozen compatibility facade
 # at a fresh site to exercise the close_local delegate end-to-end.
 SQLITE_CONN_REUSE_ALLOWED_IMPORTS = {
@@ -1714,6 +1731,11 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/api/deps.py",
     "backend/app/api/auth_routes.py",
     "backend/app/api/routes.py",
+    # FastAPI composition root: the startup-readiness lifespan + gate middleware
+    # add ~60 lines above its sole facade consumer (repository().pending_actions),
+    # shifting that call's line without changing the surface. Like the other API
+    # entry files above, main.py's internal line numbers are not API surface.
+    "backend/app/main.py",
     "backend/tests/test_architecture_module_boundaries.py",
     "backend/tests/test_repository_runtime.py",
     # Task 27 migrates every production caller onto ports / repo.maintenance —
@@ -1760,6 +1782,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK25_ALLOWED_MEMBER_FILES
     | TASK26_ALLOWED_MEMBER_FILES
     | TASK27_ALLOWED_MEMBER_FILES
+    | STARTUP_READINESS_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2560,6 +2583,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in STARTUP_READINESS_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual
