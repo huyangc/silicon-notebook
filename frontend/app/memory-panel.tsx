@@ -6,9 +6,12 @@ import { Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles,
 import { AnswerMarkdown } from "./answer-markdown";
 import {
   AGENT_SCOPE_OPTIONS,
+  agentPageHasMore,
+  agentPagePath,
   agentTokenDraft,
   agentTokenRequest,
   canIssueAgentToken,
+  mergeAgentPage,
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
@@ -135,15 +138,25 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
   const [issued, setIssued] = useState<AgentTokenIssued | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [profilePageLoading, setProfilePageLoading] = useState(false);
+  const [tokenPageLoading, setTokenPageLoading] = useState(false);
+  const [profileHasMore, setProfileHasMore] = useState(false);
+  const [tokenHasMore, setTokenHasMore] = useState(false);
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const requestEpochRef = useRef(0);
   const listControllerRef = useRef<AbortController | null>(null);
+  const profilePageControllerRef = useRef<AbortController | null>(null);
+  const tokenPageControllerRef = useRef<AbortController | null>(null);
+  const profileOffsetRef = useRef(0);
+  const tokenOffsetRef = useRef(0);
   const mutationControllersRef = useRef(new Set<AbortController>());
   const mountedRef = useRef(true);
 
   useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
     listControllerRef.current?.abort();
+    profilePageControllerRef.current?.abort();
+    tokenPageControllerRef.current?.abort();
     mutationControllersRef.current.forEach((controller) => controller.abort());
   }), [sessionSignal]);
 
@@ -152,6 +165,8 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
     return () => {
       mountedRef.current = false;
       listControllerRef.current?.abort();
+      profilePageControllerRef.current?.abort();
+      tokenPageControllerRef.current?.abort();
       mutationControllersRef.current.forEach((controller) => controller.abort());
     };
   }, []);
@@ -161,16 +176,24 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
     const epoch = ++requestEpochRef.current;
     const controller = new AbortController();
     listControllerRef.current = controller;
+    profileOffsetRef.current = 0;
+    tokenOffsetRef.current = 0;
+    setProfilePageLoading(false);
+    setTokenPageLoading(false);
     setLoading(true);
     setError("");
     Promise.all([
-      memoryApi<AgentProfile[]>("/agent-profiles", { signal: controller.signal }),
-      memoryApi<AgentTokenSummary[]>("/agent-tokens", { signal: controller.signal }),
+      memoryApi<AgentProfile[]>(agentPagePath("/agent-profiles", 0), { signal: controller.signal }),
+      memoryApi<AgentTokenSummary[]>(agentPagePath("/agent-tokens", 0), { signal: controller.signal }),
       memoryApi<NotebookSummary[]>("/notebooks", { signal: controller.signal }),
     ]).then(([nextProfiles, nextTokens, nextNotebooks]) => {
       if (controller.signal.aborted || epoch !== requestEpochRef.current) return;
       setProfiles(nextProfiles);
       setTokens(nextTokens);
+      profileOffsetRef.current = nextProfiles.length;
+      tokenOffsetRef.current = nextTokens.length;
+      setProfileHasMore(agentPageHasMore(nextProfiles));
+      setTokenHasMore(agentPageHasMore(nextTokens));
       setNotebooks(nextNotebooks);
       const activeProfiles = nextProfiles.filter((profile) => profile.status === "active");
       setSelectedProfile((current) => activeProfiles.some((profile) => profile.id === current)
@@ -192,10 +215,72 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
     });
     return () => {
       controller.abort();
+      profilePageControllerRef.current?.abort();
+      profilePageControllerRef.current = null;
+      tokenPageControllerRef.current?.abort();
+      tokenPageControllerRef.current = null;
       if (listControllerRef.current === controller) listControllerRef.current = null;
       if (requestEpochRef.current === epoch) requestEpochRef.current += 1;
     };
   }, [expanded, refresh, sessionSignal]);
+
+  async function loadMoreProfiles() {
+    if (loading || profilePageLoading || !profileHasMore || sessionSignal.aborted) return;
+    const epoch = requestEpochRef.current;
+    const controller = new AbortController();
+    profilePageControllerRef.current?.abort();
+    profilePageControllerRef.current = controller;
+    setProfilePageLoading(true);
+    setError("");
+    try {
+      const page = await memoryApi<AgentProfile[]>(
+        agentPagePath("/agent-profiles", profileOffsetRef.current),
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || epoch !== requestEpochRef.current || !mountedRef.current) return;
+      setProfiles((current) => mergeAgentPage(current, page));
+      profileOffsetRef.current += page.length;
+      setProfileHasMore(agentPageHasMore(page));
+    } catch (cause) {
+      if (!controller.signal.aborted && epoch === requestEpochRef.current && mountedRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      if (profilePageControllerRef.current === controller) {
+        profilePageControllerRef.current = null;
+        if (mountedRef.current && epoch === requestEpochRef.current) setProfilePageLoading(false);
+      }
+    }
+  }
+
+  async function loadMoreTokens() {
+    if (loading || tokenPageLoading || !tokenHasMore || sessionSignal.aborted) return;
+    const epoch = requestEpochRef.current;
+    const controller = new AbortController();
+    tokenPageControllerRef.current?.abort();
+    tokenPageControllerRef.current = controller;
+    setTokenPageLoading(true);
+    setError("");
+    try {
+      const page = await memoryApi<AgentTokenSummary[]>(
+        agentPagePath("/agent-tokens", tokenOffsetRef.current),
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || epoch !== requestEpochRef.current || !mountedRef.current) return;
+      setTokens((current) => mergeAgentPage(current, page));
+      tokenOffsetRef.current += page.length;
+      setTokenHasMore(agentPageHasMore(page));
+    } catch (cause) {
+      if (!controller.signal.aborted && epoch === requestEpochRef.current && mountedRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      if (tokenPageControllerRef.current === controller) {
+        tokenPageControllerRef.current = null;
+        if (mountedRef.current && epoch === requestEpochRef.current) setTokenPageLoading(false);
+      }
+    }
+  }
 
   async function mutate<T>(path: string, options: RequestInit): Promise<T | null> {
     if (sessionSignal.aborted) return null;
@@ -287,6 +372,11 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
                     {profile.status === "active" && <button type="button" disabled={loading} onClick={() => disableProfile(profile.id)}>停用</button>}
                   </div>
                 ))}
+                {profileHasMore && (
+                  <button type="button" className="agent-load-more" disabled={loading || profilePageLoading} onClick={() => loadMoreProfiles()}>
+                    {profilePageLoading ? "加载中…" : "加载更多 Profile"}
+                  </button>
+                )}
               </div>
             </form>
 
@@ -328,6 +418,11 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
                 {token.revoked_at ? <em>已撤销</em> : <button type="button" className="danger" disabled={loading} onClick={() => revokeToken(token.id)}>撤销</button>}
               </article>
             ))}
+            {tokenHasMore && (
+              <button type="button" className="agent-load-more" disabled={loading || tokenPageLoading} onClick={() => loadMoreTokens()}>
+                {tokenPageLoading ? "加载中…" : "加载更多 Token"}
+              </button>
+            )}
           </div>
         </div>
       )}

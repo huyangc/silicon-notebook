@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  AGENT_ACCESS_PAGE_SIZE,
   AGENT_SCOPE_OPTIONS,
+  agentPageHasMore,
+  agentPagePath,
   agentTokenDraft,
   agentTokenRequest,
   canIssueAgentToken,
+  mergeAgentPage,
 } from "./agent-token-model.ts";
 
 test("new token drafts stay least-privileged and default to one notebook", () => {
@@ -66,4 +70,34 @@ test("global Memory page wires profile, token, revoke, and disable actions", () 
   assert.match(panel, /过期时间/);
   assert.match(panel, /明文 token 仅显示这一次/);
   assert.match(panel, /status: "revoked"/);
+});
+
+test("profile and token page paths retain independent offsets", () => {
+  assert.equal(
+    agentPagePath("/agent-profiles", 25),
+    `/agent-profiles?offset=25&limit=${AGENT_ACCESS_PAGE_SIZE}`,
+  );
+  assert.equal(
+    agentPagePath("/agent-tokens", 75),
+    `/agent-tokens?offset=75&limit=${AGENT_ACCESS_PAGE_SIZE}`,
+  );
+});
+
+test("incremental pages deduplicate records without disturbing prior order", () => {
+  assert.deepEqual(
+    mergeAgentPage(
+      [{ id: "profile-1", name: "One" }, { id: "profile-2", name: "Old" }],
+      [{ id: "profile-2", name: "Updated" }, { id: "profile-3", name: "Three" }],
+    ),
+    [
+      { id: "profile-1", name: "One" },
+      { id: "profile-2", name: "Updated" },
+      { id: "profile-3", name: "Three" },
+    ],
+  );
+});
+
+test("a full bounded page exposes a next page while a short page terminates", () => {
+  assert.equal(agentPageHasMore(Array(AGENT_ACCESS_PAGE_SIZE).fill({})), true);
+  assert.equal(agentPageHasMore(Array(AGENT_ACCESS_PAGE_SIZE - 1).fill({})), false);
 });

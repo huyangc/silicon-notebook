@@ -446,6 +446,8 @@
 .agent-token-list small { color: #747d8c; font-size: 11px; overflow-wrap: anywhere; }
 .agent-profile-list button,
 .agent-token-list button { min-height: 30px; flex: 0 0 auto; font-size: 11px; }
+.agent-profile-list .agent-load-more,
+.agent-token-list .agent-load-more { width: 100%; border-style: dashed; color: #5b4ad9; }
 .agent-token-list button.danger { border-color: #efc6c6; color: #a52d2d; }
 .agent-token-list em { color: #8a93a1; font-size: 12px; font-style: normal; }
 

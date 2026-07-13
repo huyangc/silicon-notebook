@@ -6,6 +6,8 @@ export const AGENT_SCOPE_OPTIONS = [
   { value: "ask:execute", label: "执行 Notebook Ask" },
 ] as const;
 
+export const AGENT_ACCESS_PAGE_SIZE = 25;
+
 export type AgentScope = (typeof AGENT_SCOPE_OPTIONS)[number]["value"];
 
 export type AgentTokenDraft = {
@@ -46,4 +48,32 @@ export function canIssueAgentToken(profileId: string, draft: AgentTokenDraft): b
     && draft.scopes.length
     && draft.expires_at,
   );
+}
+
+export function agentPagePath(path: string, offset: number): string {
+  const params = new URLSearchParams({
+    offset: String(Math.max(0, offset)),
+    limit: String(AGENT_ACCESS_PAGE_SIZE),
+  });
+  return `${path}?${params.toString()}`;
+}
+
+export function agentPageHasMore(page: readonly unknown[]): boolean {
+  return page.length === AGENT_ACCESS_PAGE_SIZE;
+}
+
+export function mergeAgentPage<T extends { id: string }>(
+  current: readonly T[],
+  page: readonly T[],
+): T[] {
+  const incoming = new Map(page.map((item) => [item.id, item]));
+  const merged = current.map((item) => incoming.get(item.id) ?? item);
+  const known = new Set(current.map((item) => item.id));
+  for (const item of page) {
+    if (!known.has(item.id)) {
+      merged.push(item);
+      known.add(item.id);
+    }
+  }
+  return merged;
 }

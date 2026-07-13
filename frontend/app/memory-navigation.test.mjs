@@ -53,3 +53,18 @@ test("notebook deletion warns about lifecycle cleanup without exposing private c
   assert.match(page, /所有成员各自绑定到此笔记本的私有 Memory/);
   assert.doesNotMatch(page, /成员.*\{.*counts\.memories/);
 });
+
+test("global Agent access keeps profile and token pagination independent", () => {
+  assert.match(panel, /profilePageControllerRef/);
+  assert.match(panel, /tokenPageControllerRef/);
+  assert.match(panel, /loadMoreProfiles/);
+  assert.match(panel, /loadMoreTokens/);
+  assert.match(panel, /加载更多 Profile/);
+  assert.match(panel, /加载更多 Token/);
+  assert.match(panel, /agentPagePath\("\/agent-profiles", profileOffsetRef\.current\)/);
+  assert.match(panel, /agentPagePath\("\/agent-tokens", tokenOffsetRef\.current\)/);
+  assert.match(panel, /profileOffsetRef\.current = 0;\s+tokenOffsetRef\.current = 0;/);
+  assert.match(panel, /profilePageControllerRef\.current\?\.abort\(\)/);
+  assert.match(panel, /tokenPageControllerRef\.current\?\.abort\(\)/);
+  assert.equal((panel.match(/setRefresh\(\(value\) => value \+ 1\)/g) || []).length >= 4, true);
+});
