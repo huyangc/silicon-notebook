@@ -76,3 +76,22 @@ Initial REDs were observed before production changes:
 - Confirmed the edit invalidation and Memory revision append share one SQLite write transaction.
 - Confirmed legacy facade signatures and frozen OpenAPI/repository contracts remain green.
 - Confirmed no progress ledger changes and no unrelated branch findings were modified.
+
+## Follow-up: production-shaped review projection
+
+An independent whole-branch review found that the first frontend fixture did not match
+`MemoryService._promotion_candidates`: it omitted `name` from Claim/Formula/Procedure and
+treated `variables` / `goal` as guaranteed review fields. The follow-up was again completed
+with a failing test first.
+
+- Claim now projects `name` + `statement`.
+- Formula now projects `name` + `expression`.
+- Procedure now projects `name` + `steps`.
+- Concept projects the payload's `name` and optional `definition`.
+- Optional future `variables` / `goal` are rendered only when actually present in the pinned
+  payload; they are not shown as production guarantees.
+- A regression invariant compares every production-shaped payload key with the projected
+  review labels, preventing a field that will enter Base KG from being omitted in admin review.
+
+Follow-up verification: focused review projection `3 passed`; complete frontend `185 passed`;
+`npm run lint` and `npm run build` passed.

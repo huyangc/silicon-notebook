@@ -10,9 +10,9 @@ test("memory promotion review exposes every typed candidate and pinned evidence"
     payload: {
       candidates: [
         { object_type: "concept", payload: { name: "PLL", definition: "A loop" } },
-        { object_type: "claim", payload: { statement: "PLL locks" } },
-        { object_type: "formula", payload: { expression: "f=1/T", variables: ["f", "T"] } },
-        { object_type: "procedure", payload: { goal: "Lock", steps: ["Tune", "Verify"] } },
+        { object_type: "claim", payload: { name: "Lock claim", statement: "PLL locks" } },
+        { object_type: "formula", payload: { name: "Period formula", expression: "f=1/T" } },
+        { object_type: "procedure", payload: { name: "Lock procedure", steps: ["Tune", "Verify"] } },
       ],
     },
     evidence: [
@@ -24,9 +24,9 @@ test("memory promotion review exposes every typed candidate and pinned evidence"
   assert.equal(sections.sourceRevision, 7);
   assert.deepEqual(sections.candidates, [
     { objectType: "concept", fields: [["名称", "PLL"], ["定义", "A loop"]] },
-    { objectType: "claim", fields: [["陈述", "PLL locks"]] },
-    { objectType: "formula", fields: [["表达式", "f=1/T"], ["变量", "f、T"]] },
-    { objectType: "procedure", fields: [["目标", "Lock"], ["步骤", "1. Tune\n2. Verify"]] },
+    { objectType: "claim", fields: [["名称", "Lock claim"], ["陈述", "PLL locks"]] },
+    { objectType: "formula", fields: [["名称", "Period formula"], ["表达式", "f=1/T"]] },
+    { objectType: "procedure", fields: [["名称", "Lock procedure"], ["步骤", "1. Tune\n2. Verify"]] },
   ]);
   assert.equal(sections.evidence.length, 2);
   assert.equal(sections.evidence[1].quotedSpan, "Second quote");
@@ -51,23 +51,33 @@ test("review sections omit unknown fields and raw private context", () => {
   assert.equal(JSON.stringify(sections).includes("task_context"), false);
 });
 
-test("review sections keep the complete type-specific field contract", () => {
+test("every production candidate payload key is present in the review projection", () => {
+  const productionCandidates = [
+    { object_type: "concept", payload: { name: "PLL", definition: "A loop" } },
+    { object_type: "claim", payload: { name: "Claim", statement: "It locks" } },
+    { object_type: "formula", payload: { name: "Formula", expression: "f=1/T" } },
+    { object_type: "procedure", payload: { name: "Procedure", steps: ["Tune"] } },
+  ];
   const sections = promotionReviewSections({
     source_kind: "memory",
     source_revision: 3,
-    payload: {
-      candidates: [
-        { object_type: "concept", payload: { name: "PLL" } },
-        { object_type: "formula", payload: { expression: "f=1/T" } },
-        { object_type: "procedure", payload: { steps: ["Tune"] } },
-      ],
-    },
+    payload: { candidates: productionCandidates },
     evidence: [],
   });
 
-  assert.deepEqual(sections.candidates.map((item) => item.fields.map(([label]) => label)), [
-    ["名称", "定义"],
-    ["表达式", "变量"],
-    ["目标", "步骤"],
-  ]);
+  const labelForKey = {
+    name: "名称",
+    definition: "定义",
+    statement: "陈述",
+    expression: "表达式",
+    steps: "步骤",
+  };
+  productionCandidates.forEach((candidate, index) => {
+    const projectedLabels = sections.candidates[index].fields.map(([label]) => label);
+    assert.deepEqual(
+      projectedLabels,
+      Object.keys(candidate.payload).map((key) => labelForKey[key]),
+      `${candidate.object_type} omitted a payload field that will enter Base KG`,
+    );
+  });
 });

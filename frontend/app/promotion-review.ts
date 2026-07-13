@@ -41,22 +41,29 @@ function list(value: unknown): string[] {
 }
 
 function typedFields(objectType: string, payload: UnknownRecord): Array<[string, string]> {
-  const definitions: Record<string, Array<[string, string]>> = {
-    concept: [["名称", text(payload.name)], ["定义", text(payload.definition)]],
-    claim: [["陈述", text(payload.statement)]],
+  const definitions: Record<string, Array<[string, string, string]>> = {
+    concept: [
+      ["name", "名称", text(payload.name)],
+      ["definition", "定义", text(payload.definition)],
+    ],
+    claim: [
+      ["name", "名称", text(payload.name)],
+      ["statement", "陈述", text(payload.statement)],
+    ],
     formula: [
-      ["表达式", text(payload.expression)],
-      ["变量", list(payload.variables).join("、")],
+      ["name", "名称", text(payload.name)],
+      ["expression", "表达式", text(payload.expression)],
+      ["variables", "变量", list(payload.variables).join("、")],
     ],
     procedure: [
-      ["目标", text(payload.goal)],
-      ["步骤", list(payload.steps).map((step, index) => `${index + 1}. ${step}`).join("\n")],
+      ["name", "名称", text(payload.name)],
+      ["steps", "步骤", list(payload.steps).map((step, index) => `${index + 1}. ${step}`).join("\n")],
+      ["goal", "目标", text(payload.goal)],
     ],
   };
-  return (definitions[objectType] ?? []).map(([label, value]) => [
-    label,
-    value || "未提供",
-  ]);
+  return (definitions[objectType] ?? [])
+    .filter(([key]) => Object.hasOwn(payload, key))
+    .map(([, label, value]) => [label, value || "未提供"]);
 }
 
 /** Build the strict admin-review projection; unknown/private fields are dropped. */
