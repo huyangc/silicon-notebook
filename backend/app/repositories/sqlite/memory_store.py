@@ -14,8 +14,8 @@ from app.models.schemas import (
     MemoryRecord,
     PaginatedMemories,
 )
+from app.core.json_safety import strict_json_dumps
 from app.repositories.sqlite.database import SqliteDatabase
-from app.services.memory_inputs import strict_json_dumps
 from app.services.vector_index import encode_vector
 
 
@@ -831,7 +831,6 @@ class MemoryStore:
         if cursor.rowcount != 1:
             raise ValueError("active Memory promotion could not be superseded")
         provenance["kg_promotion"] = {
-            **promotion,
             "state": "superseded",
             "superseded_at": now,
             "superseded_reason": reason,

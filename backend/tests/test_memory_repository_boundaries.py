@@ -75,6 +75,9 @@ def test_memory_store_owns_sql_and_service_never_imports_facade():
     assert "app.repositories.sqlite.memory_store" not in _imports(ports_path)
     assert "app.models.memory" in _imports(service_path)
     assert "app.models.memory" in _imports(ports_path)
+    assert "app.services.memory_inputs" not in _imports(store_path)
+    assert "app.core.json_safety" in _imports(store_path)
+    assert "app.core.json_safety" in _imports(service_path.parent / "memory_inputs.py")
 
 
 def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_path):

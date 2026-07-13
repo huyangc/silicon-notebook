@@ -825,7 +825,6 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
         {"task_context": {"private": "证" * 3_000}},
         {"evidence_refs": [{"source_id": str(index)} for index in range(1_000)]},
         {"evidence_refs": [{"quote": "x" * 100_000}]},
-        {"evidence_refs": [{"quote": "证" * 5_000}]},
         {"client_request_id": "r" * 100_000},
         {"title": "t" * (MEMORY_TITLE_MAX_CHARS + 1)},
         {"content_md": "c" * (MEMORY_CONTENT_MAX_CHARS + 1)},
@@ -875,6 +874,40 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
 
     assert live_calls == 0
     assert create_calls == 0
+
+
+@pytest.mark.anyio
+async def test_propose_memory_accepts_payloads_within_exact_core_json_limits(mcp_env):
+    notebook_id = mcp_env["notebook"].id
+    task_context = {"private": "x" * 8_050}
+    evidence_refs = [{"quote": "x" * 600} for _ in range(21)]
+
+    # These values are deliberately above the removed MCP-only 8,000-byte,
+    # 20-item, and 12,000-byte caps while remaining within the shared Core
+    # 8,192-byte, 50-item, and 32,768-byte contract.
+    assert len(json.dumps(
+        task_context, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")) > 8_000
+    assert len(evidence_refs) > 20
+    assert len(json.dumps(
+        evidence_refs, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")) > 12_000
+
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["token_a"].token
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        created = _payload(await client.call("propose_memory", {
+            "title": "Exact Core envelope",
+            "content_md": "Former MCP-only sub-budgets must not narrow Core.",
+            "tags": ["core"],
+            "reason": "Core limit regression",
+            "task_context": task_context,
+            "evidence_refs": evidence_refs,
+            "client_request_id": "exact-core-envelope",
+        }))
+
+    assert created["status"] == "candidate"
 
 
 def test_nonlocal_plain_http_mcp_configuration_is_rejected():

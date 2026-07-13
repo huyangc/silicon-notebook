@@ -24,7 +24,6 @@ from starlette.responses import JSONResponse
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.schemas import AgentPrincipal, AskRequest, UserProfile
 from app.services.memory_inputs import (
-    MEMORY_EVIDENCE_MAX_COUNT,
     MEMORY_TAG_MAX_COUNT,
     normalize_client_request_id,
     normalize_content,
@@ -53,10 +52,6 @@ OUTPUT_KEY_LIMIT = 120
 OUTPUT_MAPPING_LIMIT = 20
 OUTPUT_DEPTH_LIMIT = 5
 OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
-PROPOSAL_TAGS_JSON_LIMIT = 2_000
-PROPOSAL_TASK_CONTEXT_JSON_LIMIT = 8_000
-PROPOSAL_EVIDENCE_LIMIT = min(20, MEMORY_EVIDENCE_MAX_COUNT)
-PROPOSAL_EVIDENCE_JSON_LIMIT = 12_000
 _SELECTED_ATTR = "_silicon_notebook_selected_notebook"
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
@@ -410,19 +405,6 @@ def _budget_response(
     return result
 
 
-def _proposal_json_size(value: Any, field: str) -> int:
-    try:
-        return len(json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must contain JSON data") from exc
-
-
 def _validate_proposal_input(
     title: str,
     content_md: str,
@@ -446,26 +428,11 @@ def _validate_proposal_input(
     if any(not isinstance(tag, str) or not tag.strip() for tag in raw_tags):
         raise ValueError("tags must not contain blank values")
     clean_tags = normalize_tags(raw_tags)
-    if _proposal_json_size(clean_tags, "tags") > PROPOSAL_TAGS_JSON_LIMIT:
-        raise ValueError("tags serialized payload is too large")
 
     clean_task_context = normalize_task_context(task_context)
     if not clean_task_context:
         raise ValueError("task_context must be nonblank")
-    if (
-        _proposal_json_size(clean_task_context, "task_context")
-        > PROPOSAL_TASK_CONTEXT_JSON_LIMIT
-    ):
-        raise ValueError("task_context serialized payload is too large")
-
-    if len(evidence_refs) > PROPOSAL_EVIDENCE_LIMIT:
-        raise ValueError(f"evidence_refs exceeds {PROPOSAL_EVIDENCE_LIMIT} items")
     clean_evidence = normalize_evidence_refs(evidence_refs)
-    if (
-        _proposal_json_size(clean_evidence, "evidence_refs")
-        > PROPOSAL_EVIDENCE_JSON_LIMIT
-    ):
-        raise ValueError("evidence_refs serialized payload is too large")
     return (
         clean_title,
         clean_content,

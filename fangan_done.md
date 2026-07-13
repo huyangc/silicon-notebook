@@ -321,13 +321,13 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **Memory → KG**：仅 confirmed 且尚未提案的 Memory 可由创建者提议；既有 admin promotion
   queue 展示脱敏后的结构化提取候选与服务端验证过的 evidence，不提供原始 Memory
   revision/provenance 浏览。编辑或弃用 proposed Memory 会在同一事务中拒绝活跃队列项、保留固定
-  快照审计并清除当前 promotion 状态。批准前重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，批准
+  快照审计、清除当前 proposal 指针与 promotion 状态。批准前重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，批准
   复用 dedupe/merge，创建或合并一个或多个 Base KG 对象；API 与晋升审计保存完整
   `base_object_ids`。私有 Memory 的 owner/status 不改变，完整私有任务上下文不进入 Base KG 对象。
 - **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
   notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
   `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证七工具、session 选择隔离、candidate
-  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2934 passed, 1 skipped`、
+  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2935 passed, 1 skipped`、
   前端 `189 passed`、TypeScript 与 Next.js production build 均成功。
 
 ## 20. 当前边界（后续阶段，未计入已完成）

@@ -9,6 +9,10 @@ from base `1700291`:
 2. MCP proposal input reuse of the Core Memory contract before live auth/service;
 3. atomic supersession when a proposed confirmed Memory is deprecated.
 
+A follow-up final review additionally required pointer-free superseded
+provenance, neutral Core ownership of JSON safety, and exact (not narrower)
+MCP/Core acceptance limits.
+
 No MCP tool, lifecycle state, schema, or frontend capability was added.
 
 ## TDD evidence
@@ -25,20 +29,28 @@ No MCP tool, lifecycle state, schema, or frontend capability was added.
   queue row. A concurrent deprecate/approve run could leave a terminal Memory
   with a still-proposed queue row. `confirmed -> rejected` was confirmed to be
   an existing illegal transition and was not expanded.
+- Follow-up RED proved superseded current provenance retained `proposal_id`,
+  `MemoryStore` depended on `app.services.memory_inputs`, and a valid proposal
+  above the former MCP-only 8,000-byte/20-item/12,000-byte sub-budgets was
+  rejected despite fitting the Core contract.
 
 ### GREEN
 
 - Core non-finite/null focused regression: `7 passed`.
 - MCP Core-limit/non-finite/null focused regression: `6 passed`.
 - Promotion terminal/illegal-reject/race focused regression: `3 passed`.
+- Follow-up pointer/architecture/exact-MCP RED tests: `1 + 1 + 1` failed first,
+  then passed after the narrow fixes.
 
 ## Implementation
 
 ### Standard JSON boundary
 
-`memory_inputs.py` now recursively rejects actual non-finite Python floats and
-uses `allow_nan=False` for both size validation and the shared persistence
-serializer. `MemoryService.create_candidate` therefore rejects bad task/evidence
+Neutral `app/core/json_safety.py` now recursively rejects actual non-finite
+Python floats and uses `allow_nan=False` for both canonical size validation and
+the shared persistence serializer. `memory_inputs.py` converts neutral safety
+errors to its public input error, while `MemoryStore` imports only the neutral
+Core helper. `MemoryService.create_candidate` therefore rejects bad task/evidence
 before notebook lookup or persistence. `MemoryStore` also uses the strict
 serializer for Memory tags/provenance and promotion provenance updates, so an
 internal caller cannot write non-standard JSON tokens. SQLite writes remain
@@ -50,9 +62,10 @@ and detail read.
 
 The MCP proposal envelope imports and calls the exact Core title, content, tag,
 reason, task-context, evidence, and client-request-id normalizers instead of
-maintaining looser scalar duplicates. The pre-existing tighter MCP serialized
-sub-budgets (tags/task context/evidence) and raw collection caps remain in
-place. Validation still occurs before `_selected_notebook`, so just-over-Core
+maintaining looser scalar duplicates. Adapter-only tag/task/evidence serialized
+sub-budgets were removed: MCP accepts the exact Core 8,192-byte task context,
+50 evidence references, and 32,768-byte evidence payload contract. Validation
+still occurs before `_selected_notebook`, so just-over-Core
 input performs no live token refresh and no service call. The exact seven-tool
 surface and every response budget are unchanged.
 
@@ -66,6 +79,8 @@ write transaction it:
   `superseded_by_memory_terminal_status` for a terminal transition;
 - records the owner reviewer and superseded timestamp/reason in provenance;
 - retains immutable `kg_promotion_snapshots` and the pinned source revision;
+- replaces current `kg_promotion` with a pointer-free superseded state, so its
+  `proposal_id` remains only in snapshot and queue history;
 - clears the current `memory_items.promotion_state` to `none`;
 - writes the terminal Memory revision.
 
@@ -83,9 +98,8 @@ non-finite/null handling and proposed-Memory deprecation. Updated
 
 ## Verification
 
-- Broader Memory/API/MCP/promotion/phase suite: `93 passed`.
-- Architecture/contracts/static manifest suite: `77 passed`.
-- Exact full backend: `2934 passed, 1 skipped` in `254.83s`.
+- Broader Memory/API/MCP/promotion/architecture suite: `156 passed`.
+- Exact full backend: `2935 passed, 1 skipped` in `258.81s`.
 - Frontend tests: `189 passed`.
 - TypeScript: `npm run lint` passed.
 - Next.js production build: `npm run build` passed.
@@ -100,6 +114,10 @@ non-finite/null handling and proposed-Memory deprecation. Updated
 - Confirmed the terminal supersession, queue mutation, provenance update,
   promotion-state reset, and revision append share one SQLite write transaction.
 - Confirmed historical pinned snapshots remain readable in the rejected audit
-  queue while the active queue contains no superseded proposal.
+  queue while current provenance has no proposal pointer and the active queue
+  contains no superseded proposal.
+- Confirmed stores no longer import the Memory service input module.
+- Confirmed MCP accepts values between the removed adapter sub-budgets and the
+  exact Core limits, while just-over-Core input stops before live auth/service.
 - Confirmed the exact MCP public tool set and response budget code were not
   changed.

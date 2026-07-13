@@ -312,7 +312,10 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
     assert deprecated.status == "deprecated"
     assert deprecated.promotion_state == "none"
     assert deprecated.provenance["kg_promotion"]["state"] == "superseded"
-    assert deprecated.provenance["kg_promotion"]["proposal_id"] == proposal["id"]
+    assert not deprecated.provenance["kg_promotion"].get("proposal_id")
+    assert deprecated.provenance["kg_promotion"]["superseded_reason"] == (
+        "superseded_by_memory_terminal_status"
+    )
     assert deprecated.provenance["kg_promotion_snapshots"][proposal["id"]][
         "source_revision"
     ] == proposal["source_revision"]

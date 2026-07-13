@@ -5,10 +5,10 @@ Memory service so internal/MCP callers cannot bypass the HTTP boundary.
 """
 from __future__ import annotations
 
-import json
-import math
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from app.core.json_safety import JsonSafetyError, strict_json_size_bytes
 
 
 MEMORY_TITLE_MAX_CHARS = 80
@@ -24,20 +24,6 @@ MEMORY_CLIENT_REQUEST_ID_MAX_CHARS = 200
 
 class MemoryInputError(ValueError):
     """A caller-controlled Memory payload violated the shared contract."""
-
-
-def validate_json_value(value: Any, *, field: str) -> None:
-    """Recursively reject Python values outside the standard JSON number set."""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise MemoryInputError(f"{field} must not contain non-finite numbers")
-    if isinstance(value, Mapping):
-        for child in value.values():
-            validate_json_value(child, field=field)
-    elif isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
-        for child in value:
-            validate_json_value(child, field=field)
 
 
 def normalize_text(
@@ -101,27 +87,10 @@ def normalize_tags(value: Any) -> list[str]:
 
 
 def _json_size(value: Any, *, field: str) -> tuple[Any, int]:
-    validate_json_value(value, field=field)
     try:
-        encoded = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
-        raise MemoryInputError(f"{field} must be JSON serializable") from exc
-    return value, len(encoded.encode("utf-8"))
-
-
-def strict_json_dumps(value: Any, *, field: str) -> str:
-    """Serialize a Memory-owned JSON value without non-standard float tokens."""
-    validate_json_value(value, field=field)
-    try:
-        return json.dumps(value, ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise MemoryInputError(f"{field} must be JSON serializable") from exc
+        return value, strict_json_size_bytes(value, field=field)
+    except JsonSafetyError as exc:
+        raise MemoryInputError(str(exc)) from exc
 
 
 def normalize_task_context(value: Any) -> dict[str, Any]:

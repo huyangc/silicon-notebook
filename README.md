@@ -256,6 +256,7 @@ characters, task context 8,192 serialized UTF-8 bytes, at most 50 evidence refer
 32,768 serialized UTF-8 bytes, and client request id 200 characters. HTTP validation errors
 return 422; MCP/internal calls use the same service validation. Nested NaN or positive/negative
 infinity is rejected before persistence, while legitimate JSON null round-trips unchanged.
+The MCP proposal envelope uses these exact Core limits and does not impose narrower duplicates.
 
 The Memory page's **Agent access** area creates stable Agent profiles and one-time plaintext
 tokens. A token has an expiry, a default notebook, a notebook allowlist, and the smallest
@@ -300,7 +301,8 @@ admin queue shows sanitized extraction candidates and server-validated evidence,
 Memory revision/provenance browser. The proposal pins the exact source revision, sanitized
 candidate snapshot, and validated evidence shown to the reviewer. Editing or deprecating a
 proposed Memory atomically supersedes that proposal and resets its promotion state; edits can
-then be re-proposed. Approval revalidates the Memory's current confirmed status and creator access,
+then be re-proposed. The current provenance clears the proposal pointer; the pinned proposal remains
+only in snapshot and queue history. Approval revalidates the Memory's current confirmed status and creator access,
 plus the pinned revision and notebook binding, in the write transaction before reusing KG dedupe/merge to create or merge one
 or more Base KG objects. Approval/rejection records the authenticated admin reviewer; the API
 and promotion audit record the complete `base_object_ids` result. This does not change or
